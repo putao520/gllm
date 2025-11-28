@@ -54,13 +54,57 @@ gllm includes built-in aliases for popular open-source models and supports any H
 
 ### Built-in Model Aliases
 
-| Alias | HuggingFace Model | Type | Dimensions | Use Case |
-|-------|------------------|------|------------|----------|
-| `bge-m3` | `BAAI/bge-m3` | Embedding | 1024 | Multilingual, 8192 tokens |
-| `bge-large-zh` | `BAAI/bge-large-zh-v1.5` | Embedding | 1024 | Chinese optimized |
-| `bge-small-en` | `BAAI/bge-small-en-v1.5` | Embedding | 384 | English, lightweight |
-| `bge-reranker-v2` | `BAAI/bge-reranker-v2-m3` | Rerank | - | Multilingual reranking |
-| `bge-reranker-large` | `BAAI/bge-reranker-large` | Rerank | - | High-performance reranking |
+gllm supports 23 popular models out of the box:
+
+#### 🔄 Text Embedding Models (16 models)
+
+| Alias | HuggingFace Model | Dimensions | Speed | Best For |
+|-------|------------------|------------|-------|----------|
+| **BGE Series** | | | | |
+| `bge-m3` | `BAAI/bge-m3` | 1024 | Medium | 🌍 Multilingual, 8192 tokens |
+| `bge-large-zh` | `BAAI/bge-large-zh-v1.5` | 1024 | Slow | 🇨🇳 Chinese optimized |
+| `bge-small-en` | `BAAI/bge-small-en-v1.5` | 384 | Fast | 🇺🇸 English, lightweight |
+| `bge-base-en` | `BAAI/bge-base-en-v1.5` | 768 | Medium | 🇺🇸 English balanced |
+| `bge-large-en` | `BAAI/bge-large-en-v1.5` | 1024 | Slow | 🇺🇸 English high accuracy |
+
+| **Sentence Transformers** | | | | |
+| `all-MiniLM-L6-v2` | `sentence-transformers/all-MiniLM-L6-v2` | 384 | Fast | 🎯 General purpose |
+| `all-mpnet-base-v2` | `sentence-transformers/all-mpnet-base-v2` | 768 | Medium | 🎯 High quality English |
+| `paraphrase-MiniLM-L6-v2` | `sentence-transformers/paraphrase-MiniLM-L6-v2` | 384 | Fast | 🔄 Paraphrase detection |
+| `multi-qa-mpnet-base-dot-v1` | `sentence-transformers/multi-qa-mpnet-base-dot-v1` | 768 | Medium | ❓ Question answering |
+| `all-MiniLM-L12-v2` | `sentence-transformers/all-MiniLM-L12-v2` | 384 | Fast | 🎯 General purpose (larger) |
+| `all-distilroberta-v1` | `sentence-transformers/all-distilroberta-v1` | 768 | Medium | ⚡ Fast inference |
+
+| **E5 Series** | | | | |
+| `e5-large` | `intfloat/e5-large` | 1024 | Slow | 🎯 Instruction tuned |
+| `e5-base` | `intfloat/e5-base` | 768 | Medium | 🎯 Instruction tuned |
+| `e5-small` | `intfloat/e5-small` | 384 | Fast | ⚡ Lightweight instruction tuned |
+
+| **JINA Embeddings** | | | | |
+| `jina-embeddings-v2-base-en` | `jinaai/jina-embeddings-v2-base-en` | 768 | Medium | 🎯 Modern architecture |
+| `jina-embeddings-v2-small-en` | `jinaai/jina-embeddings-v2-small-en` | 384 | Fast | ⚡ Lightweight modern |
+
+| **Multilingual** | | | | |
+| `multilingual-MiniLM-L12-v2` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 384 | Medium | 🌍 50+ languages |
+| `distiluse-base-multilingual-cased-v1` | `sentence-transformers/distiluse-base-multilingual-cased-v1` | 512 | Medium | 🌍 Multilingual cased |
+
+#### 🎯 Document Reranking Models (7 models)
+
+| Alias | HuggingFace Model | Speed | Best For |
+|-------|------------------|-------|----------|
+| **BGE Rerankers** | | | |
+| `bge-reranker-v2` | `BAAI/bge-reranker-v2-m3` | Medium | 🌍 Multilingual reranking |
+| `bge-reranker-large` | `BAAI/bge-reranker-large` | Slow | 🎯 High accuracy |
+| `bge-reranker-base` | `BAAI/bge-reranker-base` | Fast | ⚡ Fast reranking |
+
+| **MS MARCO Rerankers** | | | |
+| `ms-marco-MiniLM-L-6-v2` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Fast | 🎯 Search relevance |
+| `ms-marco-MiniLM-L-12-v2` | `cross-encoder/ms-marco-MiniLM-L-12-v2` | Medium | 🎯 Higher accuracy search |
+| `ms-marco-TinyBERT-L-2-v2` | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | Very Fast | ⚡ Lightweight reranking |
+| `ms-marco-electra-base` | `cross-encoder/ms-marco-electra-base` | Medium | ⚡ Efficient reranking |
+
+| **Specialized** | | | |
+| `quora-distilroberta-base` | `cross-encoder/quora-distilroberta-base` | Medium | ❓ Question similarity |
 
 ### Using Custom Models
 
@@ -73,6 +117,40 @@ let client = Client::new("sentence-transformers/all-MiniLM-L6-v2")?;
 // Or use colon notation for shorthand
 let client = Client::new("sentence-transformers:all-MiniLM-L6-v2")?;
 ```
+
+### 🎛️ Model Selection Guide
+
+#### Embedding Models - Choose Based On:
+
+**🚀 Speed & Efficiency**
+- `bge-small-en` / `e5-small` / `all-MiniLM-L6-v2` - Fastest, 384 dims
+- Perfect for high-throughput applications
+
+**⚖️ Balance of Speed & Accuracy**
+- `bge-base-en` / `e5-base` / `all-mpnet-base-v2` - 768 dims
+- Great general-purpose choice
+
+**🎯 High Accuracy**
+- `bge-large-en` / `e5-large` / `bge-m3` - 1024 dims
+- Best for quality-critical applications
+
+**🌍 Multilingual Support**
+- `bge-m3` - 8192 tokens, 100+ languages (recommended)
+- `multilingual-MiniLM-L12-v2` - 50+ languages (lighter)
+
+#### Reranking Models - Choose Based On:
+
+**⚡ Fast Reranking**
+- `bge-reranker-base` / `ms-marco-TinyBERT-L-2-v2`
+- Best for real-time applications
+
+**🎯 Balanced Performance**
+- `bge-reranker-v2` / `ms-marco-MiniLM-L-6-v2`
+- Good accuracy with reasonable speed
+
+**🏆 High Accuracy**
+- `bge-reranker-large` / `ms-marco-MiniLM-L-12-v2`
+- Maximum quality for batch processing
 
 ### Model Requirements
 

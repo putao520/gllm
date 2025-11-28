@@ -43,6 +43,7 @@ impl ModelRegistry {
     pub fn new() -> Self {
         let mut models = HashMap::new();
         let entries = [
+            // BGE Embedding Models
             (
                 "bge-m3",
                 "BAAI/bge-m3",
@@ -62,6 +63,108 @@ impl ModelRegistry {
                 Architecture::Bert,
             ),
             (
+                "bge-base-en",
+                "BAAI/bge-base-en-v1.5",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "bge-large-en",
+                "BAAI/bge-large-en-v1.5",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // Sentence Transformers Models
+            (
+                "all-MiniLM-L6-v2",
+                "sentence-transformers/all-MiniLM-L6-v2",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "all-mpnet-base-v2",
+                "sentence-transformers/all-mpnet-base-v2",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "paraphrase-MiniLM-L6-v2",
+                "sentence-transformers/paraphrase-MiniLM-L6-v2",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "multi-qa-mpnet-base-dot-v1",
+                "sentence-transformers/multi-qa-mpnet-base-dot-v1",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // E5 Models
+            (
+                "e5-large",
+                "intfloat/e5-large",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "e5-base",
+                "intfloat/e5-base",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "e5-small",
+                "intfloat/e5-small",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // JINA Embeddings
+            (
+                "jina-embeddings-v2-base-en",
+                "jinaai/jina-embeddings-v2-base-en",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "jina-embeddings-v2-small-en",
+                "jinaai/jina-embeddings-v2-small-en",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // Multilingual Models
+            (
+                "multilingual-MiniLM-L12-v2",
+                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "distiluse-base-multilingual-cased-v1",
+                "sentence-transformers/distiluse-base-multilingual-cased-v1",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // Light Models for Edge Devices
+            (
+                "all-MiniLM-L12-v2",
+                "sentence-transformers/all-MiniLM-L12-v2",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "all-distilroberta-v1",
+                "sentence-transformers/all-distilroberta-v1",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+
+            // BGE Rerankers
+            (
                 "bge-reranker-v2",
                 "BAAI/bge-reranker-v2-m3",
                 ModelType::Rerank,
@@ -70,6 +173,46 @@ impl ModelRegistry {
             (
                 "bge-reranker-large",
                 "BAAI/bge-reranker-large",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+            (
+                "bge-reranker-base",
+                "BAAI/bge-reranker-base",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+
+            // MS MARCO Rerankers
+            (
+                "ms-marco-MiniLM-L-6-v2",
+                "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+            (
+                "ms-marco-MiniLM-L-12-v2",
+                "cross-encoder/ms-marco-MiniLM-L-12-v2",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+            (
+                "ms-marco-TinyBERT-L-2-v2",
+                "cross-encoder/ms-marco-TinyBERT-L-2-v2",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+            (
+                "ms-marco-electra-base",
+                "cross-encoder/ms-marco-electra-base",
+                ModelType::Rerank,
+                Architecture::CrossEncoder,
+            ),
+
+            // Specialized Rerankers
+            (
+                "quora-distilroberta-base",
+                "cross-encoder/quora-distilroberta-base",
                 ModelType::Rerank,
                 Architecture::CrossEncoder,
             ),
