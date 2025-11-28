@@ -56,7 +56,7 @@ fn test_all_26_model_categories_basic() -> Result<()> {
                 successful_aliases += 1;
 
                 // Count model types based on naming patterns
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") {
+                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
@@ -78,7 +78,7 @@ fn test_all_26_model_categories_basic() -> Result<()> {
                 successful_aliases += 1;
 
                 // Count model types based on naming patterns
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") {
+                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
@@ -100,7 +100,7 @@ fn test_all_26_model_categories_basic() -> Result<()> {
     // We should have identified the correct number of embedding vs rerank models
     // Based on our list: 18 embedding models (4 BGE + 6 Sentence Transformers + 3 E5 + 2 JINA + 1 Chinese + 2 Multilingual), 8 rerank models (3 BGE rerankers + 4 MS MARCO + 1 quora)
     assert_eq!(embedding_models, 18, "Should have 18 embedding model aliases");
-    assert_eq!(rerank_models, 8, "Should have 8 rerank model aliases");
+    assert_eq!(rerank_models, 8, "Should have 8 rerank model aliases (3 BGE rerankers + 4 MS MARCO + 1 quora)");
 
     println!("✅ All 26 model categories validated successfully!");
     Ok(())
