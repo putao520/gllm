@@ -23,6 +23,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 无 C/C++ 依赖
 - 所有依赖库均为纯 Rust 或提供纯 Rust 特性
 
+**状态**: ✅ 已实现 [PRD-03]
+
 ---
 
 ## 模型管理
@@ -37,6 +39,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 支持 SafeTensors 格式
 - 使用 rustls 作为 TLS 后端
 
+**状态**: ✅ 已实现 [PRD-01]
+
 ### REQ-MODEL-002: 模型别名系统
 
 **描述**: 提供简化的模型别名，映射到 HuggingFace repo ID
@@ -46,6 +50,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 内置常用模型别名注册表
 - 也支持直接使用 HF repo ID
 
+**状态**: ✅ 已实现 [PRD-01]
+
 ### REQ-MODEL-003: SafeTensors 加载
 
 **描述**: 加载 SafeTensors 格式模型权重到 Burn
@@ -54,6 +60,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 使用 burn-import 的 SafetensorsFileRecorder
 - 支持 FP16/FP32 精度
 - 支持量化模型加载
+
+**状态**: ✅ 已实现 [PRD-01]
 
 ---
 
@@ -68,6 +76,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 返回 Vec<f32> 向量
 - 支持批量输入
 
+**状态**: ✅ 已实现 [PRD-02]
+
 ### REQ-INFER-002: Rerank 推理
 
 **描述**: 支持文档重排序
@@ -76,6 +86,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 支持 Cross-Encoder 架构 (基于 Burn 基础组件实现)
 - 输入 query + documents，输出排序后的文档列表
 - 返回相关性分数
+
+**状态**: ✅ 已实现 [PRD-02]
 
 ---
 
@@ -90,6 +102,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 类型安全的请求/响应结构
 - 符合 Rust 惯用法
 
+**状态**: ✅ 已实现 [PRD-02]
+
 ### REQ-API-002: 同步 API
 
 **描述**: 提供同步调用接口
@@ -97,6 +111,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 **验收标准**:
 - `Client::new()` 同步初始化
 - `.generate()` 同步返回完整结果
+
+**状态**: ✅ 已实现 [PRD-02]
 
 ### REQ-API-003: 异步 API
 
@@ -106,6 +122,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - `AsyncClient::new().await` 异步初始化
 - `.generate().await` 异步返回
 - 可选特性，通过 feature flag 启用
+
+**状态**: ✅ 已实现 [PRD-02]
 
 ---
 
@@ -120,6 +138,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 跨平台支持 (Vulkan/DX12/Metal)
 - 作为默认后端
 
+**状态**: ✅ 已实现 [PRD-02]
+
 ### REQ-BACKEND-002: CPU 后端
 
 **描述**: 支持 ndarray 作为 CPU 后端
@@ -128,6 +148,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 纯 Rust 实现
 - 无 GPU 环境可用
 - 通过 feature flag 启用
+
+**状态**: ✅ 已实现 [PRD-02]
 
 ---
 
@@ -141,3 +163,5 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 支持 Burn 内置量化方案
 - 支持 INT8 量化
 - 保持纯 Rust 实现
+
+**状态**: 🔄 基础支持已实现 [PRD-02]（通过 SafeTensors 加载支持量化模型，但未实现专用量化推理优化）
