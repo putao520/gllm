@@ -16,53 +16,68 @@
 
 ## 📦 Installation
 
-Add gllm to your `Cargo.toml`:
+### Requirements
+
+- **Rust 1.70+** (2021 edition)
+- **Memory** - Minimum 2GB RAM, 4GB+ recommended for larger models
+- **GPU (Optional)** - For faster inference with WGPU backend
+
+### Step 1: Add to Cargo.toml
 
 ```toml
 [dependencies]
-gllm = "0.1.0"
+gllm = "0.2"
 ```
 
-### Feature Flags
-
-Choose your backend and features:
+### Step 2: Choose Your Backend
 
 ```toml
-# Default: WGPU (GPU acceleration)
-gllm = "0.1.0"
+# Option 1: Default (WGPU GPU support + CPU fallback)
+gllm = "0.2"
 
-# CPU-only (no GPU dependencies)
-gllm = { version = "0.1.0", features = ["cpu"] }
+# Option 2: CPU-only (no GPU dependencies, pure Rust)
+gllm = { version = "0.2", features = ["cpu"] }
 
-# Async support
-gllm = { version = "0.1.0", features = ["async"] }
+# Option 3: With async support
+gllm = { version = "0.2", features = ["async"] }
 
-# CPU + Async
-gllm = { version = "0.1.0", features = ["cpu", "async"] }
+# Option 4: CPU-only + async
+gllm = { version = "0.2", features = ["cpu", "async"] }
 ```
 
-### System Requirements
+### Step 3: Start Using (5 minutes)
 
-- **Rust 1.70+** (2021 edition)
-- **GPU (Optional)** - For WGPU backend:
-  - Vulkan, DirectX 12, Metal, or OpenGL 4.3+ support
-- **Memory** - Minimum 2GB RAM, 4GB+ recommended for larger models
+See the Quick Start section below.
+
+## ℹ️ Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `wgpu` | ✅ | GPU acceleration using WGPU (Vulkan/DX12/Metal) |
+| `cpu` | ❌ | CPU-only inference using ndarray (pure Rust) |
+| `async` | ❌ | Async client support with tokio |
+
+### GPU Support
+
+The WGPU backend supports:
+- **NVIDIA GPUs** - via Vulkan or CUDA
+- **AMD GPUs** - via Vulkan or DirectX
+- **Intel GPUs** - via Vulkan or DirectX
+- **Apple Silicon** - via Metal
+- **Intel/AMD CPUs** - Fallback to CPU compute
 
 ## 🎯 Supported Models
 
-gllm includes built-in aliases for popular open-source models and supports any HuggingFace SafeTensors model.
+gllm includes built-in aliases for **26 popular models** and supports any HuggingFace SafeTensors model.
 
-### Built-in Model Aliases
+### Built-in Model Aliases (26 Models)
 
-gllm supports 23 popular models out of the box:
-
-#### 🔄 Text Embedding Models (16 models)
+#### 🔄 Text Embedding Models (18 models)
 
 | Alias | HuggingFace Model | Dimensions | Speed | Best For |
 |-------|------------------|------------|-------|----------|
 | **BGE Series** | | | | |
-| `bge-m3` | `BAAI/bge-m3` | 1024 | Medium | 🌍 Multilingual, 8192 tokens |
-| `bge-large-zh` | `BAAI/bge-large-zh-v1.5` | 1024 | Slow | 🇨🇳 Chinese optimized |
+| `bge-small-zh` | `BAAI/bge-small-zh-v1.5` | 512 | Fast | 🇨🇳 Chinese, lightweight |
 | `bge-small-en` | `BAAI/bge-small-en-v1.5` | 384 | Fast | 🇺🇸 English, lightweight |
 | `bge-base-en` | `BAAI/bge-base-en-v1.5` | 768 | Medium | 🇺🇸 English balanced |
 | `bge-large-en` | `BAAI/bge-large-en-v1.5` | 1024 | Slow | 🇺🇸 English high accuracy |
@@ -84,11 +99,14 @@ gllm supports 23 popular models out of the box:
 | `jina-embeddings-v2-base-en` | `jinaai/jina-embeddings-v2-base-en` | 768 | Medium | 🎯 Modern architecture |
 | `jina-embeddings-v2-small-en` | `jinaai/jina-embeddings-v2-small-en` | 384 | Fast | ⚡ Lightweight modern |
 
+| **Chinese Models** | | | | |
+| `m3e-base` | `moka-ai/m3e-base` | 768 | Medium | 🇨🇳 Chinese, high quality |
+
 | **Multilingual** | | | | |
 | `multilingual-MiniLM-L12-v2` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 384 | Medium | 🌍 50+ languages |
 | `distiluse-base-multilingual-cased-v1` | `sentence-transformers/distiluse-base-multilingual-cased-v1` | 512 | Medium | 🌍 Multilingual cased |
 
-#### 🎯 Document Reranking Models (7 models)
+#### 🎯 Document Reranking Models (8 models)
 
 | Alias | HuggingFace Model | Speed | Best For |
 |-------|------------------|-------|----------|
@@ -103,7 +121,7 @@ gllm supports 23 popular models out of the box:
 | `ms-marco-TinyBERT-L-2-v2` | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | Very Fast | ⚡ Lightweight reranking |
 | `ms-marco-electra-base` | `cross-encoder/ms-marco-electra-base` | Medium | ⚡ Efficient reranking |
 
-| **Specialized** | | | |
+| **Specialized Rerankers** | | | |
 | `quora-distilroberta-base` | `cross-encoder/quora-distilroberta-base` | Medium | ❓ Question similarity |
 
 ### Using Custom Models
@@ -131,12 +149,13 @@ let client = Client::new("sentence-transformers:all-MiniLM-L6-v2")?;
 - Great general-purpose choice
 
 **🎯 High Accuracy**
-- `bge-large-en` / `e5-large` / `bge-m3` - 1024 dims
+- `bge-large-en` / `e5-large` - 1024 dims
 - Best for quality-critical applications
 
-**🌍 Multilingual Support**
-- `bge-m3` - 8192 tokens, 100+ languages (recommended)
-- `multilingual-MiniLM-L12-v2` - 50+ languages (lighter)
+**🌍 Multilingual & Chinese Support**
+- `bge-small-zh` - 512 dims, Chinese optimized
+- `m3e-base` - 768 dims, Chinese high quality
+- `multilingual-MiniLM-L12-v2` - 384 dims, 50+ languages
 
 #### Reranking Models - Choose Based On:
 
@@ -169,8 +188,8 @@ Generate semantic embeddings for search, clustering, or similarity matching:
 use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client with built-in BGE-M3 model (auto-downloaded)
-    let client = Client::new("bge-m3")?;
+    // Create client with built-in model (auto-downloaded from HuggingFace)
+    let client = Client::new("bge-small-en")?;
 
     // Generate embeddings for multiple texts
     let response = client
@@ -238,7 +257,7 @@ For async applications, enable the `async` feature:
 
 ```toml
 [dependencies]
-gllm = { version = "0.1.0", features = ["async"] }
+gllm = { version = "0.2", features = ["async"] }
 ```
 
 ```rust
@@ -246,7 +265,7 @@ use gllm::AsyncClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = AsyncClient::new("bge-m3").await?;
+    let client = AsyncClient::new("bge-small-en").await?;
 
     let response = client
         .embeddings(["Hello world", "Async programming"])
@@ -269,11 +288,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use gllm::{Client, ClientConfig, Device};
 
 let config = ClientConfig {
-    model_dir: Some("/custom/model/path".into()),  // Override model storage
-    device: Device::Auto,                           // Auto-select GPU/CPU
+    models_dir: "/custom/model/path".into(),        // Override model storage (default: ~/.gllm/models)
+    device: Device::Auto,                           // Auto-select GPU/CPU (or Device::Cpu, Device::Gpu)
 };
 
-let client = Client::with_config("bge-m3", config)?;
+let client = Client::with_config("bge-small-en", config)?;
 ```
 
 ### Batch Processing
@@ -409,18 +428,30 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ## 🧪 Testing
 
-Run the test suite:
+Run the complete test suite:
 
 ```bash
-# Unit tests
-cargo test
+# Unit tests only
+cargo test --lib
 
-# Integration tests (requires CPU backend)
-cargo test --features cpu --test integration
+# Integration tests (fast, no model downloads needed)
+cargo test --test integration
 
-# All tests with verbose output
+# E2E tests with real model downloads and inference (requires models in ~/.gllm/models/)
+cargo test --test integration -- --ignored
+
+# All tests including E2E
+cargo test -- --include-ignored
+
+# Verbose output
 cargo test -- --nocapture
 ```
+
+### Test Coverage
+
+- ✅ 10 unit tests (model configs, registry, pooling)
+- ✅ 14 integration tests (API, error handling, features)
+- ✅ 8 E2E tests (real model downloads and inference for all 26 models)
 
 ## 🤝 Contributing
 
