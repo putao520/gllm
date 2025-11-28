@@ -1,0 +1,57 @@
+use super::common::{
+    EMBEDDING_DIM, env_lock, init_test_env, is_backend_unavailable, preferred_device,
+    prepare_context, write_dummy_weights,
+};
+use gllm::{Client, Error, Result};
+use safetensors::SafeTensors;
+use std::fs;
+
+#[test]
+fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
+    let _guard = env_lock();
+    init_test_env();
+    let device = preferred_device();
+
+    let (client, ctx) = match prepare_context("bge-m3", device) {
+        Ok(value) => value,
+        Err(err) if is_backend_unavailable(&err) => {
+            eprintln!("Skipping test: {err}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    assert!(ctx.repo_dir.ends_with("BAAI--bge-m3"));
+    assert!(ctx.repo_dir.is_dir());
+    drop(client);
+
+    Ok(())
+}
+
+#[test]
+fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
+    let _guard = env_lock();
+    init_test_env();
+    let device = preferred_device();
+
+    let (_client, ctx) = match prepare_context("bge-m3", device) {
+        Ok(value) => value,
+        Err(err) if is_backend_unavailable(&err) => {
+            eprintln!("Skipping test: {err}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let weights = ctx.repo_dir.join("model.safetensors");
+    write_dummy_weights(&weights);
+
+    let data = fs::read(&weights)?;
+    SafeTensors::deserialize(&data).map_err(|err| Error::LoadError(err.to_string()))?;
+
+    let client = Client::with_config("bge-m3", ctx.config.clone())?;
+    let response = client.embeddings(["warmup"]).generate()?;
+    assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
+
+    Ok(())
+}

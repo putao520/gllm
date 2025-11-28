@@ -1,0 +1,26 @@
+[package]
+name = "gllm"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["wgpu"]
+wgpu = ["burn/wgpu"]
+cpu = ["burn/ndarray"]
+async = ["tokio"]
+
+[dependencies]
+burn = { version = "0.20.0-pre.3", default-features = false, features = ["std"] }
+burn-import = { version = "0.20.0-pre.3", default-features = false, features = ["safetensors"] }
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
+tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+safetensors = "0.4"
