@@ -8,7 +8,7 @@ description = "Pure Rust library for local text embeddings and reranking with 26
 repository = "https://github.com/putao520/gllm"
 homepage = "https://github.com/putao520/gllm"
 keywords = ["embeddings", "reranking", "nlp", "ml", "rust"]
-categories = ["algorithms", "machine-learning", "text-processing"]
+categories = ["algorithms", "science", "text-processing"]
 
 [lib]
 name = "gllm"
