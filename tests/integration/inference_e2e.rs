@@ -3,7 +3,7 @@
 //!
 //! Run with: cargo test --test integration -- --ignored inference_e2e
 
-use gllm::{Client, ClientConfig, Device, ModelType, ModelRegistry};
+use gllm::{Client, ClientConfig, Device, ModelRegistry};
 use std::path::PathBuf;
 
 fn get_models_dir() -> PathBuf {

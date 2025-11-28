@@ -54,12 +54,6 @@ const REQUIRED_FILES: &[&str] = &[
     "tokenizer.json",
 ];
 
-/// Optional files that may or may not exist
-const OPTIONAL_FILES: &[&str] = &[
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-];
-
 fn get_test_models_dir() -> PathBuf {
     // Use the standard location: ~/.gllm/models
     dirs::home_dir()
