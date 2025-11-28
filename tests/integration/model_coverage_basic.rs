@@ -25,6 +25,8 @@ fn test_all_26_model_categories_basic() -> Result<()> {
         // MS MARCO Rerankers (4 models)
         "ms-marco-MiniLM-L-6-v2", "ms-marco-MiniLM-L-12-v2",
         "ms-marco-TinyBERT-L-2-v2", "ms-marco-electra-base",
+        // Specialized Rerankers (1 model)
+        "quora-distilroberta-base",
     ];
 
     println!("🎯 Testing all 26 model categories");
@@ -96,9 +98,9 @@ fn test_all_26_model_categories_basic() -> Result<()> {
     println!("  Rerank models: {}", rerank_models);
 
     // We should have identified the correct number of embedding vs rerank models
-    // Based on our list: 19 embedding models (4 BGE + 6 Sentence Transformers + 3 E5 + 2 JINA + 1 Chinese + 2 Multilingual + 1 quora), 7 rerank models (3 BGE rerankers + 4 MS MARCO)
-    assert_eq!(embedding_models, 19, "Should have 19 embedding model aliases");
-    assert_eq!(rerank_models, 7, "Should have 7 rerank model aliases");
+    // Based on our list: 18 embedding models (4 BGE + 6 Sentence Transformers + 3 E5 + 2 JINA + 1 Chinese + 2 Multilingual), 8 rerank models (3 BGE rerankers + 4 MS MARCO + 1 quora)
+    assert_eq!(embedding_models, 18, "Should have 18 embedding model aliases");
+    assert_eq!(rerank_models, 8, "Should have 8 rerank model aliases");
 
     println!("✅ All 26 model categories validated successfully!");
     Ok(())
