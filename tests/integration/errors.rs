@@ -21,7 +21,7 @@ fn embeddings_reject_empty_inputs() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (client, _ctx) = match prepare_context_with_weights("bge-m3", device) {
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", device) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");

@@ -12,7 +12,7 @@ fn embeddings_sync_end_to_end() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (client, _ctx) = match prepare_context_with_weights("bge-m3", device) {
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", device) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -43,7 +43,7 @@ async fn embeddings_async_end_to_end() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (client, _ctx) = match prepare_async_context_with_weights("bge-m3", device).await {
+    let (client, _ctx) = match prepare_async_context_with_weights("bge-small-en", device).await {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");

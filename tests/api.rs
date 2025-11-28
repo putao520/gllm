@@ -20,7 +20,7 @@ fn build_client() -> Client {
         std::env::set_var("GLLM_TEST_MODE", "1");
     }
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let model_dir = temp_dir.path().join("BAAI--bge-m3");
+    let model_dir = temp_dir.path().join("BAAI--bge-small-en-v1.5");
     fs::create_dir_all(&model_dir).expect("create model dir");
     write_dummy_weights(&model_dir.join("model.safetensors"));
 
@@ -28,7 +28,7 @@ fn build_client() -> Client {
     config.models_dir = temp_dir.keep();
     config.device = Device::Cpu;
 
-    Client::with_config("bge-m3", config).expect("client")
+    Client::with_config("bge-small-en", config).expect("client")
 }
 
 #[test]

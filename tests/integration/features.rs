@@ -13,7 +13,7 @@ fn wgpu_backend_executes_embeddings() -> Result<()> {
     let _guard = env_lock();
     init_test_env();
 
-    let (client, _ctx) = match prepare_context_with_weights("bge-m3", Device::Auto) {
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", Device::Auto) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -33,7 +33,7 @@ fn cpu_backend_executes_embeddings() -> Result<()> {
     let _guard = env_lock();
     init_test_env();
 
-    let (client, _ctx) = match prepare_context_with_weights("bge-m3", Device::Cpu) {
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", Device::Cpu) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -54,7 +54,7 @@ async fn async_feature_combination_supported() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (client, _ctx) = match prepare_async_context_with_weights("bge-m3", device).await {
+    let (client, _ctx) = match prepare_async_context_with_weights("bge-small-en", device).await {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -75,8 +75,8 @@ fn multi_backend_outputs_share_shapes() -> Result<()> {
     let _guard = env_lock();
     init_test_env();
 
-    let (cpu_client, _cpu_ctx) = prepare_context_with_weights("bge-m3", Device::Cpu)?;
-    let (auto_client, _gpu_ctx) = match prepare_context_with_weights("bge-m3", Device::Auto) {
+    let (cpu_client, _cpu_ctx) = prepare_context_with_weights("bge-small-en", Device::Cpu)?;
+    let (auto_client, _gpu_ctx) = match prepare_context_with_weights("bge-small-en", Device::Auto) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");

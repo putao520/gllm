@@ -12,7 +12,7 @@ fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (client, ctx) = match prepare_context("bge-m3", device) {
+    let (client, ctx) = match prepare_context("bge-small-en", device) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -21,7 +21,7 @@ fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
         Err(err) => return Err(err),
     };
 
-    assert!(ctx.repo_dir.ends_with("BAAI--bge-m3"));
+    assert!(ctx.repo_dir.ends_with("BAAI--bge-small-en-v1.5"));
     assert!(ctx.repo_dir.is_dir());
     drop(client);
 
@@ -34,7 +34,7 @@ fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
     init_test_env();
     let device = preferred_device();
 
-    let (_client, ctx) = match prepare_context("bge-m3", device) {
+    let (_client, ctx) = match prepare_context("bge-small-en", device) {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -49,7 +49,7 @@ fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
     let data = fs::read(&weights)?;
     SafeTensors::deserialize(&data).map_err(|err| Error::LoadError(err.to_string()))?;
 
-    let client = Client::with_config("bge-m3", ctx.config.clone())?;
+    let client = Client::with_config("bge-small-en", ctx.config.clone())?;
     let response = client.embeddings(["warmup"]).generate()?;
     assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
 

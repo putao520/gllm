@@ -108,7 +108,7 @@ fn test_all_26_model_categories_basic() -> Result<()> {
 fn test_model_type_classification() -> Result<()> {
     // Test our classification logic works correctly
     let embedding_models = [
-        "bge-m3", "bge-small-en", "all-MiniLM-L6-v2", "e5-base",
+        "bge-small-zh", "bge-small-en", "all-MiniLM-L6-v2", "e5-base",
         "jina-embeddings-v2-base-en", "multilingual-MiniLM-L12-v2"
     ];
 
