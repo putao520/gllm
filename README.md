@@ -14,7 +14,7 @@
 - 🎯 **Production ready** - Pure Rust implementation with static compilation support
 - 🚀 **Easy to use** - OpenAI-style API with builder patterns
 
-## 🚀 Quick Start
+## 📦 Installation
 
 Add gllm to your `Cargo.toml`:
 
@@ -22,6 +22,66 @@ Add gllm to your `Cargo.toml`:
 [dependencies]
 gllm = "0.1.0"
 ```
+
+### Feature Flags
+
+Choose your backend and features:
+
+```toml
+# Default: WGPU (GPU acceleration)
+gllm = "0.1.0"
+
+# CPU-only (no GPU dependencies)
+gllm = { version = "0.1.0", features = ["cpu"] }
+
+# Async support
+gllm = { version = "0.1.0", features = ["async"] }
+
+# CPU + Async
+gllm = { version = "0.1.0", features = ["cpu", "async"] }
+```
+
+### System Requirements
+
+- **Rust 1.70+** (2021 edition)
+- **GPU (Optional)** - For WGPU backend:
+  - Vulkan, DirectX 12, Metal, or OpenGL 4.3+ support
+- **Memory** - Minimum 2GB RAM, 4GB+ recommended for larger models
+
+## 🎯 Supported Models
+
+gllm includes built-in aliases for popular open-source models and supports any HuggingFace SafeTensors model.
+
+### Built-in Model Aliases
+
+| Alias | HuggingFace Model | Type | Dimensions | Use Case |
+|-------|------------------|------|------------|----------|
+| `bge-m3` | `BAAI/bge-m3` | Embedding | 1024 | Multilingual, 8192 tokens |
+| `bge-large-zh` | `BAAI/bge-large-zh-v1.5` | Embedding | 1024 | Chinese optimized |
+| `bge-small-en` | `BAAI/bge-small-en-v1.5` | Embedding | 384 | English, lightweight |
+| `bge-reranker-v2` | `BAAI/bge-reranker-v2-m3` | Rerank | - | Multilingual reranking |
+| `bge-reranker-large` | `BAAI/bge-reranker-large` | Rerank | - | High-performance reranking |
+
+### Using Custom Models
+
+You can use any HuggingFace SafeTensors model directly:
+
+```rust
+// Use any HuggingFace SafeTensors model
+let client = Client::new("sentence-transformers/all-MiniLM-L6-v2")?;
+
+// Or use colon notation for shorthand
+let client = Client::new("sentence-transformers:all-MiniLM-L6-v2")?;
+```
+
+### Model Requirements
+
+- **Embedding Models**: BERT-style encoder models with SafeTensors weights
+- **Rerank Models**: Cross-encoder models with SafeTensors weights
+- **Format**: SafeTensors (`.safetensors` files)
+- **Tokenizer**: HuggingFace compatible tokenizer files
+
+## 🚀 Quick Start
 
 ### Text Embeddings
 
@@ -123,41 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## 🎯 Built-in Models
-
-gllm includes aliases for popular open-source models:
-
-| Alias | HuggingFace Model | Type | Use Case |
-|-------|------------------|------|----------|
-| `bge-m3` | `BAAI/bge-m3` | Embedding | Multilingual, 8192 tokens, 1024 dims |
-| `bge-large-zh` | `BAAI/bge-large-zh-v1.5` | Embedding | Chinese, 1024 dims |
-| `bge-small-en` | `BAAI/bge-small-en-v1.5` | Embedding | English, 384 dims |
-| `bge-reranker-v2` | `BAAI/bge-reranker-v2-m3` | Rerank | Multilingual reranking |
-| `bge-reranker-large` | `BAAI/bge-reranker-large` | Rerank | High-performance reranking |
-
-You can also use any HuggingFace model ID directly:
-
-```rust
-// Use any HuggingFace SafeTensors model
-let client = Client::new("sentence-transformers/all-MiniLM-L6-v2")?;
-```
-
 ## 🔧 Advanced Usage
-
-### Backend Selection
-
-Choose between GPU and CPU backends using feature flags:
-
-```toml
-# Default: WGPU (GPU acceleration)
-gllm = "0.1.0"
-
-# CPU-only (no GPU dependencies)
-gllm = { version = "0.1.0", features = ["cpu"] }
-
-# Both backends available
-gllm = { version = "0.1.0", features = ["wgpu", "cpu"] }
-```
 
 ### Custom Configuration
 
