@@ -1,5 +1,5 @@
 use crate::engine::TokenizerAdapter;
-use crate::registry::{Architecture, ModelInfo, ModelRegistry};
+use crate::registry::{ModelInfo, ModelRegistry};
 use crate::types::{ClientConfig, Error, Result};
 use hf_hub::api::sync::Api;
 use std::fs;
@@ -86,30 +86,31 @@ impl ModelManager {
         Ok(())
     }
 
-    /// Validate that weights exist and are readable.
-    pub fn load_model<B: burn::tensor::backend::Backend>(&self, model_dir: &Path) -> Result<()> {
+    /// Validate that model files exist and are readable.
+    pub fn validate_model_files(&self, model_dir: &Path) -> Result<()> {
+        // Check for SafeTensors weights
         let weights = model_dir.join("model.safetensors");
-        if !weights.exists() {
-            return Err(Error::LoadError(format!(
-                "Missing weights at {}",
-                weights.display()
-            )));
+        if weights.exists() {
+            fs::metadata(&weights).map_err(Error::from)?;
         }
 
-        fs::metadata(&weights).map_err(Error::from)?;
+        // Check for config.json
+        let config = model_dir.join("config.json");
+        if config.exists() {
+            fs::metadata(&config).map_err(Error::from)?;
+        }
+
+        // Check for tokenizer files
+        let tokenizer = model_dir.join("tokenizer.json");
+        if tokenizer.exists() {
+            fs::metadata(&tokenizer).map_err(Error::from)?;
+        }
+
         Ok(())
     }
 
     fn repo_dir(&self, repo_id: &str) -> PathBuf {
         let safe = repo_id.replace('/', "--");
         self.config.models_dir.join(safe)
-    }
-}
-
-/// Determine sensible defaults for dimensionality based on architecture.
-pub(crate) fn default_hidden_size(architecture: Architecture) -> usize {
-    match architecture {
-        Architecture::Bert => 64,
-        Architecture::CrossEncoder => 48,
     }
 }

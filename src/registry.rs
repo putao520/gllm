@@ -22,7 +22,7 @@ pub enum Architecture {
 
 /// Metadata describing a model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ModelInfo {
+pub struct ModelInfo {
     /// Alias for quick reference.
     pub alias: String,
     /// HuggingFace repository ID.
@@ -34,7 +34,7 @@ pub(crate) struct ModelInfo {
 }
 
 /// Registry of built-in model aliases.
-pub(crate) struct ModelRegistry {
+pub struct ModelRegistry {
     models: HashMap<String, ModelInfo>,
 }
 
@@ -45,14 +45,8 @@ impl ModelRegistry {
         let entries = [
             // BGE Embedding Models
             (
-                "bge-m3",
-                "BAAI/bge-m3",
-                ModelType::Embedding,
-                Architecture::Bert,
-            ),
-            (
-                "bge-large-zh",
-                "BAAI/bge-large-zh-v1.5",
+                "bge-small-zh",
+                "BAAI/bge-small-zh-v1.5",
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
@@ -74,7 +68,6 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
             // Sentence Transformers Models
             (
                 "all-MiniLM-L6-v2",
@@ -100,7 +93,6 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
             // E5 Models
             (
                 "e5-large",
@@ -120,7 +112,6 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
             // JINA Embeddings
             (
                 "jina-embeddings-v2-base-en",
@@ -134,7 +125,13 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
+            // Chinese Models
+            (
+                "m3e-base",
+                "moka-ai/m3e-base",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
             // Multilingual Models
             (
                 "multilingual-MiniLM-L12-v2",
@@ -148,7 +145,6 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
             // Light Models for Edge Devices
             (
                 "all-MiniLM-L12-v2",
@@ -162,7 +158,6 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
-
             // BGE Rerankers
             (
                 "bge-reranker-v2",
@@ -182,7 +177,6 @@ impl ModelRegistry {
                 ModelType::Rerank,
                 Architecture::CrossEncoder,
             ),
-
             // MS MARCO Rerankers
             (
                 "ms-marco-MiniLM-L-6-v2",
@@ -208,7 +202,6 @@ impl ModelRegistry {
                 ModelType::Rerank,
                 Architecture::CrossEncoder,
             ),
-
             // Specialized Rerankers
             (
                 "quora-distilroberta-base",
@@ -289,8 +282,8 @@ mod tests {
     #[test]
     fn resolves_builtin_model() {
         let registry = ModelRegistry::new();
-        let info = registry.resolve("bge-m3").unwrap();
-        assert_eq!(info.repo_id, "BAAI/bge-m3");
+        let info = registry.resolve("bge-small-en").unwrap();
+        assert_eq!(info.repo_id, "BAAI/bge-small-en-v1.5");
         assert!(matches!(info.architecture, Architecture::Bert));
     }
 

@@ -3,8 +3,16 @@ name = "gllm"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "gllm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "test_models"
+path = "test_models.rs"
+
 [features]
-default = ["wgpu"]
+default = ["wgpu", "cpu"]
 wgpu = ["burn/wgpu"]
 cpu = ["burn/ndarray"]
 async = ["tokio"]
@@ -20,7 +28,7 @@ serde_json = "1"
 thiserror = "2"
 log = "0.4"
 dirs = "5"
+safetensors = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
-safetensors = "0.4"

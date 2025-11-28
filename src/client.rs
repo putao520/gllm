@@ -7,10 +7,6 @@ use crate::model::{ModelArtifacts, ModelManager};
 use crate::rerank::AsyncRerankBuilder;
 use crate::rerank::RerankBuilder;
 use crate::types::{ClientConfig, Result};
-#[cfg(feature = "cpu")]
-use burn::backend::NdArray;
-#[cfg(feature = "wgpu")]
-use burn::backend::Wgpu;
 use log::warn;
 
 /// Synchronous client.
@@ -31,22 +27,11 @@ impl Client {
     pub fn with_config(model: &str, config: ClientConfig) -> Result<Self> {
         let manager = ModelManager::new(config.clone());
         let artifacts = manager.prepare(model)?;
-        let engine = build_backend(&artifacts.info, &artifacts.tokenizer, &config.device)?;
+        let engine = build_backend(&artifacts.info, &artifacts.model_dir, &config.device)?;
 
-        // Validate weights if present; continue with initialized parameters if validation fails.
-        match &engine {
-            #[cfg(feature = "wgpu")]
-            EngineBackend::Wgpu { .. } => {
-                if let Err(err) = manager.load_model::<Wgpu<f32>>(&artifacts.model_dir) {
-                    warn!("Skipping weight validation (wgpu): {err}");
-                }
-            }
-            #[cfg(feature = "cpu")]
-            EngineBackend::Cpu { .. } => {
-                if let Err(err) = manager.load_model::<NdArray<f32>>(&artifacts.model_dir) {
-                    warn!("Skipping weight validation (cpu): {err}");
-                }
-            }
+        // Validate model files if present; continue with initialized parameters if validation fails.
+        if let Err(err) = manager.validate_model_files(&artifacts.model_dir) {
+            warn!("Skipping model file validation: {err}");
         }
 
         Ok(Self {

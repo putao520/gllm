@@ -1,14 +1,11 @@
-use crate::model::default_hidden_size;
+use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
+use crate::model_config::ModelConfig;
 use crate::registry::ModelInfo;
 use crate::types::{Device, Error, Result};
 #[cfg(feature = "cpu")]
 use burn::backend::NdArray;
 #[cfg(feature = "wgpu")]
 use burn::backend::Wgpu;
-use burn::nn::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
-use burn::nn::{
-    Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Sigmoid,
-};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use std::collections::hash_map::DefaultHasher;
@@ -16,8 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-pub(crate) const MAX_SEQ_LEN: usize = 128;
-const EMBEDDING_OUTPUT: usize = 128;
+pub(crate) const MAX_SEQ_LEN: usize = 512;
 
 /// Lightweight tokenizer wrapper supporting both HF tokenizers and a deterministic fallback.
 #[derive(Clone)]
@@ -84,9 +80,9 @@ impl TokenizerAdapter {
         let (mut doc_tokens, used_doc) = self.encode(document, max_len - query_tokens.len());
 
         let mut merged = Vec::with_capacity(max_len);
-        merged.push(1); // CLS-like token for separation.
+        merged.push(101); // CLS token id
         merged.append(&mut query_tokens);
-        merged.push(2); // SEP-like token.
+        merged.push(102); // SEP token id
         merged.append(&mut doc_tokens);
         merged.truncate(max_len);
 
@@ -95,6 +91,7 @@ impl TokenizerAdapter {
     }
 
     /// Vocabulary size for embedding tables.
+    #[allow(dead_code)]
     pub fn vocab_size(&self) -> usize {
         // Reserve one additional slot for padding.
         self.vocab_size + 1
@@ -111,35 +108,35 @@ impl TokenizerAdapter {
     }
 }
 
-/// Embedding encoder built with Burn primitives.
+/// Embedding encoder built with dynamic BERT model.
 #[derive(Clone)]
 pub(crate) struct EmbeddingEngine<B: Backend> {
-    embedding: Embedding<B>,
-    attention: MultiHeadAttention<B>,
-    projection: Linear<B>,
-    norm: LayerNorm<B>,
-    output_dim: usize,
+    model: DynamicBertModel<B>,
     device: B::Device,
 }
 
 impl<B: Backend> EmbeddingEngine<B> {
-    pub fn new(device: B::Device, vocab_size: usize, hidden: usize, output_dim: usize) -> Self {
-        let embedding = EmbeddingConfig::new(vocab_size, hidden).init(&device);
-        let attention = MultiHeadAttentionConfig::new(hidden, 4)
-            .with_dropout(0.05)
-            .init(&device);
-        let norm = LayerNormConfig::new(hidden).init(&device);
-        let projection = LinearConfig::new(hidden, output_dim).init(&device);
-        B::seed(&device, 42);
+    pub fn new(device: B::Device, model_dir: &Path) -> Result<Self> {
+        // Load model configuration
+        let config_path = model_dir.join("config.json");
+        let repo_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .replace("--", "/");
+        let config_file = config_path.exists().then_some(config_path.as_path());
+        let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
-        Self {
-            embedding,
-            attention,
-            projection,
-            norm,
-            output_dim,
-            device,
+        // Create dynamic BERT model
+        let mut model = DynamicBertModel::new(&device, config)?;
+
+        // Load weights if available
+        let safetensors_path = model_dir.join("model.safetensors");
+        if safetensors_path.exists() {
+            model.load_safetensors(&safetensors_path)?;
         }
+
+        Ok(Self { model, device })
     }
 
     pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
@@ -148,66 +145,80 @@ impl<B: Backend> EmbeddingEngine<B> {
                 "At least one text is required for embeddings".into(),
             ));
         }
+
         let batch = tokens.len();
         let seq_len = tokens.iter().map(|t| t.len()).max().unwrap_or(1);
+
+        // Pad all token sequences to same length
         let mut flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
         for item in tokens {
-            if item.len() != seq_len {
-                return Err(Error::InvalidConfig("Mismatched token lengths".into()));
-            }
-            flat.extend_from_slice(item);
+            let mut padded = item.clone();
+            padded.resize(seq_len, 0); // pad with 0 (PAD token)
+            flat.extend_from_slice(&padded);
         }
 
+        // Create input tensor
         let token_tensor =
             Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [batch, seq_len]), &self.device);
-        let embedded = self.embedding.forward(token_tensor);
-        let attn_out = self.attention.forward(MhaInput::self_attn(embedded));
-        let normalized = self.norm.forward(attn_out.context);
-        let pooled = normalized.mean_dim(1);
-        let projected = self.projection.forward(pooled);
-        let data = projected
+
+        // Forward pass through BERT
+        let hidden_states = self.model.forward(token_tensor)?;
+        let pooled = self.model.pool_hidden_states(hidden_states);
+
+        let data = pooled
             .into_data()
             .into_vec::<f32>()
             .map_err(|err| Error::InferenceError(err.to_string()))?;
 
-        let mut result = Vec::with_capacity(batch);
-        for chunk in data.chunks(self.output_dim) {
+        let hidden_size = self.model.hidden_size();
+        let mut embeddings = Vec::with_capacity(batch);
+        for chunk in data.chunks(hidden_size) {
             let norm = chunk.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
-            result.push(chunk.iter().map(|v| v / norm).collect());
+            embeddings.push(chunk.iter().map(|v| v / norm).collect());
         }
-        Ok(result)
+
+        Ok(embeddings)
     }
+
 }
 
-/// Cross-encoder rerank engine with simple attention + scoring head.
+/// Cross-encoder rerank engine with dynamic BERT model.
 #[derive(Clone)]
 pub(crate) struct RerankEngine<B: Backend> {
-    embedding: Embedding<B>,
-    attention: MultiHeadAttention<B>,
-    norm: LayerNorm<B>,
-    scorer: Linear<B>,
-    sigmoid: Sigmoid,
+    model: DynamicCrossEncoder<B>,
     device: B::Device,
 }
 
 impl<B: Backend> RerankEngine<B> {
-    pub fn new(device: B::Device, vocab_size: usize, hidden: usize) -> Self {
-        let embedding = EmbeddingConfig::new(vocab_size, hidden).init(&device);
-        let attention = MultiHeadAttentionConfig::new(hidden, 2)
-            .with_dropout(0.1)
-            .init(&device);
-        let norm = LayerNormConfig::new(hidden).init(&device);
-        let scorer = LinearConfig::new(hidden, 1).init(&device);
-        B::seed(&device, 7);
+    pub fn new(device: B::Device, model_dir: &Path) -> Result<Self> {
+        // Load model configuration
+        let config_path = model_dir.join("config.json");
+        let repo_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .replace("--", "/");
+        let config_file = config_path.exists().then_some(config_path.as_path());
+        let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
-        Self {
-            embedding,
-            attention,
-            norm,
-            scorer,
-            sigmoid: Sigmoid::new(),
-            device,
+        // Ensure this is configured as a cross-encoder
+        let mut config = config;
+        if !config.is_cross_encoder() {
+            // Force cross-encoder configuration for rerankers
+            config.num_labels = Some(1);
+            config.classifier_dropout = Some(0.1);
         }
+
+        // Create dynamic cross-encoder model
+        let mut model = DynamicCrossEncoder::new(&device, config)?;
+
+        // Load weights if available
+        let safetensors_path = model_dir.join("model.safetensors");
+        if safetensors_path.exists() {
+            model.load_safetensors(&safetensors_path)?;
+        }
+
+        Ok(Self { model, device })
     }
 
     pub fn score(&self, pairs: &[Vec<i64>]) -> Result<Vec<f32>> {
@@ -216,33 +227,32 @@ impl<B: Backend> RerankEngine<B> {
                 "At least one query-document pair is required".into(),
             ));
         }
+
         let batch = pairs.len();
         let seq_len = pairs.iter().map(|t| t.len()).max().unwrap_or(1);
-        let mut flat = Vec::with_capacity(batch * seq_len);
+
+        // Pad all token sequences to same length
+        let mut flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
         for pair in pairs {
-            if pair.len() != seq_len {
-                return Err(Error::InvalidConfig(
-                    "Rerank token sequences must be equal length".into(),
-                ));
-            }
-            flat.extend_from_slice(pair);
+            let mut padded = pair.clone();
+            padded.resize(seq_len, 0); // pad with 0 (PAD token)
+            flat.extend_from_slice(&padded);
         }
 
+        // Create input tensor
         let token_tensor =
             Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [batch, seq_len]), &self.device);
-        let embedded = self.embedding.forward(token_tensor);
-        let attn_out = self.attention.forward(MhaInput::self_attn(embedded));
-        let normalized = self.norm.forward(attn_out.context);
-        let pooled = normalized.mean_dim(1);
-        let logits = self.scorer.forward(pooled);
-        let scores = self.sigmoid.forward(logits);
 
-        // Flatten the [batch, 1] tensor to [batch] by extracting all values
-        let data = scores.into_data();
-        let values: Vec<f32> = data
+        // Forward pass through cross-encoder with sigmoid
+        let scores = self.model.forward_with_sigmoid(token_tensor)?;
+
+        // Convert to vector and extract scalar values
+        let data = scores
+            .into_data()
             .into_vec::<f32>()
             .map_err(|err| Error::InferenceError(err.to_string()))?;
-        Ok(values)
+
+        Ok(data)
     }
 }
 
@@ -278,31 +288,39 @@ impl EngineBackend {
             EngineBackend::Cpu { rerank, .. } => rerank.score(tokens),
         }
     }
+
 }
 
 /// Build an engine backend according to device preference and available features.
 pub(crate) fn build_backend(
-    info: &ModelInfo,
-    tokenizer: &TokenizerAdapter,
+    _info: &ModelInfo,
+    model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
-    let hidden = default_hidden_size(info.architecture);
+    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
+
+    #[cfg(feature = "cpu")]
+    if prefer_cpu {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(EngineBackend::Cpu { embedding, rerank });
+    }
 
     #[cfg(feature = "wgpu")]
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let init = std::panic::catch_unwind(|| {
             let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
-            let embedding = EmbeddingEngine::<Wgpu<f32>>::new(
-                wgpu_device.clone(),
-                tokenizer.vocab_size(),
-                hidden,
-                EMBEDDING_OUTPUT,
-            );
-            let rerank =
-                RerankEngine::<Wgpu<f32>>::new(wgpu_device, tokenizer.vocab_size(), hidden);
-            EngineBackend::Wgpu { embedding, rerank }
+            let embedding = EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir);
+            let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir);
+
+            match (embedding, rerank) {
+                (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Wgpu { embedding, rerank }),
+                _ => None,
+            }
         });
-        if let Ok(engine) = init {
+
+        if let Ok(Some(engine)) = init {
             return Ok(engine);
         }
     }
@@ -311,14 +329,9 @@ pub(crate) fn build_backend(
     {
         if matches!(device, Device::Cpu | Device::Auto) {
             let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-            let embedding = EmbeddingEngine::<NdArray<f32>>::new(
-                ndarray_device.clone(),
-                tokenizer.vocab_size(),
-                hidden,
-                EMBEDDING_OUTPUT,
-            );
-            let rerank =
-                RerankEngine::<NdArray<f32>>::new(ndarray_device, tokenizer.vocab_size(), hidden);
+            let embedding =
+                EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
+            let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
             return Ok(EngineBackend::Cpu { embedding, rerank });
         }
     }

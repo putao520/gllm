@@ -1,6 +1,9 @@
 mod common;
+mod download_e2e;
 mod embeddings;
 mod errors;
 mod features;
+mod inference_e2e;
+mod model_coverage_basic;
 mod model_management;
 mod rerank;

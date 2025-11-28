@@ -14,6 +14,11 @@ fn write_dummy_weights(path: &std::path::Path) {
 }
 
 fn build_client() -> Client {
+    unsafe {
+        std::env::set_var("GLLM_SKIP_DOWNLOAD", "1");
+        std::env::set_var("HF_HUB_OFFLINE", "1");
+        std::env::set_var("GLLM_TEST_MODE", "1");
+    }
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let model_dir = temp_dir.path().join("BAAI--bge-m3");
     fs::create_dir_all(&model_dir).expect("create model dir");

@@ -48,7 +48,7 @@ pub struct RerankResponse {
 }
 
 /// Device selection for inference.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum Device {
     /// Auto-select best available backend (prefer GPU).
     #[default]
@@ -113,7 +113,32 @@ pub enum Error {
 
     /// Wrapped IO error.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Error::ModelNotFound(s) => Error::ModelNotFound(s.clone()),
+            Error::DownloadError(s) => Error::DownloadError(s.clone()),
+            Error::LoadError(s) => Error::LoadError(s.clone()),
+            Error::InferenceError(s) => Error::InferenceError(s.clone()),
+            Error::InvalidConfig(s) => Error::InvalidConfig(s.clone()),
+            Error::Io(io_err) => Error::Io(std::io::Error::new(io_err.kind(), io_err.to_string())),
+        }
+    }
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::LoadError(s)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err)
+    }
 }
 
 /// Result alias for gllm operations.
