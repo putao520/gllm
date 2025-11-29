@@ -1,5 +1,3 @@
-#[cfg(feature = "async")]
-use gllm::AsyncClient;
 use gllm::{Client, ClientConfig, Device, Error, Result};
 use safetensors::Dtype;
 use safetensors::tensor::{TensorView, serialize};
@@ -46,6 +44,22 @@ pub(crate) struct TempContext {
     pub _temp_dir: tempfile::TempDir,
 }
 
+fn discover_repo_dir(base: &Path) -> Result<PathBuf> {
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            return Ok(entry.path());
+        }
+    }
+    Err(Error::LoadError("Model directory was not created".into()))
+}
+
+pub(crate) fn is_backend_unavailable(err: &Error) -> bool {
+    matches!(err, Error::InvalidConfig(_))
+}
+
+// 同步版本
+#[cfg(not(feature = "tokio"))]
 pub(crate) fn prepare_context(model: &str, device: Device) -> Result<(Client, TempContext)> {
     init_test_env();
 
@@ -67,6 +81,7 @@ pub(crate) fn prepare_context(model: &str, device: Device) -> Result<(Client, Te
     ))
 }
 
+#[cfg(not(feature = "tokio"))]
 pub(crate) fn prepare_context_with_weights(
     model: &str,
     device: Device,
@@ -79,27 +94,38 @@ pub(crate) fn prepare_context_with_weights(
     Ok((refreshed, ctx))
 }
 
-#[cfg(feature = "async")]
-pub(crate) async fn prepare_async_context_with_weights(
+// 异步版本
+#[cfg(feature = "tokio")]
+pub(crate) async fn prepare_context(model: &str, device: Device) -> Result<(Client, TempContext)> {
+    init_test_env();
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let mut config = ClientConfig::default();
+    config.models_dir = temp_dir.path().to_path_buf();
+    config.device = device;
+
+    let client = Client::with_config(model, config.clone()).await?;
+    let repo_dir = discover_repo_dir(&config.models_dir)?;
+
+    Ok((
+        client,
+        TempContext {
+            config,
+            repo_dir,
+            _temp_dir: temp_dir,
+        },
+    ))
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) async fn prepare_context_with_weights(
     model: &str,
     device: Device,
-) -> Result<(AsyncClient, TempContext)> {
-    let (_client, ctx) = prepare_context_with_weights(model, device)?;
-    let client = AsyncClient::with_config(model, ctx.config.clone()).await?;
-    Ok((client, ctx))
-}
+) -> Result<(Client, TempContext)> {
+    let (_client, ctx) = prepare_context(model, device).await?;
+    let weights = ctx.repo_dir.join("model.safetensors");
+    write_dummy_weights(&weights);
 
-fn discover_repo_dir(base: &Path) -> Result<PathBuf> {
-    for entry in fs::read_dir(base)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            return Ok(entry.path());
-        }
-    }
-
-    Err(Error::LoadError("Model directory was not created".into()))
-}
-
-pub(crate) fn is_backend_unavailable(err: &Error) -> bool {
-    matches!(err, Error::InvalidConfig(_))
+    let refreshed = Client::with_config(model, ctx.config.clone()).await?;
+    Ok((refreshed, ctx))
 }

@@ -66,7 +66,8 @@ fn model_dir_name(repo_id: &str) -> String {
     repo_id.replace('/', "--")
 }
 
-/// Test download of a single small model (for quick CI checks)
+/// Test download of a single small model (for quick CI checks) - 同步版本
+#[cfg(not(feature = "tokio"))]
 #[test]
 #[ignore = "Downloads real model, run with --ignored"]
 fn download_single_small_model() {
@@ -106,7 +107,49 @@ fn download_single_small_model() {
     }
 }
 
-/// Test download of all 26 models (full E2E test)
+/// Test download of a single small model (for quick CI checks) - 异步版本
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Downloads real model, run with --ignored"]
+async fn download_single_small_model() {
+    let (alias, repo_id) = ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2");
+    let models_dir = get_test_models_dir();
+    let model_dir = models_dir.join(model_dir_name(repo_id));
+
+    // Clean up before test
+    let _ = fs::remove_dir_all(&model_dir);
+
+    println!("📥 Downloading {} ({})...", alias, repo_id);
+    let start = Instant::now();
+
+    let config = gllm::ClientConfig {
+        device: gllm::Device::Auto,
+        models_dir: models_dir.clone(),
+    };
+
+    let result = gllm::Client::with_config(alias, config).await;
+
+    match result {
+        Ok(_client) => {
+            let elapsed = start.elapsed();
+            println!("✅ Downloaded {} in {:.2}s", alias, elapsed.as_secs_f64());
+
+            // Verify required files exist
+            for file in REQUIRED_FILES {
+                let path = model_dir.join(file);
+                assert!(path.exists(), "Missing required file: {} for {}", file, alias);
+                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                println!("   📄 {} ({:.2} MB)", file, size as f64 / 1024.0 / 1024.0);
+            }
+        }
+        Err(e) => {
+            panic!("❌ Failed to download {}: {:?}", alias, e);
+        }
+    }
+}
+
+/// Test download of all 26 models (full E2E test) - 同步版本
+#[cfg(not(feature = "tokio"))]
 #[test]
 #[ignore = "Downloads all models, takes significant time and bandwidth"]
 fn download_all_26_models() {
@@ -139,6 +182,90 @@ fn download_all_26_models() {
         };
 
         match gllm::Client::with_config(alias, config) {
+            Ok(_client) => {
+                let elapsed = start.elapsed();
+                let msg = format!("{:.1}s", elapsed.as_secs_f64());
+                println!("         ✅ Done in {}", msg);
+                results.push((alias.to_string(), true, msg));
+
+                // Verify files
+                for file in REQUIRED_FILES {
+                    let path = model_dir.join(file);
+                    if !path.exists() {
+                        println!("         ⚠️  Missing: {}", file);
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                println!("         ❌ Failed: {}", msg);
+                results.push((alias.to_string(), false, msg));
+            }
+        }
+    }
+
+    // Summary
+    let total_elapsed = total_start.elapsed();
+    let success_count = results.iter().filter(|(_, ok, _)| *ok).count();
+    let failed_count = results.len() - success_count;
+
+    println!();
+    println!("{}", "=".repeat(60));
+    println!("📊 E2E DOWNLOAD TEST SUMMARY");
+    println!("{}", "=".repeat(60));
+    println!("Total models: {}", ALL_MODELS.len());
+    println!("✅ Successful: {}", success_count);
+    println!("❌ Failed: {}", failed_count);
+    println!("⏱️  Total time: {:.1}s", total_elapsed.as_secs_f64());
+    println!();
+
+    if failed_count > 0 {
+        println!("Failed models:");
+        for (alias, ok, msg) in &results {
+            if !ok {
+                println!("  - {}: {}", alias, msg);
+            }
+        }
+        panic!("{} models failed to download", failed_count);
+    }
+
+    println!("✅ All 26 models downloaded successfully!");
+}
+
+/// Test download of all 26 models (full E2E test) - 异步版本
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Downloads all models, takes significant time and bandwidth"]
+async fn download_all_26_models() {
+    let models_dir = get_test_models_dir();
+    fs::create_dir_all(&models_dir).expect("create test models dir");
+
+    let mut results: Vec<(String, bool, String)> = Vec::new();
+    let total_start = Instant::now();
+
+    println!("🎯 Starting E2E download test for all 26 models");
+    println!("📁 Models directory: {}", models_dir.display());
+    println!();
+
+    for (i, (alias, repo_id)) in ALL_MODELS.iter().enumerate() {
+        let model_dir = models_dir.join(model_dir_name(repo_id));
+
+        // Skip if already downloaded
+        if model_dir.join("model.safetensors").exists() {
+            println!("[{:2}/24] ⏭️  {} - already exists", i + 1, alias);
+            results.push((alias.to_string(), true, "cached".to_string()));
+            continue;
+        }
+
+        println!("[{:2}/24] 📥 Downloading {}...", i + 1, alias);
+        let start = Instant::now();
+
+        let config = gllm::ClientConfig {
+            device: gllm::Device::Auto,
+            models_dir: models_dir.clone(),
+        };
+
+        match gllm::Client::with_config(alias, config).await {
             Ok(_client) => {
                 let elapsed = start.elapsed();
                 let msg = format!("{:.1}s", elapsed.as_secs_f64());
@@ -287,7 +414,8 @@ fn verify_downloaded_model_files() {
     }
 }
 
-/// Test that a downloaded model can be used for inference
+/// Test that a downloaded model can be used for inference - 同步版本
+#[cfg(not(feature = "tokio"))]
 #[test]
 #[ignore = "Requires downloaded model and GPU/CPU backend"]
 fn test_inference_with_downloaded_model() {
@@ -311,6 +439,44 @@ fn test_inference_with_downloaded_model() {
     ];
 
     match client.embeddings(&texts).generate() {
+        Ok(response) => {
+            println!("✅ Generated {} embeddings", response.embeddings.len());
+            for emb in &response.embeddings {
+                println!("   Text {}: {} dimensions", emb.index + 1, emb.embedding.len());
+            }
+        }
+        Err(e) => {
+            println!("❌ Inference failed: {:?}", e);
+            panic!("Inference test failed");
+        }
+    }
+}
+
+/// Test that a downloaded model can be used for inference - 异步版本
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires downloaded model and GPU/CPU backend"]
+async fn test_inference_with_downloaded_model() {
+    // Use smallest model for quick test
+    let alias = "all-MiniLM-L6-v2";
+    let models_dir = get_test_models_dir();
+
+    println!("🧪 Testing inference with {}...", alias);
+
+    let config = gllm::ClientConfig {
+        device: gllm::Device::Auto,
+        models_dir,
+    };
+
+    let client = gllm::Client::with_config(alias, config).await
+        .expect("Failed to create client");
+
+    let texts = vec![
+        "Hello, world!",
+        "This is a test sentence.",
+    ];
+
+    match client.embeddings(&texts).generate().await {
         Ok(response) => {
             println!("✅ Generated {} embeddings", response.embeddings.len());
             for emb in &response.embeddings {

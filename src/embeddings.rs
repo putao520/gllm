@@ -1,7 +1,7 @@
 use crate::engine::{EngineBackend, MAX_SEQ_LEN, TokenizerAdapter};
 use crate::types::{Embedding, EmbeddingResponse, Error, Result, Usage};
 
-/// Embeddings request builder (synchronous).
+/// Embeddings request builder.
 pub struct EmbeddingsBuilder<'a> {
     pub(crate) engine: &'a EngineBackend,
     pub(crate) tokenizer: &'a TokenizerAdapter,
@@ -9,8 +9,7 @@ pub struct EmbeddingsBuilder<'a> {
 }
 
 impl<'a> EmbeddingsBuilder<'a> {
-    /// Generate embeddings synchronously.
-    pub fn generate(self) -> Result<EmbeddingResponse> {
+    fn run(self) -> Result<EmbeddingResponse> {
         if self.inputs.is_empty() {
             return Err(Error::InvalidConfig(
                 "At least one input is required for embeddings".into(),
@@ -41,16 +40,20 @@ impl<'a> EmbeddingsBuilder<'a> {
     }
 }
 
-/// Embeddings request builder (asynchronous).
-#[cfg(feature = "async")]
-pub struct AsyncEmbeddingsBuilder<'a> {
-    pub(crate) inner: EmbeddingsBuilder<'a>,
+// 同步接口
+#[cfg(not(feature = "tokio"))]
+impl<'a> EmbeddingsBuilder<'a> {
+    /// Generate embeddings.
+    pub fn generate(self) -> Result<EmbeddingResponse> {
+        self.run()
+    }
 }
 
-#[cfg(feature = "async")]
-impl<'a> AsyncEmbeddingsBuilder<'a> {
-    /// Generate embeddings asynchronously.
+// 异步接口
+#[cfg(feature = "tokio")]
+impl<'a> EmbeddingsBuilder<'a> {
+    /// Generate embeddings.
     pub async fn generate(self) -> Result<EmbeddingResponse> {
-        self.inner.generate()
+        tokio::task::block_in_place(|| self.run())
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "gllm"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["gllm contributors"]
 license = "MIT"
@@ -22,7 +22,7 @@ path = "test_models.rs"
 default = ["wgpu", "cpu"]
 wgpu = ["burn/wgpu"]
 cpu = ["burn/ndarray"]
-async = ["tokio"]
+tokio = ["dep:tokio"]  # 启用异步接口
 
 [dependencies]
 burn = { version = "0.20.0-pre.3", default-features = false, features = ["std"] }

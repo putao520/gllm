@@ -3,33 +3,22 @@
 
 use gllm::{Device, Result};
 
+#[cfg(not(feature = "tokio"))]
 #[test]
 fn test_all_26_model_categories_basic() -> Result<()> {
-    // All 26 model categories we support
     let all_models = [
-        // BGE Series (4 models)
         "bge-small-zh", "bge-small-en", "bge-base-en", "bge-large-en",
-        // Sentence Transformers (6 models)
         "all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-MiniLM-L6-v2",
         "multi-qa-mpnet-base-dot-v1", "all-MiniLM-L12-v2", "all-distilroberta-v1",
-        // E5 Series (3 models)
         "e5-large", "e5-base", "e5-small",
-        // JINA Series (2 models)
         "jina-embeddings-v2-base-en", "jina-embeddings-v2-small-en",
-        // Chinese Models (1 model)
         "m3e-base",
-        // Multilingual Models (2 models)
         "multilingual-MiniLM-L12-v2", "distiluse-base-multilingual-cased-v1",
-        // BGE Rerankers (3 models)
         "bge-reranker-v2", "bge-reranker-large", "bge-reranker-base",
-        // MS MARCO Rerankers (4 models)
         "ms-marco-MiniLM-L-6-v2", "ms-marco-MiniLM-L-12-v2",
         "ms-marco-TinyBERT-L-2-v2", "ms-marco-electra-base",
-        // Specialized Rerankers (1 model)
         "quora-distilroberta-base",
     ];
-
-    println!("🎯 Testing all 26 model categories");
 
     assert_eq!(all_models.len(), 26, "Should have exactly 26 models");
 
@@ -38,10 +27,7 @@ fn test_all_26_model_categories_basic() -> Result<()> {
     let mut embedding_models = 0;
     let mut rerank_models = 0;
 
-    for (i, model_alias) in all_models.iter().enumerate() {
-        println!("{}. Testing model alias: {}", i + 1, model_alias);
-
-        // Test that we can create a client config for each model
+    for model_alias in all_models.iter() {
         let client_result = gllm::Client::with_config(
             model_alias,
             gllm::ClientConfig {
@@ -52,32 +38,15 @@ fn test_all_26_model_categories_basic() -> Result<()> {
 
         match client_result {
             Ok(_) => {
-                println!("  ✅ {} - alias resolves successfully", model_alias);
                 successful_aliases += 1;
-
-                // Count model types based on naming patterns
                 if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
                 }
             }
-            Err(gllm::Error::ModelNotFound(_)) => {
-                println!("  ⚠️ {} - alias not found (expected in test mode)", model_alias);
+            Err(gllm::Error::ModelNotFound(_)) | Err(gllm::Error::DownloadError(_)) => {
                 successful_aliases += 1;
-
-                // Still count model types for classification
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") {
-                    rerank_models += 1;
-                } else {
-                    embedding_models += 1;
-                }
-            }
-            Err(gllm::Error::DownloadError(_)) => {
-                println!("  ⚠️ {} - model files not available (expected in test mode)", model_alias);
-                successful_aliases += 1;
-
-                // Count model types based on naming patterns
                 if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
                     rerank_models += 1;
                 } else {
@@ -85,30 +54,79 @@ fn test_all_26_model_categories_basic() -> Result<()> {
                 }
             }
             Err(err) => {
-                println!("  ❌ {} - error: {:?}", model_alias, err);
-                return Err(gllm::Error::InvalidConfig(format!("Failed to resolve model alias {}: {:?}", model_alias, err)));
+                return Err(gllm::Error::InvalidConfig(format!("Failed: {}: {:?}", model_alias, err)));
             }
         }
     }
 
-    println!("\n📊 Summary:");
-    println!("  Total models tested: {}", all_models.len());
-    println!("  Successful aliases: {}", successful_aliases);
-    println!("  Embedding models: {}", embedding_models);
-    println!("  Rerank models: {}", rerank_models);
+    assert_eq!(embedding_models, 18);
+    assert_eq!(rerank_models, 8);
+    Ok(())
+}
 
-    // We should have identified the correct number of embedding vs rerank models
-    // Based on our list: 18 embedding models (4 BGE + 6 Sentence Transformers + 3 E5 + 2 JINA + 1 Chinese + 2 Multilingual), 8 rerank models (3 BGE rerankers + 4 MS MARCO + 1 quora)
-    assert_eq!(embedding_models, 18, "Should have 18 embedding model aliases");
-    assert_eq!(rerank_models, 8, "Should have 8 rerank model aliases (3 BGE rerankers + 4 MS MARCO + 1 quora)");
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_all_26_model_categories_basic() -> Result<()> {
+    let all_models = [
+        "bge-small-zh", "bge-small-en", "bge-base-en", "bge-large-en",
+        "all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-MiniLM-L6-v2",
+        "multi-qa-mpnet-base-dot-v1", "all-MiniLM-L12-v2", "all-distilroberta-v1",
+        "e5-large", "e5-base", "e5-small",
+        "jina-embeddings-v2-base-en", "jina-embeddings-v2-small-en",
+        "m3e-base",
+        "multilingual-MiniLM-L12-v2", "distiluse-base-multilingual-cased-v1",
+        "bge-reranker-v2", "bge-reranker-large", "bge-reranker-base",
+        "ms-marco-MiniLM-L-6-v2", "ms-marco-MiniLM-L-12-v2",
+        "ms-marco-TinyBERT-L-2-v2", "ms-marco-electra-base",
+        "quora-distilroberta-base",
+    ];
 
-    println!("✅ All 26 model categories validated successfully!");
+    assert_eq!(all_models.len(), 26, "Should have exactly 26 models");
+
+    let device = Device::Auto;
+    let mut successful_aliases = 0;
+    let mut embedding_models = 0;
+    let mut rerank_models = 0;
+
+    for model_alias in all_models.iter() {
+        let client_result = gllm::Client::with_config(
+            model_alias,
+            gllm::ClientConfig {
+                device: device.clone(),
+                models_dir: std::env::temp_dir().join("gllm-test-models"),
+            },
+        ).await;
+
+        match client_result {
+            Ok(_) => {
+                successful_aliases += 1;
+                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                    rerank_models += 1;
+                } else {
+                    embedding_models += 1;
+                }
+            }
+            Err(gllm::Error::ModelNotFound(_)) | Err(gllm::Error::DownloadError(_)) => {
+                successful_aliases += 1;
+                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                    rerank_models += 1;
+                } else {
+                    embedding_models += 1;
+                }
+            }
+            Err(err) => {
+                return Err(gllm::Error::InvalidConfig(format!("Failed: {}: {:?}", model_alias, err)));
+            }
+        }
+    }
+
+    assert_eq!(embedding_models, 18);
+    assert_eq!(rerank_models, 8);
     Ok(())
 }
 
 #[test]
 fn test_model_type_classification() -> Result<()> {
-    // Test our classification logic works correctly
     let embedding_models = [
         "bge-small-zh", "bge-small-en", "all-MiniLM-L6-v2", "e5-base",
         "jina-embeddings-v2-base-en", "multilingual-MiniLM-L12-v2"
@@ -130,6 +148,5 @@ fn test_model_type_classification() -> Result<()> {
                 "{} should be classified as rerank model", model);
     }
 
-    println!("✅ Model type classification works correctly");
     Ok(())
 }

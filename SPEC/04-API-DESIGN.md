@@ -1,47 +1,51 @@
-# gllm API 设计
+# gllm API Design
 
-## 概述
+## Overview
 
-定义 gllm 嵌入和重排序库的公共 API 接口，采用 OpenAI SDK 风格设计。
+Defines the public API interfaces for the gllm embedding and reranking library, using OpenAI SDK-style design.
 
-## 修订历史
+## Revision History
 
-| 版本 | 日期 | 描述 |
-|------|------|------|
-| v0.1.0 | 2025-01-28 | 初始 API 设计 |
+| Version | Date | Description |
+|---------|------|-------------|
+| v0.1.0 | 2025-01-28 | Initial API design |
+| v0.3.0 | 2025-01-29 | Unified sync/async API with `tokio` feature |
 
 ---
 
-## 客户端 API
+## Client API
 
-### API-CLIENT-001: Client (同步客户端)
+### API-CLIENT-001: Client (Unified Client)
 
+The same `Client` type provides both sync and async interfaces through conditional compilation.
+
+**Sync Mode** (default, no feature flags):
 ```rust
-/// 同步客户端
+/// Sync client
 pub struct Client { /* ... */ }
 
 impl Client {
-    /// 创建新客户端
+    /// Create new client
     ///
     /// # Arguments
-    /// * `model` - 模型名称 (别名或 HF repo ID)
+    /// * `model` - Model name (alias or HF repo ID)
     ///
     /// # Examples
     /// ```
-    /// let client = Client::new("bge-m3")?;
+    /// let client = Client::new("bge-small-en")?;
     /// ```
     pub fn new(model: &str) -> Result<Self>;
 
-    /// 使用自定义配置创建客户端
+    /// Create client with custom config
     pub fn with_config(model: &str, config: ClientConfig) -> Result<Self>;
 
-    /// 获取 Embeddings Builder
+    /// Get Embeddings Builder
     pub fn embeddings<I, S>(&self, input: I) -> EmbeddingsBuilder<'_>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>;
 
-    /// 获取 Rerank Builder
+    /// Get Rerank Builder
     pub fn rerank<I, S>(&self, query: &str, documents: I) -> RerankBuilder<'_>
     where
         I: IntoIterator<Item = S>,
@@ -49,32 +53,19 @@ impl Client {
 }
 ```
 
-### API-CLIENT-002: AsyncClient (异步客户端)
-
+**Async Mode** (with `tokio` feature):
 ```rust
-/// 异步客户端 (feature = "async")
-#[cfg(feature = "async")]
-pub struct AsyncClient { /* ... */ }
-
-#[cfg(feature = "async")]
-impl AsyncClient {
-    /// 异步创建新客户端
+/// Async client (feature = "tokio")
+#[cfg(feature = "tokio")]
+impl Client {
+    /// Create new client asynchronously
     pub async fn new(model: &str) -> Result<Self>;
 
-    /// 使用自定义配置异步创建客户端
+    /// Create client with custom config asynchronously
     pub async fn with_config(model: &str, config: ClientConfig) -> Result<Self>;
 
-    /// 获取异步 Embeddings Builder
-    pub fn embeddings<I, S>(&self, input: I) -> AsyncEmbeddingsBuilder<'_>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>;
-
-    /// 获取异步 Rerank Builder
-    pub fn rerank<I, S>(&self, query: &str, documents: I) -> AsyncRerankBuilder<'_>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>;
+    // embeddings() and rerank() methods are the same,
+    // but the builders' generate() method returns a Future
 }
 ```
 
@@ -84,26 +75,22 @@ impl AsyncClient {
 
 ### API-EMB-001: EmbeddingsBuilder
 
+**Sync Mode** (default):
 ```rust
-/// Embeddings 请求构建器
+/// Embeddings request builder
 pub struct EmbeddingsBuilder<'a> { /* ... */ }
 
 impl<'a> EmbeddingsBuilder<'a> {
-    /// 同步生成嵌入向量
+    /// Generate embeddings synchronously
     pub fn generate(self) -> Result<EmbeddingResponse>;
 }
 ```
 
-### API-EMB-002: AsyncEmbeddingsBuilder
-
+**Async Mode** (with `tokio` feature):
 ```rust
-/// 异步 Embeddings 请求构建器
-#[cfg(feature = "async")]
-pub struct AsyncEmbeddingsBuilder<'a> { /* ... */ }
-
-#[cfg(feature = "async")]
-impl<'a> AsyncEmbeddingsBuilder<'a> {
-    /// 异步生成嵌入向量
+#[cfg(feature = "tokio")]
+impl<'a> EmbeddingsBuilder<'a> {
+    /// Generate embeddings asynchronously
     pub async fn generate(self) -> Result<EmbeddingResponse>;
 }
 ```
@@ -114,53 +101,59 @@ impl<'a> AsyncEmbeddingsBuilder<'a> {
 
 ### API-RERANK-001: RerankBuilder
 
+**Sync Mode** (default):
 ```rust
-/// Rerank 请求构建器
+/// Rerank request builder
 pub struct RerankBuilder<'a> { /* ... */ }
 
 impl<'a> RerankBuilder<'a> {
-    /// 设置返回结果数量
+    /// Set number of results to return
     pub fn top_n(self, n: usize) -> Self;
 
-    /// 是否返回原始文档
+    /// Whether to return original documents
     pub fn return_documents(self, return_docs: bool) -> Self;
 
-    /// 同步生成重排序结果
+    /// Generate rerank results synchronously
     pub fn generate(self) -> Result<RerankResponse>;
 }
 ```
 
-### API-RERANK-002: AsyncRerankBuilder
-
+**Async Mode** (with `tokio` feature):
 ```rust
-/// 异步 Rerank 请求构建器
-#[cfg(feature = "async")]
-pub struct AsyncRerankBuilder<'a> { /* ... */ }
-
-#[cfg(feature = "async")]
-impl<'a> AsyncRerankBuilder<'a> {
-    /// 设置返回结果数量
+#[cfg(feature = "tokio")]
+impl<'a> RerankBuilder<'a> {
+    /// Set number of results to return
     pub fn top_n(self, n: usize) -> Self;
 
-    /// 是否返回原始文档
+    /// Whether to return original documents
     pub fn return_documents(self, return_docs: bool) -> Self;
 
-    /// 异步生成重排序结果
+    /// Generate rerank results asynchronously
     pub async fn generate(self) -> Result<RerankResponse>;
 }
 ```
 
 ---
 
-## 使用示例
+## Feature Flags
 
-### Embeddings (同步)
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `wgpu` | Yes | GPU acceleration using WGPU |
+| `cpu` | No | CPU-only inference using ndarray |
+| `tokio` | No | Async interface (same API, add `.await`) |
+
+---
+
+## Usage Examples
+
+### Embeddings (Sync)
 
 ```rust
 use gllm::{Client, Result};
 
 fn main() -> Result<()> {
-    let client = Client::new("bge-m3")?;
+    let client = Client::new("bge-small-en")?;
 
     let response = client
         .embeddings(["Hello world", "How are you?"])
@@ -174,14 +167,15 @@ fn main() -> Result<()> {
 }
 ```
 
-### Embeddings (异步)
+### Embeddings (Async)
 
 ```rust
-use gllm::{AsyncClient, Result};
+use gllm::{Client, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = AsyncClient::new("bge-m3").await?;
+    // Same Client type, just add .await
+    let client = Client::new("bge-small-en").await?;
 
     let response = client
         .embeddings(["Hello world", "How are you?"])
@@ -196,7 +190,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Rerank (同步)
+### Rerank (Sync)
 
 ```rust
 use gllm::{Client, Result};
@@ -229,11 +223,46 @@ fn main() -> Result<()> {
 }
 ```
 
+### Rerank (Async)
+
+```rust
+use gllm::{Client, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = Client::new("bge-reranker-v2").await?;
+
+    let response = client
+        .rerank(
+            "What is machine learning?",
+            [
+                "Machine learning is a subset of AI.",
+                "The weather is nice today.",
+                "Deep learning uses neural networks.",
+            ],
+        )
+        .top_n(2)
+        .return_documents(true)
+        .generate()
+        .await?;
+
+    for result in response.results {
+        println!(
+            "Score: {:.4}, Doc: {}",
+            result.score,
+            result.document.unwrap_or_default()
+        );
+    }
+
+    Ok(())
+}
+```
+
 ---
 
-## 错误处理
+## Error Handling
 
-所有 API 返回 `Result<T>` 类型，错误类型为 `gllm::Error`：
+All APIs return `Result<T>` type with error type `gllm::Error`:
 
 ```rust
 use gllm::{Client, Error};

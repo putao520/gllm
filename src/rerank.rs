@@ -1,7 +1,7 @@
 use crate::engine::{EngineBackend, MAX_SEQ_LEN, TokenizerAdapter};
 use crate::types::{Error, RerankResponse, RerankResult, Result};
 
-/// Rerank request builder (synchronous).
+/// Rerank request builder.
 pub struct RerankBuilder<'a> {
     pub(crate) engine: &'a EngineBackend,
     pub(crate) tokenizer: &'a TokenizerAdapter,
@@ -24,8 +24,7 @@ impl<'a> RerankBuilder<'a> {
         self
     }
 
-    /// Generate rerank results synchronously.
-    pub fn generate(self) -> Result<RerankResponse> {
+    fn run(self) -> Result<RerankResponse> {
         if self.documents.is_empty() {
             return Err(Error::InvalidConfig(
                 "At least one document is required for rerank".into(),
@@ -68,28 +67,20 @@ impl<'a> RerankBuilder<'a> {
     }
 }
 
-/// Rerank request builder (asynchronous).
-#[cfg(feature = "async")]
-pub struct AsyncRerankBuilder<'a> {
-    pub(crate) inner: RerankBuilder<'a>,
+// 同步接口
+#[cfg(not(feature = "tokio"))]
+impl<'a> RerankBuilder<'a> {
+    /// Generate rerank results.
+    pub fn generate(self) -> Result<RerankResponse> {
+        self.run()
+    }
 }
 
-#[cfg(feature = "async")]
-impl<'a> AsyncRerankBuilder<'a> {
-    /// Limit the number of results returned.
-    pub fn top_n(mut self, n: usize) -> Self {
-        self.inner.top_n = Some(n);
-        self
-    }
-
-    /// Enable or disable returning raw documents in results.
-    pub fn return_documents(mut self, return_docs: bool) -> Self {
-        self.inner.return_documents = return_docs;
-        self
-    }
-
-    /// Generate rerank results asynchronously.
+// 异步接口
+#[cfg(feature = "tokio")]
+impl<'a> RerankBuilder<'a> {
+    /// Generate rerank results.
     pub async fn generate(self) -> Result<RerankResponse> {
-        self.inner.generate()
+        tokio::task::block_in_place(|| self.run())
     }
 }

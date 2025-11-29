@@ -114,6 +114,10 @@ pub enum Error {
     /// Wrapped IO error.
     #[error("IO error: {0}")]
     Io(std::io::Error),
+
+    /// Internal error (e.g., task join error in async operations).
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
 impl Clone for Error {
@@ -125,6 +129,7 @@ impl Clone for Error {
             Error::InferenceError(s) => Error::InferenceError(s.clone()),
             Error::InvalidConfig(s) => Error::InvalidConfig(s.clone()),
             Error::Io(io_err) => Error::Io(std::io::Error::new(io_err.kind(), io_err.to_string())),
+            Error::InternalError(s) => Error::InternalError(s.clone()),
         }
     }
 }

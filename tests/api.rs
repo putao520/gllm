@@ -1,4 +1,4 @@
-#![cfg(feature = "cpu")]
+#![cfg(all(feature = "cpu", not(feature = "tokio")))]
 
 use gllm::{Client, ClientConfig, Device};
 use safetensors::Dtype;
@@ -6,7 +6,7 @@ use safetensors::tensor::{TensorView, serialize};
 use std::fs;
 
 fn write_dummy_weights(path: &std::path::Path) {
-    let weights: Vec<u8> = vec![0u8; 64]; // 16 f32 values = 64 bytes
+    let weights: Vec<u8> = vec![0u8; 64];
     let shape = vec![4usize, 4usize];
     let tensor = TensorView::new(Dtype::F32, shape, &weights).expect("tensor view");
     let data = serialize([("dense.weight", tensor)].into_iter(), &None).expect("serialize");

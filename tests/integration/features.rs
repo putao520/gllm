@@ -1,13 +1,11 @@
-#[cfg(feature = "async")]
-use super::common::preferred_device;
-#[cfg(feature = "async")]
-use super::common::prepare_async_context_with_weights;
 use super::common::{
-    EMBEDDING_DIM, env_lock, init_test_env, is_backend_unavailable, prepare_context_with_weights,
+    EMBEDDING_DIM, env_lock, init_test_env, is_backend_unavailable, preferred_device,
+    prepare_context_with_weights,
 };
 use gllm::{Device, Result};
 
-#[cfg(feature = "wgpu")]
+// wgpu backend 测试（同步模式）
+#[cfg(all(feature = "wgpu", not(feature = "tokio")))]
 #[test]
 fn wgpu_backend_executes_embeddings() -> Result<()> {
     let _guard = env_lock();
@@ -27,7 +25,29 @@ fn wgpu_backend_executes_embeddings() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "cpu")]
+// wgpu backend 测试（异步模式）
+#[cfg(all(feature = "wgpu", feature = "tokio"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn wgpu_backend_executes_embeddings() -> Result<()> {
+    let _guard = env_lock();
+    init_test_env();
+
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", Device::Auto).await {
+        Ok(value) => value,
+        Err(err) if is_backend_unavailable(&err) => {
+            eprintln!("Skipping test: {err}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let response = client.embeddings(["wgpu path"]).generate().await?;
+    assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
+    Ok(())
+}
+
+// cpu backend 测试（同步模式）
+#[cfg(all(feature = "cpu", not(feature = "tokio")))]
 #[test]
 fn cpu_backend_executes_embeddings() -> Result<()> {
     let _guard = env_lock();
@@ -47,14 +67,14 @@ fn cpu_backend_executes_embeddings() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "async")]
-#[tokio::test(flavor = "current_thread")]
-async fn async_feature_combination_supported() -> Result<()> {
+// cpu backend 测试（异步模式）
+#[cfg(all(feature = "cpu", feature = "tokio"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn cpu_backend_executes_embeddings() -> Result<()> {
     let _guard = env_lock();
     init_test_env();
-    let device = preferred_device();
 
-    let (client, _ctx) = match prepare_async_context_with_weights("bge-small-en", device).await {
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", Device::Cpu).await {
         Ok(value) => value,
         Err(err) if is_backend_unavailable(&err) => {
             eprintln!("Skipping test: {err}");
@@ -63,13 +83,13 @@ async fn async_feature_combination_supported() -> Result<()> {
         Err(err) => return Err(err),
     };
 
-    let response = client.embeddings(["async blend"]).generate().await?;
+    let response = client.embeddings(["cpu path"]).generate().await?;
     assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
-
     Ok(())
 }
 
-#[cfg(all(feature = "wgpu", feature = "cpu"))]
+// 多 backend 测试（同步模式）
+#[cfg(all(feature = "wgpu", feature = "cpu", not(feature = "tokio")))]
 #[test]
 fn multi_backend_outputs_share_shapes() -> Result<()> {
     let _guard = env_lock();
@@ -92,5 +112,56 @@ fn multi_backend_outputs_share_shapes() -> Result<()> {
         cpu.embeddings[0].embedding.len(),
         gpu.embeddings[0].embedding.len()
     );
+    Ok(())
+}
+
+// 多 backend 测试（异步模式）
+#[cfg(all(feature = "wgpu", feature = "cpu", feature = "tokio"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_backend_outputs_share_shapes() -> Result<()> {
+    let _guard = env_lock();
+    init_test_env();
+
+    let (cpu_client, _cpu_ctx) = prepare_context_with_weights("bge-small-en", Device::Cpu).await?;
+    let (auto_client, _gpu_ctx) =
+        match prepare_context_with_weights("bge-small-en", Device::Auto).await {
+            Ok(value) => value,
+            Err(err) if is_backend_unavailable(&err) => {
+                eprintln!("Skipping test: {err}");
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
+
+    let cpu = cpu_client.embeddings(["multi-backend"]).generate().await?;
+    let gpu = auto_client.embeddings(["multi-backend"]).generate().await?;
+
+    assert_eq!(
+        cpu.embeddings[0].embedding.len(),
+        gpu.embeddings[0].embedding.len()
+    );
+    Ok(())
+}
+
+// tokio 特性测试
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "multi_thread")]
+async fn tokio_feature_works() -> Result<()> {
+    let _guard = env_lock();
+    init_test_env();
+    let device = preferred_device();
+
+    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", device).await {
+        Ok(value) => value,
+        Err(err) if is_backend_unavailable(&err) => {
+            eprintln!("Skipping test: {err}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let response = client.embeddings(["tokio async"]).generate().await?;
+    assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
+
     Ok(())
 }

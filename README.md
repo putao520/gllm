@@ -38,11 +38,11 @@ gllm = "0.2"
 # Option 2: CPU-only (no GPU dependencies, pure Rust)
 gllm = { version = "0.2", features = ["cpu"] }
 
-# Option 3: With async support
-gllm = { version = "0.2", features = ["async"] }
+# Option 3: With async support (tokio)
+gllm = { version = "0.2", features = ["tokio"] }
 
 # Option 4: CPU-only + async
-gllm = { version = "0.2", features = ["cpu", "async"] }
+gllm = { version = "0.2", features = ["cpu", "tokio"] }
 ```
 
 ### Step 3: Start Using (5 minutes)
@@ -55,7 +55,7 @@ See the Quick Start section below.
 |---------|---------|-------------|
 | `wgpu` | ✅ | GPU acceleration using WGPU (Vulkan/DX12/Metal) |
 | `cpu` | ❌ | CPU-only inference using ndarray (pure Rust) |
-| `async` | ❌ | Async client support with tokio |
+| `tokio` | ❌ | Async interface support (same API, add `.await`) |
 
 ### GPU Support
 
@@ -253,20 +253,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Async Support
 
-For async applications, enable the `async` feature:
+For async applications, enable the `tokio` feature:
 
 ```toml
 [dependencies]
-gllm = { version = "0.2", features = ["async"] }
+gllm = { version = "0.2", features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 ```rust
-use gllm::AsyncClient;
+use gllm::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = AsyncClient::new("bge-small-en").await?;
+    // Same API as sync, just add .await
+    let client = Client::new("bge-small-en").await?;
 
+    // Embeddings
     let response = client
         .embeddings(["Hello world", "Async programming"])
         .generate()
@@ -274,6 +277,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for embedding in response.embeddings {
         println!("Vector: {} dimensions", embedding.embedding.len());
+    }
+
+    // Reranking
+    let client = Client::new("bge-reranker-v2").await?;
+
+    let response = client
+        .rerank("What is machine learning?", [
+            "Machine learning is a subset of AI",
+            "Python is a programming language",
+            "Deep learning uses neural networks",
+        ])
+        .top_n(2)
+        .generate()
+        .await?;
+
+    for result in response.results {
+        println!("Score: {:.4}, Index: {}", result.score, result.index);
     }
 
     Ok(())
@@ -396,7 +416,7 @@ Models are automatically downloaded and cached in `~/.gllm/models/`:
 |---------|---------|-------------|
 | `wgpu` | ✅ | GPU acceleration using WGPU |
 | `cpu` | ❌ | CPU-only inference using ndarray |
-| `async` | ❌ | Async client support with tokio |
+| `tokio` | ❌ | Async interface support (same API, add `.await`) |
 
 ### Build Examples
 
@@ -408,7 +428,7 @@ cargo build --release
 cargo build --release --features cpu
 
 # Async support
-cargo build --release --features "wgpu,async"
+cargo build --release --features "wgpu,tokio"
 
 # Static compilation
 cargo build --release --target x86_64-unknown-linux-musl
