@@ -302,28 +302,6 @@ impl ModelConfig {
             fixes.push(ConfigAutoFix::SetPadTokenId(value));
         }
 
-        if std::env::var("GLLM_TEST_MODE").is_ok() {
-            if self.hidden_size != 128 {
-                self.hidden_size = 128;
-                fixes.push(ConfigAutoFix::SetHiddenSize(self.hidden_size));
-            }
-            if self.num_hidden_layers != 2 {
-                self.num_hidden_layers = 2;
-                fixes.push(ConfigAutoFix::SetModelType(format!(
-                    "{model_id} layers set to {} for test mode",
-                    self.num_hidden_layers
-                )));
-            }
-            if self.num_attention_heads != 8 {
-                self.num_attention_heads = 8;
-                fixes.push(ConfigAutoFix::SetAttentionHeads(self.num_attention_heads));
-            }
-            self.intermediate_size = Some(self.hidden_size.saturating_mul(2));
-            fixes.push(ConfigAutoFix::SetIntermediateSize(
-                self.intermediate_size.unwrap(),
-            ));
-        }
-
         if self.max_batch_size.is_none() {
             self.max_batch_size = Some(8);
             fixes.push(ConfigAutoFix::SetMaxBatchSize(8));
@@ -483,8 +461,8 @@ mod tests {
         )
         .expect("write config");
 
-        let (cfg, _) =
-            ModelConfig::load("baai/bge-small-en-v1.5", Some(config_path.as_path())).expect("load config");
+        let (cfg, _) = ModelConfig::load("baai/bge-small-en-v1.5", Some(config_path.as_path()))
+            .expect("load config");
         assert_eq!(cfg.hidden_size, 256);
         assert_eq!(cfg.num_hidden_layers, 6);
         assert_eq!(cfg.num_attention_heads, 8);

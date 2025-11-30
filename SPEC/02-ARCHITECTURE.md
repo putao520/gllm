@@ -287,3 +287,96 @@ Sigmoid → 相关性分数
 - 聚焦核心场景：语义检索和重排序
 - 减少复杂度，BERT/CrossEncoder 架构统一
 - LLM 生成可由其他成熟库处理
+
+### ARCH-ADR-006: Actor 模式解决线程安全问题 🔒 FROZEN
+
+**问题背景**:
+- Burn 框架的 `Param<T>` 使用 `std::cell::OnceCell`，不是 `Sync`
+- 这导致 `EmbeddingEngine`/`RerankEngine` → `EngineBackend` → `Client` 都不是 Send/Sync
+- 在 tokio 异步环境中无法跨线程共享（如 `tokio::spawn`、`Arc<Client>`）
+
+**决策**: 使用 Actor 模式隔离非线程安全类型
+
+**架构设计**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     调用方（异步环境）                            │
+│  Arc<EmbedderHandle> / Arc<RerankerHandle>                      │
+│  ├── 天然 Send + Sync                                           │
+│  └── 只包含 mpsc::Sender（线程安全）                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ mpsc channel
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    专用推理线程（Dedicated Thread）               │
+│  ├── gllm::Client（非 Send/Sync，但在单线程内使用）              │
+│  ├── 接收请求 → 执行推理 → 通过 oneshot 返回结果                 │
+│  └── 生命周期与 Handle 绑定                                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**通信协议**:
+
+```rust
+// 请求类型
+enum EmbedRequest {
+    Embed {
+        text: String,
+        respond: oneshot::Sender<Result<Vec<f32>>>,
+    },
+    EmbedBatch {
+        texts: Vec<String>,
+        respond: oneshot::Sender<Result<Vec<Vec<f32>>>>,
+    },
+    Shutdown,
+}
+
+enum RerankRequest {
+    Rerank {
+        query: String,
+        documents: Vec<String>,
+        respond: oneshot::Sender<Result<Vec<RerankResult>>>,
+    },
+    Shutdown,
+}
+
+// Handle（用户持有，Send + Sync）
+pub struct EmbedderHandle {
+    sender: mpsc::Sender<EmbedRequest>,
+}
+
+pub struct RerankerHandle {
+    sender: mpsc::Sender<RerankRequest>,
+}
+```
+
+**API 设计**:
+
+```rust
+// 同步 API（无 tokio 特性）
+impl EmbedderHandle {
+    pub fn new() -> Result<Self>;           // 启动专用线程
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+// 异步 API（tokio 特性）
+impl EmbedderHandle {
+    pub async fn new() -> Result<Self>;     // 启动专用线程
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+```
+
+**理由**:
+- 彻底解决 Send/Sync 问题，无需 unsafe
+- Handle 只包含 channel sender，天然线程安全
+- 推理在专用线程执行，避免阻塞 tokio 运行时
+- 零额外依赖（复用 tokio mpsc/oneshot）
+- 简单可维护，代码量约 100-150 行
+
+**限制**:
+- 所有推理请求串行执行（单线程）
+- 对于高并发场景，可扩展为 worker pool（未来优化）

@@ -1,6 +1,6 @@
-use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 use burn::tensor::linalg::vector_normalize;
+use burn::tensor::Tensor;
 
 /// Pooling strategy used for sequence representations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +54,9 @@ impl<B: Backend> DynamicPooler<B> {
                 .slice([0..batch_size, 0..1, 0..hidden_size])
                 .reshape([batch_size, hidden_size]),
             PoolingStrategy::Mean | PoolingStrategy::WeightedMean => {
-                hidden_states
-                    .mean_dim(1)
-                    .reshape([batch_size, hidden_size])
+                hidden_states.mean_dim(1).reshape([batch_size, hidden_size])
             }
-            PoolingStrategy::Max => hidden_states
-                .max_dim(1)
-                .reshape([batch_size, hidden_size]),
+            PoolingStrategy::Max => hidden_states.max_dim(1).reshape([batch_size, hidden_size]),
             PoolingStrategy::LastToken => hidden_states
                 .slice([0..batch_size, (seq_len - 1)..seq_len, 0..hidden_size])
                 .reshape([batch_size, hidden_size]),
@@ -73,10 +69,10 @@ impl<B: Backend> DynamicPooler<B> {
     }
 }
 
-#[cfg(all(test, feature = "cpu"))]
+#[cfg(test)]
 mod tests {
-        use super::*;
-        use burn::backend::ndarray::NdArray;
+    use super::*;
+    use burn::backend::ndarray::NdArray;
 
     #[test]
     fn mean_pooling_reduces_dim() {

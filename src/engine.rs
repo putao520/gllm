@@ -2,10 +2,7 @@ use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
 use crate::model_config::ModelConfig;
 use crate::registry::ModelInfo;
 use crate::types::{Device, Error, Result};
-#[cfg(feature = "cpu")]
-use burn::backend::NdArray;
-#[cfg(feature = "wgpu")]
-use burn::backend::Wgpu;
+use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use std::collections::hash_map::DefaultHasher;
@@ -257,14 +254,20 @@ impl<B: Backend> RerankEngine<B> {
 }
 
 /// Backend-specific engine bundle.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) enum EngineBackend {
-    #[cfg(feature = "wgpu")]
+    /// GPU backend using WebGPU
     Wgpu {
         embedding: EmbeddingEngine<Wgpu<f32>>,
         rerank: RerankEngine<Wgpu<f32>>,
     },
-    #[cfg(feature = "cpu")]
-    Cpu {
+    /// CPU backend with BLAS acceleration (OpenBLAS/MKL/Accelerate)
+    Candle {
+        embedding: EmbeddingEngine<Candle<f32, i64>>,
+        rerank: RerankEngine<Candle<f32, i64>>,
+    },
+    /// Pure Rust CPU backend (no external dependencies)
+    NdArray {
         embedding: EmbeddingEngine<NdArray<f32>>,
         rerank: RerankEngine<NdArray<f32>>,
     },
@@ -273,25 +276,185 @@ pub(crate) enum EngineBackend {
 impl EngineBackend {
     pub fn run_embeddings(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
         match self {
-            #[cfg(feature = "wgpu")]
             EngineBackend::Wgpu { embedding, .. } => embedding.embed(tokens),
-            #[cfg(feature = "cpu")]
-            EngineBackend::Cpu { embedding, .. } => embedding.embed(tokens),
+            EngineBackend::Candle { embedding, .. } => embedding.embed(tokens),
+            EngineBackend::NdArray { embedding, .. } => embedding.embed(tokens),
         }
     }
 
     pub fn run_rerank(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
         match self {
-            #[cfg(feature = "wgpu")]
             EngineBackend::Wgpu { rerank, .. } => rerank.score(tokens),
-            #[cfg(feature = "cpu")]
-            EngineBackend::Cpu { rerank, .. } => rerank.score(tokens),
+            EngineBackend::Candle { rerank, .. } => rerank.score(tokens),
+            EngineBackend::NdArray { rerank, .. } => rerank.score(tokens),
         }
     }
 
 }
 
-/// Build an engine backend according to device preference and available features.
+impl Drop for EngineBackend {
+    fn drop(&mut self) {
+        // Explicit cleanup for wgpu backend to avoid SIGSEGV on exit
+        // Uses retry logic with increasing delays to ensure GPU cleanup threads complete
+        if matches!(self, EngineBackend::Wgpu { .. }) {
+            log::debug!("Starting wgpu EngineBackend cleanup (retry strategy)");
+
+            // Retry strategy: Multiple shorter sleeps instead of one long sleep
+            // This allows GPU cleanup threads to checkpoint progress multiple times
+            let retry_attempts = 5;
+            let delays = [50, 100, 150, 200, 300]; // milliseconds per attempt
+
+            for (attempt, &delay_ms) in delays.iter().enumerate() {
+                log::debug!("wgpu cleanup attempt {}/{}: {}ms delay",
+                    attempt + 1, retry_attempts, delay_ms);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+
+            log::debug!("wgpu EngineBackend cleanup completed (total delay: 800ms)");
+        }
+    }
+}
+
+/// Embedding-only engine backend.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+pub(crate) enum EmbeddingBackend {
+    Wgpu(EmbeddingEngine<Wgpu<f32>>),
+    Candle(EmbeddingEngine<Candle<f32, i64>>),
+    NdArray(EmbeddingEngine<NdArray<f32>>),
+}
+
+impl EmbeddingBackend {
+    pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            EmbeddingBackend::Wgpu(engine) => engine.embed(tokens),
+            EmbeddingBackend::Candle(engine) => engine.embed(tokens),
+            EmbeddingBackend::NdArray(engine) => engine.embed(tokens),
+        }
+    }
+}
+
+/// Reranking-only engine backend.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+pub(crate) enum RerankingBackend {
+    Wgpu(RerankEngine<Wgpu<f32>>),
+    Candle(RerankEngine<Candle<f32, i64>>),
+    NdArray(RerankEngine<NdArray<f32>>),
+}
+
+impl RerankingBackend {
+    pub fn score(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
+        match self {
+            RerankingBackend::Wgpu(engine) => engine.score(tokens),
+            RerankingBackend::Candle(engine) => engine.score(tokens),
+            RerankingBackend::NdArray(engine) => engine.score(tokens),
+        }
+    }
+}
+
+/// Build an embedding-only backend according to device preference.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+pub(crate) fn build_embedding_backend(
+    model_dir: &std::path::PathBuf,
+    device: &Device,
+) -> Result<EmbeddingBackend> {
+    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
+
+    // Test mode: use pure Rust NdArray backend
+    if prefer_cpu {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(EmbeddingBackend::NdArray(embedding));
+    }
+
+    // Priority 1: Try GPU (Wgpu)
+    if matches!(device, Device::Gpu(_) | Device::Auto) {
+        let init = std::panic::catch_unwind(|| {
+            let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+            EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
+        });
+
+        if let Ok(Some(engine)) = init {
+            return Ok(EmbeddingBackend::Wgpu(engine));
+        }
+    }
+
+    // Priority 2: Try Candle (CPU with BLAS acceleration)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let candle_init = std::panic::catch_unwind(|| {
+            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
+            EmbeddingEngine::<Candle<f32, i64>>::new(candle_device, model_dir).ok()
+        });
+
+        if let Ok(Some(engine)) = candle_init {
+            return Ok(EmbeddingBackend::Candle(engine));
+        }
+    }
+
+    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(EmbeddingBackend::NdArray(embedding));
+    }
+
+    Err(Error::InvalidConfig(
+        "No compatible backend available".into(),
+    ))
+}
+
+/// Build a reranking-only backend according to device preference.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+pub(crate) fn build_rerank_backend(
+    model_dir: &std::path::PathBuf,
+    device: &Device,
+) -> Result<RerankingBackend> {
+    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
+
+    // Test mode: use pure Rust NdArray backend
+    if prefer_cpu {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(RerankingBackend::NdArray(rerank));
+    }
+
+    // Priority 1: Try GPU (Wgpu)
+    if matches!(device, Device::Gpu(_) | Device::Auto) {
+        let init = std::panic::catch_unwind(|| {
+            let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+            RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
+        });
+
+        if let Ok(Some(engine)) = init {
+            return Ok(RerankingBackend::Wgpu(engine));
+        }
+    }
+
+    // Priority 2: Try Candle (CPU with BLAS acceleration)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let candle_init = std::panic::catch_unwind(|| {
+            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
+            RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir).ok()
+        });
+
+        if let Ok(Some(engine)) = candle_init {
+            return Ok(RerankingBackend::Candle(engine));
+        }
+    }
+
+    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(RerankingBackend::NdArray(rerank));
+    }
+
+    Err(Error::InvalidConfig(
+        "No compatible backend available".into(),
+    ))
+}
+
+/// Build an engine backend according to device preference.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_backend(
     _info: &ModelInfo,
     model_dir: &std::path::PathBuf,
@@ -299,15 +462,15 @@ pub(crate) fn build_backend(
 ) -> Result<EngineBackend> {
     let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
 
-    #[cfg(feature = "cpu")]
+    // Test mode: use pure Rust NdArray backend
     if prefer_cpu {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
         let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
-        return Ok(EngineBackend::Cpu { embedding, rerank });
+        return Ok(EngineBackend::NdArray { embedding, rerank });
     }
 
-    #[cfg(feature = "wgpu")]
+    // Priority 1: Try GPU (Wgpu)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let init = std::panic::catch_unwind(|| {
             let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
@@ -325,18 +488,34 @@ pub(crate) fn build_backend(
         }
     }
 
-    #[cfg(feature = "cpu")]
-    {
-        if matches!(device, Device::Cpu | Device::Auto) {
-            let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-            let embedding =
-                EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
-            let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
-            return Ok(EngineBackend::Cpu { embedding, rerank });
+    // Priority 2: Try Candle (CPU with BLAS acceleration)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let candle_init = std::panic::catch_unwind(|| {
+            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
+            let embedding = EmbeddingEngine::<Candle<f32, i64>>::new(candle_device.clone(), model_dir);
+            let rerank = RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir);
+
+            match (embedding, rerank) {
+                (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Candle { embedding, rerank }),
+                _ => None,
+            }
+        });
+
+        if let Ok(Some(engine)) = candle_init {
+            return Ok(engine);
         }
     }
 
+    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let embedding =
+            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        return Ok(EngineBackend::NdArray { embedding, rerank });
+    }
+
     Err(Error::InvalidConfig(
-        "No compatible backend available; enable `wgpu` or `cpu` feature".into(),
+        "No compatible backend available".into(),
     ))
 }

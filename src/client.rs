@@ -1,5 +1,5 @@
 use crate::embeddings::EmbeddingsBuilder;
-use crate::engine::{EngineBackend, TokenizerAdapter, build_backend};
+use crate::engine::{build_backend, EngineBackend, TokenizerAdapter};
 use crate::model::{ModelArtifacts, ModelManager};
 use crate::rerank::RerankBuilder;
 use crate::types::{ClientConfig, Result};
@@ -14,7 +14,7 @@ pub struct Client {
 }
 
 impl Client {
-    fn create(model: &str, config: ClientConfig) -> Result<Self> {
+    pub(crate) fn create(model: &str, config: ClientConfig) -> Result<Self> {
         let manager = ModelManager::new(config.clone());
         let artifacts = manager.prepare(model)?;
         let engine = build_backend(&artifacts.info, &artifacts.model_dir, &config.device)?;
@@ -63,6 +63,33 @@ impl Client {
             top_n: None,
             return_documents: false,
         }
+    }
+}
+
+impl Client {
+    /// Explicitly clean up GPU resources to avoid SIGSEGV on exit.
+    /// Call this before dropping the Client if you want to ensure proper cleanup.
+    /// See https://github.com/gfx-rs/wgpu/issues/5655 for details.
+    pub fn cleanup(&mut self) {
+        log::debug!("Client GPU cleanup requested");
+        // Additional final cleanup: retry pattern with small delays
+        // EngineBackend::Drop will do most of the heavy lifting (800ms)
+        // This ensures final synchronization before process exit
+        for attempt in 1..=3 {
+            log::debug!("Client cleanup attempt {}/3", attempt);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        log::debug!("Client cleanup completed");
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        // Trigger explicit cleanup when Client is dropped.
+        // EngineBackend Drop will run its own cleanup with retry strategy (800ms total)
+        // Then Client adds final synchronization (150ms total for 3 retries of 50ms each)
+        // Combined strategy: retry + increasing delays across multiple layers
+        self.cleanup();
     }
 }
 

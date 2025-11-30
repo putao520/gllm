@@ -1,30 +1,35 @@
-use super::common::{
-    EMBEDDING_DIM, env_lock, init_test_env, is_backend_unavailable, preferred_device,
-    prepare_context, write_dummy_weights,
-};
-use gllm::{Client, Error, Result};
-use safetensors::SafeTensors;
-use std::fs;
+//! Model management integration tests using real models.
+
+use gllm::{Client, ClientConfig, Device, ModelRegistry, Result};
+use std::path::PathBuf;
+
+fn get_models_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gllm")
+        .join("models")
+}
+
+fn get_config() -> ClientConfig {
+    ClientConfig {
+        device: Device::Auto,
+        models_dir: get_models_dir(),
+    }
+}
 
 #[cfg(not(feature = "tokio"))]
 #[test]
 fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
+    let registry = ModelRegistry::new();
+    let info = registry.resolve("bge-small-en")?;
 
-    let (client, ctx) = match prepare_context("bge-small-en", device) {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    // Verify alias resolves correctly
+    assert!(info.repo_id.contains("bge-small-en"));
 
-    assert!(ctx.repo_dir.ends_with("BAAI--bge-small-en-v1.5"));
-    assert!(ctx.repo_dir.is_dir());
-    drop(client);
+    // Verify client can be created
+    let client = Client::with_config("bge-small-en", get_config())?;
+    let response = client.embeddings(["test"]).generate()?;
+    assert_eq!(response.embeddings.len(), 1);
 
     Ok(())
 }
@@ -32,22 +37,16 @@ fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
+    let registry = ModelRegistry::new();
+    let info = registry.resolve("bge-small-en")?;
 
-    let (client, ctx) = match prepare_context("bge-small-en", device).await {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    // Verify alias resolves correctly
+    assert!(info.repo_id.contains("bge-small-en"));
 
-    assert!(ctx.repo_dir.ends_with("BAAI--bge-small-en-v1.5"));
-    assert!(ctx.repo_dir.is_dir());
-    drop(client);
+    // Verify client can be created
+    let client = Client::with_config("bge-small-en", get_config()).await?;
+    let response = client.embeddings(["test"]).generate().await?;
+    assert_eq!(response.embeddings.len(), 1);
 
     Ok(())
 }
@@ -55,28 +54,12 @@ async fn alias_resolution_and_auto_download_creates_repo_dir() -> Result<()> {
 #[cfg(not(feature = "tokio"))]
 #[test]
 fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
+    let client = Client::with_config("bge-small-en", get_config())?;
 
-    let (_client, ctx) = match prepare_context("bge-small-en", device) {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
-
-    let weights = ctx.repo_dir.join("model.safetensors");
-    write_dummy_weights(&weights);
-
-    let data = fs::read(&weights)?;
-    SafeTensors::deserialize(&data).map_err(|err| Error::LoadError(err.to_string()))?;
-
-    let client = Client::with_config("bge-small-en", ctx.config.clone())?;
+    // Verify model can generate embeddings (proves weights are loaded)
     let response = client.embeddings(["warmup"]).generate()?;
-    assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
+    assert_eq!(response.embeddings[0].embedding.len(), 384);
+    assert!(response.embeddings[0].embedding.iter().all(|v| v.is_finite()));
 
     Ok(())
 }
@@ -84,28 +67,12 @@ fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn safetensors_weights_are_readable_and_used_in_clients() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
+    let client = Client::with_config("bge-small-en", get_config()).await?;
 
-    let (_client, ctx) = match prepare_context("bge-small-en", device).await {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
-
-    let weights = ctx.repo_dir.join("model.safetensors");
-    write_dummy_weights(&weights);
-
-    let data = fs::read(&weights)?;
-    SafeTensors::deserialize(&data).map_err(|err| Error::LoadError(err.to_string()))?;
-
-    let client = Client::with_config("bge-small-en", ctx.config.clone()).await?;
+    // Verify model can generate embeddings (proves weights are loaded)
     let response = client.embeddings(["warmup"]).generate().await?;
-    assert_eq!(response.embeddings[0].embedding.len(), EMBEDDING_DIM);
+    assert_eq!(response.embeddings[0].embedding.len(), 384);
+    assert!(response.embeddings[0].embedding.iter().all(|v| v.is_finite()));
 
     Ok(())
 }

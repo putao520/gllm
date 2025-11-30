@@ -16,7 +16,6 @@ fn get_models_dir() -> PathBuf {
 /// Test embedding models for inference - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 fn test_all_embedding_models_inference() {
     let embedding_models = [
         "bge-small-zh",
@@ -61,7 +60,10 @@ fn test_all_embedding_models_inference() {
 
         match Client::with_config(model_alias, config.clone()) {
             Ok(client) => {
-                match client.embeddings(&test_texts.iter().map(|(_, t)| *t).collect::<Vec<_>>()).generate() {
+                match client
+                    .embeddings(&test_texts.iter().map(|(_, t)| *t).collect::<Vec<_>>())
+                    .generate()
+                {
                     Ok(response) => {
                         let embeddings = &response.embeddings;
                         println!(
@@ -96,7 +98,6 @@ fn test_all_embedding_models_inference() {
 /// Test embedding models for inference - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 async fn test_all_embedding_models_inference() {
     let embedding_models = [
         "bge-small-zh",
@@ -141,7 +142,11 @@ async fn test_all_embedding_models_inference() {
 
         match Client::with_config(model_alias, config.clone()).await {
             Ok(client) => {
-                match client.embeddings(&test_texts.iter().map(|(_, t)| *t).collect::<Vec<_>>()).generate().await {
+                match client
+                    .embeddings(&test_texts.iter().map(|(_, t)| *t).collect::<Vec<_>>())
+                    .generate()
+                    .await
+                {
                     Ok(response) => {
                         let embeddings = &response.embeddings;
                         println!(
@@ -176,7 +181,6 @@ async fn test_all_embedding_models_inference() {
 /// Test reranking models for inference - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 fn test_all_rerank_models_inference() {
     let rerank_models = [
         "bge-reranker-v2",
@@ -212,25 +216,23 @@ fn test_all_rerank_models_inference() {
         print!("[{:2}/8] Testing {} ... ", i + 1, model_alias);
 
         match Client::with_config(model_alias, config.clone()) {
-            Ok(client) => {
-                match client.rerank(query, &documents).generate() {
-                    Ok(response) => {
-                        let results = &response.results;
-                        if results.is_empty() {
-                            println!("❌ No results returned");
-                            failed += 1;
-                        } else {
-                            let top_score = results.first().map(|r| r.score).unwrap_or(0.0);
-                            println!("✅ {} results, top score: {:.4}", results.len(), top_score);
-                            successful += 1;
-                        }
-                    }
-                    Err(e) => {
-                        println!("❌ Inference failed: {}", e);
+            Ok(client) => match client.rerank(query, &documents).generate() {
+                Ok(response) => {
+                    let results = &response.results;
+                    if results.is_empty() {
+                        println!("❌ No results returned");
                         failed += 1;
+                    } else {
+                        let top_score = results.first().map(|r| r.score).unwrap_or(0.0);
+                        println!("✅ {} results, top score: {:.4}", results.len(), top_score);
+                        successful += 1;
                     }
                 }
-            }
+                Err(e) => {
+                    println!("❌ Inference failed: {}", e);
+                    failed += 1;
+                }
+            },
             Err(e) => {
                 println!("❌ Client creation failed: {}", e);
                 failed += 1;
@@ -250,7 +252,6 @@ fn test_all_rerank_models_inference() {
 /// Test reranking models for inference - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 async fn test_all_rerank_models_inference() {
     let rerank_models = [
         "bge-reranker-v2",
@@ -286,25 +287,23 @@ async fn test_all_rerank_models_inference() {
         print!("[{:2}/8] Testing {} ... ", i + 1, model_alias);
 
         match Client::with_config(model_alias, config.clone()).await {
-            Ok(client) => {
-                match client.rerank(query, &documents).generate().await {
-                    Ok(response) => {
-                        let results = &response.results;
-                        if results.is_empty() {
-                            println!("❌ No results returned");
-                            failed += 1;
-                        } else {
-                            let top_score = results.first().map(|r| r.score).unwrap_or(0.0);
-                            println!("✅ {} results, top score: {:.4}", results.len(), top_score);
-                            successful += 1;
-                        }
-                    }
-                    Err(e) => {
-                        println!("❌ Inference failed: {}", e);
+            Ok(client) => match client.rerank(query, &documents).generate().await {
+                Ok(response) => {
+                    let results = &response.results;
+                    if results.is_empty() {
+                        println!("❌ No results returned");
                         failed += 1;
+                    } else {
+                        let top_score = results.first().map(|r| r.score).unwrap_or(0.0);
+                        println!("✅ {} results, top score: {:.4}", results.len(), top_score);
+                        successful += 1;
                     }
                 }
-            }
+                Err(e) => {
+                    println!("❌ Inference failed: {}", e);
+                    failed += 1;
+                }
+            },
             Err(e) => {
                 println!("❌ Client creation failed: {}", e);
                 failed += 1;
@@ -324,7 +323,6 @@ async fn test_all_rerank_models_inference() {
 /// Test a single embedding model with detailed output - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 fn test_single_embedding_model_detailed() {
     let model = "bge-small-en";
     let texts = vec!["Hello world", "How are you?", "Machine learning"];
@@ -351,11 +349,7 @@ fn test_single_embedding_model_detailed() {
                         let max = vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                         let mean = vec.iter().sum::<f32>() / vec.len() as f32;
 
-                        println!(
-                            "\nText {}: '{}'",
-                            i,
-                            texts.get(i).unwrap_or(&"unknown")
-                        );
+                        println!("\nText {}: '{}'", i, texts.get(i).unwrap_or(&"unknown"));
                         println!("  Dimensions: {}", vec.len());
                         println!("  Min: {:.6}, Max: {:.6}, Mean: {:.6}", min, max, mean);
                         println!("  First 5 values: {:?}", &vec[..5.min(vec.len())]);
@@ -392,7 +386,6 @@ fn test_single_embedding_model_detailed() {
 /// Test a single embedding model with detailed output - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 async fn test_single_embedding_model_detailed() {
     let model = "bge-small-en";
     let texts = vec!["Hello world", "How are you?", "Machine learning"];
@@ -419,11 +412,7 @@ async fn test_single_embedding_model_detailed() {
                         let max = vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                         let mean = vec.iter().sum::<f32>() / vec.len() as f32;
 
-                        println!(
-                            "\nText {}: '{}'",
-                            i,
-                            texts.get(i).unwrap_or(&"unknown")
-                        );
+                        println!("\nText {}: '{}'", i, texts.get(i).unwrap_or(&"unknown"));
                         println!("  Dimensions: {}", vec.len());
                         println!("  Min: {:.6}, Max: {:.6}, Mean: {:.6}", min, max, mean);
                         println!("  First 5 values: {:?}", &vec[..5.min(vec.len())]);
@@ -460,7 +449,6 @@ async fn test_single_embedding_model_detailed() {
 /// Test a single reranking model with detailed output - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 fn test_single_rerank_model_detailed() {
     let model = "bge-reranker-base";
     let query = "What is the capital of France?";
@@ -481,35 +469,33 @@ fn test_single_rerank_model_detailed() {
     };
 
     match Client::with_config(model, config) {
-        Ok(client) => {
-            match client.rerank(query, &documents).generate() {
-                Ok(response) => {
-                    println!("✅ Model loaded successfully");
-                    println!("\nQuery: '{}'", query);
-                    println!("Documents: {} items", documents.len());
-                    println!("\nReranked results:");
-                    println!("{}", "-".repeat(80));
+        Ok(client) => match client.rerank(query, &documents).generate() {
+            Ok(response) => {
+                println!("✅ Model loaded successfully");
+                println!("\nQuery: '{}'", query);
+                println!("Documents: {} items", documents.len());
+                println!("\nReranked results:");
+                println!("{}", "-".repeat(80));
 
-                    for (rank, result) in response.results.iter().enumerate() {
-                        println!(
-                            "Rank {}: Score {:.4} | Doc {}: {}",
-                            rank + 1,
-                            result.score,
-                            result.index,
-                            documents
-                                .get(result.index)
-                                .unwrap_or(&"unknown")
-                                .chars()
-                                .take(60)
-                                .collect::<String>()
-                        );
-                    }
-                }
-                Err(e) => {
-                    panic!("Inference failed: {}", e);
+                for (rank, result) in response.results.iter().enumerate() {
+                    println!(
+                        "Rank {}: Score {:.4} | Doc {}: {}",
+                        rank + 1,
+                        result.score,
+                        result.index,
+                        documents
+                            .get(result.index)
+                            .unwrap_or(&"unknown")
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                    );
                 }
             }
-        }
+            Err(e) => {
+                panic!("Inference failed: {}", e);
+            }
+        },
         Err(e) => {
             panic!("Failed to create client: {}", e);
         }
@@ -522,7 +508,6 @@ fn test_single_rerank_model_detailed() {
 /// Test a single reranking model with detailed output - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires downloaded models and GPU/CPU"]
 async fn test_single_rerank_model_detailed() {
     let model = "bge-reranker-base";
     let query = "What is the capital of France?";
@@ -543,35 +528,33 @@ async fn test_single_rerank_model_detailed() {
     };
 
     match Client::with_config(model, config).await {
-        Ok(client) => {
-            match client.rerank(query, &documents).generate().await {
-                Ok(response) => {
-                    println!("✅ Model loaded successfully");
-                    println!("\nQuery: '{}'", query);
-                    println!("Documents: {} items", documents.len());
-                    println!("\nReranked results:");
-                    println!("{}", "-".repeat(80));
+        Ok(client) => match client.rerank(query, &documents).generate().await {
+            Ok(response) => {
+                println!("✅ Model loaded successfully");
+                println!("\nQuery: '{}'", query);
+                println!("Documents: {} items", documents.len());
+                println!("\nReranked results:");
+                println!("{}", "-".repeat(80));
 
-                    for (rank, result) in response.results.iter().enumerate() {
-                        println!(
-                            "Rank {}: Score {:.4} | Doc {}: {}",
-                            rank + 1,
-                            result.score,
-                            result.index,
-                            documents
-                                .get(result.index)
-                                .unwrap_or(&"unknown")
-                                .chars()
-                                .take(60)
-                                .collect::<String>()
-                        );
-                    }
-                }
-                Err(e) => {
-                    panic!("Inference failed: {}", e);
+                for (rank, result) in response.results.iter().enumerate() {
+                    println!(
+                        "Rank {}: Score {:.4} | Doc {}: {}",
+                        rank + 1,
+                        result.score,
+                        result.index,
+                        documents
+                            .get(result.index)
+                            .unwrap_or(&"unknown")
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                    );
                 }
             }
-        }
+            Err(e) => {
+                panic!("Inference failed: {}", e);
+            }
+        },
         Err(e) => {
             panic!("Failed to create client: {}", e);
         }

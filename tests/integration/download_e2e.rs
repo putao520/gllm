@@ -4,8 +4,8 @@
 //! Run with: cargo test --test integration -- --ignored download_e2e
 //! Or for a single model: cargo test --test integration -- --ignored download_single
 
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// All 26 supported models with SafeTensors format
@@ -17,42 +17,80 @@ const ALL_MODELS: &[(&str, &str)] = &[
     ("bge-large-en", "BAAI/bge-large-en-v1.5"),
     // Sentence Transformers (6 models)
     ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"),
-    ("all-mpnet-base-v2", "sentence-transformers/all-mpnet-base-v2"),
-    ("paraphrase-MiniLM-L6-v2", "sentence-transformers/paraphrase-MiniLM-L6-v2"),
-    ("multi-qa-mpnet-base-dot-v1", "sentence-transformers/multi-qa-mpnet-base-dot-v1"),
-    ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2"),
-    ("all-distilroberta-v1", "sentence-transformers/all-distilroberta-v1"),
+    (
+        "all-mpnet-base-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+    ),
+    (
+        "paraphrase-MiniLM-L6-v2",
+        "sentence-transformers/paraphrase-MiniLM-L6-v2",
+    ),
+    (
+        "multi-qa-mpnet-base-dot-v1",
+        "sentence-transformers/multi-qa-mpnet-base-dot-v1",
+    ),
+    (
+        "all-MiniLM-L12-v2",
+        "sentence-transformers/all-MiniLM-L12-v2",
+    ),
+    (
+        "all-distilroberta-v1",
+        "sentence-transformers/all-distilroberta-v1",
+    ),
     // E5 Series (3 models)
     ("e5-large", "intfloat/e5-large"),
     ("e5-base", "intfloat/e5-base"),
     ("e5-small", "intfloat/e5-small"),
     // JINA Series (2 models)
-    ("jina-embeddings-v2-base-en", "jinaai/jina-embeddings-v2-base-en"),
-    ("jina-embeddings-v2-small-en", "jinaai/jina-embeddings-v2-small-en"),
+    (
+        "jina-embeddings-v2-base-en",
+        "jinaai/jina-embeddings-v2-base-en",
+    ),
+    (
+        "jina-embeddings-v2-small-en",
+        "jinaai/jina-embeddings-v2-small-en",
+    ),
     // Chinese Models (1 model)
     ("m3e-base", "moka-ai/m3e-base"),
     // Multilingual Models (2 models)
-    ("multilingual-MiniLM-L12-v2", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
-    ("distiluse-base-multilingual-cased-v1", "sentence-transformers/distiluse-base-multilingual-cased-v1"),
+    (
+        "multilingual-MiniLM-L12-v2",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    ),
+    (
+        "distiluse-base-multilingual-cased-v1",
+        "sentence-transformers/distiluse-base-multilingual-cased-v1",
+    ),
     // BGE Rerankers (3 models)
     ("bge-reranker-v2", "BAAI/bge-reranker-v2-m3"),
     ("bge-reranker-large", "BAAI/bge-reranker-large"),
     ("bge-reranker-base", "BAAI/bge-reranker-base"),
     // MS MARCO Rerankers (4 models)
-    ("ms-marco-MiniLM-L-6-v2", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
-    ("ms-marco-MiniLM-L-12-v2", "cross-encoder/ms-marco-MiniLM-L-12-v2"),
-    ("ms-marco-TinyBERT-L-2-v2", "cross-encoder/ms-marco-TinyBERT-L-2-v2"),
-    ("ms-marco-electra-base", "cross-encoder/ms-marco-electra-base"),
+    (
+        "ms-marco-MiniLM-L-6-v2",
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    ),
+    (
+        "ms-marco-MiniLM-L-12-v2",
+        "cross-encoder/ms-marco-MiniLM-L-12-v2",
+    ),
+    (
+        "ms-marco-TinyBERT-L-2-v2",
+        "cross-encoder/ms-marco-TinyBERT-L-2-v2",
+    ),
+    (
+        "ms-marco-electra-base",
+        "cross-encoder/ms-marco-electra-base",
+    ),
     // Specialized Rerankers (1 model)
-    ("quora-distilroberta-base", "cross-encoder/quora-distilroberta-base"),
+    (
+        "quora-distilroberta-base",
+        "cross-encoder/quora-distilroberta-base",
+    ),
 ];
 
 /// Required files that must exist after download
-const REQUIRED_FILES: &[&str] = &[
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-];
+const REQUIRED_FILES: &[&str] = &["model.safetensors", "config.json", "tokenizer.json"];
 
 fn get_test_models_dir() -> PathBuf {
     // Use the standard location: ~/.gllm/models
@@ -69,7 +107,6 @@ fn model_dir_name(repo_id: &str) -> String {
 /// Test download of a single small model (for quick CI checks) - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Downloads real model, run with --ignored"]
 fn download_single_small_model() {
     let (alias, repo_id) = ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2");
     let models_dir = get_test_models_dir();
@@ -96,7 +133,12 @@ fn download_single_small_model() {
             // Verify required files exist
             for file in REQUIRED_FILES {
                 let path = model_dir.join(file);
-                assert!(path.exists(), "Missing required file: {} for {}", file, alias);
+                assert!(
+                    path.exists(),
+                    "Missing required file: {} for {}",
+                    file,
+                    alias
+                );
                 let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 println!("   📄 {} ({:.2} MB)", file, size as f64 / 1024.0 / 1024.0);
             }
@@ -110,7 +152,6 @@ fn download_single_small_model() {
 /// Test download of a single small model (for quick CI checks) - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Downloads real model, run with --ignored"]
 async fn download_single_small_model() {
     let (alias, repo_id) = ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2");
     let models_dir = get_test_models_dir();
@@ -137,7 +178,12 @@ async fn download_single_small_model() {
             // Verify required files exist
             for file in REQUIRED_FILES {
                 let path = model_dir.join(file);
-                assert!(path.exists(), "Missing required file: {} for {}", file, alias);
+                assert!(
+                    path.exists(),
+                    "Missing required file: {} for {}",
+                    file,
+                    alias
+                );
                 let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 println!("   📄 {} ({:.2} MB)", file, size as f64 / 1024.0 / 1024.0);
             }
@@ -151,7 +197,6 @@ async fn download_single_small_model() {
 /// Test download of all 26 models (full E2E test) - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Downloads all models, takes significant time and bandwidth"]
 fn download_all_26_models() {
     let models_dir = get_test_models_dir();
     fs::create_dir_all(&models_dir).expect("create test models dir");
@@ -235,7 +280,6 @@ fn download_all_26_models() {
 /// Test download of all 26 models (full E2E test) - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Downloads all models, takes significant time and bandwidth"]
 async fn download_all_26_models() {
     let models_dir = get_test_models_dir();
     fs::create_dir_all(&models_dir).expect("create test models dir");
@@ -318,7 +362,6 @@ async fn download_all_26_models() {
 
 /// Test that model files are valid after download
 #[test]
-#[ignore = "Requires downloaded models"]
 fn verify_downloaded_model_files() {
     let models_dir = get_test_models_dir();
 
@@ -417,7 +460,6 @@ fn verify_downloaded_model_files() {
 /// Test that a downloaded model can be used for inference - 同步版本
 #[cfg(not(feature = "tokio"))]
 #[test]
-#[ignore = "Requires downloaded model and GPU/CPU backend"]
 fn test_inference_with_downloaded_model() {
     // Use smallest model for quick test
     let alias = "all-MiniLM-L6-v2";
@@ -430,19 +472,19 @@ fn test_inference_with_downloaded_model() {
         models_dir,
     };
 
-    let client = gllm::Client::with_config(alias, config)
-        .expect("Failed to create client");
+    let client = gllm::Client::with_config(alias, config).expect("Failed to create client");
 
-    let texts = vec![
-        "Hello, world!",
-        "This is a test sentence.",
-    ];
+    let texts = vec!["Hello, world!", "This is a test sentence."];
 
     match client.embeddings(&texts).generate() {
         Ok(response) => {
             println!("✅ Generated {} embeddings", response.embeddings.len());
             for emb in &response.embeddings {
-                println!("   Text {}: {} dimensions", emb.index + 1, emb.embedding.len());
+                println!(
+                    "   Text {}: {} dimensions",
+                    emb.index + 1,
+                    emb.embedding.len()
+                );
             }
         }
         Err(e) => {
@@ -455,7 +497,6 @@ fn test_inference_with_downloaded_model() {
 /// Test that a downloaded model can be used for inference - 异步版本
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires downloaded model and GPU/CPU backend"]
 async fn test_inference_with_downloaded_model() {
     // Use smallest model for quick test
     let alias = "all-MiniLM-L6-v2";
@@ -468,19 +509,21 @@ async fn test_inference_with_downloaded_model() {
         models_dir,
     };
 
-    let client = gllm::Client::with_config(alias, config).await
+    let client = gllm::Client::with_config(alias, config)
+        .await
         .expect("Failed to create client");
 
-    let texts = vec![
-        "Hello, world!",
-        "This is a test sentence.",
-    ];
+    let texts = vec!["Hello, world!", "This is a test sentence."];
 
     match client.embeddings(&texts).generate().await {
         Ok(response) => {
             println!("✅ Generated {} embeddings", response.embeddings.len());
             for emb in &response.embeddings {
-                println!("   Text {}: {} dimensions", emb.index + 1, emb.embedding.len());
+                println!(
+                    "   Text {}: {} dimensions",
+                    emb.index + 1,
+                    emb.embedding.len()
+                );
             }
         }
         Err(e) => {

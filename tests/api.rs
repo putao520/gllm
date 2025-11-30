@@ -1,52 +1,34 @@
-#![cfg(all(feature = "cpu", not(feature = "tokio")))]
+//! API tests using real models.
+//! Requires models to be downloaded: ~/.gllm/models/
+
+#![cfg(not(feature = "tokio"))]
 
 use gllm::{Client, ClientConfig, Device};
-use safetensors::Dtype;
-use safetensors::tensor::{TensorView, serialize};
-use std::fs;
 
-fn write_dummy_weights(path: &std::path::Path) {
-    let weights: Vec<u8> = vec![0u8; 64];
-    let shape = vec![4usize, 4usize];
-    let tensor = TensorView::new(Dtype::F32, shape, &weights).expect("tensor view");
-    let data = serialize([("dense.weight", tensor)].into_iter(), &None).expect("serialize");
-    fs::write(path, data).expect("write weights");
-}
-
-fn build_client() -> Client {
-    unsafe {
-        std::env::set_var("GLLM_SKIP_DOWNLOAD", "1");
-        std::env::set_var("HF_HUB_OFFLINE", "1");
-        std::env::set_var("GLLM_TEST_MODE", "1");
-    }
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let model_dir = temp_dir.path().join("BAAI--bge-small-en-v1.5");
-    fs::create_dir_all(&model_dir).expect("create model dir");
-    write_dummy_weights(&model_dir.join("model.safetensors"));
-
-    let mut config = ClientConfig::default();
-    config.models_dir = temp_dir.keep();
-    config.device = Device::Cpu;
-
-    Client::with_config("bge-small-en", config).expect("client")
+fn build_client(model: &str) -> Client {
+    let config = ClientConfig {
+        device: Device::Cpu,
+        ..Default::default()
+    };
+    Client::with_config(model, config).expect("client")
 }
 
 #[test]
 fn embeddings_flow_cpu() {
-    let client = build_client();
+    let client = build_client("bge-small-en");
     let response = client
         .embeddings(["hello world", "rust embeddings"])
         .generate()
         .expect("embeddings");
 
     assert_eq!(response.embeddings.len(), 2);
-    assert_eq!(response.embeddings[0].embedding.len(), 128);
+    assert_eq!(response.embeddings[0].embedding.len(), 384);
     assert!(response.usage.prompt_tokens > 0);
 }
 
 #[test]
 fn rerank_flow_cpu() {
-    let client = build_client();
+    let client = build_client("bge-reranker-v2");
     let response = client
         .rerank(
             "search query",

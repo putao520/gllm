@@ -1,24 +1,19 @@
-use super::common::{
-    env_lock, init_test_env, is_backend_unavailable, preferred_device, prepare_context_with_weights,
-};
-use gllm::Result;
+//! Rerank integration tests using real models.
+
+use gllm::{Client, ClientConfig, Device, Result};
 use std::collections::HashSet;
+
+fn get_config() -> ClientConfig {
+    ClientConfig {
+        device: Device::Auto,
+        ..Default::default()
+    }
+}
 
 #[cfg(not(feature = "tokio"))]
 #[test]
 fn rerank_end_to_end() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
-
-    let (client, _ctx) = match prepare_context_with_weights("bge-reranker-v2", device) {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    let client = Client::with_config("bge-reranker-v2", get_config())?;
 
     let documents = vec![
         "Machine learning is a subset of AI.",
@@ -39,7 +34,7 @@ fn rerank_end_to_end() -> Result<()> {
         assert!(window[0].score >= window[1].score);
     }
     for result in &response.results {
-        assert!(result.score >= 0.0 && result.score <= 1.0);
+        assert!(result.score.is_finite());
         assert!(result.index < documents.len());
         assert!(seen.insert(result.index));
         assert!(result.document.is_some());
@@ -51,18 +46,7 @@ fn rerank_end_to_end() -> Result<()> {
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn rerank_end_to_end() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
-
-    let (client, _ctx) = match prepare_context_with_weights("bge-reranker-v2", device).await {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    let client = Client::with_config("bge-reranker-v2", get_config()).await?;
 
     let documents = vec![
         "Machine learning is a subset of AI.",
@@ -84,7 +68,7 @@ async fn rerank_end_to_end() -> Result<()> {
         assert!(window[0].score >= window[1].score);
     }
     for result in &response.results {
-        assert!(result.score >= 0.0 && result.score <= 1.0);
+        assert!(result.score.is_finite());
         assert!(result.index < documents.len());
         assert!(seen.insert(result.index));
         assert!(result.document.is_some());

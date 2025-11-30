@@ -7,16 +7,31 @@ use gllm::{Device, Result};
 #[test]
 fn test_all_26_model_categories_basic() -> Result<()> {
     let all_models = [
-        "bge-small-zh", "bge-small-en", "bge-base-en", "bge-large-en",
-        "all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-MiniLM-L6-v2",
-        "multi-qa-mpnet-base-dot-v1", "all-MiniLM-L12-v2", "all-distilroberta-v1",
-        "e5-large", "e5-base", "e5-small",
-        "jina-embeddings-v2-base-en", "jina-embeddings-v2-small-en",
+        "bge-small-zh",
+        "bge-small-en",
+        "bge-base-en",
+        "bge-large-en",
+        "all-MiniLM-L6-v2",
+        "all-mpnet-base-v2",
+        "paraphrase-MiniLM-L6-v2",
+        "multi-qa-mpnet-base-dot-v1",
+        "all-MiniLM-L12-v2",
+        "all-distilroberta-v1",
+        "e5-large",
+        "e5-base",
+        "e5-small",
+        "jina-embeddings-v2-base-en",
+        "jina-embeddings-v2-small-en",
         "m3e-base",
-        "multilingual-MiniLM-L12-v2", "distiluse-base-multilingual-cased-v1",
-        "bge-reranker-v2", "bge-reranker-large", "bge-reranker-base",
-        "ms-marco-MiniLM-L-6-v2", "ms-marco-MiniLM-L-12-v2",
-        "ms-marco-TinyBERT-L-2-v2", "ms-marco-electra-base",
+        "multilingual-MiniLM-L12-v2",
+        "distiluse-base-multilingual-cased-v1",
+        "bge-reranker-v2",
+        "bge-reranker-large",
+        "bge-reranker-base",
+        "ms-marco-MiniLM-L-6-v2",
+        "ms-marco-MiniLM-L-12-v2",
+        "ms-marco-TinyBERT-L-2-v2",
+        "ms-marco-electra-base",
         "quora-distilroberta-base",
     ];
 
@@ -39,7 +54,10 @@ fn test_all_26_model_categories_basic() -> Result<()> {
         match client_result {
             Ok(_) => {
                 successful_aliases += 1;
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                if model_alias.contains("reranker")
+                    || model_alias.starts_with("ms-marco-")
+                    || model_alias.starts_with("quora-")
+                {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
@@ -47,14 +65,20 @@ fn test_all_26_model_categories_basic() -> Result<()> {
             }
             Err(gllm::Error::ModelNotFound(_)) | Err(gllm::Error::DownloadError(_)) => {
                 successful_aliases += 1;
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                if model_alias.contains("reranker")
+                    || model_alias.starts_with("ms-marco-")
+                    || model_alias.starts_with("quora-")
+                {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
                 }
             }
             Err(err) => {
-                return Err(gllm::Error::InvalidConfig(format!("Failed: {}: {:?}", model_alias, err)));
+                return Err(gllm::Error::InvalidConfig(format!(
+                    "Failed: {}: {:?}",
+                    model_alias, err
+                )));
             }
         }
     }
@@ -68,16 +92,31 @@ fn test_all_26_model_categories_basic() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_all_26_model_categories_basic() -> Result<()> {
     let all_models = [
-        "bge-small-zh", "bge-small-en", "bge-base-en", "bge-large-en",
-        "all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-MiniLM-L6-v2",
-        "multi-qa-mpnet-base-dot-v1", "all-MiniLM-L12-v2", "all-distilroberta-v1",
-        "e5-large", "e5-base", "e5-small",
-        "jina-embeddings-v2-base-en", "jina-embeddings-v2-small-en",
+        "bge-small-zh",
+        "bge-small-en",
+        "bge-base-en",
+        "bge-large-en",
+        "all-MiniLM-L6-v2",
+        "all-mpnet-base-v2",
+        "paraphrase-MiniLM-L6-v2",
+        "multi-qa-mpnet-base-dot-v1",
+        "all-MiniLM-L12-v2",
+        "all-distilroberta-v1",
+        "e5-large",
+        "e5-base",
+        "e5-small",
+        "jina-embeddings-v2-base-en",
+        "jina-embeddings-v2-small-en",
         "m3e-base",
-        "multilingual-MiniLM-L12-v2", "distiluse-base-multilingual-cased-v1",
-        "bge-reranker-v2", "bge-reranker-large", "bge-reranker-base",
-        "ms-marco-MiniLM-L-6-v2", "ms-marco-MiniLM-L-12-v2",
-        "ms-marco-TinyBERT-L-2-v2", "ms-marco-electra-base",
+        "multilingual-MiniLM-L12-v2",
+        "distiluse-base-multilingual-cased-v1",
+        "bge-reranker-v2",
+        "bge-reranker-large",
+        "bge-reranker-base",
+        "ms-marco-MiniLM-L-6-v2",
+        "ms-marco-MiniLM-L-12-v2",
+        "ms-marco-TinyBERT-L-2-v2",
+        "ms-marco-electra-base",
         "quora-distilroberta-base",
     ];
 
@@ -95,12 +134,16 @@ async fn test_all_26_model_categories_basic() -> Result<()> {
                 device: device.clone(),
                 models_dir: std::env::temp_dir().join("gllm-test-models"),
             },
-        ).await;
+        )
+        .await;
 
         match client_result {
             Ok(_) => {
                 successful_aliases += 1;
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                if model_alias.contains("reranker")
+                    || model_alias.starts_with("ms-marco-")
+                    || model_alias.starts_with("quora-")
+                {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
@@ -108,14 +151,20 @@ async fn test_all_26_model_categories_basic() -> Result<()> {
             }
             Err(gllm::Error::ModelNotFound(_)) | Err(gllm::Error::DownloadError(_)) => {
                 successful_aliases += 1;
-                if model_alias.contains("reranker") || model_alias.starts_with("ms-marco-") || model_alias.starts_with("quora-") {
+                if model_alias.contains("reranker")
+                    || model_alias.starts_with("ms-marco-")
+                    || model_alias.starts_with("quora-")
+                {
                     rerank_models += 1;
                 } else {
                     embedding_models += 1;
                 }
             }
             Err(err) => {
-                return Err(gllm::Error::InvalidConfig(format!("Failed: {}: {:?}", model_alias, err)));
+                return Err(gllm::Error::InvalidConfig(format!(
+                    "Failed: {}: {:?}",
+                    model_alias, err
+                )));
             }
         }
     }
@@ -128,24 +177,39 @@ async fn test_all_26_model_categories_basic() -> Result<()> {
 #[test]
 fn test_model_type_classification() -> Result<()> {
     let embedding_models = [
-        "bge-small-zh", "bge-small-en", "all-MiniLM-L6-v2", "e5-base",
-        "jina-embeddings-v2-base-en", "multilingual-MiniLM-L12-v2"
+        "bge-small-zh",
+        "bge-small-en",
+        "all-MiniLM-L6-v2",
+        "e5-base",
+        "jina-embeddings-v2-base-en",
+        "multilingual-MiniLM-L12-v2",
     ];
 
     let rerank_models = [
-        "bge-reranker-v2", "ms-marco-MiniLM-L-6-v2", "bge-reranker-large"
+        "bge-reranker-v2",
+        "ms-marco-MiniLM-L-6-v2",
+        "bge-reranker-large",
     ];
 
     for model in &embedding_models {
-        assert!(model.contains("bge") || model.contains("all-") ||
-                model.contains("e5") || model.contains("jina") ||
-                model.contains("multilingual") || model.contains("distiluse"),
-                "{} should be classified as embedding model", model);
+        assert!(
+            model.contains("bge")
+                || model.contains("all-")
+                || model.contains("e5")
+                || model.contains("jina")
+                || model.contains("multilingual")
+                || model.contains("distiluse"),
+            "{} should be classified as embedding model",
+            model
+        );
     }
 
     for model in &rerank_models {
-        assert!(model.contains("reranker") || model.starts_with("ms-marco-"),
-                "{} should be classified as rerank model", model);
+        assert!(
+            model.contains("reranker") || model.starts_with("ms-marco-"),
+            "{} should be classified as rerank model",
+            model
+        );
     }
 
     Ok(())

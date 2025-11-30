@@ -1,4 +1,4 @@
-use crate::engine::{EngineBackend, MAX_SEQ_LEN, TokenizerAdapter};
+use crate::engine::{EngineBackend, TokenizerAdapter, MAX_SEQ_LEN};
 use crate::types::{Error, RerankResponse, RerankResult, Result};
 
 /// Rerank request builder.

@@ -1,24 +1,18 @@
-use super::common::{
-    EMBEDDING_DIM, env_lock, init_test_env, is_backend_unavailable, preferred_device,
-    prepare_context_with_weights,
-};
-use gllm::Result;
+//! Embeddings integration tests using real models.
+
+use gllm::{Client, ClientConfig, Device, Result};
+
+fn get_config() -> ClientConfig {
+    ClientConfig {
+        device: Device::Auto,
+        ..Default::default()
+    }
+}
 
 #[cfg(not(feature = "tokio"))]
 #[test]
 fn embeddings_end_to_end() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
-
-    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", device) {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    let client = Client::with_config("bge-small-en", get_config())?;
 
     let inputs = vec!["hello world", "rust embeddings"];
     let response = client.embeddings(inputs.clone()).generate()?;
@@ -28,7 +22,7 @@ fn embeddings_end_to_end() -> Result<()> {
 
     for (idx, emb) in response.embeddings.iter().enumerate() {
         assert_eq!(emb.index, idx);
-        assert_eq!(emb.embedding.len(), EMBEDDING_DIM);
+        assert_eq!(emb.embedding.len(), 384); // bge-small-en has 384 dims
         assert!(emb.embedding.iter().all(|v| v.is_finite()));
     }
 
@@ -38,18 +32,7 @@ fn embeddings_end_to_end() -> Result<()> {
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn embeddings_end_to_end() -> Result<()> {
-    let _guard = env_lock();
-    init_test_env();
-    let device = preferred_device();
-
-    let (client, _ctx) = match prepare_context_with_weights("bge-small-en", device).await {
-        Ok(value) => value,
-        Err(err) if is_backend_unavailable(&err) => {
-            eprintln!("Skipping test: {err}");
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
+    let client = Client::with_config("bge-small-en", get_config()).await?;
 
     let inputs = vec!["hello world", "rust embeddings"];
     let response = client.embeddings(inputs.clone()).generate().await?;
@@ -59,7 +42,7 @@ async fn embeddings_end_to_end() -> Result<()> {
 
     for (idx, emb) in response.embeddings.iter().enumerate() {
         assert_eq!(emb.index, idx);
-        assert_eq!(emb.embedding.len(), EMBEDDING_DIM);
+        assert_eq!(emb.embedding.len(), 384); // bge-small-en has 384 dims
         assert!(emb.embedding.iter().all(|v| v.is_finite()));
     }
 
