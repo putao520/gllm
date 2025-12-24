@@ -41,6 +41,7 @@ impl Client {
             engine: &self.engine,
             tokenizer: &self.tokenizer,
             inputs,
+            graph_inputs: Vec::new(),
         }
     }
 

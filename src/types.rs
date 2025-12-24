@@ -11,6 +11,17 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+/// Input for GraphCodeBERT containing source code and data flow graph info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphCodeInput {
+    /// Source code text.
+    pub code: String,
+    /// Position indices mapping (if using custom positions).
+    pub position_ids: Option<Vec<i64>>,
+    /// Data flow graph attention mask (allows focusing on data dependencies).
+    pub dfg_mask: Option<Vec<Vec<i64>>>,
+}
+
 /// Single embedding vector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embedding {

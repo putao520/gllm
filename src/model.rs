@@ -44,46 +44,62 @@ impl ModelManager {
         })
     }
 
-    /// Download a model from HuggingFace into the target directory.
+    /// Download a model from HuggingFace (or ModelScope fallback) into the target directory.
     pub fn download_model(&self, info: &ModelInfo, target: &Path) -> Result<()> {
-        let skip = std::env::var("GLLM_SKIP_DOWNLOAD").is_ok();
-        if skip {
+        fs::create_dir_all(target)?;
+
+        let download_fn = |endpoint: Option<&str>| -> Result<()> {
+            let api = if let Some(ep) = endpoint {
+                use hf_hub::api::sync::ApiBuilder;
+                ApiBuilder::new()
+                    .with_endpoint(ep.to_string())
+                    .build()
+                    .map_err(|e| Error::DownloadError(e.to_string()))?
+            } else {
+                Api::new().map_err(|e| Error::DownloadError(e.to_string()))?
+            };
+
+            let repo = api.model(info.repo_id.clone());
+            let files = [
+                "model.safetensors",
+                "config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+            ];
+
+            for file in files {
+                let dest = target.join(file);
+                if dest.exists() {
+                    continue;
+                }
+
+                match repo.get(file) {
+                    Ok(src) => {
+                        if let Err(err) = fs::copy(&src, &dest) {
+                            return Err(Error::DownloadError(err.to_string()));
+                        }
+                    }
+                    Err(err) => {
+                        // Config or tokenizer files might be absent for some repos; only error on weights.
+                        if file == "model.safetensors" {
+                            return Err(Error::DownloadError(err.to_string()));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // 1. Try Hugging Face (default)
+        if let Ok(()) = download_fn(None) {
             return Ok(());
         }
 
-        fs::create_dir_all(target)?;
-        let api = Api::new().map_err(|e| Error::DownloadError(e.to_string()))?;
-        let repo = api.model(info.repo_id.clone());
-        let files = [
-            "model.safetensors",
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-        ];
-
-        for file in files {
-            let dest = target.join(file);
-            if dest.exists() {
-                continue;
-            }
-
-            match repo.get(file) {
-                Ok(src) => {
-                    if let Err(err) = fs::copy(&src, &dest) {
-                        return Err(Error::DownloadError(err.to_string()));
-                    }
-                }
-                Err(err) => {
-                    // Config or tokenizer files might be absent for some repos; only error on weights.
-                    if file == "model.safetensors" {
-                        return Err(Error::DownloadError(err.to_string()));
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        // 2. Fallback: ModelScope (China)
+        // Note: ModelScope uses the same repo IDs for most major upstream models.
+        eprintln!("HuggingFace download failed, attempting ModelScope fallback...");
+        download_fn(Some("https://modelscope.cn/api/v1"))
     }
 
     /// Validate that model files exist and are readable.

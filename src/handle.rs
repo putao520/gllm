@@ -56,6 +56,10 @@ pub enum EmbedRequest {
         texts: Vec<String>,
         respond: EmbedBatchResponseSender,
     },
+    EmbedGraphBatch {
+        inputs: Vec<crate::types::GraphCodeInput>,
+        respond: EmbedBatchResponseSender,
+    },
     Shutdown,
 }
 
@@ -172,6 +176,19 @@ impl EmbedderHandle {
         rx.recv()
             .map_err(|_| Error::InternalError("Embedder response channel closed".into()))?
     }
+
+    pub fn embed_graph_batch(&self, inputs: Vec<crate::types::GraphCodeInput>) -> Result<Vec<Vec<f32>>> {
+        let (tx, rx) = mpsc::channel();
+        self.sender
+            .send(EmbedRequest::EmbedGraphBatch {
+                inputs,
+                respond: tx,
+            })
+            .map_err(|_| Error::InferenceError("Embedding actor is not available".into()))?;
+
+        rx.recv()
+            .map_err(|_| Error::InternalError("Embedder response channel closed".into()))?
+    }
 }
 
 #[cfg(not(feature = "tokio"))]
@@ -231,6 +248,14 @@ fn embedder_loop(model: String, receiver: EmbedReceiver, ready: mpsc::Sender<Res
                 let _ = respond.send(result);
             }
             EmbedRequest::EmbedBatch { texts, respond } => {
+                let tokens = tokenize_texts(&tokenizer, &texts);
+                let result = engine.embed(&tokens);
+                let _ = respond.send(result);
+            }
+            EmbedRequest::EmbedGraphBatch { inputs, respond } => {
+                // Fallback: extract code from GraphInput and tokenize as text
+                // until EngineBackend supports DFG tensors.
+                let texts: Vec<String> = inputs.into_iter().map(|i| i.code).collect();
                 let tokens = tokenize_texts(&tokenizer, &texts);
                 let result = engine.embed(&tokens);
                 let _ = respond.send(result);
@@ -402,6 +427,20 @@ impl EmbedderHandle {
         rx.await
             .map_err(|_| Error::InternalError("Embedder response channel closed".into()))?
     }
+
+    pub async fn embed_graph_batch(&self, inputs: Vec<crate::types::GraphCodeInput>) -> Result<Vec<Vec<f32>>> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(EmbedRequest::EmbedGraphBatch {
+                inputs,
+                respond: tx,
+            })
+            .await
+            .map_err(|_| Error::InferenceError("Embedding actor is not available".into()))?;
+
+        rx.await
+            .map_err(|_| Error::InternalError("Embedder response channel closed".into()))?
+    }
 }
 
 #[cfg(feature = "tokio")]
@@ -465,6 +504,13 @@ fn embedder_loop_async(
                 let _ = respond.send(result);
             }
             EmbedRequest::EmbedBatch { texts, respond } => {
+                let tokens = tokenize_texts(&tokenizer, &texts);
+                let result = engine.embed(&tokens);
+                let _ = respond.send(result);
+            }
+            EmbedRequest::EmbedGraphBatch { inputs, respond } => {
+                // Fallback: extract code from GraphInput and tokenize as text.
+                let texts: Vec<String> = inputs.into_iter().map(|i| i.code).collect();
                 let tokens = tokenize_texts(&tokenizer, &texts);
                 let result = engine.embed(&tokens);
                 let _ = respond.send(result);

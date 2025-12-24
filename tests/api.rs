@@ -28,7 +28,7 @@ fn embeddings_flow_cpu() {
 
 #[test]
 fn rerank_flow_cpu() {
-    let client = build_client("bge-reranker-v2");
+    let client = build_client("bge-reranker-base");
     let response = client
         .rerank(
             "search query",

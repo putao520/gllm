@@ -21,6 +21,6 @@ pub use handle::{EmbedderHandle, RerankerHandle};
 pub use registry::{Architecture, ModelInfo, ModelRegistry, ModelType};
 pub use rerank::RerankBuilder;
 pub use types::{
-    ClientConfig, Device, Embedding, EmbeddingResponse, Error, RerankResponse, RerankResult,
+    ClientConfig, Device, Embedding, EmbeddingResponse, Error, GraphCodeInput, RerankResponse, RerankResult,
     Result, Usage,
 };

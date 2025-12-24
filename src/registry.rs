@@ -145,6 +145,31 @@ impl ModelRegistry {
                 ModelType::Embedding,
                 Architecture::Bert,
             ),
+            // Code Models
+            (
+                "codebert-base",
+                "claudios/codebert-base", // Official repo missing safetensors
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "starencoder",
+                "bigcode/starencoder",
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "graphcodebert-base",
+                "claudios/graphcodebert-base", // Official repo missing safetensors
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
+            (
+                "unixcoder-base",
+                "claudios/unixcoder-base", // Official repo missing safetensors
+                ModelType::Embedding,
+                Architecture::Bert,
+            ),
             // Light Models for Edge Devices
             (
                 "all-MiniLM-L12-v2",

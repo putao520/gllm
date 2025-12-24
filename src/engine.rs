@@ -367,14 +367,18 @@ pub(crate) fn build_embedding_backend(
     }
 
     // Priority 1: Try GPU (Wgpu)
+    // Supports concurrent model loading; if VRAM is insufficient, initialization will fail
+    // or panic, triggering the fallback to CPU (Candle).
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let init = std::panic::catch_unwind(|| {
             let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
-            EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
+            EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir)
         });
 
-        if let Ok(Some(engine)) = init {
-            return Ok(EmbeddingBackend::Wgpu(engine));
+        match init {
+            Ok(Ok(engine)) => return Ok(EmbeddingBackend::Wgpu(engine)),
+            Ok(Err(e)) => log::warn!("GPU (Wgpu) initialization failed (likely OOM or config): {}, falling back to CPU", e),
+            Err(_) => log::warn!("GPU (Wgpu) initialization panicked (likely OOM), falling back to CPU"),
         }
     }
 
