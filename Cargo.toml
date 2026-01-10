@@ -1,6 +1,6 @@
 [package]
 name = "gllm"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["gllm contributors"]
 license = "MIT"
@@ -26,9 +26,12 @@ path = "stress_test.rs"
 tokio = ["dep:tokio"]
 wgpu = []
 cpu = []
+wgpu-detect = ["dep:wgpu", "dep:pollster"]  # Enable GPU detection
 
 [dependencies]
 burn = { version = "0.20.0-pre.3", default-features = false, features = ["std", "wgpu", "candle", "ndarray"] }
+wgpu = { version = "26.0", optional = true }
+pollster = { version = "0.4", optional = true }
 burn-import = { version = "0.20.0-pre.3", default-features = false, features = ["safetensors"] }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }
