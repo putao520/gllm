@@ -2,8 +2,57 @@ use crate::engine::TokenizerAdapter;
 use crate::registry::{ModelInfo, ModelRegistry};
 use crate::types::{ClientConfig, Error, Result};
 use hf_hub::api::sync::Api;
+use serde::Deserialize;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Deserialize)]
+struct ShardIndex {
+    metadata: Option<ShardMetadata>,
+    weight_map: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShardMetadata {
+    total_size: Option<u64>,
+}
+
+impl ShardIndex {
+    fn from_slice(bytes: &[u8]) -> Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|err| Error::DownloadError(format!("Failed to parse shard index: {err}")))
+    }
+
+    fn from_path(path: &Path) -> Result<Self> {
+        let bytes = fs::read(path).map_err(|err| {
+            Error::DownloadError(format!(
+                "Failed to read shard index {}: {err}",
+                path.display()
+            ))
+        })?;
+        Self::from_slice(&bytes).map_err(|err| {
+            Error::DownloadError(format!(
+                "Failed to parse shard index {}: {err}",
+                path.display()
+            ))
+        })
+    }
+
+    fn shard_filenames(&self) -> Vec<String> {
+        let mut shards = BTreeSet::new();
+        for filename in self.weight_map.values() {
+            shards.insert(filename.clone());
+        }
+        shards.into_iter().collect()
+    }
+}
+
+fn cleanup_partial_downloads(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
 
 /// Model artifacts prepared for inference.
 pub(crate) struct ModelArtifacts {
@@ -60,12 +109,85 @@ impl ModelManager {
             };
 
             let repo = api.model(info.repo_id.clone());
+            let mut downloaded_files = Vec::new();
+
+            let shard_index_name = "model.safetensors.index.json";
+            let shard_index_path = target.join(shard_index_name);
+            let mut has_shards = false;
+
+            if shard_index_path.exists() {
+                has_shards = true;
+            } else if let Ok(src) = repo.get(shard_index_name) {
+                if let Err(err) = fs::copy(&src, &shard_index_path) {
+                    let _ = fs::remove_file(&shard_index_path);
+                    return Err(Error::DownloadError(err.to_string()));
+                }
+                downloaded_files.push(shard_index_path.clone());
+                has_shards = true;
+            }
+
+            if has_shards {
+                let shard_index = match ShardIndex::from_path(&shard_index_path) {
+                    Ok(index) => index,
+                    Err(err) => {
+                        cleanup_partial_downloads(&downloaded_files);
+                        return Err(err);
+                    }
+                };
+                let shard_files = shard_index.shard_filenames();
+                if shard_files.is_empty() {
+                    cleanup_partial_downloads(&downloaded_files);
+                    return Err(Error::DownloadError(
+                        "Shard index contains no shard entries".into(),
+                    ));
+                }
+
+                let total = shard_files.len();
+                for (idx, shard) in shard_files.iter().enumerate() {
+                    let dest = target.join(shard);
+                    if dest.exists() {
+                        continue;
+                    }
+
+                    eprintln!("Downloading shard {}/{}: {}", idx + 1, total, shard);
+                    match repo.get(shard) {
+                        Ok(src) => {
+                            if let Err(err) = fs::copy(&src, &dest) {
+                                let _ = fs::remove_file(&dest);
+                                cleanup_partial_downloads(&downloaded_files);
+                                return Err(Error::DownloadError(err.to_string()));
+                            }
+                            downloaded_files.push(dest);
+                        }
+                        Err(err) => {
+                            cleanup_partial_downloads(&downloaded_files);
+                            return Err(Error::DownloadError(err.to_string()));
+                        }
+                    }
+                }
+            } else {
+                let dest = target.join("model.safetensors");
+                if !dest.exists() {
+                    match repo.get("model.safetensors") {
+                        Ok(src) => {
+                            if let Err(err) = fs::copy(&src, &dest) {
+                                let _ = fs::remove_file(&dest);
+                                return Err(Error::DownloadError(err.to_string()));
+                            }
+                        }
+                        Err(err) => {
+                            return Err(Error::DownloadError(err.to_string()));
+                        }
+                    }
+                }
+            }
+
             let files = [
-                "model.safetensors",
                 "config.json",
                 "tokenizer.json",
                 "tokenizer_config.json",
                 "special_tokens_map.json",
+                "vocab.json",
             ];
 
             for file in files {
@@ -80,11 +202,8 @@ impl ModelManager {
                             return Err(Error::DownloadError(err.to_string()));
                         }
                     }
-                    Err(err) => {
-                        // Config or tokenizer files might be absent for some repos; only error on weights.
-                        if file == "model.safetensors" {
-                            return Err(Error::DownloadError(err.to_string()));
-                        }
+                    Err(_) => {
+                        // Config or tokenizer files might be absent for some repos.
                     }
                 }
             }
@@ -128,5 +247,49 @@ impl ModelManager {
     fn repo_dir(&self, repo_id: &str) -> PathBuf {
         let safe = repo_id.replace('/', "--");
         self.config.models_dir.join(safe)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShardIndex;
+
+    #[test]
+    fn shard_index_parses_metadata_and_weights() {
+        let payload = r#"{
+            "metadata": { "total_size": 123456 },
+            "weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00003.safetensors"
+            }
+        }"#;
+
+        let index: ShardIndex = serde_json::from_str(payload).expect("parse shard index");
+        assert_eq!(index.weight_map.len(), 2);
+        assert_eq!(
+            index.metadata.and_then(|meta| meta.total_size),
+            Some(123456)
+        );
+    }
+
+    #[test]
+    fn shard_index_extracts_unique_filenames() {
+        let payload = r#"{
+            "weight_map": {
+                "a": "model-00001-of-00003.safetensors",
+                "b": "model-00001-of-00003.safetensors",
+                "c": "model-00002-of-00003.safetensors"
+            }
+        }"#;
+
+        let index: ShardIndex = serde_json::from_str(payload).expect("parse shard index");
+        let shards = index.shard_filenames();
+        assert_eq!(
+            shards,
+            vec![
+                "model-00001-of-00003.safetensors",
+                "model-00002-of-00003.safetensors"
+            ]
+        );
     }
 }

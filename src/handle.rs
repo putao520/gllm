@@ -120,6 +120,14 @@ fn prepare_model(model: &str) -> Result<(std::path::PathBuf, TokenizerAdapter)> 
     Ok((artifacts.model_dir, tokenizer))
 }
 
+/// Prepare model artifacts with specified device.
+fn prepare_model_with_device(model: &str, device: Device) -> Result<(std::path::PathBuf, TokenizerAdapter, Device)> {
+    let manager = ModelManager::new(ClientConfig::default());
+    let artifacts = manager.prepare(model)?;
+    let tokenizer = artifacts.tokenizer.clone();
+    Ok((artifacts.model_dir, tokenizer, device))
+}
+
 /// Tokenize texts for embedding.
 fn tokenize_texts(tokenizer: &TokenizerAdapter, texts: &[String]) -> Vec<Vec<i64>> {
     texts
@@ -145,7 +153,12 @@ pub struct EmbedderHandle {
 #[cfg(not(feature = "tokio"))]
 impl EmbedderHandle {
     pub fn new(model: &str) -> Result<Self> {
-        start_embedder_actor(model.to_string()).map(|(sender, shutdown)| Self {
+        Self::new_with_device(model, Device::Auto)
+    }
+
+    /// Create embedder with specific device (Auto, Cpu, or Gpu).
+    pub fn new_with_device(model: &str, device: Device) -> Result<Self> {
+        start_embedder_actor_with_device(model.to_string(), device).map(|(sender, shutdown)| Self {
             sender,
             _shutdown: shutdown,
         })
@@ -193,10 +206,15 @@ impl EmbedderHandle {
 
 #[cfg(not(feature = "tokio"))]
 fn start_embedder_actor(model: String) -> Result<(EmbedSender, ShutdownGuard)> {
+    start_embedder_actor_with_device(model, Device::Auto)
+}
+
+#[cfg(not(feature = "tokio"))]
+fn start_embedder_actor_with_device(model: String, device: Device) -> Result<(EmbedSender, ShutdownGuard)> {
     let (sender, receiver) = mpsc::sync_channel::<EmbedRequest>(32);
     let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
 
-    let handle = thread::spawn(move || embedder_loop(model, receiver, ready_tx));
+    let handle = thread::spawn(move || embedder_loop_with_device(model, device, receiver, ready_tx));
 
     ready_rx.recv().unwrap_or_else(|_| {
         Err(Error::InternalError(
@@ -217,6 +235,11 @@ fn start_embedder_actor(model: String) -> Result<(EmbedSender, ShutdownGuard)> {
 
 #[cfg(not(feature = "tokio"))]
 fn embedder_loop(model: String, receiver: EmbedReceiver, ready: mpsc::Sender<Result<()>>) {
+    embedder_loop_with_device(model, Device::Auto, receiver, ready)
+}
+
+#[cfg(not(feature = "tokio"))]
+fn embedder_loop_with_device(model: String, device: Device, receiver: EmbedReceiver, ready: mpsc::Sender<Result<()>>) {
     // Prepare model and build embedding-only backend
     let (model_dir, tokenizer) = match prepare_model(&model) {
         Ok(v) => v,
@@ -226,7 +249,7 @@ fn embedder_loop(model: String, receiver: EmbedReceiver, ready: mpsc::Sender<Res
         }
     };
 
-    let engine = match build_embedding_backend(&model_dir, &Device::Auto) {
+    let engine = match build_embedding_backend(&model_dir, &device) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine
@@ -389,8 +412,13 @@ pub struct EmbedderHandle {
 #[cfg(feature = "tokio")]
 impl EmbedderHandle {
     pub async fn new(model: &str) -> Result<Self> {
+        Self::new_with_device(model, Device::Auto).await
+    }
+
+    /// Create embedder with specific device (Auto, Cpu, or Gpu).
+    pub async fn new_with_device(model: &str, device: Device) -> Result<Self> {
         let model = model.to_string();
-        let (sender, shutdown) = task::spawn_blocking(move || start_embedder_actor_async(model))
+        let (sender, shutdown) = task::spawn_blocking(move || start_embedder_actor_async_with_device(model, device))
             .await
             .map_err(|err| Error::InternalError(format!("Embedder actor init error: {err}")))??;
 
@@ -445,10 +473,15 @@ impl EmbedderHandle {
 
 #[cfg(feature = "tokio")]
 fn start_embedder_actor_async(model: String) -> Result<(EmbedSender, ShutdownGuard)> {
+    start_embedder_actor_async_with_device(model, Device::Auto)
+}
+
+#[cfg(feature = "tokio")]
+fn start_embedder_actor_async_with_device(model: String, device: Device) -> Result<(EmbedSender, ShutdownGuard)> {
     let (sender, receiver) = mpsc::channel::<EmbedRequest>(32);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
 
-    let handle = thread::spawn(move || embedder_loop_async(model, receiver, ready_tx));
+    let handle = thread::spawn(move || embedder_loop_async_with_device(model, device, receiver, ready_tx));
 
     ready_rx.recv().unwrap_or_else(|_| {
         Err(Error::InternalError(
@@ -470,6 +503,16 @@ fn start_embedder_actor_async(model: String) -> Result<(EmbedSender, ShutdownGua
 #[cfg(feature = "tokio")]
 fn embedder_loop_async(
     model: String,
+    receiver: EmbedReceiver,
+    ready: std::sync::mpsc::Sender<Result<()>>,
+) {
+    embedder_loop_async_with_device(model, Device::Auto, receiver, ready)
+}
+
+#[cfg(feature = "tokio")]
+fn embedder_loop_async_with_device(
+    model: String,
+    device: Device,
     mut receiver: EmbedReceiver,
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) {
@@ -482,7 +525,7 @@ fn embedder_loop_async(
         }
     };
 
-    let engine = match build_embedding_backend(&model_dir, &Device::Auto) {
+    let engine = match build_embedding_backend(&model_dir, &device) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine

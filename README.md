@@ -26,23 +26,23 @@
 
 ```toml
 [dependencies]
-gllm = "0.2"
+gllm = "0.4"
 ```
 
 ### Step 2: Choose Your Backend
 
 ```toml
 # Option 1: Default (WGPU GPU support + CPU fallback)
-gllm = "0.2"
+gllm = "0.4"
 
 # Option 2: CPU-only (no GPU dependencies, pure Rust)
-gllm = { version = "0.2", features = ["cpu"] }
+gllm = { version = "0.4", features = ["cpu"] }
 
 # Option 3: With async support (tokio)
-gllm = { version = "0.2", features = ["tokio"] }
+gllm = { version = "0.4", features = ["tokio"] }
 
 # Option 4: CPU-only + async
-gllm = { version = "0.2", features = ["cpu", "tokio"] }
+gllm = { version = "0.4", features = ["cpu", "tokio"] }
 ```
 
 ### Step 3: Start Using (5 minutes)
@@ -68,11 +68,11 @@ The WGPU backend supports:
 
 ## 🎯 Supported Models
 
-gllm includes built-in aliases for **26 popular models** and supports any HuggingFace SafeTensors model.
+gllm includes built-in aliases for **35 popular models** and supports any HuggingFace SafeTensors model. **New in v0.4**: Dynamic quantization support for Qwen3 series models.
 
-### Built-in Model Aliases (26 Models)
+### Built-in Model Aliases (35 Models)
 
-#### 🔄 Text Embedding Models (18 models)
+#### 🔄 Text Embedding Models (23 models)
 
 | Alias | HuggingFace Model | Dimensions | Speed | Best For |
 |-------|------------------|------------|-------|----------|
@@ -98,6 +98,15 @@ gllm includes built-in aliases for **26 popular models** and supports any Huggin
 | **JINA Embeddings** | | | | |
 | `jina-embeddings-v2-base-en` | `jinaai/jina-embeddings-v2-base-en` | 768 | Medium | 🎯 Modern architecture |
 | `jina-embeddings-v2-small-en` | `jinaai/jina-embeddings-v2-small-en` | 384 | Fast | ⚡ Lightweight modern |
+| `jina-embeddings-v4` | `jinaai/jina-embeddings-v4` | 2048 | Medium | 🎯 **NEW** Latest JINA v4 |
+
+| **Qwen3 Embeddings (NEW)** | | | | |
+| `qwen3-embedding-0.6b` | `Qwen/Qwen3-Embedding-0.6B` | 1024 | Fast | ⚡ Lightweight Qwen3 |
+| `qwen3-embedding-4b` | `Qwen/Qwen3-Embedding-4B` | 2560 | Medium | ⚖️ Balanced Qwen3 |
+| `qwen3-embedding-8b` | `Qwen/Qwen3-Embedding-8B` | 4096 | Slow | 🎯 High accuracy Qwen3 |
+
+| **NVIDIA Nemotron (NEW)** | | | | |
+| `llama-embed-nemotron-8b` | `nvidia/llama-embed-nemotron-8b` | 4096 | Slow | 🏆 State-of-the-art |
 
 | **Chinese Models** | | | | |
 | `m3e-base` | `moka-ai/m3e-base` | 768 | Medium | 🇨🇳 Chinese, high quality |
@@ -106,7 +115,7 @@ gllm includes built-in aliases for **26 popular models** and supports any Huggin
 | `multilingual-MiniLM-L12-v2` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 384 | Medium | 🌍 50+ languages |
 | `distiluse-base-multilingual-cased-v1` | `sentence-transformers/distiluse-base-multilingual-cased-v1` | 512 | Medium | 🌍 Multilingual cased |
 
-#### 🎯 Document Reranking Models (8 models)
+#### 🎯 Document Reranking Models (12 models)
 
 | Alias | HuggingFace Model | Speed | Best For |
 |-------|------------------|-------|----------|
@@ -123,6 +132,14 @@ gllm includes built-in aliases for **26 popular models** and supports any Huggin
 
 | **Specialized Rerankers** | | | |
 | `quora-distilroberta-base` | `cross-encoder/quora-distilroberta-base` | Medium | ❓ Question similarity |
+
+| **Qwen3 Rerankers (NEW)** | | | |
+| `qwen3-reranker-0.6b` | `Qwen/Qwen3-Reranker-0.6B` | Fast | ⚡ Lightweight Qwen3 |
+| `qwen3-reranker-4b` | `Qwen/Qwen3-Reranker-4B` | Medium | ⚖️ Balanced Qwen3 |
+| `qwen3-reranker-8b` | `Qwen/Qwen3-Reranker-8B` | Slow | 🎯 High accuracy Qwen3 |
+
+| **JINA Rerankers (NEW)** | | | |
+| `jina-reranker-v3` | `jinaai/jina-reranker-v3` | Medium | 🎯 Latest JINA v3 |
 
 ### Using Custom Models
 
@@ -170,6 +187,45 @@ let client = Client::new("sentence-transformers:all-MiniLM-L6-v2")?;
 **🏆 High Accuracy**
 - `bge-reranker-large` / `ms-marco-MiniLM-L-12-v2`
 - Maximum quality for batch processing
+
+### 🔧 Quantization Support (NEW in v0.4)
+
+Qwen3 series models support dynamic quantization variants. Use the `alias:quant` syntax:
+
+```rust
+use gllm::{ModelRegistry, Quantization};
+
+let registry = ModelRegistry::new();
+
+// Quantized variants using :suffix syntax
+let info = registry.resolve("qwen3-embedding-0.6b:int4")?;  // Int4 quantized
+let info = registry.resolve("qwen3-embedding-8b:awq")?;     // AWQ quantized
+let info = registry.resolve("qwen3-reranker-4b:gptq")?;     // GPTQ quantized
+
+// Check quantization support
+if registry.supports_quantization("qwen3-embedding-8b") {
+    let variants = registry.available_quantizations("qwen3-embedding-8b");
+    println!("Available: {:?}", variants);  // [Int4, Int8, AWQ, GPTQ, GGUF, FP8, BNB4, BNB8]
+}
+```
+
+**Supported Quantization Types:**
+
+| Suffix | Type | Description |
+|--------|------|-------------|
+| `:int4` | Int4 | 4-bit integer quantization |
+| `:int8` | Int8 | 8-bit integer quantization |
+| `:awq` | AWQ | Activation-aware Weight Quantization |
+| `:gptq` | GPTQ | GPT Quantization |
+| `:gguf` | GGUF | GGML Universal Format |
+| `:fp8` | FP8 | 8-bit floating point |
+| `:bnb4` | BNB4 | BitsAndBytes 4-bit |
+| `:bnb8` | BNB8 | BitsAndBytes 8-bit |
+
+**Models with Quantization Support:**
+- `qwen3-embedding-0.6b/4b/8b`
+- `qwen3-reranker-0.6b/4b/8b`
+- `llama-embed-nemotron-8b`
 
 ### Model Requirements
 
@@ -257,7 +313,7 @@ For async applications, enable the `tokio` feature:
 
 ```toml
 [dependencies]
-gllm = { version = "0.2", features = ["tokio"] }
+gllm = { version = "0.4", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

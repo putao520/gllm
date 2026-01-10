@@ -5,12 +5,129 @@ use crate::types::{Device, Error, Result};
 use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use std::collections::hash_map::DefaultHasher;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
 pub(crate) const MAX_SEQ_LEN: usize = 512;
+
+#[derive(Debug, Deserialize)]
+struct TokenizerConfig {
+    pad_token: Option<Value>,
+    pad_token_id: Option<i64>,
+    eos_token: Option<Value>,
+    eos_token_id: Option<i64>,
+    bos_token: Option<Value>,
+    bos_token_id: Option<i64>,
+    unk_token: Option<Value>,
+    unk_token_id: Option<i64>,
+    vocab_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpecialTokensMap {
+    pad_token: Option<Value>,
+    eos_token: Option<Value>,
+    bos_token: Option<Value>,
+    unk_token: Option<Value>,
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn token_value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(token) => Some(token.clone()),
+        Value::Object(map) => map
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|token| token.to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_token_id(
+    token: &str,
+    tokenizer: Option<&Tokenizer>,
+    vocab_map: Option<&HashMap<String, u32>>,
+) -> Option<i64> {
+    if let Some(tokenizer) = tokenizer {
+        if let Some(id) = tokenizer.token_to_id(token) {
+            return Some(id as i64);
+        }
+    }
+    vocab_map.and_then(|vocab| vocab.get(token).map(|id| *id as i64))
+}
+
+fn resolve_pad_id(
+    tokenizer: Option<&Tokenizer>,
+    config: Option<&TokenizerConfig>,
+    special_tokens: Option<&SpecialTokensMap>,
+    vocab_map: Option<&HashMap<String, u32>>,
+) -> i64 {
+    if let Some(tokenizer) = tokenizer {
+        if let Some(padding) = tokenizer.get_padding() {
+            return padding.pad_id as i64;
+        }
+    }
+
+    if let Some(config) = config {
+        if let Some(pad_id) = config.pad_token_id {
+            return pad_id;
+        }
+        if let Some(pad_token) = config
+            .pad_token
+            .as_ref()
+            .and_then(token_value_to_string)
+        {
+            if let Some(pad_id) = resolve_token_id(&pad_token, tokenizer, vocab_map) {
+                return pad_id;
+            }
+        }
+        if let Some(eos_id) = config.eos_token_id {
+            return eos_id;
+        }
+        if let Some(eos_token) = config
+            .eos_token
+            .as_ref()
+            .and_then(token_value_to_string)
+        {
+            if let Some(eos_id) = resolve_token_id(&eos_token, tokenizer, vocab_map) {
+                return eos_id;
+            }
+        }
+    }
+
+    if let Some(special_tokens) = special_tokens {
+        if let Some(pad_token) = special_tokens
+            .pad_token
+            .as_ref()
+            .and_then(token_value_to_string)
+        {
+            if let Some(pad_id) = resolve_token_id(&pad_token, tokenizer, vocab_map) {
+                return pad_id;
+            }
+        }
+        if let Some(eos_token) = special_tokens
+            .eos_token
+            .as_ref()
+            .and_then(token_value_to_string)
+        {
+            if let Some(eos_id) = resolve_token_id(&eos_token, tokenizer, vocab_map) {
+                return eos_id;
+            }
+        }
+    }
+
+    0
+}
 
 /// Lightweight tokenizer wrapper supporting both HF tokenizers and a deterministic fallback.
 #[derive(Clone)]
@@ -24,22 +141,43 @@ impl TokenizerAdapter {
     /// Load tokenizer from model directory if available.
     pub fn from_dir(dir: &Path) -> Result<Self> {
         let tokenizer_path = dir.join("tokenizer.json");
+        let tokenizer_config = read_json::<TokenizerConfig>(&dir.join("tokenizer_config.json"));
+        let special_tokens = read_json::<SpecialTokensMap>(&dir.join("special_tokens_map.json"));
+        let vocab_map = read_json::<HashMap<String, u32>>(&dir.join("vocab.json"));
+
         if tokenizer_path.exists() {
-            let tokenizer = Tokenizer::from_file(&tokenizer_path)
-                .map_err(|err| Error::LoadError(err.to_string()))?;
-            let pad_id = tokenizer.get_padding().map(|p| p.pad_id).unwrap_or(0);
-            let vocab_size = tokenizer.get_vocab_size(true);
-            return Ok(Self {
-                tokenizer: Some(tokenizer),
-                vocab_size,
-                pad_id: pad_id as i64,
-            });
+            if let Ok(tokenizer) = Tokenizer::from_file(&tokenizer_path) {
+                let vocab_size = tokenizer.get_vocab_size(true);
+                let pad_id = resolve_pad_id(
+                    Some(&tokenizer),
+                    tokenizer_config.as_ref(),
+                    special_tokens.as_ref(),
+                    vocab_map.as_ref(),
+                );
+                return Ok(Self {
+                    tokenizer: Some(tokenizer),
+                    vocab_size,
+                    pad_id,
+                });
+            }
         }
+
+        let vocab_size = vocab_map
+            .as_ref()
+            .map(|vocab| vocab.len())
+            .or_else(|| tokenizer_config.as_ref().and_then(|config| config.vocab_size))
+            .unwrap_or(32_000);
+        let pad_id = resolve_pad_id(
+            None,
+            tokenizer_config.as_ref(),
+            special_tokens.as_ref(),
+            vocab_map.as_ref(),
+        );
 
         Ok(Self {
             tokenizer: None,
-            vocab_size: 32_000,
-            pad_id: 0,
+            vocab_size,
+            pad_id,
         })
     }
 
@@ -376,7 +514,21 @@ pub(crate) fn build_embedding_backend(
         });
 
         match init {
-            Ok(Ok(engine)) => return Ok(EmbeddingBackend::Wgpu(engine)),
+            Ok(Ok(engine)) => {
+                // Step 2: Verify GPU compute actually works by running a test embedding
+                // This catches "Encoder is invalid" errors that only occur during real GPU work
+                let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Run a minimal embedding to verify GPU compute works
+                    let test_tokens = vec![vec![101i64, 7592, 102]]; // [CLS] hello [SEP]
+                    engine.embed(&test_tokens)
+                }));
+
+                match compute_test {
+                    Ok(Ok(_)) => return Ok(EmbeddingBackend::Wgpu(engine)),
+                    Ok(Err(e)) => log::warn!("GPU (Wgpu) compute test failed: {}, falling back to CPU", e),
+                    Err(_) => log::warn!("GPU (Wgpu) compute test panicked (Encoder invalid?), falling back to CPU"),
+                }
+            }
             Ok(Err(e)) => log::warn!("GPU (Wgpu) initialization failed (likely OOM or config): {}, falling back to CPU", e),
             Err(_) => log::warn!("GPU (Wgpu) initialization panicked (likely OOM), falling back to CPU"),
         }
@@ -429,7 +581,18 @@ pub(crate) fn build_rerank_backend(
         });
 
         if let Ok(Some(engine)) = init {
-            return Ok(RerankingBackend::Wgpu(engine));
+            // Verify GPU compute works by running a test score
+            let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // [CLS] query [SEP] doc [SEP] - a simple pair for testing
+                let test_pairs = vec![vec![101i64, 7592, 102, 2088, 102]];
+                engine.score(&test_pairs)
+            }));
+
+            match compute_test {
+                Ok(Ok(_)) => return Ok(RerankingBackend::Wgpu(engine)),
+                Ok(Err(e)) => log::warn!("GPU (Wgpu) rerank compute test failed: {}, falling back to CPU", e),
+                Err(_) => log::warn!("GPU (Wgpu) rerank compute test panicked, falling back to CPU"),
+            }
         }
     }
 

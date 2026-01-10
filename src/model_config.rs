@@ -69,6 +69,10 @@ pub struct ModelConfig {
     pub num_hidden_layers: usize,
     #[serde(default, deserialize_with = "de_usize_or_zero")]
     pub num_attention_heads: usize,
+    #[serde(default)]
+    pub num_key_value_heads: Option<usize>,
+    #[serde(default)]
+    pub head_dim: Option<usize>,
     #[serde(default, deserialize_with = "de_usize_or_zero")]
     pub vocab_size: usize,
     #[serde(default, deserialize_with = "de_usize_or_zero")]
@@ -93,6 +97,14 @@ pub struct ModelConfig {
     pub initializer_range: Option<f32>,
     #[serde(default)]
     pub layer_norm_eps: Option<f64>,
+    #[serde(default)]
+    pub rms_norm_eps: Option<f64>,
+    #[serde(default)]
+    pub rope_theta: Option<f64>,
+    #[serde(default)]
+    pub rope_scaling: Option<Value>,
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
     #[serde(default)]
     pub use_cache: Option<bool>,
     #[serde(default)]
@@ -187,6 +199,12 @@ impl ModelConfig {
         merge_opt!(hidden_act);
         merge_opt!(initializer_range);
         merge_opt!(layer_norm_eps);
+        merge_opt!(rms_norm_eps);
+        merge_opt!(rope_theta);
+        merge_opt!(rope_scaling);
+        merge_opt!(sliding_window);
+        merge_opt!(num_key_value_heads);
+        merge_opt!(head_dim);
         merge_opt!(use_cache);
         merge_opt!(position_embedding_type);
         merge_opt!(pooler_hidden_act);
@@ -256,7 +274,7 @@ impl ModelConfig {
         }
 
         let default_layer_norm = if self.is_roberta_like() { 1e-5 } else { 1e-12 };
-        if self.layer_norm_eps.is_none() {
+        if self.layer_norm_eps.is_none() && self.rms_norm_eps.is_none() {
             self.layer_norm_eps = Some(default_layer_norm);
             fixes.push(ConfigAutoFix::SetLayerNormEps(default_layer_norm));
         }
@@ -418,6 +436,12 @@ impl Default for ModelConfig {
             hidden_act: None,
             initializer_range: None,
             layer_norm_eps: None,
+            rms_norm_eps: None,
+            rope_theta: None,
+            rope_scaling: None,
+            sliding_window: None,
+            num_key_value_heads: None,
+            head_dim: None,
             use_cache: Some(true),
             position_embedding_type: Some("absolute".to_string()),
             pooler_hidden_act: None,

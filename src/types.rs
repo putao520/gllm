@@ -118,6 +118,11 @@ pub enum Error {
     #[error("Inference error: {0}")]
     InferenceError(String),
 
+    /// Out of memory error (GPU VRAM or system memory exhausted).
+    /// This error triggers automatic fallback to CPU backend.
+    #[error("Out of memory: {0}")]
+    Oom(String),
+
     /// Invalid configuration provided.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
@@ -131,6 +136,24 @@ pub enum Error {
     InternalError(String),
 }
 
+impl Error {
+    /// Check if this error indicates an out-of-memory condition.
+    pub fn is_oom(&self) -> bool {
+        match self {
+            Error::Oom(_) => true,
+            Error::InferenceError(msg) | Error::InternalError(msg) => {
+                let msg_lower = msg.to_lowercase();
+                msg_lower.contains("oom")
+                    || msg_lower.contains("out of memory")
+                    || msg_lower.contains("allocate")
+                    || msg_lower.contains("memory")
+                    || msg_lower.contains("buffer")
+            }
+            _ => false,
+        }
+    }
+}
+
 impl Clone for Error {
     fn clone(&self) -> Self {
         match self {
@@ -138,6 +161,7 @@ impl Clone for Error {
             Error::DownloadError(s) => Error::DownloadError(s.clone()),
             Error::LoadError(s) => Error::LoadError(s.clone()),
             Error::InferenceError(s) => Error::InferenceError(s.clone()),
+            Error::Oom(s) => Error::Oom(s.clone()),
             Error::InvalidConfig(s) => Error::InvalidConfig(s.clone()),
             Error::Io(io_err) => Error::Io(std::io::Error::new(io_err.kind(), io_err.to_string())),
             Error::InternalError(s) => Error::InternalError(s.clone()),

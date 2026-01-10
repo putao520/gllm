@@ -1,5 +1,5 @@
 use crate::model_config::ModelConfig;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
     let key = repo_id.to_ascii_lowercase();
@@ -345,6 +345,55 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             0.0,
             0.1,
         ),
+        "jinaai/jina-embeddings-v4" => jina_v4_preset(),
+
+        // Qwen3 Embedding Models
+        "qwen/qwen3-embedding-0.6b" => qwen3_embedding_preset(
+            896,
+            24,
+            14,
+            2,
+            4864,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-embedding-4b" => qwen3_embedding_preset(
+            2560,
+            36,
+            32,
+            4,
+            13824,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-embedding-8b" => qwen3_embedding_preset(
+            4096,
+            36,
+            32,
+            8,
+            14336,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+
+        // NVIDIA Embedding
+        "nvidia/llama-embed-nemotron-8b" => nvidia_nemotron_preset(
+            4096,
+            32,
+            32,
+            8,
+            14336,
+            131072,
+            128256,
+            500_000.0,
+            1e-5,
+        ),
 
         // BGE Rerankers
         "baai/bge-reranker-v2-m3" => with_rerank(preset(
@@ -470,6 +519,44 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             0.1,
         )),
 
+        // Qwen3 Reranker Models
+        "qwen/qwen3-reranker-0.6b" => qwen3_reranker_preset(
+            896,
+            24,
+            14,
+            2,
+            4864,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-reranker-4b" => qwen3_reranker_preset(
+            2560,
+            36,
+            32,
+            4,
+            13824,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-reranker-8b" => qwen3_reranker_preset(
+            4096,
+            36,
+            32,
+            8,
+            14336,
+            32768,
+            151936,
+            1_000_000.0,
+            1e-6,
+        ),
+
+        // Jina Reranker V3
+        "jinaai/jina-reranker-v3" => jina_reranker_v3_preset(),
+
         // Default
         _ => preset(
             768,
@@ -487,6 +574,228 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             0.1,
         ),
     }
+}
+
+fn qwen3_embedding_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    ModelConfig {
+        architectures: Some(vec!["Qwen3ForCausalLM".to_string()]),
+        model_type: Some("qwen3".to_string()),
+        hidden_size,
+        num_hidden_layers: layers,
+        num_attention_heads: heads,
+        num_key_value_heads: Some(kv_heads),
+        head_dim: None,
+        vocab_size: vocab,
+        max_position_embeddings: max_pos,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(intermediate),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(rms_norm_eps),
+        rope_theta: Some(rope_theta),
+        rope_scaling: None,
+        sliding_window: None,
+        use_cache: Some(true),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: None,
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(true),
+        is_decoder: Some(false),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    }
+}
+
+fn qwen3_reranker_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    with_rerank(qwen3_embedding_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+    ))
+}
+
+fn nvidia_nemotron_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    ModelConfig {
+        architectures: Some(vec!["LlamaBidirectionalModel".to_string()]),
+        model_type: Some("llama_bidirec".to_string()),
+        hidden_size,
+        num_hidden_layers: layers,
+        num_attention_heads: heads,
+        num_key_value_heads: Some(kv_heads),
+        head_dim: Some(128),
+        vocab_size: vocab,
+        max_position_embeddings: max_pos,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(intermediate),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(rms_norm_eps),
+        rope_theta: Some(rope_theta),
+        rope_scaling: Some(json!({
+            "factor": 8.0,
+            "high_freq_factor": 4.0,
+            "low_freq_factor": 1.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "llama3",
+        })),
+        sliding_window: None,
+        use_cache: Some(false),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: None,
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(false),
+        is_decoder: Some(false),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    }
+}
+
+fn jina_v4_preset() -> ModelConfig {
+    ModelConfig {
+        architectures: Some(vec!["JinaEmbeddingsV4Model".to_string()]),
+        model_type: Some("qwen2_5_vl_text".to_string()),
+        hidden_size: 2048,
+        num_hidden_layers: 36,
+        num_attention_heads: 16,
+        num_key_value_heads: Some(2),
+        head_dim: None,
+        vocab_size: 151936,
+        max_position_embeddings: 128000,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(11008),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(1e-6),
+        rope_theta: Some(1_000_000.0),
+        rope_scaling: Some(json!({
+            "mrope_section": [16, 24, 24],
+            "rope_type": "default",
+            "type": "default",
+        })),
+        sliding_window: Some(32768),
+        use_cache: Some(true),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: None,
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(true),
+        is_decoder: Some(false),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    }
+}
+
+fn jina_reranker_v3_preset() -> ModelConfig {
+    with_rerank(ModelConfig {
+        architectures: Some(vec!["JinaForRanking".to_string()]),
+        model_type: Some("qwen3".to_string()),
+        hidden_size: 1024,
+        num_hidden_layers: 28,
+        num_attention_heads: 16,
+        num_key_value_heads: Some(8),
+        head_dim: Some(128),
+        vocab_size: 151936,
+        max_position_embeddings: 131072,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(3072),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(1e-6),
+        rope_theta: Some(1_000_000.0),
+        rope_scaling: None,
+        sliding_window: None,
+        use_cache: Some(false),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: None,
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(true),
+        is_decoder: Some(false),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    })
 }
 
 fn preset(
@@ -510,6 +819,8 @@ fn preset(
         hidden_size,
         num_hidden_layers: layers,
         num_attention_heads: heads,
+        num_key_value_heads: None,
+        head_dim: None,
         vocab_size: vocab,
         max_position_embeddings: max_pos,
         attention_probs_dropout_prob: Some(attention_dropout),
@@ -521,6 +832,10 @@ fn preset(
         hidden_act: Some("gelu".to_string()),
         initializer_range: Some(0.02),
         layer_norm_eps: Some(layer_norm_eps),
+        rms_norm_eps: None,
+        rope_theta: None,
+        rope_scaling: None,
+        sliding_window: None,
         use_cache: Some(true),
         position_embedding_type: Some("absolute".to_string()),
         pooler_hidden_act: None,
@@ -569,7 +884,12 @@ mod tests {
             "intfloat/e5-small",
             "jinaai/jina-embeddings-v2-base-en",
             "jinaai/jina-embeddings-v2-small-en",
+            "jinaai/jina-embeddings-v4",
             "moka-ai/m3e-base",
+            "nvidia/llama-embed-nemotron-8b",
+            "qwen/qwen3-embedding-0.6b",
+            "qwen/qwen3-embedding-4b",
+            "qwen/qwen3-embedding-8b",
             "baai/bge-reranker-v2-m3",
             "baai/bge-reranker-large",
             "baai/bge-reranker-base",
@@ -578,6 +898,10 @@ mod tests {
             "cross-encoder/ms-marco-tinybert-l-2-v2",
             "cross-encoder/ms-marco-electra-base",
             "cross-encoder/quora-distilroberta-base",
+            "qwen/qwen3-reranker-0.6b",
+            "qwen/qwen3-reranker-4b",
+            "qwen/qwen3-reranker-8b",
+            "jinaai/jina-reranker-v3",
         ];
 
         for repo in repos {
@@ -605,5 +929,58 @@ mod tests {
         assert_eq!(cfg.layer_norm_eps.unwrap(), 1e-5);
         assert_eq!(cfg.pad_token_id, Some(1));
         assert_eq!(cfg.type_vocab_size, Some(1));
+    }
+
+    #[test]
+    fn qwen3_embedding_presets_match_spec() {
+        let cfg = model_defaults("qwen/qwen3-embedding-0.6b");
+        assert_eq!(cfg.hidden_size, 896);
+        assert_eq!(cfg.num_hidden_layers, 24);
+        assert_eq!(cfg.num_attention_heads, 14);
+        assert_eq!(cfg.num_key_value_heads, Some(2));
+        assert_eq!(cfg.intermediate_size, Some(4864));
+        assert_eq!(cfg.vocab_size, 151936);
+        assert_eq!(cfg.rope_theta, Some(1_000_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-6));
+
+        let cfg = model_defaults("qwen/qwen3-embedding-4b");
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.num_hidden_layers, 36);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(4));
+        assert_eq!(cfg.intermediate_size, Some(13824));
+
+        let cfg = model_defaults("qwen/qwen3-embedding-8b");
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 36);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.intermediate_size, Some(14336));
+    }
+
+    #[test]
+    fn reranker_presets_set_num_labels() {
+        let cfg = model_defaults("qwen/qwen3-reranker-0.6b");
+        assert_eq!(cfg.num_labels, Some(1));
+        let cfg = model_defaults("jinaai/jina-reranker-v3");
+        assert_eq!(cfg.num_labels, Some(1));
+    }
+
+    #[test]
+    fn nemotron_preset_includes_rope_scaling() {
+        let cfg = model_defaults("nvidia/llama-embed-nemotron-8b");
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.rope_theta, Some(500_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-5));
+        assert!(cfg.rope_scaling.is_some());
+    }
+
+    #[test]
+    fn jina_v4_preset_includes_sliding_window() {
+        let cfg = model_defaults("jinaai/jina-embeddings-v4");
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.num_key_value_heads, Some(2));
+        assert_eq!(cfg.sliding_window, Some(32768));
+        assert!(cfg.rope_scaling.is_some());
     }
 }

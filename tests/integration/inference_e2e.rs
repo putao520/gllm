@@ -590,6 +590,7 @@ fn test_model_registry_and_types() {
                     match info.model_type {
                         gllm::ModelType::Embedding => "Embedding",
                         gllm::ModelType::Rerank => "Rerank",
+                        gllm::ModelType::Generator => "Generator",
                     }
                 });
             }
