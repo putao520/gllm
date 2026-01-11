@@ -1,10 +1,10 @@
 [package]
 name = "gllm"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["gllm contributors"]
 license = "MIT"
-description = "Pure Rust library for local text embeddings, reranking, and text generation with 40+ models including Qwen2/Mistral LLMs"
+description = "Pure Rust library for local text embeddings, reranking, and text generation with 60+ models including Qwen3/Phi-4/SmolLM3/InternLM3 LLMs"
 repository = "https://github.com/putao520/gllm"
 homepage = "https://github.com/putao520/gllm"
 keywords = ["embeddings", "reranking", "nlp", "ml", "rust"]

@@ -336,10 +336,18 @@ for token in stream {
 
 > **CodeXEmbed** (SFR-Embedding-Code) is the 2024 state-of-the-art for code embedding, outperforming Voyage-Code by 20%+ on CoIR benchmark.
 
-### Generator Models (12) - NEW in v0.6.0+
+### Generator Models (22) - NEW in v0.8.0+
 
 | Model | Alias | Parameters | Architecture | Best For |
 |-------|-------|------------|--------------|----------|
+| **Qwen3 Series (2025)** |
+| Qwen3 0.6B | `qwen3-0.6b` | 0.6B | Decoder (Qwen3) | Ultra-fast generation |
+| Qwen3 1.7B | `qwen3-1.7b` | 1.7B | Decoder (Qwen3) | Lightweight |
+| Qwen3 4B | `qwen3-4b` | 4B | Decoder (Qwen3) | Balanced |
+| Qwen3 8B | `qwen3-8b` | 8B | Decoder (Qwen3) | High quality |
+| Qwen3 14B | `qwen3-14b` | 14B | Decoder (Qwen3) | Very high quality |
+| Qwen3 32B | `qwen3-32b` | 32B | Decoder (Qwen3) | Premium quality |
+| **Qwen2.5 Series** |
 | Qwen2.5 0.5B Instruct | `qwen2.5-0.5b-instruct` | 0.5B | Decoder (Qwen2) | Fast generation |
 | Qwen2.5 1.5B Instruct | `qwen2.5-1.5b-instruct` | 1.5B | Decoder (Qwen2) | Lightweight |
 | Qwen2.5 3B Instruct | `qwen2.5-3b-instruct` | 3B | Decoder (Qwen2) | Balanced |
@@ -347,12 +355,20 @@ for token in stream {
 | Qwen2.5 14B Instruct | `qwen2.5-14b-instruct` | 14B | Decoder (Qwen2) | Very high quality |
 | Qwen2.5 32B Instruct | `qwen2.5-32b-instruct` | 32B | Decoder (Qwen2) | Premium quality |
 | Qwen2.5 72B Instruct | `qwen2.5-72b-instruct` | 72B | Decoder (Qwen2) | Maximum quality |
-| GLM-4 9B Chat | `glm-4-9b-chat` | 9B | Decoder (GLM4) | Chinese & English |
+| **Phi-4 Series (2025)** |
+| Phi-4 | `phi-4` | 14B | Decoder (Phi3) | Microsoft flagship |
+| Phi-4 Mini Instruct | `phi-4-mini-instruct` | 3.8B | Decoder (Phi3) | Efficient reasoning |
+| **Other 2025 Models** |
+| SmolLM3 3B | `smollm3-3b` | 3B | Decoder (SmolLM3) | HuggingFace efficient |
+| InternLM3 8B Instruct | `internlm3-8b-instruct` | 8B | Decoder (InternLM3) | Chinese & English |
+| GLM-4 9B Chat | `glm-4-9b-chat` | 9B | Decoder (GLM4) | Zhipu AI flagship |
+| **Legacy Models** |
 | Qwen2 7B Instruct | `qwen2-7b-instruct` | 7B | Decoder (Qwen2) | Legacy |
 | Mistral 7B Instruct | `mistral-7b-instruct` | 7B | Decoder (Mistral) | Legacy |
 
-> **Qwen2.5** is the 2025 state-of-the-art open-source LLM family with 128K context and excellent multilingual support.
-> **GLM-4** is Zhipu AI's flagship model with 131K context and strong Chinese/English performance.
+> **Qwen3** (2025) is the latest state-of-the-art open-source LLM with 40K context and hybrid thinking modes.
+> **Phi-4** (2025) is Microsoft's flagship small model with exceptional reasoning capabilities.
+> **SmolLM3** and **InternLM3** are efficient 2025 models optimized for edge deployment.
 
 ### Reranking Models (12)
 

@@ -346,6 +346,120 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1_000_000.0,
             1e-6,
         ),
+        // Qwen3 Generator Models
+        "qwen/qwen3-0.6b" => qwen3_preset(
+            1024,
+            28,
+            16,
+            8,
+            3072,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-1.7b" => qwen3_preset(
+            2048,
+            28,
+            16,
+            8,
+            6144,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-4b" => qwen3_preset(
+            2560,
+            36,
+            32,
+            8,
+            9728,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-8b" => qwen3_preset(
+            4096,
+            36,
+            32,
+            8,
+            12288,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-14b" => qwen3_preset(
+            5120,
+            40,
+            40,
+            8,
+            17408,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-32b" => qwen3_preset(
+            5120,
+            64,
+            64,
+            8,
+            25600,
+            151936,
+            40960,
+            1_000_000.0,
+            1e-6,
+        ),
+        // Phi-4 Models
+        "microsoft/phi-4" => phi4_preset(
+            5120,
+            40,
+            40,
+            10,
+            17920,
+            100352,
+            16384,
+            250_000.0,
+            1e-5,
+        ),
+        "microsoft/phi-4-mini-instruct" => phi4_preset(
+            3072,
+            32,
+            24,
+            8,
+            8192,
+            200064,
+            131072,
+            10000.0,
+            1e-5,
+        ),
+        // SmolLM3 Models
+        "huggingfacetb/smollm3-3b" => smollm3_preset(
+            2048,
+            36,
+            16,
+            4,
+            11008,
+            128256,
+            65536,
+            5_000_000.0,
+            1e-6,
+        ),
+        // InternLM3 Models
+        "internlm/internlm3-8b-instruct" => internlm3_preset(
+            4096,
+            48,
+            32,
+            2,
+            10240,
+            128512,
+            32768,
+            50_000_000.0,
+            1e-5,
+        ),
         "thudm/glm-4-9b-chat-hf" => glm4_chat_preset(
             4096,
             40,
@@ -773,6 +887,35 @@ fn qwen2_instruct_preset() -> ModelConfig {
     )
 }
 
+fn qwen3_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "qwen3",
+        &["Qwen3ForCausalLM"],
+    )
+}
+
 fn qwen25_instruct_preset(
     hidden_size: usize,
     layers: usize,
@@ -799,6 +942,93 @@ fn qwen25_instruct_preset(
         None,
         "qwen2",
         &["Qwen2ForCausalLM"],
+    )
+}
+
+fn phi4_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "phi3",
+        &["Phi3ForCausalLM"],
+    )
+}
+
+fn smollm3_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "smollm3",
+        &["SmolLM3ForCausalLM"],
+    )
+}
+
+fn internlm3_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "internlm3",
+        &["InternLM3ForCausalLM"],
     )
 }
 
@@ -1214,6 +1444,16 @@ mod tests {
             "qwen/qwen2.5-14b-instruct",
             "qwen/qwen2.5-32b-instruct",
             "qwen/qwen2.5-72b-instruct",
+            "qwen/qwen3-0.6b",
+            "qwen/qwen3-1.7b",
+            "qwen/qwen3-4b",
+            "qwen/qwen3-8b",
+            "qwen/qwen3-14b",
+            "qwen/qwen3-32b",
+            "microsoft/phi-4",
+            "microsoft/phi-4-mini-instruct",
+            "huggingfacetb/smollm3-3b",
+            "internlm/internlm3-8b-instruct",
             "thudm/glm-4-9b-chat-hf",
             "baai/bge-reranker-v2-m3",
             "baai/bge-reranker-large",

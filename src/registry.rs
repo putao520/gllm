@@ -34,6 +34,12 @@ pub enum Architecture {
     Qwen3Reranker,
     /// Qwen3 decoder for generation.
     Qwen3Generator,
+    /// Phi-3 decoder for generation.
+    Phi3Generator,
+    /// SmolLM3 decoder for generation.
+    SmolLM3Generator,
+    /// InternLM3 decoder for generation.
+    InternLM3Generator,
     /// Jina v4 embedding.
     JinaV4,
     /// Jina reranker v3.
@@ -243,8 +249,18 @@ impl ModelRegistry {
             ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
             ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
             ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen3-0.6b", "Qwen/Qwen3-0.6B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-1.7b", "Qwen/Qwen3-1.7B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-4b", "Qwen/Qwen3-4B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator, false),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
+            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator, false),
+            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator, false),
+            ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator, false),
+            ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator, false),
 
             // Light Models for Edge Devices
             ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
@@ -379,9 +395,20 @@ impl ModelRegistry {
             Quantization::None
         };
 
+        let is_generator = lower.contains("generator")
+            || lower.contains("instruct")
+            || lower.contains("chat")
+            || lower.contains("phi-4")
+            || lower.contains("phi4")
+            || lower.contains("smollm3")
+            || lower.contains("internlm3")
+            || ((lower.contains("qwen3") || lower.contains("qwen-3"))
+                && !lower.contains("embedding")
+                && !lower.contains("reranker"));
+
         let model_type = if lower.contains("reranker") {
             ModelType::Rerank
-        } else if lower.contains("generator") || lower.contains("instruct") || lower.contains("chat") {
+        } else if is_generator {
             ModelType::Generator
         } else {
             ModelType::Embedding
@@ -411,6 +438,12 @@ impl ModelRegistry {
                 ModelType::Generator => Architecture::MistralGenerator,
                 _ => Architecture::MistralEmbedding,
             }
+        } else if lower.contains("phi-4") || lower.contains("phi4") {
+            Architecture::Phi3Generator
+        } else if lower.contains("smollm3") {
+            Architecture::SmolLM3Generator
+        } else if lower.contains("internlm3") {
+            Architecture::InternLM3Generator
         } else if lower.contains("qwen3") || lower.contains("qwen-3") {
             match model_type {
                 ModelType::Embedding => Architecture::Qwen3Embedding,
@@ -552,8 +585,18 @@ mod tests {
             ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
             ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
             ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen3-0.6b", "Qwen/Qwen3-0.6B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-1.7b", "Qwen/Qwen3-1.7B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-4b", "Qwen/Qwen3-4B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
+            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator),
+            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator),
+            ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),
+            ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator),
             ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker),
