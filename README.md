@@ -1,27 +1,30 @@
-# gllm: Pure Rust Local Embeddings & Reranking
+# gllm: Pure Rust Local Embeddings, Reranking & Text Generation
 
 [![Crates.io](https://img.shields.io/crates/v/gllm.svg)](https://crates.io/crates/gllm)
 [![Documentation](https://docs.rs/gllm/badge.svg)](https://docs.rs/gllm)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**gllm** is a pure Rust library for local text embeddings and reranking, built on the [Burn](https://github.com/tracel-ai/burn) deep learning framework. It provides an OpenAI SDK-style API with zero external C dependencies, supporting static compilation.
+**gllm** is a pure Rust library for local text embeddings, reranking, and text generation, built on the [Burn](https://github.com/tracel-ai/burn) deep learning framework. It provides an OpenAI SDK-style API with zero external C dependencies, supporting static compilation.
 
 ## Features
 
 - **Text Embeddings** - Convert text into high-dimensional vectors for semantic search
 - **Document Reranking** - Sort documents by relevance using cross-encoders
+- **Text Generation** - Generate text using decoder-based LLMs (Qwen3, GLM-4, Phi-4, etc.)
+- **MoE Models (v0.10+)** - Mixture-of-Experts support for GLM-4.7, Qwen3-MoE, Mixtral, DeepSeek-V3
 - **Code Embeddings** - Specialized models for code semantic similarity (CodeXEmbed)
-- **GPU Acceleration** - WGPU backend with automatic GPU/CPU fallback
-- **50+ Built-in Models** - BGE, E5, Sentence Transformers, Qwen2.5, Qwen3, GLM-4, JINA, CodeXEmbed, and more
-- **Encoder & Decoder Architectures** - BERT-style encoders and Qwen2.5/GLM-4/Mistral-style decoders
+- **GPU Acceleration** - WGPU backend with automatic GPU/CPU fallback, global device singleton for stability
+- **60+ Built-in Models** - BGE, E5, Sentence Transformers, Qwen3, GLM-4, Phi-4, JINA, CodeXEmbed, and more
+- **Encoder & Decoder Architectures** - BERT-style encoders and Qwen3/GLM-4/Mistral-style decoders
 - **Quantization Support** - Int4/Int8/AWQ/GPTQ/GGUF for Qwen3 series
 - **Pure Rust** - Static compilation ready, no C dependencies
+- **Performance Optimized (v0.10+)** - RoPE precomputation, KV cache preallocation, chunked attention
 
 ## Installation
 
 ```toml
 [dependencies]
-gllm = "0.7"
+gllm = "0.10"
 ```
 
 ### Feature Flags
@@ -35,13 +38,13 @@ gllm = "0.7"
 
 ```toml
 # CPU-only
-gllm = { version = "0.4", features = ["cpu"] }
+gllm = { version = "0.10", features = ["cpu"] }
 
 # With async
-gllm = { version = "0.4", features = ["tokio"] }
+gllm = { version = "0.10", features = ["tokio"] }
 
 # With GPU detection
-gllm = { version = "0.4", features = ["wgpu-detect"] }
+gllm = { version = "0.10", features = ["wgpu-detect"] }
 ```
 
 ### Requirements
@@ -100,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```toml
 [dependencies]
-gllm = { version = "0.5", features = ["tokio"] }
+gllm = { version = "0.10", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -370,6 +373,37 @@ for token in stream {
 > **Phi-4** (2025) is Microsoft's flagship small model with exceptional reasoning capabilities.
 > **SmolLM3** and **InternLM3** are efficient 2025 models optimized for edge deployment.
 
+### MoE (Mixture-of-Experts) Models - NEW in v0.10.0
+
+| Model | Alias | Total/Active Params | Experts | Best For |
+|-------|-------|---------------------|---------|----------|
+| GLM-4.7 | `glm-4.7` | 400B/40B | 160 (top-8) | Zhipu AI flagship MoE |
+| Qwen3 30B-A3B | `qwen3-30b-a3b` | 30B/3B | MoE | Efficient large model |
+| Qwen3 235B-A22B | `qwen3-235b-a22b` | 235B/22B | MoE | Maximum quality |
+| Mixtral 8x7B Instruct | `mixtral-8x7b-instruct` | 47B/13B | 8 | Mistral flagship |
+| Mixtral 8x22B Instruct | `mixtral-8x22b-instruct` | 176B/39B | 8 | Largest Mixtral |
+| DeepSeek-V3 | `deepseek-v3` | 671B/37B | 256 (top-8) | DeepSeek flagship |
+
+> **MoE Architecture** enables running massive models efficiently by activating only a subset of experts per token.
+> GLM-4.7 activates 8 of 160 experts + 1 shared expert per token, achieving 400B quality with 40B compute.
+
+```rust
+use gllm::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // GLM-4.7 MoE model (activates 8/160 experts per token)
+    let client = Client::new("glm-4.7")?;
+
+    let response = client
+        .generate("Explain mixture of experts architecture:")
+        .max_tokens(256)
+        .generate()?;
+
+    println!("{}", response.text);
+    Ok(())
+}
+```
+
 ### Reranking Models (12)
 
 | Model | Alias | Speed | Best For |
@@ -469,6 +503,25 @@ cargo test --test integration # Integration tests
 cargo test -- --ignored       # E2E tests (downloads models)
 ```
 
+## Changelog
+
+### v0.10.1 (2025-01)
+- **Fix**: SIGSEGV on wgpu cleanup - use global device singleton
+- All wgpu backends now share a single device instance for stability
+
+### v0.10.0 (2025-01)
+- **MoE Support**: GLM-4.7, Qwen3-MoE, Mixtral, DeepSeek-V3
+- **Performance**: RoPE precomputation, KV cache preallocation, chunked attention
+- **Breaking**: Removed backward compatibility layers for cleaner codebase
+
+### v0.9.0 (2025-01)
+- Initial MoE layer implementation
+- GLM-4.7 model support
+
+### v0.8.0 (2024-12)
+- Qwen3, Phi-4, SmolLM3, InternLM3 generator models
+- Enhanced quantization support
+
 ## License
 
 MIT License - see [LICENSE](LICENSE)
@@ -478,7 +531,9 @@ MIT License - see [LICENSE](LICENSE)
 - [Burn Framework](https://github.com/tracel-ai/burn)
 - [HuggingFace](https://huggingface.co/)
 - [BGE Models](https://github.com/FlagOpen/FlagEmbedding)
+- [Qwen](https://github.com/QwenLM/Qwen)
+- [GLM](https://github.com/THUDM/GLM)
 
 ---
 
-**Built with Rust**
+**Built with Rust** 🦀
