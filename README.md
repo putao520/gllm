@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-gllm = "0.6"
+gllm = "0.7"
 ```
 
 ### Feature Flags
