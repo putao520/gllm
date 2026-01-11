@@ -528,13 +528,14 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1.5625e-7,
         ),
         "zai-org/glm-4.7" => glm47_moe_preset(
-            5120,
-            92,
-            96,
-            8,
-            12288,
-            202752,
-            151552,
+            5120,   // hidden_size
+            92,     // layers
+            96,     // heads
+            8,      // kv_heads
+            128,    // head_dim (explicit: 96*128=12288 != hidden_size=5120)
+            12288,  // intermediate
+            202752, // max_pos
+            151552, // vocab
             1_000_000.0,
             1e-5,
         ),
@@ -1221,13 +1222,13 @@ fn glm47_moe_preset(
     layers: usize,
     heads: usize,
     kv_heads: usize,
+    head_dim: usize, // GLM-4.7 uses non-standard head_dim (96*128=12288 != 5120)
     intermediate: usize,
     max_pos: usize,
     vocab: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
 ) -> ModelConfig {
-    let head_dim = hidden_size / heads;
     let mut config = decoder_generation_preset(
         hidden_size,
         layers,
@@ -1255,16 +1256,20 @@ fn glm47_moe_preset(
 }
 
 fn deepseek_v3_preset() -> ModelConfig {
-    let head_dim = 7168 / 128;
+    // DeepSeek-V3 uses MLA (Multi-head Latent Attention) with:
+    // - qk_rope_head_dim = 64
+    // - qk_nope_head_dim = 128
+    // - v_head_dim = 128 (used for output projection)
+    let v_head_dim = 128;
     let mut config = decoder_generation_preset(
-        7168,
-        61,
-        128,
-        128,
-        head_dim,
-        18432,
-        163840,
-        129280,
+        7168,   // hidden_size
+        61,     // layers
+        128,    // heads
+        128,    // kv_heads
+        v_head_dim, // Use v_head_dim for attention output (MLA architecture)
+        18432,  // intermediate
+        163840, // max_pos
+        129280, // vocab
         10000.0,
         1e-6,
         None,
@@ -1280,6 +1285,9 @@ fn deepseek_v3_preset() -> ModelConfig {
         "num_experts_per_tok": 8,
         "n_shared_experts": 1,
         "moe_intermediate_size": 2048,
+        "qk_rope_head_dim": 64,
+        "qk_nope_head_dim": 128,
+        "v_head_dim": 128,
     });
     config
 }
@@ -1829,6 +1837,7 @@ mod tests {
         assert_eq!(cfg.num_hidden_layers, 61);
         assert_eq!(cfg.num_attention_heads, 128);
         assert_eq!(cfg.num_key_value_heads, Some(128));
+        assert_eq!(cfg.head_dim, Some(128)); // v_head_dim for MLA architecture
         assert_eq!(cfg.intermediate_size, Some(18432));
         assert_eq!(cfg.vocab_size, 129280);
         assert_eq!(cfg.max_position_embeddings, 163840);
@@ -1838,6 +1847,22 @@ mod tests {
         assert_eq!(cfg.moe_intermediate_size, Some(2048));
         assert_eq!(cfg.rope_theta, Some(10000.0));
         assert_eq!(cfg.rms_norm_eps, Some(1e-6));
+
+        // GLM-4.7 MoE (non-standard head_dim: 96*128=12288 != hidden_size=5120)
+        let cfg = model_defaults("zai-org/glm-4.7");
+        assert_eq!(cfg.hidden_size, 5120);
+        assert_eq!(cfg.num_hidden_layers, 92);
+        assert_eq!(cfg.num_attention_heads, 96);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.head_dim, Some(128)); // Explicit head_dim
+        assert_eq!(cfg.intermediate_size, Some(12288));
+        assert_eq!(cfg.vocab_size, 151552);
+        assert_eq!(cfg.max_position_embeddings, 202752);
+        assert_eq!(cfg.num_experts, Some(160));
+        assert_eq!(cfg.num_experts_per_tok, Some(8));
+        assert_eq!(cfg.n_shared_experts, Some(1));
+        assert_eq!(cfg.rope_theta, Some(1_000_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-5));
     }
 
     #[test]

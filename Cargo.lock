@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "gllm"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "burn",
  "burn-import",
