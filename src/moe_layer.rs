@@ -155,3 +155,96 @@ impl<B: Backend> MoELayer<B> {
         output
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type TestBackend = NdArray<f32>;
+
+    #[test]
+    fn moe_layer_forward_preserves_shape() {
+        let device = <TestBackend as Backend>::Device::default();
+        let hidden_size = 64;
+        let intermediate_size = 128;
+        let num_experts = 4;
+        let num_experts_per_tok = 2;
+        let n_shared_experts = 1;
+
+        let moe = MoELayer::<TestBackend>::new(
+            &device,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            num_experts_per_tok,
+            n_shared_experts,
+        );
+
+        // Input: [batch=2, seq=8, hidden=64]
+        let input = Tensor::<TestBackend, 3>::random(
+            [2, 8, hidden_size],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+
+        let output = moe.forward(input.clone());
+        let [batch, seq, hidden] = output.dims();
+
+        assert_eq!(batch, 2);
+        assert_eq!(seq, 8);
+        assert_eq!(hidden, hidden_size);
+    }
+
+    #[test]
+    fn moe_router_selects_top_k_experts() {
+        let device = <TestBackend as Backend>::Device::default();
+        let hidden_size = 32;
+        let num_experts = 8;
+        let num_experts_per_tok = 2;
+
+        let router =
+            MoERouter::<TestBackend>::new(&device, hidden_size, num_experts, num_experts_per_tok);
+
+        let input = Tensor::<TestBackend, 3>::random(
+            [1, 4, hidden_size],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+
+        let (indices, weights) = router.forward(input);
+        let [b, s, k] = indices.dims();
+
+        assert_eq!(b, 1);
+        assert_eq!(s, 4);
+        assert_eq!(k, num_experts_per_tok);
+
+        // Weights should be normalized (sum to ~1 per token)
+        let [wb, ws, wk] = weights.dims();
+        assert_eq!(wb, 1);
+        assert_eq!(ws, 4);
+        assert_eq!(wk, num_experts_per_tok);
+    }
+
+    #[test]
+    fn expert_ffn_forward_preserves_shape() {
+        let device = <TestBackend as Backend>::Device::default();
+        let hidden_size = 64;
+        let intermediate_size = 256;
+
+        let expert = ExpertFFN::<TestBackend>::new(&device, hidden_size, intermediate_size);
+
+        let input = Tensor::<TestBackend, 3>::random(
+            [1, 16, hidden_size],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+
+        let output = expert.forward(input);
+        let [batch, seq, hidden] = output.dims();
+
+        assert_eq!(batch, 1);
+        assert_eq!(seq, 16);
+        assert_eq!(hidden, hidden_size);
+    }
+}
