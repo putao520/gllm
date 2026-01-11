@@ -2,12 +2,14 @@
 
 ## 概述
 
-gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 Burn 深度学习框架，提供 OpenAI 风格 SDK API。
+gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 Burn 深度学习框架，提供 OpenAI 风格 SDK API。支持 Encoder (BERT) 和 Decoder (Qwen2/Mistral) 两种架构。
 
 ## 修订历史
 
 | 版本 | 日期 | 描述 |
 |------|------|------|
+| v0.5.0 | 2025-01-11 | 新增 Decoder 架构支持 (Qwen2/Mistral)、CodeXEmbed 代码嵌入模型 |
+| v0.4.1 | 2025-01-10 | GPU 检测、OOM 恢复 |
 | v0.1.0 | 2025-01-28 | 初始架构设计 |
 
 ---
@@ -279,14 +281,21 @@ Sigmoid → 相关性分数
 - 支持静态编译
 - 无 OpenSSL 依赖
 
-### ARCH-ADR-005: 专注 Embedding 和 Rerank
+### ARCH-ADR-005: 三大核心功能
 
-**决策**: 不支持 LLM 文本生成
+**决策**: 支持 Embedding、Rerank 和 Text Generation
 
 **理由**:
-- 聚焦核心场景：语义检索和重排序
-- 减少复杂度，BERT/CrossEncoder 架构统一
-- LLM 生成可由其他成熟库处理
+- v0.5.0 已添加 Decoder 架构支持 (Qwen2/Mistral)
+- 复用现有 DecoderModel 实现文本生成，无额外复杂度
+- 统一 API 设计：Client.embeddings() / Client.rerank() / Client.generate()
+- 满足完整的 RAG 场景需求
+
+**v0.6.0 新增组件**:
+- `GeneratorModel` - 封装 DecoderModel + LmHead
+- `KVCache` - 增量解码加速
+- `Sampler` - Temperature/Top-p/Top-k 采样
+- `GenerationBuilder` - 生成请求构建器
 
 ### ARCH-ADR-006: Actor 模式解决线程安全问题 🔒 FROZEN
 

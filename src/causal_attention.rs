@@ -1,3 +1,4 @@
+use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::rope::{RopeConfig, RotaryPositionEmbedding};
 use crate::types::{Error, Result};
@@ -137,7 +138,58 @@ impl<B: Backend> CausalAttention<B> {
 
         let scale = (self.head_dim as f32).sqrt();
         let mut scores = q.matmul(k.transpose()) / scale;
-        let mask = self.build_causal_mask(seq_len);
+        let mask = self.build_causal_mask(seq_len, seq_len, position_offset);
+        scores = scores + mask;
+
+        let attn = softmax(scores, 3);
+        let context = attn.matmul(v);
+        let context = context
+            .swap_dims(1, 2)
+            .reshape([batch_size, seq_len, self.hidden_size]);
+
+        self.o_proj.forward(context)
+    }
+
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: Tensor<B, 3>,
+        position_offset: usize,
+        cache: &mut KVCache<B>,
+        layer: usize,
+    ) -> Tensor<B, 3> {
+        let [batch_size, seq_len, _hidden] = hidden_states.dims();
+
+        let q = self
+            .q_proj
+            .forward(hidden_states.clone())
+            .reshape([batch_size, seq_len, self.num_attention_heads, self.head_dim]);
+        let k = self
+            .k_proj
+            .forward(hidden_states.clone())
+            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+        let v = self
+            .v_proj
+            .forward(hidden_states)
+            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+
+        let (q, k) = match &self.rope {
+            Some(rope) => rope.apply(q, k, position_offset),
+            None => (q, k),
+        };
+
+        let q = q.swap_dims(1, 2);
+        let k = k.swap_dims(1, 2);
+        let v = v.swap_dims(1, 2);
+
+        let (k, v) = cache.update(layer, k, v);
+
+        let k = self.repeat_kv(k);
+        let v = self.repeat_kv(v);
+
+        let key_len = k.dims()[2];
+        let scale = (self.head_dim as f32).sqrt();
+        let mut scores = q.matmul(k.transpose()) / scale;
+        let mask = self.build_causal_mask(seq_len, key_len, position_offset);
         scores = scores + mask;
 
         let attn = softmax(scores, 3);
@@ -163,25 +215,31 @@ impl<B: Backend> CausalAttention<B> {
             .reshape([batch_size, kv_heads * repeat, seq_len, head_dim])
     }
 
-    fn build_causal_mask(&self, seq_len: usize) -> Tensor<B, 4> {
-        let mut data = Vec::with_capacity(seq_len * seq_len);
+    fn build_causal_mask(
+        &self,
+        query_len: usize,
+        key_len: usize,
+        position_offset: usize,
+    ) -> Tensor<B, 4> {
+        let mut data = Vec::with_capacity(query_len * key_len);
         let mask_value = -1.0e4_f32;
-        let window = self.sliding_window.unwrap_or(seq_len);
+        let window = self.sliding_window.unwrap_or(key_len);
 
-        for i in 0..seq_len {
+        for i in 0..query_len {
+            let absolute_pos = position_offset + i;
             let start = if window > 0 {
-                i.saturating_sub(window.saturating_sub(1))
+                absolute_pos.saturating_sub(window.saturating_sub(1))
             } else {
                 0
             };
-            for j in 0..seq_len {
-                let allowed = j <= i && j >= start;
+            for j in 0..key_len {
+                let allowed = j <= absolute_pos && j >= start;
                 data.push(if allowed { 0.0 } else { mask_value });
             }
         }
 
-        Tensor::<B, 2>::from_data(TensorData::new(data, [seq_len, seq_len]), &self.device)
-            .reshape([1, 1, seq_len, seq_len])
+        Tensor::<B, 2>::from_data(TensorData::new(data, [query_len, key_len]), &self.device)
+            .reshape([1, 1, query_len, key_len])
     }
 }
 

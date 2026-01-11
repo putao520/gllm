@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-gllm = "0.5"
+gllm = "0.6"
 ```
 
 ### Feature Flags
@@ -252,6 +252,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Text Generation (v0.6.0+)
+
+Generate text using decoder-based LLMs like Qwen2 and Mistral:
+
+```rust
+use gllm::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Qwen2 Instruct models for text generation
+    let client = Client::new("qwen2-0.5b-instruct")?;
+    // let client = Client::new("qwen2-1.5b-instruct")?;
+    // let client = Client::new("qwen2-7b-instruct")?;
+
+    let response = client
+        .generate("Explain quantum computing in simple terms:")
+        .max_tokens(256)
+        .temperature(0.7)
+        .top_p(0.9)
+        .generate()?;
+
+    println!("{}", response.text);
+    println!("Tokens: {}", response.tokens.len());
+    Ok(())
+}
+```
+
+With streaming support (coming soon):
+
+```rust
+// Future API for streaming
+let stream = client
+    .generate("Write a poem about Rust:")
+    .max_tokens(100)
+    .stream()?;
+
+for token in stream {
+    print!("{}", token?);
+}
+```
+
 ## Supported Models
 
 ### Embedding Models (27)
@@ -288,6 +328,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | GraphCodeBERT | `graphcodebert-base` | 768 | Encoder | Legacy code |
 
 > **CodeXEmbed** (SFR-Embedding-Code) is the 2024 state-of-the-art for code embedding, outperforming Voyage-Code by 20%+ on CoIR benchmark.
+
+### Generator Models (4) - NEW in v0.6.0
+
+| Model | Alias | Parameters | Architecture | Best For |
+|-------|-------|------------|--------------|----------|
+| Qwen2 0.5B Instruct | `qwen2-0.5b-instruct` | 0.5B | Decoder (Qwen2) | Fast generation |
+| Qwen2 1.5B Instruct | `qwen2-1.5b-instruct` | 1.5B | Decoder (Qwen2) | Balanced |
+| Qwen2 7B Instruct | `qwen2-7b-instruct` | 7B | Decoder (Qwen2) | High quality |
+| Mistral 7B Instruct | `mistral-7b-instruct` | 7B | Decoder (Mistral) | High quality |
 
 ### Reranking Models (12)
 

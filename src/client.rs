@@ -1,11 +1,12 @@
 use crate::embeddings::EmbeddingsBuilder;
 use crate::engine::{build_backend, EngineBackend, TokenizerAdapter};
+use crate::generation::{GenerationBuilder, GenerationConfig};
 use crate::model::{ModelArtifacts, ModelManager};
 use crate::rerank::RerankBuilder;
 use crate::types::{ClientConfig, Result};
 use log::warn;
 
-/// Client for embeddings and reranking.
+/// Client for embeddings, reranking, and generation.
 pub struct Client {
     engine: EngineBackend,
     tokenizer: TokenizerAdapter,
@@ -63,6 +64,16 @@ impl Client {
             documents: docs,
             top_n: None,
             return_documents: false,
+        }
+    }
+
+    /// Build a text generation request.
+    pub fn generate(&self, prompt: &str) -> GenerationBuilder<'_> {
+        GenerationBuilder {
+            engine: &self.engine,
+            tokenizer: &self.tokenizer,
+            prompt: prompt.to_string(),
+            config: GenerationConfig::default(),
         }
     }
 }

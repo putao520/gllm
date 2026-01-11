@@ -268,6 +268,7 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
         ),
         "salesforce/sfr-embedding-code-2b_r" => codex_embed_qwen2_preset(),
         "salesforce/sfr-embedding-code-7b_r" => codex_embed_mistral_preset(),
+        "qwen/qwen2-7b-instruct" => qwen2_instruct_preset(),
 
         // E5 Models
         repo if repo.starts_with("intfloat/e5-small") => preset(
@@ -666,6 +667,24 @@ fn codex_embed_mistral_preset() -> ModelConfig {
     )
 }
 
+fn qwen2_instruct_preset() -> ModelConfig {
+    decoder_generation_preset(
+        4096,
+        32,
+        32,
+        32,
+        128,
+        11008,
+        32768,
+        152064,
+        1_000_000.0,
+        1e-6,
+        None,
+        "qwen2",
+        &["Qwen2ForCausalLM"],
+    )
+}
+
 fn decoder_embedding_preset(
     hidden_size: usize,
     layers: usize,
@@ -709,6 +728,62 @@ fn decoder_embedding_preset(
         pooler_hidden_act: None,
         pooler_dropout: None,
         pooling_type: Some("last_token".to_string()),
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(true),
+        is_decoder: Some(true),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    }
+}
+
+fn decoder_generation_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+    sliding_window: Option<usize>,
+    model_type: &str,
+    architectures: &[&str],
+) -> ModelConfig {
+    ModelConfig {
+        architectures: Some(architectures.iter().map(|s| s.to_string()).collect()),
+        model_type: Some(model_type.to_string()),
+        hidden_size,
+        num_hidden_layers: layers,
+        num_attention_heads: heads,
+        num_key_value_heads: Some(kv_heads),
+        head_dim: Some(head_dim),
+        vocab_size: vocab,
+        max_position_embeddings: max_pos,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(intermediate),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(rms_norm_eps),
+        rope_theta: Some(rope_theta),
+        rope_scaling: None,
+        sliding_window,
+        use_cache: Some(true),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: None,
         num_labels: None,
         classifier_dropout: None,
         tie_word_embeddings: Some(true),

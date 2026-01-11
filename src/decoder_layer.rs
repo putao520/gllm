@@ -1,4 +1,5 @@
 use crate::causal_attention::CausalAttention;
+use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::rms_norm::RmsNorm;
 use crate::types::Result;
@@ -42,6 +43,27 @@ impl<B: Backend> DecoderLayer<B> {
     pub fn forward(&self, hidden_states: Tensor<B, 3>, position_offset: usize) -> Tensor<B, 3> {
         let attn_input = self.attention_norm.forward(hidden_states.clone());
         let attn_output = self.attention.forward(attn_input, position_offset);
+        let hidden_states = hidden_states + attn_output;
+
+        let ffn_input = self.ffn_norm.forward(hidden_states.clone());
+        let gate = silu(self.gate_proj.forward(ffn_input.clone()));
+        let up = self.up_proj.forward(ffn_input);
+        let ffn_output = self.down_proj.forward(gate * up);
+
+        hidden_states + ffn_output
+    }
+
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: Tensor<B, 3>,
+        position_offset: usize,
+        cache: &mut KVCache<B>,
+        layer: usize,
+    ) -> Tensor<B, 3> {
+        let attn_input = self.attention_norm.forward(hidden_states.clone());
+        let attn_output = self
+            .attention
+            .forward_with_cache(attn_input, position_offset, cache, layer);
         let hidden_states = hidden_states + attn_output;
 
         let ffn_input = self.ffn_norm.forward(hidden_states.clone());

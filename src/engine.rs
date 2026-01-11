@@ -1,7 +1,9 @@
 use crate::decoder_model::DecoderModel;
 use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
+use crate::generation::{GenerationConfig, GenerationOutput};
+use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
-use crate::registry::{Architecture, ModelInfo};
+use crate::registry::{Architecture, ModelInfo, ModelType};
 use crate::types::{Device, Error, Result};
 use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
@@ -207,6 +209,55 @@ impl TokenizerAdapter {
         }
         let used = ids.len();
         (self.pad(ids, limit), used)
+    }
+
+    /// Encode a string into token ids without padding.
+    pub fn encode_unpadded(&self, text: &str, max_len: usize) -> Vec<i64> {
+        let limit = max_len.max(1);
+        if let Some(tokenizer) = &self.tokenizer {
+            if let Ok(encoding) = tokenizer.encode(text, true) {
+                let mut ids: Vec<i64> = encoding.get_ids().iter().map(|id| *id as i64).collect();
+                ids.truncate(limit);
+                if ids.is_empty() {
+                    ids.push(self.pad_id);
+                }
+                return ids;
+            }
+        }
+
+        let mut ids = Vec::new();
+        for word in text.split_whitespace() {
+            let mut hasher = DefaultHasher::new();
+            word.hash(&mut hasher);
+            let hash = hasher.finish();
+            ids.push(((hash % self.vocab_size as u64) as i64).max(1));
+            if ids.len() >= limit {
+                break;
+            }
+        }
+        if ids.is_empty() {
+            ids.push(self.pad_id);
+        }
+        ids
+    }
+
+    /// Decode token ids into a string.
+    pub fn decode(&self, tokens: &[i64]) -> String {
+        if let Some(tokenizer) = &self.tokenizer {
+            let ids: Vec<u32> = tokens
+                .iter()
+                .filter_map(|id| u32::try_from(*id).ok())
+                .collect();
+            if let Ok(text) = tokenizer.decode(&ids, true) {
+                return text;
+            }
+        }
+
+        tokens
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Encode a query and document pair by concatenating tokens with a separator.
@@ -454,6 +505,18 @@ pub(crate) enum EngineBackend {
         embedding: EmbeddingEngine<NdArray<f32>>,
         rerank: RerankEngine<NdArray<f32>>,
     },
+    /// Generator backend using WebGPU
+    GeneratorWgpu {
+        generator: GeneratorEngine<Wgpu<f32>>,
+    },
+    /// Generator backend using BLAS-accelerated CPU
+    GeneratorCandle {
+        generator: GeneratorEngine<Candle<f32, i64>>,
+    },
+    /// Generator backend using pure Rust CPU
+    GeneratorNdArray {
+        generator: GeneratorEngine<NdArray<f32>>,
+    },
 }
 
 impl EngineBackend {
@@ -462,6 +525,11 @@ impl EngineBackend {
             EngineBackend::Wgpu { embedding, .. } => embedding.embed(tokens),
             EngineBackend::Candle { embedding, .. } => embedding.embed(tokens),
             EngineBackend::NdArray { embedding, .. } => embedding.embed(tokens),
+            EngineBackend::GeneratorWgpu { .. }
+            | EngineBackend::GeneratorCandle { .. }
+            | EngineBackend::GeneratorNdArray { .. } => Err(Error::InvalidConfig(
+                "Embeddings are not supported for generator models".into(),
+            )),
         }
     }
 
@@ -470,16 +538,57 @@ impl EngineBackend {
             EngineBackend::Wgpu { rerank, .. } => rerank.score(tokens),
             EngineBackend::Candle { rerank, .. } => rerank.score(tokens),
             EngineBackend::NdArray { rerank, .. } => rerank.score(tokens),
+            EngineBackend::GeneratorWgpu { .. }
+            | EngineBackend::GeneratorCandle { .. }
+            | EngineBackend::GeneratorNdArray { .. } => Err(Error::InvalidConfig(
+                "Rerank is not supported for generator models".into(),
+            )),
         }
     }
 
+    pub fn run_generate(
+        &self,
+        prompt_ids: Vec<i64>,
+        config: &GenerationConfig,
+        tokenizer: &TokenizerAdapter,
+    ) -> Result<GenerationOutput> {
+        match self {
+            EngineBackend::GeneratorWgpu { generator } => {
+                generator.generate(prompt_ids, config, tokenizer)
+            }
+            EngineBackend::GeneratorCandle { generator } => {
+                generator.generate(prompt_ids, config, tokenizer)
+            }
+            EngineBackend::GeneratorNdArray { generator } => {
+                generator.generate(prompt_ids, config, tokenizer)
+            }
+            _ => Err(Error::InvalidConfig(
+                "Generation is not supported for this model".into(),
+            )),
+        }
+    }
+
+    pub fn max_position_embeddings(&self) -> Option<usize> {
+        match self {
+            EngineBackend::GeneratorWgpu { generator } => {
+                Some(generator.max_position_embeddings())
+            }
+            EngineBackend::GeneratorCandle { generator } => {
+                Some(generator.max_position_embeddings())
+            }
+            EngineBackend::GeneratorNdArray { generator } => {
+                Some(generator.max_position_embeddings())
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Drop for EngineBackend {
     fn drop(&mut self) {
         // Explicit cleanup for wgpu backend to avoid SIGSEGV on exit
         // Uses retry logic with increasing delays to ensure GPU cleanup threads complete
-        if matches!(self, EngineBackend::Wgpu { .. }) {
+        if matches!(self, EngineBackend::Wgpu { .. } | EngineBackend::GeneratorWgpu { .. }) {
             log::debug!("Starting wgpu EngineBackend cleanup (retry strategy)");
 
             // Retry strategy: Multiple shorter sleeps instead of one long sleep
@@ -692,6 +801,65 @@ pub(crate) fn build_rerank_backend(
     ))
 }
 
+/// Build a generator backend according to device preference.
+/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+pub(crate) fn build_generator_backend(
+    info: &ModelInfo,
+    model_dir: &std::path::PathBuf,
+    device: &Device,
+) -> Result<EngineBackend> {
+    use crate::gpu_capabilities::GpuCapabilities;
+
+    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
+
+    if prefer_cpu {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let generator = GeneratorEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
+        return Ok(EngineBackend::GeneratorNdArray { generator });
+    }
+
+    if matches!(device, Device::Gpu(_) | Device::Auto) {
+        let gpu_caps = GpuCapabilities::detect();
+
+        if !gpu_caps.is_gpu_available() {
+            log::warn!(
+                "GPU (Wgpu) pre-check failed for generator: {} not usable, skipping GPU",
+                gpu_caps.name
+            );
+        } else {
+            let init = std::panic::catch_unwind(|| {
+                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                GeneratorEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info).ok()
+            });
+
+            if let Ok(Some(engine)) = init {
+                return Ok(EngineBackend::GeneratorWgpu { generator: engine });
+            }
+        }
+    }
+
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let candle_init = std::panic::catch_unwind(|| {
+            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
+            GeneratorEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
+        });
+
+        if let Ok(Some(engine)) = candle_init {
+            return Ok(EngineBackend::GeneratorCandle { generator: engine });
+        }
+    }
+
+    if matches!(device, Device::Cpu | Device::Auto) {
+        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
+        let generator = GeneratorEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
+        return Ok(EngineBackend::GeneratorNdArray { generator });
+    }
+
+    Err(Error::InvalidConfig(
+        "No compatible backend available".into(),
+    ))
+}
+
 /// Build an engine backend according to device preference.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_backend(
@@ -700,6 +868,10 @@ pub(crate) fn build_backend(
     device: &Device,
 ) -> Result<EngineBackend> {
     let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
+
+    if matches!(info.model_type, ModelType::Generator) {
+        return build_generator_backend(info, model_dir, device);
+    }
 
     // Test mode: use pure Rust NdArray backend
     if prefer_cpu {

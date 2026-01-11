@@ -24,6 +24,10 @@ pub enum Architecture {
     Qwen2Embedding,
     /// Mistral embedding decoder.
     MistralEmbedding,
+    /// Qwen2 decoder for generation.
+    Qwen2Generator,
+    /// Mistral decoder for generation.
+    MistralGenerator,
     /// Qwen3 embedding encoder.
     Qwen3Embedding,
     /// Qwen3 cross-encoder reranker.
@@ -230,6 +234,10 @@ impl ModelRegistry {
             ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding, false),
             ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding, false),
 
+            // Qwen2/Mistral Generator Models
+            ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
+
             // Light Models for Edge Devices
             ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
             ("all-distilroberta-v1", "sentence-transformers/all-distilroberta-v1", ModelType::Embedding, Architecture::Bert, false),
@@ -377,6 +385,16 @@ impl ModelRegistry {
             Architecture::Qwen2Embedding
         } else if lower.contains("sfr-embedding-code-7b") || lower.contains("codexembed-7b") {
             Architecture::MistralEmbedding
+        } else if lower.contains("qwen2") || lower.contains("qwen-2") {
+            match model_type {
+                ModelType::Generator => Architecture::Qwen2Generator,
+                _ => Architecture::Qwen2Embedding,
+            }
+        } else if lower.contains("mistral") {
+            match model_type {
+                ModelType::Generator => Architecture::MistralGenerator,
+                _ => Architecture::MistralEmbedding,
+            }
         } else if lower.contains("qwen3") || lower.contains("qwen-3") {
             match model_type {
                 ModelType::Embedding => Architecture::Qwen3Embedding,
@@ -510,6 +528,8 @@ mod tests {
             ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
             ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
             ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
+            ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
             ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker),
