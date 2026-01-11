@@ -36,9 +36,10 @@ impl Default for RopeConfig {
 #[derive(Clone)]
 pub struct RotaryPositionEmbedding<B: Backend> {
     /// Precomputed cosine values: [max_seq_len, dim/2]
-    cos_cache: Tensor<B, 2>,
+    cos_cached: Tensor<B, 2>,
     /// Precomputed sine values: [max_seq_len, dim/2]
-    sin_cache: Tensor<B, 2>,
+    sin_cached: Tensor<B, 2>,
+    max_cached_len: usize,
     dim: usize,
 }
 
@@ -80,18 +81,19 @@ impl<B: Backend> RotaryPositionEmbedding<B> {
         let cos_vals: Vec<f32> = freqs.iter().map(|f| f.cos()).collect();
         let sin_vals: Vec<f32> = freqs.iter().map(|f| f.sin()).collect();
 
-        let cos_cache = Tensor::<B, 2>::from_data(
+        let cos_cached = Tensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(cos_vals, [max_seq_len, half_dim]),
             device,
         );
-        let sin_cache = Tensor::<B, 2>::from_data(
+        let sin_cached = Tensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(sin_vals, [max_seq_len, half_dim]),
             device,
         );
 
         Self {
-            cos_cache,
-            sin_cache,
+            cos_cached,
+            sin_cached,
+            max_cached_len: max_seq_len,
             dim,
         }
     }
@@ -111,13 +113,14 @@ impl<B: Backend> RotaryPositionEmbedding<B> {
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [_batch, seq_len, _num_heads, head_dim] = query.dims();
         let half_dim = head_dim / 2;
+        debug_assert!(position_offset + seq_len <= self.max_cached_len);
 
         // Get cos/sin for current positions
-        let cos = self.cos_cache
+        let cos = self.cos_cached
             .clone()
             .slice([position_offset..(position_offset + seq_len), 0..half_dim])
             .reshape([1, seq_len, 1, half_dim]);
-        let sin = self.sin_cache
+        let sin = self.sin_cached
             .clone()
             .slice([position_offset..(position_offset + seq_len), 0..half_dim])
             .reshape([1, seq_len, 1, half_dim]);
@@ -140,13 +143,14 @@ impl<B: Backend> RotaryPositionEmbedding<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden_size] = hidden_states.dims();
         let half_dim = self.dim / 2;
+        debug_assert!(position_offset + seq_len <= self.max_cached_len);
 
         // Get cos/sin for current positions
-        let cos = self.cos_cache
+        let cos = self.cos_cached
             .clone()
             .slice([position_offset..(position_offset + seq_len), 0..half_dim])
             .reshape([1, seq_len, half_dim]);
-        let sin = self.sin_cache
+        let sin = self.sin_cached
             .clone()
             .slice([position_offset..(position_offset + seq_len), 0..half_dim])
             .reshape([1, seq_len, half_dim]);
@@ -203,8 +207,8 @@ mod tests {
 
         let rope = RotaryPositionEmbedding::<NdArray<f32>>::new(&device, config);
 
-        assert_eq!(rope.cos_cache.dims(), [512, 32]);
-        assert_eq!(rope.sin_cache.dims(), [512, 32]);
+        assert_eq!(rope.cos_cached.dims(), [512, 32]);
+        assert_eq!(rope.sin_cached.dims(), [512, 32]);
     }
 
     #[test]

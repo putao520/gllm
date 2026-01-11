@@ -85,12 +85,14 @@ pub struct ModelConfig {
     pub hidden_dropout_prob: Option<f32>,
     #[serde(default)]
     pub intermediate_size: Option<usize>,
-    #[serde(default, alias = "n_routed_experts")]
+    #[serde(default, alias = "n_routed_experts", alias = "num_local_experts")]
     pub num_experts: Option<usize>,
     #[serde(default, alias = "num_experts_per_token", alias = "top_k")]
     pub num_experts_per_tok: Option<usize>,
     #[serde(default)]
     pub n_shared_experts: Option<usize>,
+    #[serde(default)]
+    pub moe_intermediate_size: Option<usize>,
     #[serde(default)]
     pub max_batch_size: Option<usize>,
     #[serde(default)]
@@ -202,6 +204,7 @@ impl ModelConfig {
         merge_opt!(num_experts);
         merge_opt!(num_experts_per_tok);
         merge_opt!(n_shared_experts);
+        merge_opt!(moe_intermediate_size);
         merge_opt!(max_batch_size);
         merge_opt!(memory_limit_mb);
         merge_opt!(gpu_memory_fraction);
@@ -442,6 +445,7 @@ impl Default for ModelConfig {
             num_experts: None,
             num_experts_per_tok: None,
             n_shared_experts: None,
+            moe_intermediate_size: None,
             max_batch_size: None,
             memory_limit_mb: None,
             gpu_memory_fraction: None,

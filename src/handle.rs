@@ -121,17 +121,6 @@ fn prepare_model(model: &str) -> Result<(std::path::PathBuf, TokenizerAdapter, M
     Ok((artifacts.model_dir, tokenizer, artifacts.info.clone()))
 }
 
-/// Prepare model artifacts with specified device.
-fn prepare_model_with_device(
-    model: &str,
-    device: Device,
-) -> Result<(std::path::PathBuf, TokenizerAdapter, Device, ModelInfo)> {
-    let manager = ModelManager::new(ClientConfig::default());
-    let artifacts = manager.prepare(model)?;
-    let tokenizer = artifacts.tokenizer.clone();
-    Ok((artifacts.model_dir, tokenizer, device, artifacts.info.clone()))
-}
-
 /// Tokenize texts for embedding.
 fn tokenize_texts(tokenizer: &TokenizerAdapter, texts: &[String]) -> Vec<Vec<i64>> {
     texts
@@ -209,11 +198,6 @@ impl EmbedderHandle {
 }
 
 #[cfg(not(feature = "tokio"))]
-fn start_embedder_actor(model: String) -> Result<(EmbedSender, ShutdownGuard)> {
-    start_embedder_actor_with_device(model, Device::Auto)
-}
-
-#[cfg(not(feature = "tokio"))]
 fn start_embedder_actor_with_device(model: String, device: Device) -> Result<(EmbedSender, ShutdownGuard)> {
     let (sender, receiver) = mpsc::sync_channel::<EmbedRequest>(32);
     let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
@@ -235,11 +219,6 @@ fn start_embedder_actor_with_device(model: String, device: Device) -> Result<(Em
     );
 
     Ok((sender, shutdown))
-}
-
-#[cfg(not(feature = "tokio"))]
-fn embedder_loop(model: String, receiver: EmbedReceiver, ready: mpsc::Sender<Result<()>>) {
-    embedder_loop_with_device(model, Device::Auto, receiver, ready)
 }
 
 #[cfg(not(feature = "tokio"))]

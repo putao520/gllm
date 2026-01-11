@@ -135,38 +135,6 @@ impl GpuCapabilities {
     }
 }
 
-/// Calculate recommended batch size based on VRAM and device type.
-fn calculate_default_batch_size(gpu_type: GpuType, vram_mb: u64) -> usize {
-    match gpu_type {
-        GpuType::Cpu => 4, // CPU: small batches to avoid memory pressure
-        GpuType::Integrated => {
-            // Integrated GPU shares system RAM, be conservative
-            if vram_mb >= 2048 {
-                8
-            } else {
-                4
-            }
-        }
-        GpuType::Discrete | GpuType::Virtual => {
-            // Discrete GPU: scale with VRAM
-            // Base: 500MB, Per-item: ~50MB, Headroom: 30%
-            let usable_vram = (vram_mb as f64 * 0.7) as u64;
-            let available_for_batch = usable_vram.saturating_sub(500);
-            let batch_size = (available_for_batch / 50).max(4).min(128) as usize;
-
-            // Clamp to reasonable range based on VRAM
-            match vram_mb {
-                0..=2048 => batch_size.min(8),      // <=2GB: max 8
-                2049..=4096 => batch_size.min(16),  // 2-4GB: max 16
-                4097..=8192 => batch_size.min(32),  // 4-8GB: max 32
-                8193..=16384 => batch_size.min(64), // 8-16GB: max 64
-                _ => batch_size.min(128),           // >16GB: max 128
-            }
-        }
-        GpuType::Unknown => 8, // Unknown: moderate default
-    }
-}
-
 /// Internal implementation of GPU detection.
 fn detect_gpu_capabilities_impl() -> GpuCapabilities {
     // Check if test mode is enabled (skip GPU detection)
@@ -252,10 +220,16 @@ fn detect_wgpu_basic() -> Result<GpuCapabilities, String> {
         }
     };
 
-    // Get VRAM estimate from device name
-    let vram_mb = estimate_vram_from_name(&info.name);
-
-    let recommended_batch_size = calculate_default_batch_size(gpu_type, vram_mb);
+    let vram_mb = 0;
+    let recommended_batch_size = if gpu_available {
+        match gpu_type {
+            GpuType::Integrated => 8,
+            GpuType::Discrete | GpuType::Virtual => 32,
+            GpuType::Unknown | GpuType::Cpu => 4,
+        }
+    } else {
+        4
+    };
 
     let backend_name = if gpu_available {
         "wgpu"
@@ -271,237 +245,6 @@ fn detect_wgpu_basic() -> Result<GpuCapabilities, String> {
         gpu_available,
         backend_name,
     })
-}
-
-/// Estimate VRAM from GPU name (heuristic).
-/// Returns 0 if unknown.
-fn estimate_vram_from_name(name: &str) -> u64 {
-    let name_lower = name.to_lowercase();
-
-    // NVIDIA RTX 40 series
-    if name_lower.contains("4090") {
-        return 24576;
-    }
-    if name_lower.contains("4080") {
-        return 16384;
-    }
-    if name_lower.contains("4070 ti super") {
-        return 16384;
-    }
-    if name_lower.contains("4070 ti") {
-        return 12288;
-    }
-    if name_lower.contains("4070 super") {
-        return 12288;
-    }
-    if name_lower.contains("4070") {
-        return 12288;
-    }
-    if name_lower.contains("4060 ti") {
-        return 8192;
-    }
-    if name_lower.contains("4060") {
-        return 8192;
-    }
-
-    // NVIDIA RTX 30 series
-    if name_lower.contains("3090 ti") {
-        return 24576;
-    }
-    if name_lower.contains("3090") {
-        return 24576;
-    }
-    if name_lower.contains("3080 ti") {
-        return 12288;
-    }
-    if name_lower.contains("3080") {
-        return 10240;
-    }
-    if name_lower.contains("3070 ti") {
-        return 8192;
-    }
-    if name_lower.contains("3070") {
-        return 8192;
-    }
-    if name_lower.contains("3060 ti") {
-        return 8192;
-    }
-    if name_lower.contains("3060") {
-        return 12288;
-    }
-
-    // NVIDIA RTX 20 series
-    if name_lower.contains("2080 ti") {
-        return 11264;
-    }
-    if name_lower.contains("2080 super") {
-        return 8192;
-    }
-    if name_lower.contains("2080") {
-        return 8192;
-    }
-    if name_lower.contains("2070 super") {
-        return 8192;
-    }
-    if name_lower.contains("2070") {
-        return 8192;
-    }
-    if name_lower.contains("2060 super") {
-        return 8192;
-    }
-    if name_lower.contains("2060") {
-        return 6144;
-    }
-
-    // NVIDIA GTX 16 series
-    if name_lower.contains("1660 ti") {
-        return 6144;
-    }
-    if name_lower.contains("1660 super") {
-        return 6144;
-    }
-    if name_lower.contains("1660") {
-        return 6144;
-    }
-    if name_lower.contains("1650 super") {
-        return 4096;
-    }
-    if name_lower.contains("1650") {
-        return 4096;
-    }
-
-    // NVIDIA GTX 10 series
-    if name_lower.contains("1080 ti") {
-        return 11264;
-    }
-    if name_lower.contains("1080") {
-        return 8192;
-    }
-    if name_lower.contains("1070 ti") {
-        return 8192;
-    }
-    if name_lower.contains("1070") {
-        return 8192;
-    }
-    if name_lower.contains("1060") {
-        return 6144;
-    }
-    if name_lower.contains("1050 ti") {
-        return 4096;
-    }
-    if name_lower.contains("1050") {
-        return 2048;
-    }
-
-    // NVIDIA RTX 50 series (upcoming)
-    if name_lower.contains("5090") {
-        return 32768;
-    }
-    if name_lower.contains("5080") {
-        return 16384;
-    }
-
-    // AMD RX 7000 series
-    if name_lower.contains("7900 xtx") {
-        return 24576;
-    }
-    if name_lower.contains("7900 xt") {
-        return 20480;
-    }
-    if name_lower.contains("7900 gre") {
-        return 16384;
-    }
-    if name_lower.contains("7800 xt") {
-        return 16384;
-    }
-    if name_lower.contains("7700 xt") {
-        return 12288;
-    }
-    if name_lower.contains("7600 xt") {
-        return 16384;
-    }
-    if name_lower.contains("7600") {
-        return 8192;
-    }
-
-    // AMD RX 6000 series
-    if name_lower.contains("6950 xt") {
-        return 16384;
-    }
-    if name_lower.contains("6900 xt") {
-        return 16384;
-    }
-    if name_lower.contains("6800 xt") {
-        return 16384;
-    }
-    if name_lower.contains("6800") {
-        return 16384;
-    }
-    if name_lower.contains("6750 xt") {
-        return 12288;
-    }
-    if name_lower.contains("6700 xt") {
-        return 12288;
-    }
-    if name_lower.contains("6700") {
-        return 10240;
-    }
-    if name_lower.contains("6650 xt") {
-        return 8192;
-    }
-    if name_lower.contains("6600 xt") {
-        return 8192;
-    }
-    if name_lower.contains("6600") {
-        return 8192;
-    }
-
-    // Intel Arc
-    if name_lower.contains("a770") {
-        return 16384;
-    }
-    if name_lower.contains("a750") {
-        return 8192;
-    }
-    if name_lower.contains("a580") {
-        return 8192;
-    }
-    if name_lower.contains("a380") {
-        return 6144;
-    }
-    if name_lower.contains("a310") {
-        return 4096;
-    }
-
-    // Intel integrated (approximate shared memory)
-    if name_lower.contains("intel")
-        && (name_lower.contains("uhd") || name_lower.contains("iris") || name_lower.contains("xe"))
-    {
-        return 2048; // Shared memory estimate
-    }
-
-    // AMD APU (approximate shared memory)
-    if name_lower.contains("radeon graphics")
-        || name_lower.contains("vega")
-        || name_lower.contains("radeon 780m")
-        || name_lower.contains("radeon 760m")
-    {
-        return 2048; // Shared memory estimate
-    }
-
-    // Apple Silicon (M-series)
-    if name_lower.contains("apple m") {
-        if name_lower.contains("m3 max") || name_lower.contains("m2 max") {
-            return 32768; // Up to 96GB unified, assume 32GB usable for GPU
-        }
-        if name_lower.contains("m3 pro") || name_lower.contains("m2 pro") {
-            return 16384;
-        }
-        return 8192; // Base M-series
-    }
-
-    // Unknown - return conservative default
-    4096
 }
 
 #[cfg(test)]
@@ -539,30 +282,4 @@ mod tests {
         assert_eq!(batch, 4);
     }
 
-    #[test]
-    fn test_vram_estimation_nvidia() {
-        assert_eq!(estimate_vram_from_name("NVIDIA GeForce RTX 4090"), 24576);
-        assert_eq!(estimate_vram_from_name("NVIDIA GeForce RTX 3080"), 10240);
-        assert_eq!(estimate_vram_from_name("NVIDIA GeForce GTX 1660 Ti"), 6144);
-    }
-
-    #[test]
-    fn test_vram_estimation_amd() {
-        assert_eq!(estimate_vram_from_name("AMD Radeon RX 7900 XTX"), 24576);
-        assert_eq!(estimate_vram_from_name("AMD Radeon RX 6800 XT"), 16384);
-    }
-
-    #[test]
-    fn test_vram_estimation_intel() {
-        assert_eq!(estimate_vram_from_name("Intel Arc A770"), 16384);
-        assert_eq!(estimate_vram_from_name("Intel UHD Graphics 770"), 2048);
-    }
-
-    #[test]
-    fn test_default_batch_size_calculation() {
-        assert_eq!(calculate_default_batch_size(GpuType::Cpu, 0), 4);
-        assert_eq!(calculate_default_batch_size(GpuType::Integrated, 2048), 8);
-        assert!(calculate_default_batch_size(GpuType::Discrete, 8192) <= 32);
-        assert!(calculate_default_batch_size(GpuType::Discrete, 24576) <= 128);
-    }
 }

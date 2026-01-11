@@ -1,3 +1,4 @@
+use crate::causal_attention::CausalAttention;
 use crate::decoder_layer::DecoderLayer;
 use crate::model_config::ModelConfig;
 use crate::rms_norm::RmsNorm;
@@ -33,9 +34,13 @@ impl<B: Backend> DecoderModel<B> {
         }
 
         let embeddings = EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device);
+        let head_dim = config
+            .head_dim
+            .unwrap_or_else(|| config.hidden_size / config.num_attention_heads);
+        let rope = CausalAttention::build_rope(device, &config, head_dim);
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(device, &config)?);
+            layers.push(DecoderLayer::new(device, &config, rope.clone())?);
         }
 
         let final_norm = RmsNorm::new(device, &config);

@@ -9,13 +9,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct ShardIndex {
-    metadata: Option<ShardMetadata>,
     weight_map: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ShardMetadata {
-    total_size: Option<u64>,
 }
 
 impl ShardIndex {
@@ -255,9 +249,8 @@ mod tests {
     use super::ShardIndex;
 
     #[test]
-    fn shard_index_parses_metadata_and_weights() {
+    fn shard_index_parses_weights() {
         let payload = r#"{
-            "metadata": { "total_size": 123456 },
             "weight_map": {
                 "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
                 "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00003.safetensors"
@@ -266,10 +259,6 @@ mod tests {
 
         let index: ShardIndex = serde_json::from_str(payload).expect("parse shard index");
         assert_eq!(index.weight_map.len(), 2);
-        assert_eq!(
-            index.metadata.and_then(|meta| meta.total_size),
-            Some(123456)
-        );
     }
 
     #[test]

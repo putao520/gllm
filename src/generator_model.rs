@@ -1,3 +1,4 @@
+use crate::causal_attention::CausalAttention;
 use crate::decoder_layer::DecoderLayer;
 use crate::generation::{FinishReason, GenerationConfig, GenerationOutput};
 use crate::kv_cache::KVCache;
@@ -20,8 +21,9 @@ pub struct GeneratorModel<B: Backend> {
     lm_head: Linear<B>,
     pad_token_id: i64,
     max_position_embeddings: usize,
-    hidden_size: usize,
     vocab_size: usize,
+    num_key_value_heads: usize,
+    head_dim: usize,
     device: B::Device,
 }
 
@@ -39,9 +41,15 @@ impl<B: Backend> GeneratorModel<B> {
         }
 
         let embeddings = EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device);
+        let num_attention_heads = config.num_attention_heads;
+        let num_key_value_heads = config.num_key_value_heads.unwrap_or(num_attention_heads);
+        let head_dim = config
+            .head_dim
+            .unwrap_or_else(|| config.hidden_size / num_attention_heads);
+        let rope = CausalAttention::build_rope(device, &config, head_dim);
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(device, &config)?);
+            layers.push(DecoderLayer::new(device, &config, rope.clone())?);
         }
 
         let final_norm = RmsNorm::new(device, &config);
@@ -54,8 +62,9 @@ impl<B: Backend> GeneratorModel<B> {
             lm_head,
             pad_token_id: config.pad_token_id.unwrap_or(0),
             max_position_embeddings: config.max_position_embeddings,
-            hidden_size: config.hidden_size,
             vocab_size: config.vocab_size,
+            num_key_value_heads,
+            head_dim,
             device: device.clone(),
         })
     }
@@ -104,7 +113,19 @@ impl<B: Backend> GeneratorModel<B> {
             )));
         }
 
-        let mut cache = KVCache::new(self.layers.len());
+        let max_len = if self.max_position_embeddings > 0 {
+            self.max_position_embeddings
+        } else {
+            prompt_ids.len().saturating_add(config.max_new_tokens)
+        };
+        let mut cache = KVCache::preallocate(
+            self.layers.len(),
+            max_len,
+            1,
+            self.num_key_value_heads,
+            self.head_dim,
+            &self.device,
+        );
         let mut tokens = prompt_ids.clone();
         let sampling = SamplingConfig {
             temperature: config.temperature,

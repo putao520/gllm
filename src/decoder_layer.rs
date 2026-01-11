@@ -1,4 +1,5 @@
 use crate::causal_attention::CausalAttention;
+use crate::rope::RotaryPositionEmbedding;
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::rms_norm::RmsNorm;
@@ -7,6 +8,7 @@ use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation::silu;
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct DecoderLayer<B: Backend> {
@@ -19,12 +21,16 @@ pub struct DecoderLayer<B: Backend> {
 }
 
 impl<B: Backend> DecoderLayer<B> {
-    pub fn new(device: &B::Device, config: &ModelConfig) -> Result<Self> {
+    pub fn new(
+        device: &B::Device,
+        config: &ModelConfig,
+        rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+    ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let intermediate = config.intermediate_size.unwrap_or(hidden_size.saturating_mul(4));
 
         let attention_norm = RmsNorm::new(device, config);
-        let attention = CausalAttention::new(device, config)?;
+        let attention = CausalAttention::new(device, config, rope)?;
         let ffn_norm = RmsNorm::new(device, config);
         let gate_proj = LinearConfig::new(hidden_size, intermediate).init(device);
         let up_proj = LinearConfig::new(hidden_size, intermediate).init(device);

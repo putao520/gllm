@@ -48,8 +48,6 @@ pub struct FallbackEmbedder {
     fallback: Arc<Mutex<Option<EmbedderHandle>>>,
     /// Model name for creating fallback
     model_name: String,
-    /// Model directory for creating fallback
-    model_dir: Option<std::path::PathBuf>,
     /// Whether GPU mode is disabled (after repeated failures)
     gpu_disabled: Arc<AtomicBool>,
     /// Consecutive GPU failure counter
@@ -76,7 +74,6 @@ impl FallbackEmbedder {
             primary: Arc::new(Mutex::new(primary)),
             fallback: Arc::new(Mutex::new(None)),
             model_name: model.to_string(),
-            model_dir: None,
             gpu_disabled: Arc::new(AtomicBool::new(false)),
             failure_count: Arc::new(AtomicUsize::new(0)),
         })
@@ -97,7 +94,6 @@ impl FallbackEmbedder {
             primary: Arc::new(Mutex::new(primary)),
             fallback: Arc::new(Mutex::new(None)),
             model_name: model.to_string(),
-            model_dir: None,
             gpu_disabled: Arc::new(AtomicBool::new(false)),
             failure_count: Arc::new(AtomicUsize::new(0)),
         })

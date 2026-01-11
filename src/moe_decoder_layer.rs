@@ -2,11 +2,13 @@ use crate::causal_attention::CausalAttention;
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::moe_layer::MoELayer;
+use crate::rope::RotaryPositionEmbedding;
 use crate::rms_norm::RmsNorm;
 use crate::types::{Error, Result};
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 use serde_json::Value;
+use std::sync::Arc;
 
 fn resolve_moe_value(config: &ModelConfig, direct: Option<usize>, keys: &[&str]) -> Option<usize> {
     if direct.is_some() {
@@ -28,14 +30,24 @@ pub struct MoEDecoderLayer<B: Backend> {
 }
 
 impl<B: Backend> MoEDecoderLayer<B> {
-    pub fn new(device: &B::Device, config: &ModelConfig) -> Result<Self> {
+    pub fn new(
+        device: &B::Device,
+        config: &ModelConfig,
+        rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+    ) -> Result<Self> {
         let hidden_size = config.hidden_size;
-        let intermediate = config.intermediate_size.unwrap_or(hidden_size.saturating_mul(4));
+        let fallback_intermediate = config
+            .intermediate_size
+            .unwrap_or(hidden_size.saturating_mul(4));
+        let moe_intermediate = config
+            .moe_intermediate_size
+            .or_else(|| lookup_extra_usize(&config.extra, "moe_intermediate_size"))
+            .unwrap_or(fallback_intermediate);
 
         let num_experts = resolve_moe_value(
             config,
             config.num_experts,
-            &["n_routed_experts", "num_experts"],
+            &["n_routed_experts", "num_experts", "num_local_experts"],
         )
         .ok_or_else(|| {
             Error::InvalidConfig("MoE config missing num_experts (n_routed_experts)".into())
@@ -65,12 +77,12 @@ impl<B: Backend> MoEDecoderLayer<B> {
         }
 
         let attention_norm = RmsNorm::new(device, config);
-        let attention = CausalAttention::new(device, config)?;
+        let attention = CausalAttention::new(device, config, rope)?;
         let ffn_norm = RmsNorm::new(device, config);
         let moe = MoELayer::new(
             device,
             hidden_size,
-            intermediate,
+            moe_intermediate,
             num_experts,
             num_experts_per_tok,
             n_shared_experts,

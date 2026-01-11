@@ -1,7 +1,7 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::backend::Backend;
-use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
+use burn::tensor::{ElementConversion, Int, Tensor};
 
 #[derive(Clone)]
 pub struct ExpertFFN<B: Backend> {
@@ -91,66 +91,60 @@ impl<B: Backend> MoELayer<B> {
         }
     }
 
+    /// MoE forward with on-device routing/grouping and batched expert updates.
     pub fn forward(&self, hidden_states: Tensor<B, 3>) -> Tensor<B, 3> {
         let device = hidden_states.device();
         let [batch_size, seq_len, hidden_size] = hidden_states.dims();
         let tokens = batch_size.saturating_mul(seq_len);
         let top_k = self.router.num_experts_per_tok;
+        let assignments = tokens.saturating_mul(top_k);
+
+        if assignments == 0 {
+            return hidden_states;
+        }
 
         let (expert_indices, expert_weights) = self.router.forward(hidden_states.clone());
+        let expert_indices = expert_indices.reshape([assignments]);
+        let expert_weights = expert_weights.reshape([assignments]);
 
-        let indices_data = expert_indices
+        let token_indices = Tensor::<B, 1, Int>::arange(0..tokens as i64, &device)
+            .unsqueeze_dim::<2>(1)
+            .repeat(&[1, top_k])
+            .reshape([assignments]);
+
+        let (sorted_experts, sort_indices) = expert_indices.sort_with_indices(0);
+        let sorted_tokens = token_indices.select(0, sort_indices.clone());
+        let sorted_weights = expert_weights.select(0, sort_indices);
+
+        let ones = Tensor::<B, 1, Int>::ones([assignments], &device);
+        let counts = Tensor::<B, 1, Int>::zeros([self.router.num_experts], &device)
+            .scatter(0, sorted_experts, ones);
+        let offsets = counts.cumsum(0);
+        let offsets_data = offsets
             .into_data()
             .into_vec::<B::IntElem>()
-            .expect("MoE expert indices should match backend int element type");
-        let weights_data = expert_weights
-            .into_data()
-            .into_vec::<B::FloatElem>()
-            .expect("MoE expert weights should match backend float element type");
-
-        let mut per_expert_indices: Vec<Vec<B::IntElem>> =
-            vec![Vec::new(); self.router.num_experts];
-        let mut per_expert_weights: Vec<Vec<B::FloatElem>> =
-            vec![Vec::new(); self.router.num_experts];
-
-        for token_idx in 0..tokens {
-            let base = token_idx * top_k;
-            for k in 0..top_k {
-                let expert_idx = indices_data[base + k].elem::<i64>() as usize;
-                if expert_idx < self.router.num_experts {
-                    per_expert_indices[expert_idx]
-                        .push(B::IntElem::from_elem(token_idx as i64));
-                    per_expert_weights[expert_idx].push(weights_data[base + k]);
-                }
-            }
-        }
+            .expect("MoE expert offsets should match backend int element type");
 
         let hidden_states_flat = hidden_states.clone().reshape([tokens, hidden_size]);
         let mut output = Tensor::<B, 2>::zeros([tokens, hidden_size], &device);
 
+        let mut start = 0usize;
         for (expert_idx, expert) in self.experts.iter().enumerate() {
-            let token_indices = &per_expert_indices[expert_idx];
-            if token_indices.is_empty() {
-                continue;
+            let end = offsets_data
+                .get(expert_idx)
+                .map(|v| v.elem::<i64>() as usize)
+                .unwrap_or(start);
+            if start != end {
+                let token_slice = sorted_tokens.clone().slice([start..end]);
+                let weight_slice = sorted_weights.clone().slice([start..end]);
+                let selected = hidden_states_flat.clone().select(0, token_slice.clone());
+                let selected = selected.reshape([1, end - start, hidden_size]);
+                let expert_output = expert.forward(selected).reshape([end - start, hidden_size]);
+                let weighted_output = expert_output * weight_slice.reshape([end - start, 1]);
+
+                output = output.select_assign(0, token_slice, weighted_output);
             }
-
-            let num_tokens = token_indices.len();
-            let indices_tensor = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(token_indices.clone(), [num_tokens]),
-                &device,
-            );
-
-            let selected = hidden_states_flat.clone().select(0, indices_tensor.clone());
-            let selected = selected.reshape([1, num_tokens, hidden_size]);
-            let expert_output = expert.forward(selected).reshape([num_tokens, hidden_size]);
-
-            let weights_tensor = Tensor::<B, 2>::from_data(
-                TensorData::new(per_expert_weights[expert_idx].clone(), [num_tokens, 1]),
-                &device,
-            );
-            let weighted_output = expert_output * weights_tensor;
-
-            output = output.select_assign(0, indices_tensor, weighted_output);
+            start = end;
         }
 
         let mut output = output.reshape([batch_size, seq_len, hidden_size]);

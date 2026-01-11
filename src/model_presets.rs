@@ -413,6 +413,34 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1_000_000.0,
             1e-6,
         ),
+        "qwen/qwen3-30b-a3b" => qwen3_moe_preset(
+            2048,
+            48,
+            32,
+            4,
+            6144,
+            151936,
+            40960,
+            128,
+            8,
+            None,
+            1_000_000.0,
+            1e-6,
+        ),
+        "qwen/qwen3-235b-a22b" => qwen3_moe_preset(
+            4096,
+            94,
+            64,
+            4,
+            12288,
+            151936,
+            40960,
+            128,
+            8,
+            Some(1536),
+            1_000_000.0,
+            1e-6,
+        ),
         // Phi-4 Models
         "microsoft/phi-4" => phi4_preset(
             5120,
@@ -460,6 +488,32 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             50_000_000.0,
             1e-5,
         ),
+        "mistralai/mixtral-8x7b-instruct-v0.1" => mixtral_preset(
+            4096,
+            32,
+            32,
+            8,
+            14336,
+            32768,
+            32000,
+            8,
+            2,
+            1_000_000.0,
+            1e-5,
+        ),
+        "mistralai/mixtral-8x22b-instruct-v0.1" => mixtral_preset(
+            6144,
+            56,
+            48,
+            8,
+            16384,
+            65536,
+            32768,
+            8,
+            2,
+            1_000_000.0,
+            1e-5,
+        ),
         "thudm/glm-4-9b-chat-hf" => glm4_chat_preset(
             4096,
             40,
@@ -482,6 +536,7 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1_000_000.0,
             1e-5,
         ),
+        "deepseek-ai/deepseek-v3" => deepseek_v3_preset(),
 
         // E5 Models
         repo if repo.starts_with("intfloat/e5-small") => preset(
@@ -819,6 +874,7 @@ fn qwen3_embedding_preset(
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -928,6 +984,89 @@ fn qwen3_preset(
         "qwen3",
         &["Qwen3ForCausalLM"],
     )
+}
+
+fn qwen3_moe_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    num_experts: usize,
+    num_experts_per_tok: usize,
+    moe_intermediate_size: Option<usize>,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    let mut config = decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "qwen3_moe",
+        &["Qwen3MoeForCausalLM"],
+    );
+    config.num_experts = Some(num_experts);
+    config.num_experts_per_tok = Some(num_experts_per_tok);
+    config.moe_intermediate_size = moe_intermediate_size;
+    let mut extra = json!({
+        "n_routed_experts": num_experts,
+        "num_experts": num_experts,
+        "num_experts_per_tok": num_experts_per_tok,
+    });
+    if let Some(size) = moe_intermediate_size {
+        extra["moe_intermediate_size"] = json!(size);
+    }
+    config.extra = extra;
+    config
+}
+
+fn mixtral_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    num_experts: usize,
+    num_experts_per_tok: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    let mut config = decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "mixtral",
+        &["MixtralForCausalLM"],
+    );
+    config.num_experts = Some(num_experts);
+    config.num_experts_per_tok = Some(num_experts_per_tok);
+    config.extra = json!({
+        "num_local_experts": num_experts,
+        "num_experts_per_tok": num_experts_per_tok,
+    });
+    config
 }
 
 fn qwen25_instruct_preset(
@@ -1113,6 +1252,36 @@ fn glm47_moe_preset(
     config
 }
 
+fn deepseek_v3_preset() -> ModelConfig {
+    let head_dim = 7168 / 128;
+    let mut config = decoder_generation_preset(
+        7168,
+        61,
+        128,
+        128,
+        head_dim,
+        18432,
+        163840,
+        129280,
+        10000.0,
+        1e-6,
+        None,
+        "deepseek_v3",
+        &["DeepseekV3ForCausalLM"],
+    );
+    config.num_experts = Some(256);
+    config.num_experts_per_tok = Some(8);
+    config.n_shared_experts = Some(1);
+    config.moe_intermediate_size = Some(2048);
+    config.extra = json!({
+        "n_routed_experts": 256,
+        "num_experts_per_tok": 8,
+        "n_shared_experts": 1,
+        "moe_intermediate_size": 2048,
+    });
+    config
+}
+
 fn decoder_embedding_preset(
     hidden_size: usize,
     layers: usize,
@@ -1144,6 +1313,7 @@ fn decoder_embedding_preset(
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1203,6 +1373,7 @@ fn decoder_generation_preset(
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1282,6 +1453,7 @@ fn nvidia_nemotron_preset(
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1333,6 +1505,7 @@ fn jina_v4_preset() -> ModelConfig {
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1382,6 +1555,7 @@ fn jina_reranker_v3_preset() -> ModelConfig {
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1441,6 +1615,7 @@ fn preset(
         num_experts: None,
         num_experts_per_tok: None,
         n_shared_experts: None,
+        moe_intermediate_size: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1520,12 +1695,17 @@ mod tests {
             "qwen/qwen3-8b",
             "qwen/qwen3-14b",
             "qwen/qwen3-32b",
+            "qwen/qwen3-30b-a3b",
+            "qwen/qwen3-235b-a22b",
             "microsoft/phi-4",
             "microsoft/phi-4-mini-instruct",
             "huggingfacetb/smollm3-3b",
             "internlm/internlm3-8b-instruct",
+            "mistralai/mixtral-8x7b-instruct-v0.1",
+            "mistralai/mixtral-8x22b-instruct-v0.1",
             "thudm/glm-4-9b-chat-hf",
             "zai-org/glm-4.7",
+            "deepseek-ai/deepseek-v3",
             "baai/bge-reranker-v2-m3",
             "baai/bge-reranker-large",
             "baai/bge-reranker-base",
@@ -1592,6 +1772,70 @@ mod tests {
         assert_eq!(cfg.num_attention_heads, 32);
         assert_eq!(cfg.num_key_value_heads, Some(8));
         assert_eq!(cfg.intermediate_size, Some(14336));
+    }
+
+    #[test]
+    fn moe_presets_match_spec() {
+        let cfg = model_defaults("qwen/qwen3-30b-a3b");
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.num_hidden_layers, 48);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(4));
+        assert_eq!(cfg.intermediate_size, Some(6144));
+        assert_eq!(cfg.vocab_size, 151936);
+        assert_eq!(cfg.max_position_embeddings, 40960);
+        assert_eq!(cfg.num_experts, Some(128));
+        assert_eq!(cfg.num_experts_per_tok, Some(8));
+        assert_eq!(cfg.rope_theta, Some(1_000_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-6));
+
+        let cfg = model_defaults("qwen/qwen3-235b-a22b");
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 94);
+        assert_eq!(cfg.num_attention_heads, 64);
+        assert_eq!(cfg.num_key_value_heads, Some(4));
+        assert_eq!(cfg.intermediate_size, Some(12288));
+        assert_eq!(cfg.num_experts, Some(128));
+        assert_eq!(cfg.num_experts_per_tok, Some(8));
+        assert_eq!(cfg.moe_intermediate_size, Some(1536));
+
+        let cfg = model_defaults("mistralai/mixtral-8x7b-instruct-v0.1");
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.intermediate_size, Some(14336));
+        assert_eq!(cfg.vocab_size, 32000);
+        assert_eq!(cfg.max_position_embeddings, 32768);
+        assert_eq!(cfg.num_experts, Some(8));
+        assert_eq!(cfg.num_experts_per_tok, Some(2));
+        assert_eq!(cfg.rope_theta, Some(1_000_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-5));
+
+        let cfg = model_defaults("mistralai/mixtral-8x22b-instruct-v0.1");
+        assert_eq!(cfg.hidden_size, 6144);
+        assert_eq!(cfg.num_hidden_layers, 56);
+        assert_eq!(cfg.num_attention_heads, 48);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.intermediate_size, Some(16384));
+        assert_eq!(cfg.max_position_embeddings, 65536);
+        assert_eq!(cfg.num_experts, Some(8));
+        assert_eq!(cfg.num_experts_per_tok, Some(2));
+
+        let cfg = model_defaults("deepseek-ai/deepseek-v3");
+        assert_eq!(cfg.hidden_size, 7168);
+        assert_eq!(cfg.num_hidden_layers, 61);
+        assert_eq!(cfg.num_attention_heads, 128);
+        assert_eq!(cfg.num_key_value_heads, Some(128));
+        assert_eq!(cfg.intermediate_size, Some(18432));
+        assert_eq!(cfg.vocab_size, 129280);
+        assert_eq!(cfg.max_position_embeddings, 163840);
+        assert_eq!(cfg.num_experts, Some(256));
+        assert_eq!(cfg.num_experts_per_tok, Some(8));
+        assert_eq!(cfg.n_shared_experts, Some(1));
+        assert_eq!(cfg.moe_intermediate_size, Some(2048));
+        assert_eq!(cfg.rope_theta, Some(10000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-6));
     }
 
     #[test]

@@ -59,7 +59,10 @@ impl<B: Backend> GeneratorEngine<B> {
         }
 
         let mut model = match info.architecture {
-            Architecture::GLM4MoE => {
+            Architecture::GLM4MoE
+            | Architecture::Qwen3MoE
+            | Architecture::Mixtral
+            | Architecture::DeepSeekV3 => {
                 GeneratorVariant::Moe(MoEGeneratorModel::new(&device, config.clone())?)
             }
             _ => GeneratorVariant::Dense(GeneratorModel::new(&device, config.clone())?),

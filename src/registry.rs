@@ -52,6 +52,12 @@ pub enum Architecture {
     GLM4,
     /// Zhipu GLM-4 MoE.
     GLM4MoE,
+    /// Qwen3 MoE decoder for generation.
+    Qwen3MoE,
+    /// Mixtral decoder for generation.
+    Mixtral,
+    /// DeepSeek-V3 decoder for generation.
+    DeepSeekV3,
 }
 
 /// Quantization type for models.
@@ -257,9 +263,14 @@ impl ModelRegistry {
             ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator, false),
             ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator, false),
             ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator, false),
+            ("qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", ModelType::Generator, Architecture::Qwen3MoE, false),
+            ("qwen3-235b-a22b", "Qwen/Qwen3-235B-A22B", ModelType::Generator, Architecture::Qwen3MoE, false),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
+            ("mixtral-8x7b-instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral, false),
+            ("mixtral-8x22b-instruct", "mistralai/Mixtral-8x22B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral, false),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
             ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE, false),
+            ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3, false),
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator, false),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator, false),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator, false),
@@ -404,6 +415,8 @@ impl ModelRegistry {
             || lower.contains("glm-4.7")
             || lower.contains("glm4_moe")
             || lower.contains("glm4-moe")
+            || lower.contains("mixtral")
+            || lower.contains("deepseek")
             || lower.contains("phi-4")
             || lower.contains("phi4")
             || lower.contains("smollm3")
@@ -444,6 +457,10 @@ impl ModelRegistry {
                 ModelType::Generator => Architecture::MistralGenerator,
                 _ => Architecture::MistralEmbedding,
             }
+        } else if lower.contains("mixtral") {
+            Architecture::Mixtral
+        } else if lower.contains("deepseek") && lower.contains("v3") {
+            Architecture::DeepSeekV3
         } else if lower.contains("phi-4") || lower.contains("phi4") {
             Architecture::Phi3Generator
         } else if lower.contains("smollm3") {
@@ -454,7 +471,13 @@ impl ModelRegistry {
             match model_type {
                 ModelType::Embedding => Architecture::Qwen3Embedding,
                 ModelType::Rerank => Architecture::Qwen3Reranker,
-                ModelType::Generator => Architecture::Qwen3Generator,
+                ModelType::Generator => {
+                    if lower.contains("moe") || (lower.contains("-a") && lower.contains("b")) {
+                        Architecture::Qwen3MoE
+                    } else {
+                        Architecture::Qwen3Generator
+                    }
+                }
             }
         } else if lower.contains("jina") {
             if lower.contains("reranker") {
@@ -602,9 +625,14 @@ mod tests {
             ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", ModelType::Generator, Architecture::Qwen3MoE),
+            ("qwen3-235b-a22b", "Qwen/Qwen3-235B-A22B", ModelType::Generator, Architecture::Qwen3MoE),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
+            ("mixtral-8x7b-instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
+            ("mixtral-8x22b-instruct", "mistralai/Mixtral-8x22B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
             ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE),
+            ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3),
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),

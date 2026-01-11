@@ -6,6 +6,7 @@ use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct CausalAttention<B: Backend> {
@@ -13,7 +14,7 @@ pub struct CausalAttention<B: Backend> {
     k_proj: Linear<B>,
     v_proj: Linear<B>,
     o_proj: Linear<B>,
-    rope: Option<RotaryPositionEmbedding<B>>,
+    rope: Option<Arc<RotaryPositionEmbedding<B>>>,
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
@@ -23,7 +24,11 @@ pub struct CausalAttention<B: Backend> {
 }
 
 impl<B: Backend> CausalAttention<B> {
-    pub fn new(device: &B::Device, config: &ModelConfig) -> Result<Self> {
+    pub fn new(
+        device: &B::Device,
+        config: &ModelConfig,
+        rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+    ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         if hidden_size == 0 {
             return Err(Error::InvalidConfig(
@@ -67,23 +72,13 @@ impl<B: Backend> CausalAttention<B> {
             ));
         }
 
-        let rope = if config
-            .position_embedding_type
-            .as_deref()
-            .map_or(false, |t| t == "rope" || t == "rotary")
-            || config.rope_theta.is_some()
-        {
-            let ntk_factor = config
-                .rope_scaling
-                .as_ref()
-                .and_then(|scaling| scaling.get("factor").and_then(|v| v.as_f64()));
-            let rope_config = RopeConfig {
-                theta: config.rope_theta.unwrap_or(10000.0),
-                dim: head_dim,
-                max_seq_len: config.max_position_embeddings,
-                ntk_factor,
-            };
-            Some(RotaryPositionEmbedding::new(device, rope_config))
+        let rope = if Self::uses_rope(config) {
+            if rope.is_none() {
+                return Err(Error::InvalidConfig(
+                    "RoPE enabled but no precomputed cache was provided".into(),
+                ));
+            }
+            rope
         } else {
             None
         };
@@ -136,13 +131,7 @@ impl<B: Backend> CausalAttention<B> {
         let k = self.repeat_kv(k);
         let v = self.repeat_kv(v);
 
-        let scale = (self.head_dim as f32).sqrt();
-        let mut scores = q.matmul(k.transpose()) / scale;
-        let mask = self.build_causal_mask(seq_len, seq_len, position_offset);
-        scores = scores + mask;
-
-        let attn = softmax(scores, 3);
-        let context = attn.matmul(v);
+        let context = self.attend(q, k, v, position_offset, seq_len);
         let context = context
             .swap_dims(1, 2)
             .reshape([batch_size, seq_len, self.hidden_size]);
@@ -187,13 +176,7 @@ impl<B: Backend> CausalAttention<B> {
         let v = self.repeat_kv(v);
 
         let key_len = k.dims()[2];
-        let scale = (self.head_dim as f32).sqrt();
-        let mut scores = q.matmul(k.transpose()) / scale;
-        let mask = self.build_causal_mask(seq_len, key_len, position_offset);
-        scores = scores + mask;
-
-        let attn = softmax(scores, 3);
-        let context = attn.matmul(v);
+        let context = self.attend(q, k, v, position_offset, key_len);
         let context = context
             .swap_dims(1, 2)
             .reshape([batch_size, seq_len, self.hidden_size]);
@@ -213,6 +196,44 @@ impl<B: Backend> CausalAttention<B> {
             .reshape([batch_size, kv_heads, 1, seq_len, head_dim])
             .repeat(&[1, 1, repeat, 1, 1])
             .reshape([batch_size, kv_heads * repeat, seq_len, head_dim])
+    }
+
+    fn attend(
+        &self,
+        q: Tensor<B, 4>,
+        k: Tensor<B, 4>,
+        v: Tensor<B, 4>,
+        position_offset: usize,
+        key_len: usize,
+    ) -> Tensor<B, 4> {
+        let [batch_size, num_heads, query_len, head_dim] = q.dims();
+        let scale = (self.head_dim as f32).sqrt();
+        let k_t = k.transpose();
+
+        if query_len > 4096 {
+            let mut outputs = Vec::new();
+            let mut start = 0usize;
+            while start < query_len {
+                let end = (start + 2048).min(query_len);
+                let q_slice = q
+                    .clone()
+                    .slice([0..batch_size, 0..num_heads, start..end, 0..head_dim]);
+                let mut scores = q_slice.matmul(k_t.clone()) / scale;
+                let mask = self.build_causal_mask(end - start, key_len, position_offset + start);
+                scores = scores + mask;
+                let attn = softmax(scores, 3);
+                let context = attn.matmul(v.clone());
+                outputs.push(context);
+                start = end;
+            }
+            Tensor::cat(outputs, 2)
+        } else {
+            let mut scores = q.matmul(k_t) / scale;
+            let mask = self.build_causal_mask(query_len, key_len, position_offset);
+            scores = scores + mask;
+            let attn = softmax(scores, 3);
+            attn.matmul(v)
+        }
     }
 
     fn build_causal_mask(
@@ -241,6 +262,36 @@ impl<B: Backend> CausalAttention<B> {
         Tensor::<B, 2>::from_data(TensorData::new(data, [query_len, key_len]), &self.device)
             .reshape([1, 1, query_len, key_len])
     }
+
+    fn uses_rope(config: &ModelConfig) -> bool {
+        config
+            .position_embedding_type
+            .as_deref()
+            .map_or(false, |t| t == "rope" || t == "rotary")
+            || config.rope_theta.is_some()
+    }
+
+    pub(crate) fn build_rope(
+        device: &B::Device,
+        config: &ModelConfig,
+        head_dim: usize,
+    ) -> Option<Arc<RotaryPositionEmbedding<B>>> {
+        if !Self::uses_rope(config) {
+            return None;
+        }
+
+        let ntk_factor = config
+            .rope_scaling
+            .as_ref()
+            .and_then(|scaling| scaling.get("factor").and_then(|v| v.as_f64()));
+        let rope_config = RopeConfig {
+            theta: config.rope_theta.unwrap_or(10000.0),
+            dim: head_dim,
+            max_seq_len: config.max_position_embeddings,
+            ntk_factor,
+        };
+        Some(Arc::new(RotaryPositionEmbedding::new(device, rope_config)))
+    }
 }
 
 #[cfg(test)]
@@ -260,7 +311,8 @@ mod tests {
         config.vocab_size = 128;
         config.position_embedding_type = Some("rope".to_string());
 
-        let attention = CausalAttention::<NdArray<f32>>::new(&device, &config).expect("init");
+        let rope = CausalAttention::<NdArray<f32>>::build_rope(&device, &config, 4);
+        let attention = CausalAttention::<NdArray<f32>>::new(&device, &config, rope).expect("init");
         let input = Tensor::<NdArray<f32>, 3>::zeros([2, 5, 16], &device);
         let output = attention.forward(input, 0);
 

@@ -25,10 +25,6 @@ struct TokenizerConfig {
     pad_token_id: Option<i64>,
     eos_token: Option<Value>,
     eos_token_id: Option<i64>,
-    bos_token: Option<Value>,
-    bos_token_id: Option<i64>,
-    unk_token: Option<Value>,
-    unk_token_id: Option<i64>,
     vocab_size: Option<usize>,
 }
 
@@ -36,8 +32,6 @@ struct TokenizerConfig {
 struct SpecialTokensMap {
     pad_token: Option<Value>,
     eos_token: Option<Value>,
-    bos_token: Option<Value>,
-    unk_token: Option<Value>,
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {

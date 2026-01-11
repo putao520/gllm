@@ -1,10 +1,10 @@
 [package]
 name = "gllm"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["gllm contributors"]
 license = "MIT"
-description = "Pure Rust library for local text embeddings, reranking, and text generation with 60+ models including GLM-4.7 MoE/Qwen3/Phi-4 LLMs"
+description = "Pure Rust library for local embeddings, reranking, and text generation with MoE-optimized inference and aggressive performance tuning"
 repository = "https://github.com/putao520/gllm"
 homepage = "https://github.com/putao520/gllm"
 keywords = ["embeddings", "reranking", "nlp", "ml", "rust"]
@@ -45,4 +45,9 @@ safetensors = "0.4"
 rand = "0.8"
 
 [dev-dependencies]
+criterion = "0.5"
 tempfile = "3"
+
+[[bench]]
+name = "moe_layer"
+harness = false
