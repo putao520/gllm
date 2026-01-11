@@ -236,7 +236,15 @@ impl ModelRegistry {
 
             // Qwen2/Mistral Generator Models
             ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-0.5b-instruct", "Qwen/Qwen2.5-0.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-1.5b-instruct", "Qwen/Qwen2.5-1.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-3b-instruct", "Qwen/Qwen2.5-3B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-7b-instruct", "Qwen/Qwen2.5-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
+            ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
+            ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
 
             // Light Models for Edge Devices
             ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
@@ -385,6 +393,14 @@ impl ModelRegistry {
             Architecture::Qwen2Embedding
         } else if lower.contains("sfr-embedding-code-7b") || lower.contains("codexembed-7b") {
             Architecture::MistralEmbedding
+        } else if lower.contains("qwen2.5")
+            || lower.contains("qwen-2.5")
+            || lower.contains("qwen2_5")
+        {
+            match model_type {
+                ModelType::Generator => Architecture::Qwen2Generator,
+                _ => Architecture::Qwen2Embedding,
+            }
         } else if lower.contains("qwen2") || lower.contains("qwen-2") {
             match model_type {
                 ModelType::Generator => Architecture::Qwen2Generator,
@@ -529,7 +545,15 @@ mod tests {
             ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
             ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
             ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-0.5b-instruct", "Qwen/Qwen2.5-0.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-1.5b-instruct", "Qwen/Qwen2.5-1.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-3b-instruct", "Qwen/Qwen2.5-3B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-7b-instruct", "Qwen/Qwen2.5-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
+            ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
             ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker),

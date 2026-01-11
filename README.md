@@ -12,8 +12,8 @@
 - **Document Reranking** - Sort documents by relevance using cross-encoders
 - **Code Embeddings** - Specialized models for code semantic similarity (CodeXEmbed)
 - **GPU Acceleration** - WGPU backend with automatic GPU/CPU fallback
-- **40+ Built-in Models** - BGE, E5, Sentence Transformers, Qwen3, JINA, CodeXEmbed, and more
-- **Encoder & Decoder Architectures** - BERT-style encoders and Qwen2/Mistral-style decoders
+- **50+ Built-in Models** - BGE, E5, Sentence Transformers, Qwen2.5, Qwen3, GLM-4, JINA, CodeXEmbed, and more
+- **Encoder & Decoder Architectures** - BERT-style encoders and Qwen2.5/GLM-4/Mistral-style decoders
 - **Quantization Support** - Int4/Int8/AWQ/GPTQ/GGUF for Qwen3 series
 - **Pure Rust** - Static compilation ready, no C dependencies
 
@@ -254,16 +254,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Text Generation (v0.6.0+)
 
-Generate text using decoder-based LLMs like Qwen2 and Mistral:
+Generate text using decoder-based LLMs like Qwen2.5, GLM-4, and Mistral:
 
 ```rust
 use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Qwen2 Instruct models for text generation
-    let client = Client::new("qwen2-0.5b-instruct")?;
-    // let client = Client::new("qwen2-1.5b-instruct")?;
+    // Qwen2.5 Instruct models (latest 2025)
+    let client = Client::new("qwen2.5-7b-instruct")?;
+    // let client = Client::new("qwen2.5-0.5b-instruct")?;  // Lightweight
+    // let client = Client::new("qwen2.5-72b-instruct")?;   // Largest
+
+    // GLM-4 Chat models
+    // let client = Client::new("glm-4-9b-chat")?;
+
+    // Legacy Qwen2/Mistral
     // let client = Client::new("qwen2-7b-instruct")?;
+    // let client = Client::new("mistral-7b-instruct")?;
 
     let response = client
         .generate("Explain quantum computing in simple terms:")
@@ -329,14 +336,23 @@ for token in stream {
 
 > **CodeXEmbed** (SFR-Embedding-Code) is the 2024 state-of-the-art for code embedding, outperforming Voyage-Code by 20%+ on CoIR benchmark.
 
-### Generator Models (4) - NEW in v0.6.0
+### Generator Models (12) - NEW in v0.6.0+
 
 | Model | Alias | Parameters | Architecture | Best For |
 |-------|-------|------------|--------------|----------|
-| Qwen2 0.5B Instruct | `qwen2-0.5b-instruct` | 0.5B | Decoder (Qwen2) | Fast generation |
-| Qwen2 1.5B Instruct | `qwen2-1.5b-instruct` | 1.5B | Decoder (Qwen2) | Balanced |
-| Qwen2 7B Instruct | `qwen2-7b-instruct` | 7B | Decoder (Qwen2) | High quality |
-| Mistral 7B Instruct | `mistral-7b-instruct` | 7B | Decoder (Mistral) | High quality |
+| Qwen2.5 0.5B Instruct | `qwen2.5-0.5b-instruct` | 0.5B | Decoder (Qwen2) | Fast generation |
+| Qwen2.5 1.5B Instruct | `qwen2.5-1.5b-instruct` | 1.5B | Decoder (Qwen2) | Lightweight |
+| Qwen2.5 3B Instruct | `qwen2.5-3b-instruct` | 3B | Decoder (Qwen2) | Balanced |
+| Qwen2.5 7B Instruct | `qwen2.5-7b-instruct` | 7B | Decoder (Qwen2) | High quality |
+| Qwen2.5 14B Instruct | `qwen2.5-14b-instruct` | 14B | Decoder (Qwen2) | Very high quality |
+| Qwen2.5 32B Instruct | `qwen2.5-32b-instruct` | 32B | Decoder (Qwen2) | Premium quality |
+| Qwen2.5 72B Instruct | `qwen2.5-72b-instruct` | 72B | Decoder (Qwen2) | Maximum quality |
+| GLM-4 9B Chat | `glm-4-9b-chat` | 9B | Decoder (GLM4) | Chinese & English |
+| Qwen2 7B Instruct | `qwen2-7b-instruct` | 7B | Decoder (Qwen2) | Legacy |
+| Mistral 7B Instruct | `mistral-7b-instruct` | 7B | Decoder (Mistral) | Legacy |
+
+> **Qwen2.5** is the 2025 state-of-the-art open-source LLM family with 128K context and excellent multilingual support.
+> **GLM-4** is Zhipu AI's flagship model with 131K context and strong Chinese/English performance.
 
 ### Reranking Models (12)
 
