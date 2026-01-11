@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```toml
 [dependencies]
-gllm = { version = "0.4", features = ["tokio"] }
+gllm = { version = "0.5", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -182,6 +182,74 @@ let client = Client::new("codexembed-2b")?;
 
 // CodeXEmbed-7B (4096 dimensions, Mistral-based decoder)
 let client = Client::new("codexembed-7b")?;
+```
+
+### Qwen3 Large Language Model Embeddings
+
+Qwen3 series provides state-of-the-art embeddings with decoder architecture and quantization support.
+
+```rust
+use gllm::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Qwen3 Embedding - decoder-based LLM for high-quality embeddings
+    let client = Client::new("qwen3-embedding-0.6b")?;  // 1024 dimensions
+    // let client = Client::new("qwen3-embedding-4b")?;   // 2560 dimensions
+    // let client = Client::new("qwen3-embedding-8b")?;   // 4096 dimensions
+
+    let texts = [
+        "Rust is a systems programming language",
+        "Python is great for machine learning",
+        "JavaScript runs in browsers",
+    ];
+
+    let response = client.embeddings(texts).generate()?;
+
+    for (i, emb) in response.embeddings.iter().enumerate() {
+        println!("Text {}: {} dimensions", i, emb.embedding.len());
+    }
+    Ok(())
+}
+```
+
+With quantization support for memory efficiency:
+
+```rust
+use gllm::registry;
+
+// Quantized Qwen3 models (reduced memory, maintained quality)
+let info = registry::resolve("qwen3-embedding-8b:int4")?;  // Int4 quantization
+let info = registry::resolve("qwen3-embedding-8b:int8")?;  // Int8 quantization
+let info = registry::resolve("qwen3-embedding-4b:awq")?;   // AWQ quantization
+```
+
+### Qwen3 Reranker
+
+High-accuracy document reranking with LLM-based cross-encoder:
+
+```rust
+use gllm::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Qwen3 Reranker - LLM-based cross-encoder
+    let client = Client::new("qwen3-reranker-0.6b")?;
+    // let client = Client::new("qwen3-reranker-4b")?;
+    // let client = Client::new("qwen3-reranker-8b")?;
+
+    let response = client
+        .rerank("What is the capital of France?", [
+            "Paris is the capital and largest city of France.",
+            "London is the capital of the United Kingdom.",
+            "The Eiffel Tower is located in Paris.",
+        ])
+        .top_n(2)
+        .generate()?;
+
+    for result in response.results {
+        println!("Rank {}: Score {:.4}", result.index, result.score);
+    }
+    Ok(())
+}
 ```
 
 ## Supported Models
