@@ -1,14 +1,43 @@
 use crate::engine::TokenizerAdapter;
 use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::generator_model::GeneratorModel;
+use crate::moe_generator_model::MoEGeneratorModel;
 use crate::model_config::ModelConfig;
-use crate::registry::ModelInfo;
+use crate::registry::{Architecture, ModelInfo};
 use crate::types::{Error, Result};
 use burn::tensor::backend::Backend;
+use std::path::Path;
+
+#[derive(Clone)]
+enum GeneratorVariant<B: Backend> {
+    Dense(GeneratorModel<B>),
+    Moe(MoEGeneratorModel<B>),
+}
+
+impl<B: Backend> GeneratorVariant<B> {
+    fn generate(
+        &self,
+        prompt_ids: Vec<i64>,
+        config: &GenerationConfig,
+        tokenizer: &TokenizerAdapter,
+    ) -> Result<GenerationOutput> {
+        match self {
+            Self::Dense(model) => model.generate(prompt_ids, config, tokenizer),
+            Self::Moe(model) => model.generate(prompt_ids, config, tokenizer),
+        }
+    }
+
+    fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        match self {
+            Self::Dense(model) => model.load_safetensors(safetensors_path),
+            Self::Moe(model) => model.load_safetensors(safetensors_path),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct GeneratorEngine<B: Backend> {
-    model: GeneratorModel<B>,
+    model: GeneratorVariant<B>,
     max_position_embeddings: usize,
 }
 
@@ -29,7 +58,12 @@ impl<B: Backend> GeneratorEngine<B> {
             ));
         }
 
-        let mut model = GeneratorModel::new(&device, config.clone())?;
+        let mut model = match info.architecture {
+            Architecture::GLM4MoE => {
+                GeneratorVariant::Moe(MoEGeneratorModel::new(&device, config.clone())?)
+            }
+            _ => GeneratorVariant::Dense(GeneratorModel::new(&device, config.clone())?),
+        };
 
         let safetensors_path = model_dir.join("model.safetensors");
         if safetensors_path.exists() {

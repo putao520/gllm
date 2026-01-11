@@ -471,6 +471,17 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             10000.0,
             1.5625e-7,
         ),
+        "zai-org/glm-4.7" => glm47_moe_preset(
+            5120,
+            92,
+            96,
+            8,
+            12288,
+            202752,
+            151552,
+            1_000_000.0,
+            1e-5,
+        ),
 
         // E5 Models
         repo if repo.starts_with("intfloat/e5-small") => preset(
@@ -805,6 +816,9 @@ fn qwen3_embedding_preset(
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(intermediate),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1061,6 +1075,44 @@ fn glm4_chat_preset(
     )
 }
 
+fn glm47_moe_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let head_dim = hidden_size / heads;
+    let mut config = decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "glm4_moe",
+        &["Glm4MoeForCausalLM"],
+    );
+    config.num_experts = Some(160);
+    config.num_experts_per_tok = Some(8);
+    config.n_shared_experts = Some(1);
+    config.extra = json!({
+        "n_routed_experts": 160,
+        "num_experts_per_tok": 8,
+        "n_shared_experts": 1
+    });
+    config
+}
+
 fn decoder_embedding_preset(
     hidden_size: usize,
     layers: usize,
@@ -1089,6 +1141,9 @@ fn decoder_embedding_preset(
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(intermediate),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1145,6 +1200,9 @@ fn decoder_generation_preset(
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(intermediate),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1221,6 +1279,9 @@ fn nvidia_nemotron_preset(
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(intermediate),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1269,6 +1330,9 @@ fn jina_v4_preset() -> ModelConfig {
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(11008),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1315,6 +1379,9 @@ fn jina_reranker_v3_preset() -> ModelConfig {
         attention_probs_dropout_prob: Some(0.0),
         hidden_dropout_prob: Some(0.0),
         intermediate_size: Some(3072),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1371,6 +1438,9 @@ fn preset(
         attention_probs_dropout_prob: Some(attention_dropout),
         hidden_dropout_prob: Some(hidden_dropout),
         intermediate_size: Some(intermediate),
+        num_experts: None,
+        num_experts_per_tok: None,
+        n_shared_experts: None,
         max_batch_size: None,
         memory_limit_mb: None,
         gpu_memory_fraction: None,
@@ -1455,6 +1525,7 @@ mod tests {
             "huggingfacetb/smollm3-3b",
             "internlm/internlm3-8b-instruct",
             "thudm/glm-4-9b-chat-hf",
+            "zai-org/glm-4.7",
             "baai/bge-reranker-v2-m3",
             "baai/bge-reranker-large",
             "baai/bge-reranker-base",

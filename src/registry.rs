@@ -50,6 +50,8 @@ pub enum Architecture {
     Gemma3n,
     /// Zhipu GLM-4.
     GLM4,
+    /// Zhipu GLM-4 MoE.
+    GLM4MoE,
 }
 
 /// Quantization type for models.
@@ -257,6 +259,7 @@ impl ModelRegistry {
             ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator, false),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
+            ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE, false),
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator, false),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator, false),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator, false),
@@ -398,6 +401,9 @@ impl ModelRegistry {
         let is_generator = lower.contains("generator")
             || lower.contains("instruct")
             || lower.contains("chat")
+            || lower.contains("glm-4.7")
+            || lower.contains("glm4_moe")
+            || lower.contains("glm4-moe")
             || lower.contains("phi-4")
             || lower.contains("phi4")
             || lower.contains("smollm3")
@@ -458,6 +464,11 @@ impl ModelRegistry {
             }
         } else if lower.contains("nemotron") {
             Architecture::NVIDIANemotron
+        } else if lower.contains("glm-4.7")
+            || lower.contains("glm4_moe")
+            || lower.contains("glm4-moe")
+        {
+            Architecture::GLM4MoE
         } else if lower.contains("glm") {
             Architecture::GLM4
         } else if lower.contains("gemma") {
@@ -593,6 +604,7 @@ mod tests {
             ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator),
             ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
+            ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE),
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),
