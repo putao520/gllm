@@ -1,33 +1,21 @@
-use gllm::ModelRegistry;
+use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Testing MoE model registry...\n");
+    println!("Testing smallest MoE model: Qwen3-30B-A3B");
+    println!("Total: 30B params, Active: 3B params per token\n");
 
-    let registry = ModelRegistry::new();
+    // Qwen3-30B-A3B 是最小的 MoE 模型
+    let client = Client::new("qwen3-30b-a3b")?;
 
-    let moe_models = [
-        "glm-4.7",
-        "qwen3-30b-a3b",
-        "qwen3-235b-a22b",
-        "mixtral-8x7b-instruct",
-        "mixtral-8x22b-instruct",
-        "deepseek-v3",
-    ];
+    println!("Client created successfully!");
 
-    for model in moe_models {
-        match registry.resolve(model) {
-            Ok(info) => {
-                println!("✅ {} -> {}", model, info.repo_id);
-                println!("   Architecture: {:?}", info.architecture);
-                println!("   Type: {:?}", info.model_type);
-                println!();
-            }
-            Err(e) => {
-                println!("❌ {} -> Error: {}", model, e);
-                println!();
-            }
-        }
-    }
+    let response = client
+        .generate("What is 2+2? Answer in one word:")
+        .max_new_tokens(8)
+        .generate()?;
+
+    println!("Response: {}", response.text);
+    println!("Tokens generated: {}", response.tokens.len());
 
     Ok(())
 }

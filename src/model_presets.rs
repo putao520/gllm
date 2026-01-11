@@ -414,29 +414,31 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1e-6,
         ),
         "qwen/qwen3-30b-a3b" => qwen3_moe_preset(
-            2048,
-            48,
-            32,
-            4,
-            6144,
-            151936,
-            40960,
-            128,
-            8,
+            2048,   // hidden_size
+            48,     // layers
+            32,     // heads
+            4,      // kv_heads
+            128,    // head_dim (explicit, non-standard: 32*128=4096 != 2048)
+            6144,   // intermediate
+            151936, // vocab
+            40960,  // max_pos
+            128,    // num_experts
+            8,      // num_experts_per_tok
             None,
             1_000_000.0,
             1e-6,
         ),
         "qwen/qwen3-235b-a22b" => qwen3_moe_preset(
-            4096,
-            94,
-            64,
-            4,
-            12288,
-            151936,
-            40960,
-            128,
-            8,
+            4096,   // hidden_size
+            94,     // layers
+            64,     // heads
+            4,      // kv_heads
+            128,    // head_dim (explicit, non-standard: 64*128=8192 != 4096)
+            12288,  // intermediate
+            151936, // vocab
+            40960,  // max_pos
+            128,    // num_experts
+            8,      // num_experts_per_tok
             Some(1536),
             1_000_000.0,
             1e-6,
@@ -991,6 +993,7 @@ fn qwen3_moe_preset(
     layers: usize,
     heads: usize,
     kv_heads: usize,
+    head_dim: usize, // Explicit head_dim (Qwen3-MoE uses non-standard head_dim)
     intermediate: usize,
     vocab: usize,
     max_pos: usize,
@@ -1000,7 +1003,6 @@ fn qwen3_moe_preset(
     rope_theta: f64,
     rms_norm_eps: f64,
 ) -> ModelConfig {
-    let head_dim = hidden_size / heads;
     let mut config = decoder_generation_preset(
         hidden_size,
         layers,

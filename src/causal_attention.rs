@@ -18,6 +18,7 @@ pub struct CausalAttention<B: Backend> {
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
+    #[allow(dead_code)] // Used for documentation/debugging
     hidden_size: usize,
     sliding_window: Option<usize>,
     device: B::Device,
@@ -132,9 +133,12 @@ impl<B: Backend> CausalAttention<B> {
         let v = self.repeat_kv(v);
 
         let context = self.attend(q, k, v, position_offset, seq_len);
+        // Reshape to [batch, seq, num_heads * head_dim] for o_proj
+        // Note: For models like Qwen3-MoE, num_heads * head_dim != hidden_size
+        let attn_out_dim = self.num_attention_heads * self.head_dim;
         let context = context
             .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, self.hidden_size]);
+            .reshape([batch_size, seq_len, attn_out_dim]);
 
         self.o_proj.forward(context)
     }
@@ -177,9 +181,11 @@ impl<B: Backend> CausalAttention<B> {
 
         let key_len = k.dims()[2];
         let context = self.attend(q, k, v, position_offset, key_len);
+        // Reshape to [batch, seq, num_heads * head_dim] for o_proj
+        let attn_out_dim = self.num_attention_heads * self.head_dim;
         let context = context
             .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, self.hidden_size]);
+            .reshape([batch_size, seq_len, attn_out_dim]);
 
         self.o_proj.forward(context)
     }
