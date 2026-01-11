@@ -15,7 +15,19 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::OnceLock;
 use tokenizers::Tokenizer;
+
+/// Global singleton wgpu device to prevent multiple device creation and cleanup race conditions.
+/// All wgpu backends share this single device instance.
+static WGPU_DEVICE: OnceLock<<Wgpu<f32> as Backend>::Device> = OnceLock::new();
+
+/// Get or create the global wgpu device singleton.
+fn get_wgpu_device() -> <Wgpu<f32> as Backend>::Device {
+    WGPU_DEVICE
+        .get_or_init(|| <Wgpu<f32> as Backend>::Device::default())
+        .clone()
+}
 
 pub(crate) const MAX_SEQ_LEN: usize = 512;
 
@@ -578,28 +590,8 @@ impl EngineBackend {
     }
 }
 
-impl Drop for EngineBackend {
-    fn drop(&mut self) {
-        // Explicit cleanup for wgpu backend to avoid SIGSEGV on exit
-        // Uses retry logic with increasing delays to ensure GPU cleanup threads complete
-        if matches!(self, EngineBackend::Wgpu { .. } | EngineBackend::GeneratorWgpu { .. }) {
-            log::debug!("Starting wgpu EngineBackend cleanup (retry strategy)");
-
-            // Retry strategy: Multiple shorter sleeps instead of one long sleep
-            // This allows GPU cleanup threads to checkpoint progress multiple times
-            let retry_attempts = 5;
-            let delays = [50, 100, 150, 200, 300]; // milliseconds per attempt
-
-            for (attempt, &delay_ms) in delays.iter().enumerate() {
-                log::debug!("wgpu cleanup attempt {}/{}: {}ms delay",
-                    attempt + 1, retry_attempts, delay_ms);
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            }
-
-            log::debug!("wgpu EngineBackend cleanup completed (total delay: 800ms)");
-        }
-    }
-}
+// Note: EngineBackend no longer needs custom Drop since all wgpu backends share
+// the global WGPU_DEVICE singleton. The device is only dropped on process exit.
 
 /// Embedding-only engine backend.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
@@ -637,6 +629,9 @@ impl RerankingBackend {
     }
 }
 
+// Note: EmbeddingBackend and RerankingBackend no longer need custom Drop
+// since all wgpu backends share the global WGPU_DEVICE singleton.
+
 /// Build an embedding-only backend according to device preference.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_embedding_backend(
@@ -671,7 +666,7 @@ pub(crate) fn build_embedding_backend(
         } else {
             // GPU is available, proceed with initialization
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                let wgpu_device = get_wgpu_device();
                 EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info)
             });
 
@@ -750,7 +745,7 @@ pub(crate) fn build_rerank_backend(
             );
         } else {
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                let wgpu_device = get_wgpu_device();
                 RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
             });
 
@@ -822,7 +817,7 @@ pub(crate) fn build_generator_backend(
             );
         } else {
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                let wgpu_device = get_wgpu_device();
                 GeneratorEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info).ok()
             });
 
@@ -879,7 +874,7 @@ pub(crate) fn build_backend(
     // Priority 1: Try GPU (Wgpu)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let init = std::panic::catch_unwind(|| {
-            let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+            let wgpu_device = get_wgpu_device();
             let embedding =
                 EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir, info);
             let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir);
