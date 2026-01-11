@@ -10,8 +10,10 @@
 
 - **Text Embeddings** - Convert text into high-dimensional vectors for semantic search
 - **Document Reranking** - Sort documents by relevance using cross-encoders
+- **Code Embeddings** - Specialized models for code semantic similarity (CodeXEmbed)
 - **GPU Acceleration** - WGPU backend with automatic GPU/CPU fallback
-- **35 Built-in Models** - BGE, E5, Sentence Transformers, Qwen3, JINA, and more
+- **40+ Built-in Models** - BGE, E5, Sentence Transformers, Qwen3, JINA, CodeXEmbed, and more
+- **Encoder & Decoder Architectures** - BERT-style encoders and Qwen2/Mistral-style decoders
 - **Quantization Support** - Int4/Int8/AWQ/GPTQ/GGUF for Qwen3 series
 - **Pure Rust** - Static compilation ready, no C dependencies
 
@@ -19,7 +21,7 @@
 
 ```toml
 [dependencies]
-gllm = "0.4"
+gllm = "0.5"
 ```
 
 ### Feature Flags
@@ -145,31 +147,79 @@ let embedder = FallbackEmbedder::new("bge-small-en").await?;
 let vector = embedder.embed("Hello world").await?;
 ```
 
+### Code Embeddings (v0.5.0+)
+
+CodeXEmbed models are optimized for code semantic similarity, outperforming Voyage-Code by 20%+ on CoIR benchmark.
+
+```rust
+use gllm::Client;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // CodeXEmbed-400M (1024 dimensions, BERT-based)
+    let client = Client::new("codexembed-400m")?;
+
+    let code_snippets = [
+        "fn add(a: i32, b: i32) -> i32 { a + b }",
+        "def add(a, b): return a + b",
+        "function add(a, b) { return a + b; }",
+    ];
+
+    let response = client.embeddings(code_snippets).generate()?;
+
+    // All 3 add functions will have high similarity scores
+    for emb in response.embeddings {
+        println!("Vector: {} dimensions", emb.embedding.len());
+    }
+    Ok(())
+}
+```
+
+For larger models with higher accuracy:
+
+```rust
+// CodeXEmbed-2B (1536 dimensions, Qwen2-based decoder)
+let client = Client::new("codexembed-2b")?;
+
+// CodeXEmbed-7B (4096 dimensions, Mistral-based decoder)
+let client = Client::new("codexembed-7b")?;
+```
+
 ## Supported Models
 
-### Embedding Models (23)
+### Embedding Models (27)
 
-| Model | Alias | Dimensions | Best For |
-|-------|-------|------------|----------|
-| BGE Small EN | `bge-small-en` | 384 | Fast English |
-| BGE Base EN | `bge-base-en` | 768 | Balanced English |
-| BGE Large EN | `bge-large-en` | 1024 | High accuracy |
-| BGE Small ZH | `bge-small-zh` | 512 | Chinese |
-| E5 Small | `e5-small` | 384 | Instruction tuned |
-| E5 Base | `e5-base` | 768 | Instruction tuned |
-| E5 Large | `e5-large` | 1024 | Instruction tuned |
-| MiniLM L6 | `all-MiniLM-L6-v2` | 384 | General purpose |
-| MiniLM L12 | `all-MiniLM-L12-v2` | 384 | General (larger) |
-| MPNet Base | `all-mpnet-base-v2` | 768 | High quality |
-| JINA v2 Base | `jina-embeddings-v2-base-en` | 768 | Modern arch |
-| JINA v2 Small | `jina-embeddings-v2-small-en` | 384 | Lightweight |
-| JINA v4 | `jina-embeddings-v4` | 2048 | Latest JINA |
-| Qwen3 0.6B | `qwen3-embedding-0.6b` | 1024 | Lightweight |
-| Qwen3 4B | `qwen3-embedding-4b` | 2560 | Balanced |
-| Qwen3 8B | `qwen3-embedding-8b` | 4096 | High accuracy |
-| Nemotron 8B | `llama-embed-nemotron-8b` | 4096 | State-of-the-art |
-| M3E Base | `m3e-base` | 768 | Chinese quality |
-| Multilingual | `multilingual-MiniLM-L12-v2` | 384 | 50+ languages |
+| Model | Alias | Dimensions | Architecture | Best For |
+|-------|-------|------------|--------------|----------|
+| BGE Small EN | `bge-small-en` | 384 | Encoder | Fast English |
+| BGE Base EN | `bge-base-en` | 768 | Encoder | Balanced English |
+| BGE Large EN | `bge-large-en` | 1024 | Encoder | High accuracy |
+| BGE Small ZH | `bge-small-zh` | 512 | Encoder | Chinese |
+| E5 Small | `e5-small` | 384 | Encoder | Instruction tuned |
+| E5 Base | `e5-base` | 768 | Encoder | Instruction tuned |
+| E5 Large | `e5-large` | 1024 | Encoder | Instruction tuned |
+| MiniLM L6 | `all-MiniLM-L6-v2` | 384 | Encoder | General purpose |
+| MiniLM L12 | `all-MiniLM-L12-v2` | 384 | Encoder | General (larger) |
+| MPNet Base | `all-mpnet-base-v2` | 768 | Encoder | High quality |
+| JINA v2 Base | `jina-embeddings-v2-base-en` | 768 | Encoder | Modern arch |
+| JINA v2 Small | `jina-embeddings-v2-small-en` | 384 | Encoder | Lightweight |
+| JINA v4 | `jina-embeddings-v4` | 2048 | Encoder | Latest JINA |
+| Qwen3 0.6B | `qwen3-embedding-0.6b` | 1024 | Encoder | Lightweight |
+| Qwen3 4B | `qwen3-embedding-4b` | 2560 | Encoder | Balanced |
+| Qwen3 8B | `qwen3-embedding-8b` | 4096 | Encoder | High accuracy |
+| Nemotron 8B | `llama-embed-nemotron-8b` | 4096 | Encoder | State-of-the-art |
+| M3E Base | `m3e-base` | 768 | Encoder | Chinese quality |
+| Multilingual | `multilingual-MiniLM-L12-v2` | 384 | Encoder | 50+ languages |
+
+### Code Embedding Models (4) - NEW in v0.5.0
+
+| Model | Alias | Dimensions | Architecture | Best For |
+|-------|-------|------------|--------------|----------|
+| CodeXEmbed 400M | `codexembed-400m` | 1024 | Encoder (BERT) | Fast code search |
+| CodeXEmbed 2B | `codexembed-2b` | 1536 | Decoder (Qwen2) | Balanced code |
+| CodeXEmbed 7B | `codexembed-7b` | 4096 | Decoder (Mistral) | High accuracy code |
+| GraphCodeBERT | `graphcodebert-base` | 768 | Encoder | Legacy code |
+
+> **CodeXEmbed** (SFR-Embedding-Code) is the 2024 state-of-the-art for code embedding, outperforming Voyage-Code by 20%+ on CoIR benchmark.
 
 ### Reranking Models (12)
 

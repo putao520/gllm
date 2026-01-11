@@ -20,6 +20,10 @@ pub enum Architecture {
     Bert,
     /// Cross-encoder architecture.
     CrossEncoder,
+    /// Qwen2 embedding decoder.
+    Qwen2Embedding,
+    /// Mistral embedding decoder.
+    MistralEmbedding,
     /// Qwen3 embedding encoder.
     Qwen3Embedding,
     /// Qwen3 cross-encoder reranker.
@@ -211,11 +215,20 @@ impl ModelRegistry {
             ("multilingual-MiniLM-L12-v2", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
             ("distiluse-base-multilingual-cased-v1", "sentence-transformers/distiluse-base-multilingual-cased-v1", ModelType::Embedding, Architecture::Bert, false),
 
-            // Code Models
+            // Code Models (Legacy - BERT-based)
             ("codebert-base", "claudios/codebert-base", ModelType::Embedding, Architecture::Bert, false),
             ("starencoder", "bigcode/starencoder", ModelType::Embedding, Architecture::Bert, false),
             ("graphcodebert-base", "claudios/graphcodebert-base", ModelType::Embedding, Architecture::Bert, false),
             ("unixcoder-base", "claudios/unixcoder-base", ModelType::Embedding, Architecture::Bert, false),
+
+            // Code Models (2024 SOTA - CodeXEmbed / SFR-Embedding-Code)
+            // CoIR benchmark SOTA: outperforms Voyage-Code by 20%+
+            ("codexembed-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert, false),
+            ("sfr-embedding-code-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert, false),
+            ("codexembed-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding, false),
+            ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding, false),
+            ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding, false),
+            ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding, false),
 
             // Light Models for Edge Devices
             ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
@@ -358,7 +371,13 @@ impl ModelRegistry {
             ModelType::Embedding
         };
 
-        let architecture = if lower.contains("qwen3") || lower.contains("qwen-3") {
+        let architecture = if lower.contains("sfr-embedding-code-2b")
+            || lower.contains("codexembed-2b")
+        {
+            Architecture::Qwen2Embedding
+        } else if lower.contains("sfr-embedding-code-7b") || lower.contains("codexembed-7b") {
+            Architecture::MistralEmbedding
+        } else if lower.contains("qwen3") || lower.contains("qwen-3") {
             match model_type {
                 ModelType::Embedding => Architecture::Qwen3Embedding,
                 ModelType::Rerank => Architecture::Qwen3Reranker,
@@ -487,6 +506,10 @@ mod tests {
             ("qwen3-embedding-0.6b", "Qwen/Qwen3-Embedding-0.6B", ModelType::Embedding, Architecture::Qwen3Embedding),
             ("qwen3-embedding-4b", "Qwen/Qwen3-Embedding-4B", ModelType::Embedding, Architecture::Qwen3Embedding),
             ("qwen3-embedding-8b", "Qwen/Qwen3-Embedding-8B", ModelType::Embedding, Architecture::Qwen3Embedding),
+            ("codexembed-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
+            ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
+            ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
+            ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
             ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker),
             ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker),

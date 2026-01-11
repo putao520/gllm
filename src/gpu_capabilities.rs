@@ -195,6 +195,9 @@ fn detect_gpu_capabilities_impl() -> GpuCapabilities {
 }
 
 /// Detect GPU capabilities using wgpu.
+///
+/// This function actually requests a wgpu Device to verify GPU availability.
+/// This catches OOM errors that would otherwise panic during burn/cubecl initialization.
 #[cfg(feature = "wgpu-detect")]
 fn detect_wgpu_basic() -> Result<GpuCapabilities, String> {
     use wgpu::{DeviceType, Instance, InstanceDescriptor};
@@ -223,14 +226,41 @@ fn detect_wgpu_basic() -> Result<GpuCapabilities, String> {
         DeviceType::Other => GpuType::Unknown,
     };
 
+    // CRITICAL: Actually request a device to verify GPU is usable
+    // This catches OOM errors that would otherwise panic in cubecl-wgpu's .unwrap()
+    // The panic happens in burn/cubecl initialization, which can't be caught with
+    // panic=abort in release builds.
+    let device_result = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("gllm-gpu-probe"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+        },
+    ));
+
+    let gpu_available = match device_result {
+        Ok(_device) => {
+            log::debug!("gllm: GPU device probe successful for {}", info.name);
+            gpu_type != GpuType::Cpu
+        }
+        Err(e) => {
+            log::warn!("gllm: GPU device probe failed for {}: {} - will use CPU fallback",
+                info.name, e);
+            false
+        }
+    };
+
     // Get VRAM estimate from device name
     let vram_mb = estimate_vram_from_name(&info.name);
 
     let recommended_batch_size = calculate_default_batch_size(gpu_type, vram_mb);
 
-    let backend_name = match gpu_type {
-        GpuType::Cpu => "ndarray",
-        _ => "wgpu",
+    let backend_name = if gpu_available {
+        "wgpu"
+    } else {
+        "ndarray"
     };
 
     Ok(GpuCapabilities {
@@ -238,7 +268,7 @@ fn detect_wgpu_basic() -> Result<GpuCapabilities, String> {
         name: info.name.clone(),
         vram_mb,
         recommended_batch_size,
-        gpu_available: gpu_type != GpuType::Cpu,
+        gpu_available,
         backend_name,
     })
 }

@@ -9,6 +9,8 @@ pub enum BertVariant {
     DistilBert,
     Electra,
     Albert,
+    /// GTE/CodeXEmbed models with RoPE and LastToken pooling.
+    Gte,
     Unknown,
 }
 
@@ -20,6 +22,24 @@ impl BertVariant {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
+
+        // Check for GTE/CodeXEmbed models (use RoPE position embeddings)
+        let is_rope = config
+            .position_embedding_type
+            .as_ref()
+            .map_or(false, |t| t == "rope" || t == "rotary");
+
+        // Check architectures for NewModel (GTE/CodeXEmbed signature)
+        let is_new_model = config
+            .architectures
+            .as_ref()
+            .map_or(false, |arches| {
+                arches.iter().any(|arch| arch.contains("NewModel"))
+            });
+
+        if is_rope || is_new_model || ty.contains("new") || ty.contains("gte") {
+            return BertVariant::Gte;
+        }
 
         if ty.contains("roberta") {
             BertVariant::Roberta
@@ -70,6 +90,7 @@ impl BertVariant {
         match self {
             BertVariant::Roberta => 1,
             BertVariant::DistilBert => 0,
+            BertVariant::Gte => 2, // GTE/CodeXEmbed uses type_vocab_size=2
             _ => 2,
         }
     }
@@ -82,6 +103,7 @@ impl BertVariant {
                 "max" => return PoolingStrategy::Max,
                 "last" | "last_token" => return PoolingStrategy::LastToken,
                 "weighted_mean" => return PoolingStrategy::WeightedMean,
+                "mean" => return PoolingStrategy::Mean,
                 _ => {}
             }
         }
@@ -89,6 +111,8 @@ impl BertVariant {
         match self {
             BertVariant::Bert | BertVariant::Roberta | BertVariant::Albert => PoolingStrategy::Cls,
             BertVariant::DistilBert | BertVariant::Electra => PoolingStrategy::Mean,
+            // GTE/CodeXEmbed models use LastToken pooling for code embeddings
+            BertVariant::Gte => PoolingStrategy::LastToken,
             BertVariant::Unknown => PoolingStrategy::Mean,
         }
     }

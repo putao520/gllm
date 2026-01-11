@@ -20,7 +20,10 @@
 //! ```
 
 mod bert_variants;
+pub mod causal_attention;
 mod client;
+pub mod decoder_layer;
+pub mod decoder_model;
 mod dynamic_bert;
 mod embeddings;
 mod engine;
@@ -34,6 +37,8 @@ mod performance_optimizer;
 mod pooling;
 mod registry;
 mod rerank;
+mod rope;
+pub mod rms_norm;
 mod types;
 
 pub use client::Client;

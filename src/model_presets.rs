@@ -266,6 +266,8 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             0.1,
             0.1,
         ),
+        "salesforce/sfr-embedding-code-2b_r" => codex_embed_qwen2_preset(),
+        "salesforce/sfr-embedding-code-7b_r" => codex_embed_mistral_preset(),
 
         // E5 Models
         repo if repo.starts_with("intfloat/e5-small") => preset(
@@ -628,6 +630,98 @@ fn qwen3_embedding_preset(
     }
 }
 
+fn codex_embed_qwen2_preset() -> ModelConfig {
+    decoder_embedding_preset(
+        1536,
+        28,
+        12,
+        2,
+        128,
+        8960,
+        131072,
+        151936,
+        1_000_000.0,
+        1e-6,
+        None,
+        "qwen2",
+        &["Qwen2ForCausalLM"],
+    )
+}
+
+fn codex_embed_mistral_preset() -> ModelConfig {
+    decoder_embedding_preset(
+        4096,
+        32,
+        32,
+        8,
+        128,
+        14336,
+        32768,
+        32000,
+        10_000.0,
+        1e-5,
+        Some(4096),
+        "mistral",
+        &["MistralForCausalLM"],
+    )
+}
+
+fn decoder_embedding_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate: usize,
+    max_pos: usize,
+    vocab: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+    sliding_window: Option<usize>,
+    model_type: &str,
+    architectures: &[&str],
+) -> ModelConfig {
+    ModelConfig {
+        architectures: Some(architectures.iter().map(|s| s.to_string()).collect()),
+        model_type: Some(model_type.to_string()),
+        hidden_size,
+        num_hidden_layers: layers,
+        num_attention_heads: heads,
+        num_key_value_heads: Some(kv_heads),
+        head_dim: Some(head_dim),
+        vocab_size: vocab,
+        max_position_embeddings: max_pos,
+        attention_probs_dropout_prob: Some(0.0),
+        hidden_dropout_prob: Some(0.0),
+        intermediate_size: Some(intermediate),
+        max_batch_size: None,
+        memory_limit_mb: None,
+        gpu_memory_fraction: None,
+        hidden_act: Some("silu".to_string()),
+        initializer_range: None,
+        layer_norm_eps: None,
+        rms_norm_eps: Some(rms_norm_eps),
+        rope_theta: Some(rope_theta),
+        rope_scaling: None,
+        sliding_window,
+        use_cache: Some(true),
+        position_embedding_type: Some("rope".to_string()),
+        pooler_hidden_act: None,
+        pooler_dropout: None,
+        pooling_type: Some("last_token".to_string()),
+        num_labels: None,
+        classifier_dropout: None,
+        tie_word_embeddings: Some(true),
+        is_decoder: Some(true),
+        cross_attention_hidden_size: None,
+        pad_token_id: Some(0),
+        bos_token_id: None,
+        eos_token_id: None,
+        type_vocab_size: Some(1),
+        extra: Value::Object(Map::new()),
+    }
+}
+
 fn qwen3_reranker_preset(
     hidden_size: usize,
     layers: usize,
@@ -890,6 +984,8 @@ mod tests {
             "qwen/qwen3-embedding-0.6b",
             "qwen/qwen3-embedding-4b",
             "qwen/qwen3-embedding-8b",
+            "salesforce/sfr-embedding-code-2b_r",
+            "salesforce/sfr-embedding-code-7b_r",
             "baai/bge-reranker-v2-m3",
             "baai/bge-reranker-large",
             "baai/bge-reranker-base",
@@ -956,6 +1052,31 @@ mod tests {
         assert_eq!(cfg.num_attention_heads, 32);
         assert_eq!(cfg.num_key_value_heads, Some(8));
         assert_eq!(cfg.intermediate_size, Some(14336));
+    }
+
+    #[test]
+    fn codex_embed_presets_match_spec() {
+        let cfg = model_defaults("salesforce/sfr-embedding-code-2b_r");
+        assert_eq!(cfg.hidden_size, 1536);
+        assert_eq!(cfg.num_hidden_layers, 28);
+        assert_eq!(cfg.num_attention_heads, 12);
+        assert_eq!(cfg.num_key_value_heads, Some(2));
+        assert_eq!(cfg.intermediate_size, Some(8960));
+        assert_eq!(cfg.rope_theta, Some(1_000_000.0));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-6));
+        assert_eq!(cfg.pooling_type.as_deref(), Some("last_token"));
+        assert_eq!(cfg.is_decoder, Some(true));
+
+        let cfg = model_defaults("salesforce/sfr-embedding-code-7b_r");
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.intermediate_size, Some(14336));
+        assert_eq!(cfg.sliding_window, Some(4096));
+        assert_eq!(cfg.rms_norm_eps, Some(1e-5));
+        assert_eq!(cfg.pooling_type.as_deref(), Some("last_token"));
+        assert_eq!(cfg.is_decoder, Some(true));
     }
 
     #[test]

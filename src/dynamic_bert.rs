@@ -2,6 +2,7 @@ use crate::bert_variants::BertVariant;
 use crate::model_config::ModelConfig;
 use crate::performance_optimizer::PerformanceOptimizer;
 use crate::pooling::{DynamicPooler, PoolingConfig, PoolingStrategy};
+use crate::rope::{RopeConfig, RotaryPositionEmbedding};
 use crate::types::{Error, Result};
 use burn::nn::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
 use burn::nn::{
@@ -107,11 +108,25 @@ impl<B: Backend> DynamicBertEncoder<B> {
     }
 }
 
+/// Position embedding type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PositionEmbeddingType {
+    /// Standard absolute position embeddings (BERT-style).
+    Absolute,
+    /// Rotary Position Embedding (RoPE).
+    Rope,
+}
+
 /// Dynamic BERT model that can be configured based on HuggingFace config.
 #[derive(Clone)]
 pub struct DynamicBertModel<B: Backend> {
     embeddings: Embedding<B>,
-    position_embeddings: Embedding<B>,
+    /// Absolute position embeddings (used when position_type is Absolute).
+    position_embeddings: Option<Embedding<B>>,
+    /// RoPE embeddings (used when position_type is Rope).
+    rope: Option<RotaryPositionEmbedding<B>>,
+    /// Position embedding type.
+    position_type: PositionEmbeddingType,
     token_type_embeddings: Option<Embedding<B>>,
     encoder: DynamicBertEncoder<B>,
     embedding_layernorm: LayerNorm<B>,
@@ -133,8 +148,37 @@ impl<B: Backend> DynamicBertModel<B> {
         let max_pos = config.max_position_embeddings;
         let type_vocab_size = variant.type_vocab_size(&config);
 
+        // Detect position embedding type from config
+        let position_type = match config.position_embedding_type.as_deref() {
+            Some("rope") | Some("rotary") => PositionEmbeddingType::Rope,
+            _ => PositionEmbeddingType::Absolute,
+        };
+
         let embeddings = EmbeddingConfig::new(vocab_size, hidden_size).init(device);
-        let position_embeddings = EmbeddingConfig::new(max_pos, hidden_size).init(device);
+
+        // Create position embeddings based on type
+        let (position_embeddings, rope) = match position_type {
+            PositionEmbeddingType::Absolute => {
+                let pos_emb = EmbeddingConfig::new(max_pos, hidden_size).init(device);
+                (Some(pos_emb), None)
+            }
+            PositionEmbeddingType::Rope => {
+                // Extract NTK scaling factor if present
+                let ntk_factor = config.rope_scaling.as_ref().and_then(|scaling| {
+                    scaling.get("factor").and_then(|v| v.as_f64())
+                });
+
+                let rope_config = RopeConfig {
+                    theta: config.rope_theta.unwrap_or(10000.0),
+                    dim: hidden_size,
+                    max_seq_len: max_pos,
+                    ntk_factor,
+                };
+                let rope_emb = RotaryPositionEmbedding::new(device, rope_config);
+                (None, Some(rope_emb))
+            }
+        };
+
         let token_type_embeddings = (type_vocab_size > 0)
             .then(|| EmbeddingConfig::new(type_vocab_size, hidden_size).init(device));
 
@@ -157,6 +201,8 @@ impl<B: Backend> DynamicBertModel<B> {
         Ok(Self {
             embeddings,
             position_embeddings,
+            rope,
+            position_type,
             token_type_embeddings,
             encoder,
             embedding_layernorm,
@@ -183,14 +229,29 @@ impl<B: Backend> DynamicBertModel<B> {
         // Trigger optimizer logic for telemetry; currently not enforced.
         let _ = self.optimizer.optimize_batch_size(seq_len);
 
-        let position_ids = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &self.device)
-            .reshape([1, seq_len])
-            .repeat(&[batch_size, 1]);
+        // Get token embeddings
+        let mut embeddings = self.embeddings.forward(input_ids);
 
-        let token_embeddings = self.embeddings.forward(input_ids);
-        let position_embeddings = self.position_embeddings.forward(position_ids);
+        // Apply position embeddings based on type
+        match self.position_type {
+            PositionEmbeddingType::Absolute => {
+                if let Some(pos_emb) = &self.position_embeddings {
+                    let position_ids = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &self.device)
+                        .reshape([1, seq_len])
+                        .repeat(&[batch_size, 1]);
+                    embeddings = embeddings + pos_emb.forward(position_ids);
+                }
+            }
+            PositionEmbeddingType::Rope => {
+                // RoPE is applied in the attention layer, but we can optionally
+                // apply it to embeddings for simplified encoder-only models
+                if let Some(rope) = &self.rope {
+                    embeddings = rope.apply_to_hidden_states(embeddings, 0);
+                }
+            }
+        }
 
-        let mut embeddings = token_embeddings + position_embeddings;
+        // Add token type embeddings if present
         if let Some(token_type_embeddings) = &self.token_type_embeddings {
             let token_type_ids = Tensor::<B, 2, Int>::zeros([batch_size, seq_len], &self.device);
             embeddings = embeddings + token_type_embeddings.forward(token_type_ids);

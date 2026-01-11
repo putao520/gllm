@@ -1,5 +1,6 @@
 use crate::engine::{build_embedding_backend, build_rerank_backend, TokenizerAdapter, MAX_SEQ_LEN};
 use crate::model::ModelManager;
+use crate::registry::ModelInfo;
 use crate::types::{ClientConfig, Device, Error, RerankResponse, RerankResult, Result};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -113,19 +114,22 @@ impl Drop for ShutdownGuard {
 }
 
 /// Prepare model artifacts and return model directory.
-fn prepare_model(model: &str) -> Result<(std::path::PathBuf, TokenizerAdapter)> {
+fn prepare_model(model: &str) -> Result<(std::path::PathBuf, TokenizerAdapter, ModelInfo)> {
     let manager = ModelManager::new(ClientConfig::default());
     let artifacts = manager.prepare(model)?;
     let tokenizer = artifacts.tokenizer.clone();
-    Ok((artifacts.model_dir, tokenizer))
+    Ok((artifacts.model_dir, tokenizer, artifacts.info.clone()))
 }
 
 /// Prepare model artifacts with specified device.
-fn prepare_model_with_device(model: &str, device: Device) -> Result<(std::path::PathBuf, TokenizerAdapter, Device)> {
+fn prepare_model_with_device(
+    model: &str,
+    device: Device,
+) -> Result<(std::path::PathBuf, TokenizerAdapter, Device, ModelInfo)> {
     let manager = ModelManager::new(ClientConfig::default());
     let artifacts = manager.prepare(model)?;
     let tokenizer = artifacts.tokenizer.clone();
-    Ok((artifacts.model_dir, tokenizer, device))
+    Ok((artifacts.model_dir, tokenizer, device, artifacts.info.clone()))
 }
 
 /// Tokenize texts for embedding.
@@ -241,7 +245,7 @@ fn embedder_loop(model: String, receiver: EmbedReceiver, ready: mpsc::Sender<Res
 #[cfg(not(feature = "tokio"))]
 fn embedder_loop_with_device(model: String, device: Device, receiver: EmbedReceiver, ready: mpsc::Sender<Result<()>>) {
     // Prepare model and build embedding-only backend
-    let (model_dir, tokenizer) = match prepare_model(&model) {
+    let (model_dir, tokenizer, info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -249,7 +253,7 @@ fn embedder_loop_with_device(model: String, device: Device, receiver: EmbedRecei
         }
     };
 
-    let engine = match build_embedding_backend(&model_dir, &device) {
+    let engine = match build_embedding_backend(&info, &model_dir, &device) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine
@@ -351,7 +355,7 @@ fn start_reranker_actor(model: String) -> Result<(RerankSender, ShutdownGuard)> 
 #[cfg(not(feature = "tokio"))]
 fn reranker_loop(model: String, receiver: RerankReceiver, ready: mpsc::Sender<Result<()>>) {
     // Prepare model and build rerank-only backend
-    let (model_dir, tokenizer) = match prepare_model(&model) {
+    let (model_dir, tokenizer, _info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -517,7 +521,7 @@ fn embedder_loop_async_with_device(
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) {
     // Prepare model and build embedding-only backend
-    let (model_dir, tokenizer) = match prepare_model(&model) {
+    let (model_dir, tokenizer, info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -525,7 +529,7 @@ fn embedder_loop_async_with_device(
         }
     };
 
-    let engine = match build_embedding_backend(&model_dir, &device) {
+    let engine = match build_embedding_backend(&info, &model_dir, &device) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine
@@ -636,7 +640,7 @@ fn reranker_loop_async(
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) {
     // Prepare model and build rerank-only backend
-    let (model_dir, tokenizer) = match prepare_model(&model) {
+    let (model_dir, tokenizer, _info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));

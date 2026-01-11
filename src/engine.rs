@@ -1,6 +1,7 @@
+use crate::decoder_model::DecoderModel;
 use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
 use crate::model_config::ModelConfig;
-use crate::registry::ModelInfo;
+use crate::registry::{Architecture, ModelInfo};
 use crate::types::{Device, Error, Result};
 use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
@@ -243,15 +244,51 @@ impl TokenizerAdapter {
     }
 }
 
+#[derive(Clone)]
+enum EmbeddingModel<B: Backend> {
+    Encoder(DynamicBertModel<B>),
+    Decoder(DecoderModel<B>),
+}
+
+impl<B: Backend> EmbeddingModel<B> {
+    fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Result<Tensor<B, 2>> {
+        match self {
+            EmbeddingModel::Encoder(model) => {
+                let hidden_states = model.forward(input_ids)?;
+                Ok(model.pool_hidden_states(hidden_states))
+            }
+            EmbeddingModel::Decoder(model) => {
+                let hidden_states = model.forward(input_ids.clone())?;
+                model.pool_hidden_states(hidden_states, input_ids)
+            }
+        }
+    }
+
+    fn hidden_size(&self) -> usize {
+        match self {
+            EmbeddingModel::Encoder(model) => model.hidden_size(),
+            EmbeddingModel::Decoder(model) => model.hidden_size(),
+        }
+    }
+
+    fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        match self {
+            EmbeddingModel::Encoder(model) => model.load_safetensors(safetensors_path),
+            EmbeddingModel::Decoder(model) => model.load_safetensors(safetensors_path),
+        }
+    }
+}
+
 /// Embedding encoder built with dynamic BERT model.
 #[derive(Clone)]
 pub(crate) struct EmbeddingEngine<B: Backend> {
-    model: DynamicBertModel<B>,
+    model: EmbeddingModel<B>,
     device: B::Device,
+    pad_id: i64,
 }
 
 impl<B: Backend> EmbeddingEngine<B> {
-    pub fn new(device: B::Device, model_dir: &Path) -> Result<Self> {
+    pub fn new(device: B::Device, model_dir: &Path, info: &ModelInfo) -> Result<Self> {
         // Load model configuration
         let config_path = model_dir.join("config.json");
         let repo_name = model_dir
@@ -261,9 +298,14 @@ impl<B: Backend> EmbeddingEngine<B> {
             .replace("--", "/");
         let config_file = config_path.exists().then_some(config_path.as_path());
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
+        let pad_id = config.pad_token_id.unwrap_or(0);
 
-        // Create dynamic BERT model
-        let mut model = DynamicBertModel::new(&device, config)?;
+        let mut model = match info.architecture {
+            Architecture::Qwen2Embedding | Architecture::MistralEmbedding => {
+                EmbeddingModel::Decoder(DecoderModel::new(&device, config)?)
+            }
+            _ => EmbeddingModel::Encoder(DynamicBertModel::new(&device, config)?),
+        };
 
         // Load weights if available
         let safetensors_path = model_dir.join("model.safetensors");
@@ -271,7 +313,11 @@ impl<B: Backend> EmbeddingEngine<B> {
             model.load_safetensors(&safetensors_path)?;
         }
 
-        Ok(Self { model, device })
+        Ok(Self {
+            model,
+            device,
+            pad_id,
+        })
     }
 
     pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
@@ -288,7 +334,7 @@ impl<B: Backend> EmbeddingEngine<B> {
         let mut flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
         for item in tokens {
             let mut padded = item.clone();
-            padded.resize(seq_len, 0); // pad with 0 (PAD token)
+            padded.resize(seq_len, self.pad_id);
             flat.extend_from_slice(&padded);
         }
 
@@ -296,9 +342,8 @@ impl<B: Backend> EmbeddingEngine<B> {
         let token_tensor =
             Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [batch, seq_len]), &self.device);
 
-        // Forward pass through BERT
-        let hidden_states = self.model.forward(token_tensor)?;
-        let pooled = self.model.pool_hidden_states(hidden_states);
+        // Forward pass through embedding model
+        let pooled = self.model.forward(token_tensor)?;
 
         let data = pooled
             .into_data()
@@ -492,45 +537,60 @@ impl RerankingBackend {
 /// Build an embedding-only backend according to device preference.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_embedding_backend(
+    info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EmbeddingBackend> {
+    use crate::gpu_capabilities::GpuCapabilities;
+
     let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
 
     // Test mode: use pure Rust NdArray backend
     if prefer_cpu {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(EmbeddingBackend::NdArray(embedding));
     }
 
     // Priority 1: Try GPU (Wgpu)
-    // Supports concurrent model loading; if VRAM is insufficient, initialization will fail
-    // or panic, triggering the fallback to CPU (Candle).
+    // CRITICAL: Pre-check GPU availability using wgpu-detect feature.
+    // This detects OOM errors BEFORE calling burn/cubecl, which would panic
+    // with .unwrap() in cubecl-wgpu. The panic can't be caught when panic=abort.
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let init = std::panic::catch_unwind(|| {
-            let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
-            EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir)
-        });
+        // GpuCapabilities::detect() actually calls request_device() to verify GPU works
+        let gpu_caps = GpuCapabilities::detect();
 
-        match init {
-            Ok(Ok(engine)) => {
-                // Step 2: Verify GPU compute actually works by running a test embedding
-                // This catches "Encoder is invalid" errors that only occur during real GPU work
-                let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // Run a minimal embedding to verify GPU compute works
-                    let test_tokens = vec![vec![101i64, 7592, 102]]; // [CLS] hello [SEP]
-                    engine.embed(&test_tokens)
-                }));
+        if !gpu_caps.is_gpu_available() {
+            log::warn!(
+                "GPU (Wgpu) pre-check failed: {} not usable, skipping GPU initialization",
+                gpu_caps.name
+            );
+        } else {
+            // GPU is available, proceed with initialization
+            let init = std::panic::catch_unwind(|| {
+                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info)
+            });
 
-                match compute_test {
-                    Ok(Ok(_)) => return Ok(EmbeddingBackend::Wgpu(engine)),
-                    Ok(Err(e)) => log::warn!("GPU (Wgpu) compute test failed: {}, falling back to CPU", e),
-                    Err(_) => log::warn!("GPU (Wgpu) compute test panicked (Encoder invalid?), falling back to CPU"),
+            match init {
+                Ok(Ok(engine)) => {
+                    // Step 2: Verify GPU compute actually works by running a test embedding
+                    // This catches "Encoder is invalid" errors that only occur during real GPU work
+                    let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Run a minimal embedding to verify GPU compute works
+                        let test_tokens = vec![vec![101i64, 7592, 102]]; // [CLS] hello [SEP]
+                        engine.embed(&test_tokens)
+                    }));
+
+                    match compute_test {
+                        Ok(Ok(_)) => return Ok(EmbeddingBackend::Wgpu(engine)),
+                        Ok(Err(e)) => log::warn!("GPU (Wgpu) compute test failed: {}, falling back to CPU", e),
+                        Err(_) => log::warn!("GPU (Wgpu) compute test panicked (Encoder invalid?), falling back to CPU"),
+                    }
                 }
+                Ok(Err(e)) => log::warn!("GPU (Wgpu) initialization failed (likely OOM or config): {}, falling back to CPU", e),
+                Err(_) => log::warn!("GPU (Wgpu) initialization panicked (likely OOM), falling back to CPU"),
             }
-            Ok(Err(e)) => log::warn!("GPU (Wgpu) initialization failed (likely OOM or config): {}, falling back to CPU", e),
-            Err(_) => log::warn!("GPU (Wgpu) initialization panicked (likely OOM), falling back to CPU"),
         }
     }
 
@@ -538,7 +598,7 @@ pub(crate) fn build_embedding_backend(
     if matches!(device, Device::Cpu | Device::Auto) {
         let candle_init = std::panic::catch_unwind(|| {
             let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            EmbeddingEngine::<Candle<f32, i64>>::new(candle_device, model_dir).ok()
+            EmbeddingEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
         });
 
         if let Ok(Some(engine)) = candle_init {
@@ -549,7 +609,7 @@ pub(crate) fn build_embedding_backend(
     // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(EmbeddingBackend::NdArray(embedding));
     }
 
@@ -564,6 +624,8 @@ pub(crate) fn build_rerank_backend(
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<RerankingBackend> {
+    use crate::gpu_capabilities::GpuCapabilities;
+
     let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
 
     // Test mode: use pure Rust NdArray backend
@@ -574,24 +636,34 @@ pub(crate) fn build_rerank_backend(
     }
 
     // Priority 1: Try GPU (Wgpu)
+    // CRITICAL: Pre-check GPU availability to avoid panic in cubecl-wgpu
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let init = std::panic::catch_unwind(|| {
-            let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
-            RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
-        });
+        let gpu_caps = GpuCapabilities::detect();
 
-        if let Ok(Some(engine)) = init {
-            // Verify GPU compute works by running a test score
-            let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // [CLS] query [SEP] doc [SEP] - a simple pair for testing
-                let test_pairs = vec![vec![101i64, 7592, 102, 2088, 102]];
-                engine.score(&test_pairs)
-            }));
+        if !gpu_caps.is_gpu_available() {
+            log::warn!(
+                "GPU (Wgpu) pre-check failed for reranker: {} not usable, skipping GPU",
+                gpu_caps.name
+            );
+        } else {
+            let init = std::panic::catch_unwind(|| {
+                let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
+                RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
+            });
 
-            match compute_test {
-                Ok(Ok(_)) => return Ok(RerankingBackend::Wgpu(engine)),
-                Ok(Err(e)) => log::warn!("GPU (Wgpu) rerank compute test failed: {}, falling back to CPU", e),
-                Err(_) => log::warn!("GPU (Wgpu) rerank compute test panicked, falling back to CPU"),
+            if let Ok(Some(engine)) = init {
+                // Verify GPU compute works by running a test score
+                let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // [CLS] query [SEP] doc [SEP] - a simple pair for testing
+                    let test_pairs = vec![vec![101i64, 7592, 102, 2088, 102]];
+                    engine.score(&test_pairs)
+                }));
+
+                match compute_test {
+                    Ok(Ok(_)) => return Ok(RerankingBackend::Wgpu(engine)),
+                    Ok(Err(e)) => log::warn!("GPU (Wgpu) rerank compute test failed: {}, falling back to CPU", e),
+                    Err(_) => log::warn!("GPU (Wgpu) rerank compute test panicked, falling back to CPU"),
+                }
             }
         }
     }
@@ -623,7 +695,7 @@ pub(crate) fn build_rerank_backend(
 /// Build an engine backend according to device preference.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_backend(
-    _info: &ModelInfo,
+    info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
@@ -632,7 +704,8 @@ pub(crate) fn build_backend(
     // Test mode: use pure Rust NdArray backend
     if prefer_cpu {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
+        let embedding =
+            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
         let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
         return Ok(EngineBackend::NdArray { embedding, rerank });
     }
@@ -641,7 +714,8 @@ pub(crate) fn build_backend(
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let init = std::panic::catch_unwind(|| {
             let wgpu_device = <Wgpu<f32> as Backend>::Device::default();
-            let embedding = EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir);
+            let embedding =
+                EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir, info);
             let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir);
 
             match (embedding, rerank) {
@@ -659,7 +733,8 @@ pub(crate) fn build_backend(
     if matches!(device, Device::Cpu | Device::Auto) {
         let candle_init = std::panic::catch_unwind(|| {
             let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            let embedding = EmbeddingEngine::<Candle<f32, i64>>::new(candle_device.clone(), model_dir);
+            let embedding =
+                EmbeddingEngine::<Candle<f32, i64>>::new(candle_device.clone(), model_dir, info);
             let rerank = RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir);
 
             match (embedding, rerank) {
@@ -677,7 +752,7 @@ pub(crate) fn build_backend(
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding =
-            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir)?;
+            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
         let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
         return Ok(EngineBackend::NdArray { embedding, rerank });
     }
