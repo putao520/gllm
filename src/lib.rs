@@ -19,6 +19,8 @@
 //! let vector = embedder.embed("Hello world").await?;
 //! ```
 
+pub mod attention;
+pub mod distributed;
 mod bert_variants;
 pub mod causal_attention;
 pub mod flash_attention;
