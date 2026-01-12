@@ -1,4 +1,4 @@
-use crate::engine::TokenizerAdapter;
+use crate::engine::{find_model_file, TokenizerAdapter};
 use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::generator_model::GeneratorModel;
 use crate::moe_generator_model::MoEGeneratorModel;
@@ -27,10 +27,10 @@ impl<B: Backend> GeneratorVariant<B> {
         }
     }
 
-    fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+    fn load_auto(&mut self, path: &Path) -> Result<()> {
         match self {
-            Self::Dense(model) => model.load_safetensors(safetensors_path),
-            Self::Moe(model) => model.load_safetensors(safetensors_path),
+            Self::Dense(model) => model.load_auto(path),
+            Self::Moe(model) => model.load_auto(path),
         }
     }
 }
@@ -68,9 +68,8 @@ impl<B: Backend> GeneratorEngine<B> {
             _ => GeneratorVariant::Dense(GeneratorModel::new(&device, config.clone())?),
         };
 
-        let safetensors_path = model_dir.join("model.safetensors");
-        if safetensors_path.exists() {
-            model.load_safetensors(&safetensors_path)?;
+        if let Some(model_path) = find_model_file(model_dir) {
+            model.load_auto(&model_path)?;
         }
 
         Ok(Self {

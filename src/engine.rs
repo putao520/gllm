@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokenizers::Tokenizer;
 
@@ -49,6 +49,29 @@ struct SpecialTokensMap {
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn find_model_file(model_dir: &Path) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(model_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_gguf = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false);
+            if is_gguf {
+                return Some(path);
+            }
+        }
+    }
+
+    let safetensors = model_dir.join("model.safetensors");
+    if safetensors.exists() {
+        return Some(safetensors);
+    }
+
+    None
 }
 
 fn token_value_to_string(value: &Value) -> Option<String> {
@@ -328,10 +351,10 @@ impl<B: Backend> EmbeddingModel<B> {
         }
     }
 
-    fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
         match self {
-            EmbeddingModel::Encoder(model) => model.load_safetensors(safetensors_path),
-            EmbeddingModel::Decoder(model) => model.load_safetensors(safetensors_path),
+            EmbeddingModel::Encoder(model) => model.load_auto(path),
+            EmbeddingModel::Decoder(model) => model.load_auto(path),
         }
     }
 }
@@ -365,9 +388,8 @@ impl<B: Backend> EmbeddingEngine<B> {
         };
 
         // Load weights if available
-        let safetensors_path = model_dir.join("model.safetensors");
-        if safetensors_path.exists() {
-            model.load_safetensors(&safetensors_path)?;
+        if let Some(model_path) = find_model_file(model_dir) {
+            model.load_auto(&model_path)?;
         }
 
         Ok(Self {
@@ -450,9 +472,8 @@ impl<B: Backend> RerankEngine<B> {
         let mut model = DynamicCrossEncoder::new(&device, config)?;
 
         // Load weights if available
-        let safetensors_path = model_dir.join("model.safetensors");
-        if safetensors_path.exists() {
-            model.load_safetensors(&safetensors_path)?;
+        if let Some(model_path) = find_model_file(model_dir) {
+            model.load_auto(&model_path)?;
         }
 
         Ok(Self { model, device })

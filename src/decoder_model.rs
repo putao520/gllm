@@ -6,18 +6,17 @@ use crate::types::{Error, Result};
 use burn::nn::{Embedding, EmbeddingConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use safetensors::SafeTensors;
 use std::path::Path;
 
 #[derive(Clone)]
 pub struct DecoderModel<B: Backend> {
-    embeddings: Embedding<B>,
-    layers: Vec<DecoderLayer<B>>,
-    final_norm: RmsNorm<B>,
-    pad_token_id: i64,
-    max_position_embeddings: usize,
-    hidden_size: usize,
-    device: B::Device,
+    pub(crate) embeddings: Embedding<B>,
+    pub(crate) layers: Vec<DecoderLayer<B>>,
+    pub(crate) final_norm: RmsNorm<B>,
+    pub(crate) pad_token_id: i64,
+    pub(crate) max_position_embeddings: usize,
+    pub(crate) hidden_size: usize,
+    pub(crate) device: B::Device,
 }
 
 impl<B: Backend> DecoderModel<B> {
@@ -109,6 +108,9 @@ impl<B: Backend> DecoderModel<B> {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        use crate::weight_loader::{load_linear, load_embedding, WeightLoader};
+        use burn::module::Param;
+
         let bytes = std::fs::read(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to read SafeTensors file {}: {err}",
@@ -116,16 +118,105 @@ impl<B: Backend> DecoderModel<B> {
             ))
         })?;
 
-        let tensors = SafeTensors::deserialize(&bytes)
-            .map_err(|err| Error::LoadError(format!("Invalid SafeTensors: {err}")))?;
+        let loader = WeightLoader::from_bytes(&bytes)?;
 
-        if tensors.len() == 0 {
-            return Err(Error::LoadError(
-                "SafeTensors file contains no tensors".into(),
-            ));
+        // Load embeddings
+        let embed_names = [
+            "model.embed_tokens.weight",
+            "transformer.wte.weight",
+            "embeddings.word_embeddings.weight",
+        ];
+        for name in embed_names {
+            if loader.has_tensor(name) {
+                self.embeddings = load_embedding(&loader, name, &self.device)?;
+                break;
+            }
         }
 
+        // Load decoder layers
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            let prefix = format!("model.layers.{}", layer_idx);
+
+            // Load attention weights
+            if loader.has_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
+                layer.attention.q_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.q_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.q_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.k_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.k_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.k_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.v_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.v_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.v_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.o_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.o_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.o_proj.bias", prefix)),
+                    &self.device,
+                )?;
+            }
+
+            // Load FFN weights
+            if loader.has_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
+                layer.gate_proj = load_linear(
+                    &loader,
+                    &format!("{}.mlp.gate_proj.weight", prefix),
+                    None,
+                    &self.device,
+                )?;
+                layer.up_proj = load_linear(
+                    &loader,
+                    &format!("{}.mlp.up_proj.weight", prefix),
+                    None,
+                    &self.device,
+                )?;
+                layer.down_proj = load_linear(
+                    &loader,
+                    &format!("{}.mlp.down_proj.weight", prefix),
+                    None,
+                    &self.device,
+                )?;
+            }
+
+            // Load RMSNorm weights
+            if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
+                let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                layer.attention_norm.inner.gamma = Param::from_tensor(norm_weight);
+            }
+            if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
+                let norm_tensor = loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                layer.ffn_norm.inner.gamma = Param::from_tensor(norm_weight);
+            }
+        }
+
+        // Load final layer norm
+        let final_norm_names = ["model.norm.weight", "transformer.ln_f.weight"];
+        for name in final_norm_names {
+            if loader.has_tensor(name) {
+                let norm_tensor = loader.load_tensor(name)?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                self.final_norm.inner.gamma = Param::from_tensor(norm_weight);
+                break;
+            }
+        }
+
+        log::info!("Successfully loaded decoder weights from {}", safetensors_path.display());
         Ok(())
+    }
+
+    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
+        self.load_safetensors(path)
     }
 
     fn last_token_indices(&self, input_ids: &Tensor<B, 2, Int>) -> Result<Vec<i64>> {

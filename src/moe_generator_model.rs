@@ -10,21 +10,20 @@ use crate::types::{Error, Result};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use safetensors::SafeTensors;
 use std::path::Path;
 
 #[derive(Clone)]
 pub struct MoEGeneratorModel<B: Backend> {
-    embeddings: Embedding<B>,
-    layers: Vec<MoEDecoderLayer<B>>,
-    final_norm: RmsNorm<B>,
-    lm_head: Linear<B>,
-    pad_token_id: i64,
-    max_position_embeddings: usize,
-    vocab_size: usize,
-    num_key_value_heads: usize,
-    head_dim: usize,
-    device: B::Device,
+    pub(crate) embeddings: Embedding<B>,
+    pub(crate) layers: Vec<MoEDecoderLayer<B>>,
+    pub(crate) final_norm: RmsNorm<B>,
+    pub(crate) lm_head: Linear<B>,
+    pub(crate) pad_token_id: i64,
+    pub(crate) max_position_embeddings: usize,
+    pub(crate) vocab_size: usize,
+    pub(crate) num_key_value_heads: usize,
+    pub(crate) head_dim: usize,
+    pub(crate) device: B::Device,
 }
 
 impl<B: Backend> MoEGeneratorModel<B> {
@@ -167,6 +166,9 @@ impl<B: Backend> MoEGeneratorModel<B> {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        use crate::weight_loader::{load_linear, load_embedding, WeightLoader};
+        use burn::module::Param;
+
         let bytes = std::fs::read(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to read SafeTensors file {}: {err}",
@@ -174,16 +176,152 @@ impl<B: Backend> MoEGeneratorModel<B> {
             ))
         })?;
 
-        let tensors = SafeTensors::deserialize(&bytes)
-            .map_err(|err| Error::LoadError(format!("Invalid SafeTensors: {err}")))?;
+        let loader = WeightLoader::from_bytes(&bytes)?;
 
-        if tensors.len() == 0 {
-            return Err(Error::LoadError(
-                "SafeTensors file contains no tensors".into(),
-            ));
+        // Load embeddings
+        let embed_names = [
+            "model.embed_tokens.weight",
+            "transformer.wte.weight",
+            "transformer.embedding.word_embeddings.weight",
+        ];
+        for name in embed_names {
+            if loader.has_tensor(name) {
+                self.embeddings = load_embedding(&loader, name, &self.device)?;
+                break;
+            }
         }
 
+        // Load MoE decoder layers
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            let prefix = format!("model.layers.{}", layer_idx);
+
+            // Load attention weights
+            if loader.has_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
+                layer.attention.q_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.q_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.q_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.k_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.k_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.k_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.v_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.v_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.v_proj.bias", prefix)),
+                    &self.device,
+                )?;
+                layer.attention.o_proj = load_linear(
+                    &loader,
+                    &format!("{}.self_attn.o_proj.weight", prefix),
+                    Some(&format!("{}.self_attn.o_proj.bias", prefix)),
+                    &self.device,
+                )?;
+            }
+
+            // Load MoE router (gate)
+            if loader.has_tensor(&format!("{}.mlp.gate.weight", prefix)) {
+                layer.moe.router.gate = load_linear(
+                    &loader,
+                    &format!("{}.mlp.gate.weight", prefix),
+                    None,
+                    &self.device,
+                )?;
+            }
+
+            // Load MoE experts
+            for (expert_idx, expert) in layer.moe.experts.iter_mut().enumerate() {
+                let expert_prefix = format!("{}.mlp.experts.{}", prefix, expert_idx);
+                if loader.has_tensor(&format!("{}.gate_proj.weight", expert_prefix)) {
+                    expert.gate_proj = load_linear(
+                        &loader,
+                        &format!("{}.gate_proj.weight", expert_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                    expert.up_proj = load_linear(
+                        &loader,
+                        &format!("{}.up_proj.weight", expert_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                    expert.down_proj = load_linear(
+                        &loader,
+                        &format!("{}.down_proj.weight", expert_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                }
+            }
+
+            // Load shared expert if present
+            if let Some(shared) = &mut layer.moe.shared_expert {
+                let shared_prefix = format!("{}.mlp.shared_expert", prefix);
+                if loader.has_tensor(&format!("{}.gate_proj.weight", shared_prefix)) {
+                    shared.gate_proj = load_linear(
+                        &loader,
+                        &format!("{}.gate_proj.weight", shared_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                    shared.up_proj = load_linear(
+                        &loader,
+                        &format!("{}.up_proj.weight", shared_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                    shared.down_proj = load_linear(
+                        &loader,
+                        &format!("{}.down_proj.weight", shared_prefix),
+                        None,
+                        &self.device,
+                    )?;
+                }
+            }
+
+            // Load RMSNorm weights
+            if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
+                let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                layer.attention_norm.inner.gamma = Param::from_tensor(norm_weight);
+            }
+            if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
+                let norm_tensor = loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                layer.ffn_norm.inner.gamma = Param::from_tensor(norm_weight);
+            }
+        }
+
+        // Load final layer norm
+        let final_norm_names = ["model.norm.weight", "transformer.ln_f.weight"];
+        for name in final_norm_names {
+            if loader.has_tensor(name) {
+                let norm_tensor = loader.load_tensor(name)?;
+                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
+                self.final_norm.inner.gamma = Param::from_tensor(norm_weight);
+                break;
+            }
+        }
+
+        // Load LM head
+        let lm_head_names = ["lm_head.weight", "output.weight"];
+        for name in lm_head_names {
+            if loader.has_tensor(name) {
+                self.lm_head = load_linear(&loader, name, None, &self.device)?;
+                break;
+            }
+        }
+
+        log::info!("Successfully loaded MoE weights from {}", safetensors_path.display());
         Ok(())
+    }
+
+    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
+        self.load_safetensors(path)
     }
 
     pub fn max_position_embeddings(&self) -> usize {

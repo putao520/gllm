@@ -12,7 +12,6 @@ use burn::nn::{
 use burn::tensor::activation::{relu, sigmoid};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
-use safetensors::SafeTensors;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -24,12 +23,12 @@ pub enum HiddenAct {
 /// Dynamic BERT layer that can be configured based on model config.
 #[derive(Clone)]
 pub struct DynamicBertLayer<B: Backend> {
-    attention: MultiHeadAttention<B>,
-    ffn_1: Linear<B>,
-    ffn_2: Linear<B>,
-    attention_layernorm: LayerNorm<B>,
-    output_layernorm: LayerNorm<B>,
-    hidden_act: HiddenAct,
+    pub(crate) attention: MultiHeadAttention<B>,
+    pub(crate) ffn_1: Linear<B>,
+    pub(crate) ffn_2: Linear<B>,
+    pub(crate) attention_layernorm: LayerNorm<B>,
+    pub(crate) output_layernorm: LayerNorm<B>,
+    pub(crate) hidden_act: HiddenAct,
 }
 
 impl<B: Backend> DynamicBertLayer<B> {
@@ -89,7 +88,7 @@ impl<B: Backend> DynamicBertLayer<B> {
 /// Dynamic BERT encoder with configurable layers.
 #[derive(Clone)]
 pub struct DynamicBertEncoder<B: Backend> {
-    layers: Vec<DynamicBertLayer<B>>,
+    pub(crate) layers: Vec<DynamicBertLayer<B>>,
 }
 
 impl<B: Backend> DynamicBertEncoder<B> {
@@ -120,22 +119,22 @@ pub enum PositionEmbeddingType {
 /// Dynamic BERT model that can be configured based on HuggingFace config.
 #[derive(Clone)]
 pub struct DynamicBertModel<B: Backend> {
-    embeddings: Embedding<B>,
+    pub(crate) embeddings: Embedding<B>,
     /// Absolute position embeddings (used when position_type is Absolute).
-    position_embeddings: Option<Embedding<B>>,
+    pub(crate) position_embeddings: Option<Embedding<B>>,
     /// RoPE embeddings (used when position_type is Rope).
-    rope: Option<RotaryPositionEmbedding<B>>,
+    pub(crate) rope: Option<RotaryPositionEmbedding<B>>,
     /// Position embedding type.
-    position_type: PositionEmbeddingType,
-    token_type_embeddings: Option<Embedding<B>>,
-    encoder: DynamicBertEncoder<B>,
-    embedding_layernorm: LayerNorm<B>,
-    embedding_dropout: Option<Dropout>,
-    pooler: DynamicPooler<B>,
-    optimizer: PerformanceOptimizer,
-    config: ModelConfig,
-    device: B::Device,
-    max_position_embeddings: usize,
+    pub(crate) position_type: PositionEmbeddingType,
+    pub(crate) token_type_embeddings: Option<Embedding<B>>,
+    pub(crate) encoder: DynamicBertEncoder<B>,
+    pub(crate) embedding_layernorm: LayerNorm<B>,
+    pub(crate) embedding_dropout: Option<Dropout>,
+    pub(crate) pooler: DynamicPooler<B>,
+    pub(crate) optimizer: PerformanceOptimizer,
+    pub(crate) config: ModelConfig,
+    pub(crate) device: B::Device,
+    pub(crate) max_position_embeddings: usize,
 }
 
 impl<B: Backend> DynamicBertModel<B> {
@@ -274,6 +273,8 @@ impl<B: Backend> DynamicBertModel<B> {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        use crate::weight_loader::{load_embedding, load_layer_norm, load_linear, load_mha, WeightLoader};
+
         let bytes = std::fs::read(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to read SafeTensors file {}: {err}",
@@ -281,32 +282,167 @@ impl<B: Backend> DynamicBertModel<B> {
             ))
         })?;
 
-        let tensors = SafeTensors::deserialize(&bytes)
-            .map_err(|err| Error::LoadError(format!("Invalid SafeTensors: {err}")))?;
+        let loader = WeightLoader::from_bytes(&bytes)?;
+        let hidden_size = self.config.hidden_size;
+        let num_heads = self.config.num_attention_heads;
+        let dropout = self.config.attention_probs_dropout_prob.unwrap_or(0.1) as f64;
+        let eps = self.config.layer_norm_eps.unwrap_or(1e-12) as f64;
 
-        if tensors.len() == 0 {
-            return Err(Error::LoadError(
-                "SafeTensors file contains no tensors".into(),
-            ));
+        // Detect model prefix (bert., roberta., distilbert., xlm-roberta., etc.)
+        let prefixes = ["bert.", "roberta.", "distilbert.", "xlm-roberta.", ""];
+        let model_prefix = prefixes
+            .iter()
+            .find(|p| {
+                loader.has_tensor(&format!("{}embeddings.word_embeddings.weight", p))
+            })
+            .copied()
+            .unwrap_or("");
+
+        // Load word embeddings
+        let word_embed_name = format!("{}embeddings.word_embeddings.weight", model_prefix);
+        if loader.has_tensor(&word_embed_name) {
+            self.embeddings = load_embedding(&loader, &word_embed_name, &self.device)?;
         }
 
+        // Load position embeddings (for absolute position type)
+        if self.position_type == PositionEmbeddingType::Absolute {
+            let pos_embed_name = format!("{}embeddings.position_embeddings.weight", model_prefix);
+            if loader.has_tensor(&pos_embed_name) {
+                self.position_embeddings = Some(load_embedding(&loader, &pos_embed_name, &self.device)?);
+            }
+        }
+
+        // Load token type embeddings
+        let type_embed_name = format!("{}embeddings.token_type_embeddings.weight", model_prefix);
+        if loader.has_tensor(&type_embed_name) {
+            self.token_type_embeddings = Some(load_embedding(&loader, &type_embed_name, &self.device)?);
+        }
+
+        // Load embedding LayerNorm
+        let embed_ln_weight = format!("{}embeddings.LayerNorm.weight", model_prefix);
+        let embed_ln_bias = format!("{}embeddings.LayerNorm.bias", model_prefix);
+        if loader.has_tensor(&embed_ln_weight) {
+            self.embedding_layernorm = load_layer_norm(
+                &loader,
+                &embed_ln_weight,
+                Some(&embed_ln_bias),
+                hidden_size,
+                eps,
+                &self.device,
+            )?;
+        }
+
+        // Load encoder layers
+        for (layer_idx, layer) in self.encoder.layers.iter_mut().enumerate() {
+            let layer_prefix = format!("{}encoder.layer.{}", model_prefix, layer_idx);
+
+            // Load attention weights
+            let q_weight = format!("{}.attention.self.query.weight", layer_prefix);
+            let q_bias = format!("{}.attention.self.query.bias", layer_prefix);
+            let k_weight = format!("{}.attention.self.key.weight", layer_prefix);
+            let k_bias = format!("{}.attention.self.key.bias", layer_prefix);
+            let v_weight = format!("{}.attention.self.value.weight", layer_prefix);
+            let v_bias = format!("{}.attention.self.value.bias", layer_prefix);
+            let o_weight = format!("{}.attention.output.dense.weight", layer_prefix);
+            let o_bias = format!("{}.attention.output.dense.bias", layer_prefix);
+
+            if loader.has_tensor(&q_weight) {
+                layer.attention = load_mha(
+                    &loader,
+                    &q_weight,
+                    Some(&q_bias),
+                    &k_weight,
+                    Some(&k_bias),
+                    &v_weight,
+                    Some(&v_bias),
+                    &o_weight,
+                    Some(&o_bias),
+                    hidden_size,
+                    num_heads,
+                    dropout,
+                    &self.device,
+                )?;
+            }
+
+            // Load attention LayerNorm
+            let attn_ln_weight = format!("{}.attention.output.LayerNorm.weight", layer_prefix);
+            let attn_ln_bias = format!("{}.attention.output.LayerNorm.bias", layer_prefix);
+            if loader.has_tensor(&attn_ln_weight) {
+                layer.attention_layernorm = load_layer_norm(
+                    &loader,
+                    &attn_ln_weight,
+                    Some(&attn_ln_bias),
+                    hidden_size,
+                    eps,
+                    &self.device,
+                )?;
+            }
+
+            // Load FFN weights (intermediate.dense = ffn_1, output.dense = ffn_2)
+            let ffn1_weight = format!("{}.intermediate.dense.weight", layer_prefix);
+            let ffn1_bias = format!("{}.intermediate.dense.bias", layer_prefix);
+            if loader.has_tensor(&ffn1_weight) {
+                layer.ffn_1 = load_linear(
+                    &loader,
+                    &ffn1_weight,
+                    Some(&ffn1_bias),
+                    &self.device,
+                )?;
+            }
+
+            let ffn2_weight = format!("{}.output.dense.weight", layer_prefix);
+            let ffn2_bias = format!("{}.output.dense.bias", layer_prefix);
+            if loader.has_tensor(&ffn2_weight) {
+                layer.ffn_2 = load_linear(
+                    &loader,
+                    &ffn2_weight,
+                    Some(&ffn2_bias),
+                    &self.device,
+                )?;
+            }
+
+            // Load output LayerNorm
+            let out_ln_weight = format!("{}.output.LayerNorm.weight", layer_prefix);
+            let out_ln_bias = format!("{}.output.LayerNorm.bias", layer_prefix);
+            if loader.has_tensor(&out_ln_weight) {
+                layer.output_layernorm = load_layer_norm(
+                    &loader,
+                    &out_ln_weight,
+                    Some(&out_ln_bias),
+                    hidden_size,
+                    eps,
+                    &self.device,
+                )?;
+            }
+        }
+
+        log::info!("Successfully loaded BERT weights from {}", safetensors_path.display());
         Ok(())
+    }
+
+    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
+        self.load_safetensors(path)
     }
 }
 
 /// Dynamic cross-encoder model for reranking.
+/// Supports both single-layer (classifier.weight) and two-layer (classifier.dense + classifier.out_proj) classifiers.
 #[derive(Clone)]
 pub struct DynamicCrossEncoder<B: Backend> {
     bert: DynamicBertModel<B>,
     pooler: DynamicPooler<B>,
-    classifier: Linear<B>,
+    /// Optional intermediate dense layer (for two-layer classifiers like RoBERTa rerankers)
+    classifier_dense: Option<Linear<B>>,
+    /// Output projection layer
+    classifier_out: Linear<B>,
     classifier_dropout: Option<Dropout>,
 }
 
 impl<B: Backend> DynamicCrossEncoder<B> {
     pub fn new(device: &B::Device, config: ModelConfig) -> Result<Self> {
         let bert = DynamicBertModel::new(device, config.clone())?;
-        let classifier = LinearConfig::new(config.hidden_size, 1).init(device);
+        // Default: single-layer classifier [hidden_size, 1]
+        let classifier_out = LinearConfig::new(config.hidden_size, 1).init(device);
         let classifier_dropout = config
             .classifier_dropout
             .map(|p| DropoutConfig::new(p as f64).init());
@@ -316,7 +452,8 @@ impl<B: Backend> DynamicCrossEncoder<B> {
         Ok(Self {
             bert,
             pooler,
-            classifier,
+            classifier_dense: None,
+            classifier_out,
             classifier_dropout,
         })
     }
@@ -329,7 +466,12 @@ impl<B: Backend> DynamicCrossEncoder<B> {
             pooled = dropout.forward(pooled);
         }
 
-        Ok(self.classifier.forward(pooled))
+        // Apply two-layer classifier if present (classifier.dense + classifier.out_proj)
+        if let Some(dense) = &self.classifier_dense {
+            pooled = burn::tensor::activation::tanh(dense.forward(pooled));
+        }
+
+        Ok(self.classifier_out.forward(pooled))
     }
 
     pub fn forward_with_sigmoid(&self, input_ids: Tensor<B, 2, Int>) -> Result<Tensor<B, 2>> {
@@ -337,6 +479,56 @@ impl<B: Backend> DynamicCrossEncoder<B> {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
-        self.bert.load_safetensors(safetensors_path)
+        use crate::weight_loader::{load_linear, WeightLoader};
+
+        // First load BERT weights
+        self.bert.load_safetensors(safetensors_path)?;
+
+        // Then load classifier weights
+        let bytes = std::fs::read(safetensors_path).map_err(|err| {
+            Error::LoadError(format!(
+                "Failed to read SafeTensors file {}: {err}",
+                safetensors_path.display()
+            ))
+        })?;
+
+        let loader = WeightLoader::from_bytes(&bytes)?;
+
+        // Check for two-layer classifier (RoBERTa style: classifier.dense + classifier.out_proj)
+        if loader.has_tensor("classifier.dense.weight") && loader.has_tensor("classifier.out_proj.weight") {
+            log::info!("Loading two-layer classifier (dense + out_proj)");
+            self.classifier_dense = Some(load_linear(
+                &loader,
+                "classifier.dense.weight",
+                Some("classifier.dense.bias"),
+                &self.bert.device,
+            )?);
+            self.classifier_out = load_linear(
+                &loader,
+                "classifier.out_proj.weight",
+                Some("classifier.out_proj.bias"),
+                &self.bert.device,
+            )?;
+            return Ok(());
+        }
+
+        // Check for single-layer classifier (BERT style: classifier.weight)
+        if loader.has_tensor("classifier.weight") {
+            log::info!("Loading single-layer classifier");
+            self.classifier_out = load_linear(
+                &loader,
+                "classifier.weight",
+                Some("classifier.bias"),
+                &self.bert.device,
+            )?;
+            return Ok(());
+        }
+
+        log::warn!("No classifier weights found, using random initialization");
+        Ok(())
+    }
+
+    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
+        self.load_safetensors(path)
     }
 }
