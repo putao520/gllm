@@ -369,12 +369,6 @@ impl<B: Backend> EmbeddingModel<B> {
         ))
     }
 
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        match self {
-            EmbeddingModel::Encoder(model) => model.load_auto(path),
-            EmbeddingModel::Decoder(model) => model.load_auto(path),
-        }
-    }
 }
 
 /// Embedding encoder built with dynamic BERT model.

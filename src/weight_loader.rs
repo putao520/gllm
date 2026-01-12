@@ -21,8 +21,6 @@ use std::path::Path;
 /// Weight loader for SafeTensors files.
 pub struct WeightLoader<'a> {
     tensors: SafeTensors<'a>,
-    /// Tensor name to data mapping for multi-shard support
-    tensor_map: HashMap<String, Vec<u8>>,
 }
 
 /// Loaded tensor data with shape and dtype information.
@@ -104,10 +102,7 @@ impl<'a> WeightLoader<'a> {
         let tensors = SafeTensors::deserialize(bytes)
             .map_err(|e| Error::LoadError(format!("Failed to deserialize SafeTensors: {}", e)))?;
 
-        Ok(Self {
-            tensors,
-            tensor_map: HashMap::new(),
-        })
+        Ok(Self { tensors })
     }
 
     /// Get all tensor names in the file.

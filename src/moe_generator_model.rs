@@ -320,10 +320,6 @@ impl<B: Backend> MoEGeneratorModel<B> {
         Ok(())
     }
 
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        self.load_safetensors(path)
-    }
-
     pub fn max_position_embeddings(&self) -> usize {
         self.max_position_embeddings
     }

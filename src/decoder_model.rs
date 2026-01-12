@@ -215,10 +215,6 @@ impl<B: Backend> DecoderModel<B> {
         Ok(())
     }
 
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        self.load_safetensors(path)
-    }
-
     fn last_token_indices(&self, input_ids: &Tensor<B, 2, Int>) -> Result<Vec<i64>> {
         let [batch_size, seq_len] = input_ids.dims();
         let data = input_ids

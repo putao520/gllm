@@ -420,9 +420,6 @@ impl<B: Backend> DynamicBertModel<B> {
         Ok(())
     }
 
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        self.load_safetensors(path)
-    }
 }
 
 /// Dynamic cross-encoder model for reranking.
@@ -528,7 +525,4 @@ impl<B: Backend> DynamicCrossEncoder<B> {
         Ok(())
     }
 
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        self.load_safetensors(path)
-    }
 }

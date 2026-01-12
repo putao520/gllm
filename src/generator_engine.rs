@@ -27,13 +27,6 @@ impl<B: Backend> GeneratorVariant<B> {
         }
     }
 
-    fn load_auto(&mut self, path: &Path) -> Result<()> {
-        match self {
-            Self::Dense(model) => model.load_auto(path),
-            Self::Moe(model) => model.load_auto(path),
-        }
-    }
-
     fn load_safetensors(&mut self, path: &Path) -> Result<()> {
         match self {
             Self::Dense(model) => model.load_safetensors(path),
