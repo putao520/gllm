@@ -1,7 +1,7 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::backend::Backend;
-use burn::tensor::{ElementConversion, Int, Tensor};
+use burn::tensor::{ElementConversion, IndexingUpdateOp, Int, Tensor};
 
 #[derive(Clone)]
 pub struct ExpertFFN<B: Backend> {
@@ -118,7 +118,7 @@ impl<B: Backend> MoELayer<B> {
 
         let ones = Tensor::<B, 1, Int>::ones([assignments], &device);
         let counts = Tensor::<B, 1, Int>::zeros([self.router.num_experts], &device)
-            .scatter(0, sorted_experts, ones);
+            .scatter(0, sorted_experts, ones, IndexingUpdateOp::Add);
         let offsets = counts.cumsum(0);
         let offsets_data = offsets
             .into_data()
@@ -142,7 +142,7 @@ impl<B: Backend> MoELayer<B> {
                 let expert_output = expert.forward(selected).reshape([end - start, hidden_size]);
                 let weighted_output = expert_output * weight_slice.reshape([end - start, 1]);
 
-                output = output.select_assign(0, token_slice, weighted_output);
+                output = output.select_assign(0, token_slice, weighted_output, IndexingUpdateOp::Add);
             }
             start = end;
         }

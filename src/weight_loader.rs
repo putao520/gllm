@@ -270,7 +270,7 @@ pub fn load_layer_norm<B: Backend>(
         if loader.has_tensor(bias_name) {
             let beta_tensor = loader.load_tensor(bias_name)?;
             let beta_val = beta_tensor.to_tensor::<B, 1>(device, [d_model])?;
-            layer_norm.beta = Param::from_tensor(beta_val);
+            layer_norm.beta = Some(Param::from_tensor(beta_val));
         }
     }
 
