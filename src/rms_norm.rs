@@ -5,7 +5,7 @@ use burn::tensor::Tensor;
 
 #[derive(Clone)]
 pub struct RmsNorm<B: Backend> {
-    inner: BurnRmsNorm<B>,
+    pub(crate) inner: BurnRmsNorm<B>,
 }
 
 impl<B: Backend> RmsNorm<B> {

@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct DecoderLayer<B: Backend> {
-    attention_norm: RmsNorm<B>,
-    attention: CausalAttention<B>,
-    ffn_norm: RmsNorm<B>,
-    gate_proj: Linear<B>,
-    up_proj: Linear<B>,
-    down_proj: Linear<B>,
+    pub(crate) attention_norm: RmsNorm<B>,
+    pub(crate) attention: CausalAttention<B>,
+    pub(crate) ffn_norm: RmsNorm<B>,
+    pub(crate) gate_proj: Linear<B>,
+    pub(crate) up_proj: Linear<B>,
+    pub(crate) down_proj: Linear<B>,
 }
 
 impl<B: Backend> DecoderLayer<B> {

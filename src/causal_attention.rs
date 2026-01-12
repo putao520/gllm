@@ -2,7 +2,12 @@ use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::rope::{RopeConfig, RotaryPositionEmbedding};
 use crate::types::{Error, Result};
+#[cfg(feature = "paged-attention")]
+use crate::paged_attention::PagedKVCache;
+#[cfg(feature = "flash-attention")]
+use crate::flash_attention::{flash_attention_forward, FlashAttentionConfig};
 use burn::nn::{Linear, LinearConfig};
+#[cfg(not(feature = "flash-attention"))]
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
@@ -10,18 +15,18 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct CausalAttention<B: Backend> {
-    q_proj: Linear<B>,
-    k_proj: Linear<B>,
-    v_proj: Linear<B>,
-    o_proj: Linear<B>,
-    rope: Option<Arc<RotaryPositionEmbedding<B>>>,
-    num_attention_heads: usize,
-    num_key_value_heads: usize,
-    head_dim: usize,
+    pub(crate) q_proj: Linear<B>,
+    pub(crate) k_proj: Linear<B>,
+    pub(crate) v_proj: Linear<B>,
+    pub(crate) o_proj: Linear<B>,
+    pub(crate) rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+    pub(crate) num_attention_heads: usize,
+    pub(crate) num_key_value_heads: usize,
+    pub(crate) head_dim: usize,
     #[allow(dead_code)] // Used for documentation/debugging
-    hidden_size: usize,
-    sliding_window: Option<usize>,
-    device: B::Device,
+    pub(crate) hidden_size: usize,
+    pub(crate) sliding_window: Option<usize>,
+    pub(crate) device: B::Device,
 }
 
 impl<B: Backend> CausalAttention<B> {
@@ -190,6 +195,85 @@ impl<B: Backend> CausalAttention<B> {
         self.o_proj.forward(context)
     }
 
+    #[cfg(feature = "paged-attention")]
+    pub fn forward_with_paged_cache(
+        &self,
+        hidden_states: Tensor<B, 3>,
+        position_offset: usize,
+        cache: &mut PagedKVCache<B>,
+        layer: usize,
+        seq_id: usize,
+    ) -> Tensor<B, 3> {
+        let [batch_size, seq_len, _hidden] = hidden_states.dims();
+        assert_eq!(
+            batch_size, 1,
+            "paged attention currently supports batch_size == 1"
+        );
+
+        let q = self
+            .q_proj
+            .forward(hidden_states.clone())
+            .reshape([batch_size, seq_len, self.num_attention_heads, self.head_dim]);
+        let k = self
+            .k_proj
+            .forward(hidden_states.clone())
+            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+        let v = self
+            .v_proj
+            .forward(hidden_states)
+            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+
+        let (q, k) = match &self.rope {
+            Some(rope) => rope.apply(q, k, position_offset),
+            None => (q, k),
+        };
+
+        let q = q.swap_dims(1, 2);
+        let k = k.swap_dims(1, 2);
+        let v = v.swap_dims(1, 2);
+
+        let k = k
+            .clone()
+            .slice([
+                0..1,
+                0..self.num_key_value_heads,
+                0..seq_len,
+                0..self.head_dim,
+            ])
+            .reshape([self.num_key_value_heads, seq_len, self.head_dim]);
+        let v = v
+            .clone()
+            .slice([
+                0..1,
+                0..self.num_key_value_heads,
+                0..seq_len,
+                0..self.head_dim,
+            ])
+            .reshape([self.num_key_value_heads, seq_len, self.head_dim]);
+
+        cache
+            .append(layer, seq_id, k, v)
+            .expect("paged cache append failed");
+
+        let (k, v) = cache
+            .get_kv(layer, seq_id)
+            .expect("paged cache lookup failed");
+        let key_len = k.dims()[1];
+        let k = k.reshape([1, self.num_key_value_heads, key_len, self.head_dim]);
+        let v = v.reshape([1, self.num_key_value_heads, key_len, self.head_dim]);
+
+        let k = self.repeat_kv(k);
+        let v = self.repeat_kv(v);
+
+        let context = self.attend(q, k, v, position_offset, key_len);
+        let attn_out_dim = self.num_attention_heads * self.head_dim;
+        let context = context
+            .swap_dims(1, 2)
+            .reshape([batch_size, seq_len, attn_out_dim]);
+
+        self.o_proj.forward(context)
+    }
+
     fn repeat_kv(&self, tensor: Tensor<B, 4>) -> Tensor<B, 4> {
         if self.num_key_value_heads == self.num_attention_heads {
             return tensor;
@@ -212,33 +296,51 @@ impl<B: Backend> CausalAttention<B> {
         position_offset: usize,
         key_len: usize,
     ) -> Tensor<B, 4> {
-        let [batch_size, num_heads, query_len, head_dim] = q.dims();
-        let scale = (self.head_dim as f32).sqrt();
-        let k_t = k.transpose();
+        #[cfg(feature = "flash-attention")]
+        {
+            let config = FlashAttentionConfig::default();
+            return flash_attention_forward(
+                q,
+                k,
+                v,
+                true,
+                position_offset,
+                key_len,
+                self.sliding_window,
+                config,
+            );
+        }
 
-        if query_len > 4096 {
-            let mut outputs = Vec::new();
-            let mut start = 0usize;
-            while start < query_len {
-                let end = (start + 2048).min(query_len);
-                let q_slice = q
-                    .clone()
-                    .slice([0..batch_size, 0..num_heads, start..end, 0..head_dim]);
-                let mut scores = q_slice.matmul(k_t.clone()) / scale;
-                let mask = self.build_causal_mask(end - start, key_len, position_offset + start);
+        #[cfg(not(feature = "flash-attention"))]
+        {
+            let [batch_size, num_heads, query_len, head_dim] = q.dims();
+            let scale = (self.head_dim as f32).sqrt();
+            let k_t = k.transpose();
+
+            if query_len > 4096 {
+                let mut outputs = Vec::new();
+                let mut start = 0usize;
+                while start < query_len {
+                    let end = (start + 2048).min(query_len);
+                    let q_slice = q
+                        .clone()
+                        .slice([0..batch_size, 0..num_heads, start..end, 0..head_dim]);
+                    let mut scores = q_slice.matmul(k_t.clone()) / scale;
+                    let mask = self.build_causal_mask(end - start, key_len, position_offset + start);
+                    scores = scores + mask;
+                    let attn = softmax(scores, 3);
+                    let context = attn.matmul(v.clone());
+                    outputs.push(context);
+                    start = end;
+                }
+                Tensor::cat(outputs, 2)
+            } else {
+                let mut scores = q.matmul(k_t) / scale;
+                let mask = self.build_causal_mask(query_len, key_len, position_offset);
                 scores = scores + mask;
                 let attn = softmax(scores, 3);
-                let context = attn.matmul(v.clone());
-                outputs.push(context);
-                start = end;
+                attn.matmul(v)
             }
-            Tensor::cat(outputs, 2)
-        } else {
-            let mut scores = q.matmul(k_t) / scale;
-            let mask = self.build_causal_mask(query_len, key_len, position_offset);
-            scores = scores + mask;
-            let attn = softmax(scores, 3);
-            attn.matmul(v)
         }
     }
 

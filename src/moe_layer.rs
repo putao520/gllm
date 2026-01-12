@@ -5,9 +5,9 @@ use burn::tensor::{ElementConversion, Int, Tensor};
 
 #[derive(Clone)]
 pub struct ExpertFFN<B: Backend> {
-    gate_proj: Linear<B>,
-    up_proj: Linear<B>,
-    down_proj: Linear<B>,
+    pub(crate) gate_proj: Linear<B>,
+    pub(crate) up_proj: Linear<B>,
+    pub(crate) down_proj: Linear<B>,
 }
 
 impl<B: Backend> ExpertFFN<B> {
@@ -32,9 +32,9 @@ impl<B: Backend> ExpertFFN<B> {
 
 #[derive(Clone)]
 pub struct MoERouter<B: Backend> {
-    gate: Linear<B>,
-    num_experts: usize,
-    num_experts_per_tok: usize,
+    pub(crate) gate: Linear<B>,
+    pub(crate) num_experts: usize,
+    pub(crate) num_experts_per_tok: usize,
 }
 
 impl<B: Backend> MoERouter<B> {
@@ -62,9 +62,9 @@ impl<B: Backend> MoERouter<B> {
 
 #[derive(Clone)]
 pub struct MoELayer<B: Backend> {
-    router: MoERouter<B>,
-    experts: Vec<ExpertFFN<B>>,
-    shared_expert: Option<ExpertFFN<B>>,
+    pub(crate) router: MoERouter<B>,
+    pub(crate) experts: Vec<ExpertFFN<B>>,
+    pub(crate) shared_expert: Option<ExpertFFN<B>>,
 }
 
 impl<B: Backend> MoELayer<B> {

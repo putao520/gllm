@@ -23,10 +23,10 @@ fn lookup_extra_usize(extra: &Value, key: &str) -> Option<usize> {
 
 #[derive(Clone)]
 pub struct MoEDecoderLayer<B: Backend> {
-    attention_norm: RmsNorm<B>,
-    attention: CausalAttention<B>,
-    ffn_norm: RmsNorm<B>,
-    moe: MoELayer<B>,
+    pub(crate) attention_norm: RmsNorm<B>,
+    pub(crate) attention: CausalAttention<B>,
+    pub(crate) ffn_norm: RmsNorm<B>,
+    pub(crate) moe: MoELayer<B>,
 }
 
 impl<B: Backend> MoEDecoderLayer<B> {
