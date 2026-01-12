@@ -334,7 +334,7 @@ fn start_reranker_actor(model: String) -> Result<(RerankSender, ShutdownGuard)> 
 #[cfg(not(feature = "tokio"))]
 fn reranker_loop(model: String, receiver: RerankReceiver, ready: mpsc::Sender<Result<()>>) {
     // Prepare model and build rerank-only backend
-    let (model_dir, tokenizer, _info) = match prepare_model(&model) {
+    let (model_dir, tokenizer, info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -342,7 +342,7 @@ fn reranker_loop(model: String, receiver: RerankReceiver, ready: mpsc::Sender<Re
         }
     };
 
-    let engine = match build_rerank_backend(&model_dir, &Device::Auto) {
+    let engine = match build_rerank_backend(&info, &model_dir, &Device::Auto) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine
@@ -619,7 +619,7 @@ fn reranker_loop_async(
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) {
     // Prepare model and build rerank-only backend
-    let (model_dir, tokenizer, _info) = match prepare_model(&model) {
+    let (model_dir, tokenizer, info) = match prepare_model(&model) {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -627,7 +627,7 @@ fn reranker_loop_async(
         }
     };
 
-    let engine = match build_rerank_backend(&model_dir, &Device::Auto) {
+    let engine = match build_rerank_backend(&info, &model_dir, &Device::Auto) {
         Ok(engine) => {
             let _ = ready.send(Ok(()));
             engine

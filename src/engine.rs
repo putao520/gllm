@@ -3,7 +3,7 @@ use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
 use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
-use crate::registry::{Architecture, ModelInfo, ModelType};
+use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
 use crate::types::{Device, Error, Result};
 use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
@@ -51,27 +51,28 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&bytes).ok()
 }
 
-pub(crate) fn find_model_file(model_dir: &Path) -> Option<PathBuf> {
-    if let Ok(entries) = fs::read_dir(model_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_gguf = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("gguf"))
-                .unwrap_or(false);
-            if is_gguf {
-                return Some(path);
+pub(crate) fn find_model_file(model_dir: &Path, quantization: &Quantization) -> Option<PathBuf> {
+    match quantization {
+        Quantization::GGUF => {
+            if let Ok(entries) = fs::read_dir(model_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path
+                        .extension()
+                        .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+                        .unwrap_or(false)
+                    {
+                        return Some(path);
+                    }
+                }
             }
+            None
+        }
+        _ => {
+            let safetensors = model_dir.join("model.safetensors");
+            safetensors.exists().then_some(safetensors)
         }
     }
-
-    let safetensors = model_dir.join("model.safetensors");
-    if safetensors.exists() {
-        return Some(safetensors);
-    }
-
-    None
 }
 
 fn token_value_to_string(value: &Value) -> Option<String> {
@@ -351,6 +352,23 @@ impl<B: Backend> EmbeddingModel<B> {
         }
     }
 
+    pub fn load_safetensors(&mut self, path: &Path) -> Result<()> {
+        match self {
+            EmbeddingModel::Encoder(model) => model.load_safetensors(path),
+            EmbeddingModel::Decoder(model) => model.load_safetensors(path),
+        }
+    }
+
+    pub fn load_awq(&mut self, path: &Path) -> Result<()> {
+        self.load_safetensors(path)
+    }
+
+    pub fn load_gguf(&mut self, _path: &Path) -> Result<()> {
+        Err(Error::InvalidConfig(
+            "GGUF is not supported for embedding models".into(),
+        ))
+    }
+
     pub fn load_auto(&mut self, path: &Path) -> Result<()> {
         match self {
             EmbeddingModel::Encoder(model) => model.load_auto(path),
@@ -388,8 +406,13 @@ impl<B: Backend> EmbeddingEngine<B> {
         };
 
         // Load weights if available
-        if let Some(model_path) = find_model_file(model_dir) {
-            model.load_auto(&model_path)?;
+        if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
+            match info.quantization {
+                Quantization::GGUF => model.load_gguf(&model_path)?,
+                Quantization::AWQ => model.load_awq(&model_path)?,
+                Quantization::GPTQ => model.load_safetensors(&model_path)?, // TODO: implement load_gptq
+                _ => model.load_safetensors(&model_path)?,
+            }
         }
 
         Ok(Self {
@@ -449,7 +472,7 @@ pub(crate) struct RerankEngine<B: Backend> {
 }
 
 impl<B: Backend> RerankEngine<B> {
-    pub fn new(device: B::Device, model_dir: &Path) -> Result<Self> {
+    pub fn new(device: B::Device, model_dir: &Path, info: &ModelInfo) -> Result<Self> {
         // Load model configuration
         let config_path = model_dir.join("config.json");
         let repo_name = model_dir
@@ -472,8 +495,17 @@ impl<B: Backend> RerankEngine<B> {
         let mut model = DynamicCrossEncoder::new(&device, config)?;
 
         // Load weights if available
-        if let Some(model_path) = find_model_file(model_dir) {
-            model.load_auto(&model_path)?;
+        if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
+            match info.quantization {
+                Quantization::GGUF => {
+                    return Err(Error::InvalidConfig(
+                        "GGUF is not supported for rerank models".into(),
+                    ));
+                }
+                Quantization::AWQ => model.load_safetensors(&model_path)?,
+                Quantization::GPTQ => model.load_safetensors(&model_path)?, // TODO: implement load_gptq
+                _ => model.load_safetensors(&model_path)?,
+            }
         }
 
         Ok(Self { model, device })
@@ -740,6 +772,7 @@ pub(crate) fn build_embedding_backend(
 /// Build a reranking-only backend according to device preference.
 /// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
 pub(crate) fn build_rerank_backend(
+    info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<RerankingBackend> {
@@ -750,7 +783,7 @@ pub(crate) fn build_rerank_backend(
     // Test mode: use pure Rust NdArray backend
     if prefer_cpu {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(RerankingBackend::NdArray(rerank));
     }
 
@@ -767,7 +800,7 @@ pub(crate) fn build_rerank_backend(
         } else {
             let init = std::panic::catch_unwind(|| {
                 let wgpu_device = get_wgpu_device();
-                RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir).ok()
+                RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info).ok()
             });
 
             if let Ok(Some(engine)) = init {
@@ -791,7 +824,7 @@ pub(crate) fn build_rerank_backend(
     if matches!(device, Device::Cpu | Device::Auto) {
         let candle_init = std::panic::catch_unwind(|| {
             let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir).ok()
+            RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
         });
 
         if let Ok(Some(engine)) = candle_init {
@@ -802,7 +835,7 @@ pub(crate) fn build_rerank_backend(
     // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(RerankingBackend::NdArray(rerank));
     }
 
@@ -888,7 +921,7 @@ pub(crate) fn build_backend(
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding =
             EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(EngineBackend::NdArray { embedding, rerank });
     }
 
@@ -898,7 +931,7 @@ pub(crate) fn build_backend(
             let wgpu_device = get_wgpu_device();
             let embedding =
                 EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir, info);
-            let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir);
+            let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info);
 
             match (embedding, rerank) {
                 (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Wgpu { embedding, rerank }),
@@ -917,7 +950,7 @@ pub(crate) fn build_backend(
             let candle_device = <Candle<f32, i64> as Backend>::Device::default();
             let embedding =
                 EmbeddingEngine::<Candle<f32, i64>>::new(candle_device.clone(), model_dir, info);
-            let rerank = RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir);
+            let rerank = RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info);
 
             match (embedding, rerank) {
                 (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Candle { embedding, rerank }),
@@ -935,7 +968,7 @@ pub(crate) fn build_backend(
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding =
             EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir)?;
+        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
         return Ok(EngineBackend::NdArray { embedding, rerank });
     }
 

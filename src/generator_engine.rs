@@ -3,7 +3,7 @@ use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::generator_model::GeneratorModel;
 use crate::moe_generator_model::MoEGeneratorModel;
 use crate::model_config::ModelConfig;
-use crate::registry::{Architecture, ModelInfo};
+use crate::registry::{Architecture, ModelInfo, Quantization};
 use crate::types::{Error, Result};
 use burn::tensor::backend::Backend;
 use std::path::Path;
@@ -31,6 +31,31 @@ impl<B: Backend> GeneratorVariant<B> {
         match self {
             Self::Dense(model) => model.load_auto(path),
             Self::Moe(model) => model.load_auto(path),
+        }
+    }
+
+    fn load_safetensors(&mut self, path: &Path) -> Result<()> {
+        match self {
+            Self::Dense(model) => model.load_safetensors(path),
+            Self::Moe(model) => model.load_safetensors(path),
+        }
+    }
+
+    fn load_awq(&mut self, path: &Path) -> Result<()> {
+        match self {
+            Self::Dense(model) => model.load_awq(path),
+            Self::Moe(_) => Err(Error::InvalidConfig(
+                "AWQ is not supported for MoE generator models".into(),
+            )),
+        }
+    }
+
+    fn load_gguf(&mut self, path: &Path) -> Result<()> {
+        match self {
+            Self::Dense(model) => model.load_gguf(path),
+            Self::Moe(_) => Err(Error::InvalidConfig(
+                "GGUF is not supported for MoE generator models".into(),
+            )),
         }
     }
 }
@@ -68,8 +93,13 @@ impl<B: Backend> GeneratorEngine<B> {
             _ => GeneratorVariant::Dense(GeneratorModel::new(&device, config.clone())?),
         };
 
-        if let Some(model_path) = find_model_file(model_dir) {
-            model.load_auto(&model_path)?;
+        if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
+            match info.quantization {
+                Quantization::GGUF => model.load_gguf(&model_path)?,
+                Quantization::AWQ => model.load_awq(&model_path)?,
+                Quantization::GPTQ => model.load_safetensors(&model_path)?, // TODO: implement load_gptq
+                _ => model.load_safetensors(&model_path)?,
+            }
         }
 
         Ok(Self {
