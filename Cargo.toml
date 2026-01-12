@@ -3,7 +3,7 @@ name = "gllm"
 version = "0.10.3"
 edition = "2021"
 authors = ["gllm contributors"]
-license = "MIT"
+license = "Apache-2.0"
 description = "Pure Rust library for local embeddings, reranking, and text generation with MoE-optimized inference and aggressive performance tuning"
 repository = "https://github.com/putao520/gllm"
 homepage = "https://github.com/putao520/gllm"
@@ -23,9 +23,11 @@ name = "stress_test"
 path = "stress_test.rs"
 
 [features]
+default = ["cpu"]
 tokio = ["dep:tokio"]
-wgpu = []
-cpu = []
+wgpu = ["gllm-kernels/wgpu"]
+cpu = ["gllm-kernels/cpu"]
+cuda = ["gllm-kernels/cuda"]
 wgpu-detect = ["dep:wgpu", "dep:pollster"]  # Enable GPU detection
 quantized = []
 gpu-quantized = ["quantized"]
@@ -34,6 +36,7 @@ flash-attention = []
 
 [dependencies]
 burn = { version = "0.20.0-pre.3", default-features = false, features = ["std", "wgpu", "candle", "ndarray"] }
+gllm-kernels = { path = "../gllm-kernels", default-features = false }
 wgpu = { version = "26.0", optional = true }
 pollster = { version = "0.4", optional = true }
 burn-import = { version = "0.20.0-pre.3", default-features = false, features = ["safetensors"] }
