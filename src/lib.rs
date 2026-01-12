@@ -21,6 +21,7 @@
 
 mod bert_variants;
 pub mod causal_attention;
+pub mod flash_attention;
 mod client;
 pub mod decoder_layer;
 pub mod decoder_model;
@@ -31,12 +32,22 @@ mod fallback;
 pub mod generation;
 mod generator_engine;
 pub mod generator_model;
+#[cfg(feature = "quantized")]
+pub mod gguf;
+#[cfg(feature = "quantized")]
+pub mod quantized;
+#[cfg(feature = "quantized")]
+pub mod awq;
+#[cfg(feature = "quantized")]
+pub mod quantized_ops;
 pub mod moe_decoder_layer;
 pub mod moe_generator_model;
 pub mod moe_layer;
 mod gpu_capabilities;
 mod handle;
 pub mod kv_cache;
+#[cfg(feature = "paged-attention")]
+pub mod paged_attention;
 mod model;
 mod model_config;
 mod model_presets;
@@ -48,6 +59,7 @@ mod rope;
 pub mod rms_norm;
 pub mod sampler;
 mod types;
+pub mod weight_loader;
 
 pub use client::Client;
 pub use embeddings::EmbeddingsBuilder;

@@ -263,14 +263,34 @@ Sigmoid → 相关性分数
 - 跨平台支持 (Vulkan/DX12/Metal)
 - 符合静态编译要求
 
-### ARCH-ADR-003: 模型格式仅支持 SafeTensors
+### ARCH-ADR-003: 模型格式支持 SafeTensors 和 GGUF
 
-**决策**: 不支持 GGUF 格式
+**决策**: 支持 SafeTensors (默认) 和 GGUF (量化模型) 两种格式
 
 **理由**:
-- SafeTensors 由 Burn 原生支持
-- GGUF 需要 llama.cpp 绑定，破坏纯 Rust 目标
-- HuggingFace 模型普遍提供 SafeTensors 格式
+- SafeTensors 由 Burn 原生支持，用于 HuggingFace 全精度模型
+- GGUF 通过**纯 Rust 解析器**实现（无 llama.cpp 绑定），保持纯 Rust 目标
+- GGUF 支持 Q4_0/Q4_K_M/Q8_0 等量化格式，显著降低内存和提升推理速度
+- HuggingFace 和 llama.cpp 生态都有大量 GGUF 量化模型
+
+**v0.11.0 新增组件**:
+- `GgufLoader` - 纯 Rust GGUF 文件解析器
+- `QTensor` - 量化张量，支持多种 GGML 数据类型
+- `QLinear` - 量化线性层，支持 dequantize + matmul
+
+### ARCH-ADR-003b: 支持 AWQ 量化格式
+
+**决策**: 支持 HuggingFace AWQ (Activation-aware Weight Quantization) 格式
+
+**理由**:
+- AWQ 是 HuggingFace 生态主流的 INT4 量化格式
+- 与 SafeTensors 格式兼容，仅权重存储方式不同
+- 提供比 GGUF Q4 更高的精度（通过 activation-aware scaling）
+- 大量预量化模型可用（TheBloke 等发布者）
+
+**v0.11.0 新增组件**:
+- `AwqWeight` - AWQ 量化权重（qweight + scales + zeros）
+- `AwqLinear` - AWQ 量化线性层，支持 per-group dequantize
 
 ### ARCH-ADR-004: 使用 rustls 作为 TLS 后端
 

@@ -27,6 +27,10 @@ tokio = ["dep:tokio"]
 wgpu = []
 cpu = []
 wgpu-detect = ["dep:wgpu", "dep:pollster"]  # Enable GPU detection
+quantized = []
+gpu-quantized = ["quantized"]
+paged-attention = []
+flash-attention = []
 
 [dependencies]
 burn = { version = "0.20.0-pre.3", default-features = false, features = ["std", "wgpu", "candle", "ndarray"] }
@@ -43,6 +47,8 @@ log = "0.4"
 dirs = "5"
 safetensors = "0.4"
 rand = "0.8"
+half = "2.4"
+memmap2 = "0.9"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -51,3 +57,8 @@ tempfile = "3"
 [[bench]]
 name = "moe_layer"
 harness = false
+
+[[bench]]
+name = "quantized_matmul"
+harness = false
+required-features = ["quantized"]
