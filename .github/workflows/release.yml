@@ -1,0 +1,176 @@
+name: Release Fat Binary
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-fat-binary:
+    name: Build for ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            rust: stable
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            rust: stable
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            rust: stable
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            rust: stable
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lld \
+            clang \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: Configure Rust (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << EOF
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          rustflags = ["-C", "link-arg=--ld-path=/usr/bin/aarch64-linux-gnu-ld"]
+          EOF
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}
+
+      - name: Build gllm-kernels (no tests)
+        working-directory: gllm-kernels
+        run: |
+          cargo build --release --features fat-binary --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Build gllm (no tests)
+        run: |
+          cargo build --release --features fat-binary --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Strip binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/${{ matrix.target }}/release/libgllm.rlib
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          strip -x target/${{ matrix.target }}/release/libgllm.rlib
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgllm-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/libgllm.rlib
+          if-no-files-found: error
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-fat-binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/libgllm-*/libgllm.rlib
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## gllm Fat Binary Release
+
+            This release includes pre-compiled libraries with all GPU backends:
+            - ✅ CUDA (NVIDIA GPUs)
+            - ✅ ROCm (AMD GPUs)
+            - ✅ Metal (Apple Silicon)
+            - ✅ WGPU (Cross-platform)
+            - ✅ CPU (Fallback)
+
+            ### Usage
+
+            No feature selection needed - the library automatically detects
+            and uses the best available backend at runtime!
+
+            ### Installation
+
+            \`\`\`toml
+            [dependencies]
+            gllm = "0.11.0"
+            \`\`\`
+
+            ### Backend Override
+
+            Set the `GLLM_BACKEND` environment variable:
+
+            \`\`\`bash
+            GLLM_BACKEND=cuda cargo run
+            GLLM_BACKEND=metal cargo run
+            GLLM_BACKEND=rocm cargo run
+            \`\`\`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

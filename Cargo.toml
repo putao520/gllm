@@ -23,14 +23,24 @@ name = "stress_test"
 path = "stress_test.rs"
 
 [features]
+# Fat binary: 跨平台后端（所有平台）
 default = ["cpu"]
-tokio = ["dep:tokio"]
-wgpu = ["gllm-kernels/wgpu"]
+fat-binary = ["gllm-kernels/fat-binary", "cuda", "wgpu"]
+
+# 平台特定的 fat binary（推荐）
+fat-binary-linux = ["fat-binary", "rocm"]
+fat-binary-macos = ["fat-binary", "metal"]
+
+# 单独后端（高级用户）
 cpu = ["gllm-kernels/cpu"]
 cuda = ["gllm-kernels/cuda"]
 rocm = ["gllm-kernels/rocm"]
 metal = ["gllm-kernels/metal"]
-wgpu-detect = ["dep:wgpu", "dep:pollster"]  # Enable GPU detection
+wgpu = ["gllm-kernels/wgpu"]
+
+# 其他 features
+tokio = ["dep:tokio"]
+wgpu-detect = ["dep:wgpu", "dep:pollster"]
 quantized = []
 gpu-quantized = ["quantized"]
 paged-attention = []

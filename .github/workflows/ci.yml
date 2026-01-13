@@ -1,0 +1,94 @@
+name: CI (Compile Only)
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  check-features:
+    name: Check ${{ matrix.feature }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        feature:
+          - cpu
+          - cuda
+          - rocm
+          - metal
+          - wgpu
+          - fat-binary
+        exclude:
+          # CUDA only on Linux
+          - os: macos-latest
+            feature: cuda
+          # ROCm only on Linux
+          - os: macos-latest
+            feature: rocm
+          # Metal only on macOS
+          - os: ubuntu-latest
+            feature: metal
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check gllm-kernels (no tests)
+        working-directory: gllm-kernels
+        run: |
+          cargo check --features ${{ matrix.feature }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Check gllm (no tests)
+        run: |
+          cargo check --features ${{ matrix.feature }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+  fmt-and-lint:
+    name: Format and Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Run clippy (gllm-kernels)
+        working-directory: gllm-kernels
+        run: |
+          cargo clippy --all-features -- -D warnings
+
+      - name: Run clippy (gllm)
+        run: |
+          cargo clippy --all-features -- -D warnings
