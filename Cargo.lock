@@ -3006,10 +3006,13 @@ dependencies = [
  "burn-rocm",
  "burn-wgpu 0.20.0-pre.6",
  "crossbeam-channel",
+ "dirs 5.0.1",
  "half",
  "log",
  "metal 0.29.0",
  "objc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
