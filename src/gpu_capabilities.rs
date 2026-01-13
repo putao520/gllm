@@ -136,19 +136,27 @@ impl GpuCapabilities {
 }
 
 /// Internal implementation of GPU detection.
+///
+/// CRITICAL: GPU detection uses `pollster::block_on()` which can deadlock
+/// when called from a tokio runtime thread. To avoid this, we spawn a
+/// dedicated OS thread for GPU detection.
 fn detect_gpu_capabilities_impl() -> GpuCapabilities {
-    // Check if test mode is enabled (skip GPU detection)
-    if std::env::var("GLLM_TEST_MODE").is_ok() {
-        return GpuCapabilities::default();
-    }
-
     // Try wgpu-based detection (only when wgpu-detect feature is enabled)
     #[cfg(feature = "wgpu-detect")]
     {
-        match detect_wgpu_basic() {
-            Ok(caps) => return caps,
-            Err(e) => {
+        // CRITICAL FIX: Run GPU detection in a dedicated thread to avoid
+        // pollster::block_on() deadlock with tokio runtime.
+        // pollster uses a simple spin-loop that blocks the current thread,
+        // which can deadlock if called from within a tokio worker thread.
+        let handle = std::thread::spawn(|| detect_wgpu_basic());
+
+        match handle.join() {
+            Ok(Ok(caps)) => return caps,
+            Ok(Err(e)) => {
                 log::debug!("gllm: GPU detection failed: {}", e);
+            }
+            Err(_) => {
+                log::warn!("gllm: GPU detection thread panicked, using CPU fallback");
             }
         }
     }

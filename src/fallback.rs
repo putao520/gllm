@@ -421,4 +421,15 @@ mod tests {
         assert!(!embedder.is_gpu_disabled());
         assert_eq!(embedder.failure_count(), 0);
     }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn test_codexembed_loading() {
+        use std::time::Instant;
+        eprintln!("Starting codexembed-400m load...");
+        let start = Instant::now();
+        let embedder = FallbackEmbedder::new("codexembed-400m").await;
+        eprintln!("codexembed-400m load took: {:?}", start.elapsed());
+        assert!(embedder.is_ok(), "codexembed-400m should load");
+    }
 }

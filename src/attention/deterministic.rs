@@ -192,17 +192,18 @@ mod tests {
     #[test]
     fn test_deterministic_config_default() {
         let config = DeterministicConfig::default();
-        assert!(config.strict_order);
-        assert!(config.deterministic_rng);
-        assert!(config.no_gpu_nondeterminism);
-        assert!(config.is_deterministic());
+        // Default is relaxed (non-deterministic for performance)
+        assert!(!config.enabled);
+        assert!(!config.fixed_tile_order);
+        assert!(!config.no_gpu_nondeterminism);
+        assert!(!config.is_deterministic());
     }
 
     #[test]
     fn test_deterministic_config_relaxed() {
         let config = DeterministicConfig::relaxed();
-        assert!(!config.strict_order);
-        assert!(!config.deterministic_rng);
+        assert!(!config.enabled);
+        assert!(!config.fixed_tile_order);
         assert!(!config.no_gpu_nondeterminism);
         assert!(!config.is_deterministic());
     }

@@ -688,15 +688,6 @@ pub(crate) fn build_embedding_backend(
 ) -> Result<EmbeddingBackend> {
     use crate::gpu_capabilities::GpuCapabilities;
 
-    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
-
-    // Test mode: use pure Rust NdArray backend
-    if prefer_cpu {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EmbeddingBackend::NdArray(embedding));
-    }
-
     // Priority 1: Try GPU (Wgpu)
     // CRITICAL: Pre-check GPU availability using wgpu-detect feature.
     // This detects OOM errors BEFORE calling burn/cubecl, which would panic
@@ -772,15 +763,6 @@ pub(crate) fn build_rerank_backend(
 ) -> Result<RerankingBackend> {
     use crate::gpu_capabilities::GpuCapabilities;
 
-    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
-
-    // Test mode: use pure Rust NdArray backend
-    if prefer_cpu {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(RerankingBackend::NdArray(rerank));
-    }
-
     // Priority 1: Try GPU (Wgpu)
     // CRITICAL: Pre-check GPU availability to avoid panic in cubecl-wgpu
     if matches!(device, Device::Gpu(_) | Device::Auto) {
@@ -847,14 +829,6 @@ pub(crate) fn build_generator_backend(
 ) -> Result<EngineBackend> {
     use crate::gpu_capabilities::GpuCapabilities;
 
-    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
-
-    if prefer_cpu {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let generator = GeneratorEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EngineBackend::GeneratorNdArray { generator });
-    }
-
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let gpu_caps = GpuCapabilities::detect();
 
@@ -904,19 +878,8 @@ pub(crate) fn build_backend(
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
-    let prefer_cpu = std::env::var("GLLM_TEST_MODE").is_ok();
-
     if matches!(info.model_type, ModelType::Generator) {
         return build_generator_backend(info, model_dir, device);
-    }
-
-    // Test mode: use pure Rust NdArray backend
-    if prefer_cpu {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding =
-            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EngineBackend::NdArray { embedding, rerank });
     }
 
     // Priority 1: Try GPU (Wgpu)
