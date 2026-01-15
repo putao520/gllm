@@ -10,6 +10,8 @@ use crate::rms_norm::RmsNorm;
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use memmap2::Mmap;
+use std::fs::File;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -169,14 +171,21 @@ impl<B: Backend> GeneratorModel<B> {
         use crate::weight_loader::{load_linear, load_embedding, WeightLoader};
         use burn::module::Param;
 
-        let bytes = std::fs::read(safetensors_path).map_err(|err| {
+        let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
-                "Failed to read SafeTensors file {}: {err}",
+                "Failed to open SafeTensors file {}: {err}",
+                safetensors_path.display()
+            ))
+        })?;
+        // Safety: the file is not mutated while the mmap is alive.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|err| {
+            Error::LoadError(format!(
+                "Failed to memory-map SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
 
-        let loader = WeightLoader::from_bytes(&bytes)?;
+        let loader = WeightLoader::from_bytes(&mmap)?;
 
         // Load embeddings - try different naming conventions
         let embed_names = [

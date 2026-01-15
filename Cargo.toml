@@ -23,36 +23,24 @@ name = "stress_test"
 path = "stress_test.rs"
 
 [features]
-# Fat binary: 跨平台后端（所有平台）
-default = ["cpu"]
-fat-binary = ["gllm-kernels/fat-binary", "cuda", "wgpu"]
+# 默认配置：Fat Binary - 所有后端编译，运行时选择
+default = []
 
-# 平台特定的 fat binary（推荐）
-fat-binary-linux = ["fat-binary", "rocm"]
-fat-binary-macos = ["fat-binary", "metal"]
-
-# 单独后端（高级用户）
-cpu = ["gllm-kernels/cpu"]
-cuda = ["gllm-kernels/cuda"]
-rocm = ["gllm-kernels/rocm"]
-metal = ["gllm-kernels/metal"]
-wgpu = ["gllm-kernels/wgpu"]
-
-# 其他 features
+# 可选 features
 tokio = ["dep:tokio"]
-wgpu-detect = ["dep:wgpu", "dep:pollster"]
 quantized = []
 gpu-quantized = ["quantized"]
 paged-attention = []
 flash-attention = []
-metal-kernel = ["gllm-kernels/metal-kernel"]
-rocm-kernel = ["gllm-kernels/rocm-kernel"]
+
+# 开发/调试 features
+nccl = ["gllm-kernels/nccl"]
 
 [dependencies]
-burn = { version = "0.20.0-pre.6", default-features = false, features = ["std", "wgpu", "candle", "ndarray"] }
+# 通过 gllm-kernels 获取 burn 后端，不直接指定 burn features
+burn = { version = "0.20.0-pre.6", default-features = false, features = ["std"] }
+burn-ndarray = { version = "0.20.0-pre.6", default-features = false, features = ["std"] }
 gllm-kernels = { path = "../gllm-kernels", default-features = false }
-wgpu = { version = "26.0", optional = true }
-pollster = { version = "0.4", optional = true }
 burn-import = { version = "0.20.0-pre.6", default-features = false, features = ["safetensors"] }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }

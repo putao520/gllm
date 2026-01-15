@@ -12,6 +12,8 @@ use burn::nn::{
 use burn::tensor::activation::{relu, sigmoid};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
+use memmap2::Mmap;
+use std::fs::File;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -275,14 +277,21 @@ impl<B: Backend> DynamicBertModel<B> {
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
         use crate::weight_loader::{load_embedding, load_layer_norm, load_linear, load_mha, WeightLoader};
 
-        let bytes = std::fs::read(safetensors_path).map_err(|err| {
+        let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
-                "Failed to read SafeTensors file {}: {err}",
+                "Failed to open SafeTensors file {}: {err}",
+                safetensors_path.display()
+            ))
+        })?;
+        // Safety: the file is not mutated while the mmap is alive.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|err| {
+            Error::LoadError(format!(
+                "Failed to memory-map SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
 
-        let loader = WeightLoader::from_bytes(&bytes)?;
+        let loader = WeightLoader::from_bytes(&mmap)?;
         let hidden_size = self.config.hidden_size;
         let num_heads = self.config.num_attention_heads;
         let dropout = self.config.attention_probs_dropout_prob.unwrap_or(0.1) as f64;

@@ -72,7 +72,7 @@ impl<B: Backend> DynamicPooler<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn mean_pooling_reduces_dim() {

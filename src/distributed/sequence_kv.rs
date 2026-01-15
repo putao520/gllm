@@ -256,7 +256,7 @@ impl<B: Backend> SequenceFactory<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     type TestBackend = NdArray<f32>;
 

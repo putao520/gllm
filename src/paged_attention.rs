@@ -692,7 +692,7 @@ impl<'a, B: Backend> IsolatedAttentionContext<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn test_block_manager_allocate_free() {

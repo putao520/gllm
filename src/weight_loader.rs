@@ -539,6 +539,75 @@ pub mod mappings {
     }
 }
 
+/// Load Engram embedding table from SafeTensors.
+///
+/// Engram embeddings are stored as a 2D tensor [num_buckets, embedding_dim].
+/// This function returns the flattened f32 data suitable for `EngramModule::from_embeddings`.
+///
+/// Common weight names:
+/// - `model.engram.embeddings.weight` (DeepSeek-V4+)
+/// - `engram.embedding_table` (alternative naming)
+/// - `conditional_memory.embeddings` (alternative naming)
+pub fn load_engram_embeddings(
+    loader: &WeightLoader,
+    config: &crate::model_config::ModelConfig,
+) -> Result<Option<Vec<f32>>> {
+    // Check if Engram is enabled in config
+    let (_, num_buckets, embedding_dim, _) = match config.engram_config() {
+        Some(cfg) => cfg,
+        None => return Ok(None), // Engram not enabled
+    };
+
+    // Try common Engram weight names
+    let engram_names = [
+        "model.engram.embeddings.weight",
+        "model.engram.embedding_table",
+        "engram.embeddings.weight",
+        "engram.embedding_table",
+        "conditional_memory.embeddings",
+        "conditional_memory.embedding_table",
+    ];
+
+    for name in engram_names {
+        if loader.has_tensor(name) {
+            let tensor = loader.load_tensor(name)?;
+
+            // Verify shape matches config
+            if tensor.shape.len() != 2 {
+                return Err(Error::LoadError(format!(
+                    "Engram tensor '{}' has wrong dimensions: expected 2D, got {}D",
+                    name, tensor.shape.len()
+                )));
+            }
+
+            let [loaded_buckets, loaded_dim] = [tensor.shape[0], tensor.shape[1]];
+            if loaded_buckets != num_buckets {
+                log::warn!(
+                    "Engram bucket count mismatch: config has {}, weights have {}. Using weights.",
+                    num_buckets, loaded_buckets
+                );
+            }
+            if loaded_dim != embedding_dim {
+                log::warn!(
+                    "Engram embedding dim mismatch: config has {}, weights have {}. Using weights.",
+                    embedding_dim, loaded_dim
+                );
+            }
+
+            log::info!(
+                "Loaded Engram embeddings from '{}': [{} x {}]",
+                name, loaded_buckets, loaded_dim
+            );
+
+            return Ok(Some(tensor.data));
+        }
+    }
+
+    // No Engram weights found - this is OK if config enables Engram but model doesn't ship with weights
+    log::debug!("No Engram weights found in model file");
+    Ok(None)
+}
+
 /// Multi-shard weight loading support.
 pub mod shards {
     use super::*;
@@ -676,5 +745,33 @@ mod tests {
             Architecture::from_model_type("chatglm"),
             Architecture::Glm
         );
+    }
+
+    #[test]
+    fn test_weight_loader_from_mmap() {
+        use memmap2::Mmap;
+        use safetensors::tensor::{serialize, TensorView};
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let bytes: Vec<u8> = data
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let tensor = TensorView::new(Dtype::F32, vec![3], &bytes).expect("tensor view");
+        let safetensors = serialize([("weight", tensor)], &None).expect("serialize safetensors");
+
+        let mut file = NamedTempFile::new().expect("tempfile");
+        file.write_all(&safetensors).expect("write safetensors");
+
+        let file_handle = std::fs::File::open(file.path()).expect("open safetensors");
+        // Safety: the file is not mutated while the mmap is alive.
+        let mmap = unsafe { Mmap::map(&file_handle) }.expect("mmap safetensors");
+        let loader = WeightLoader::from_bytes(&mmap).expect("weight loader");
+        let loaded = loader.load_tensor("weight").expect("load tensor");
+
+        assert_eq!(loaded.shape, vec![3]);
+        assert_eq!(loaded.data, data);
     }
 }

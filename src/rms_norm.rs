@@ -25,7 +25,7 @@ impl<B: Backend> RmsNorm<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn rms_norm_preserves_shape() {

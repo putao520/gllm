@@ -168,7 +168,7 @@ fn build_block_causal_mask<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
     use burn::tensor::activation::softmax;
 
     fn build_full_causal_mask<B: Backend>(

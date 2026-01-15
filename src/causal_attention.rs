@@ -4,14 +4,20 @@ use crate::rope::{RopeConfig, RotaryPositionEmbedding};
 use crate::types::{Error, Result};
 #[cfg(feature = "paged-attention")]
 use crate::paged_attention::PagedKVCache;
-#[cfg(feature = "flash-attention")]
-use crate::flash_attention::{flash_attention_forward, FlashAttentionConfig};
 use burn::nn::{Linear, LinearConfig};
-#[cfg(not(feature = "flash-attention"))]
-use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+// Zero-cost kernel dispatcher (initialized once)
+use gllm_kernels::{KernelDispatcher, FlashAttentionConfig as KernelFlashConfig};
+
+static DISPATCHER: OnceLock<KernelDispatcher> = OnceLock::new();
+
+#[inline(always)]
+fn get_dispatcher() -> &'static KernelDispatcher {
+    DISPATCHER.get_or_init(KernelDispatcher::new)
+}
 
 #[derive(Clone)]
 pub struct CausalAttention<B: Backend> {
@@ -293,55 +299,41 @@ impl<B: Backend> CausalAttention<B> {
         q: Tensor<B, 4>,
         k: Tensor<B, 4>,
         v: Tensor<B, 4>,
-        position_offset: usize,
-        key_len: usize,
+        _position_offset: usize,
+        _key_len: usize,
     ) -> Tensor<B, 4> {
-        #[cfg(feature = "flash-attention")]
-        {
-            let config = FlashAttentionConfig::default();
-            return flash_attention_forward(
-                q,
-                k,
-                v,
-                true,
-                position_offset,
-                key_len,
-                self.sliding_window,
-                config,
-            );
-        }
+        let [batch_size, num_heads, seq_q, head_dim] = q.dims();
+        let seq_kv = k.dims()[2];
+        let device = q.device();
 
-        #[cfg(not(feature = "flash-attention"))]
-        {
-            let [batch_size, num_heads, query_len, head_dim] = q.dims();
-            let scale = (self.head_dim as f32).sqrt();
-            let k_t = k.transpose();
+        // Extract tensor data as f32 slices
+        let q_data: Vec<f32> = q.into_data().into_vec().expect("q to f32");
+        let k_data: Vec<f32> = k.into_data().into_vec().expect("k to f32");
+        let v_data: Vec<f32> = v.into_data().into_vec().expect("v to f32");
 
-            if query_len > 4096 {
-                let mut outputs = Vec::new();
-                let mut start = 0usize;
-                while start < query_len {
-                    let end = (start + 2048).min(query_len);
-                    let q_slice = q
-                        .clone()
-                        .slice([0..batch_size, 0..num_heads, start..end, 0..head_dim]);
-                    let mut scores = q_slice.matmul(k_t.clone()) / scale;
-                    let mask = self.build_causal_mask(end - start, key_len, position_offset + start);
-                    scores = scores + mask;
-                    let attn = softmax(scores, 3);
-                    let context = attn.matmul(v.clone());
-                    outputs.push(context);
-                    start = end;
-                }
-                Tensor::cat(outputs, 2)
-            } else {
-                let mut scores = q.matmul(k_t) / scale;
-                let mask = self.build_causal_mask(query_len, key_len, position_offset);
-                scores = scores + mask;
-                let attn = softmax(scores, 3);
-                attn.matmul(v)
-            }
-        }
+        // Output buffer
+        let mut output_data = vec![0.0f32; batch_size * num_heads * seq_q * head_dim];
+
+        // Call kernel dispatcher (zero-cost generic dispatch)
+        let config = KernelFlashConfig {
+            batch_size,
+            num_heads,
+            seq_len_q: seq_q,
+            seq_len_kv: seq_kv,
+            head_dim,
+            causal: true,
+            use_log_space_softmax: seq_q > 4096 || seq_kv > 4096,
+            use_kahan_accumulator: seq_q > 4096 || seq_kv > 4096,
+            ..Default::default()
+        };
+
+        get_dispatcher().flash_attention(&q_data, &k_data, &v_data, &mut output_data, config);
+
+        // Convert back to tensor
+        Tensor::from_data(
+            TensorData::new(output_data, [batch_size, num_heads, seq_q, head_dim]),
+            &device,
+        )
     }
 
     fn build_causal_mask(
@@ -405,7 +397,7 @@ impl<B: Backend> CausalAttention<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn causal_attention_preserves_shape() {

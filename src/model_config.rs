@@ -139,6 +139,21 @@ pub struct ModelConfig {
     pub bos_token_id: Option<i64>,
     #[serde(default)]
     pub eos_token_id: Option<i64>,
+    /// Engram conditional memory configuration (DeepSeek-V4+)
+    #[serde(default)]
+    pub engram_enabled: Option<bool>,
+    /// Engram N-gram size (typically 2-4)
+    #[serde(default)]
+    pub engram_ngram_size: Option<usize>,
+    /// Engram number of buckets in embedding table
+    #[serde(default)]
+    pub engram_num_buckets: Option<usize>,
+    /// Engram embedding dimension (should match hidden_size)
+    #[serde(default)]
+    pub engram_embedding_dim: Option<usize>,
+    /// Engram output scaling factor
+    #[serde(default)]
+    pub engram_scale: Option<f32>,
     #[serde(default)]
     pub extra: Value,
 }
@@ -230,6 +245,11 @@ impl ModelConfig {
         merge_opt!(pad_token_id);
         merge_opt!(bos_token_id);
         merge_opt!(eos_token_id);
+        merge_opt!(engram_enabled);
+        merge_opt!(engram_ngram_size);
+        merge_opt!(engram_num_buckets);
+        merge_opt!(engram_embedding_dim);
+        merge_opt!(engram_scale);
 
         self.extra = merge_json(self.extra, override_config.extra);
         self
@@ -423,6 +443,24 @@ impl ModelConfig {
         Ok(warnings)
     }
 
+    /// Check if Engram conditional memory is enabled for this model.
+    pub fn is_engram_enabled(&self) -> bool {
+        self.engram_enabled.unwrap_or(false)
+    }
+
+    /// Get Engram configuration if enabled.
+    /// Returns (ngram_size, num_buckets, embedding_dim, scale).
+    pub fn engram_config(&self) -> Option<(usize, usize, usize, f32)> {
+        if !self.is_engram_enabled() {
+            return None;
+        }
+        let ngram_size = self.engram_ngram_size.unwrap_or(3);
+        let num_buckets = self.engram_num_buckets.unwrap_or(1 << 20); // 1M default
+        let embedding_dim = self.engram_embedding_dim.unwrap_or(self.hidden_size);
+        let scale = self.engram_scale.unwrap_or(1.0);
+        Some((ngram_size, num_buckets, embedding_dim, scale))
+    }
+
     #[allow(dead_code)]
     pub fn get_model_defaults(repo_id: &str) -> Self {
         model_defaults(repo_id)
@@ -472,6 +510,11 @@ impl Default for ModelConfig {
             bos_token_id: None,
             eos_token_id: None,
             type_vocab_size: None,
+            engram_enabled: None,
+            engram_ngram_size: None,
+            engram_num_buckets: None,
+            engram_embedding_dim: None,
+            engram_scale: None,
             extra: Value::Object(Map::new()),
         }
     }

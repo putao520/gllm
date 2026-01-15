@@ -193,7 +193,7 @@ impl<B: Backend> RotaryPositionEmbedding<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn rope_creates_frequency_tables() {

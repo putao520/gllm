@@ -4,33 +4,39 @@
 
 mod deterministic;
 
-pub use gllm_kernels::{
+// Re-export from ops submodules
+pub use gllm_kernels::ops::stable_accumulator::{
     AccumulatorConfig,
-    AttentionConfig,
-    BlockManager,
-    BlockTable,
-    FlashAttentionConfig,
-    FusedPagedAttention,
     HierarchicalAccumulator,
-    HierarchicalFlashAttention,
     KahanAccumulator,
     KahanSum,
-    KVBlock,
-    LogSpaceSoftmax,
-    PagedAttention,
-    PagedAttentionConfig,
-    PagedKVCache,
     StableAccumulator,
     StableRowState,
+};
+pub use gllm_kernels::ops::paged_attention::{
+    BlockManager,
+    BlockTable,
+    KVBlock,
+    PagedAttention,
+    PagedKVCache,
+};
+pub use gllm_kernels::ops::flash_attention::{
+    DeterministicConfig,
+    FlashAttentionConfig,
+    FusedPagedAttention,
+    HierarchicalFlashAttention,
+    HierarchicalFlashConfig,
+};
+pub use gllm_kernels::ops::softmax::{
+    LogSpaceSoftmax,
     log_add_exp,
     log_sum_exp,
 };
-
-pub use gllm_kernels::ops::flash_attention::{
-    DeterministicConfig,
-    HierarchicalFlashConfig,
+pub use gllm_kernels::types::{
+    AttentionConfig,
+    PagedAttentionConfig,
 };
 
 pub use deterministic::{DeterministicConfigExt, DeterministicGuard};
-pub use gllm_kernels::PagedKVCache as PagedKvCache;
-pub use gllm_kernels::StableRowState as LogSpaceRowState;
+pub use gllm_kernels::ops::paged_attention::PagedKVCache as PagedKvCache;
+pub use gllm_kernels::ops::stable_accumulator::StableRowState as LogSpaceRowState;

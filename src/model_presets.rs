@@ -541,6 +541,36 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
         ),
         "deepseek-ai/deepseek-v3" => deepseek_v3_preset(),
 
+        // GPT-OSS Models (OpenAI 2025 Open Source MoE)
+        "openai/gpt-oss-20b" => gpt_oss_preset(
+            2880,   // hidden_size
+            24,     // layers
+            64,     // heads
+            8,      // kv_heads
+            64,     // head_dim (non-standard: 64*64=4096 != hidden_size)
+            2880,   // intermediate_size (same as hidden_size for GPT-OSS)
+            201088, // vocab
+            131072, // max_pos (128K context via YaRN)
+            32,     // num_experts
+            4,      // experts_per_tok
+            150000.0, // rope_theta
+            1e-5,   // rms_norm_eps
+        ),
+        "openai/gpt-oss-120b" => gpt_oss_preset(
+            2880,   // hidden_size
+            36,     // layers
+            64,     // heads
+            8,      // kv_heads
+            64,     // head_dim (non-standard)
+            2880,   // intermediate_size
+            201088, // vocab
+            131072, // max_pos (128K context via YaRN)
+            128,    // num_experts
+            4,      // experts_per_tok
+            150000.0, // rope_theta
+            1e-5,   // rms_norm_eps
+        ),
+
         // E5 Models
         repo if repo.starts_with("intfloat/e5-small") => preset(
             384,
@@ -903,6 +933,12 @@ fn qwen3_embedding_preset(
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 
@@ -1099,6 +1135,61 @@ fn qwen25_instruct_preset(
         "qwen2",
         &["Qwen2ForCausalLM"],
     )
+}
+
+/// GPT-OSS preset (OpenAI 2025 Open Source MoE)
+///
+/// Key characteristics:
+/// - MoE with MXFP4 quantization on expert weights
+/// - Non-standard head_dim (64*64=4096 != hidden_size=2880)
+/// - YaRN rope scaling (4K→128K context)
+/// - Alternating sliding/full attention pattern
+fn gpt_oss_preset(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    num_experts: usize,
+    num_experts_per_tok: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
+    let mut config = decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        head_dim,
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        Some(128), // sliding_window for alternating attention
+        "gpt_oss",
+        &["GptOssForCausalLM"],
+    );
+    config.num_experts = Some(num_experts);
+    config.num_experts_per_tok = Some(num_experts_per_tok);
+    config.extra = json!({
+        "num_local_experts": num_experts,
+        "num_experts_per_tok": num_experts_per_tok,
+        "rope_scaling": {
+            "rope_type": "yarn",
+            "factor": 32.0,
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "original_max_position_embeddings": 4096
+        },
+        "quantization_config": {
+            "quant_method": "mxfp4"
+        }
+    });
+    config
 }
 
 fn phi4_preset(
@@ -1349,6 +1440,12 @@ fn decoder_embedding_preset(
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 
@@ -1409,6 +1506,12 @@ fn decoder_generation_preset(
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 
@@ -1495,6 +1598,12 @@ fn nvidia_nemotron_preset(
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 
@@ -1545,6 +1654,12 @@ fn jina_v4_preset() -> ModelConfig {
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 
@@ -1591,6 +1706,12 @@ fn jina_reranker_v3_preset() -> ModelConfig {
         eos_token_id: None,
         type_vocab_size: Some(1),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     })
 }
 
@@ -1651,6 +1772,12 @@ fn preset(
         eos_token_id: None,
         type_vocab_size: Some(type_vocab_size),
         extra: Value::Object(Map::new()),
+        // Engram conditional memory (disabled by default)
+        engram_enabled: None,
+        engram_ngram_size: None,
+        engram_num_buckets: None,
+        engram_embedding_dim: None,
+        engram_scale: None,
     }
 }
 

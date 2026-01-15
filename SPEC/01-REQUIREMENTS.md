@@ -166,3 +166,46 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 - 保持纯 Rust 实现
 
 **状态**: 🔄 基础支持已实现 [PRD-02]（通过 SafeTensors 加载支持量化模型，但未实现专用量化推理优化）
+
+---
+
+## gllm-kernels 集成
+
+### REQ-KERN-001: 运行时后端选择
+
+**描述**: 使用 gllm-kernels 实现运行时 GPU 后端自动检测和选择
+
+**验收标准**:
+- 程序启动时自动检测可用后端（CUDA > ROCm > Metal > WGPU > CPU）
+- 支持 `GLLM_BACKEND` 环境变量强制指定后端
+- 同一二进制支持所有 GPU 厂商，用户无需重新编译
+
+**关联设计**: ARCH-ADR-007
+
+**状态**: 🔲 待实现
+
+### REQ-KERN-002: 2M 超长上下文支持
+
+**描述**: Attention 计算支持 2M+ token 上下文，无数值溢出
+
+**验收标准**:
+- 使用 gllm-kernels 的 LogSpaceSoftmax 防止 exp 溢出
+- 使用 KahanAccumulator 减少浮点累积误差
+- 支持增量计算，无需一次性加载全序列
+
+**关联设计**: ARCH-ADR-008
+
+**状态**: 🔲 待实现
+
+### REQ-KERN-003: 零成本算子调用
+
+**描述**: Attention 算子调用必须是零成本抽象
+
+**验收标准**:
+- 使用原生切片 `&[f16]` 作为算子输入，避免 Tensor 抽象开销
+- burn 仅用于权重加载，推理使用 gllm-kernels 原生算子
+- 无 trait object 动态派发
+
+**关联设计**: ARCH-ADR-007
+
+**状态**: 🔲 待实现

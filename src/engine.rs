@@ -5,9 +5,10 @@ use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
 use crate::types::{Device, Error, Result};
-use burn::backend::{Candle, NdArray, Wgpu};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use burn_ndarray::NdArray;
+use gllm_kernels::{detect_backend, BackendType, DefaultBackend};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,14 +19,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokenizers::Tokenizer;
 
-/// Global singleton wgpu device to prevent multiple device creation and cleanup race conditions.
-/// All wgpu backends share this single device instance.
-static WGPU_DEVICE: OnceLock<<Wgpu<f32> as Backend>::Device> = OnceLock::new();
+/// Global singleton GPU device to prevent multiple device creation and cleanup race conditions.
+/// All GPU backends share this single device instance.
+static GPU_DEVICE: OnceLock<<DefaultBackend as Backend>::Device> = OnceLock::new();
 
-/// Get or create the global wgpu device singleton.
-fn get_wgpu_device() -> <Wgpu<f32> as Backend>::Device {
-    WGPU_DEVICE
-        .get_or_init(|| <Wgpu<f32> as Backend>::Device::default())
+/// Get or create the global GPU device singleton.
+fn get_gpu_device() -> <DefaultBackend as Backend>::Device {
+    GPU_DEVICE
+        .get_or_init(|| <DefaultBackend as Backend>::Device::default())
         .clone()
 }
 
@@ -541,33 +542,24 @@ impl<B: Backend> RerankEngine<B> {
 }
 
 /// Backend-specific engine bundle.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU based on compile flags) -> NdArray (CPU fallback)
 pub(crate) enum EngineBackend {
-    /// GPU backend using WebGPU
-    Wgpu {
-        embedding: EmbeddingEngine<Wgpu<f32>>,
-        rerank: RerankEngine<Wgpu<f32>>,
+    /// GPU backend using gllm-kernels DefaultBackend (CUDA/ROCm/Metal/WGPU)
+    Gpu {
+        embedding: EmbeddingEngine<DefaultBackend>,
+        rerank: RerankEngine<DefaultBackend>,
     },
-    /// CPU backend with BLAS acceleration (OpenBLAS/MKL/Accelerate)
-    Candle {
-        embedding: EmbeddingEngine<Candle<f32, i64>>,
-        rerank: RerankEngine<Candle<f32, i64>>,
-    },
-    /// Pure Rust CPU backend (no external dependencies)
-    NdArray {
+    /// Pure Rust CPU backend (fallback)
+    Cpu {
         embedding: EmbeddingEngine<NdArray<f32>>,
         rerank: RerankEngine<NdArray<f32>>,
     },
-    /// Generator backend using WebGPU
-    GeneratorWgpu {
-        generator: GeneratorEngine<Wgpu<f32>>,
+    /// Generator backend using GPU
+    GeneratorGpu {
+        generator: GeneratorEngine<DefaultBackend>,
     },
-    /// Generator backend using BLAS-accelerated CPU
-    GeneratorCandle {
-        generator: GeneratorEngine<Candle<f32, i64>>,
-    },
-    /// Generator backend using pure Rust CPU
-    GeneratorNdArray {
+    /// Generator backend using CPU
+    GeneratorCpu {
         generator: GeneratorEngine<NdArray<f32>>,
     },
 }
@@ -575,27 +567,25 @@ pub(crate) enum EngineBackend {
 impl EngineBackend {
     pub fn run_embeddings(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
         match self {
-            EngineBackend::Wgpu { embedding, .. } => embedding.embed(tokens),
-            EngineBackend::Candle { embedding, .. } => embedding.embed(tokens),
-            EngineBackend::NdArray { embedding, .. } => embedding.embed(tokens),
-            EngineBackend::GeneratorWgpu { .. }
-            | EngineBackend::GeneratorCandle { .. }
-            | EngineBackend::GeneratorNdArray { .. } => Err(Error::InvalidConfig(
-                "Embeddings are not supported for generator models".into(),
-            )),
+            EngineBackend::Gpu { embedding, .. } => embedding.embed(tokens),
+            EngineBackend::Cpu { embedding, .. } => embedding.embed(tokens),
+            EngineBackend::GeneratorGpu { .. } | EngineBackend::GeneratorCpu { .. } => {
+                Err(Error::InvalidConfig(
+                    "Embeddings are not supported for generator models".into(),
+                ))
+            }
         }
     }
 
     pub fn run_rerank(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
         match self {
-            EngineBackend::Wgpu { rerank, .. } => rerank.score(tokens),
-            EngineBackend::Candle { rerank, .. } => rerank.score(tokens),
-            EngineBackend::NdArray { rerank, .. } => rerank.score(tokens),
-            EngineBackend::GeneratorWgpu { .. }
-            | EngineBackend::GeneratorCandle { .. }
-            | EngineBackend::GeneratorNdArray { .. } => Err(Error::InvalidConfig(
-                "Rerank is not supported for generator models".into(),
-            )),
+            EngineBackend::Gpu { rerank, .. } => rerank.score(tokens),
+            EngineBackend::Cpu { rerank, .. } => rerank.score(tokens),
+            EngineBackend::GeneratorGpu { .. } | EngineBackend::GeneratorCpu { .. } => {
+                Err(Error::InvalidConfig(
+                    "Rerank is not supported for generator models".into(),
+                ))
+            }
         }
     }
 
@@ -606,13 +596,10 @@ impl EngineBackend {
         tokenizer: &TokenizerAdapter,
     ) -> Result<GenerationOutput> {
         match self {
-            EngineBackend::GeneratorWgpu { generator } => {
+            EngineBackend::GeneratorGpu { generator } => {
                 generator.generate(prompt_ids, config, tokenizer)
             }
-            EngineBackend::GeneratorCandle { generator } => {
-                generator.generate(prompt_ids, config, tokenizer)
-            }
-            EngineBackend::GeneratorNdArray { generator } => {
+            EngineBackend::GeneratorCpu { generator } => {
                 generator.generate(prompt_ids, config, tokenizer)
             }
             _ => Err(Error::InvalidConfig(
@@ -623,13 +610,7 @@ impl EngineBackend {
 
     pub fn max_position_embeddings(&self) -> Option<usize> {
         match self {
-            EngineBackend::GeneratorWgpu { generator } => {
-                Some(generator.max_position_embeddings())
-            }
-            EngineBackend::GeneratorCandle { generator } => {
-                Some(generator.max_position_embeddings())
-            }
-            EngineBackend::GeneratorNdArray { generator } => {
+            EngineBackend::GeneratorGpu { generator } | EngineBackend::GeneratorCpu { generator } => {
                 Some(generator.max_position_embeddings())
             }
             _ => None,
@@ -637,116 +618,94 @@ impl EngineBackend {
     }
 }
 
-// Note: EngineBackend no longer needs custom Drop since all wgpu backends share
-// the global WGPU_DEVICE singleton. The device is only dropped on process exit.
+// Note: EngineBackend no longer needs custom Drop since all GPU backends share
+// the global GPU_DEVICE singleton. The device is only dropped on process exit.
 
 /// Embedding-only engine backend.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU) -> NdArray (CPU fallback)
 pub(crate) enum EmbeddingBackend {
-    Wgpu(EmbeddingEngine<Wgpu<f32>>),
-    Candle(EmbeddingEngine<Candle<f32, i64>>),
-    NdArray(EmbeddingEngine<NdArray<f32>>),
+    Gpu(EmbeddingEngine<DefaultBackend>),
+    Cpu(EmbeddingEngine<NdArray<f32>>),
 }
 
 impl EmbeddingBackend {
     pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
         match self {
-            EmbeddingBackend::Wgpu(engine) => engine.embed(tokens),
-            EmbeddingBackend::Candle(engine) => engine.embed(tokens),
-            EmbeddingBackend::NdArray(engine) => engine.embed(tokens),
+            EmbeddingBackend::Gpu(engine) => engine.embed(tokens),
+            EmbeddingBackend::Cpu(engine) => engine.embed(tokens),
         }
     }
 }
 
 /// Reranking-only engine backend.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU) -> NdArray (CPU fallback)
 pub(crate) enum RerankingBackend {
-    Wgpu(RerankEngine<Wgpu<f32>>),
-    Candle(RerankEngine<Candle<f32, i64>>),
-    NdArray(RerankEngine<NdArray<f32>>),
+    Gpu(RerankEngine<DefaultBackend>),
+    Cpu(RerankEngine<NdArray<f32>>),
 }
 
 impl RerankingBackend {
     pub fn score(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
         match self {
-            RerankingBackend::Wgpu(engine) => engine.score(tokens),
-            RerankingBackend::Candle(engine) => engine.score(tokens),
-            RerankingBackend::NdArray(engine) => engine.score(tokens),
+            RerankingBackend::Gpu(engine) => engine.score(tokens),
+            RerankingBackend::Cpu(engine) => engine.score(tokens),
         }
     }
 }
 
 // Note: EmbeddingBackend and RerankingBackend no longer need custom Drop
-// since all wgpu backends share the global WGPU_DEVICE singleton.
+// since all GPU backends share the global GPU_DEVICE singleton.
 
 /// Build an embedding-only backend according to device preference.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_embedding_backend(
     info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EmbeddingBackend> {
-    use crate::gpu_capabilities::GpuCapabilities;
-
-    // Priority 1: Try GPU (Wgpu)
-    // CRITICAL: Pre-check GPU availability using wgpu-detect feature.
-    // This detects OOM errors BEFORE calling burn/cubecl, which would panic
-    // with .unwrap() in cubecl-wgpu. The panic can't be caught when panic=abort.
+    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
+    // detect_backend() checks: CUDA → ROCm → Metal → WGPU → CPU
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        // GpuCapabilities::detect() actually calls request_device() to verify GPU works
-        let gpu_caps = GpuCapabilities::detect();
+        let detected = detect_backend();
+        log::info!("Detected backend: {}", detected.name());
 
-        if !gpu_caps.is_gpu_available() {
-            log::warn!(
-                "GPU (Wgpu) pre-check failed: {} not usable, skipping GPU initialization",
-                gpu_caps.name
-            );
-        } else {
-            // GPU is available, proceed with initialization
+        // Only try GPU if runtime detection found a GPU backend
+        if !matches!(detected, BackendType::Cpu) {
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = get_wgpu_device();
-                EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info)
+                let gpu_device = get_gpu_device();
+                EmbeddingEngine::<DefaultBackend>::new(gpu_device, model_dir, info)
             });
 
             match init {
                 Ok(Ok(engine)) => {
-                    // Step 2: Verify GPU compute actually works by running a test embedding
-                    // This catches "Encoder is invalid" errors that only occur during real GPU work
+                    // Verify GPU compute actually works by running a test embedding
+                    // This catches runtime errors that only occur during real GPU work
                     let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Run a minimal embedding to verify GPU compute works
                         let test_tokens = vec![vec![101i64, 7592, 102]]; // [CLS] hello [SEP]
                         engine.embed(&test_tokens)
                     }));
 
                     match compute_test {
-                        Ok(Ok(_)) => return Ok(EmbeddingBackend::Wgpu(engine)),
-                        Ok(Err(e)) => log::warn!("GPU (Wgpu) compute test failed: {}, falling back to CPU", e),
-                        Err(_) => log::warn!("GPU (Wgpu) compute test panicked (Encoder invalid?), falling back to CPU"),
+                        Ok(Ok(_)) => {
+                            log::info!("GPU backend ({}) initialized successfully", detected.name());
+                            return Ok(EmbeddingBackend::Gpu(engine));
+                        }
+                        Ok(Err(e)) => log::warn!("GPU ({}) compute test failed: {}, falling back to CPU", detected.name(), e),
+                        Err(_) => log::warn!("GPU ({}) compute test panicked, falling back to CPU", detected.name()),
                     }
                 }
-                Ok(Err(e)) => log::warn!("GPU (Wgpu) initialization failed (likely OOM or config): {}, falling back to CPU", e),
-                Err(_) => log::warn!("GPU (Wgpu) initialization panicked (likely OOM), falling back to CPU"),
+                Ok(Err(e)) => log::warn!("GPU ({}) initialization failed: {}, falling back to CPU", detected.name(), e),
+                Err(_) => log::warn!("GPU ({}) initialization panicked, falling back to CPU", detected.name()),
             }
         }
     }
 
-    // Priority 2: Try Candle (CPU with BLAS acceleration)
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let candle_init = std::panic::catch_unwind(|| {
-            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            EmbeddingEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
-        });
-
-        if let Ok(Some(engine)) = candle_init {
-            return Ok(EmbeddingBackend::Candle(engine));
-        }
-    }
-
-    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EmbeddingBackend::NdArray(embedding));
+        log::info!("CPU backend (NdArray) initialized");
+        return Ok(EmbeddingBackend::Cpu(embedding));
     }
 
     Err(Error::InvalidConfig(
@@ -755,64 +714,47 @@ pub(crate) fn build_embedding_backend(
 }
 
 /// Build a reranking-only backend according to device preference.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_rerank_backend(
     info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<RerankingBackend> {
-    use crate::gpu_capabilities::GpuCapabilities;
-
-    // Priority 1: Try GPU (Wgpu)
-    // CRITICAL: Pre-check GPU availability to avoid panic in cubecl-wgpu
+    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let gpu_caps = GpuCapabilities::detect();
+        let detected = detect_backend();
 
-        if !gpu_caps.is_gpu_available() {
-            log::warn!(
-                "GPU (Wgpu) pre-check failed for reranker: {} not usable, skipping GPU",
-                gpu_caps.name
-            );
-        } else {
+        if !matches!(detected, BackendType::Cpu) {
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = get_wgpu_device();
-                RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info).ok()
+                let gpu_device = get_gpu_device();
+                RerankEngine::<DefaultBackend>::new(gpu_device, model_dir, info).ok()
             });
 
             if let Ok(Some(engine)) = init {
                 // Verify GPU compute works by running a test score
                 let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // [CLS] query [SEP] doc [SEP] - a simple pair for testing
                     let test_pairs = vec![vec![101i64, 7592, 102, 2088, 102]];
                     engine.score(&test_pairs)
                 }));
 
                 match compute_test {
-                    Ok(Ok(_)) => return Ok(RerankingBackend::Wgpu(engine)),
-                    Ok(Err(e)) => log::warn!("GPU (Wgpu) rerank compute test failed: {}, falling back to CPU", e),
-                    Err(_) => log::warn!("GPU (Wgpu) rerank compute test panicked, falling back to CPU"),
+                    Ok(Ok(_)) => {
+                        log::info!("GPU rerank backend ({}) initialized successfully", detected.name());
+                        return Ok(RerankingBackend::Gpu(engine));
+                    }
+                    Ok(Err(e)) => log::warn!("GPU ({}) rerank compute test failed: {}, falling back to CPU", detected.name(), e),
+                    Err(_) => log::warn!("GPU ({}) rerank compute test panicked, falling back to CPU", detected.name()),
                 }
             }
         }
     }
 
-    // Priority 2: Try Candle (CPU with BLAS acceleration)
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let candle_init = std::panic::catch_unwind(|| {
-            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
-        });
-
-        if let Ok(Some(engine)) = candle_init {
-            return Ok(RerankingBackend::Candle(engine));
-        }
-    }
-
-    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(RerankingBackend::NdArray(rerank));
+        log::info!("CPU rerank backend (NdArray) initialized");
+        return Ok(RerankingBackend::Cpu(rerank));
     }
 
     Err(Error::InvalidConfig(
@@ -821,49 +763,35 @@ pub(crate) fn build_rerank_backend(
 }
 
 /// Build a generator backend according to device preference.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_generator_backend(
     info: &ModelInfo,
     model_dir: &std::path::PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
-    use crate::gpu_capabilities::GpuCapabilities;
-
+    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let gpu_caps = GpuCapabilities::detect();
+        let detected = detect_backend();
 
-        if !gpu_caps.is_gpu_available() {
-            log::warn!(
-                "GPU (Wgpu) pre-check failed for generator: {} not usable, skipping GPU",
-                gpu_caps.name
-            );
-        } else {
+        if !matches!(detected, BackendType::Cpu) {
             let init = std::panic::catch_unwind(|| {
-                let wgpu_device = get_wgpu_device();
-                GeneratorEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info).ok()
+                let gpu_device = get_gpu_device();
+                GeneratorEngine::<DefaultBackend>::new(gpu_device, model_dir, info).ok()
             });
 
             if let Ok(Some(engine)) = init {
-                return Ok(EngineBackend::GeneratorWgpu { generator: engine });
+                log::info!("GPU generator backend ({}) initialized successfully", detected.name());
+                return Ok(EngineBackend::GeneratorGpu { generator: engine });
             }
         }
     }
 
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let candle_init = std::panic::catch_unwind(|| {
-            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            GeneratorEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info).ok()
-        });
-
-        if let Ok(Some(engine)) = candle_init {
-            return Ok(EngineBackend::GeneratorCandle { generator: engine });
-        }
-    }
-
+    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let generator = GeneratorEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EngineBackend::GeneratorNdArray { generator });
+        log::info!("CPU generator backend (NdArray) initialized");
+        return Ok(EngineBackend::GeneratorCpu { generator });
     }
 
     Err(Error::InvalidConfig(
@@ -872,7 +800,7 @@ pub(crate) fn build_generator_backend(
 }
 
 /// Build an engine backend according to device preference.
-/// Priority: Wgpu (GPU) -> Candle (CPU with BLAS) -> NdArray (pure Rust CPU)
+/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_backend(
     info: &ModelInfo,
     model_dir: &std::path::PathBuf,
@@ -882,51 +810,38 @@ pub(crate) fn build_backend(
         return build_generator_backend(info, model_dir, device);
     }
 
-    // Priority 1: Try GPU (Wgpu)
+    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let init = std::panic::catch_unwind(|| {
-            let wgpu_device = get_wgpu_device();
-            let embedding =
-                EmbeddingEngine::<Wgpu<f32>>::new(wgpu_device.clone(), model_dir, info);
-            let rerank = RerankEngine::<Wgpu<f32>>::new(wgpu_device, model_dir, info);
+        let detected = detect_backend();
 
-            match (embedding, rerank) {
-                (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Wgpu { embedding, rerank }),
-                _ => None,
+        if !matches!(detected, BackendType::Cpu) {
+            let init = std::panic::catch_unwind(|| {
+                let gpu_device = get_gpu_device();
+                let embedding =
+                    EmbeddingEngine::<DefaultBackend>::new(gpu_device.clone(), model_dir, info);
+                let rerank = RerankEngine::<DefaultBackend>::new(gpu_device, model_dir, info);
+
+                match (embedding, rerank) {
+                    (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Gpu { embedding, rerank }),
+                    _ => None,
+                }
+            });
+
+            if let Ok(Some(engine)) = init {
+                log::info!("GPU backend ({}) initialized successfully", detected.name());
+                return Ok(engine);
             }
-        });
-
-        if let Ok(Some(engine)) = init {
-            return Ok(engine);
         }
     }
 
-    // Priority 2: Try Candle (CPU with BLAS acceleration)
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let candle_init = std::panic::catch_unwind(|| {
-            let candle_device = <Candle<f32, i64> as Backend>::Device::default();
-            let embedding =
-                EmbeddingEngine::<Candle<f32, i64>>::new(candle_device.clone(), model_dir, info);
-            let rerank = RerankEngine::<Candle<f32, i64>>::new(candle_device, model_dir, info);
-
-            match (embedding, rerank) {
-                (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Candle { embedding, rerank }),
-                _ => None,
-            }
-        });
-
-        if let Ok(Some(engine)) = candle_init {
-            return Ok(engine);
-        }
-    }
-
-    // Priority 3: Fallback to NdArray (pure Rust, no external dependencies)
+    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
         let ndarray_device = <NdArray<f32> as Backend>::Device::default();
         let embedding =
             EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
         let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        return Ok(EngineBackend::NdArray { embedding, rerank });
+        log::info!("CPU backend (NdArray) initialized");
+        return Ok(EngineBackend::Cpu { embedding, rerank });
     }
 
     Err(Error::InvalidConfig(

@@ -1,11 +1,14 @@
 use crate::causal_attention::CausalAttention;
 use crate::decoder_layer::DecoderLayer;
+use crate::engram::SharedEngram;
 use crate::model_config::ModelConfig;
 use crate::rms_norm::RmsNorm;
 use crate::types::{Error, Result};
 use burn::nn::{Embedding, EmbeddingConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use memmap2::Mmap;
+use std::fs::File;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -17,6 +20,8 @@ pub struct DecoderModel<B: Backend> {
     pub(crate) max_position_embeddings: usize,
     pub(crate) hidden_size: usize,
     pub(crate) device: B::Device,
+    /// Optional Engram conditional memory module (for DeepSeek-V4+ models).
+    pub(crate) engram: Option<SharedEngram>,
 }
 
 impl<B: Backend> DecoderModel<B> {
@@ -53,11 +58,24 @@ impl<B: Backend> DecoderModel<B> {
             max_position_embeddings: config.max_position_embeddings,
             hidden_size: config.hidden_size,
             device: device.clone(),
+            engram: None, // Loaded separately via set_engram()
         })
     }
 
+    /// Set the Engram conditional memory module.
+    ///
+    /// This should be called after loading Engram weights for models that support it.
+    pub fn set_engram(&mut self, engram: SharedEngram) {
+        self.engram = Some(engram);
+    }
+
+    /// Get a reference to the Engram module if present.
+    pub fn engram(&self) -> Option<&SharedEngram> {
+        self.engram.as_ref()
+    }
+
     pub fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Result<Tensor<B, 3>> {
-        let [_batch_size, seq_len] = input_ids.dims();
+        let [batch_size, seq_len] = input_ids.dims();
         if seq_len == 0 {
             return Err(Error::InvalidConfig(
                 "input sequence length must be greater than 0".into(),
@@ -70,9 +88,31 @@ impl<B: Backend> DecoderModel<B> {
             )));
         }
 
+        // Extract token IDs for Engram lookup (if Engram is enabled)
+        let tokens: Option<Vec<u32>> = if self.engram.is_some() {
+            let ids: Vec<i64> = input_ids.clone().into_data().into_vec()
+                .map_err(|e| Error::InferenceError(format!("Failed to extract token IDs: {}", e)))?;
+            Some(ids.iter().map(|&id| id as u32).collect())
+        } else {
+            None
+        };
+
         let mut hidden_states = self.embeddings.forward(input_ids);
-        for layer in &self.layers {
+
+        // Process through decoder layers with optional Engram fusion
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
             hidden_states = layer.forward(hidden_states, 0);
+
+            // Apply Engram fusion after the last layer (or could be per-layer in future)
+            if layer_idx == self.layers.len() - 1 {
+                if let (Some(engram), Some(ref toks)) = (&self.engram, &tokens) {
+                    // Process each batch item separately for Engram
+                    for batch_idx in 0..batch_size {
+                        let batch_tokens = &toks[batch_idx * seq_len..(batch_idx + 1) * seq_len];
+                        engram.fuse_with_attention(&mut hidden_states, batch_tokens);
+                    }
+                }
+            }
         }
 
         Ok(self.final_norm.forward(hidden_states))
@@ -111,14 +151,21 @@ impl<B: Backend> DecoderModel<B> {
         use crate::weight_loader::{load_linear, load_embedding, WeightLoader};
         use burn::module::Param;
 
-        let bytes = std::fs::read(safetensors_path).map_err(|err| {
+        let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
-                "Failed to read SafeTensors file {}: {err}",
+                "Failed to open SafeTensors file {}: {err}",
+                safetensors_path.display()
+            ))
+        })?;
+        // Safety: the file is not mutated while the mmap is alive.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|err| {
+            Error::LoadError(format!(
+                "Failed to memory-map SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
 
-        let loader = WeightLoader::from_bytes(&bytes)?;
+        let loader = WeightLoader::from_bytes(&mmap)?;
 
         // Load embeddings
         let embed_names = [
@@ -243,7 +290,7 @@ impl<B: Backend> DecoderModel<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn pool_last_token_respects_padding() {

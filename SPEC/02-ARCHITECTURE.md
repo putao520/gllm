@@ -409,3 +409,123 @@ impl EmbedderHandle {
 **限制**:
 - 所有推理请求串行执行（单线程）
 - 对于高并发场景，可扩展为 worker pool（未来优化）
+
+### ARCH-ADR-007: 集成 gllm-kernels 运行时后端
+
+**决策**: 使用 gllm-kernels 作为底层算子库，支持运行时后端选择
+
+**问题背景**:
+- 原有架构使用 Burn 框架的 feature flags 在编译时确定后端
+- 用户无法在运行时根据设备自动选择最优后端
+- 缺少针对 2M+ 超长上下文的数值稳定性优化
+
+**架构设计**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           gllm                                       │
+├─────────────────────────────────────────────────────────────────────┤
+│  Model Layer (权重加载)                                              │
+│    └── burn Tensor 用于 SafeTensors/GGUF 加载                       │
+├─────────────────────────────────────────────────────────────────────┤
+│  Attention Layer (causal_attention.rs)                               │
+│    ├── 从 burn Tensor 获取原生切片 &[f16]                            │
+│    ├── 调用 gllm_kernels::KernelDispatcher::flash_attention()       │
+│    └── 从切片创建输出 Tensor                                         │
+├─────────────────────────────────────────────────────────────────────┤
+│  Engine Layer (engine.rs)                                            │
+│    └── 使用 gllm_kernels::detect_backend() 获取运行时后端           │
+└─────────────────────────────────────────────────────────────────────┘
+           │
+           │ 运行时调用
+           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        gllm-kernels                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│  KernelDispatcher                                                    │
+│    ├── 运行时检测: CUDA → ROCm → Metal → WGPU → CPU                 │
+│    ├── 零成本派发: match enum + #[inline(always)]                   │
+│    └── 2M 上下文优化: LogSpaceSoftmax + KahanAccumulator            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**调用示例**:
+
+```rust
+// gllm/src/attention/causal_attention.rs
+use gllm_kernels::{KernelDispatcher, FlashAttentionConfig};
+
+impl CausalAttention {
+    pub fn forward(&self, q: Tensor, k: Tensor, v: Tensor) -> Tensor {
+        // 获取原生切片
+        let q_slice = q.to_data().as_slice::<f16>();
+        let k_slice = k.to_data().as_slice::<f16>();
+        let v_slice = v.to_data().as_slice::<f16>();
+
+        let mut output = vec![f16::ZERO; output_len];
+
+        // 调用优化算子
+        self.dispatcher.flash_attention(
+            q_slice, k_slice, v_slice,
+            &mut output,
+            FlashAttentionConfig {
+                use_log_space_softmax: true,  // 2M 上下文
+                use_kahan_accumulator: true,  // 数值稳定
+                ..Default::default()
+            },
+        );
+
+        Tensor::from_data(output, device)
+    }
+}
+```
+
+**理由**:
+- **运行时选择**: 同一二进制支持所有 GPU 厂商，用户无需重新编译
+- **零成本抽象**: 泛型 + enum match 无 vtable 开销
+- **数值稳定**: 2M+ 上下文不会溢出或精度损失
+- **职责分离**: gllm 专注模型管理，gllm-kernels 专注算子优化
+
+**依赖关系**:
+
+```toml
+# gllm/Cargo.toml
+[dependencies]
+gllm-kernels = { version = "0.2", features = ["fat-binary"] }
+```
+
+**后端选择优先级**:
+1. `GLLM_BACKEND` 环境变量（强制指定）
+2. 自动检测: CUDA → ROCm → Metal → WGPU → CPU
+
+### ARCH-ADR-008: 2M 超长上下文支持
+
+**决策**: 所有 Attention 计算必须使用 gllm-kernels 的数值稳定算法
+
+**问题背景**:
+- 标准 Softmax 的 exp() 在长序列时会溢出
+- 浮点累加误差随序列长度线性增长 O(n)
+- 2M token 上下文需要特殊处理
+
+**解决方案**:
+
+| 问题 | 解决方案 | gllm-kernels 组件 |
+|------|----------|-------------------|
+| exp 溢出 | Log-Space Softmax | `LogSpaceSoftmax` |
+| 累加误差 | Kahan 补偿求和 | `KahanAccumulator` |
+| 超长序列 | 分层累加器 | `HierarchicalAccumulator` |
+| 在线计算 | 稳定累加器 | `StableAccumulator` |
+
+**数学保证**:
+- Log-Space: 避免 exp(>709) 溢出
+- Kahan: 误差从 O(n) 降至 O(1)
+- 分层: 支持任意长度序列
+
+**配置方式**:
+
+```rust
+FlashAttentionConfig {
+    use_log_space_softmax: true,   // 2M 上下文必须开启
+    use_kahan_accumulator: true,   // 建议开启
+    ..Default::default()
+}

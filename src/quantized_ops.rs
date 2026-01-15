@@ -3,9 +3,7 @@
 use half::f16;
 
 #[cfg(feature = "gpu-quantized")]
-use crate::GpuCapabilities;
-#[cfg(feature = "gpu-quantized")]
-use burn::backend::{wgpu::WgpuDevice, Wgpu};
+use gllm_kernels::{detect_backend, BackendType, DefaultBackend};
 #[cfg(feature = "gpu-quantized")]
 use burn::tensor::backend::Backend;
 #[cfg(feature = "gpu-quantized")]
@@ -341,27 +339,28 @@ fn awq_matmul_burn<B: Backend>(
 #[cfg(feature = "gpu-quantized")]
 impl QuantizedBackend for GpuQuantizedBackend {
     fn q4_matmul(input: MatmulInput<'_>, qweight: &[u8], scales: &[f16]) -> Vec<f32> {
-        let caps = GpuCapabilities::detect();
-        if !caps.is_gpu_available() {
+        let detected = detect_backend();
+        if matches!(detected, BackendType::Cpu) {
             log::warn!("gllm: GPU not available, using CPU q4 matmul");
             return CpuQuantizedBackend::q4_matmul(input, qweight, scales);
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let device = WgpuDevice::default();
-            q4_matmul_burn::<Wgpu>(input, qweight, scales, &device)
+            let device = <DefaultBackend as Backend>::Device::default();
+            q4_matmul_burn::<DefaultBackend>(input, qweight, scales, &device)
         }));
 
         match result {
             Ok(Ok(output)) => output,
             Ok(Err(err)) => {
                 log::warn!(
-                    "gllm: GPU q4 matmul failed ({err}), falling back to CPU"
+                    "gllm: GPU ({}) q4 matmul failed ({err}), falling back to CPU",
+                    detected.name()
                 );
                 CpuQuantizedBackend::q4_matmul(input, qweight, scales)
             }
             Err(_) => {
-                log::warn!("gllm: GPU q4 matmul panicked, falling back to CPU");
+                log::warn!("gllm: GPU ({}) q4 matmul panicked, falling back to CPU", detected.name());
                 CpuQuantizedBackend::q4_matmul(input, qweight, scales)
             }
         }
@@ -374,27 +373,28 @@ impl QuantizedBackend for GpuQuantizedBackend {
         zeros: &[u32],
         group_size: usize,
     ) -> Vec<f32> {
-        let caps = GpuCapabilities::detect();
-        if !caps.is_gpu_available() {
+        let detected = detect_backend();
+        if matches!(detected, BackendType::Cpu) {
             log::warn!("gllm: GPU not available, using CPU AWQ matmul");
             return CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size);
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let device = WgpuDevice::default();
-            awq_matmul_burn::<Wgpu>(input, qweight, scales, zeros, group_size, &device)
+            let device = <DefaultBackend as Backend>::Device::default();
+            awq_matmul_burn::<DefaultBackend>(input, qweight, scales, zeros, group_size, &device)
         }));
 
         match result {
             Ok(Ok(output)) => output,
             Ok(Err(err)) => {
                 log::warn!(
-                    "gllm: GPU AWQ matmul failed ({err}), falling back to CPU"
+                    "gllm: GPU ({}) AWQ matmul failed ({err}), falling back to CPU",
+                    detected.name()
                 );
                 CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size)
             }
             Err(_) => {
-                log::warn!("gllm: GPU AWQ matmul panicked, falling back to CPU");
+                log::warn!("gllm: GPU ({}) AWQ matmul panicked, falling back to CPU", detected.name());
                 CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size)
             }
         }

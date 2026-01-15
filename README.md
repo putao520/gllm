@@ -123,20 +123,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### GPU Detection (v0.4.1+)
+### Backend Detection (v0.11+)
 
 ```rust
-use gllm::{GpuCapabilities, GpuType};
+use gllm::{detect_backend, BackendType};
 
-// Detect GPU capabilities (cached after first call)
-let caps = GpuCapabilities::detect();
+// Detect best available backend (cached after first call)
+// Priority: CUDA → ROCm → Metal → WGPU → CPU
+let backend = detect_backend();
 
-println!("GPU: {} ({:?})", caps.name, caps.gpu_type);
-println!("VRAM: {} MB", caps.vram_mb);
-println!("Recommended batch size: {}", caps.recommended_batch_size);
+println!("Detected backend: {}", backend.name());
 
-if caps.gpu_available {
-    println!("Using {} backend", caps.backend_name);
+match backend {
+    BackendType::Cuda => println!("Using NVIDIA CUDA"),
+    BackendType::Rocm => println!("Using AMD ROCm"),
+    BackendType::Metal => println!("Using Apple Metal"),
+    BackendType::Wgpu => println!("Using WebGPU (fallback)"),
+    BackendType::Cpu => println!("Using CPU"),
 }
 ```
 

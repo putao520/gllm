@@ -58,6 +58,8 @@ pub enum Architecture {
     Mixtral,
     /// DeepSeek-V3 decoder for generation.
     DeepSeekV3,
+    /// GPT-OSS MoE decoder for generation (OpenAI 2025).
+    GptOss,
 }
 
 /// Quantization type for models.
@@ -271,6 +273,11 @@ impl ModelRegistry {
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
             ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE, false),
             ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3, false),
+
+            // GPT-OSS Models (OpenAI 2025 Open Source MoE)
+            ("gpt-oss-20b", "openai/gpt-oss-20b", ModelType::Generator, Architecture::GptOss, false),
+            ("gpt-oss-120b", "openai/gpt-oss-120b", ModelType::Generator, Architecture::GptOss, false),
+
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator, false),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator, false),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator, false),
