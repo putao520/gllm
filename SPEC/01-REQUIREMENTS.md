@@ -2,7 +2,7 @@
 
 ## 概述
 
-gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenAI 风格的 SDK API，支持静态编译。
+gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，基于 gllm-kernels 的零成本算子与权重容器，提供 OpenAI 风格的 SDK API，支持静态编译。
 
 ## 修订历史
 
@@ -55,10 +55,10 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 
 ### REQ-MODEL-003: SafeTensors 加载
 
-**描述**: 加载 SafeTensors 格式模型权重到 Burn
+**描述**: 加载 SafeTensors 格式模型权重到 WeightMatrix/Vector
 
 **验收标准**:
-- 使用 burn-import 的 SafetensorsFileRecorder
+- 使用 safetensors + WeightLoader 解析权重
 - 支持 FP16/FP32 精度
 - 支持量化模型加载
 
@@ -73,7 +73,7 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 **描述**: 支持文本嵌入向量生成
 
 **验收标准**:
-- 支持 BERT 架构 (基于 Burn 基础组件实现)
+- 支持 BERT 架构 (基于 gllm-kernels 零成本算子实现)
 - 返回 Vec<f32> 向量
 - 支持批量输入
 
@@ -84,11 +84,34 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 **描述**: 支持文档重排序
 
 **验收标准**:
-- 支持 Cross-Encoder 架构 (基于 Burn 基础组件实现)
+- 支持 Cross-Encoder 架构 (基于 gllm-kernels 零成本算子实现)
 - 输入 query + documents，输出排序后的文档列表
 - 返回相关性分数
 
 **状态**: ✅ 已实现 [PRD-02]
+
+### REQ-INFER-003: Generator 推理
+
+**描述**: 支持文本生成（LLM 推理）
+
+**验收标准**:
+- 支持多种 Decoder 架构（详见 05-MODEL-REGISTRY.md）：
+  - Qwen2Generator: Qwen2/2.5 系列
+  - Qwen3Generator: Qwen3 系列
+  - Qwen3MoE: Qwen3 MoE 系列
+  - MistralGenerator: Mistral 系列
+  - Mixtral: Mixtral MoE 系列
+  - Phi3Generator: Phi-4 系列
+  - SmolLM3Generator: SmolLM3 系列
+  - InternLM3Generator: InternLM3 系列
+  - GLM4: GLM-4 系列
+  - GLM4MoE: GLM-4.7 MoE 系列
+  - DeepSeekV3: DeepSeek-V3 系列
+- 支持 FP16/GGUF/AWQ 等量化格式
+- 支持 KV Cache 增量推理
+- 返回生成的 token 序列
+
+**状态**: ✅ 已实现 (2025-01-17)
 
 ---
 
@@ -132,23 +155,23 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 
 ### REQ-BACKEND-001: WGPU 后端
 
-**描述**: 支持 wgpu 作为 GPU 后端
+**描述**: 支持 WGPU 作为 GPU 后端
 
 **验收标准**:
 - 纯 Rust 实现
 - 跨平台支持 (Vulkan/DX12/Metal)
-- 作为默认后端
+- 运行时后端检测中自动选择或回退
 
 **状态**: ✅ 已实现 [PRD-02]
 
 ### REQ-BACKEND-002: CPU 后端
 
-**描述**: 支持 ndarray 作为 CPU 后端
+**描述**: 支持 gllm-kernels CPU 后端
 
 **验收标准**:
 - 纯 Rust 实现
-- 无 GPU 环境可用
-- 通过 feature flag 启用
+- 无 GPU 环境可用时自动回退
+- 与运行时后端检测兼容
 
 **状态**: ✅ 已实现 [PRD-02]
 
@@ -161,8 +184,8 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 **描述**: 支持量化模型以减少内存占用
 
 **验收标准**:
-- 支持 Burn 内置量化方案
-- 支持 INT8 量化
+- 支持 gllm-kernels 量化算子与 AWQ/GGUF 权重
+- 支持 INT8/INT4 量化
 - 保持纯 Rust 实现
 
 **状态**: 🔄 基础支持已实现 [PRD-02]（通过 SafeTensors 加载支持量化模型，但未实现专用量化推理优化）
@@ -182,7 +205,7 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 
 **关联设计**: ARCH-ADR-007
 
-**状态**: 🔲 待实现
+**状态**: ✅ 已实现 (2025-01-17) - KernelDispatcher 自动检测后端
 
 ### REQ-KERN-002: 2M 超长上下文支持
 
@@ -195,17 +218,17 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，提供 OpenA
 
 **关联设计**: ARCH-ADR-008
 
-**状态**: 🔲 待实现
+**状态**: ✅ 已实现 (2025-01-17) - flash_attention 实现
 
 ### REQ-KERN-003: 零成本算子调用
 
 **描述**: Attention 算子调用必须是零成本抽象
 
 **验收标准**:
-- 使用原生切片 `&[f16]` 作为算子输入，避免 Tensor 抽象开销
-- burn 仅用于权重加载，推理使用 gllm-kernels 原生算子
+- 使用原生切片 `&[f16]` 作为算子输入，避免额外抽象开销
+- 推理使用 gllm-kernels 原生算子与 WeightMatrix/Vector
 - 无 trait object 动态派发
 
 **关联设计**: ARCH-ADR-007
 
-**状态**: 🔲 待实现
+**状态**: ✅ 已实现 (2025-01-17) - Burn 依赖完全移除，纯 gllm-kernels 实现

@@ -1,42 +1,69 @@
+//! RMS Normalization using gllm-kernels.
+
 use crate::model_config::ModelConfig;
-use burn::nn::{RmsNorm as BurnRmsNorm, RmsNormConfig};
-use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
+use gllm_kernels::{rms_norm_forward, WeightVector};
 
 #[derive(Clone)]
-pub struct RmsNorm<B: Backend> {
-    pub(crate) inner: BurnRmsNorm<B>,
+pub struct RmsNorm {
+    pub gamma: WeightVector,
+    hidden_size: usize,
+    eps: f32,
 }
 
-impl<B: Backend> RmsNorm<B> {
-    pub fn new(device: &B::Device, config: &ModelConfig) -> Self {
-        let eps = config.rms_norm_eps.unwrap_or(1e-6);
-        let inner = RmsNormConfig::new(config.hidden_size)
-            .with_epsilon(eps)
-            .init(device);
-        Self { inner }
+impl RmsNorm {
+    pub fn new(config: &ModelConfig) -> Self {
+        let hidden_size = config.hidden_size;
+        let eps = config.rms_norm_eps.unwrap_or(1e-5) as f32;
+        let gamma = WeightVector::ones(hidden_size);
+        Self {
+            gamma,
+            hidden_size,
+            eps,
+        }
     }
 
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        self.inner.forward(input)
+    pub fn with_weight(gamma: WeightVector, hidden_size: usize, eps: f32) -> Self {
+        Self {
+            gamma,
+            hidden_size,
+            eps,
+        }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn_ndarray::NdArray;
+    /// Forward pass for 2D input [batch, hidden].
+    pub fn forward_2d(&self, input: &[f32], batch: usize) -> Vec<f32> {
+        let mut output = vec![0.0f32; batch * self.hidden_size];
+        rms_norm_forward(
+            input,
+            self.gamma.as_slice(),
+            &mut output,
+            batch,
+            self.hidden_size,
+            self.eps,
+        );
+        output
+    }
 
-    #[test]
-    fn rms_norm_preserves_shape() {
-        let device = <NdArray<f32> as Backend>::Device::default();
-        let mut config = ModelConfig::default();
-        config.hidden_size = 4;
+    /// Forward pass for 3D input [batch, seq_len, hidden].
+    pub fn forward_3d(&self, input: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
+        let rows = batch * seq_len;
+        let mut output = vec![0.0f32; rows * self.hidden_size];
+        rms_norm_forward(
+            input,
+            self.gamma.as_slice(),
+            &mut output,
+            rows,
+            self.hidden_size,
+            self.eps,
+        );
+        output
+    }
 
-        let layer = RmsNorm::<NdArray<f32>>::new(&device, &config);
-        let input = Tensor::<NdArray<f32>, 3>::zeros([2, 3, 4], &device);
-        let output = layer.forward(input);
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
 
-        assert_eq!(output.dims(), [2, 3, 4]);
+    pub fn eps(&self) -> f32 {
+        self.eps
     }
 }

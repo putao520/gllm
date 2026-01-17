@@ -1,113 +1,39 @@
-use burn::tensor::activation::softmax;
-use burn::tensor::backend::Backend;
-use burn::tensor::{ElementConversion, Int, Tensor};
-use rand::distributions::WeightedIndex;
-use rand::prelude::*;
+//! Sampling operations using gllm-kernels.
 
-pub struct SamplingConfig {
-    pub temperature: f32,
-    pub top_p: f32,
-    pub top_k: usize,
+// Re-export SamplingConfig from gllm-kernels for convenience
+pub use gllm_kernels::SamplingConfig;
+use gllm_kernels::sample_tokens;
+
+/// Sample the next token from logits using the given sampling configuration.
+///
+/// * `logits` - Logits slice of shape [batch, vocab_size]
+pub fn sample_next_token(
+    logits: &[f32],
+    batch_size: usize,
+    vocab_size: usize,
+    config: &SamplingConfig,
+) -> Vec<u32> {
+    sample_tokens(logits, batch_size, vocab_size, config)
 }
 
-pub fn sample_next_token<B: Backend>(
-    logits: Tensor<B, 2>,
+/// Sample the next token from 3D logits [batch, seq_len, vocab_size].
+pub fn sample_next_token_3d(
+    logits: &[f32],
+    batch: usize,
+    seq_len: usize,
+    vocab_size: usize,
     config: &SamplingConfig,
-    device: &B::Device,
-) -> Vec<i64> {
-    let [batch_size, vocab_size] = logits.dims();
-    if config.temperature <= 0.0 {
-        let indices = match logits.argmax(1).into_data().into_vec::<B::IntElem>() {
-            Ok(data) => data,
-            Err(_) => return vec![0; batch_size],
-        };
-        return indices.into_iter().map(|v| v.elem::<i64>()).collect();
+) -> Vec<u32> {
+    let start = (seq_len - 1) * vocab_size;
+    let mut last_logits = Vec::with_capacity(batch * vocab_size);
+    for b in 0..batch {
+        let row_start = b * seq_len * vocab_size + start;
+        last_logits.extend_from_slice(&logits[row_start..row_start + vocab_size]);
     }
+    sample_next_token(&last_logits, batch, vocab_size, config)
+}
 
-    let logits = if (config.temperature - 1.0).abs() > f32::EPSILON {
-        logits / config.temperature
-    } else {
-        logits
-    };
-
-    let apply_top_p = config.top_p > 0.0 && config.top_p < 1.0;
-    let k = if config.top_k > 0 {
-        config.top_k.min(vocab_size)
-    } else {
-        vocab_size
-    };
-
-    let (values, indices) = if config.top_k > 0 || apply_top_p {
-        logits.topk_with_indices(k, 1)
-    } else {
-        let indices = Tensor::<B, 1, Int>::arange(0..vocab_size as i64, device)
-            .unsqueeze_dim::<2>(0)
-            .repeat(&[batch_size, 1]);
-        (logits, indices)
-    };
-    let probs = softmax(values, 1);
-
-    let prob_data = match probs.into_data().into_vec::<f32>() {
-        Ok(data) => data,
-        Err(_) => return vec![0; batch_size],
-    };
-    let index_data = match indices.into_data().into_vec::<B::IntElem>() {
-        Ok(data) => data,
-        Err(_) => return vec![0; batch_size],
-    };
-
-    let mut rng = thread_rng();
-    let mut outputs = Vec::with_capacity(batch_size);
-    let stride = if config.top_k > 0 || apply_top_p {
-        k
-    } else {
-        vocab_size
-    };
-
-    for batch in 0..batch_size {
-        let start = batch * stride;
-        let end = start + stride;
-        let row_probs = &prob_data[start..end];
-        let row_indices = &index_data[start..end];
-        let mut candidates: Vec<(i64, f32)> = row_indices
-            .iter()
-            .zip(row_probs.iter())
-            .map(|(idx, &prob)| (idx.elem::<i64>(), prob))
-            .collect();
-
-        if apply_top_p {
-            let mut filtered = Vec::new();
-            let mut filtered_weights = Vec::new();
-            let mut cumulative = 0.0;
-
-            for (token, weight) in candidates.iter() {
-                filtered.push(*token);
-                filtered_weights.push(*weight);
-                cumulative += *weight;
-                if cumulative >= config.top_p {
-                    break;
-                }
-            }
-
-            candidates = filtered.into_iter().map(|id| (id, 0.0)).collect();
-            let weights = filtered_weights;
-
-            let sample = WeightedIndex::new(&weights)
-                .ok()
-                .map(|dist| candidates[dist.sample(&mut rng)].0)
-                .unwrap_or_else(|| candidates.first().map(|(id, _)| *id).unwrap_or(0));
-            outputs.push(sample);
-            continue;
-        }
-
-        let weights: Vec<f32> = candidates.iter().map(|(_, prob)| *prob).collect();
-        let sample = WeightedIndex::new(&weights)
-            .ok()
-            .map(|dist| candidates[dist.sample(&mut rng)].0)
-            .unwrap_or_else(|| candidates.first().map(|(id, _)| *id).unwrap_or(0));
-
-        outputs.push(sample);
-    }
-
-    outputs
+/// Greedy decode: select the token with highest probability.
+pub fn greedy_decode(logits: &[f32], batch_size: usize, vocab_size: usize) -> Vec<u32> {
+    sample_next_token(logits, batch_size, vocab_size, &SamplingConfig::greedy())
 }

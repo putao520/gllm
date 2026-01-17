@@ -266,17 +266,18 @@ Generate text using decoder-based LLMs like Qwen2.5, GLM-4, and Mistral:
 use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Qwen2.5 Instruct models (latest 2025)
-    let client = Client::new("qwen2.5-7b-instruct")?;
-    // let client = Client::new("qwen2.5-0.5b-instruct")?;  // Lightweight
-    // let client = Client::new("qwen2.5-72b-instruct")?;   // Largest
+    // Qwen3 models (2025)
+    let client = Client::new("qwen3-8b")?;
+    // let client = Client::new("qwen3-0.6b")?;  // Lightweight (0.6B)
+    // let client = Client::new("qwen3-32b")?;   // High quality (32B)
 
-    // GLM-4 Chat models
-    // let client = Client::new("glm-4-9b-chat")?;
+    // Qwen3-next models (latest 2025, faster inference)
+    // let client = Client::new("qwen3-next-0.6b")?;
+    // let client = Client::new("qwen3-next-8b")?;
 
-    // Legacy Qwen2/Mistral
-    // let client = Client::new("qwen2-7b-instruct")?;
-    // let client = Client::new("mistral-7b-instruct")?;
+    // Ministral models (efficient 2024)
+    // let client = Client::new("ministral-3b-instruct")?;
+    // let client = Client::new("ministral-8b-instruct")?;
 
     let response = client
         .generate("Explain quantum computing in simple terms:")
@@ -342,7 +343,7 @@ for token in stream {
 
 > **CodeXEmbed** (SFR-Embedding-Code) is the 2024 state-of-the-art for code embedding, outperforming Voyage-Code by 20%+ on CoIR benchmark.
 
-### Generator Models (22) - NEW in v0.8.0+
+### Generator Models - NEW in v0.8.0+
 
 | Model | Alias | Parameters | Architecture | Best For |
 |-------|-------|------------|--------------|----------|
@@ -353,28 +354,27 @@ for token in stream {
 | Qwen3 8B | `qwen3-8b` | 8B | Decoder (Qwen3) | High quality |
 | Qwen3 14B | `qwen3-14b` | 14B | Decoder (Qwen3) | Very high quality |
 | Qwen3 32B | `qwen3-32b` | 32B | Decoder (Qwen3) | Premium quality |
-| **Qwen2.5 Series** |
-| Qwen2.5 0.5B Instruct | `qwen2.5-0.5b-instruct` | 0.5B | Decoder (Qwen2) | Fast generation |
-| Qwen2.5 1.5B Instruct | `qwen2.5-1.5b-instruct` | 1.5B | Decoder (Qwen2) | Lightweight |
-| Qwen2.5 3B Instruct | `qwen2.5-3b-instruct` | 3B | Decoder (Qwen2) | Balanced |
-| Qwen2.5 7B Instruct | `qwen2.5-7b-instruct` | 7B | Decoder (Qwen2) | High quality |
-| Qwen2.5 14B Instruct | `qwen2.5-14b-instruct` | 14B | Decoder (Qwen2) | Very high quality |
-| Qwen2.5 32B Instruct | `qwen2.5-32b-instruct` | 32B | Decoder (Qwen2) | Premium quality |
-| Qwen2.5 72B Instruct | `qwen2.5-72b-instruct` | 72B | Decoder (Qwen2) | Maximum quality |
+| **Qwen3-next Series (2025, faster inference)** |
+| Qwen3-next 0.6B | `qwen3-next-0.6b` | 0.6B | Decoder (Qwen3) | Ultra-fast, latest |
+| Qwen3-next 2B | `qwen3-next-2b` | 2B | Decoder (Qwen3) | Lightweight, latest |
+| Qwen3-next 4B | `qwen3-next-4b` | 4B | Decoder (Qwen3) | Balanced, latest |
+| Qwen3-next 8B | `qwen3-next-8b` | 8B | Decoder (Qwen3) | High quality, latest |
+| Qwen3-next 32B | `qwen3-next-32b` | 32B | Decoder (Qwen3) | Premium, latest |
+| **Ministral Series (2024, efficient)** |
+| Ministral 3B Instruct | `ministral-3b-instruct` | 3B | Decoder (Mistral) | Efficient, small |
+| Ministral 8B Instruct | `ministral-8b-instruct` | 8B | Decoder (Mistral) | Efficient, balanced |
+| Mistral 7B Instruct v0.3 | `mistral-7b-instruct` | 7B | Decoder (Mistral) | High quality |
 | **Phi-4 Series (2025)** |
-| Phi-4 | `phi-4` | 14B | Decoder (Phi3) | Microsoft flagship |
-| Phi-4 Mini Instruct | `phi-4-mini-instruct` | 3.8B | Decoder (Phi3) | Efficient reasoning |
+| Phi-4 | `phi-4` | 14B | Decoder (Phi4) | Microsoft flagship |
+| Phi-4 Mini Instruct | `phi-4-mini-instruct` | 3.8B | Decoder (Phi4) | Efficient reasoning |
 | **Other 2025 Models** |
 | SmolLM3 3B | `smollm3-3b` | 3B | Decoder (SmolLM3) | HuggingFace efficient |
 | InternLM3 8B Instruct | `internlm3-8b-instruct` | 8B | Decoder (InternLM3) | Chinese & English |
 | GLM-4 9B Chat | `glm-4-9b-chat` | 9B | Decoder (GLM4) | Zhipu AI flagship |
-| **Legacy Models** |
-| Qwen2 7B Instruct | `qwen2-7b-instruct` | 7B | Decoder (Qwen2) | Legacy |
-| Mistral 7B Instruct | `mistral-7b-instruct` | 7B | Decoder (Mistral) | Legacy |
 
-> **Qwen3** (2025) is the latest state-of-the-art open-source LLM with 40K context and hybrid thinking modes.
+> **Qwen3/Qwen3-next** (2025) are the latest state-of-the-art open-source LLMs with 40K context and hybrid thinking modes.
+> **Ministral** (2024) is Mistral AI's efficient small model series for edge deployment.
 > **Phi-4** (2025) is Microsoft's flagship small model with exceptional reasoning capabilities.
-> **SmolLM3** and **InternLM3** are efficient 2025 models optimized for edge deployment.
 
 ### MoE (Mixture-of-Experts) Models - NEW in v0.10.0
 

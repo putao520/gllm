@@ -22,7 +22,46 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Configuration for deterministic computation.
-pub use gllm_kernels::ops::flash_attention::DeterministicConfig;
+///
+/// Controls various aspects of deterministic execution to ensure
+/// bit-exact reproducibility across runs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeterministicConfig {
+    /// Master enable flag for deterministic mode.
+    pub enabled: bool,
+    /// Use fixed tile processing order (may reduce parallelism).
+    pub fixed_tile_order: bool,
+    /// Disable GPU non-deterministic algorithms (uses deterministic alternatives).
+    pub no_gpu_nondeterminism: bool,
+    /// Verify determinism by running twice and comparing (debug only).
+    pub verify_determinism: bool,
+}
+
+impl DeterministicConfig {
+    /// Create a strict deterministic configuration.
+    ///
+    /// All determinism guarantees are enabled, but performance may be reduced.
+    pub fn strict() -> Self {
+        Self {
+            enabled: true,
+            fixed_tile_order: true,
+            no_gpu_nondeterminism: true,
+            verify_determinism: false,
+        }
+    }
+
+    /// Create a relaxed configuration (default).
+    ///
+    /// No determinism guarantees, maximum performance.
+    pub fn relaxed() -> Self {
+        Self::default()
+    }
+
+    /// Check if any determinism guarantees are active.
+    pub fn is_deterministic(&self) -> bool {
+        self.enabled || self.fixed_tile_order || self.no_gpu_nondeterminism
+    }
+}
 
 /// Global flag for deterministic mode (for GPU operations).
 static DETERMINISTIC_MODE: AtomicBool = AtomicBool::new(false);

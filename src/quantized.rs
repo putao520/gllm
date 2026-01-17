@@ -6,9 +6,8 @@
 
 use crate::quantized_ops::{DefaultQuantizedBackend, MatmulInput, QuantizedBackend};
 use crate::types::{Error, Result};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
 use half::f16;
+use gllm_kernels::linear_forward;
 
 /// GGML data types used by GGUF tensors.
 #[allow(non_camel_case_types)]
@@ -263,19 +262,17 @@ struct Q4Cache {
 }
 
 /// Quantized linear layer that dequantizes weights on-the-fly.
-pub struct QLinear<B: Backend> {
+pub struct QLinear {
     /// Quantized weight matrix.
     weight: QTensor,
     /// Cached Q4_0 scales and packed values.
     q4_cache: Option<Q4Cache>,
     /// Optional bias vector.
-    bias: Option<Tensor<B, 1>>,
+    bias: Option<Vec<f32>>,
     /// Input feature dimension.
     in_features: usize,
     /// Output feature dimension.
     out_features: usize,
-    /// Device to place the dequantized tensor on.
-    device: B::Device,
 }
 
 fn build_q4_cache(weight: &QTensor, in_features: usize, out_features: usize) -> Option<Q4Cache> {
@@ -309,9 +306,9 @@ fn build_q4_cache(weight: &QTensor, in_features: usize, out_features: usize) -> 
     Some(Q4Cache { qweight, scales })
 }
 
-impl<B: Backend> QLinear<B> {
+impl QLinear {
     /// Create a quantized linear layer from a GGUF tensor.
-    pub fn new(weight: QTensor, bias: Option<Tensor<B, 1>>, device: &B::Device) -> Self {
+    pub fn new(weight: QTensor, bias: Option<Vec<f32>>) -> Self {
         let (out_features, in_features) = match weight.shape.as_slice() {
             [out, inn] => (*out, *inn),
             _ => (0, 0),
@@ -323,74 +320,53 @@ impl<B: Backend> QLinear<B> {
             bias,
             in_features,
             out_features,
-            device: device.clone(),
         }
     }
 
     /// Forward pass using the optimized quantized matmul when available.
-    pub fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        self.forward_optimized(input)
-    }
-
-    /// Optimized forward pass using block dequantization + matmul.
-    pub fn forward_optimized(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        if self.weight.dtype != GgmlDType::Q4_0 {
-            return self.forward_naive(input);
+    pub fn forward(&self, input: &[f32], batch: usize) -> Result<Vec<f32>> {
+        if input.len() != batch * self.in_features {
+            return Err(Error::InferenceError(
+                "QLinear input length mismatch".into(),
+            ));
         }
-        let Some(cache) = &self.q4_cache else {
-            return self.forward_naive(input);
-        };
-
-        let [batch, in_features] = input.dims();
-        if in_features != self.in_features {
-            return self.forward_naive(input);
-        }
-
-        let input_data = match input.clone().into_data().into_vec::<f32>() {
-            Ok(data) => data,
-            Err(_) => return self.forward_naive(input),
-        };
-        if input_data.len() != batch * in_features {
-            return self.forward_naive(input);
-        }
-
-        let output_data = DefaultQuantizedBackend::q4_matmul(
-            MatmulInput::new(&input_data, batch, in_features),
-            &cache.qweight,
-            &cache.scales,
-        );
-        if output_data.len() != batch * self.out_features {
-            return self.forward_naive(input);
+        if self.weight.dtype == GgmlDType::Q4_0 {
+            if let Some(cache) = &self.q4_cache {
+                let mut output = DefaultQuantizedBackend::q4_matmul(
+                    MatmulInput::new(input, batch, self.in_features),
+                    &cache.qweight,
+                    &cache.scales,
+                );
+                if output.len() != batch * self.out_features {
+                    return Err(Error::InferenceError(
+                        "QLinear output length mismatch".into(),
+                    ));
+                }
+                if let Some(bias) = &self.bias {
+                    for b in 0..batch {
+                        let out_row = &mut output
+                            [b * self.out_features..(b + 1) * self.out_features];
+                        for o in 0..self.out_features {
+                            out_row[o] += bias[o];
+                        }
+                    }
+                }
+                return Ok(output);
+            }
         }
 
-        let output = Tensor::from_data(
-            TensorData::new(output_data, [batch, self.out_features]),
-            &self.device,
-        );
-
-        if let Some(bias) = &self.bias {
-            output + bias.clone().unsqueeze()
-        } else {
-            output
-        }
-    }
-
-    fn forward_naive(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        // Dequantize weight on every call to keep the storage quantized.
         let weight_data = self.weight.dequantize();
-        let weight = Tensor::from_data(
-            TensorData::new(weight_data, [self.out_features, self.in_features]),
-            &self.device,
-        )
-        .transpose(); // Burn expects [in, out].
-
-        let output = input.matmul(weight);
-
-        if let Some(bias) = &self.bias {
-            output + bias.clone().unsqueeze()
-        } else {
-            output
-        }
+        let mut output = vec![0.0f32; batch * self.out_features];
+        linear_forward(
+            input,
+            &weight_data,
+            self.bias.as_deref(),
+            &mut output,
+            batch,
+            self.in_features,
+            self.out_features,
+        );
+        Ok(output)
     }
 }
 

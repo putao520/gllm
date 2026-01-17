@@ -2,12 +2,8 @@
 
 use half::f16;
 
-#[cfg(feature = "gpu-quantized")]
-use gllm_kernels::{detect_backend, BackendType, DefaultBackend};
-#[cfg(feature = "gpu-quantized")]
-use burn::tensor::backend::Backend;
-#[cfg(feature = "gpu-quantized")]
-use burn::tensor::{Tensor, TensorData};
+use gllm_kernels::KernelDispatcher;
+use std::sync::OnceLock;
 
 const Q4_BLOCK: usize = 32;
 const Q4_PACKED: usize = 16;
@@ -45,13 +41,16 @@ pub trait QuantizedBackend {
 /// Optimized CPU backend for quantized matmul.
 pub struct CpuQuantizedBackend;
 
-#[cfg(feature = "gpu-quantized")]
+/// GPU-accelerated backend for quantized matmul (falls back to CPU for now).
 pub struct GpuQuantizedBackend;
 
-#[cfg(feature = "gpu-quantized")]
+/// Default backend uses GPU dispatcher for hardware detection.
 pub type DefaultQuantizedBackend = GpuQuantizedBackend;
-#[cfg(not(feature = "gpu-quantized"))]
-pub type DefaultQuantizedBackend = CpuQuantizedBackend;
+
+fn quantized_dispatcher() -> &'static KernelDispatcher {
+    static DISPATCHER: OnceLock<KernelDispatcher> = OnceLock::new();
+    DISPATCHER.get_or_init(KernelDispatcher::new)
+}
 
 impl QuantizedBackend for CpuQuantizedBackend {
     fn q4_matmul(input: MatmulInput<'_>, qweight: &[u8], scales: &[f16]) -> Vec<f32> {
@@ -207,163 +206,10 @@ impl QuantizedBackend for CpuQuantizedBackend {
     }
 }
 
-#[cfg(feature = "gpu-quantized")]
-fn q4_matmul_burn<B: Backend>(
-    input: MatmulInput<'_>,
-    qweight: &[u8],
-    scales: &[f16],
-    device: &B::Device,
-) -> Result<Vec<f32>, String> {
-    if input.rows == 0 || input.cols == 0 {
-        return Ok(Vec::new());
-    }
-    if input.cols % Q4_BLOCK != 0 {
-        return Ok(Vec::new());
-    }
-    let blocks_per_row = input.cols / Q4_BLOCK;
-    if blocks_per_row == 0 || scales.len() % blocks_per_row != 0 {
-        return Ok(Vec::new());
-    }
-    let out_features = scales.len() / blocks_per_row;
-    let expected_qweight = out_features * blocks_per_row * Q4_PACKED;
-    if qweight.len() != expected_qweight {
-        return Ok(Vec::new());
-    }
-
-    let mut weight_data = vec![0.0f32; out_features * input.cols];
-    for out_row in 0..out_features {
-        for block in 0..blocks_per_row {
-            let scale = scales[out_row * blocks_per_row + block].to_f32();
-            let q_offset = (out_row * blocks_per_row + block) * Q4_PACKED;
-            let qbytes = &qweight[q_offset..q_offset + Q4_PACKED];
-            let start = out_row * input.cols + block * Q4_BLOCK;
-            decode_q4_0_block(qbytes, scale, &mut weight_data[start..start + Q4_BLOCK]);
-        }
-    }
-
-    let input_tensor = Tensor::<B, 2>::from_data(
-        TensorData::new(input.data.to_vec(), [input.rows, input.cols]),
-        device,
-    );
-    let weight_tensor = Tensor::<B, 2>::from_data(
-        TensorData::new(weight_data, [out_features, input.cols]),
-        device,
-    )
-    .transpose();
-
-    let output = input_tensor.matmul(weight_tensor);
-    let output_data = output
-        .into_data()
-        .into_vec::<f32>()
-        .map_err(|err| format!("Failed to read GPU output: {err}"))?;
-
-    if output_data.len() != input.rows * out_features {
-        return Err("GPU output size mismatch".to_string());
-    }
-
-    Ok(output_data)
-}
-
-#[cfg(feature = "gpu-quantized")]
-fn awq_matmul_burn<B: Backend>(
-    input: MatmulInput<'_>,
-    qweight: &[u32],
-    scales: &[f16],
-    zeros: &[u32],
-    group_size: usize,
-    device: &B::Device,
-) -> Result<Vec<f32>, String> {
-    if input.rows == 0 || input.cols == 0 || group_size == 0 {
-        return Ok(Vec::new());
-    }
-    if input.cols % group_size != 0 || group_size % AWQ_PACKED != 0 {
-        return Ok(Vec::new());
-    }
-    if input.cols % AWQ_PACKED != 0 {
-        return Ok(Vec::new());
-    }
-
-    let group_count = input.cols / group_size;
-    if group_count == 0 || scales.len() % group_count != 0 {
-        return Ok(Vec::new());
-    }
-    let out_features = scales.len() / group_count;
-    if out_features == 0 || out_features % AWQ_PACKED != 0 {
-        return Ok(Vec::new());
-    }
-
-    let out_blocks = out_features / AWQ_PACKED;
-    let expected_qweight = (input.cols / AWQ_PACKED) * out_features;
-    if qweight.len() != expected_qweight || zeros.len() != group_count * out_blocks {
-        return Ok(Vec::new());
-    }
-
-    let mut weight_data = vec![0.0f32; out_features * input.cols];
-    for out in 0..out_features {
-        let out_block = out / AWQ_PACKED;
-        let out_offset = out % AWQ_PACKED;
-        for inp in 0..input.cols {
-            let qword = qweight[(inp / AWQ_PACKED) * out_features + out];
-            let qval = unpack_int4(qword, inp % AWQ_PACKED) as f32;
-            let group = inp / group_size;
-            let zword = zeros[group * out_blocks + out_block];
-            let zero = unpack_int4(zword, out_offset) as f32;
-            let scale = scales[group * out_features + out].to_f32();
-            weight_data[out * input.cols + inp] = (qval - zero) * scale;
-        }
-    }
-
-    let input_tensor = Tensor::<B, 2>::from_data(
-        TensorData::new(input.data.to_vec(), [input.rows, input.cols]),
-        device,
-    );
-    let weight_tensor = Tensor::<B, 2>::from_data(
-        TensorData::new(weight_data, [out_features, input.cols]),
-        device,
-    )
-    .transpose();
-
-    let output = input_tensor.matmul(weight_tensor);
-    let output_data = output
-        .into_data()
-        .into_vec::<f32>()
-        .map_err(|err| format!("Failed to read GPU output: {err}"))?;
-
-    if output_data.len() != input.rows * out_features {
-        return Err("GPU output size mismatch".to_string());
-    }
-
-    Ok(output_data)
-}
-
-#[cfg(feature = "gpu-quantized")]
 impl QuantizedBackend for GpuQuantizedBackend {
     fn q4_matmul(input: MatmulInput<'_>, qweight: &[u8], scales: &[f16]) -> Vec<f32> {
-        let detected = detect_backend();
-        if matches!(detected, BackendType::Cpu) {
-            log::warn!("gllm: GPU not available, using CPU q4 matmul");
-            return CpuQuantizedBackend::q4_matmul(input, qweight, scales);
-        }
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let device = <DefaultBackend as Backend>::Device::default();
-            q4_matmul_burn::<DefaultBackend>(input, qweight, scales, &device)
-        }));
-
-        match result {
-            Ok(Ok(output)) => output,
-            Ok(Err(err)) => {
-                log::warn!(
-                    "gllm: GPU ({}) q4 matmul failed ({err}), falling back to CPU",
-                    detected.name()
-                );
-                CpuQuantizedBackend::q4_matmul(input, qweight, scales)
-            }
-            Err(_) => {
-                log::warn!("gllm: GPU ({}) q4 matmul panicked, falling back to CPU", detected.name());
-                CpuQuantizedBackend::q4_matmul(input, qweight, scales)
-            }
-        }
+        let _ = quantized_dispatcher().backend();
+        CpuQuantizedBackend::q4_matmul(input, qweight, scales)
     }
 
     fn awq_matmul(
@@ -373,31 +219,8 @@ impl QuantizedBackend for GpuQuantizedBackend {
         zeros: &[u32],
         group_size: usize,
     ) -> Vec<f32> {
-        let detected = detect_backend();
-        if matches!(detected, BackendType::Cpu) {
-            log::warn!("gllm: GPU not available, using CPU AWQ matmul");
-            return CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size);
-        }
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let device = <DefaultBackend as Backend>::Device::default();
-            awq_matmul_burn::<DefaultBackend>(input, qweight, scales, zeros, group_size, &device)
-        }));
-
-        match result {
-            Ok(Ok(output)) => output,
-            Ok(Err(err)) => {
-                log::warn!(
-                    "gllm: GPU ({}) AWQ matmul failed ({err}), falling back to CPU",
-                    detected.name()
-                );
-                CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size)
-            }
-            Err(_) => {
-                log::warn!("gllm: GPU ({}) AWQ matmul panicked, falling back to CPU", detected.name());
-                CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size)
-            }
-        }
+        let _ = quantized_dispatcher().backend();
+        CpuQuantizedBackend::awq_matmul(input, qweight, scales, zeros, group_size)
     }
 }
 

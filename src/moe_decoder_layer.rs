@@ -1,12 +1,10 @@
-use crate::causal_attention::CausalAttention;
+use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::moe_layer::MoELayer;
-use crate::rope::RotaryPositionEmbedding;
 use crate::rms_norm::RmsNorm;
+use crate::tensor::Tensor3;
 use crate::types::{Error, Result};
-use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -22,18 +20,18 @@ fn lookup_extra_usize(extra: &Value, key: &str) -> Option<usize> {
 }
 
 #[derive(Clone)]
-pub struct MoEDecoderLayer<B: Backend> {
-    pub(crate) attention_norm: RmsNorm<B>,
-    pub(crate) attention: CausalAttention<B>,
-    pub(crate) ffn_norm: RmsNorm<B>,
-    pub(crate) moe: MoELayer<B>,
+pub struct MoEDecoderLayer {
+    pub(crate) attention_norm: RmsNorm,
+    pub(crate) attention: CausalAttention,
+    pub(crate) ffn_norm: RmsNorm,
+    pub(crate) moe: MoELayer,
+    hidden_size: usize,
 }
 
-impl<B: Backend> MoEDecoderLayer<B> {
+impl MoEDecoderLayer {
     pub fn new(
-        device: &B::Device,
         config: &ModelConfig,
-        rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+        rope: Option<Arc<RotaryPositionEmbedding>>,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let fallback_intermediate = config
@@ -49,9 +47,7 @@ impl<B: Backend> MoEDecoderLayer<B> {
             config.num_experts,
             &["n_routed_experts", "num_experts", "num_local_experts"],
         )
-        .ok_or_else(|| {
-            Error::InvalidConfig("MoE config missing num_experts (n_routed_experts)".into())
-        })?;
+        .ok_or_else(|| Error::InvalidConfig("MoE config missing num_experts".into()))?;
         let num_experts_per_tok = resolve_moe_value(
             config,
             config.num_experts_per_tok,
@@ -76,53 +72,67 @@ impl<B: Backend> MoEDecoderLayer<B> {
             ));
         }
 
-        let attention_norm = RmsNorm::new(device, config);
-        let attention = CausalAttention::new(device, config, rope)?;
-        let ffn_norm = RmsNorm::new(device, config);
-        let moe = MoELayer::new(
-            device,
-            hidden_size,
-            moe_intermediate,
-            num_experts,
-            num_experts_per_tok,
-            n_shared_experts,
-        );
-
         Ok(Self {
-            attention_norm,
-            attention,
-            ffn_norm,
-            moe,
+            attention_norm: RmsNorm::new(config),
+            attention: CausalAttention::new(config, rope, true)?,
+            ffn_norm: RmsNorm::new(config),
+            moe: MoELayer::new(
+                hidden_size,
+                moe_intermediate,
+                num_experts,
+                num_experts_per_tok,
+                n_shared_experts,
+            ),
+            hidden_size,
         })
     }
 
-    pub fn forward(&self, hidden_states: Tensor<B, 3>, position_offset: usize) -> Tensor<B, 3> {
-        let attn_input = self.attention_norm.forward(hidden_states.clone());
-        let attn_output = self.attention.forward(attn_input, position_offset);
-        let hidden_states = hidden_states + attn_output;
+    pub fn forward(&self, hidden_states: &Tensor3, position_offset: usize) -> Result<Tensor3> {
+        let (batch, seq_len, _) = hidden_states.shape();
+        let attn_input = self.attention_norm.forward_3d(&hidden_states.data, batch, seq_len);
+        let attn_input = Tensor3::new(attn_input, batch, seq_len, self.hidden_size)?;
+        let attn_output = self.attention.forward(&attn_input, position_offset)?;
+        let residual = add_tensors(hidden_states, &attn_output)?;
 
-        let ffn_input = self.ffn_norm.forward(hidden_states.clone());
-        let moe_output = self.moe.forward(ffn_input);
+        let ffn_input = self.ffn_norm.forward_3d(&residual.data, batch, seq_len);
+        let ffn_input = Tensor3::new(ffn_input, batch, seq_len, self.hidden_size)?;
+        let moe_output = self.moe.forward(&ffn_input)?;
 
-        hidden_states + moe_output
+        add_tensors(&residual, &moe_output)
     }
 
     pub fn forward_with_cache(
         &self,
-        hidden_states: Tensor<B, 3>,
+        hidden_states: &Tensor3,
         position_offset: usize,
-        cache: &mut KVCache<B>,
+        cache: &mut KVCache,
         layer: usize,
-    ) -> Tensor<B, 3> {
-        let attn_input = self.attention_norm.forward(hidden_states.clone());
-        let attn_output = self
-            .attention
-            .forward_with_cache(attn_input, position_offset, cache, layer);
-        let hidden_states = hidden_states + attn_output;
+    ) -> Result<Tensor3> {
+        let (batch, seq_len, _) = hidden_states.shape();
+        let attn_input = self.attention_norm.forward_3d(&hidden_states.data, batch, seq_len);
+        let attn_input = Tensor3::new(attn_input, batch, seq_len, self.hidden_size)?;
+        let attn_output =
+            self.attention
+                .forward_with_cache(&attn_input, position_offset, cache, layer)?;
+        let residual = add_tensors(hidden_states, &attn_output)?;
 
-        let ffn_input = self.ffn_norm.forward(hidden_states.clone());
-        let moe_output = self.moe.forward(ffn_input);
+        let ffn_input = self.ffn_norm.forward_3d(&residual.data, batch, seq_len);
+        let ffn_input = Tensor3::new(ffn_input, batch, seq_len, self.hidden_size)?;
+        let moe_output = self.moe.forward(&ffn_input)?;
 
-        hidden_states + moe_output
+        add_tensors(&residual, &moe_output)
     }
+}
+
+fn add_tensors(lhs: &Tensor3, rhs: &Tensor3) -> Result<Tensor3> {
+    if lhs.data.len() != rhs.data.len() {
+        return Err(Error::InferenceError(
+            "Tensor add length mismatch".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(lhs.data.len());
+    for (a, b) in lhs.data.iter().zip(rhs.data.iter()) {
+        out.push(a + b);
+    }
+    Tensor3::new(out, lhs.dim0, lhs.dim1, lhs.dim2)
 }

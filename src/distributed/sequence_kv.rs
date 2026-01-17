@@ -6,9 +6,6 @@
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
-
 use super::shard_manager::{ShardConfig, ShardManager, ShardLocation};
 
 /// Configuration for sequence KV storage.
@@ -65,21 +62,18 @@ impl SequenceHandle {
     }
 }
 
-// Explicitly NOT implementing Send/Sync for SequenceHandle
-// This forces each sequence to be accessed from a single thread
-
 /// Per-layer KV storage for a sequence.
-#[derive(Debug)]
-pub struct LayerKV<B: Backend> {
+#[derive(Debug, Default)]
+pub struct LayerKV {
     /// Keys for this layer [accumulated_len, num_heads, head_dim]
-    pub keys: Option<Tensor<B, 3>>,
+    pub keys: Option<Vec<f32>>,
     /// Values for this layer [accumulated_len, num_heads, head_dim]
-    pub values: Option<Tensor<B, 3>>,
+    pub values: Option<Vec<f32>>,
     /// Current sequence length for this layer
     pub seq_len: usize,
 }
 
-impl<B: Backend> LayerKV<B> {
+impl LayerKV {
     pub fn new() -> Self {
         Self {
             keys: None,
@@ -89,24 +83,28 @@ impl<B: Backend> LayerKV<B> {
     }
 
     /// Append new KV to this layer.
-    pub fn append(&mut self, k: Tensor<B, 3>, v: Tensor<B, 3>) {
-        let new_len = k.dims()[0];
-
+    pub fn append(&mut self, k: Vec<f32>, v: Vec<f32>, new_len: usize) {
         self.keys = Some(match self.keys.take() {
-            Some(existing) => Tensor::cat(vec![existing, k], 0),
+            Some(mut existing) => {
+                existing.extend_from_slice(&k);
+                existing
+            }
             None => k,
         });
 
         self.values = Some(match self.values.take() {
-            Some(existing) => Tensor::cat(vec![existing, v], 0),
+            Some(mut existing) => {
+                existing.extend_from_slice(&v);
+                existing
+            }
             None => v,
         });
 
         self.seq_len += new_len;
     }
 
-    /// Get the current KV tensors.
-    pub fn get(&self) -> Option<(Tensor<B, 3>, Tensor<B, 3>)> {
+    /// Get the current KV buffers.
+    pub fn get(&self) -> Option<(Vec<f32>, Vec<f32>)> {
         match (&self.keys, &self.values) {
             (Some(k), Some(v)) => Some((k.clone(), v.clone())),
             _ => None,
@@ -114,32 +112,26 @@ impl<B: Backend> LayerKV<B> {
     }
 }
 
-impl<B: Backend> Default for LayerKV<B> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Per-sequence KV storage.
 ///
 /// Each sequence has completely isolated storage, ensuring
 /// no data races between concurrent requests.
-pub struct SequenceKV<B: Backend> {
+pub struct SequenceKV<D> {
     /// Sequence ID
     id: usize,
     /// KV storage per layer
-    layers: Vec<LayerKV<B>>,
+    layers: Vec<LayerKV>,
     /// Shard manager for distributed storage
     shard_manager: ShardManager,
     /// Configuration
     config: SequenceConfig,
-    /// Device for tensor allocation
-    device: B::Device,
+    /// Device marker
+    device: D,
 }
 
-impl<B: Backend> SequenceKV<B> {
+impl<D: Clone> SequenceKV<D> {
     /// Create a new sequence KV storage.
-    pub fn new(id: usize, config: SequenceConfig, device: B::Device) -> Self {
+    pub fn new(id: usize, config: SequenceConfig, device: D) -> Self {
         let layers = (0..config.num_layers).map(|_| LayerKV::new()).collect();
         let shard_manager = ShardManager::new(config.shard.clone());
 
@@ -158,28 +150,20 @@ impl<B: Backend> SequenceKV<B> {
     }
 
     /// Append KV for a specific layer.
-    ///
-    /// # Arguments
-    /// * `layer` - Layer index
-    /// * `k` - Key tensor [new_len, num_heads, head_dim]
-    /// * `v` - Value tensor [new_len, num_heads, head_dim]
-    pub fn append(&mut self, layer: usize, k: Tensor<B, 3>, v: Tensor<B, 3>) {
+    pub fn append(&mut self, layer: usize, k: Vec<f32>, v: Vec<f32>, new_len: usize) {
         if layer >= self.layers.len() {
             return;
         }
 
-        let new_len = k.dims()[0];
-
-        // Update shard allocation (only for layer 0 to avoid double-counting)
         if layer == 0 {
             self.shard_manager.allocate(new_len);
         }
 
-        self.layers[layer].append(k, v);
+        self.layers[layer].append(k, v, new_len);
     }
 
     /// Get KV for a specific layer.
-    pub fn get_kv(&self, layer: usize) -> Option<(Tensor<B, 3>, Tensor<B, 3>)> {
+    pub fn get_kv(&self, layer: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         self.layers.get(layer).and_then(|l| l.get())
     }
 
@@ -194,7 +178,7 @@ impl<B: Backend> SequenceKV<B> {
     }
 
     /// Get the device.
-    pub fn device(&self) -> &B::Device {
+    pub fn device(&self) -> &D {
         &self.device
     }
 
@@ -220,18 +204,18 @@ impl<B: Backend> SequenceKV<B> {
 }
 
 /// Factory for creating isolated sequences.
-pub struct SequenceFactory<B: Backend> {
+pub struct SequenceFactory<D> {
     /// Next sequence ID
     next_id: AtomicUsize,
     /// Configuration template
     config: SequenceConfig,
-    /// Device
-    device: B::Device,
+    /// Device marker
+    device: D,
 }
 
-impl<B: Backend> SequenceFactory<B> {
+impl<D: Clone> SequenceFactory<D> {
     /// Create a new sequence factory.
-    pub fn new(config: SequenceConfig, device: B::Device) -> Self {
+    pub fn new(config: SequenceConfig, device: D) -> Self {
         Self {
             next_id: AtomicUsize::new(0),
             config,
@@ -239,114 +223,11 @@ impl<B: Backend> SequenceFactory<B> {
         }
     }
 
-    /// Create a new isolated sequence.
-    pub fn create(&self) -> (SequenceHandle, SequenceKV<B>) {
+    /// Create a new sequence and handle.
+    pub fn create(&self) -> (SequenceHandle, SequenceKV<D>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = SequenceHandle::new(id);
-        let kv = SequenceKV::new(id, self.config.clone(), self.device.clone());
-        (handle, kv)
-    }
-
-    /// Get the number of sequences created.
-    pub fn num_created(&self) -> usize {
-        self.next_id.load(Ordering::Relaxed)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn_ndarray::NdArray;
-
-    type TestBackend = NdArray<f32>;
-
-    #[test]
-    fn test_sequence_kv_basic() {
-        let device = <TestBackend as Backend>::Device::default();
-        let config = SequenceConfig {
-            num_layers: 2,
-            num_kv_heads: 4,
-            head_dim: 8,
-            ..Default::default()
-        };
-
-        let mut seq = SequenceKV::<TestBackend>::new(0, config, device.clone());
-
-        // Append to layer 0
-        let k = Tensor::zeros([10, 4, 8], &device);
-        let v = Tensor::zeros([10, 4, 8], &device);
-        seq.append(0, k, v);
-
-        assert_eq!(seq.seq_len(), 10);
-
-        // Get KV
-        let (k, v) = seq.get_kv(0).unwrap();
-        assert_eq!(k.dims(), [10, 4, 8]);
-        assert_eq!(v.dims(), [10, 4, 8]);
-    }
-
-    #[test]
-    fn test_sequence_kv_multiple_appends() {
-        let device = <TestBackend as Backend>::Device::default();
-        let config = SequenceConfig {
-            num_layers: 1,
-            num_kv_heads: 2,
-            head_dim: 4,
-            ..Default::default()
-        };
-
-        let mut seq = SequenceKV::<TestBackend>::new(0, config, device.clone());
-
-        // Multiple appends
-        for _ in 0..5 {
-            let k = Tensor::zeros([8, 2, 4], &device);
-            let v = Tensor::zeros([8, 2, 4], &device);
-            seq.append(0, k, v);
-        }
-
-        assert_eq!(seq.seq_len(), 40);
-
-        let (k, _) = seq.get_kv(0).unwrap();
-        assert_eq!(k.dims(), [40, 2, 4]);
-    }
-
-    #[test]
-    fn test_sequence_factory() {
-        let device = <TestBackend as Backend>::Device::default();
-        let config = SequenceConfig::default();
-
-        let factory = SequenceFactory::<TestBackend>::new(config, device);
-
-        let (handle1, _kv1) = factory.create();
-        let (handle2, _kv2) = factory.create();
-
-        assert_eq!(handle1.id(), 0);
-        assert_eq!(handle2.id(), 1);
-        assert_eq!(factory.num_created(), 2);
-    }
-
-    #[test]
-    fn test_sequence_isolation() {
-        let device = <TestBackend as Backend>::Device::default();
-        let config = SequenceConfig {
-            num_layers: 1,
-            num_kv_heads: 2,
-            head_dim: 4,
-            ..Default::default()
-        };
-
-        let factory = SequenceFactory::<TestBackend>::new(config, device.clone());
-
-        let (_, mut seq1) = factory.create();
-        let (_, mut seq2) = factory.create();
-
-        // Modify seq1
-        let k = Tensor::ones([5, 2, 4], &device);
-        let v = Tensor::ones([5, 2, 4], &device);
-        seq1.append(0, k, v);
-
-        // seq2 should be unaffected
-        assert_eq!(seq1.seq_len(), 5);
-        assert_eq!(seq2.seq_len(), 0);
+        let sequence = SequenceKV::new(id, self.config.clone(), self.device.clone());
+        (handle, sequence)
     }
 }

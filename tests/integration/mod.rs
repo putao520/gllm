@@ -6,4 +6,5 @@ mod features;
 mod inference_e2e;
 mod model_coverage_basic;
 mod model_management;
+mod model_test_plan;
 mod rerank;

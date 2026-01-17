@@ -7,12 +7,11 @@
 use crate::quantized_ops::{DefaultQuantizedBackend, MatmulInput, QuantizedBackend};
 use crate::types::{Error, Result};
 use crate::weight_loader::{RawTensor, WeightLoader};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
 use half::f16;
 use safetensors::Dtype;
 
 /// AWQ packed weight representation.
+#[derive(Clone)]
 pub struct AwqWeight {
     /// INT4 quantized values (packed: 8 x 4-bit values per u32).
     pub qweight: Vec<u32>,
@@ -78,78 +77,34 @@ impl AwqWeight {
         output
     }
 
-    /// Dequantize and run matmul on the provided device.
-    pub fn matmul<B: Backend>(&self, input: Tensor<B, 2>, device: &B::Device) -> Tensor<B, 2> {
-        self.matmul_optimized(input, device)
-    }
-
-    /// Optimized AWQ matmul using block dequantization.
-    pub fn matmul_optimized<B: Backend>(
-        &self,
-        input: Tensor<B, 2>,
-        device: &B::Device,
-    ) -> Tensor<B, 2> {
-        let [batch, in_features] = input.dims();
+    /// AWQ 量化矩阵乘法。
+    pub fn matmul(&self, input: &[f32], batch: usize, in_features: usize) -> Result<Vec<f32>> {
         if in_features != self.shape[1] {
-            return self.matmul_naive(input, device);
+            return Err(Error::InferenceError(
+                "AWQ matmul input feature size mismatch".into(),
+            ));
+        }
+        if input.len() != batch * in_features {
+            return Err(Error::InferenceError(
+                "AWQ matmul input length mismatch".into(),
+            ));
         }
 
-        let input_data = match input.clone().into_data().into_vec::<f32>() {
-            Ok(data) => data,
-            Err(_) => return self.matmul_naive(input, device),
-        };
-        if input_data.len() != batch * in_features {
-            return self.matmul_naive(input, device);
-        }
-
-        let output_data = DefaultQuantizedBackend::awq_matmul(
-            MatmulInput::new(&input_data, batch, in_features),
+        let output = DefaultQuantizedBackend::awq_matmul(
+            MatmulInput::new(input, batch, in_features),
             &self.qweight,
             &self.scales,
             &self.zeros,
             self.group_size,
         );
-        if output_data.len() != batch * self.shape[0] {
-            return self.matmul_naive(input, device);
+
+        if output.len() != batch * self.shape[0] {
+            return Err(Error::InferenceError(
+                "AWQ matmul output length mismatch".into(),
+            ));
         }
 
-        Tensor::from_data(
-            TensorData::new(output_data, [batch, self.shape[0]]),
-            device,
-        )
-    }
-
-    fn matmul_naive<B: Backend>(&self, input: Tensor<B, 2>, device: &B::Device) -> Tensor<B, 2> {
-        let weight_data = self.dequantize();
-        let [out_features, in_features] = self.shape;
-        let weight = Tensor::from_data(
-            TensorData::new(weight_data, [out_features, in_features]),
-            device,
-        )
-        .transpose();
-        input.matmul(weight)
-    }
-}
-
-/// Linear layer wrapper that uses AWQ weights.
-pub struct AwqLinear<B: Backend> {
-    /// Packed AWQ weights.
-    pub weight: AwqWeight,
-    /// Optional bias vector.
-    pub bias: Option<Tensor<B, 1>>,
-    /// Device used for dequantization.
-    pub device: B::Device,
-}
-
-impl<B: Backend> AwqLinear<B> {
-    /// Forward pass using AWQ dequantization + matmul.
-    pub fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        let output = self.weight.matmul(input, &self.device);
-        if let Some(bias) = &self.bias {
-            output + bias.clone().unsqueeze()
-        } else {
-            output
-        }
+        Ok(output)
     }
 }
 

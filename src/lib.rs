@@ -1,4 +1,4 @@
-//! gllm: Pure Rust embeddings and rerank library built on Burn.
+//! gllm: Pure Rust embeddings and rerank library built on gllm-kernels.
 //!
 //! ## Features
 //!
@@ -35,13 +35,10 @@ mod fallback;
 pub mod generation;
 mod generator_engine;
 pub mod generator_model;
-#[cfg(feature = "quantized")]
+pub mod hooks;
 pub mod gguf;
-#[cfg(feature = "quantized")]
 pub mod quantized;
-#[cfg(feature = "quantized")]
 pub mod awq;
-#[cfg(feature = "quantized")]
 pub mod quantized_ops;
 pub mod moe_decoder_layer;
 pub mod moe_generator_model;
@@ -57,7 +54,9 @@ mod performance_optimizer;
 mod pooling;
 mod registry;
 mod rerank;
-mod rope;
+mod tensor;
+// gllm-kernels wrappers for normalization and sampling
+// RoPE is now in causal_attention.rs (RopeConfig, RotaryPositionEmbedding)
 pub mod rms_norm;
 pub mod sampler;
 mod types;
@@ -80,6 +79,9 @@ pub use types::{
 // Engram conditional memory exports
 pub use engram::{EngramModule, SharedEngram};
 
+// Inference hooks exports
+pub use hooks::{InferenceHook, HookManager, LastHiddenStateCollector, CollectedState};
+
 // Embedding quantization and fast similarity search exports from gllm-kernels
 pub use gllm_kernels::{
     // Binary Quantization (1-bit, 32x compression, POPCNT similarity)
@@ -92,4 +94,16 @@ pub use gllm_kernels::{
     MatryoshkaConfig, matryoshka_truncate, select_matryoshka_dim,
     // Three-stage rerank pipeline
     RerankPipelineConfig, RerankResult as KernelRerankResult, rerank_binary_stage, rerank_int8_stage,
+};
+
+// Raw slice-based operations from gllm-kernels
+pub use gllm_kernels::{
+    // RoPE (Rotary Position Embedding) - raw slice API
+    RoPEConfig as KernelRoPEConfig, rope_precompute, rope_apply, rope_apply_inplace,
+    // Sampling operations - raw slice API
+    SamplingConfig as KernelSamplingConfig, TopKResult,
+    topk, apply_temperature, softmax_1d, apply_top_p, sample_tokens, argmax,
+    // MoE (Mixture-of-Experts) routing - raw slice API
+    MoERoutingConfig as KernelMoERoutingConfig, MoERoutingResult,
+    moe_route, compute_routing_logits, compute_expert_load, compute_load_balance_loss,
 };

@@ -1,5 +1,5 @@
 use crate::engine::TokenizerAdapter;
-use crate::registry::{ModelInfo, ModelRegistry};
+use crate::registry::{ModelInfo, ModelRegistry, Quantization};
 use crate::types::{ClientConfig, Error, Result};
 use hf_hub::api::sync::Api;
 use serde::Deserialize;
@@ -91,6 +91,9 @@ impl ModelManager {
     pub fn download_model(&self, info: &ModelInfo, target: &Path) -> Result<()> {
         fs::create_dir_all(target)?;
 
+        // Check if this is a GGUF model
+        let is_gguf = matches!(info.quantization, Quantization::GGUF);
+
         let download_fn = |endpoint: Option<&str>| -> Result<()> {
             let api = if let Some(ep) = endpoint {
                 use hf_hub::api::sync::ApiBuilder;
@@ -105,77 +108,117 @@ impl ModelManager {
             let repo = api.model(info.repo_id.clone());
             let mut downloaded_files = Vec::new();
 
-            let shard_index_name = "model.safetensors.index.json";
-            let shard_index_path = target.join(shard_index_name);
-            let mut has_shards = false;
+            if is_gguf {
+                // For GGUF models, try common quantization file patterns
+                // Prefer Q4_K_M as a good balance of size and quality
+                let gguf_patterns = self.get_gguf_file_patterns(&info.repo_id);
+                let mut gguf_downloaded = false;
 
-            if shard_index_path.exists() {
-                has_shards = true;
-            } else if let Ok(src) = repo.get(shard_index_name) {
-                if let Err(err) = fs::copy(&src, &shard_index_path) {
-                    let _ = fs::remove_file(&shard_index_path);
-                    return Err(Error::DownloadError(err.to_string()));
-                }
-                downloaded_files.push(shard_index_path.clone());
-                has_shards = true;
-            }
-
-            if has_shards {
-                let shard_index = match ShardIndex::from_path(&shard_index_path) {
-                    Ok(index) => index,
-                    Err(err) => {
-                        cleanup_partial_downloads(&downloaded_files);
-                        return Err(err);
-                    }
-                };
-                let shard_files = shard_index.shard_filenames();
-                if shard_files.is_empty() {
-                    cleanup_partial_downloads(&downloaded_files);
-                    return Err(Error::DownloadError(
-                        "Shard index contains no shard entries".into(),
-                    ));
-                }
-
-                let total = shard_files.len();
-                for (idx, shard) in shard_files.iter().enumerate() {
-                    let dest = target.join(shard);
+                for pattern in &gguf_patterns {
+                    let dest = target.join(pattern);
                     if dest.exists() {
-                        continue;
+                        gguf_downloaded = true;
+                        break;
                     }
 
-                    eprintln!("Downloading shard {}/{}: {}", idx + 1, total, shard);
-                    match repo.get(shard) {
+                    eprintln!("Trying GGUF file: {}", pattern);
+                    match repo.get(pattern) {
                         Ok(src) => {
-                            if let Err(err) = fs::copy(&src, &dest) {
+                            if let Err(_err) = fs::copy(&src, &dest) {
                                 let _ = fs::remove_file(&dest);
+                                continue;
+                            }
+                            downloaded_files.push(dest);
+                            gguf_downloaded = true;
+                            eprintln!("Downloaded GGUF: {}", pattern);
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+
+                if !gguf_downloaded {
+                    cleanup_partial_downloads(&downloaded_files);
+                    return Err(Error::DownloadError(format!(
+                        "No GGUF file found in repo {}. Tried patterns: {:?}",
+                        info.repo_id, gguf_patterns
+                    )));
+                }
+            } else {
+                // Standard safetensors download
+                let shard_index_name = "model.safetensors.index.json";
+                let shard_index_path = target.join(shard_index_name);
+                let mut has_shards = false;
+
+                if shard_index_path.exists() {
+                    has_shards = true;
+                } else if let Ok(src) = repo.get(shard_index_name) {
+                    if let Err(err) = fs::copy(&src, &shard_index_path) {
+                        let _ = fs::remove_file(&shard_index_path);
+                        return Err(Error::DownloadError(err.to_string()));
+                    }
+                    downloaded_files.push(shard_index_path.clone());
+                    has_shards = true;
+                }
+
+                if has_shards {
+                    let shard_index = match ShardIndex::from_path(&shard_index_path) {
+                        Ok(index) => index,
+                        Err(err) => {
+                            cleanup_partial_downloads(&downloaded_files);
+                            return Err(err);
+                        }
+                    };
+                    let shard_files = shard_index.shard_filenames();
+                    if shard_files.is_empty() {
+                        cleanup_partial_downloads(&downloaded_files);
+                        return Err(Error::DownloadError(
+                            "Shard index contains no shard entries".into(),
+                        ));
+                    }
+
+                    let total = shard_files.len();
+                    for (idx, shard) in shard_files.iter().enumerate() {
+                        let dest = target.join(shard);
+                        if dest.exists() {
+                            continue;
+                        }
+
+                        eprintln!("Downloading shard {}/{}: {}", idx + 1, total, shard);
+                        match repo.get(shard) {
+                            Ok(src) => {
+                                if let Err(err) = fs::copy(&src, &dest) {
+                                    let _ = fs::remove_file(&dest);
+                                    cleanup_partial_downloads(&downloaded_files);
+                                    return Err(Error::DownloadError(err.to_string()));
+                                }
+                                downloaded_files.push(dest);
+                            }
+                            Err(err) => {
                                 cleanup_partial_downloads(&downloaded_files);
                                 return Err(Error::DownloadError(err.to_string()));
                             }
-                            downloaded_files.push(dest);
-                        }
-                        Err(err) => {
-                            cleanup_partial_downloads(&downloaded_files);
-                            return Err(Error::DownloadError(err.to_string()));
                         }
                     }
-                }
-            } else {
-                let dest = target.join("model.safetensors");
-                if !dest.exists() {
-                    match repo.get("model.safetensors") {
-                        Ok(src) => {
-                            if let Err(err) = fs::copy(&src, &dest) {
-                                let _ = fs::remove_file(&dest);
+                } else {
+                    let dest = target.join("model.safetensors");
+                    if !dest.exists() {
+                        match repo.get("model.safetensors") {
+                            Ok(src) => {
+                                if let Err(err) = fs::copy(&src, &dest) {
+                                    let _ = fs::remove_file(&dest);
+                                    return Err(Error::DownloadError(err.to_string()));
+                                }
+                            }
+                            Err(err) => {
                                 return Err(Error::DownloadError(err.to_string()));
                             }
-                        }
-                        Err(err) => {
-                            return Err(Error::DownloadError(err.to_string()));
                         }
                     }
                 }
             }
 
+            // Download tokenizer and config files
             let files = [
                 "config.json",
                 "tokenizer.json",
@@ -213,6 +256,61 @@ impl ModelManager {
         // Note: ModelScope uses the same repo IDs for most major upstream models.
         eprintln!("HuggingFace download failed, attempting ModelScope fallback...");
         download_fn(Some("https://modelscope.cn/api/v1"))
+    }
+
+    /// Generate possible GGUF file patterns based on repo ID.
+    /// GGUF repos typically have files like: {model-name}-{quant}.gguf
+    fn get_gguf_file_patterns(&self, repo_id: &str) -> Vec<String> {
+        // Extract model name from repo_id (e.g., "Qwen/Qwen3-0.6B-GGUF" -> "Qwen3-0.6B")
+        let raw_name = repo_id
+            .split('/')
+            .last()
+            .unwrap_or(repo_id);
+
+        // Keep original case and also try lowercase
+        let original_name = raw_name
+            .replace("-GGUF", "")
+            .replace("-gguf", "")
+            .replace("_GGUF", "")
+            .replace("_gguf", "");
+        let lower_name = original_name.to_lowercase();
+
+        // Common GGUF quantization suffixes, ordered by preference
+        // Q4_K_M is good balance of size/quality, Q8_0 for smaller models
+        let quant_suffixes = [
+            "q4_k_m", "q8_0", "q4_k_s", "q5_k_m", "q5_k_s",
+            "q3_k_m", "q3_k_s", "q6_k", "q4_0", "q4_1",
+            "q5_0", "q5_1", "q2_k", "fp16", "bf16",
+            "iq4_xs", "iq4_nl", "iq3_xxs", "iq3_xs", "iq2_xxs", "iq2_xs",
+        ];
+
+        let mut patterns = Vec::new();
+
+        // Most common HuggingFace pattern: lowercase name with lowercase quant
+        // e.g., "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+        for suffix in &quant_suffixes {
+            patterns.push(format!("{}-{}.gguf", lower_name, suffix));
+        }
+
+        // Original case with uppercase quant (e.g., "Qwen3-0.6B-Q8_0.gguf")
+        for suffix in &quant_suffixes {
+            let upper = suffix.to_uppercase();
+            patterns.push(format!("{}-{}.gguf", original_name, upper));
+        }
+
+        // Underscore variants (less common)
+        for suffix in &quant_suffixes {
+            patterns.push(format!("{}_{}.gguf", lower_name, suffix));
+        }
+
+        // Pattern: {model-name}.gguf (single file without quant suffix)
+        patterns.push(format!("{}.gguf", lower_name));
+        patterns.push(format!("{}.gguf", original_name));
+
+        // Pattern: model.gguf (generic name)
+        patterns.push("model.gguf".to_string());
+
+        patterns
     }
 
     /// Validate that model files exist and are readable.

@@ -1,10 +1,13 @@
 //! Attention mechanisms for gllm
 //!
-//! Re-exports from gllm-kernels
+//! Re-exports from gllm-kernels.
+//!
+//! Note: Per ADR-001, attention is dispatched through gllm-kernels.
+//! Use `KernelDispatcher` for GPU-accelerated attention operations.
 
 mod deterministic;
 
-// Re-export from ops submodules
+// Re-export stable accumulator utilities (numerical stability)
 pub use gllm_kernels::ops::stable_accumulator::{
     AccumulatorConfig,
     HierarchicalAccumulator,
@@ -13,30 +16,26 @@ pub use gllm_kernels::ops::stable_accumulator::{
     StableAccumulator,
     StableRowState,
 };
-pub use gllm_kernels::ops::paged_attention::{
-    BlockManager,
-    BlockTable,
-    KVBlock,
-    PagedAttention,
-    PagedKVCache,
-};
-pub use gllm_kernels::ops::flash_attention::{
-    DeterministicConfig,
-    FlashAttentionConfig,
-    FusedPagedAttention,
-    HierarchicalFlashAttention,
-    HierarchicalFlashConfig,
-};
+
+// Re-export softmax utilities
 pub use gllm_kernels::ops::softmax::{
     LogSpaceSoftmax,
     log_add_exp,
     log_sum_exp,
 };
+
+// Re-export attention config types
 pub use gllm_kernels::types::{
     AttentionConfig,
     PagedAttentionConfig,
 };
 
+// Re-export KernelDispatcher configs for GPU-accelerated attention
+pub use gllm_kernels::{
+    FlashAttentionConfig,
+    PagedAttentionConfig as KernelPagedAttentionConfig,
+    KernelDispatcher,
+};
+
 pub use deterministic::{DeterministicConfigExt, DeterministicGuard};
-pub use gllm_kernels::ops::paged_attention::PagedKVCache as PagedKvCache;
 pub use gllm_kernels::ops::stable_accumulator::StableRowState as LogSpaceRowState;

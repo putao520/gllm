@@ -34,8 +34,8 @@ pub enum Architecture {
     Qwen3Reranker,
     /// Qwen3 decoder for generation.
     Qwen3Generator,
-    /// Phi-3 decoder for generation.
-    Phi3Generator,
+    /// Phi-4 decoder for generation.
+    Phi4Generator,
     /// SmolLM3 decoder for generation.
     SmolLM3Generator,
     /// InternLM3 decoder for generation.
@@ -150,8 +150,8 @@ struct RegistryEntry {
     model_type: ModelType,
     /// Architecture.
     architecture: Architecture,
-    /// Whether this model supports quantization variants.
-    supports_quantization: bool,
+    /// Optional override for GGUF repo (for third-party GGUF providers like bartowski).
+    gguf_override: Option<String>,
 }
 
 impl RegistryEntry {
@@ -159,7 +159,6 @@ impl RegistryEntry {
         repo_id: &str,
         model_type: ModelType,
         architecture: Architecture,
-        supports_quantization: bool,
     ) -> Self {
         let parts: Vec<&str> = repo_id.split('/').collect();
         let (org, base_name) = if parts.len() == 2 {
@@ -173,15 +172,33 @@ impl RegistryEntry {
             base_name,
             model_type,
             architecture,
-            supports_quantization,
+            gguf_override: None,
         }
     }
 
+    fn with_gguf(mut self, gguf_repo: &str) -> Self {
+        self.gguf_override = Some(gguf_repo.to_string());
+        self
+    }
+
     fn to_model_info(&self, alias: &str, quantization: Quantization) -> ModelInfo {
-        let repo_id = if quantization.is_quantized() && self.supports_quantization {
-            format!("{}/{}{}", self.org, self.base_name, quantization.repo_suffix())
-        } else {
-            format!("{}/{}", self.org, self.base_name)
+        let repo_id = match quantization {
+            Quantization::GGUF => {
+                // Use GGUF override if available, otherwise default pattern
+                if let Some(ref gguf_repo) = self.gguf_override {
+                    gguf_repo.clone()
+                } else {
+                    format!("{}/{}{}", self.org, self.base_name, quantization.repo_suffix())
+                }
+            }
+            _ if quantization.is_quantized() => {
+                // For other quantization types, use standard pattern
+                format!("{}/{}{}", self.org, self.base_name, quantization.repo_suffix())
+            }
+            _ => {
+                // Default (no quantization)
+                format!("{}/{}", self.org, self.base_name)
+            }
         };
 
         ModelInfo {
@@ -204,126 +221,156 @@ impl ModelRegistry {
     pub fn new() -> Self {
         let mut entries = HashMap::new();
 
-        // (alias, repo_id, model_type, architecture, supports_quantization)
+        // (alias, repo_id, model_type, architecture)
+        // All models support quantization suffixes - repo path: {org}/{model}{suffix}
         let model_entries = [
-            // BGE Embedding Models (no quantization variants)
-            ("bge-small-zh", "BAAI/bge-small-zh-v1.5", ModelType::Embedding, Architecture::Bert, false),
-            ("bge-small-en", "BAAI/bge-small-en-v1.5", ModelType::Embedding, Architecture::Bert, false),
-            ("bge-base-en", "BAAI/bge-base-en-v1.5", ModelType::Embedding, Architecture::Bert, false),
-            ("bge-large-en", "BAAI/bge-large-en-v1.5", ModelType::Embedding, Architecture::Bert, false),
+            // BGE Embedding Models
+            ("bge-small-zh", "BAAI/bge-small-zh-v1.5", ModelType::Embedding, Architecture::Bert),
+            ("bge-small-en", "BAAI/bge-small-en-v1.5", ModelType::Embedding, Architecture::Bert),
+            ("bge-base-en", "BAAI/bge-base-en-v1.5", ModelType::Embedding, Architecture::Bert),
+            ("bge-large-en", "BAAI/bge-large-en-v1.5", ModelType::Embedding, Architecture::Bert),
 
-            // Sentence Transformers Models (no quantization)
-            ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2", ModelType::Embedding, Architecture::Bert, false),
-            ("all-mpnet-base-v2", "sentence-transformers/all-mpnet-base-v2", ModelType::Embedding, Architecture::Bert, false),
-            ("paraphrase-MiniLM-L6-v2", "sentence-transformers/paraphrase-MiniLM-L6-v2", ModelType::Embedding, Architecture::Bert, false),
-            ("multi-qa-mpnet-base-dot-v1", "sentence-transformers/multi-qa-mpnet-base-dot-v1", ModelType::Embedding, Architecture::Bert, false),
+            // Sentence Transformers Models
+            ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2", ModelType::Embedding, Architecture::Bert),
+            ("all-mpnet-base-v2", "sentence-transformers/all-mpnet-base-v2", ModelType::Embedding, Architecture::Bert),
+            ("paraphrase-MiniLM-L6-v2", "sentence-transformers/paraphrase-MiniLM-L6-v2", ModelType::Embedding, Architecture::Bert),
+            ("multi-qa-mpnet-base-dot-v1", "sentence-transformers/multi-qa-mpnet-base-dot-v1", ModelType::Embedding, Architecture::Bert),
 
-            // E5 Models (no quantization)
-            ("e5-large", "intfloat/e5-large", ModelType::Embedding, Architecture::Bert, false),
-            ("e5-base", "intfloat/e5-base", ModelType::Embedding, Architecture::Bert, false),
-            ("e5-small", "intfloat/e5-small", ModelType::Embedding, Architecture::Bert, false),
+            // E5 Models
+            ("e5-large", "intfloat/e5-large", ModelType::Embedding, Architecture::Bert),
+            ("e5-base", "intfloat/e5-base", ModelType::Embedding, Architecture::Bert),
+            ("e5-small", "intfloat/e5-small", ModelType::Embedding, Architecture::Bert),
 
             // JINA Embeddings
-            ("jina-embeddings-v2-base-en", "jinaai/jina-embeddings-v2-base-en", ModelType::Embedding, Architecture::Bert, false),
-            ("jina-embeddings-v2-small-en", "jinaai/jina-embeddings-v2-small-en", ModelType::Embedding, Architecture::Bert, false),
-            ("jina-embeddings-v4", "jinaai/jina-embeddings-v4", ModelType::Embedding, Architecture::JinaV4, true),
+            ("jina-embeddings-v2-base-en", "jinaai/jina-embeddings-v2-base-en", ModelType::Embedding, Architecture::Bert),
+            ("jina-embeddings-v2-small-en", "jinaai/jina-embeddings-v2-small-en", ModelType::Embedding, Architecture::Bert),
+            ("jina-embeddings-v4", "jinaai/jina-embeddings-v4", ModelType::Embedding, Architecture::JinaV4),
 
             // Chinese Models
-            ("m3e-base", "moka-ai/m3e-base", ModelType::Embedding, Architecture::Bert, false),
+            ("m3e-base", "moka-ai/m3e-base", ModelType::Embedding, Architecture::Bert),
 
             // Multilingual Models
-            ("multilingual-MiniLM-L12-v2", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
-            ("distiluse-base-multilingual-cased-v1", "sentence-transformers/distiluse-base-multilingual-cased-v1", ModelType::Embedding, Architecture::Bert, false),
+            ("multilingual-MiniLM-L12-v2", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert),
+            ("distiluse-base-multilingual-cased-v1", "sentence-transformers/distiluse-base-multilingual-cased-v1", ModelType::Embedding, Architecture::Bert),
 
             // Code Models (Legacy - BERT-based)
-            ("codebert-base", "claudios/codebert-base", ModelType::Embedding, Architecture::Bert, false),
-            ("starencoder", "bigcode/starencoder", ModelType::Embedding, Architecture::Bert, false),
-            ("graphcodebert-base", "claudios/graphcodebert-base", ModelType::Embedding, Architecture::Bert, false),
-            ("unixcoder-base", "claudios/unixcoder-base", ModelType::Embedding, Architecture::Bert, false),
+            ("codebert-base", "claudios/codebert-base", ModelType::Embedding, Architecture::Bert),
+            ("starencoder", "bigcode/starencoder", ModelType::Embedding, Architecture::Bert),
+            ("graphcodebert-base", "claudios/graphcodebert-base", ModelType::Embedding, Architecture::Bert),
+            ("unixcoder-base", "claudios/unixcoder-base", ModelType::Embedding, Architecture::Bert),
 
             // Code Models (2024 SOTA - CodeXEmbed / SFR-Embedding-Code)
             // CoIR benchmark SOTA: outperforms Voyage-Code by 20%+
-            ("codexembed-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert, false),
-            ("sfr-embedding-code-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert, false),
-            ("codexembed-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding, false),
-            ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding, false),
-            ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding, false),
-            ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding, false),
+            ("codexembed-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert),
+            ("sfr-embedding-code-400m", "Salesforce/SFR-Embedding-Code-400M_R", ModelType::Embedding, Architecture::Bert),
+            ("codexembed-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
+            ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
+            ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
+            ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
 
-            // Qwen2/Mistral Generator Models
-            ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-0.5b-instruct", "Qwen/Qwen2.5-0.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-1.5b-instruct", "Qwen/Qwen2.5-1.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-3b-instruct", "Qwen/Qwen2.5-3B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-7b-instruct", "Qwen/Qwen2.5-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator, false),
-            ("qwen3-0.6b", "Qwen/Qwen3-0.6B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-1.7b", "Qwen/Qwen3-1.7B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-4b", "Qwen/Qwen3-4B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator, false),
-            ("qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", ModelType::Generator, Architecture::Qwen3MoE, false),
-            ("qwen3-235b-a22b", "Qwen/Qwen3-235B-A22B", ModelType::Generator, Architecture::Qwen3MoE, false),
-            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator, false),
-            ("mixtral-8x7b-instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral, false),
-            ("mixtral-8x22b-instruct", "mistralai/Mixtral-8x22B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral, false),
-            ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4, false),
-            ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE, false),
-            ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3, false),
+            // Qwen3/Qwen3-next Generator Models (2025 - all support GGUF via {org}/{model}-GGUF repos)
+            // Qwen2.5 removed: 2024 release, use Qwen3/Qwen3-next instead
+            ("qwen3-0.6b", "Qwen/Qwen3-0.6B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-1.7b", "Qwen/Qwen3-1.7B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-4b", "Qwen/Qwen3-4B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-8b", "Qwen/Qwen3-8B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-14b", "Qwen/Qwen3-14B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", ModelType::Generator, Architecture::Qwen3MoE),
+            ("qwen3-235b-a22b", "Qwen/Qwen3-235B-A22B", ModelType::Generator, Architecture::Qwen3MoE),
+
+            // Qwen3-next Models (2025 - faster inference, better quality)
+            ("qwen3-next-0.6b", "Qwen/Qwen3-next-0.6B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-next-2b", "Qwen/Qwen3-next-2B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-next-4b", "Qwen/Qwen3-next-4B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-next-8b", "Qwen/Qwen3-next-8B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-next-32b", "Qwen/Qwen3-next-32B", ModelType::Generator, Architecture::Qwen3Generator),
+
+            // Ministral Models (2024 - small efficient models, perfect for FP16 testing)
+            ("ministral-3b-instruct", "mistralai/Ministral-3B-Instruct-2410", ModelType::Generator, Architecture::MistralGenerator),
+            ("ministral-8b-instruct", "mistralai/Ministral-8B-Instruct-2410", ModelType::Generator, Architecture::MistralGenerator),
+            // Mistral/Mixtral Models
+            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.3", ModelType::Generator, Architecture::MistralGenerator),
+            ("mixtral-8x7b-instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
+            ("mixtral-8x22b-instruct", "mistralai/Mixtral-8x22B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
+
+            // GLM/DeepSeek Models
+            ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
+            ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE),
+            ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3),
 
             // GPT-OSS Models (OpenAI 2025 Open Source MoE)
-            ("gpt-oss-20b", "openai/gpt-oss-20b", ModelType::Generator, Architecture::GptOss, false),
-            ("gpt-oss-120b", "openai/gpt-oss-120b", ModelType::Generator, Architecture::GptOss, false),
+            ("gpt-oss-20b", "openai/gpt-oss-20b", ModelType::Generator, Architecture::GptOss),
+            ("gpt-oss-120b", "openai/gpt-oss-120b", ModelType::Generator, Architecture::GptOss),
 
-            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator, false),
-            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator, false),
-            ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator, false),
-            ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator, false),
+            // Phi-4 Models (Microsoft 2024)
+            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi4Generator),
+            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi4Generator),
+            ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),
+            ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator),
 
             // Light Models for Edge Devices
-            ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert, false),
-            ("all-distilroberta-v1", "sentence-transformers/all-distilroberta-v1", ModelType::Embedding, Architecture::Bert, false),
+            ("all-MiniLM-L12-v2", "sentence-transformers/all-MiniLM-L12-v2", ModelType::Embedding, Architecture::Bert),
+            ("all-distilroberta-v1", "sentence-transformers/all-distilroberta-v1", ModelType::Embedding, Architecture::Bert),
 
-            // Qwen3 Embedding Models (supports quantization)
-            ("qwen3-embedding-0.6b", "Qwen/Qwen3-Embedding-0.6B", ModelType::Embedding, Architecture::Qwen3Embedding, true),
-            ("qwen3-embedding-4b", "Qwen/Qwen3-Embedding-4B", ModelType::Embedding, Architecture::Qwen3Embedding, true),
-            ("qwen3-embedding-8b", "Qwen/Qwen3-Embedding-8B", ModelType::Embedding, Architecture::Qwen3Embedding, true),
+            // Qwen3 Embedding Models
+            ("qwen3-embedding-0.6b", "Qwen/Qwen3-Embedding-0.6B", ModelType::Embedding, Architecture::Qwen3Embedding),
+            ("qwen3-embedding-4b", "Qwen/Qwen3-Embedding-4B", ModelType::Embedding, Architecture::Qwen3Embedding),
+            ("qwen3-embedding-8b", "Qwen/Qwen3-Embedding-8B", ModelType::Embedding, Architecture::Qwen3Embedding),
 
-            // NVIDIA Embedding (supports quantization)
-            ("llama-embed-nemotron-8b", "nvidia/llama-embed-nemotron-8b", ModelType::Embedding, Architecture::NVIDIANemotron, true),
+            // NVIDIA Embedding
+            ("llama-embed-nemotron-8b", "nvidia/llama-embed-nemotron-8b", ModelType::Embedding, Architecture::NVIDIANemotron),
 
-            // BGE Rerankers (no quantization)
-            ("bge-reranker-v2", "BAAI/bge-reranker-v2-m3", ModelType::Rerank, Architecture::CrossEncoder, false),
-            ("bge-reranker-large", "BAAI/bge-reranker-large", ModelType::Rerank, Architecture::CrossEncoder, false),
-            ("bge-reranker-base", "BAAI/bge-reranker-base", ModelType::Rerank, Architecture::CrossEncoder, false),
+            // BGE Rerankers
+            ("bge-reranker-v2", "BAAI/bge-reranker-v2-m3", ModelType::Rerank, Architecture::CrossEncoder),
+            ("bge-reranker-large", "BAAI/bge-reranker-large", ModelType::Rerank, Architecture::CrossEncoder),
+            ("bge-reranker-base", "BAAI/bge-reranker-base", ModelType::Rerank, Architecture::CrossEncoder),
 
-            // MS MARCO Rerankers (no quantization)
-            ("ms-marco-MiniLM-L-6-v2", "cross-encoder/ms-marco-MiniLM-L-6-v2", ModelType::Rerank, Architecture::CrossEncoder, false),
-            ("ms-marco-MiniLM-L-12-v2", "cross-encoder/ms-marco-MiniLM-L-12-v2", ModelType::Rerank, Architecture::CrossEncoder, false),
-            ("ms-marco-TinyBERT-L-2-v2", "cross-encoder/ms-marco-TinyBERT-L-2-v2", ModelType::Rerank, Architecture::CrossEncoder, false),
-            ("ms-marco-electra-base", "cross-encoder/ms-marco-electra-base", ModelType::Rerank, Architecture::CrossEncoder, false),
+            // MS MARCO Rerankers
+            ("ms-marco-MiniLM-L-6-v2", "cross-encoder/ms-marco-MiniLM-L-6-v2", ModelType::Rerank, Architecture::CrossEncoder),
+            ("ms-marco-MiniLM-L-12-v2", "cross-encoder/ms-marco-MiniLM-L-12-v2", ModelType::Rerank, Architecture::CrossEncoder),
+            ("ms-marco-TinyBERT-L-2-v2", "cross-encoder/ms-marco-TinyBERT-L-2-v2", ModelType::Rerank, Architecture::CrossEncoder),
+            ("ms-marco-electra-base", "cross-encoder/ms-marco-electra-base", ModelType::Rerank, Architecture::CrossEncoder),
 
             // Specialized Rerankers
-            ("quora-distilroberta-base", "cross-encoder/quora-distilroberta-base", ModelType::Rerank, Architecture::CrossEncoder, false),
+            ("quora-distilroberta-base", "cross-encoder/quora-distilroberta-base", ModelType::Rerank, Architecture::CrossEncoder),
 
-            // Qwen3 Reranker Models (supports quantization)
-            ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker, true),
-            ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker, true),
-            ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker, true),
+            // Qwen3 Reranker Models
+            ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
+            ("qwen3-reranker-4b", "Qwen/Qwen3-Reranker-4B", ModelType::Rerank, Architecture::Qwen3Reranker),
+            ("qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", ModelType::Rerank, Architecture::Qwen3Reranker),
 
-            // Jina Reranker V3 (supports quantization)
-            ("jina-reranker-v3", "jinaai/jina-reranker-v3", ModelType::Rerank, Architecture::JinaRerankerV3, true),
+            // Jina Reranker V3
+            ("jina-reranker-v3", "jinaai/jina-reranker-v3", ModelType::Rerank, Architecture::JinaRerankerV3),
         ];
 
-        for (alias, repo_id, model_type, architecture, supports_quant) in model_entries {
+        for (alias, repo_id, model_type, architecture) in model_entries {
             let alias_key = alias.to_ascii_lowercase();
             entries.insert(
                 alias_key,
-                RegistryEntry::new(repo_id, model_type, architecture, supports_quant),
+                RegistryEntry::new(repo_id, model_type, architecture),
             );
+        }
+
+        // Models with third-party GGUF providers (bartowski, etc.)
+        // These need explicit GGUF repo overrides
+        let gguf_overrides: &[(&str, &str)] = &[
+            ("ministral-3b-instruct", "bartowski/Ministral-3B-Instruct-2410-GGUF"),
+            ("ministral-8b-instruct", "bartowski/Ministral-8B-Instruct-2410-GGUF"),
+            ("mistral-7b-instruct", "bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+            ("glm-4-9b-chat", "bartowski/glm-4-9b-chat-GGUF"),
+            ("phi-4-mini-instruct", "bartowski/phi-4-mini-instruct-GGUF"),
+            ("smollm3-3b", "bartowski/SmolLM3-3B-GGUF"),
+            ("internlm3-8b-instruct", "bartowski/internlm3-8b-instruct-GGUF"),
+            ("mixtral-8x7b-instruct", "bartowski/Mixtral-8x7B-Instruct-v0.1-GGUF"),
+            ("mixtral-8x22b-instruct", "bartowski/Mixtral-8x22B-Instruct-v0.1-GGUF"),
+        ];
+
+        for (alias, gguf_repo) in gguf_overrides {
+            let alias_key = alias.to_ascii_lowercase();
+            if let Some(entry) = entries.get_mut(&alias_key) {
+                entry.gguf_override = Some(gguf_repo.to_string());
+            }
         }
 
         Self { entries }
@@ -334,8 +381,12 @@ impl ModelRegistry {
     /// Supports quantization suffix:
     /// - `qwen3-embedding-0.6b` - default (fp16/bf16)
     /// - `qwen3-embedding-0.6b:int4` - Int4 quantization
+    /// - `qwen3-embedding-0.6b:gguf` - GGUF format
     /// - `qwen3-embedding-0.6b:awq` - AWQ quantization
     /// - `Qwen/Qwen3-Embedding-0.6B-Int4` - direct repo ID
+    ///
+    /// All models support quantization suffixes. The repo path is constructed as:
+    /// {org}/{base_name}{repo_suffix} -> e.g., Qwen/Qwen3-0.6B-GGUF
     pub fn resolve(&self, name: &str) -> Result<ModelInfo> {
         let name = name.trim();
 
@@ -345,12 +396,8 @@ impl ModelRegistry {
             if let Some(quantization) = Quantization::from_suffix(quant_str) {
                 let base_key = base.to_ascii_lowercase();
                 if let Some(entry) = self.entries.get(&base_key) {
-                    if entry.supports_quantization {
-                        return Ok(entry.to_model_info(&format!("{}:{}", base, quant_str), quantization));
-                    } else {
-                        // Model doesn't support quantization, ignore suffix
-                        return Ok(entry.to_model_info(base, Quantization::None));
-                    }
+                    // All models support quantization - repo path: {org}/{model}{suffix}
+                    return Ok(entry.to_model_info(&format!("{}:{}", base, quant_str), quantization));
                 }
             }
             // Not a valid quantization suffix, fall through to other parsing
@@ -376,24 +423,26 @@ impl ModelRegistry {
     }
 
     /// Check if a model supports quantization variants.
+    /// All registered models now support quantization suffixes.
     pub fn supports_quantization(&self, alias: &str) -> bool {
         let key = alias.to_ascii_lowercase();
-        self.entries.get(&key).map(|e| e.supports_quantization).unwrap_or(false)
+        self.entries.contains_key(&key)
     }
 
     /// Get available quantization variants for a model.
-    pub fn available_quantizations(&self, alias: &str) -> Vec<Quantization> {
-        if self.supports_quantization(alias) {
-            vec![
-                Quantization::None,
-                Quantization::Int4,
-                Quantization::Int8,
-                Quantization::AWQ,
-                Quantization::GPTQ,
-            ]
-        } else {
-            vec![Quantization::None]
-        }
+    /// All models support the full set of quantization formats.
+    pub fn available_quantizations(&self, _alias: &str) -> Vec<Quantization> {
+        vec![
+            Quantization::None,
+            Quantization::Int4,
+            Quantization::Int8,
+            Quantization::AWQ,
+            Quantization::GPTQ,
+            Quantization::GGUF,
+            Quantization::BNB4,
+            Quantization::BNB8,
+            Quantization::FP8,
+        ]
     }
 
     fn infer_from_repo(&self, repo_id: &str) -> ModelInfo {
@@ -469,7 +518,7 @@ impl ModelRegistry {
         } else if lower.contains("deepseek") && lower.contains("v3") {
             Architecture::DeepSeekV3
         } else if lower.contains("phi-4") || lower.contains("phi4") {
-            Architecture::Phi3Generator
+            Architecture::Phi4Generator
         } else if lower.contains("smollm3") {
             Architecture::SmolLM3Generator
         } else if lower.contains("internlm3") {
@@ -576,13 +625,18 @@ mod tests {
     }
 
     #[test]
-    fn quantization_ignored_for_unsupported_models() {
+    fn all_models_support_quantization() {
         let registry = ModelRegistry::new();
 
-        // BERT models don't support quantization
+        // All models now support quantization - repo path includes suffix
         let info = registry.resolve("bge-small-en:int4").unwrap();
-        assert_eq!(info.repo_id, "BAAI/bge-small-en-v1.5");
-        assert!(matches!(info.quantization, Quantization::None));
+        assert_eq!(info.repo_id, "BAAI/bge-small-en-v1.5-Int4");
+        assert!(matches!(info.quantization, Quantization::Int4));
+
+        // GGUF quantization
+        let info = registry.resolve("bge-small-en:gguf").unwrap();
+        assert_eq!(info.repo_id, "BAAI/bge-small-en-v1.5-GGUF");
+        assert!(matches!(info.quantization, Quantization::GGUF));
     }
 
     #[test]
@@ -600,11 +654,15 @@ mod tests {
     fn supports_quantization_check() {
         let registry = ModelRegistry::new();
 
+        // All registered models now support quantization
         assert!(registry.supports_quantization("qwen3-embedding-0.6b"));
         assert!(registry.supports_quantization("qwen3-reranker-8b"));
         assert!(registry.supports_quantization("jina-embeddings-v4"));
-        assert!(!registry.supports_quantization("bge-small-en"));
-        assert!(!registry.supports_quantization("all-MiniLM-L6-v2"));
+        assert!(registry.supports_quantization("bge-small-en"));
+        assert!(registry.supports_quantization("all-MiniLM-L6-v2"));
+
+        // Unregistered model returns false
+        assert!(!registry.supports_quantization("non-existent-model"));
     }
 
     #[test]
@@ -618,14 +676,8 @@ mod tests {
             ("codexembed-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
             ("sfr-embedding-code-2b", "Salesforce/SFR-Embedding-Code-2B_R", ModelType::Embedding, Architecture::Qwen2Embedding),
             ("sfr-embedding-code-7b", "Salesforce/SFR-Embedding-Code-7B_R", ModelType::Embedding, Architecture::MistralEmbedding),
-            ("qwen2-7b-instruct", "Qwen/Qwen2-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-0.5b-instruct", "Qwen/Qwen2.5-0.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-1.5b-instruct", "Qwen/Qwen2.5-1.5B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-3b-instruct", "Qwen/Qwen2.5-3B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-7b-instruct", "Qwen/Qwen2.5-7B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-14b-instruct", "Qwen/Qwen2.5-14B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-32b-instruct", "Qwen/Qwen2.5-32B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
-            ("qwen2.5-72b-instruct", "Qwen/Qwen2.5-72B-Instruct", ModelType::Generator, Architecture::Qwen2Generator),
+            ("qwen3-next-0.6b", "Qwen/Qwen3-next-0.6B", ModelType::Generator, Architecture::Qwen3Generator),
+            ("qwen3-next-2b", "Qwen/Qwen3-next-2B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-0.6b", "Qwen/Qwen3-0.6B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-1.7b", "Qwen/Qwen3-1.7B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-4b", "Qwen/Qwen3-4B", ModelType::Generator, Architecture::Qwen3Generator),
@@ -634,14 +686,16 @@ mod tests {
             ("qwen3-32b", "Qwen/Qwen3-32B", ModelType::Generator, Architecture::Qwen3Generator),
             ("qwen3-30b-a3b", "Qwen/Qwen3-30B-A3B", ModelType::Generator, Architecture::Qwen3MoE),
             ("qwen3-235b-a22b", "Qwen/Qwen3-235B-A22B", ModelType::Generator, Architecture::Qwen3MoE),
-            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.2", ModelType::Generator, Architecture::MistralGenerator),
+            ("ministral-3b-instruct", "mistralai/Ministral-3B-Instruct-2410", ModelType::Generator, Architecture::MistralGenerator),
+            ("ministral-8b-instruct", "mistralai/Ministral-8B-Instruct-2410", ModelType::Generator, Architecture::MistralGenerator),
+            ("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.3", ModelType::Generator, Architecture::MistralGenerator),
             ("mixtral-8x7b-instruct", "mistralai/Mixtral-8x7B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
             ("mixtral-8x22b-instruct", "mistralai/Mixtral-8x22B-Instruct-v0.1", ModelType::Generator, Architecture::Mixtral),
             ("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf", ModelType::Generator, Architecture::GLM4),
             ("glm-4.7", "zai-org/GLM-4.7", ModelType::Generator, Architecture::GLM4MoE),
             ("deepseek-v3", "deepseek-ai/DeepSeek-V3", ModelType::Generator, Architecture::DeepSeekV3),
-            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi3Generator),
-            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi3Generator),
+            ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi4Generator),
+            ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi4Generator),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),
             ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator),
             ("qwen3-reranker-0.6b", "Qwen/Qwen3-Reranker-0.6B", ModelType::Rerank, Architecture::Qwen3Reranker),
@@ -664,12 +718,47 @@ mod tests {
     fn list_available_quantizations() {
         let registry = ModelRegistry::new();
 
+        // All models return full quantization list
         let quants = registry.available_quantizations("qwen3-embedding-8b");
         assert!(quants.len() > 1);
         assert!(quants.contains(&Quantization::Int4));
+        assert!(quants.contains(&Quantization::GGUF));
 
+        // Even BERT models now return full list
         let quants = registry.available_quantizations("bge-small-en");
-        assert_eq!(quants.len(), 1);
+        assert!(quants.len() > 1);
         assert!(quants.contains(&Quantization::None));
+        assert!(quants.contains(&Quantization::GGUF));
+    }
+
+    #[test]
+    fn gguf_override_resolves_to_third_party_repo() {
+        let registry = ModelRegistry::new();
+
+        // Models with official GGUF repos use default pattern
+        let info = registry.resolve("qwen3-next-0.6b:gguf").unwrap();
+        assert_eq!(info.repo_id, "Qwen/Qwen3-next-0.6B-GGUF");
+
+        let info = registry.resolve("qwen3-0.6b:gguf").unwrap();
+        assert_eq!(info.repo_id, "Qwen/Qwen3-0.6B-GGUF");
+
+        // Models with GGUF override use third-party repos (bartowski)
+        let info = registry.resolve("glm-4-9b-chat:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/glm-4-9b-chat-GGUF");
+
+        let info = registry.resolve("mistral-7b-instruct:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/Mistral-7B-Instruct-v0.3-GGUF");
+
+        let info = registry.resolve("phi-4-mini-instruct:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/phi-4-mini-instruct-GGUF");
+
+        let info = registry.resolve("smollm3-3b:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/SmolLM3-3B-GGUF");
+
+        let info = registry.resolve("internlm3-8b-instruct:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/internlm3-8b-instruct-GGUF");
+
+        let info = registry.resolve("mixtral-8x7b-instruct:gguf").unwrap();
+        assert_eq!(info.repo_id, "bartowski/Mixtral-8x7B-Instruct-v0.1-GGUF");
     }
 }

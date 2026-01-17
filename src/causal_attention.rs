@@ -1,60 +1,138 @@
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
-use crate::rope::{RopeConfig, RotaryPositionEmbedding};
+use crate::tensor::Tensor3;
 use crate::types::{Error, Result};
-#[cfg(feature = "paged-attention")]
-use crate::paged_attention::PagedKVCache;
-use burn::nn::{Linear, LinearConfig};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
-use std::sync::{Arc, OnceLock};
+use crate::weight_loader::LinearWeights;
+use gllm_kernels::{
+    linear_forward, rope_apply_inplace, rope_precompute, FlashAttentionConfig, KernelDispatcher,
+    KernelFloat, RoPEConfig as KernelRoPEConfig,
+};
+use std::sync::Arc;
 
-// Zero-cost kernel dispatcher (initialized once)
-use gllm_kernels::{KernelDispatcher, FlashAttentionConfig as KernelFlashConfig};
+/// RoPE configuration for attention.
+#[derive(Debug, Clone)]
+pub struct RopeConfig {
+    pub theta: f64,
+    pub dim: usize,
+    pub max_seq_len: usize,
+    pub ntk_factor: Option<f64>,
+}
 
-static DISPATCHER: OnceLock<KernelDispatcher> = OnceLock::new();
+impl Default for RopeConfig {
+    fn default() -> Self {
+        Self {
+            theta: 10000.0,
+            dim: 64,
+            max_seq_len: 8192,
+            ntk_factor: None,
+        }
+    }
+}
 
-#[inline(always)]
-fn get_dispatcher() -> &'static KernelDispatcher {
-    DISPATCHER.get_or_init(KernelDispatcher::new)
+/// Rotary Position Embedding using gllm-kernels.
+#[derive(Clone)]
+pub struct RotaryPositionEmbedding {
+    cos_cached: Vec<f32>,
+    sin_cached: Vec<f32>,
+    dim: usize,
+    max_cached_len: usize,
+}
+
+impl RotaryPositionEmbedding {
+    pub fn new(config: RopeConfig) -> Self {
+        let dim = config.dim;
+        let max_seq_len = config.max_seq_len;
+        let half_dim = dim / 2;
+        let kernel_config = KernelRoPEConfig {
+            dim,
+            max_seq_len,
+            theta: config.theta,
+            ntk_factor: config.ntk_factor,
+        };
+
+        let expected_size = max_seq_len * half_dim;
+        let mut cos_vals = vec![0.0f32; expected_size];
+        let mut sin_vals = vec![0.0f32; expected_size];
+        rope_precompute(&mut cos_vals, &mut sin_vals, &kernel_config);
+
+        Self {
+            cos_cached: cos_vals,
+            sin_cached: sin_vals,
+            dim,
+            max_cached_len: max_seq_len,
+        }
+    }
+
+    pub fn apply_inplace<T: KernelFloat>(
+        &self,
+        tensor: &mut [T],
+        batch: usize,
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+        position_offset: usize,
+    ) {
+        let half_dim = head_dim / 2;
+        let needed = (position_offset + seq_len) * half_dim;
+        if needed > self.cos_cached.len() || needed > self.sin_cached.len() {
+            return;
+        }
+        rope_apply_inplace(
+            tensor,
+            &self.cos_cached,
+            &self.sin_cached,
+            batch,
+            seq_len,
+            num_heads,
+            head_dim,
+            position_offset,
+        );
+    }
+
+    pub fn max_cached_len(&self) -> usize {
+        self.max_cached_len
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
 }
 
 #[derive(Clone)]
-pub struct CausalAttention<B: Backend> {
-    pub(crate) q_proj: Linear<B>,
-    pub(crate) k_proj: Linear<B>,
-    pub(crate) v_proj: Linear<B>,
-    pub(crate) o_proj: Linear<B>,
-    pub(crate) rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+pub struct CausalAttention {
+    pub(crate) q_proj: LinearWeights,
+    pub(crate) k_proj: LinearWeights,
+    pub(crate) v_proj: LinearWeights,
+    pub(crate) o_proj: LinearWeights,
+    pub(crate) rope: Option<Arc<RotaryPositionEmbedding>>,
     pub(crate) num_attention_heads: usize,
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
-    #[allow(dead_code)] // Used for documentation/debugging
     pub(crate) hidden_size: usize,
     pub(crate) sliding_window: Option<usize>,
-    pub(crate) device: B::Device,
+    pub(crate) causal: bool,
+    dispatcher: Arc<KernelDispatcher>,
 }
 
-impl<B: Backend> CausalAttention<B> {
+impl CausalAttention {
     pub fn new(
-        device: &B::Device,
         config: &ModelConfig,
-        rope: Option<Arc<RotaryPositionEmbedding<B>>>,
+        rope: Option<Arc<RotaryPositionEmbedding>>,
+        causal: bool,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         if hidden_size == 0 {
             return Err(Error::InvalidConfig(
-                "hidden_size must be greater than 0 for causal attention".into(),
+                "hidden_size must be greater than 0 for attention".into(),
             ));
         }
 
         let num_attention_heads = config.num_attention_heads;
         if num_attention_heads == 0 {
             return Err(Error::InvalidConfig(
-                "num_attention_heads must be greater than 0 for causal attention".into(),
+                "num_attention_heads must be greater than 0 for attention".into(),
             ));
         }
-
         if hidden_size % num_attention_heads != 0 {
             return Err(Error::InvalidConfig(format!(
                 "hidden_size ({}) must be divisible by num_attention_heads ({})",
@@ -65,7 +143,7 @@ impl<B: Backend> CausalAttention<B> {
         let num_key_value_heads = config.num_key_value_heads.unwrap_or(num_attention_heads);
         if num_key_value_heads == 0 {
             return Err(Error::InvalidConfig(
-                "num_key_value_heads must be greater than 0 for causal attention".into(),
+                "num_key_value_heads must be greater than 0 for attention".into(),
             ));
         }
         if num_attention_heads % num_key_value_heads != 0 {
@@ -78,7 +156,7 @@ impl<B: Backend> CausalAttention<B> {
         let head_dim = config
             .head_dim
             .unwrap_or_else(|| hidden_size / num_attention_heads);
-        if head_dim % 2 != 0 {
+        if head_dim % 2 != 0 && Self::uses_rope(config) {
             return Err(Error::InvalidConfig(
                 "head_dim must be even to apply RoPE".into(),
             ));
@@ -95,10 +173,12 @@ impl<B: Backend> CausalAttention<B> {
             None
         };
 
-        let q_proj = LinearConfig::new(hidden_size, num_attention_heads * head_dim).init(device);
-        let k_proj = LinearConfig::new(hidden_size, num_key_value_heads * head_dim).init(device);
-        let v_proj = LinearConfig::new(hidden_size, num_key_value_heads * head_dim).init(device);
-        let o_proj = LinearConfig::new(num_attention_heads * head_dim, hidden_size).init(device);
+        let q_rows = num_attention_heads * head_dim;
+        let kv_rows = num_key_value_heads * head_dim;
+        let q_proj = LinearWeights::zeros(q_rows, hidden_size);
+        let k_proj = LinearWeights::zeros(kv_rows, hidden_size);
+        let v_proj = LinearWeights::zeros(kv_rows, hidden_size);
+        let o_proj = LinearWeights::zeros(hidden_size, q_rows);
 
         Ok(Self {
             q_proj,
@@ -111,271 +191,102 @@ impl<B: Backend> CausalAttention<B> {
             head_dim,
             hidden_size,
             sliding_window: config.sliding_window,
-            device: device.clone(),
+            causal,
+            dispatcher: Arc::new(KernelDispatcher::new()),
         })
     }
 
-    pub fn forward(&self, hidden_states: Tensor<B, 3>, position_offset: usize) -> Tensor<B, 3> {
-        let [batch_size, seq_len, _hidden] = hidden_states.dims();
+    pub fn forward(&self, hidden_states: &Tensor3, position_offset: usize) -> Result<Tensor3> {
+        let (batch, seq_len, _) = hidden_states.shape();
+        let q = self.project(hidden_states, &self.q_proj)?;
+        let k = self.project(hidden_states, &self.k_proj)?;
+        let v = self.project(hidden_states, &self.v_proj)?;
 
-        let q = self
-            .q_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_attention_heads, self.head_dim]);
-        let k = self
-            .k_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
-        let v = self
-            .v_proj
-            .forward(hidden_states)
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+        let mut q = reshape_to_heads(&q, batch, seq_len, self.num_attention_heads, self.head_dim);
+        let mut k = reshape_to_heads(&k, batch, seq_len, self.num_key_value_heads, self.head_dim);
+        let v = reshape_to_heads(&v, batch, seq_len, self.num_key_value_heads, self.head_dim);
 
-        let (q, k) = match &self.rope {
-            Some(rope) => rope.apply(q, k, position_offset),
-            None => (q, k),
-        };
+        if let Some(rope) = &self.rope {
+            rope.apply_inplace(
+                &mut q,
+                batch,
+                seq_len,
+                self.num_attention_heads,
+                self.head_dim,
+                position_offset,
+            );
+            rope.apply_inplace(
+                &mut k,
+                batch,
+                seq_len,
+                self.num_key_value_heads,
+                self.head_dim,
+                position_offset,
+            );
+        }
 
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let k = self.repeat_kv(k);
-        let v = self.repeat_kv(v);
-
-        let context = self.attend(q, k, v, position_offset, seq_len);
-        // Reshape to [batch, seq, num_heads * head_dim] for o_proj
-        // Note: For models like Qwen3-MoE, num_heads * head_dim != hidden_size
-        let attn_out_dim = self.num_attention_heads * self.head_dim;
-        let context = context
-            .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, attn_out_dim]);
-
-        self.o_proj.forward(context)
+        let (k, v) = self.repeat_kv(&k, &v, batch, seq_len, seq_len);
+        let context = self.attend(&q, &k, &v, batch, seq_len, seq_len, self.causal);
+        let merged = merge_heads(&context, batch, seq_len, self.num_attention_heads, self.head_dim);
+        self.project_output(&merged, batch, seq_len)
     }
 
     pub fn forward_with_cache(
         &self,
-        hidden_states: Tensor<B, 3>,
+        hidden_states: &Tensor3,
         position_offset: usize,
-        cache: &mut KVCache<B>,
+        cache: &mut KVCache,
         layer: usize,
-    ) -> Tensor<B, 3> {
-        let [batch_size, seq_len, _hidden] = hidden_states.dims();
+    ) -> Result<Tensor3> {
+        let (batch, seq_len, _) = hidden_states.shape();
+        let q = self.project(hidden_states, &self.q_proj)?;
+        let k = self.project(hidden_states, &self.k_proj)?;
+        let v = self.project(hidden_states, &self.v_proj)?;
 
-        let q = self
-            .q_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_attention_heads, self.head_dim]);
-        let k = self
-            .k_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
-        let v = self
-            .v_proj
-            .forward(hidden_states)
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
+        let mut q = reshape_to_heads(&q, batch, seq_len, self.num_attention_heads, self.head_dim);
+        let mut k = reshape_to_heads(&k, batch, seq_len, self.num_key_value_heads, self.head_dim);
+        let v = reshape_to_heads(&v, batch, seq_len, self.num_key_value_heads, self.head_dim);
 
-        let (q, k) = match &self.rope {
-            Some(rope) => rope.apply(q, k, position_offset),
-            None => (q, k),
-        };
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let (k, v) = cache.update(layer, k, v);
-
-        let k = self.repeat_kv(k);
-        let v = self.repeat_kv(v);
-
-        let key_len = k.dims()[2];
-        let context = self.attend(q, k, v, position_offset, key_len);
-        // Reshape to [batch, seq, num_heads * head_dim] for o_proj
-        let attn_out_dim = self.num_attention_heads * self.head_dim;
-        let context = context
-            .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, attn_out_dim]);
-
-        self.o_proj.forward(context)
-    }
-
-    #[cfg(feature = "paged-attention")]
-    pub fn forward_with_paged_cache(
-        &self,
-        hidden_states: Tensor<B, 3>,
-        position_offset: usize,
-        cache: &mut PagedKVCache<B>,
-        layer: usize,
-        seq_id: usize,
-    ) -> Tensor<B, 3> {
-        let [batch_size, seq_len, _hidden] = hidden_states.dims();
-        assert_eq!(
-            batch_size, 1,
-            "paged attention currently supports batch_size == 1"
-        );
-
-        let q = self
-            .q_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_attention_heads, self.head_dim]);
-        let k = self
-            .k_proj
-            .forward(hidden_states.clone())
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
-        let v = self
-            .v_proj
-            .forward(hidden_states)
-            .reshape([batch_size, seq_len, self.num_key_value_heads, self.head_dim]);
-
-        let (q, k) = match &self.rope {
-            Some(rope) => rope.apply(q, k, position_offset),
-            None => (q, k),
-        };
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let k = k
-            .clone()
-            .slice([
-                0..1,
-                0..self.num_key_value_heads,
-                0..seq_len,
-                0..self.head_dim,
-            ])
-            .reshape([self.num_key_value_heads, seq_len, self.head_dim]);
-        let v = v
-            .clone()
-            .slice([
-                0..1,
-                0..self.num_key_value_heads,
-                0..seq_len,
-                0..self.head_dim,
-            ])
-            .reshape([self.num_key_value_heads, seq_len, self.head_dim]);
-
-        cache
-            .append(layer, seq_id, k, v)
-            .expect("paged cache append failed");
-
-        let (k, v) = cache
-            .get_kv(layer, seq_id)
-            .expect("paged cache lookup failed");
-        let key_len = k.dims()[1];
-        let k = k.reshape([1, self.num_key_value_heads, key_len, self.head_dim]);
-        let v = v.reshape([1, self.num_key_value_heads, key_len, self.head_dim]);
-
-        let k = self.repeat_kv(k);
-        let v = self.repeat_kv(v);
-
-        let context = self.attend(q, k, v, position_offset, key_len);
-        let attn_out_dim = self.num_attention_heads * self.head_dim;
-        let context = context
-            .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, attn_out_dim]);
-
-        self.o_proj.forward(context)
-    }
-
-    fn repeat_kv(&self, tensor: Tensor<B, 4>) -> Tensor<B, 4> {
-        if self.num_key_value_heads == self.num_attention_heads {
-            return tensor;
+        if let Some(rope) = &self.rope {
+            rope.apply_inplace(
+                &mut q,
+                batch,
+                seq_len,
+                self.num_attention_heads,
+                self.head_dim,
+                position_offset,
+            );
+            rope.apply_inplace(
+                &mut k,
+                batch,
+                seq_len,
+                self.num_key_value_heads,
+                self.head_dim,
+                position_offset,
+            );
         }
 
-        let repeat = self.num_attention_heads / self.num_key_value_heads;
-        let [batch_size, kv_heads, seq_len, head_dim] = tensor.dims();
+        cache.update(layer, &k, &v)?;
+        let cached_k = cache.layer_k(layer)?;
+        let cached_v = cache.layer_v(layer)?;
+        let key_len = cache.seq_len();
 
-        tensor
-            .reshape([batch_size, kv_heads, 1, seq_len, head_dim])
-            .repeat(&[1, 1, repeat, 1, 1])
-            .reshape([batch_size, kv_heads * repeat, seq_len, head_dim])
-    }
-
-    fn attend(
-        &self,
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        v: Tensor<B, 4>,
-        _position_offset: usize,
-        _key_len: usize,
-    ) -> Tensor<B, 4> {
-        let [batch_size, num_heads, seq_q, head_dim] = q.dims();
-        let seq_kv = k.dims()[2];
-        let device = q.device();
-
-        // Extract tensor data as f32 slices
-        let q_data: Vec<f32> = q.into_data().into_vec().expect("q to f32");
-        let k_data: Vec<f32> = k.into_data().into_vec().expect("k to f32");
-        let v_data: Vec<f32> = v.into_data().into_vec().expect("v to f32");
-
-        // Output buffer
-        let mut output_data = vec![0.0f32; batch_size * num_heads * seq_q * head_dim];
-
-        // Call kernel dispatcher (zero-cost generic dispatch)
-        let config = KernelFlashConfig {
-            batch_size,
-            num_heads,
-            seq_len_q: seq_q,
-            seq_len_kv: seq_kv,
-            head_dim,
-            causal: true,
-            use_log_space_softmax: seq_q > 4096 || seq_kv > 4096,
-            use_kahan_accumulator: seq_q > 4096 || seq_kv > 4096,
-            ..Default::default()
-        };
-
-        get_dispatcher().flash_attention(&q_data, &k_data, &v_data, &mut output_data, config);
-
-        // Convert back to tensor
-        Tensor::from_data(
-            TensorData::new(output_data, [batch_size, num_heads, seq_q, head_dim]),
-            &device,
-        )
-    }
-
-    fn build_causal_mask(
-        &self,
-        query_len: usize,
-        key_len: usize,
-        position_offset: usize,
-    ) -> Tensor<B, 4> {
-        let mut data = Vec::with_capacity(query_len * key_len);
-        let mask_value = -1.0e4_f32;
-        let window = self.sliding_window.unwrap_or(key_len);
-
-        for i in 0..query_len {
-            let absolute_pos = position_offset + i;
-            let start = if window > 0 {
-                absolute_pos.saturating_sub(window.saturating_sub(1))
-            } else {
-                0
-            };
-            for j in 0..key_len {
-                let allowed = j <= absolute_pos && j >= start;
-                data.push(if allowed { 0.0 } else { mask_value });
-            }
-        }
-
-        Tensor::<B, 2>::from_data(TensorData::new(data, [query_len, key_len]), &self.device)
-            .reshape([1, 1, query_len, key_len])
-    }
-
-    fn uses_rope(config: &ModelConfig) -> bool {
-        config
-            .position_embedding_type
-            .as_deref()
-            .map_or(false, |t| t == "rope" || t == "rotary")
-            || config.rope_theta.is_some()
+        let max_len = cached_k.len()
+            / batch
+                .max(1)
+                .saturating_mul(self.num_key_value_heads.max(1))
+                .saturating_mul(self.head_dim.max(1));
+        let (k, v) = self.repeat_kv(cached_k, cached_v, batch, key_len, max_len);
+        let causal = self.causal && seq_len == key_len;
+        let context = self.attend(&q, &k, &v, batch, seq_len, key_len, causal);
+        let merged = merge_heads(&context, batch, seq_len, self.num_attention_heads, self.head_dim);
+        self.project_output(&merged, batch, seq_len)
     }
 
     pub(crate) fn build_rope(
-        device: &B::Device,
         config: &ModelConfig,
         head_dim: usize,
-    ) -> Option<Arc<RotaryPositionEmbedding<B>>> {
+    ) -> Option<Arc<RotaryPositionEmbedding>> {
         if !Self::uses_rope(config) {
             return None;
         }
@@ -390,32 +301,161 @@ impl<B: Backend> CausalAttention<B> {
             max_seq_len: config.max_position_embeddings,
             ntk_factor,
         };
-        Some(Arc::new(RotaryPositionEmbedding::new(device, rope_config)))
+        Some(Arc::new(RotaryPositionEmbedding::new(rope_config)))
+    }
+
+    fn project(&self, hidden_states: &Tensor3, weights: &LinearWeights) -> Result<Vec<f32>> {
+        let (batch, seq_len, hidden) = hidden_states.shape();
+        if hidden != weights.weight.cols {
+            return Err(Error::InferenceError(
+                "Attention projection input shape mismatch".into(),
+            ));
+        }
+        let rows = batch * seq_len;
+        let mut output = vec![0.0f32; rows * weights.weight.rows];
+        linear_forward(
+            &hidden_states.data,
+            weights.weight.as_slice(),
+            weights.bias.as_ref().map(|b| b.as_slice()),
+            &mut output,
+            rows,
+            weights.weight.cols,
+            weights.weight.rows,
+        );
+        Ok(output)
+    }
+
+    fn project_output(&self, input: &[f32], batch: usize, seq_len: usize) -> Result<Tensor3> {
+        let rows = batch * seq_len;
+        let mut output = vec![0.0f32; rows * self.o_proj.weight.rows];
+        linear_forward(
+            input,
+            self.o_proj.weight.as_slice(),
+            self.o_proj.bias.as_ref().map(|b| b.as_slice()),
+            &mut output,
+            rows,
+            self.o_proj.weight.cols,
+            self.o_proj.weight.rows,
+        );
+        Tensor3::new(output, batch, seq_len, self.o_proj.weight.rows)
+    }
+
+    fn attend(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        batch: usize,
+        seq_len_q: usize,
+        seq_len_kv: usize,
+        causal: bool,
+    ) -> Vec<f32> {
+        let mut output =
+            vec![0.0f32; batch * self.num_attention_heads * seq_len_q * self.head_dim];
+        self.dispatcher.flash_attention(
+            q,
+            k,
+            v,
+            &mut output,
+            FlashAttentionConfig {
+                causal,
+                use_log_space_softmax: true,
+                use_kahan_accumulator: true,
+                num_heads: self.num_attention_heads,
+                head_dim: self.head_dim,
+                seq_len_q,
+                seq_len_kv,
+                batch_size: batch,
+                ..Default::default()
+            },
+        );
+        output
+    }
+
+    fn repeat_kv(
+        &self,
+        k: &[f32],
+        v: &[f32],
+        batch: usize,
+        seq_len: usize,
+        src_stride: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let repeat = self.num_attention_heads / self.num_key_value_heads;
+        let dst_head_stride = seq_len * self.head_dim;
+        let src_head_stride = src_stride * self.head_dim;
+        let mut k_out =
+            vec![0.0f32; batch * self.num_attention_heads * dst_head_stride];
+        let mut v_out =
+            vec![0.0f32; batch * self.num_attention_heads * dst_head_stride];
+
+        for b in 0..batch {
+            for kv in 0..self.num_key_value_heads {
+                for r in 0..repeat {
+                    let h = kv * repeat + r;
+                    let src_base = (b * self.num_key_value_heads + kv) * src_head_stride;
+                    let dst_base = (b * self.num_attention_heads + h) * dst_head_stride;
+                    let src_slice = &k[src_base..src_base + dst_head_stride];
+                    k_out[dst_base..dst_base + dst_head_stride].copy_from_slice(src_slice);
+                    let src_slice = &v[src_base..src_base + dst_head_stride];
+                    v_out[dst_base..dst_base + dst_head_stride].copy_from_slice(src_slice);
+                }
+            }
+        }
+
+        (k_out, v_out)
+    }
+
+    fn uses_rope(config: &ModelConfig) -> bool {
+        config
+            .position_embedding_type
+            .as_deref()
+            .map_or(false, |t| t == "rope" || t == "rotary")
+            || config.rope_theta.is_some()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn_ndarray::NdArray;
-
-    #[test]
-    fn causal_attention_preserves_shape() {
-        let device = <NdArray<f32> as Backend>::Device::default();
-        let mut config = ModelConfig::default();
-        config.hidden_size = 16;
-        config.num_attention_heads = 4;
-        config.num_key_value_heads = Some(2);
-        config.max_position_embeddings = 16;
-        config.intermediate_size = Some(32);
-        config.vocab_size = 128;
-        config.position_embedding_type = Some("rope".to_string());
-
-        let rope = CausalAttention::<NdArray<f32>>::build_rope(&device, &config, 4);
-        let attention = CausalAttention::<NdArray<f32>>::new(&device, &config, rope).expect("init");
-        let input = Tensor::<NdArray<f32>, 3>::zeros([2, 5, 16], &device);
-        let output = attention.forward(input, 0);
-
-        assert_eq!(output.dims(), [2, 5, 16]);
+fn reshape_to_heads(
+    input: &[f32],
+    batch: usize,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch * num_heads * seq_len * head_dim];
+    let row_stride = num_heads * head_dim;
+    for b in 0..batch {
+        for s in 0..seq_len {
+            let row_base = (b * seq_len + s) * row_stride;
+            for h in 0..num_heads {
+                let src = row_base + h * head_dim;
+                let dst = (b * num_heads + h) * seq_len * head_dim + s * head_dim;
+                output[dst..dst + head_dim]
+                    .copy_from_slice(&input[src..src + head_dim]);
+            }
+        }
     }
+    output
+}
+
+fn merge_heads(
+    input: &[f32],
+    batch: usize,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch * seq_len * num_heads * head_dim];
+    let row_stride = num_heads * head_dim;
+    for b in 0..batch {
+        for s in 0..seq_len {
+            let row_base = (b * seq_len + s) * row_stride;
+            for h in 0..num_heads {
+                let src = (b * num_heads + h) * seq_len * head_dim + s * head_dim;
+                let dst = row_base + h * head_dim;
+                output[dst..dst + head_dim]
+                    .copy_from_slice(&input[src..src + head_dim]);
+            }
+        }
+    }
+    output
 }

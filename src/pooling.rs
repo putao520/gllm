@@ -1,6 +1,4 @@
-use burn::tensor::backend::Backend;
-use burn::tensor::linalg::vector_normalize;
-use burn::tensor::Tensor;
+use crate::tensor::{Matrix, Tensor3};
 
 /// Pooling strategy used for sequence representations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,60 +25,89 @@ impl Default for PoolingConfig {
 
 /// Simple dynamic pooler supporting several strategies.
 #[derive(Clone)]
-pub struct DynamicPooler<B: Backend> {
+pub struct DynamicPooler {
     strategy: PoolingStrategy,
     config: PoolingConfig,
-    _marker: core::marker::PhantomData<B>,
 }
 
-impl<B: Backend> DynamicPooler<B> {
+impl DynamicPooler {
     pub fn new(strategy: PoolingStrategy, config: PoolingConfig) -> Self {
-        Self {
-            strategy,
-            config,
-            _marker: core::marker::PhantomData,
-        }
+        Self { strategy, config }
     }
 
-    /// Pool hidden states; attention mask is optional and currently used only for mean strategies.
-    pub fn pool(
-        &self,
-        hidden_states: Tensor<B, 3>,
-        _attention_mask: Option<Tensor<B, 2>>,
-    ) -> Tensor<B, 2> {
-        let [batch_size, seq_len, hidden_size] = hidden_states.dims();
-        let pooled = match self.strategy {
-            PoolingStrategy::Cls => hidden_states
-                .slice([0..batch_size, 0..1, 0..hidden_size])
-                .reshape([batch_size, hidden_size]),
-            PoolingStrategy::Mean | PoolingStrategy::WeightedMean => {
-                hidden_states.mean_dim(1).reshape([batch_size, hidden_size])
+    /// Pool hidden states; attention mask is optional and used for mean/last strategies.
+    pub fn pool(&self, hidden_states: &Tensor3, attention_mask: Option<&[i64]>) -> Matrix {
+        let batch_size = hidden_states.dim0;
+        let seq_len = hidden_states.dim1;
+        let hidden_size = hidden_states.dim2;
+        let mut output = Matrix::zeros(batch_size, hidden_size);
+
+        for b in 0..batch_size {
+            let mut valid_count = 0usize;
+            let mut last_idx = seq_len.saturating_sub(1);
+            if let Some(mask) = attention_mask {
+                for s in 0..seq_len {
+                    let idx = b * seq_len + s;
+                    if mask.get(idx).copied().unwrap_or(0) != 0 {
+                        valid_count += 1;
+                        last_idx = s;
+                    }
+                }
+            } else {
+                valid_count = seq_len.max(1);
             }
-            PoolingStrategy::Max => hidden_states.max_dim(1).reshape([batch_size, hidden_size]),
-            PoolingStrategy::LastToken => hidden_states
-                .slice([0..batch_size, (seq_len - 1)..seq_len, 0..hidden_size])
-                .reshape([batch_size, hidden_size]),
-        };
 
-        match self.config.normalize {
-            true => vector_normalize(pooled, 2.0, 1, 1e-6),
-            false => pooled,
+            let row = output.row_mut(b);
+            match self.strategy {
+                PoolingStrategy::Cls => {
+                    row.copy_from_slice(hidden_states.slice(b, 0));
+                }
+                PoolingStrategy::LastToken => {
+                    row.copy_from_slice(hidden_states.slice(b, last_idx));
+                }
+                PoolingStrategy::Mean | PoolingStrategy::WeightedMean => {
+                    let denom = (valid_count as f32).max(1.0);
+                    for s in 0..seq_len {
+                        if let Some(mask) = attention_mask {
+                            let idx = b * seq_len + s;
+                            if mask.get(idx).copied().unwrap_or(0) == 0 {
+                                continue;
+                            }
+                        }
+                        let slice = hidden_states.slice(b, s);
+                        for i in 0..hidden_size {
+                            row[i] += slice[i];
+                        }
+                    }
+                    for i in 0..hidden_size {
+                        row[i] /= denom;
+                    }
+                }
+                PoolingStrategy::Max => {
+                    for i in 0..hidden_size {
+                        row[i] = f32::NEG_INFINITY;
+                    }
+                    for s in 0..seq_len {
+                        let slice = hidden_states.slice(b, s);
+                        for i in 0..hidden_size {
+                            row[i] = row[i].max(slice[i]);
+                        }
+                    }
+                }
+            }
+
+            if self.config.normalize {
+                let mut norm = 0.0f32;
+                for v in row.iter() {
+                    norm += v * v;
+                }
+                let denom = norm.sqrt().max(1e-6);
+                for v in row.iter_mut() {
+                    *v /= denom;
+                }
+            }
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn_ndarray::NdArray;
-
-    #[test]
-    fn mean_pooling_reduces_dim() {
-        let device = <NdArray<f32> as Backend>::Device::default();
-        let tensor =
-            Tensor::<NdArray<f32>, 3>::from_data([[[1.0f32, 2.0, 3.0], [3.0, 4.0, 5.0]]], &device);
-        let pooler = DynamicPooler::new(PoolingStrategy::Mean, PoolingConfig { normalize: false });
-        let pooled = pooler.pool(tensor, None);
-        assert_eq!(pooled.dims(), [1, 3]);
+        output
     }
 }

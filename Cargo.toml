@@ -28,8 +28,6 @@ default = []
 
 # 可选 features
 tokio = ["dep:tokio"]
-quantized = []
-gpu-quantized = ["quantized"]
 paged-attention = []
 flash-attention = []
 
@@ -37,11 +35,7 @@ flash-attention = []
 nccl = ["gllm-kernels/nccl"]
 
 [dependencies]
-# 通过 gllm-kernels 获取 burn 后端，不直接指定 burn features
-burn = { version = "0.20.0-pre.6", default-features = false, features = ["std"] }
-burn-ndarray = { version = "0.20.0-pre.6", default-features = false, features = ["std"] }
 gllm-kernels = { path = "../gllm-kernels", default-features = false }
-burn-import = { version = "0.20.0-pre.6", default-features = false, features = ["safetensors"] }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync"] }
@@ -66,4 +60,3 @@ harness = false
 [[bench]]
 name = "quantized_matmul"
 harness = false
-required-features = ["quantized"]

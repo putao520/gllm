@@ -5,10 +5,7 @@ use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
 use crate::types::{Device, Error, Result};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
-use burn_ndarray::NdArray;
-use gllm_kernels::{detect_backend, BackendType, DefaultBackend};
+use gllm_kernels::{detect_backend, BackendType};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,19 +13,7 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use tokenizers::Tokenizer;
-
-/// Global singleton GPU device to prevent multiple device creation and cleanup race conditions.
-/// All GPU backends share this single device instance.
-static GPU_DEVICE: OnceLock<<DefaultBackend as Backend>::Device> = OnceLock::new();
-
-/// Get or create the global GPU device singleton.
-fn get_gpu_device() -> <DefaultBackend as Backend>::Device {
-    GPU_DEVICE
-        .get_or_init(|| <DefaultBackend as Backend>::Device::default())
-        .clone()
-}
 
 pub(crate) const MAX_SEQ_LEN: usize = 512;
 
@@ -327,21 +312,31 @@ impl TokenizerAdapter {
 }
 
 #[derive(Clone)]
-enum EmbeddingModel<B: Backend> {
-    Encoder(DynamicBertModel<B>),
-    Decoder(DecoderModel<B>),
+enum EmbeddingModel {
+    Encoder(DynamicBertModel),
+    Decoder(DecoderModel),
 }
 
-impl<B: Backend> EmbeddingModel<B> {
-    fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Result<Tensor<B, 2>> {
+impl EmbeddingModel {
+    fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
         match self {
             EmbeddingModel::Encoder(model) => {
-                let hidden_states = model.forward(input_ids)?;
-                Ok(model.pool_hidden_states(hidden_states))
+                let hidden_states = model.forward(tokens)?;
+                let pooled = model.pool_hidden_states(&hidden_states, tokens);
+                Ok(pooled
+                    .data
+                    .chunks(pooled.cols)
+                    .map(|row| row.to_vec())
+                    .collect())
             }
             EmbeddingModel::Decoder(model) => {
-                let hidden_states = model.forward(input_ids.clone())?;
-                model.pool_hidden_states(hidden_states, input_ids)
+                let hidden_states = model.forward(tokens)?;
+                let pooled = model.pool_hidden_states(&hidden_states, tokens);
+                Ok(pooled
+                    .data
+                    .chunks(pooled.cols)
+                    .map(|row| row.to_vec())
+                    .collect())
             }
         }
     }
@@ -352,37 +347,15 @@ impl<B: Backend> EmbeddingModel<B> {
             EmbeddingModel::Decoder(model) => model.hidden_size(),
         }
     }
-
-    pub fn load_safetensors(&mut self, path: &Path) -> Result<()> {
-        match self {
-            EmbeddingModel::Encoder(model) => model.load_safetensors(path),
-            EmbeddingModel::Decoder(model) => model.load_safetensors(path),
-        }
-    }
-
-    pub fn load_awq(&mut self, path: &Path) -> Result<()> {
-        self.load_safetensors(path)
-    }
-
-    pub fn load_gguf(&mut self, _path: &Path) -> Result<()> {
-        Err(Error::InvalidConfig(
-            "GGUF is not supported for embedding models".into(),
-        ))
-    }
-
 }
 
-/// Embedding encoder built with dynamic BERT model.
 #[derive(Clone)]
-pub(crate) struct EmbeddingEngine<B: Backend> {
-    model: EmbeddingModel<B>,
-    device: B::Device,
-    pad_id: i64,
+pub(crate) struct EmbeddingEngine {
+    model: EmbeddingModel,
 }
 
-impl<B: Backend> EmbeddingEngine<B> {
-    pub fn new(device: B::Device, model_dir: &Path, info: &ModelInfo) -> Result<Self> {
-        // Load model configuration
+impl EmbeddingEngine {
+    pub fn new(model_dir: &Path, info: &ModelInfo) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let repo_name = model_dir
             .file_name()
@@ -391,84 +364,51 @@ impl<B: Backend> EmbeddingEngine<B> {
             .replace("--", "/");
         let config_file = config_path.exists().then_some(config_path.as_path());
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
-        let pad_id = config.pad_token_id.unwrap_or(0);
 
         let mut model = match info.architecture {
-            Architecture::Qwen2Embedding | Architecture::MistralEmbedding => {
-                EmbeddingModel::Decoder(DecoderModel::new(&device, config)?)
-            }
-            _ => EmbeddingModel::Encoder(DynamicBertModel::new(&device, config)?),
+            Architecture::Bert
+            | Architecture::CrossEncoder
+            | Architecture::Qwen3Embedding
+            | Architecture::Qwen3Reranker
+            | Architecture::JinaV4
+            | Architecture::JinaRerankerV3
+            | Architecture::NVIDIANemotron
+            | Architecture::Gemma3n
+            | Architecture::GLM4 => EmbeddingModel::Encoder(DynamicBertModel::new(config.clone())?),
+            _ => EmbeddingModel::Decoder(DecoderModel::new(config.clone())?),
         };
 
-        // Load weights if available
         if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
-            match info.quantization {
-                Quantization::GGUF => model.load_gguf(&model_path)?,
-                Quantization::AWQ => model.load_awq(&model_path)?,
-                Quantization::GPTQ => model.load_safetensors(&model_path)?, // TODO: implement load_gptq
-                _ => model.load_safetensors(&model_path)?,
+            match &mut model {
+                EmbeddingModel::Encoder(enc) => enc.load_safetensors(&model_path)?,
+                EmbeddingModel::Decoder(dec) => dec.load_safetensors(&model_path)?,
             }
         }
 
-        Ok(Self {
-            model,
-            device,
-            pad_id,
-        })
+        Ok(Self { model })
     }
 
     pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
         if tokens.is_empty() {
             return Err(Error::InferenceError(
-                "At least one text is required for embeddings".into(),
+                "At least one input is required".into(),
             ));
         }
-
-        let batch = tokens.len();
-        let seq_len = tokens.iter().map(|t| t.len()).max().unwrap_or(1);
-
-        // Pad all token sequences to same length
-        let mut flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
-        for item in tokens {
-            let mut padded = item.clone();
-            padded.resize(seq_len, self.pad_id);
-            flat.extend_from_slice(&padded);
-        }
-
-        // Create input tensor
-        let token_tensor =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [batch, seq_len]), &self.device);
-
-        // Forward pass through embedding model
-        let pooled = self.model.forward(token_tensor)?;
-
-        let data = pooled
-            .into_data()
-            .into_vec::<f32>()
-            .map_err(|err| Error::InferenceError(err.to_string()))?;
-
-        let hidden_size = self.model.hidden_size();
-        let mut embeddings = Vec::with_capacity(batch);
-        for chunk in data.chunks(hidden_size) {
-            let norm = chunk.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
-            embeddings.push(chunk.iter().map(|v| v / norm).collect());
-        }
-
-        Ok(embeddings)
+        self.model.forward(tokens)
     }
 
+    pub fn hidden_size(&self) -> usize {
+        self.model.hidden_size()
+    }
 }
 
-/// Cross-encoder rerank engine with dynamic BERT model.
 #[derive(Clone)]
-pub(crate) struct RerankEngine<B: Backend> {
-    model: DynamicCrossEncoder<B>,
-    device: B::Device,
+pub(crate) struct RerankEngine {
+    model: DynamicCrossEncoder,
 }
 
-impl<B: Backend> RerankEngine<B> {
-    pub fn new(device: B::Device, model_dir: &Path, info: &ModelInfo) -> Result<Self> {
-        // Load model configuration
+impl RerankEngine {
+    pub fn new(model_dir: &Path, info: &ModelInfo) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let repo_name = model_dir
             .file_name()
@@ -478,90 +418,30 @@ impl<B: Backend> RerankEngine<B> {
         let config_file = config_path.exists().then_some(config_path.as_path());
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
-        // Ensure this is configured as a cross-encoder
-        let mut config = config;
-        if !config.is_cross_encoder() {
-            // Force cross-encoder configuration for rerankers
-            config.num_labels = Some(1);
-            config.classifier_dropout = Some(0.1);
-        }
-
-        // Create dynamic cross-encoder model
-        let mut model = DynamicCrossEncoder::new(&device, config)?;
-
-        // Load weights if available
+        let mut model = DynamicCrossEncoder::new(config)?;
         if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
-            match info.quantization {
-                Quantization::GGUF => {
-                    return Err(Error::InvalidConfig(
-                        "GGUF is not supported for rerank models".into(),
-                    ));
-                }
-                Quantization::AWQ => model.load_safetensors(&model_path)?,
-                Quantization::GPTQ => model.load_safetensors(&model_path)?, // TODO: implement load_gptq
-                _ => model.load_safetensors(&model_path)?,
-            }
+            model.load_safetensors(&model_path)?;
         }
 
-        Ok(Self { model, device })
+        Ok(Self { model })
     }
 
-    pub fn score(&self, pairs: &[Vec<i64>]) -> Result<Vec<f32>> {
-        if pairs.is_empty() {
+    pub fn score(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
             return Err(Error::InferenceError(
                 "At least one query-document pair is required".into(),
             ));
         }
-
-        let batch = pairs.len();
-        let seq_len = pairs.iter().map(|t| t.len()).max().unwrap_or(1);
-
-        // Pad all token sequences to same length
-        let mut flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
-        for pair in pairs {
-            let mut padded = pair.clone();
-            padded.resize(seq_len, 0); // pad with 0 (PAD token)
-            flat.extend_from_slice(&padded);
-        }
-
-        // Create input tensor
-        let token_tensor =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [batch, seq_len]), &self.device);
-
-        // Forward pass through cross-encoder with sigmoid
-        let scores = self.model.forward_with_sigmoid(token_tensor)?;
-
-        // Convert to vector and extract scalar values
-        let data = scores
-            .into_data()
-            .into_vec::<f32>()
-            .map_err(|err| Error::InferenceError(err.to_string()))?;
-
-        Ok(data)
+        self.model.score(tokens)
     }
 }
 
 /// Backend-specific engine bundle.
-/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU based on compile flags) -> NdArray (CPU fallback)
 pub(crate) enum EngineBackend {
-    /// GPU backend using gllm-kernels DefaultBackend (CUDA/ROCm/Metal/WGPU)
-    Gpu {
-        embedding: EmbeddingEngine<DefaultBackend>,
-        rerank: RerankEngine<DefaultBackend>,
-    },
-    /// Pure Rust CPU backend (fallback)
-    Cpu {
-        embedding: EmbeddingEngine<NdArray<f32>>,
-        rerank: RerankEngine<NdArray<f32>>,
-    },
-    /// Generator backend using GPU
-    GeneratorGpu {
-        generator: GeneratorEngine<DefaultBackend>,
-    },
-    /// Generator backend using CPU
-    GeneratorCpu {
-        generator: GeneratorEngine<NdArray<f32>>,
-    },
+    Gpu { embedding: EmbeddingEngine, rerank: RerankEngine },
+    Cpu { embedding: EmbeddingEngine, rerank: RerankEngine },
+    GeneratorGpu { generator: GeneratorEngine },
+    GeneratorCpu { generator: GeneratorEngine },
 }
 
 impl EngineBackend {
@@ -618,14 +498,10 @@ impl EngineBackend {
     }
 }
 
-// Note: EngineBackend no longer needs custom Drop since all GPU backends share
-// the global GPU_DEVICE singleton. The device is only dropped on process exit.
-
 /// Embedding-only engine backend.
-/// Priority: DefaultBackend (GPU) -> NdArray (CPU fallback)
 pub(crate) enum EmbeddingBackend {
-    Gpu(EmbeddingEngine<DefaultBackend>),
-    Cpu(EmbeddingEngine<NdArray<f32>>),
+    Gpu(EmbeddingEngine),
+    Cpu(EmbeddingEngine),
 }
 
 impl EmbeddingBackend {
@@ -638,10 +514,9 @@ impl EmbeddingBackend {
 }
 
 /// Reranking-only engine backend.
-/// Priority: DefaultBackend (GPU) -> NdArray (CPU fallback)
 pub(crate) enum RerankingBackend {
-    Gpu(RerankEngine<DefaultBackend>),
-    Cpu(RerankEngine<NdArray<f32>>),
+    Gpu(RerankEngine),
+    Cpu(RerankEngine),
 }
 
 impl RerankingBackend {
@@ -653,58 +528,22 @@ impl RerankingBackend {
     }
 }
 
-// Note: EmbeddingBackend and RerankingBackend no longer need custom Drop
-// since all GPU backends share the global GPU_DEVICE singleton.
-
 /// Build an embedding-only backend according to device preference.
-/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_embedding_backend(
     info: &ModelInfo,
-    model_dir: &std::path::PathBuf,
+    model_dir: &PathBuf,
     device: &Device,
 ) -> Result<EmbeddingBackend> {
-    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
-    // detect_backend() checks: CUDA → ROCm → Metal → WGPU → CPU
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let detected = detect_backend();
-        log::info!("Detected backend: {}", detected.name());
-
-        // Only try GPU if runtime detection found a GPU backend
         if !matches!(detected, BackendType::Cpu) {
-            let init = std::panic::catch_unwind(|| {
-                let gpu_device = get_gpu_device();
-                EmbeddingEngine::<DefaultBackend>::new(gpu_device, model_dir, info)
-            });
-
-            match init {
-                Ok(Ok(engine)) => {
-                    // Verify GPU compute actually works by running a test embedding
-                    // This catches runtime errors that only occur during real GPU work
-                    let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let test_tokens = vec![vec![101i64, 7592, 102]]; // [CLS] hello [SEP]
-                        engine.embed(&test_tokens)
-                    }));
-
-                    match compute_test {
-                        Ok(Ok(_)) => {
-                            log::info!("GPU backend ({}) initialized successfully", detected.name());
-                            return Ok(EmbeddingBackend::Gpu(engine));
-                        }
-                        Ok(Err(e)) => log::warn!("GPU ({}) compute test failed: {}, falling back to CPU", detected.name(), e),
-                        Err(_) => log::warn!("GPU ({}) compute test panicked, falling back to CPU", detected.name()),
-                    }
-                }
-                Ok(Err(e)) => log::warn!("GPU ({}) initialization failed: {}, falling back to CPU", detected.name(), e),
-                Err(_) => log::warn!("GPU ({}) initialization panicked, falling back to CPU", detected.name()),
-            }
+            let engine = EmbeddingEngine::new(model_dir, info)?;
+            return Ok(EmbeddingBackend::Gpu(engine));
         }
     }
 
-    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding = EmbeddingEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        log::info!("CPU backend (NdArray) initialized");
+        let embedding = EmbeddingEngine::new(model_dir, info)?;
         return Ok(EmbeddingBackend::Cpu(embedding));
     }
 
@@ -714,46 +553,21 @@ pub(crate) fn build_embedding_backend(
 }
 
 /// Build a reranking-only backend according to device preference.
-/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_rerank_backend(
     info: &ModelInfo,
-    model_dir: &std::path::PathBuf,
+    model_dir: &PathBuf,
     device: &Device,
 ) -> Result<RerankingBackend> {
-    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let detected = detect_backend();
-
         if !matches!(detected, BackendType::Cpu) {
-            let init = std::panic::catch_unwind(|| {
-                let gpu_device = get_gpu_device();
-                RerankEngine::<DefaultBackend>::new(gpu_device, model_dir, info).ok()
-            });
-
-            if let Ok(Some(engine)) = init {
-                // Verify GPU compute works by running a test score
-                let compute_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let test_pairs = vec![vec![101i64, 7592, 102, 2088, 102]];
-                    engine.score(&test_pairs)
-                }));
-
-                match compute_test {
-                    Ok(Ok(_)) => {
-                        log::info!("GPU rerank backend ({}) initialized successfully", detected.name());
-                        return Ok(RerankingBackend::Gpu(engine));
-                    }
-                    Ok(Err(e)) => log::warn!("GPU ({}) rerank compute test failed: {}, falling back to CPU", detected.name(), e),
-                    Err(_) => log::warn!("GPU ({}) rerank compute test panicked, falling back to CPU", detected.name()),
-                }
-            }
+            let engine = RerankEngine::new(model_dir, info)?;
+            return Ok(RerankingBackend::Gpu(engine));
         }
     }
 
-    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        log::info!("CPU rerank backend (NdArray) initialized");
+        let rerank = RerankEngine::new(model_dir, info)?;
         return Ok(RerankingBackend::Cpu(rerank));
     }
 
@@ -763,34 +577,21 @@ pub(crate) fn build_rerank_backend(
 }
 
 /// Build a generator backend according to device preference.
-/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_generator_backend(
     info: &ModelInfo,
-    model_dir: &std::path::PathBuf,
+    model_dir: &PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
-    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let detected = detect_backend();
-
         if !matches!(detected, BackendType::Cpu) {
-            let init = std::panic::catch_unwind(|| {
-                let gpu_device = get_gpu_device();
-                GeneratorEngine::<DefaultBackend>::new(gpu_device, model_dir, info).ok()
-            });
-
-            if let Ok(Some(engine)) = init {
-                log::info!("GPU generator backend ({}) initialized successfully", detected.name());
-                return Ok(EngineBackend::GeneratorGpu { generator: engine });
-            }
+            let engine = GeneratorEngine::new(model_dir, info)?;
+            return Ok(EngineBackend::GeneratorGpu { generator: engine });
         }
     }
 
-    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let generator = GeneratorEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        log::info!("CPU generator backend (NdArray) initialized");
+        let generator = GeneratorEngine::new(model_dir, info)?;
         return Ok(EngineBackend::GeneratorCpu { generator });
     }
 
@@ -800,47 +601,27 @@ pub(crate) fn build_generator_backend(
 }
 
 /// Build an engine backend according to device preference.
-/// Priority: DefaultBackend (GPU: CUDA/ROCm/Metal/WGPU) -> NdArray (CPU fallback)
 pub(crate) fn build_backend(
     info: &ModelInfo,
-    model_dir: &std::path::PathBuf,
+    model_dir: &PathBuf,
     device: &Device,
 ) -> Result<EngineBackend> {
     if matches!(info.model_type, ModelType::Generator) {
         return build_generator_backend(info, model_dir, device);
     }
 
-    // Priority 1: Try GPU (DefaultBackend from gllm-kernels)
     if matches!(device, Device::Gpu(_) | Device::Auto) {
         let detected = detect_backend();
-
         if !matches!(detected, BackendType::Cpu) {
-            let init = std::panic::catch_unwind(|| {
-                let gpu_device = get_gpu_device();
-                let embedding =
-                    EmbeddingEngine::<DefaultBackend>::new(gpu_device.clone(), model_dir, info);
-                let rerank = RerankEngine::<DefaultBackend>::new(gpu_device, model_dir, info);
-
-                match (embedding, rerank) {
-                    (Ok(embedding), Ok(rerank)) => Some(EngineBackend::Gpu { embedding, rerank }),
-                    _ => None,
-                }
-            });
-
-            if let Ok(Some(engine)) = init {
-                log::info!("GPU backend ({}) initialized successfully", detected.name());
-                return Ok(engine);
-            }
+            let embedding = EmbeddingEngine::new(model_dir, info)?;
+            let rerank = RerankEngine::new(model_dir, info)?;
+            return Ok(EngineBackend::Gpu { embedding, rerank });
         }
     }
 
-    // Priority 2: Fallback to NdArray (pure Rust CPU)
     if matches!(device, Device::Cpu | Device::Auto) {
-        let ndarray_device = <NdArray<f32> as Backend>::Device::default();
-        let embedding =
-            EmbeddingEngine::<NdArray<f32>>::new(ndarray_device.clone(), model_dir, info)?;
-        let rerank = RerankEngine::<NdArray<f32>>::new(ndarray_device, model_dir, info)?;
-        log::info!("CPU backend (NdArray) initialized");
+        let embedding = EmbeddingEngine::new(model_dir, info)?;
+        let rerank = RerankEngine::new(model_dir, info)?;
         return Ok(EngineBackend::Cpu { embedding, rerank });
     }
 

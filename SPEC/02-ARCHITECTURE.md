@@ -2,7 +2,7 @@
 
 ## 概述
 
-gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 Burn 深度学习框架，提供 OpenAI 风格 SDK API。支持 Encoder (BERT) 和 Decoder (Qwen2/Mistral) 两种架构。
+gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 gllm-kernels 的零成本算子与权重容器，提供 OpenAI 风格 SDK API。支持 Encoder (BERT) 和 Decoder (Qwen2/Mistral) 两种架构。
 
 ## 修订历史
 
@@ -28,15 +28,15 @@ gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 Burn 深度学
 │  Model Layer                                                │
 │  ├── Registry        → 别名 ↔ HF repo 映射                  │
 │  ├── Downloader      → hf-hub 下载到 ~/.gllm/models/        │
-│  └── Loader          → SafeTensors → Burn Module            │
+│  └── Loader          → SafeTensors → WeightMatrix/Vector    │
 ├─────────────────────────────────────────────────────────────┤
 │  Engine Layer                                               │
 │  ├── EmbeddingEngine → BERT 编码 + Pooling                  │
 │  └── RerankEngine    → Cross-Encoder 推理                   │
 ├─────────────────────────────────────────────────────────────┤
-│  Burn Backend (feature flags)                               │
-│  ├── wgpu (default)  → 纯 Rust GPU                          │
-│  └── ndarray         → 纯 Rust CPU                          │
+│  gllm-kernels Runtime Backends                              │
+│  ├── CUDA/ROCm/Metal/WGPU → 运行时自动检测                   │
+│  └── CPU                 → 自动回退                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,8 +46,8 @@ gllm 是一个纯 Rust 本地嵌入和重排序推理库，基于 Burn 深度学
 
 | 组件 | 库 | 版本 | 说明 |
 |------|-----|------|------|
-| 深度学习框架 | burn | latest | 纯 Rust DL 框架 |
-| 模型导入 | burn-import | latest | SafeTensors 加载 |
+| 算子与权重容器 | gllm-kernels | latest | 零成本算子 + WeightMatrix/Vector |
+| 模型导入 | safetensors | latest | SafeTensors 解析 |
 | 模型下载 | hf-hub | latest | HuggingFace 客户端 (rustls) |
 | Tokenizer | tokenizers | latest | HuggingFace Tokenizers |
 | 异步运行时 | tokio | 1.x | 可选，async 特性 |
@@ -154,10 +154,13 @@ gllm/
 
 ```toml
 [features]
-default = ["wgpu"]
-wgpu = ["burn/wgpu"]       # 纯 Rust GPU 后端 (默认)
-cpu = ["burn/ndarray"]      # 纯 Rust CPU 后端
-async = ["tokio"]           # 异步 API 支持
+default = []                # Fat Binary：运行时选择后端
+tokio = ["tokio"]           # 异步 API 支持
+quantized = []              # 量化模型支持
+gpu-quantized = ["quantized"] # GPU 量化（当前为 CPU 回退）
+paged-attention = []        # 分页注意力
+flash-attention = []        # FlashAttention
+nccl = ["gllm-kernels/nccl"] # 分布式训练/推理
 ```
 
 ---
@@ -180,10 +183,10 @@ Registry 解析别名 → "BAAI/bge-m3"
     └── 不存在 → hf-hub 下载 → 保存到本地
     │
     ▼
-SafetensorsFileRecorder 加载权重
+SafeTensors 解析权重 → WeightLoader
     │
     ▼
-初始化 Burn Module → 返回 Client
+构建 WeightMatrix/Vector → 初始化模型 → 返回 Client
 ```
 
 ### 推理流程 (Embeddings)
@@ -245,14 +248,14 @@ Sigmoid → 相关性分数
 
 ## 架构决策记录 (ADR)
 
-### ARCH-ADR-001: 选择 Burn 作为深度学习框架
+### ARCH-ADR-001: 移除 Burn，使用 gllm-kernels 零成本抽象
 
-**决策**: 使用 Burn 而非 Candle 或 tch-rs
+**决策**: 使用 gllm-kernels 作为算子库与权重容器
 
 **理由**:
-- Burn 是纯 Rust 实现，支持静态编译
-- 内置完整的 Transformer 组件 (Embedding, MultiHeadAttention, LayerNorm 等)
-- 原生支持 SafeTensors 格式
+- 零成本抽象：WeightMatrix/Vector + 原生切片 API
+- 运行时后端选择：同一二进制支持多 GPU/CPU
+- 纯 Rust 实现，支持静态编译且无 Burn 依赖
 
 ### ARCH-ADR-002: 使用 wgpu 作为默认 GPU 后端
 
@@ -268,7 +271,7 @@ Sigmoid → 相关性分数
 **决策**: 支持 SafeTensors (默认) 和 GGUF (量化模型) 两种格式
 
 **理由**:
-- SafeTensors 由 Burn 原生支持，用于 HuggingFace 全精度模型
+- SafeTensors 由 safetensors crate 解析，用于 HuggingFace 全精度模型
 - GGUF 通过**纯 Rust 解析器**实现（无 llama.cpp 绑定），保持纯 Rust 目标
 - GGUF 支持 Q4_0/Q4_K_M/Q8_0 等量化格式，显著降低内存和提升推理速度
 - HuggingFace 和 llama.cpp 生态都有大量 GGUF 量化模型
@@ -320,9 +323,9 @@ Sigmoid → 相关性分数
 ### ARCH-ADR-006: Actor 模式解决线程安全问题 🔒 FROZEN
 
 **问题背景**:
-- Burn 框架的 `Param<T>` 使用 `std::cell::OnceCell`，不是 `Sync`
-- 这导致 `EmbeddingEngine`/`RerankEngine` → `EngineBackend` → `Client` 都不是 Send/Sync
-- 在 tokio 异步环境中无法跨线程共享（如 `tokio::spawn`、`Arc<Client>`）
+- 推理过程中包含可变的 KVCache/中间缓冲，默认不保证 Send/Sync
+- `EmbeddingEngine`/`RerankEngine` → `EngineBackend` → `Client` 难以跨线程共享
+- 在 tokio 异步环境中无法直接跨线程共享（如 `tokio::spawn`、`Arc<Client>`）
 
 **决策**: 使用 Actor 模式隔离非线程安全类型
 
@@ -415,7 +418,7 @@ impl EmbedderHandle {
 **决策**: 使用 gllm-kernels 作为底层算子库，支持运行时后端选择
 
 **问题背景**:
-- 原有架构使用 Burn 框架的 feature flags 在编译时确定后端
+- 旧架构在编译时固定后端，用户无法运行时自动选择最优设备
 - 用户无法在运行时根据设备自动选择最优后端
 - 缺少针对 2M+ 超长上下文的数值稳定性优化
 
@@ -426,12 +429,12 @@ impl EmbedderHandle {
 │                           gllm                                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Model Layer (权重加载)                                              │
-│    └── burn Tensor 用于 SafeTensors/GGUF 加载                       │
+│    └── WeightMatrix/Vector 用于 SafeTensors/GGUF 加载               │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Attention Layer (causal_attention.rs)                               │
-│    ├── 从 burn Tensor 获取原生切片 &[f16]                            │
+│    ├── 从 WeightMatrix 获取原生切片 &[f16]                           │
 │    ├── 调用 gllm_kernels::KernelDispatcher::flash_attention()       │
-│    └── 从切片创建输出 Tensor                                         │
+│    └── 从切片创建输出 Vec                                            │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Engine Layer (engine.rs)                                            │
 │    └── 使用 gllm_kernels::detect_backend() 获取运行时后端           │
@@ -456,17 +459,12 @@ impl EmbedderHandle {
 use gllm_kernels::{KernelDispatcher, FlashAttentionConfig};
 
 impl CausalAttention {
-    pub fn forward(&self, q: Tensor, k: Tensor, v: Tensor) -> Tensor {
-        // 获取原生切片
-        let q_slice = q.to_data().as_slice::<f16>();
-        let k_slice = k.to_data().as_slice::<f16>();
-        let v_slice = v.to_data().as_slice::<f16>();
-
+    pub fn forward(&self, q: &[f16], k: &[f16], v: &[f16]) -> Vec<f16> {
         let mut output = vec![f16::ZERO; output_len];
 
         // 调用优化算子
         self.dispatcher.flash_attention(
-            q_slice, k_slice, v_slice,
+            q, k, v,
             &mut output,
             FlashAttentionConfig {
                 use_log_space_softmax: true,  // 2M 上下文
@@ -475,7 +473,7 @@ impl CausalAttention {
             },
         );
 
-        Tensor::from_data(output, device)
+        output
     }
 }
 ```
@@ -491,7 +489,7 @@ impl CausalAttention {
 ```toml
 # gllm/Cargo.toml
 [dependencies]
-gllm-kernels = { version = "0.2", features = ["fat-binary"] }
+gllm-kernels = { version = "0.2", default-features = false }
 ```
 
 **后端选择优先级**:

@@ -1,35 +1,37 @@
 use crate::causal_attention::CausalAttention;
 use crate::decoder_layer::DecoderLayer;
+use crate::engine::TokenizerAdapter;
 use crate::generation::{FinishReason, GenerationConfig, GenerationOutput};
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::sampler::{sample_next_token, SamplingConfig};
+use crate::tensor::Tensor3;
 use crate::types::{Error, Result};
-use crate::engine::TokenizerAdapter;
-use crate::rms_norm::RmsNorm;
-use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use crate::weight_loader::{load_embedding, load_linear, WeightLoader};
+use gllm_kernels::{linear_forward, WeightMatrix};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 
+use crate::awq::AwqWeight;
+use gllm_kernels::WeightVector;
+
 #[derive(Clone)]
-pub struct GeneratorModel<B: Backend> {
-    pub(crate) embeddings: Embedding<B>,
-    pub(crate) layers: Vec<DecoderLayer<B>>,
-    pub(crate) final_norm: RmsNorm<B>,
-    pub(crate) lm_head: Linear<B>,
+pub struct GeneratorModel {
+    pub(crate) embeddings: WeightMatrix,
+    pub(crate) layers: Vec<DecoderLayer>,
+    pub(crate) final_norm: crate::rms_norm::RmsNorm,
+    pub(crate) lm_head: crate::weight_loader::LinearWeights,
     pub(crate) pad_token_id: i64,
     pub(crate) max_position_embeddings: usize,
     pub(crate) vocab_size: usize,
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
-    pub(crate) device: B::Device,
+    hidden_size: usize,
 }
 
-impl<B: Backend> GeneratorModel<B> {
-    pub fn new(device: &B::Device, config: ModelConfig) -> Result<Self> {
+impl GeneratorModel {
+    pub fn new(config: ModelConfig) -> Result<Self> {
         if config.num_hidden_layers == 0 {
             return Err(Error::InvalidConfig(
                 "num_hidden_layers must be greater than 0 for generator model".into(),
@@ -41,20 +43,20 @@ impl<B: Backend> GeneratorModel<B> {
             ));
         }
 
-        let embeddings = EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device);
+        let embeddings = WeightMatrix::zeros(config.vocab_size, config.hidden_size);
         let num_attention_heads = config.num_attention_heads;
         let num_key_value_heads = config.num_key_value_heads.unwrap_or(num_attention_heads);
         let head_dim = config
             .head_dim
             .unwrap_or_else(|| config.hidden_size / num_attention_heads);
-        let rope = CausalAttention::build_rope(device, &config, head_dim);
+        let rope = CausalAttention::build_rope(&config, head_dim);
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(device, &config, rope.clone())?);
+            layers.push(DecoderLayer::new(&config, rope.clone())?);
         }
 
-        let final_norm = RmsNorm::new(device, &config);
-        let lm_head = LinearConfig::new(config.hidden_size, config.vocab_size).init(device);
+        let final_norm = crate::rms_norm::RmsNorm::new(&config);
+        let lm_head = crate::weight_loader::LinearWeights::zeros(config.vocab_size, config.hidden_size);
 
         Ok(Self {
             embeddings,
@@ -66,35 +68,36 @@ impl<B: Backend> GeneratorModel<B> {
             vocab_size: config.vocab_size,
             num_key_value_heads,
             head_dim,
-            device: device.clone(),
+            hidden_size: config.hidden_size,
         })
     }
 
-    pub fn forward_step(
-        &self,
-        input_ids: Tensor<B, 2, Int>,
-        cache: &mut KVCache<B>,
-    ) -> Tensor<B, 2> {
-        let [_batch_size, seq_len] = input_ids.dims();
+    pub fn forward_step(&self, input_ids: &[i64], cache: &mut KVCache) -> Result<Vec<f32>> {
+        if input_ids.is_empty() {
+            return Err(Error::InvalidConfig(
+                "Generator input ids must be non-empty".into(),
+            ));
+        }
+        let seq_len = input_ids.len();
         let position_offset = cache.seq_len();
+        let mut hidden_states = self.embed_tokens(input_ids)?;
 
-        let mut hidden_states = self.embeddings.forward(input_ids);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             hidden_states =
-                layer.forward_with_cache(hidden_states, position_offset, cache, layer_idx);
+                layer.forward_with_cache(&hidden_states, position_offset, cache, layer_idx)?;
         }
 
-        let hidden_states = self.final_norm.forward(hidden_states);
-        let logits = self.lm_head.forward(hidden_states);
+        let normed =
+            self.final_norm
+                .forward_3d(&hidden_states.data, 1, seq_len);
+        let normed = Tensor3::new(normed, 1, seq_len, self.hidden_size)?;
+        let logits = self.apply_lm_head(&normed)?;
 
-        let [batch_size, _seq, _vocab] = logits.dims();
-        let last_index = seq_len.saturating_sub(1);
-        logits
-            .slice([0..batch_size, last_index..(last_index + 1), 0..self.vocab_size])
-            .reshape([batch_size, self.vocab_size])
+        let start = (seq_len - 1) * self.vocab_size;
+        Ok(logits[start..start + self.vocab_size].to_vec())
     }
 
-    pub fn generate(
+    pub(crate) fn generate(
         &self,
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
@@ -125,29 +128,27 @@ impl<B: Backend> GeneratorModel<B> {
             1,
             self.num_key_value_heads,
             self.head_dim,
-            &self.device,
         );
-        let mut tokens = prompt_ids.clone();
+
         let sampling = SamplingConfig {
             temperature: config.temperature,
             top_p: config.top_p,
             top_k: config.top_k,
+            seed: None,
         };
 
+        let mut tokens = prompt_ids.clone();
         let mut finish_reason = FinishReason::MaxTokens;
-        let mut input_ids = prompt_ids;
-        let mut logits = self.forward_step(self.tokens_to_tensor(&input_ids), &mut cache);
+        let mut logits = self.forward_step(&prompt_ids, &mut cache)?;
 
         for _ in 0..config.max_new_tokens {
-            if self.max_position_embeddings > 0
-                && cache.seq_len() >= self.max_position_embeddings
-            {
+            if self.max_position_embeddings > 0 && cache.seq_len() >= self.max_position_embeddings {
                 finish_reason = FinishReason::MaxTokens;
                 break;
             }
 
-            let next_tokens = sample_next_token(logits, &sampling, &self.device);
-            let next_token = next_tokens.first().copied().unwrap_or(self.pad_token_id);
+            let next = sample_next_token(&logits, 1, self.vocab_size, &sampling);
+            let next_token = next.first().copied().unwrap_or(self.pad_token_id as u32) as i64;
             tokens.push(next_token);
 
             if config.stop_tokens.contains(&next_token) {
@@ -155,157 +156,89 @@ impl<B: Backend> GeneratorModel<B> {
                 break;
             }
 
-            input_ids = vec![next_token];
-            logits = self.forward_step(self.tokens_to_tensor(&input_ids), &mut cache);
+            logits = self.forward_step(&[next_token], &mut cache)?;
         }
 
-        let text = tokenizer.decode(&tokens);
         Ok(GenerationOutput {
-            text,
+            text: tokenizer.decode(&tokens),
             tokens,
             finish_reason,
         })
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
-        use crate::weight_loader::{load_linear, load_embedding, WeightLoader};
-        use burn::module::Param;
-
         let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to open SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
-        // Safety: the file is not mutated while the mmap is alive.
         let mmap = unsafe { Mmap::map(&file) }.map_err(|err| {
             Error::LoadError(format!(
-                "Failed to memory-map SafeTensors file {}: {err}",
+                "Failed to map SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
-
         let loader = WeightLoader::from_bytes(&mmap)?;
 
-        // Load embeddings - try different naming conventions
-        let embed_names = [
-            "model.embed_tokens.weight",
-            "transformer.wte.weight",
-            "transformer.embedding.word_embeddings.weight",
-            "embeddings.word_embeddings.weight",
-        ];
-        for name in embed_names {
-            if loader.has_tensor(name) {
-                self.embeddings = load_embedding(&loader, name, &self.device)?;
-                break;
-            }
-        }
-
-        // Load decoder layers
+        load_embeddings_from_safetensors(&loader, &mut self.embeddings)?;
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
-            // Try LLaMA-style naming first
             let prefix = format!("model.layers.{}", layer_idx);
-
-            // Load attention weights
             if loader.has_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
                 layer.attention.q_proj = load_linear(
                     &loader,
                     &format!("{}.self_attn.q_proj.weight", prefix),
                     Some(&format!("{}.self_attn.q_proj.bias", prefix)),
-                    &self.device,
                 )?;
                 layer.attention.k_proj = load_linear(
                     &loader,
                     &format!("{}.self_attn.k_proj.weight", prefix),
                     Some(&format!("{}.self_attn.k_proj.bias", prefix)),
-                    &self.device,
                 )?;
                 layer.attention.v_proj = load_linear(
                     &loader,
                     &format!("{}.self_attn.v_proj.weight", prefix),
                     Some(&format!("{}.self_attn.v_proj.bias", prefix)),
-                    &self.device,
                 )?;
                 layer.attention.o_proj = load_linear(
                     &loader,
                     &format!("{}.self_attn.o_proj.weight", prefix),
                     Some(&format!("{}.self_attn.o_proj.bias", prefix)),
-                    &self.device,
                 )?;
             }
 
-            // Load FFN weights
             if loader.has_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
                 layer.gate_proj = load_linear(
                     &loader,
                     &format!("{}.mlp.gate_proj.weight", prefix),
                     None,
-                    &self.device,
                 )?;
                 layer.up_proj = load_linear(
                     &loader,
                     &format!("{}.mlp.up_proj.weight", prefix),
                     None,
-                    &self.device,
                 )?;
                 layer.down_proj = load_linear(
                     &loader,
                     &format!("{}.mlp.down_proj.weight", prefix),
                     None,
-                    &self.device,
                 )?;
             }
 
-            // Load RMSNorm weights
-            if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
-                let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
-                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
-                layer.attention_norm.inner.gamma = Param::from_tensor(norm_weight);
-            }
-            if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
-                let norm_tensor = loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
-                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
-                layer.ffn_norm.inner.gamma = Param::from_tensor(norm_weight);
-            }
+            load_rms_norm(&loader, &format!("{}.input_layernorm.weight", prefix), &mut layer.attention_norm)?;
+            load_rms_norm(&loader, &format!("{}.post_attention_layernorm.weight", prefix), &mut layer.ffn_norm)?;
         }
 
-        // Load final layer norm
-        let final_norm_names = [
-            "model.norm.weight",
-            "transformer.ln_f.weight",
-            "transformer.encoder.final_layernorm.weight",
-        ];
-        for name in final_norm_names {
-            if loader.has_tensor(name) {
-                let norm_tensor = loader.load_tensor(name)?;
-                let norm_weight = norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
-                self.final_norm.inner.gamma = Param::from_tensor(norm_weight);
-                break;
-            }
-        }
+        load_final_norm(&loader, &mut self.final_norm)?;
+        load_lm_head(&loader, &mut self.lm_head, &self.embeddings)?;
+        self.vocab_size = self.lm_head.weight.rows;
 
-        // Load LM head
-        let lm_head_names = [
-            "lm_head.weight",
-            "transformer.output_layer.weight",
-            "output.weight",
-        ];
-        for name in lm_head_names {
-            if loader.has_tensor(name) {
-                self.lm_head = load_linear(&loader, name, None, &self.device)?;
-                break;
-            }
-        }
-
-        log::info!("Successfully loaded weights from {}", safetensors_path.display());
         Ok(())
     }
 
-    #[cfg(feature = "quantized")]
     pub fn load_gguf(&mut self, gguf_path: &Path) -> Result<()> {
         use crate::gguf::GgufLoader;
         use crate::quantized::{GgmlDType, QTensor};
-        use burn::module::Param;
 
         let loader = GgufLoader::load(gguf_path)?;
 
@@ -345,250 +278,80 @@ impl<B: Backend> GeneratorModel<B> {
             })
         };
 
-        let qtensor_to_linear = |qtensor: QTensor| -> Result<Linear<B>> {
-            if qtensor.shape.len() != 2 {
-                return Err(Error::LoadError(
-                    "GGUF linear weight must be 2D".into(),
-                ));
-            }
-            let out_features = qtensor.shape[0];
-            let in_features = qtensor.shape[1];
-            let data = qtensor.dequantize();
-            if data.len() != out_features * in_features {
-                return Err(Error::LoadError(
-                    "GGUF linear weight size does not match shape".into(),
-                ));
-            }
-            let weight = Tensor::from_data(
-                TensorData::new(data, [out_features, in_features]),
-                &self.device,
-            )
-            .transpose();
-            Ok(Linear {
-                weight: Param::from_tensor(weight),
-                bias: None,
-            })
-        };
+        self.embeddings = qtensor_to_matrix(load_qtensor("token_embd.weight")?)?;
 
-        let qtensor_to_embedding = |qtensor: QTensor| -> Result<Embedding<B>> {
-            if qtensor.shape.len() != 2 {
-                return Err(Error::LoadError(
-                    "GGUF embedding weight must be 2D".into(),
-                ));
-            }
-            let rows = qtensor.shape[0];
-            let cols = qtensor.shape[1];
-            let data = qtensor.dequantize();
-            if data.len() != rows * cols {
-                return Err(Error::LoadError(
-                    "GGUF embedding weight size does not match shape".into(),
-                ));
-            }
-            let weight = Tensor::from_data(TensorData::new(data, [rows, cols]), &self.device);
-            Ok(Embedding {
-                weight: Param::from_tensor(weight),
-            })
-        };
-
-        let qtensor_to_vector = |qtensor: QTensor| -> Result<Tensor<B, 1>> {
-            if qtensor.shape.len() != 1 {
-                return Err(Error::LoadError(
-                    "GGUF norm weight must be 1D".into(),
-                ));
-            }
-            let size = qtensor.shape[0];
-            let data = qtensor.dequantize();
-            if data.len() != size {
-                return Err(Error::LoadError(
-                    "GGUF norm weight size does not match shape".into(),
-                ));
-            }
-            Ok(Tensor::from_data(TensorData::new(data, [size]), &self.device))
-        };
-
-        // Embedding weights.
-        self.embeddings = qtensor_to_embedding(load_qtensor("token_embd.weight")?)?;
-
-        // Decoder layers.
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             let prefix = format!("blk.{layer_idx}");
-            layer.attention.q_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_q.weight"))?)?;
-            layer.attention.k_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_k.weight"))?)?;
-            layer.attention.v_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_v.weight"))?)?;
-            layer.attention.o_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_output.weight"))?)?;
-            layer.gate_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.ffn_gate.weight"))?)?;
+            layer.attention.q_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_q.weight"))?)?;
+            layer.attention.k_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_k.weight"))?)?;
+            layer.attention.v_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_v.weight"))?)?;
+            layer.attention.o_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.attn_output.weight"))?)?;
+            layer.gate_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.ffn_gate.weight"))?)?;
             layer.up_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.ffn_up.weight"))?)?;
-            layer.down_proj =
-                qtensor_to_linear(load_qtensor(&format!("{prefix}.ffn_down.weight"))?)?;
+            layer.down_proj = qtensor_to_linear(load_qtensor(&format!("{prefix}.ffn_down.weight"))?)?;
 
             let attn_norm = qtensor_to_vector(load_qtensor(&format!("{prefix}.attn_norm.weight"))?)?;
-            layer.attention_norm.inner.gamma = Param::from_tensor(attn_norm);
+            layer.attention_norm.gamma = attn_norm;
             let ffn_norm = qtensor_to_vector(load_qtensor(&format!("{prefix}.ffn_norm.weight"))?)?;
-            layer.ffn_norm.inner.gamma = Param::from_tensor(ffn_norm);
+            layer.ffn_norm.gamma = ffn_norm;
         }
 
-        // Final layer norm + LM head.
         let final_norm = qtensor_to_vector(load_qtensor("output_norm.weight")?)?;
-        self.final_norm.inner.gamma = Param::from_tensor(final_norm);
+        self.final_norm.gamma = final_norm;
         self.lm_head = qtensor_to_linear(load_qtensor("output.weight")?)?;
+        self.vocab_size = self.lm_head.weight.rows;
 
-        log::info!("Successfully loaded GGUF weights from {}", gguf_path.display());
         Ok(())
     }
 
-    #[cfg(not(feature = "quantized"))]
-    pub fn load_gguf(&mut self, _gguf_path: &Path) -> Result<()> {
-        Err(Error::InvalidConfig(
-            "GGUF support requires the `quantized` feature".into(),
-        ))
-    }
-
-    #[cfg(feature = "quantized")]
     pub fn load_awq(&mut self, safetensors_path: &Path) -> Result<()> {
-        use crate::awq::AwqWeight;
-        use crate::weight_loader::{load_embedding, load_linear, WeightLoader};
-        use burn::module::Param;
-
-        let bytes = std::fs::read(safetensors_path).map_err(|err| {
+        let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
-                "Failed to read SafeTensors file {}: {err}",
+                "Failed to open SafeTensors file {}: {err}",
                 safetensors_path.display()
             ))
         })?;
-
-        let loader = WeightLoader::from_bytes(&bytes)?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|err| {
+            Error::LoadError(format!(
+                "Failed to map SafeTensors file {}: {err}",
+                safetensors_path.display()
+            ))
+        })?;
+        let loader = WeightLoader::from_bytes(&mmap)?;
         if !loader.is_awq_model() {
             return Err(Error::LoadError(
                 "Provided file does not appear to be an AWQ model".into(),
             ));
         }
 
-        let awq_to_linear = |weight: AwqWeight| -> Result<Linear<B>> {
-            let [out_features, in_features] = weight.shape;
-            let data = weight.dequantize();
-            if data.len() != out_features * in_features {
-                return Err(Error::LoadError(
-                    "AWQ linear weight size does not match shape".into(),
-                ));
-            }
-            let weight = Tensor::from_data(
-                TensorData::new(data, [out_features, in_features]),
-                &self.device,
-            )
-            .transpose();
-            Ok(Linear {
-                weight: Param::from_tensor(weight),
-                bias: None,
-            })
-        };
+        load_embeddings_from_safetensors(&loader, &mut self.embeddings)?;
 
-        // Embeddings (unquantized in most AWQ exports).
-        let embed_names = [
-            "model.embed_tokens.weight",
-            "transformer.wte.weight",
-            "transformer.embedding.word_embeddings.weight",
-            "embeddings.word_embeddings.weight",
-        ];
-        let mut embedding_loaded = false;
-        for name in embed_names {
-            if loader.has_tensor(name) {
-                self.embeddings = load_embedding(&loader, name, &self.device)?;
-                embedding_loaded = true;
-                break;
-            }
-        }
-        if !embedding_loaded {
-            return Err(Error::LoadError(
-                "AWQ model is missing embedding weights".into(),
-            ));
-        }
-
-        // Decoder layers (AWQ quantized linear weights).
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             let prefix = format!("model.layers.{layer_idx}");
-            layer.attention.q_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.self_attn.q_proj"),
-            )?)?;
-            layer.attention.k_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.self_attn.k_proj"),
-            )?)?;
-            layer.attention.v_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.self_attn.v_proj"),
-            )?)?;
-            layer.attention.o_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.self_attn.o_proj"),
-            )?)?;
-            layer.gate_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.mlp.gate_proj"),
-            )?)?;
-            layer.up_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.mlp.up_proj"),
-            )?)?;
-            layer.down_proj = awq_to_linear(AwqWeight::from_safetensors(
-                &loader,
-                &format!("{prefix}.mlp.down_proj"),
-            )?)?;
+            layer.attention.q_proj = load_awq_or_linear(&loader, &format!("{prefix}.self_attn.q_proj"))?;
+            layer.attention.k_proj = load_awq_or_linear(&loader, &format!("{prefix}.self_attn.k_proj"))?;
+            layer.attention.v_proj = load_awq_or_linear(&loader, &format!("{prefix}.self_attn.v_proj"))?;
+            layer.attention.o_proj = load_awq_or_linear(&loader, &format!("{prefix}.self_attn.o_proj"))?;
+            layer.gate_proj = load_awq_or_linear(&loader, &format!("{prefix}.mlp.gate_proj"))?;
+            layer.up_proj = load_awq_or_linear(&loader, &format!("{prefix}.mlp.up_proj"))?;
+            layer.down_proj = load_awq_or_linear(&loader, &format!("{prefix}.mlp.down_proj"))?;
 
-            // Norms remain in fp16/fp32 weights.
-            let attn_norm_name = format!("{prefix}.input_layernorm.weight");
-            let ffn_norm_name = format!("{prefix}.post_attention_layernorm.weight");
-            let attn_norm = loader.load_tensor(&attn_norm_name)?;
-            let attn_weight =
-                attn_norm.to_tensor::<B, 1>(&self.device, [attn_norm.shape[0]])?;
-            layer.attention_norm.inner.gamma = Param::from_tensor(attn_weight);
-            let ffn_norm = loader.load_tensor(&ffn_norm_name)?;
-            let ffn_weight = ffn_norm.to_tensor::<B, 1>(&self.device, [ffn_norm.shape[0]])?;
-            layer.ffn_norm.inner.gamma = Param::from_tensor(ffn_weight);
+            load_rms_norm(&loader, &format!("{prefix}.input_layernorm.weight"), &mut layer.attention_norm)?;
+            load_rms_norm(&loader, &format!("{prefix}.post_attention_layernorm.weight"), &mut layer.ffn_norm)?;
         }
 
-        // Final layer norm.
-        let final_norm_names = [
-            "model.norm.weight",
-            "transformer.ln_f.weight",
-            "transformer.encoder.final_layernorm.weight",
-        ];
-        let mut final_loaded = false;
-        for name in final_norm_names {
-            if loader.has_tensor(name) {
-                let norm_tensor = loader.load_tensor(name)?;
-                let norm_weight =
-                    norm_tensor.to_tensor::<B, 1>(&self.device, [norm_tensor.shape[0]])?;
-                self.final_norm.inner.gamma = Param::from_tensor(norm_weight);
-                final_loaded = true;
-                break;
-            }
-        }
-        if !final_loaded {
-            return Err(Error::LoadError(
-                "AWQ model is missing final norm weights".into(),
-            ));
-        }
+        load_final_norm(&loader, &mut self.final_norm)?;
 
-        // LM head (quantized if available, otherwise fall back to fp weights).
         let lm_head_prefixes = ["lm_head", "output", "model.lm_head"];
         let mut lm_loaded = false;
         for prefix in lm_head_prefixes {
-            let qweight_name = format!("{prefix}.qweight");
-            let weight_name = format!("{prefix}.weight");
-            if loader.has_tensor(&qweight_name) {
-                self.lm_head =
-                    awq_to_linear(AwqWeight::from_safetensors(&loader, prefix)?)?;
+            if loader.has_tensor(&format!("{prefix}.qweight")) {
+                self.lm_head = load_awq_linear(&loader, prefix)?;
                 lm_loaded = true;
                 break;
             }
-            if loader.has_tensor(&weight_name) {
-                self.lm_head = load_linear(&loader, &weight_name, None, &self.device)?;
+            if loader.has_tensor(&format!("{prefix}.weight")) {
+                self.lm_head = load_linear(&loader, &format!("{prefix}.weight"), None)?;
                 lm_loaded = true;
                 break;
             }
@@ -598,59 +361,186 @@ impl<B: Backend> GeneratorModel<B> {
                 "AWQ model is missing LM head weights".into(),
             ));
         }
+        self.vocab_size = self.lm_head.weight.rows;
 
-        log::info!(
-            "Successfully loaded AWQ weights from {}",
-            safetensors_path.display()
-        );
         Ok(())
-    }
-
-    #[cfg(not(feature = "quantized"))]
-    pub fn load_awq(&mut self, _safetensors_path: &Path) -> Result<()> {
-        Err(Error::InvalidConfig(
-            "AWQ support requires the `quantized` feature".into(),
-        ))
-    }
-
-    pub fn load_auto(&mut self, path: &Path) -> Result<()> {
-        let ext = path.extension().and_then(|value| value.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("gguf") {
-            return self.load_gguf(path);
-        }
-        if ext.eq_ignore_ascii_case("safetensors") {
-            if Self::detect_awq_format(path)? {
-                return self.load_awq(path);
-            }
-            return self.load_safetensors(path);
-        }
-        self.load_safetensors(path)
-    }
-
-    fn detect_awq_format(path: &Path) -> Result<bool> {
-        use crate::weight_loader::WeightLoader;
-
-        let bytes = std::fs::read(path).map_err(|err| {
-            Error::LoadError(format!(
-                "Failed to read SafeTensors file {}: {err}",
-                path.display()
-            ))
-        })?;
-        let loader = WeightLoader::from_bytes(&bytes)?;
-        Ok(loader.is_awq_model())
     }
 
     pub fn max_position_embeddings(&self) -> usize {
         self.max_position_embeddings
     }
 
-    fn tokens_to_tensor(&self, tokens: &[i64]) -> Tensor<B, 2, Int> {
-        let mut data = tokens.to_vec();
-        if data.is_empty() {
-            data.push(self.pad_token_id);
+    fn embed_tokens(&self, tokens: &[i64]) -> Result<Tensor3> {
+        let seq_len = tokens.len();
+        let mut data = vec![0.0f32; seq_len * self.hidden_size];
+        for (idx, &token) in tokens.iter().enumerate() {
+            let row = safe_token_index(token, self.embeddings.rows);
+            let start = idx * self.hidden_size;
+            data[start..start + self.hidden_size].copy_from_slice(self.embeddings.row(row));
         }
-        let seq_len = data.len();
-        let data = TensorData::new(data, [1, seq_len]);
-        Tensor::<B, 2, Int>::from_data(data, &self.device)
+        Tensor3::new(data, 1, seq_len, self.hidden_size)
     }
+
+    fn apply_lm_head(&self, hidden_states: &Tensor3) -> Result<Vec<f32>> {
+        let (batch, seq_len, hidden) = hidden_states.shape();
+        if hidden != self.lm_head.weight.cols {
+            return Err(Error::InferenceError(
+                "LM head input hidden size mismatch".into(),
+            ));
+        }
+        let rows = batch * seq_len;
+        let mut logits = vec![0.0f32; rows * self.lm_head.weight.rows];
+        linear_forward(
+            &hidden_states.data,
+            self.lm_head.weight.as_slice(),
+            self.lm_head.bias.as_ref().map(|b| b.as_slice()),
+            &mut logits,
+            rows,
+            self.lm_head.weight.cols,
+            self.lm_head.weight.rows,
+        );
+        Ok(logits)
+    }
+}
+
+fn load_embeddings_from_safetensors(loader: &WeightLoader, embeddings: &mut WeightMatrix) -> Result<()> {
+    let embed_names = [
+        "model.embed_tokens.weight",
+        "transformer.wte.weight",
+        "transformer.embedding.word_embeddings.weight",
+        "embeddings.word_embeddings.weight",
+    ];
+    for name in embed_names {
+        if loader.has_tensor(name) {
+            *embeddings = load_embedding(loader, name)?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn load_rms_norm(
+    loader: &WeightLoader,
+    name: &str,
+    norm: &mut crate::rms_norm::RmsNorm,
+) -> Result<()> {
+    if loader.has_tensor(name) {
+        let tensor = loader.load_tensor(name)?;
+        norm.gamma = tensor.to_weight_vector()?;
+    }
+    Ok(())
+}
+
+fn load_final_norm(loader: &WeightLoader, norm: &mut crate::rms_norm::RmsNorm) -> Result<()> {
+    let final_norm_names = [
+        "model.norm.weight",
+        "transformer.ln_f.weight",
+        "transformer.encoder.final_layernorm.weight",
+    ];
+    for name in final_norm_names {
+        if loader.has_tensor(name) {
+            let tensor = loader.load_tensor(name)?;
+            norm.gamma = tensor.to_weight_vector()?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn load_lm_head(
+    loader: &WeightLoader,
+    lm_head: &mut crate::weight_loader::LinearWeights,
+    embeddings: &WeightMatrix,
+) -> Result<()> {
+    let lm_head_names = ["lm_head.weight", "transformer.output_layer.weight", "output.weight"];
+    for name in lm_head_names {
+        if loader.has_tensor(name) {
+            *lm_head = load_linear(loader, name, None)?;
+            return Ok(());
+        }
+    }
+
+    *lm_head = crate::weight_loader::LinearWeights {
+        weight: WeightMatrix::new(embeddings.data.clone(), embeddings.rows, embeddings.cols),
+        bias: None,
+    };
+    Ok(())
+}
+
+fn safe_token_index(id: i64, vocab: usize) -> usize {
+    let fallback = if vocab == 0 { 0 } else { vocab - 1 };
+    if id < 0 {
+        return 0;
+    }
+    let idx = id as usize;
+    if idx < vocab {
+        idx
+    } else {
+        fallback
+    }
+}
+
+fn load_awq_linear(loader: &WeightLoader, prefix: &str) -> Result<crate::weight_loader::LinearWeights> {
+    let weight = AwqWeight::from_safetensors(loader, prefix)?;
+    let [out_features, in_features] = weight.shape;
+    let data = weight.dequantize();
+    if data.len() != out_features * in_features {
+        return Err(Error::LoadError(
+            "AWQ linear weight size does not match shape".into(),
+        ));
+    }
+    let bias_name = format!("{prefix}.bias");
+    let bias = if loader.has_tensor(&bias_name) {
+        Some(loader.load_tensor(&bias_name)?.to_weight_vector()?)
+    } else {
+        None
+    };
+    Ok(crate::weight_loader::LinearWeights {
+        weight: WeightMatrix::new(data, out_features, in_features),
+        bias,
+    })
+}
+
+fn load_awq_or_linear(
+    loader: &WeightLoader,
+    prefix: &str,
+) -> Result<crate::weight_loader::LinearWeights> {
+    if loader.has_tensor(&format!("{prefix}.qweight")) {
+        load_awq_linear(loader, prefix)
+    } else {
+        load_linear(loader, &format!("{prefix}.weight"), None)
+    }
+}
+
+fn qtensor_to_matrix(tensor: crate::quantized::QTensor) -> Result<WeightMatrix> {
+    if tensor.shape.len() != 2 {
+        return Err(Error::LoadError("GGUF tensor must be 2D".into()));
+    }
+    let rows = tensor.shape[0];
+    let cols = tensor.shape[1];
+    let data = tensor.dequantize();
+    if data.len() != rows * cols {
+        return Err(Error::LoadError(
+            "GGUF tensor size does not match shape".into(),
+        ));
+    }
+    Ok(WeightMatrix::new(data, rows, cols))
+}
+
+fn qtensor_to_vector(tensor: crate::quantized::QTensor) -> Result<WeightVector> {
+    if tensor.shape.len() != 1 {
+        return Err(Error::LoadError("GGUF tensor must be 1D".into()));
+    }
+    let data = tensor.dequantize();
+    if data.len() != tensor.shape[0] {
+        return Err(Error::LoadError(
+            "GGUF tensor size does not match shape".into(),
+        ));
+    }
+    Ok(WeightVector::new(data))
+}
+
+fn qtensor_to_linear(tensor: crate::quantized::QTensor) -> Result<crate::weight_loader::LinearWeights> {
+    let weight = qtensor_to_matrix(tensor)?;
+    Ok(crate::weight_loader::LinearWeights { weight, bias: None })
 }

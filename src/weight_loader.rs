@@ -3,17 +3,13 @@
 //! This module provides functionality to load HuggingFace model weights
 //! into gllm model structures. It handles:
 //! - SafeTensors file parsing
-//! - HuggingFace to Burn weight name mapping
-//! - PyTorch Linear weight transpose (HF [out, in] -> Burn [in, out])
+//! - HuggingFace weight name mapping
+//! - Linear weights stored as [out, in] row-major
 //! - Multi-shard file loading
 //! - Support for different model architectures
 
 use crate::types::{Error, Result};
-use burn::module::Param;
-use burn::nn::attention::MultiHeadAttention;
-use burn::nn::{Embedding, LayerNorm, Linear};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use gllm_kernels::{WeightMatrix, WeightVector};
 use safetensors::{Dtype, SafeTensors};
 use std::collections::HashMap;
 use std::path::Path;
@@ -42,57 +38,48 @@ pub struct RawTensor {
 }
 
 impl LoadedTensor {
-    /// Convert to Burn Tensor with the specified shape.
-    pub fn to_tensor<B: Backend, const D: usize>(
-        &self,
-        device: &B::Device,
-        expected_shape: [usize; D],
-    ) -> Result<Tensor<B, D>> {
-        // Verify shape matches
-        if self.shape.len() != D {
-            return Err(Error::LoadError(format!(
-                "Shape dimension mismatch: expected {}, got {}",
-                D,
-                self.shape.len()
-            )));
-        }
-        for (i, (&expected, &actual)) in expected_shape.iter().zip(self.shape.iter()).enumerate() {
-            if expected != actual {
-                return Err(Error::LoadError(format!(
-                    "Shape mismatch at dim {}: expected {}, got {}",
-                    i, expected, actual
-                )));
-            }
-        }
-
-        let tensor_data = TensorData::new(self.data.clone(), expected_shape);
-        Ok(Tensor::from_data(tensor_data, device))
-    }
-
-    /// Convert to Burn Tensor, transposing for Linear layers (PyTorch [out, in] -> Burn [in, out]).
-    pub fn to_tensor_transposed<B: Backend>(
-        &self,
-        device: &B::Device,
-    ) -> Result<Tensor<B, 2>> {
+    /// Convert to a WeightMatrix ([rows, cols] row-major).
+    pub fn to_weight_matrix(&self) -> Result<WeightMatrix> {
         if self.shape.len() != 2 {
             return Err(Error::LoadError(format!(
-                "Transpose requires 2D tensor, got {}D",
+                "Expected 2D tensor for matrix, got {}D",
                 self.shape.len()
             )));
         }
-
-        let [out_features, in_features] = [self.shape[0], self.shape[1]];
-
-        // Transpose data: [out, in] -> [in, out]
-        let mut transposed = vec![0.0f32; self.data.len()];
-        for i in 0..in_features {
-            for o in 0..out_features {
-                transposed[i * out_features + o] = self.data[o * in_features + i];
-            }
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if self.data.len() != rows * cols {
+            return Err(Error::LoadError(
+                "Matrix data length does not match shape".into(),
+            ));
         }
+        Ok(WeightMatrix::new(self.data.clone(), rows, cols))
+    }
 
-        let tensor_data = TensorData::new(transposed, [in_features, out_features]);
-        Ok(Tensor::from_data(tensor_data, device))
+    /// Convert to a WeightVector (accepts 1D or 2D with a singleton dimension).
+    pub fn to_weight_vector(&self) -> Result<WeightVector> {
+        match self.shape.as_slice() {
+            [len] => {
+                if self.data.len() != *len {
+                    return Err(Error::LoadError(
+                        "Vector data length does not match shape".into(),
+                    ));
+                }
+                Ok(WeightVector::new(self.data.clone()))
+            }
+            [1, len] | [len, 1] => {
+                if self.data.len() != *len {
+                    return Err(Error::LoadError(
+                        "Vector data length does not match shape".into(),
+                    ));
+                }
+                Ok(WeightVector::new(self.data.clone()))
+            }
+            _ => Err(Error::LoadError(format!(
+                "Expected 1D tensor for vector, got shape {:?}",
+                self.shape
+            ))),
+        }
     }
 }
 
@@ -198,26 +185,52 @@ fn convert_to_f32(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
 
 /// Load Linear layer weights from SafeTensors.
 ///
-/// HuggingFace Linear weights are stored as [out_features, in_features],
-/// but Burn expects [in_features, out_features], so we transpose.
-pub fn load_linear<B: Backend>(
+/// HuggingFace Linear weights are stored as [out_features, in_features].
+#[derive(Clone, Debug)]
+pub struct LinearWeights {
+    pub weight: WeightMatrix,
+    pub bias: Option<WeightVector>,
+}
+
+impl LinearWeights {
+    pub fn zeros(rows: usize, cols: usize) -> Self {
+        Self {
+            weight: WeightMatrix::zeros(rows, cols),
+            bias: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LayerNormWeights {
+    pub gamma: WeightVector,
+    pub beta: Option<WeightVector>,
+    pub eps: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct MultiHeadAttentionWeights {
+    pub query: LinearWeights,
+    pub key: LinearWeights,
+    pub value: LinearWeights,
+    pub output: LinearWeights,
+    pub d_model: usize,
+    pub n_heads: usize,
+}
+
+/// Load Linear layer weights from SafeTensors.
+pub fn load_linear(
     loader: &WeightLoader,
     weight_name: &str,
     bias_name: Option<&str>,
-    device: &B::Device,
-) -> Result<Linear<B>> {
-    // Load and transpose weight
+) -> Result<LinearWeights> {
     let weight_tensor = loader.load_tensor(weight_name)?;
-    let weight = weight_tensor.to_tensor_transposed::<B>(device)?;
-    let weight_param = Param::from_tensor(weight);
+    let weight = weight_tensor.to_weight_matrix()?;
 
-    // Load bias if present
     let bias = if let Some(bias_name) = bias_name {
         if loader.has_tensor(bias_name) {
             let bias_tensor = loader.load_tensor(bias_name)?;
-            let bias_shape = [bias_tensor.shape[0]];
-            let bias = bias_tensor.to_tensor::<B, 1>(device, bias_shape)?;
-            Some(Param::from_tensor(bias))
+            Some(bias_tensor.to_weight_vector()?)
         } else {
             None
         }
@@ -225,62 +238,65 @@ pub fn load_linear<B: Backend>(
         None
     };
 
-    Ok(Linear { weight: weight_param, bias })
+    Ok(LinearWeights { weight, bias })
 }
 
 /// Load Embedding layer weights from SafeTensors.
-pub fn load_embedding<B: Backend>(
-    loader: &WeightLoader,
-    weight_name: &str,
-    device: &B::Device,
-) -> Result<Embedding<B>> {
+pub fn load_embedding(loader: &WeightLoader, weight_name: &str) -> Result<WeightMatrix> {
     let weight_tensor = loader.load_tensor(weight_name)?;
-    let shape = [weight_tensor.shape[0], weight_tensor.shape[1]];
-    let weight = weight_tensor.to_tensor::<B, 2>(device, shape)?;
-    let weight_param = Param::from_tensor(weight);
-
-    Ok(Embedding { weight: weight_param })
+    weight_tensor.to_weight_matrix()
 }
 
 /// Load LayerNorm weights from SafeTensors.
 ///
 /// BERT uses LayerNorm with gamma (weight) and beta (bias).
-pub fn load_layer_norm<B: Backend>(
+pub fn load_layer_norm(
     loader: &WeightLoader,
     weight_name: &str,
     bias_name: Option<&str>,
     d_model: usize,
     epsilon: f64,
-    device: &B::Device,
-) -> Result<LayerNorm<B>> {
-    use burn::nn::LayerNormConfig;
-
-    // Create a LayerNorm with default weights first
-    let mut layer_norm = LayerNormConfig::new(d_model)
-        .with_epsilon(epsilon)
-        .init(device);
-
-    // Load gamma (weight)
+) -> Result<LayerNormWeights> {
     let gamma_tensor = loader.load_tensor(weight_name)?;
-    let gamma = gamma_tensor.to_tensor::<B, 1>(device, [d_model])?;
-    layer_norm.gamma = Param::from_tensor(gamma);
-
-    // Load beta (bias) - use default if not present
-    if let Some(bias_name) = bias_name {
-        if loader.has_tensor(bias_name) {
-            let beta_tensor = loader.load_tensor(bias_name)?;
-            let beta_val = beta_tensor.to_tensor::<B, 1>(device, [d_model])?;
-            layer_norm.beta = Some(Param::from_tensor(beta_val));
-        }
+    let gamma = gamma_tensor.to_weight_vector()?;
+    if gamma.len() != d_model {
+        return Err(Error::LoadError(format!(
+            "LayerNorm gamma length mismatch: expected {}, got {}",
+            d_model,
+            gamma.len()
+        )));
     }
 
-    Ok(layer_norm)
+    let beta = if let Some(bias_name) = bias_name {
+        if loader.has_tensor(bias_name) {
+            let beta_tensor = loader.load_tensor(bias_name)?;
+            let beta_vec = beta_tensor.to_weight_vector()?;
+            if beta_vec.len() != d_model {
+                return Err(Error::LoadError(format!(
+                    "LayerNorm beta length mismatch: expected {}, got {}",
+                    d_model,
+                    beta_vec.len()
+                )));
+            }
+            Some(beta_vec)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(LayerNormWeights {
+        gamma,
+        beta,
+        eps: epsilon as f32,
+    })
 }
 
 /// Load MultiHeadAttention weights from SafeTensors (BERT-style).
 ///
 /// BERT attention has separate query, key, value projections.
-pub fn load_mha<B: Backend>(
+pub fn load_mha(
     loader: &WeightLoader,
     query_weight: &str,
     query_bias: Option<&str>,
@@ -292,31 +308,16 @@ pub fn load_mha<B: Backend>(
     output_bias: Option<&str>,
     d_model: usize,
     n_heads: usize,
-    dropout: f64,
-    device: &B::Device,
-) -> Result<MultiHeadAttention<B>> {
-    use burn::nn::attention::MultiHeadAttentionConfig;
-    use burn::nn::Initializer;
-
-    // Create a base MHA with default initialization
-    let mut mha = MultiHeadAttentionConfig::new(d_model, n_heads)
-        .with_dropout(dropout)
-        .with_initializer(Initializer::Zeros) // Will be overwritten
-        .init(device);
-
-    // Load query projection
-    mha.query = load_linear(loader, query_weight, query_bias, device)?;
-
-    // Load key projection
-    mha.key = load_linear(loader, key_weight, key_bias, device)?;
-
-    // Load value projection
-    mha.value = load_linear(loader, value_weight, value_bias, device)?;
-
-    // Load output projection
-    mha.output = load_linear(loader, output_weight, output_bias, device)?;
-
-    Ok(mha)
+    _dropout: f64,
+) -> Result<MultiHeadAttentionWeights> {
+    Ok(MultiHeadAttentionWeights {
+        query: load_linear(loader, query_weight, query_bias)?,
+        key: load_linear(loader, key_weight, key_bias)?,
+        value: load_linear(loader, value_weight, value_bias)?,
+        output: load_linear(loader, output_weight, output_bias)?,
+        d_model,
+        n_heads,
+    })
 }
 
 /// Architecture-specific weight name mappings.
