@@ -128,7 +128,11 @@ impl Client {
     }
 
     /// Create a new client with custom configuration.
+    /// Uses spawn_blocking for compatibility with both single-thread and multi-thread runtimes.
     pub async fn with_config(model: &str, config: ClientConfig) -> Result<Self> {
-        tokio::task::block_in_place(|| Self::create(model, config))
+        let model = model.to_string();
+        tokio::task::spawn_blocking(move || Self::create(&model, config))
+            .await
+            .map_err(|e| crate::types::Error::InternalError(format!("spawn_blocking failed: {}", e)))?
     }
 }
