@@ -116,6 +116,17 @@ impl<'a> GenerationBuilder<'a> {
 #[cfg(feature = "tokio")]
 impl<'a> GenerationBuilder<'a> {
     pub async fn generate(self) -> Result<GenerationOutput> {
-        tokio::task::block_in_place(|| self.run())
+        // block_in_place only works on multi-threaded runtime.
+        // For current_thread runtime, run synchronously (it's already blocking).
+        let handle = tokio::runtime::Handle::current();
+        match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.run())
+            }
+            _ => {
+                // CurrentThread or other: run directly (already on blocking context)
+                self.run()
+            }
+        }
     }
 }
