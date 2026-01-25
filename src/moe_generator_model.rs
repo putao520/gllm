@@ -4,14 +4,24 @@ use crate::generation::{FinishReason, GenerationConfig, GenerationOutput};
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::moe_decoder_layer::MoEDecoderLayer;
+use crate::moe_layer::{MoEScratchGpu, PackedExpertWeights};
 use crate::sampler::{sample_next_token, SamplingConfig};
 use crate::tensor::Tensor3;
 use crate::types::{Error, Result};
 use crate::weight_loader::{load_embedding, load_linear, WeightLoader};
-use gllm_kernels::{linear_forward, WeightMatrix};
+use gllm_kernels::{linear_forward, BackendType, GpuTensor, KernelDispatcher, TensorDtype, WeightMatrix};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// Global KernelDispatcher singleton for GPU-accelerated operations.
+static KERNEL_DISPATCHER: OnceLock<KernelDispatcher> = OnceLock::new();
+
+#[inline]
+fn kernel_dispatcher() -> &'static KernelDispatcher {
+    KERNEL_DISPATCHER.get_or_init(KernelDispatcher::new)
+}
 
 use crate::awq::AwqWeight;
 
@@ -27,6 +37,81 @@ pub struct MoEGeneratorModel {
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
     hidden_size: usize,
+}
+
+pub struct MoEInferenceWorkspace {
+    pub hidden_states: Vec<f32>,
+    pub gpu_hidden_states: Option<GpuTensor>,
+    pub moe_scratch: Option<MoEScratchGpu>,
+    pub packed_weights: Vec<PackedExpertWeights>,
+}
+
+impl MoEInferenceWorkspace {
+    pub fn new(model: &MoEGeneratorModel, backend: BackendType) -> Result<Self> {
+        let mut gpu_hidden_states = None;
+        if backend != BackendType::Cpu {
+            match GpuTensor::new_temp(vec![1, model.hidden_size], TensorDtype::F32, backend) {
+                Ok(tensor) => gpu_hidden_states = Some(tensor),
+                Err(err) => log::warn!("Failed to allocate GPU hidden states: {err}"),
+            }
+        }
+
+        let mut moe_scratch = None;
+        let mut packed_weights = Vec::new();
+        if gpu_hidden_states.is_some() {
+            match Self::init_gpu_resources(model, backend) {
+                Ok((scratch, packed)) => {
+                    moe_scratch = Some(scratch);
+                    packed_weights = packed;
+                }
+                Err(err) => {
+                    log::warn!("Failed to initialize MoE GPU resources, falling back to CPU: {err}");
+                    gpu_hidden_states = None;
+                }
+            }
+        }
+
+        Ok(Self {
+            hidden_states: vec![0.0f32; model.hidden_size],
+            gpu_hidden_states,
+            moe_scratch,
+            packed_weights,
+        })
+    }
+
+    pub fn uses_gpu(&self) -> bool {
+        self.gpu_hidden_states.is_some()
+    }
+
+    fn init_gpu_resources(
+        model: &MoEGeneratorModel,
+        backend: BackendType,
+    ) -> Result<(MoEScratchGpu, Vec<PackedExpertWeights>)> {
+        let first_layer = model.layers.first().ok_or_else(|| {
+            Error::InvalidConfig("MoE model has no layers".into())
+        })?;
+        let top_k = first_layer.moe.router.num_experts_per_tok();
+        let intermediate_size = first_layer.moe.intermediate_size();
+        let scratch = MoEScratchGpu::new_with_routing(
+            model.hidden_size,
+            intermediate_size,
+            top_k,
+            backend,
+        )?;
+        let mut packed_weights = Vec::with_capacity(model.layers.len());
+        let backend_dispatch = kernel_dispatcher().backend_dispatched();
+        for layer in &model.layers {
+            match layer.moe.pack_weights(backend, backend_dispatch) {
+                Ok(packed) => packed_weights.push(packed),
+                Err(err) => {
+                    scratch.release();
+                    release_packed_weights(packed_weights);
+                    return Err(err);
+                }
+            }
+        }
+        Ok((scratch, packed_weights))
+    }
 }
 
 impl MoEGeneratorModel {
@@ -71,29 +156,29 @@ impl MoEGeneratorModel {
         })
     }
 
-    pub fn forward_step(&self, input_ids: &[i64], cache: &mut KVCache) -> Result<Vec<f32>> {
+    pub fn forward_step_with_workspace(
+        &self,
+        input_ids: &[i64],
+        cache: &mut KVCache,
+        workspace: &mut MoEInferenceWorkspace,
+        logits_out: &mut [f32],
+    ) -> Result<()> {
         if input_ids.is_empty() {
             return Err(Error::InvalidConfig(
                 "Generator input ids must be non-empty".into(),
             ));
         }
-        let seq_len = input_ids.len();
-        let position_offset = cache.seq_len();
-        let mut hidden_states = self.embed_tokens(input_ids)?;
-
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            hidden_states =
-                layer.forward_with_cache(&hidden_states, position_offset, cache, layer_idx)?;
+        if workspace.uses_gpu() {
+            return self.forward_step_gpu_sequence(input_ids, cache, workspace, logits_out);
         }
+        self.forward_step_cpu_inplace(input_ids, cache, logits_out)
+    }
 
-        let normed =
-            self.final_norm
-                .forward_3d(&hidden_states.data, 1, seq_len);
-        let normed = Tensor3::new(normed, 1, seq_len, self.hidden_size)?;
-        let logits = self.apply_lm_head(&normed)?;
-
-        let start = (seq_len - 1) * self.vocab_size;
-        Ok(logits[start..start + self.vocab_size].to_vec())
+    pub fn forward_step(&self, input_ids: &[i64], cache: &mut KVCache) -> Result<Vec<f32>> {
+        let mut logits = vec![0.0f32; self.vocab_size];
+        let mut workspace = MoEInferenceWorkspace::new(self, kernel_dispatcher().backend())?;
+        self.forward_step_with_workspace(input_ids, cache, &mut workspace, &mut logits)?;
+        Ok(logits)
     }
 
     pub(crate) fn generate(
@@ -121,12 +206,20 @@ impl MoEGeneratorModel {
         } else {
             prompt_ids.len().saturating_add(config.max_new_tokens)
         };
+        let backend = kernel_dispatcher().backend();
+        let mut workspace = MoEInferenceWorkspace::new(self, backend)?;
+        let cache_backend = if workspace.uses_gpu() {
+            backend
+        } else {
+            BackendType::Cpu
+        };
         let mut cache = KVCache::preallocate(
             self.layers.len(),
             max_len,
             1,
             self.num_key_value_heads,
             self.head_dim,
+            cache_backend,
         );
 
         let sampling = SamplingConfig {
@@ -138,7 +231,8 @@ impl MoEGeneratorModel {
 
         let mut tokens = prompt_ids.clone();
         let mut finish_reason = FinishReason::MaxTokens;
-        let mut logits = self.forward_step(&prompt_ids, &mut cache)?;
+        let mut logits = vec![0.0f32; self.vocab_size];
+        self.forward_step_with_workspace(&prompt_ids, &mut cache, &mut workspace, &mut logits)?;
 
         for _ in 0..config.max_new_tokens {
             if self.max_position_embeddings > 0 && cache.seq_len() >= self.max_position_embeddings {
@@ -155,7 +249,7 @@ impl MoEGeneratorModel {
                 break;
             }
 
-            logits = self.forward_step(&[next_token], &mut cache)?;
+            self.forward_step_with_workspace(&[next_token], &mut cache, &mut workspace, &mut logits)?;
         }
 
         Ok(GenerationOutput {
@@ -163,6 +257,90 @@ impl MoEGeneratorModel {
             tokens,
             finish_reason,
         })
+    }
+
+    fn forward_step_cpu_inplace(
+        &self,
+        input_ids: &[i64],
+        cache: &mut KVCache,
+        logits_out: &mut [f32],
+    ) -> Result<()> {
+        let seq_len = input_ids.len();
+        let position_offset = cache.seq_len();
+        let mut hidden_states = self.embed_tokens(input_ids)?;
+
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            hidden_states =
+                layer.forward_with_cache(&hidden_states, position_offset, cache, layer_idx)?;
+        }
+
+        let normed = self.final_norm.forward_3d(&hidden_states.data, 1, seq_len);
+        let normed = Tensor3::new(normed, 1, seq_len, self.hidden_size)?;
+        let logits = self.apply_lm_head(&normed)?;
+
+        let start = (seq_len - 1) * self.vocab_size;
+        logits_out.copy_from_slice(&logits[start..start + self.vocab_size]);
+        Ok(())
+    }
+
+    fn forward_step_gpu_sequence(
+        &self,
+        input_ids: &[i64],
+        cache: &mut KVCache,
+        workspace: &mut MoEInferenceWorkspace,
+        logits_out: &mut [f32],
+    ) -> Result<()> {
+        for &token in input_ids {
+            self.forward_step_gpu(token, cache, workspace, logits_out)?;
+        }
+        Ok(())
+    }
+
+    fn forward_step_gpu(
+        &self,
+        token: i64,
+        cache: &mut KVCache,
+        workspace: &mut MoEInferenceWorkspace,
+        logits_out: &mut [f32],
+    ) -> Result<()> {
+        let gpu_hidden_states = workspace.gpu_hidden_states.as_mut().ok_or_else(|| {
+            Error::InferenceError("GPU hidden states are not initialized".into())
+        })?;
+        let moe_scratch = workspace.moe_scratch.as_mut().ok_or_else(|| {
+            Error::InferenceError("MoE GPU scratch is not initialized".into())
+        })?;
+        if workspace.packed_weights.len() != self.layers.len() {
+            return Err(Error::InferenceError(
+                "Packed MoE weights are not initialized".into(),
+            ));
+        }
+
+        self.embed_tokens_inplace(token, &mut workspace.hidden_states)?;
+        kernel_dispatcher()
+            .upload_to_tensor(&workspace.hidden_states, gpu_hidden_states)
+            .map_err(Error::InferenceError)?;
+
+        let position_offset = cache.seq_len();
+        let backend = kernel_dispatcher().backend_dispatched();
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            layer.forward_inplace_gpu_with_cache(
+                gpu_hidden_states,
+                position_offset,
+                cache,
+                layer_idx,
+                &workspace.packed_weights[layer_idx],
+                moe_scratch,
+                backend,
+            )?;
+        }
+
+        self.final_norm.forward_gpu_inplace(gpu_hidden_states)?;
+        kernel_dispatcher()
+            .linear_forward_host_io_readback(gpu_hidden_states, &mut workspace.hidden_states)
+            .map_err(Error::InferenceError)?;
+        self.apply_lm_head_inplace(&workspace.hidden_states, logits_out)?;
+
+        Ok(())
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
@@ -341,6 +519,12 @@ impl MoEGeneratorModel {
         Tensor3::new(data, 1, seq_len, self.hidden_size)
     }
 
+    fn embed_tokens_inplace(&self, token: i64, output: &mut [f32]) -> Result<()> {
+        let row = safe_token_index(token, self.embeddings.rows);
+        output[..self.hidden_size].copy_from_slice(self.embeddings.row(row));
+        Ok(())
+    }
+
     fn apply_lm_head(&self, hidden_states: &Tensor3) -> Result<Vec<f32>> {
         let (batch, seq_len, hidden) = hidden_states.shape();
         if hidden != self.lm_head.weight.cols {
@@ -360,6 +544,27 @@ impl MoEGeneratorModel {
             self.lm_head.weight.rows,
         );
         Ok(logits)
+    }
+
+    fn apply_lm_head_inplace(&self, hidden_state: &[f32], output: &mut [f32]) -> Result<()> {
+        linear_forward(
+            hidden_state,
+            self.lm_head.weight.as_slice(),
+            self.lm_head.bias.as_ref().map(|b| b.as_slice()),
+            output,
+            1,
+            self.lm_head.weight.cols,
+            self.lm_head.weight.rows,
+        );
+        Ok(())
+    }
+}
+
+fn release_packed_weights(packed: Vec<PackedExpertWeights>) {
+    for weights in packed {
+        weights.all_gate.release();
+        weights.all_up.release();
+        weights.all_down.release();
     }
 }
 
@@ -386,7 +591,7 @@ fn load_rms_norm(
 ) -> Result<()> {
     if loader.has_tensor(name) {
         let tensor = loader.load_tensor(name)?;
-        norm.gamma = tensor.to_weight_vector()?;
+        norm.set_gamma(tensor.to_weight_vector()?);
     }
     Ok(())
 }
@@ -396,7 +601,7 @@ fn load_final_norm(loader: &WeightLoader, norm: &mut crate::rms_norm::RmsNorm) -
     for name in final_norm_names {
         if loader.has_tensor(name) {
             let tensor = loader.load_tensor(name)?;
-            norm.gamma = tensor.to_weight_vector()?;
+            norm.set_gamma(tensor.to_weight_vector()?);
             break;
         }
     }

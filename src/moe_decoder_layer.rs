@@ -1,10 +1,12 @@
 use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
-use crate::moe_layer::MoELayer;
+use crate::moe_layer::{MoELayer, MoEScratchGpu, PackedExpertWeights};
 use crate::rms_norm::RmsNorm;
 use crate::tensor::Tensor3;
 use crate::types::{Error, Result};
+use gllm_kernels::gpu_types::{GpuTensor, TensorDtype};
+use gllm_kernels::DispatchedBackend;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -121,6 +123,60 @@ impl MoEDecoderLayer {
         let moe_output = self.moe.forward(&ffn_input)?;
 
         add_tensors(&residual, &moe_output)
+    }
+
+    pub fn forward_inplace_gpu_with_cache(
+        &self,
+        hidden_states: &mut GpuTensor,
+        position_offset: usize,
+        cache: &mut KVCache,
+        layer: usize,
+        packed_weights: &PackedExpertWeights,
+        scratch: &mut MoEScratchGpu,
+        backend: &DispatchedBackend,
+    ) -> Result<()> {
+        let backend_type = hidden_states.backend;
+        let mut normed_attn_input = GpuTensor::new_temp(
+            vec![1, self.hidden_size],
+            TensorDtype::F32,
+            backend_type,
+        )
+        .map_err(|e| Error::InferenceError(e.to_string()))?;
+        let attn_result = self
+            .attention_norm
+            .forward_gpu(hidden_states, &mut normed_attn_input)
+            .and_then(|_| {
+                self.attention.forward_gpu_inplace(
+                    &normed_attn_input,
+                    hidden_states,
+                    position_offset,
+                    cache,
+                    layer,
+                )
+            });
+        normed_attn_input.release();
+        attn_result?;
+
+        let mut normed_ffn_input = GpuTensor::new_temp(
+            vec![1, self.hidden_size],
+            TensorDtype::F32,
+            backend_type,
+        )
+        .map_err(|e| Error::InferenceError(e.to_string()))?;
+        let moe_result = self
+            .ffn_norm
+            .forward_gpu(hidden_states, &mut normed_ffn_input)
+            .and_then(|_| {
+                self.moe.forward_inplace_gpu_fused(
+                    &normed_ffn_input,
+                    hidden_states,
+                    packed_weights,
+                    scratch,
+                    backend,
+                )
+            });
+        normed_ffn_input.release();
+        moe_result
     }
 }
 
