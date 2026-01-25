@@ -527,3 +527,97 @@ FlashAttentionConfig {
     use_kahan_accumulator: true,   // 建议开启
     ..Default::default()
 }
+
+### ARCH-ADR-009: 纯 GPU MoE 管线 🔒 FROZEN
+
+**决策**: MoE 推理必须在纯 GPU 路径执行，禁止中间 GPU→CPU→GPU 往返
+
+**问题背景**:
+- MoE routing 输出 (expert_indices, expert_weights) 在 GPU 上计算
+- 旧 API `moe_forward_gpu` 接受 host slices，强制 readback 后再上传
+- 这完全抵消了 GPU routing 的优化效果
+- 类型安全违规：`readback<T: KernelFloat>` 不支持 U32 类型
+
+**架构约束** (FROZEN - 禁止违反):
+
+| 约束ID | 约束内容 | 违规示例 |
+|--------|----------|----------|
+| ARCH-MOE-001 | `moe_forward_gpu_pure` 必须接受 GPU tensors | 接受 `&[u32]`/`&[f32]` host slices |
+| ARCH-MOE-002 | routing→forward 必须纯 GPU 数据流 | routing 输出 readback 到 CPU |
+| ARCH-MOE-003 | U32 tensor 必须有类型安全的 readback | 用 f32 读取 u32 再 `to_bits()` |
+| ARCH-MOE-004 | 只在最终输出时 readback | 每层都 readback hidden states |
+
+**正确的数据流**:
+
+```
+hidden_states (GPU)
+    │
+    ▼
+moe_route_gpu()
+    │
+    ├── expert_indices_gpu (GPU, U32)
+    └── expert_weights_gpu (GPU, F32)
+    │
+    ▼
+moe_forward_gpu_pure()  ← 新 API，接受 GPU tensors
+    │
+    ▼
+moe_output (GPU)
+    │
+    ▼
+... 继续下一层 (保持 GPU) ...
+    │
+    ▼
+最终输出时才 readback
+```
+
+**gllm-kernels API 变更**:
+
+```rust
+// 旧 API（保留用于需要 host 控制的场景）
+fn moe_forward_gpu(
+    &self,
+    input: &GpuTensor,
+    expert_indices: &[u32],      // host slice
+    expert_weights: &[f32],      // host slice
+    ...
+) -> Result<(), String>;
+
+// 新 API（符合 ARCH-MOE-001/002，纯 GPU 路径）
+fn moe_forward_gpu_pure(
+    &self,
+    input: &GpuTensor,
+    expert_indices: &GpuTensor,  // GPU tensor (U32)
+    expert_weights: &GpuTensor,  // GPU tensor (F32)
+    all_gate_weights: &GpuTensor,
+    all_up_weights: &GpuTensor,
+    all_down_weights: &GpuTensor,
+    output: &mut GpuTensor,
+    config: MoEForwardConfig,
+) -> Result<(), String>;
+```
+
+**类型安全的 U32 readback** (ARCH-MOE-003):
+
+```rust
+// gllm-kernels Backend trait 新增方法
+fn readback_u32(&self, gpu: &GpuTensor, host: &mut [u32]) -> Result<(), String>;
+```
+
+**实现要求**:
+
+| 组件 | 修改内容 |
+|------|----------|
+| gllm-kernels/backend.rs | 添加 `moe_forward_gpu_pure` 方法签名 |
+| gllm-kernels/backend.rs | 添加 `readback_u32` 方法 |
+| gllm-kernels/wgpu | 实现 `moe_forward_gpu_pure`（内部直接使用 GPU buffers） |
+| gllm/moe_layer.rs | 使用新 API，移除 routing readback + re-upload |
+
+**向后兼容**:
+- 保留旧 `moe_forward_gpu` API（用于需要 host 控制的场景）
+- 新代码优先使用 `moe_forward_gpu_pure`
+
+**验收标准**:
+- 单 token MoE 推理无 GPU→CPU→GPU 往返（routing→forward 纯 GPU）
+- U32 tensor readback 类型安全（无 f32/to_bits hack）
+- 性能提升：减少 2 次 GPU 传输（indices + weights 不再 readback）

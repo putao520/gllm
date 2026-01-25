@@ -496,13 +496,15 @@ impl MoELayer {
         scratch: &mut MoEScratchGpu,
         backend: &gllm_kernels::DispatchedBackend,
     ) -> Result<()> {
-        let routing = self.route_gpu_or_cpu(normed_input, scratch, backend)?;
-        let MoERoutingResult {
-            expert_indices,
-            expert_weights,
-            top_k,
-            ..
-        } = routing;
+        let top_k = self.router.num_experts_per_tok();
+        scratch.ensure_routing_buffers(top_k, normed_input.backend)?;
+        self.router
+            .route_gpu(
+                normed_input,
+                &mut scratch.expert_indices_gpu,
+                &mut scratch.expert_weights_gpu,
+                backend,
+            )?;
 
         // Create MoE config
         let config = MoEForwardConfig::new(
@@ -515,10 +517,10 @@ impl MoELayer {
 
         // Fused MoE forward: single kernel launch for all selected experts
         backend
-            .moe_forward_gpu(
+            .moe_forward_gpu_pure(
                 normed_input,
-                &expert_indices,
-                &expert_weights,
+                &scratch.expert_indices_gpu,
+                &scratch.expert_weights_gpu,
                 &packed_weights.all_gate,
                 &packed_weights.all_up,
                 &packed_weights.all_down,
@@ -614,12 +616,10 @@ impl MoELayer {
             backend,
         )?;
 
-        let mut indices_bits = vec![0.0f32; top_k];
-        // Read u32 indices via f32 readback and reinterpret the raw bits.
+        let mut expert_indices = vec![0u32; top_k];
         backend
-            .readback(&scratch.expert_indices_gpu, &mut indices_bits)
+            .readback_u32(&scratch.expert_indices_gpu, &mut expert_indices)
             .map_err(Error::InferenceError)?;
-        let expert_indices = indices_bits.iter().map(|v| v.to_bits()).collect();
 
         let mut expert_weights = vec![0.0f32; top_k];
         backend
