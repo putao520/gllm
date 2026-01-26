@@ -36,6 +36,8 @@ pub enum Architecture {
     Qwen3Generator,
     /// Phi-4 decoder for generation.
     Phi4Generator,
+    /// SmolLM2 decoder for generation.
+    SmolLM2Generator,
     /// SmolLM3 decoder for generation.
     SmolLM3Generator,
     /// InternLM3 decoder for generation.
@@ -307,6 +309,7 @@ impl ModelRegistry {
             ("phi-4", "microsoft/phi-4", ModelType::Generator, Architecture::Phi4Generator),
             ("phi-4-mini-instruct", "microsoft/phi-4-mini-instruct", ModelType::Generator, Architecture::Phi4Generator),
             ("smollm3-3b", "HuggingFaceTB/SmolLM3-3B", ModelType::Generator, Architecture::SmolLM3Generator),
+            ("smollm2-135m-instruct", "HuggingFaceTB/SmolLM2-135M-Instruct", ModelType::Generator, Architecture::SmolLM2Generator),
             ("internlm3-8b-instruct", "internlm/internlm3-8b-instruct", ModelType::Generator, Architecture::InternLM3Generator),
 
             // Light Models for Edge Devices
@@ -521,6 +524,8 @@ impl ModelRegistry {
             Architecture::Phi4Generator
         } else if lower.contains("smollm3") {
             Architecture::SmolLM3Generator
+        } else if lower.contains("smollm2") || lower.contains("smollm-2") {
+            Architecture::SmolLM2Generator
         } else if lower.contains("internlm3") {
             Architecture::InternLM3Generator
         } else if lower.contains("qwen3") || lower.contains("qwen-3") {

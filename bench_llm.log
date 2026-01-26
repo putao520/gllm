@@ -1,0 +1,2671 @@
+   Compiling bitflags v2.10.0
+   Compiling num-traits v0.2.19
+   Compiling anstyle v1.0.13
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v0.7.6
+   Compiling itertools v0.10.5
+   Compiling same-file v1.0.6
+   Compiling linux-raw-sys v0.11.0
+   Compiling cast v0.3.0
+   Compiling tinytemplate v1.2.1
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling fastrand v2.3.0
+   Compiling anes v0.1.6
+   Compiling walkdir v2.5.0
+   Compiling gpu-descriptor-types v0.2.0
+   Compiling gpu-alloc-types v0.3.0
+   Compiling spirv v0.3.0+sdk-1.3.268.0
+   Compiling wgpu-types v26.0.0
+   Compiling clap_builder v4.5.54
+   Compiling plotters-svg v0.3.7
+   Compiling gpu-descriptor v0.3.2
+   Compiling rustix v1.1.2
+   Compiling gpu-alloc v0.6.0
+   Compiling rand_distr v0.5.1
+   Compiling ordered-float v5.0.0
+   Compiling plotters v0.3.7
+   Compiling half v2.7.1
+   Compiling criterion-plot v0.5.0
+   Compiling naga v26.0.0
+   Compiling ciborium-ll v0.2.2
+   Compiling cudarc v0.18.2
+   Compiling ciborium v0.2.2
+   Compiling tempfile v3.23.0
+   Compiling clap v4.5.54
+   Compiling criterion v0.5.1
+   Compiling wgpu-hal v26.0.6
+   Compiling wgpu-core-deps-windows-linux-android v26.0.0
+   Compiling wgpu-core v26.0.1
+   Compiling wgpu v26.0.1
+   Compiling gllm-kernels v0.2.0 (/home/putao/code/rust/gllm-kernels)
+warning: unused imports: `compute_num_queries` and `compute_output_len`
+  --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/flash_attn.rs:28:51
+   |
+28 |     validate_attention_dims, validate_i32_bounds, compute_num_queries, compute_output_len,
+   |                                                   ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `HsaRegion`
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:18:30
+   |
+18 |     HsaExecutable, HsaQueue, HsaRegion, HsaSignal, HSA_STATUS_SUCCESS,
+   |                              ^^^^^^^^^
+
+warning: unused imports: `BindGroup` and `CommandEncoder`
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/eagle3.rs:20:5
+   |
+20 |     BindGroup, BindGroupLayout, Buffer, BufferUsages, CommandEncoder, ComputePipeline, Device,
+   |     ^^^^^^^^^                                         ^^^^^^^^^^^^^^
+
+warning: unused imports: `BindGroup` and `CommandEncoder`
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/spec_ee.rs:21:5
+   |
+21 |     BindGroup, BindGroupLayout, Buffer, BufferUsages, CommandEncoder, ComputePipeline, Device,
+   |     ^^^^^^^^^                                         ^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around `match` scrutinee expression
+    --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:4388:27
+     |
+4388 |         let level = match (q & 0x03) {
+     |                           ^        ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+4388 -         let level = match (q & 0x03) {
+4388 +         let level = match q & 0x03 {
+     |
+
+warning: unused import: `rayon::prelude`
+  --> /home/putao/code/rust/gllm-kernels/src/ops/linear.rs:24:5
+   |
+24 | use rayon::prelude::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused variable: `seq_len_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_attn.rs:890:5
+    |
+890 |     seq_len_kv: usize,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seq_len_kv`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `draft_logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:367:9
+    |
+367 |         draft_logits: *mut c_void,
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_draft_logits`
+
+warning: unused variable: `target_logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:368:9
+    |
+368 |         target_logits: *mut c_void,
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_logits`
+
+warning: unused variable: `confidence_scores`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:369:9
+    |
+369 |         confidence_scores: *mut c_void,
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence_scores`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:370:9
+    |
+370 |         batch_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:371:9
+    |
+371 |         vocab_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `num_draft_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:372:9
+    |
+372 |         num_draft_tokens: usize,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_draft_tokens`
+
+warning: unused variable: `module`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:374:13
+    |
+374 |         let module = self.module_confidence_f32.as_ref()
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_module`
+
+warning: unused variable: `draft_logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:385:9
+    |
+385 |         draft_logits: *mut c_void,
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_draft_logits`
+
+warning: unused variable: `target_logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:386:9
+    |
+386 |         target_logits: *mut c_void,
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_logits`
+
+warning: unused variable: `confidence_scores`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:387:9
+    |
+387 |         confidence_scores: *mut c_void,
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence_scores`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:388:9
+    |
+388 |         batch_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:389:9
+    |
+389 |         vocab_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `num_draft_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:390:9
+    |
+390 |         num_draft_tokens: usize,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_draft_tokens`
+
+warning: unused variable: `module`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:392:13
+    |
+392 |         let module = self.module_confidence_f16.as_ref()
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_module`
+
+warning: unused variable: `acceptance_history`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:401:9
+    |
+401 |         acceptance_history: *mut c_void,
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_acceptance_history`
+
+warning: unused variable: `confidence_scores`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:402:9
+    |
+402 |         confidence_scores: *mut c_void,
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence_scores`
+
+warning: unused variable: `current_depths`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:403:9
+    |
+403 |         current_depths: *mut c_void,
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_depths`
+
+warning: unused variable: `new_depths`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:404:9
+    |
+404 |         new_depths: *mut c_void,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_depths`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:405:9
+    |
+405 |         batch_size: usize,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `history_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:406:9
+    |
+406 |         history_len: usize,
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_history_len`
+
+warning: unused variable: `module`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:408:13
+    |
+408 |         let module = self.module_adjust_depth.as_ref()
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_module`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:240:42
+    |
+240 | ...f, hidden_states: *mut c_void, confidence: *mut c_void, batch_size: usize, hidden_dim: usize, num...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `confidence`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:240:70
+    |
+240 | ...void, confidence: *mut c_void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:240:95
+    |
+240 | ...void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:240:114
+    |
+240 | ...size, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:240:133
+    |
+240 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:245:42
+    |
+245 | ...f, hidden_states: *mut c_void, confidence: *mut c_void, batch_size: usize, hidden_dim: usize, num...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `confidence`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:245:70
+    |
+245 | ...void, confidence: *mut c_void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:245:95
+    |
+245 | ...void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:245:114
+    |
+245 | ...size, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:245:133
+    |
+245 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `confidence`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:250:43
+    |
+250 | ...self, confidence: *mut c_void, skip_mask: *mut c_void, batch_size: usize, num_layers: usize) -> R...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence`
+
+warning: unused variable: `skip_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:250:68
+    |
+250 | ..._void, skip_mask: *mut c_void, batch_size: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skip_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:250:92
+    |
+250 | ...void, batch_size: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:250:111
+    |
+250 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `confidence`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:255:43
+    |
+255 | ...self, confidence: *mut c_void, skip_mask: *mut c_void, batch_size: usize, num_layers: usize) -> R...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_confidence`
+
+warning: unused variable: `skip_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:255:68
+    |
+255 | ..._void, skip_mask: *mut c_void, batch_size: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skip_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:255:92
+    |
+255 | ...void, batch_size: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:255:111
+    |
+255 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:34
+    |
+260 | ...f, hidden_states: *mut c_void, output: *mut c_void, exit_layer: *mut c_void, batch_size: usize, h...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:62
+    |
+260 | ...t c_void, output: *mut c_void, exit_layer: *mut c_void, batch_size: usize, hidden_dim: usize, num...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `exit_layer`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:83
+    |
+260 | ...void, exit_layer: *mut c_void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exit_layer`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:108
+    |
+260 | ...void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:127
+    |
+260 | ...size, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:260:146
+    |
+260 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:34
+    |
+265 | ...f, hidden_states: *mut c_void, output: *mut c_void, exit_layer: *mut c_void, batch_size: usize, h...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:62
+    |
+265 | ...t c_void, output: *mut c_void, exit_layer: *mut c_void, batch_size: usize, hidden_dim: usize, num...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `exit_layer`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:83
+    |
+265 | ...void, exit_layer: *mut c_void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exit_layer`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:108
+    |
+265 | ...void, batch_size: usize, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:127
+    |
+265 | ...size, hidden_dim: usize, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `num_layers`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:265:146
+    |
+265 | ...size, num_layers: usize) -> Result<(), HsaSpecEEError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+
+warning: unused variable: `q`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:38
+    |
+237 | ...ion_f32(&self, q: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *m...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_q`
+
+warning: unused variable: `k`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:54
+    |
+237 | ...: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *mut c_void, batch...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `v`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:70
+    |
+237 | ...: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *mut c_void, batch_size: usize, nu...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:86
+    |
+237 | ...t c_void, output: *mut c_void, tree_mask: *mut c_void, batch_size: usize, num_heads: usize, num_n...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `tree_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:107
+    |
+237 | ..._void, tree_mask: *mut c_void, batch_size: usize, num_heads: usize, num_nodes: usize, head_dim: u...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tree_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:131
+    |
+237 | ...void, batch_size: usize, num_heads: usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFl...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:150
+    |
+237 | ...usize, num_heads: usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `num_nodes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:168
+    |
+237 | ...usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_nodes`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:237:186
+    |
+237 | ... usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `q`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:38
+    |
+242 | ...ion_f16(&self, q: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *m...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_q`
+
+warning: unused variable: `k`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:54
+    |
+242 | ...: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *mut c_void, batch...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `v`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:70
+    |
+242 | ...: *mut c_void, v: *mut c_void, output: *mut c_void, tree_mask: *mut c_void, batch_size: usize, nu...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:86
+    |
+242 | ...t c_void, output: *mut c_void, tree_mask: *mut c_void, batch_size: usize, num_heads: usize, num_n...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `tree_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:107
+    |
+242 | ..._void, tree_mask: *mut c_void, batch_size: usize, num_heads: usize, num_nodes: usize, head_dim: u...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tree_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:131
+    |
+242 | ...void, batch_size: usize, num_heads: usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFl...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:150
+    |
+242 | ...usize, num_heads: usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `num_nodes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:168
+    |
+242 | ...usize, num_nodes: usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_nodes`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:242:186
+    |
+242 | ... usize, head_dim: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `candidate_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:35
+    |
+247 |     pub fn verify_tree_f32(&self, candidate_tokens: *mut c_void, target_probs: *mut c_void, accepted...
+    |                                   ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate_tokens`
+
+warning: unused variable: `target_probs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:66
+    |
+247 | ...id, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usi...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_probs`
+
+warning: unused variable: `accepted_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:93
+    |
+247 | ...d, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Re...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accepted_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:121
+    |
+247 | ...void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaFlashTreeAttn...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:140
+    |
+247 | ... *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaFlash...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:247:163
+    |
+247 | ...size, vocab_size: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `candidate_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:35
+    |
+252 |     pub fn verify_tree_f16(&self, candidate_tokens: *mut c_void, target_probs: *mut c_void, accepted...
+    |                                   ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidate_tokens`
+
+warning: unused variable: `target_probs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:66
+    |
+252 | ...id, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usi...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_probs`
+
+warning: unused variable: `accepted_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:93
+    |
+252 | ...d, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Re...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accepted_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:121
+    |
+252 | ...void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaFlashTreeAttn...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:140
+    |
+252 | ... *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaFlash...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:252:163
+    |
+252 | ...size, vocab_size: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `parent_indices`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:257:35
+    |
+257 |     pub fn build_tree_mask(&self, parent_indices: *mut c_void, tree_mask: *mut c_void, num_nodes: us...
+    |                                   ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_parent_indices`
+
+warning: unused variable: `tree_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:257:64
+    |
+257 | ..._void, tree_mask: *mut c_void, num_nodes: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tree_mask`
+
+warning: unused variable: `num_nodes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:257:88
+    |
+257 | ..._void, num_nodes: usize) -> Result<(), HsaFlashTreeAttnError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_nodes`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:235:32
+    |
+235 | ...f32(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:235:52
+    |
+235 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:235:73
+    |
+235 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Quan...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:235:94
+    |
+235 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:235:114
+    |
+235 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:240:32
+    |
+240 | ...f16(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:240:52
+    |
+240 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:240:73
+    |
+240 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Quan...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:240:94
+    |
+240 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:240:114
+    |
+240 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:245:34
+    |
+245 | ...f32(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:245:54
+    |
+245 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:245:75
+    |
+245 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Quan...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:245:96
+    |
+245 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:245:116
+    |
+245 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:250:34
+    |
+250 | ...f16(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:250:54
+    |
+250 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:250:75
+    |
+250 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Quan...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:250:96
+    |
+250 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:250:116
+    |
+250 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `unpacked`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:255:24
+    |
+255 | ...(&self, unpacked: *mut c_void, packed: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Qua...
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unpacked`
+
+warning: unused variable: `packed`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:255:47
+    |
+255 | ...t c_void, packed: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_packed`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:255:68
+    |
+255 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `packed`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:260:26
+    |
+260 | ...ck(&self, packed: *mut c_void, unpacked: *mut c_void, num_elements: usize) -> Result<(), HsaInt2Q...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_packed`
+
+warning: unused variable: `unpacked`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:260:47
+    |
+260 | ...c_void, unpacked: *mut c_void, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unpacked`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:260:70
+    |
+260 | ...id, num_elements: usize) -> Result<(), HsaInt2QuantizerError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `attention_scores`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:265:42
+    |
+265 | ...fn compute_importance_f32(&self, attention_scores: *mut c_void, access_counts: *mut c_void, impor...
+    |                                     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attention_scores`
+
+warning: unused variable: `access_counts`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:265:73
+    |
+265 | ...d, access_counts: *mut c_void, importance: *mut c_void, num_tokens: usize, num_heads: usize) -> R...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_access_counts`
+
+warning: unused variable: `importance`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:265:101
+    |
+265 | ...void, importance: *mut c_void, num_tokens: usize, num_heads: usize) -> Result<(), HsaEvicPressErr...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_importance`
+
+warning: unused variable: `num_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:265:126
+    |
+265 | ...void, num_tokens: usize, num_heads: usize) -> Result<(), HsaEvicPressError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_tokens`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:265:145
+    |
+265 | ...usize, num_heads: usize) -> Result<(), HsaEvicPressError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `attention_scores`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:270:42
+    |
+270 | ...fn compute_importance_f16(&self, attention_scores: *mut c_void, access_counts: *mut c_void, impor...
+    |                                     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attention_scores`
+
+warning: unused variable: `access_counts`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:270:73
+    |
+270 | ...d, access_counts: *mut c_void, importance: *mut c_void, num_tokens: usize, num_heads: usize) -> R...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_access_counts`
+
+warning: unused variable: `importance`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:270:101
+    |
+270 | ...void, importance: *mut c_void, num_tokens: usize, num_heads: usize) -> Result<(), HsaEvicPressErr...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_importance`
+
+warning: unused variable: `num_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:270:126
+    |
+270 | ...void, num_tokens: usize, num_heads: usize) -> Result<(), HsaEvicPressError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_tokens`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:270:145
+    |
+270 | ...usize, num_heads: usize) -> Result<(), HsaEvicPressError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `importance`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:275:35
+    |
+275 | ...self, importance: *mut c_void, current_zones: *mut c_void, new_zones: *mut c_void, num_tokens: us...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_importance`
+
+warning: unused variable: `current_zones`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:275:60
+    |
+275 | ...d, current_zones: *mut c_void, new_zones: *mut c_void, num_tokens: usize) -> Result<(), HsaEvicPr...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_zones`
+
+warning: unused variable: `new_zones`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:275:88
+    |
+275 | ..._void, new_zones: *mut c_void, num_tokens: usize) -> Result<(), HsaEvicPressError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_zones`
+
+warning: unused variable: `num_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:275:112
+    |
+275 | ...void, num_tokens: usize) -> Result<(), HsaEvicPressError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_tokens`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:280:40
+    |
+280 | ...f32(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, num_elements: usize) -> ...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:280:60
+    |
+280 | ...t c_void, output: *mut c_void, scales: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPre...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:280:81
+    |
+280 | ...t c_void, scales: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:280:102
+    |
+280 | ...id, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:285:40
+    |
+285 | ...f16(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, num_elements: usize) -> ...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:285:60
+    |
+285 | ...t c_void, output: *mut c_void, scales: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPre...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:285:81
+    |
+285 | ...t c_void, scales: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:285:102
+    |
+285 | ...id, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:290:40
+    |
+290 | ...f32(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:290:60
+    |
+290 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:290:81
+    |
+290 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPres...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:290:102
+    |
+290 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:290:122
+    |
+290 | ...id, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `input`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:295:40
+    |
+295 | ...f16(&self, input: *mut c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_...
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:295:60
+    |
+295 | ...t c_void, output: *mut c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> R...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `scales`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:295:81
+    |
+295 | ...t c_void, scales: *mut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPres...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_scales`
+
+warning: unused variable: `zeros`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:295:102
+    |
+295 | ...ut c_void, zeros: *mut c_void, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_zeros`
+
+warning: unused variable: `num_elements`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:295:122
+    |
+295 | ...id, num_elements: usize) -> Result<(), HsaEvicPressError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_elements`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:252:36
+    |
+252 | ...f, hidden_states: *mut c_void, head_outputs: *mut c_void, batch_size: usize, hidden_dim: usize, v...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `head_outputs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:252:64
+    |
+252 | ...id, head_outputs: *mut c_void, batch_size: usize, hidden_dim: usize, vocab_size: usize) -> Result...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_outputs`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:252:91
+    |
+252 | ...void, batch_size: usize, hidden_dim: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:252:110
+    |
+252 | ...size, hidden_dim: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:252:129
+    |
+252 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `hidden_states`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:257:36
+    |
+257 | ...f, hidden_states: *mut c_void, head_outputs: *mut c_void, batch_size: usize, hidden_dim: usize, v...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_states`
+
+warning: unused variable: `head_outputs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:257:64
+    |
+257 | ...id, head_outputs: *mut c_void, batch_size: usize, hidden_dim: usize, vocab_size: usize) -> Result...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_outputs`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:257:91
+    |
+257 | ...void, batch_size: usize, hidden_dim: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:257:110
+    |
+257 | ...size, hidden_dim: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:257:129
+    |
+257 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:262:36
+    |
+262 | ...32(&self, logits: *mut c_void, indices: *mut c_void, values: *mut c_void, batch_size: usize, voca...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_logits`
+
+warning: unused variable: `indices`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:262:57
+    |
+262 | ... c_void, indices: *mut c_void, values: *mut c_void, batch_size: usize, vocab_size: usize) -> Resu...
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_indices`
+
+warning: unused variable: `values`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:262:79
+    |
+262 | ...t c_void, values: *mut c_void, batch_size: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_values`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:262:100
+    |
+262 | ...void, batch_size: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:262:119
+    |
+262 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `logits`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:267:36
+    |
+267 | ...16(&self, logits: *mut c_void, indices: *mut c_void, values: *mut c_void, batch_size: usize, voca...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_logits`
+
+warning: unused variable: `indices`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:267:57
+    |
+267 | ... c_void, indices: *mut c_void, values: *mut c_void, batch_size: usize, vocab_size: usize) -> Resu...
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_indices`
+
+warning: unused variable: `values`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:267:79
+    |
+267 | ...t c_void, values: *mut c_void, batch_size: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_values`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:267:100
+    |
+267 | ...void, batch_size: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:267:119
+    |
+267 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `head_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:272:40
+    |
+272 | ...elf, head_tokens: *mut c_void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: ...
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_tokens`
+
+warning: unused variable: `candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:272:66
+    |
+272 | ...void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: usize) -> Result<(), HsaM...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidates`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:272:91
+    |
+272 | ...c_void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: usize) -> Result<(), Hs...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:272:120
+    |
+272 | ...void, batch_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `head_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:277:40
+    |
+277 | ...elf, head_tokens: *mut c_void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: ...
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_tokens`
+
+warning: unused variable: `candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:277:66
+    |
+277 | ...void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: usize) -> Result<(), HsaM...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidates`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:277:91
+    |
+277 | ...c_void, candidates: *mut c_void, num_candidates: *mut c_void, batch_size: usize) -> Result<(), Hs...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:277:120
+    |
+277 | ...void, batch_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:41
+    |
+282 | ...self, candidates: *mut c_void, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size:...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidates`
+
+warning: unused variable: `target_probs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:66
+    |
+282 | ...id, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usi...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_probs`
+
+warning: unused variable: `accepted_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:93
+    |
+282 | ...d, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Re...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accepted_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:121
+    |
+282 | ...void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:140
+    |
+282 | ... *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaMedus...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:282:163
+    |
+282 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:41
+    |
+287 | ...self, candidates: *mut c_void, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size:...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_candidates`
+
+warning: unused variable: `target_probs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:66
+    |
+287 | ...id, target_probs: *mut c_void, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usi...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_probs`
+
+warning: unused variable: `accepted_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:93
+    |
+287 | ...d, accepted_mask: *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Re...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accepted_mask`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:121
+    |
+287 | ...void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_candidates`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:140
+    |
+287 | ... *mut c_void, batch_size: usize, num_candidates: usize, vocab_size: usize) -> Result<(), HsaMedus...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_candidates`
+
+warning: unused variable: `vocab_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:287:163
+    |
+287 | ...size, vocab_size: usize) -> Result<(), HsaMedusaError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vocab_size`
+
+warning: unused variable: `embeddings`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:245:36
+    |
+245 | ...self, embeddings: *mut c_void, hashes: *mut c_void, seq_len: usize, hidden_dim: usize) -> Result<...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_embeddings`
+
+warning: unused variable: `hashes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:245:61
+    |
+245 | ...t c_void, hashes: *mut c_void, seq_len: usize, hidden_dim: usize) -> Result<(), HsaPromptCacheErr...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hashes`
+
+warning: unused variable: `seq_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:245:82
+    |
+245 | ... c_void, seq_len: usize, hidden_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seq_len`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:245:98
+    |
+245 | ...size, hidden_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `embeddings`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:250:36
+    |
+250 | ...self, embeddings: *mut c_void, hashes: *mut c_void, seq_len: usize, hidden_dim: usize) -> Result<...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_embeddings`
+
+warning: unused variable: `hashes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:250:61
+    |
+250 | ...t c_void, hashes: *mut c_void, seq_len: usize, hidden_dim: usize) -> Result<(), HsaPromptCacheErr...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_hashes`
+
+warning: unused variable: `seq_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:250:82
+    |
+250 | ... c_void, seq_len: usize, hidden_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seq_len`
+
+warning: unused variable: `hidden_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:250:98
+    |
+250 | ...size, hidden_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hidden_dim`
+
+warning: unused variable: `query_hashes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:37
+    |
+255 | ...lf, query_hashes: *mut c_void, cached_hashes: *mut c_void, cached_lengths: *mut c_void, best_matc...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_hashes`
+
+warning: unused variable: `cached_hashes`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:64
+    |
+255 | ...d, cached_hashes: *mut c_void, cached_lengths: *mut c_void, best_match_idx: *mut c_void, best_mat...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cached_hashes`
+
+warning: unused variable: `cached_lengths`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:92
+    |
+255 | ...oid, cached_hashes: *mut c_void, cached_lengths: *mut c_void, best_match_idx: *mut c_void, best_m...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cached_lengths`
+
+warning: unused variable: `best_match_idx`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:121
+    |
+255 | ...id, cached_lengths: *mut c_void, best_match_idx: *mut c_void, best_match_len: *mut c_void, query_...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_best_match_idx`
+
+warning: unused variable: `best_match_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:150
+    |
+255 | ...id, best_match_idx: *mut c_void, best_match_len: *mut c_void, query_len: usize, num_cached: usize...
+    |                                     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_best_match_len`
+
+warning: unused variable: `query_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:179
+    |
+255 | ..._void, query_len: usize, num_cached: usize) -> Result<(), HsaPromptCacheError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_query_len`
+
+warning: unused variable: `num_cached`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:255:197
+    |
+255 | ...size, num_cached: usize) -> Result<(), HsaPromptCacheError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_cached`
+
+warning: unused variable: `cached_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:35
+    |
+260 | ...&self, cached_kv: *mut c_void, new_kv: *mut c_void, output_kv: *mut c_void, blend_len: usize, num...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cached_kv`
+
+warning: unused variable: `new_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:59
+    |
+260 | ...t c_void, new_kv: *mut c_void, output_kv: *mut c_void, blend_len: usize, num_heads: usize, head_d...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_kv`
+
+warning: unused variable: `output_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:80
+    |
+260 | ..._void, output_kv: *mut c_void, blend_len: usize, num_heads: usize, head_dim: usize, blend_factor:...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_output_kv`
+
+warning: unused variable: `blend_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:104
+    |
+260 | ..._void, blend_len: usize, num_heads: usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaP...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blend_len`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:122
+    |
+260 | ...usize, num_heads: usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:140
+    |
+260 | ... usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `blend_factor`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:260:157
+    |
+260 | ...ze, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blend_factor`
+
+warning: unused variable: `cached_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:35
+    |
+265 | ...&self, cached_kv: *mut c_void, new_kv: *mut c_void, output_kv: *mut c_void, blend_len: usize, num...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cached_kv`
+
+warning: unused variable: `new_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:59
+    |
+265 | ...t c_void, new_kv: *mut c_void, output_kv: *mut c_void, blend_len: usize, num_heads: usize, head_d...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_kv`
+
+warning: unused variable: `output_kv`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:80
+    |
+265 | ..._void, output_kv: *mut c_void, blend_len: usize, num_heads: usize, head_dim: usize, blend_factor:...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_output_kv`
+
+warning: unused variable: `blend_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:104
+    |
+265 | ..._void, blend_len: usize, num_heads: usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaP...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blend_len`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:122
+    |
+265 | ...usize, num_heads: usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:140
+    |
+265 | ... usize, head_dim: usize, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `blend_factor`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:265:157
+    |
+265 | ...ze, blend_factor: f32) -> Result<(), HsaPromptCacheError> {
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blend_factor`
+
+warning: unused variable: `src`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:270:31
+    |
+270 | ...v_f32(&self, src: *mut c_void, dst: *mut c_void, num_tokens: usize, num_heads: usize, head_dim: u...
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_src`
+
+warning: unused variable: `dst`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:270:49
+    |
+270 | ...*mut c_void, dst: *mut c_void, num_tokens: usize, num_heads: usize, head_dim: usize) -> Result<()...
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_dst`
+
+warning: unused variable: `num_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:270:67
+    |
+270 | ...void, num_tokens: usize, num_heads: usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_tokens`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:270:86
+    |
+270 | ...usize, num_heads: usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:270:104
+    |
+270 | ... usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `src`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:275:31
+    |
+275 | ...v_f16(&self, src: *mut c_void, dst: *mut c_void, num_tokens: usize, num_heads: usize, head_dim: u...
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_src`
+
+warning: unused variable: `dst`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:275:49
+    |
+275 | ...*mut c_void, dst: *mut c_void, num_tokens: usize, num_heads: usize, head_dim: usize) -> Result<()...
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_dst`
+
+warning: unused variable: `num_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:275:67
+    |
+275 | ...void, num_tokens: usize, num_heads: usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_tokens`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:275:86
+    |
+275 | ...usize, num_heads: usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:275:104
+    |
+275 | ... usize, head_dim: usize) -> Result<(), HsaPromptCacheError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `q`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:41
+    |
+244 | ...ion_f32(&self, q: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *m...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_q`
+
+warning: unused variable: `k`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:57
+    |
+244 | ...: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *mut c_void, batch...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `v`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:73
+    |
+244 | ...: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *mut c_void, batch_size: usize, nu...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:89
+    |
+244 | ...t c_void, output: *mut c_void, chunk_lse: *mut c_void, batch_size: usize, num_heads: usize, chunk...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `chunk_lse`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:110
+    |
+244 | ..._void, chunk_lse: *mut c_void, batch_size: usize, num_heads: usize, chunk_id: usize, chunk_len: u...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_lse`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:134
+    |
+244 | ...void, batch_size: usize, num_heads: usize, chunk_id: usize, chunk_len: usize, head_dim: usize) ->...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:153
+    |
+244 | ...usize, num_heads: usize, chunk_id: usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChu...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `chunk_id`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:171
+    |
+244 | ... usize, chunk_id: usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_id`
+
+warning: unused variable: `chunk_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:188
+    |
+244 | ...usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_len`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:244:206
+    |
+244 | ... usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `q`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:41
+    |
+249 | ...ion_f16(&self, q: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *m...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_q`
+
+warning: unused variable: `k`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:57
+    |
+249 | ...: *mut c_void, k: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *mut c_void, batch...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_k`
+
+warning: unused variable: `v`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:73
+    |
+249 | ...: *mut c_void, v: *mut c_void, output: *mut c_void, chunk_lse: *mut c_void, batch_size: usize, nu...
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unused variable: `output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:89
+    |
+249 | ...t c_void, output: *mut c_void, chunk_lse: *mut c_void, batch_size: usize, num_heads: usize, chunk...
+    |              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `chunk_lse`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:110
+    |
+249 | ..._void, chunk_lse: *mut c_void, batch_size: usize, num_heads: usize, chunk_id: usize, chunk_len: u...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_lse`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:134
+    |
+249 | ...void, batch_size: usize, num_heads: usize, chunk_id: usize, chunk_len: usize, head_dim: usize) ->...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:153
+    |
+249 | ...usize, num_heads: usize, chunk_id: usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChu...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `chunk_id`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:171
+    |
+249 | ... usize, chunk_id: usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_id`
+
+warning: unused variable: `chunk_len`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:188
+    |
+249 | ...usize, chunk_len: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_len`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:249:206
+    |
+249 | ... usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `chunk_outputs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:36
+    |
+254 | ...f, chunk_outputs: *mut c_void, chunk_lse: *mut c_void, final_output: *mut c_void, batch_size: usi...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_outputs`
+
+warning: unused variable: `chunk_lse`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:64
+    |
+254 | ..._void, chunk_lse: *mut c_void, final_output: *mut c_void, batch_size: usize, num_heads: usize, nu...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_lse`
+
+warning: unused variable: `final_output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:88
+    |
+254 | ...id, final_output: *mut c_void, batch_size: usize, num_heads: usize, num_chunks: usize, head_dim: ...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_output`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:115
+    |
+254 | ...void, batch_size: usize, num_heads: usize, num_chunks: usize, head_dim: usize) -> Result<(), HsaC...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:134
+    |
+254 | ...usize, num_heads: usize, num_chunks: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `num_chunks`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:152
+    |
+254 | ...size, num_chunks: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_chunks`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:254:171
+    |
+254 | ... usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `chunk_outputs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:36
+    |
+259 | ...f, chunk_outputs: *mut c_void, chunk_lse: *mut c_void, final_output: *mut c_void, batch_size: usi...
+    |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_outputs`
+
+warning: unused variable: `chunk_lse`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:64
+    |
+259 | ..._void, chunk_lse: *mut c_void, final_output: *mut c_void, batch_size: usize, num_heads: usize, nu...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chunk_lse`
+
+warning: unused variable: `final_output`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:88
+    |
+259 | ...id, final_output: *mut c_void, batch_size: usize, num_heads: usize, num_chunks: usize, head_dim: ...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_output`
+
+warning: unused variable: `batch_size`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:115
+    |
+259 | ...void, batch_size: usize, num_heads: usize, num_chunks: usize, head_dim: usize) -> Result<(), HsaC...
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:134
+    |
+259 | ...usize, num_heads: usize, num_chunks: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+warning: unused variable: `num_chunks`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:152
+    |
+259 | ...size, num_chunks: usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |          ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_chunks`
+
+warning: unused variable: `head_dim`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:259:171
+    |
+259 | ... usize, head_dim: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: unused variable: `seq_lens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:264:39
+    |
+264 | ...(&self, seq_lens: *mut c_void, prefill_mask: *mut c_void, decode_mask: *mut c_void, num_seqs: usi...
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seq_lens`
+
+warning: unused variable: `prefill_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:264:62
+    |
+264 | ...id, prefill_mask: *mut c_void, decode_mask: *mut c_void, num_seqs: usize) -> Result<(), HsaChunke...
+    |        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prefill_mask`
+
+warning: unused variable: `decode_mask`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:264:89
+    |
+264 | ...oid, decode_mask: *mut c_void, num_seqs: usize) -> Result<(), HsaChunkedPrefillError> {
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_decode_mask`
+
+warning: unused variable: `num_seqs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:264:115
+    |
+264 | ...c_void, num_seqs: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_seqs`
+
+warning: unused variable: `workloads`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:269:36
+    |
+269 | ...&self, workloads: *mut c_void, schedule: *mut c_void, num_seqs: usize, max_batch_tokens: usize) -...
+    |           ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workloads`
+
+warning: unused variable: `schedule`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:269:60
+    |
+269 | ...c_void, schedule: *mut c_void, num_seqs: usize, max_batch_tokens: usize) -> Result<(), HsaChunked...
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_schedule`
+
+warning: unused variable: `num_seqs`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:269:83
+    |
+269 | ...c_void, num_seqs: usize, max_batch_tokens: usize) -> Result<(), HsaChunkedPrefillError> {
+    |            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_seqs`
+
+warning: unused variable: `max_batch_tokens`
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:269:100
+    |
+269 | ...e: *mut c_void, num_seqs: usize, max_batch_tokens: usize) -> Result<(), HsaChunkedPrefillError> {
+    |                                     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_batch_tokens`
+
+warning: unused variable: `hs`
+    --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:3626:17
+     |
+3626 |             let hs = head_dim.min(256);
+     |                 ^^ help: if this is intentional, prefix it with an underscore: `_hs`
+
+warning: value assigned to `score` is never read
+    --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:3596:33
+     |
+3596 |                 let mut score = 0.0f32;
+     |                                 ^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `top_k_with_probs` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/ops/math.rs:48:15
+   |
+48 | pub(crate) fn top_k_with_probs<T: KernelFloat>(logits: &[T], k: usize) -> Vec<(usize, f32)> {
+   |               ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `weight_shape` is never read
+  --> /home/putao/code/rust/gllm-kernels/src/ops/eagle3/predictor.rs:12:5
+   |
+ 8 | pub struct ConfidencePredictor<T: KernelFloat> {
+   |            ------------------- field in this struct
+...
+12 |     weight_shape: [usize; 2],
+   |     ^^^^^^^^^^^^
+   |
+   = note: `ConfidencePredictor` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `kernel_layer_skip_f16` is never read
+  --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/spec_ee.rs:98:5
+   |
+90 | pub struct SpecEEKernel {
+   |            ------------ field in this struct
+...
+98 |     kernel_layer_skip_f16: CudaFunction,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kernel_build_tree_mask_f16` is never read
+   --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/flash_tree_attn.rs:104:5
+    |
+ 93 | pub struct FlashTreeAttnKernel {
+    |            ------------------- field in this struct
+...
+104 |     kernel_build_tree_mask_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kernel_zone_transition_f16` is never read
+   --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/evic_press.rs:118:5
+    |
+110 | pub struct EvicPressKernel {
+    |            --------------- field in this struct
+...
+118 |     kernel_zone_transition_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `kernel_build_candidates_f16` is never read
+   --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/medusa.rs:107:5
+    |
+ 96 | pub struct MedusaKernel {
+    |            ------------ field in this struct
+...
+107 |     kernel_build_candidates_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_compute_hash_f16` and `kernel_prefix_match_f16` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/prompt_cache.rs:102:5
+    |
+ 97 | pub struct PromptCacheKernel {
+    |            ----------------- fields in this struct
+...
+102 |     kernel_compute_hash_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+...
+105 |     kernel_prefix_match_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_pod_split_f16` and `kernel_schedule_f16` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/cuda_kernels/chunked_prefill.rs:107:5
+    |
+ 96 | pub struct ChunkedPrefillKernel {
+    |            -------------------- fields in this struct
+...
+107 |     kernel_pod_split_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+110 |     kernel_schedule_f16: CudaFunction,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HSA_PACKET_TYPE_KERNEL_DISPATCH` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:32:7
+   |
+32 | const HSA_PACKET_TYPE_KERNEL_DISPATCH: u16 = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HSA_FENCE_SCOPE_SYSTEM` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:33:7
+   |
+33 | const HSA_FENCE_SCOPE_SYSTEM: u16 = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HSA_SIGNAL_CONDITION_LT` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:34:7
+   |
+34 | const HSA_SIGNAL_CONDITION_LT: u32 = 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HSA_WAIT_STATE_BLOCKED` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:35:7
+   |
+35 | const HSA_WAIT_STATE_BLOCKED: u32 = 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:130:5
+    |
+126 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+130 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+131 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+132 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+133 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ConfidenceArgs` is never constructed
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:263:8
+    |
+263 | struct ConfidenceArgs {
+    |        ^^^^^^^^^^^^^^
+
+warning: struct `AdjustDepthArgs` is never constructed
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:275:8
+    |
+275 | struct AdjustDepthArgs {
+    |        ^^^^^^^^^^^^^^^
+
+warning: fields `module_draft_f32`, `module_draft_f16`, and `module_update_history` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_eagle3.rs:296:5
+    |
+289 | pub struct HsaEagle3Kernel {
+    |            --------------- fields in this struct
+...
+296 |     module_draft_f32: Option<HsaKernelModule>,
+    |     ^^^^^^^^^^^^^^^^
+297 |     module_draft_f16: Option<HsaKernelModule>,
+    |     ^^^^^^^^^^^^^^^^
+298 |     module_update_history: Option<HsaKernelModule>,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HSA_STATUS_SUCCESS_VAL` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:29:7
+   |
+29 | const HSA_STATUS_SUCCESS_VAL: i32 = 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_spec_ee.rs:106:5
+    |
+103 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+106 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+107 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+108 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+109 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_flash_tree_attn.rs:106:5
+    |
+103 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+106 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+107 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+108 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+109 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_int2_quantizer.rs:101:5
+    |
+ 98 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+101 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+102 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+103 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+104 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_evic_press.rs:128:5
+    |
+125 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+128 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+129 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+130 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+131 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_medusa.rs:112:5
+    |
+109 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+112 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+113 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+114 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+115 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_prompt_cache.rs:108:5
+    |
+105 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+108 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+109 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+110 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+111 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kernel_object`, `kernarg_size`, `group_segment_size`, and `private_segment_size` are never read
+   --> /home/putao/code/rust/gllm-kernels/src/hip_kernels/hsa_chunked_prefill.rs:110:5
+    |
+107 | struct HsaKernelModule {
+    |        --------------- fields in this struct
+...
+110 |     kernel_object: u64,
+    |     ^^^^^^^^^^^^^
+111 |     kernarg_size: u32,
+    |     ^^^^^^^^^^^^
+112 |     group_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^
+113 |     private_segment_size: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `log_softmax_pipeline_f32`, `top_k_pipeline_f16`, `log_softmax_pipeline_f16`, and `log_softmax_layout` are never read
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/medusa.rs:70:5
+   |
+64 | pub struct WgpuMedusa {
+   |            ---------- fields in this struct
+...
+70 |     log_softmax_pipeline_f32: wgpu::ComputePipeline,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+74 |     top_k_pipeline_f16: Option<wgpu::ComputePipeline>,
+   |     ^^^^^^^^^^^^^^^^^^
+75 |     log_softmax_pipeline_f16: Option<wgpu::ComputePipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     log_softmax_layout: wgpu::BindGroupLayout,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: field `copy_kv_f16_pipeline` is never read
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:96:5
+   |
+83 | pub struct WgpuPromptCache {
+   |            --------------- field in this struct
+...
+96 |     copy_kv_f16_pipeline: Option<wgpu::ComputePipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `merge_f16_pipeline` is never read
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/chunked_prefill.rs:108:5
+    |
+ 96 | pub struct WgpuChunkedPrefill {
+    |            ------------------ field in this struct
+...
+108 |     merge_f16_pipeline: Option<wgpu::ComputePipeline>,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: fields `quant_int8_to_int2_pipeline_f32`, `dequant_int8_pipeline_f32`, `dequant_int2_pipeline_f32`, `quant_fp16_to_int8_pipeline_f16`, `zone_warm_to_cold_layout`, and `dequant_layout` are never read
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/evic_press.rs:54:5
+   |
+48 | pub struct WgpuEvicPress {
+   |            ------------- fields in this struct
+...
+54 |     quant_int8_to_int2_pipeline_f32: wgpu::ComputePipeline,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+55 |     dequant_int8_pipeline_f32: wgpu::ComputePipeline,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+56 |     dequant_int2_pipeline_f32: wgpu::ComputePipeline,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+59 |     quant_fp16_to_int8_pipeline_f16: Option<wgpu::ComputePipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+63 |     zone_warm_to_cold_layout: wgpu::BindGroupLayout,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+64 |     dequant_layout: wgpu::BindGroupLayout,
+   |     ^^^^^^^^^^^^^^
+
+warning: fields `unpack_pipeline_f32`, `dequantize_pipeline_f16`, and `unpack_layout` are never read
+  --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/int2_quantizer.rs:43:5
+   |
+36 | pub struct WgpuInt2Quantizer {
+   |            ----------------- fields in this struct
+...
+43 |     unpack_pipeline_f32: wgpu::ComputePipeline,
+   |     ^^^^^^^^^^^^^^^^^^^
+...
+46 |     dequantize_pipeline_f16: Option<wgpu::ComputePipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+...
+51 |     unpack_layout: wgpu::BindGroupLayout,
+   |     ^^^^^^^^^^^^^
+
+warning: static `HSA_EAGLE3_KERNEL` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:89:8
+   |
+89 | static HSA_EAGLE3_KERNEL: OnceLock<Option<HsaEagle3Kernel>> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_SPEC_EE_KERNEL` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:93:8
+   |
+93 | static HSA_SPEC_EE_KERNEL: OnceLock<Option<HsaSpecEEKernel>> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_FLASH_TREE_KERNEL` is never used
+  --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:97:8
+   |
+97 | static HSA_FLASH_TREE_KERNEL: OnceLock<Option<HsaFlashTreeAttnKernel>> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_INT2_KERNEL` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:101:8
+    |
+101 | static HSA_INT2_KERNEL: OnceLock<Option<HsaInt2QuantizerKernel>> = OnceLock::new();
+    |        ^^^^^^^^^^^^^^^
+
+warning: static `HSA_EVICT_PRESS_KERNEL` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:105:8
+    |
+105 | static HSA_EVICT_PRESS_KERNEL: OnceLock<Option<HsaEvicPressKernel>> = OnceLock::new();
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_MEDUSA_KERNEL` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:109:8
+    |
+109 | static HSA_MEDUSA_KERNEL: OnceLock<Option<HsaMedusaKernel>> = OnceLock::new();
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_PROMPT_CACHE_KERNEL` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:113:8
+    |
+113 | static HSA_PROMPT_CACHE_KERNEL: OnceLock<Option<HsaPromptCacheKernel>> = OnceLock::new();
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `HSA_CHUNKED_PREFILL_KERNEL` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:117:8
+    |
+117 | static HSA_CHUNKED_PREFILL_KERNEL: OnceLock<Option<HsaChunkedPrefillKernel>> = OnceLock::new();
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_eagle3_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:172:4
+    |
+172 | fn get_hsa_eagle3_kernel() -> Option<&'static HsaEagle3Kernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_spec_ee_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:188:4
+    |
+188 | fn get_hsa_spec_ee_kernel() -> Option<&'static HsaSpecEEKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_flash_tree_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:204:4
+    |
+204 | fn get_hsa_flash_tree_kernel() -> Option<&'static HsaFlashTreeAttnKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_int2_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:220:4
+    |
+220 | fn get_hsa_int2_kernel() -> Option<&'static HsaInt2QuantizerKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_evic_press_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:236:4
+    |
+236 | fn get_hsa_evic_press_kernel() -> Option<&'static HsaEvicPressKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_medusa_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:252:4
+    |
+252 | fn get_hsa_medusa_kernel() -> Option<&'static HsaMedusaKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_prompt_cache_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:268:4
+    |
+268 | fn get_hsa_prompt_cache_kernel() -> Option<&'static HsaPromptCacheKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_hsa_chunked_prefill_kernel` is never used
+   --> /home/putao/code/rust/gllm-kernels/src/kernel_dispatcher.rs:284:4
+    |
+284 | fn get_hsa_chunked_prefill_kernel() -> Option<&'static HsaChunkedPrefillKernel> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/flash_tree_attn.rs:632:9
+    |
+632 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+632 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/flash_tree_attn.rs:792:9
+    |
+792 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+792 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/flash_tree_attn.rs:955:9
+    |
+955 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+955 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/flash_tree_attn.rs:1130:9
+     |
+1130 |         self.device.poll(wgpu::PollType::Wait);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+1130 |         let _ = self.device.poll(wgpu::PollType::Wait);
+     |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/medusa.rs:781:9
+    |
+781 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+781 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/medusa.rs:797:9
+    |
+797 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+797 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:569:9
+    |
+569 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+569 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:710:9
+    |
+710 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+710 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:839:9
+    |
+839 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+839 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:948:9
+    |
+948 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+948 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/prompt_cache.rs:1066:9
+     |
+1066 |         self.device.poll(wgpu::PollType::Wait);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+1066 |         let _ = self.device.poll(wgpu::PollType::Wait);
+     |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/chunked_prefill.rs:617:9
+    |
+617 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+617 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/chunked_prefill.rs:742:9
+    |
+742 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+742 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/chunked_prefill.rs:888:9
+    |
+888 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+888 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/chunked_prefill.rs:1055:9
+     |
+1055 |         self.device.poll(wgpu::PollType::Wait);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+1055 |         let _ = self.device.poll(wgpu::PollType::Wait);
+     |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/evic_press.rs:647:9
+    |
+647 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+647 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/evic_press.rs:663:9
+    |
+663 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+663 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/int2_quantizer.rs:682:9
+    |
+682 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+682 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> /home/putao/code/rust/gllm-kernels/src/wgpu_kernels/int2_quantizer.rs:698:9
+    |
+698 |         self.device.poll(wgpu::PollType::Wait);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+698 |         let _ = self.device.poll(wgpu::PollType::Wait);
+    |         +++++++
+
+   Compiling gllm v0.11.0 (/home/putao/code/rust/gllm)
+warning: unused variable: `attn_out_buf`
+   --> src/causal_attention.rs:320:13
+    |
+320 |         let attn_out_buf = &mut attn_out_buf[..q_len];
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attn_out_buf`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `k_buf`
+   --> src/causal_attention.rs:340:14
+    |
+340 |         let (k_buf, rest) = rest.split_at_mut(kv_len);
+    |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_k_buf`
+
+warning: unused variable: `v_buf`
+   --> src/causal_attention.rs:341:14
+    |
+341 |         let (v_buf, attn_out_buf) = rest.split_at_mut(kv_len);
+    |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_buf`
+
+warning: unused variable: `intermediate_size`
+   --> src/decoder_layer.rs:126:13
+    |
+126 |         let intermediate_size = self.gate_proj.weight.rows;
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_intermediate_size`
+
+warning: unused variable: `adaptive_len`
+   --> src/generator_model.rs:351:32
+    |
+351 |             let (draft_tokens, adaptive_len) = match draft_result {
+    |                                ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_adaptive_len`
+
+warning: unused variable: `dispatcher`
+   --> src/generator_model.rs:586:13
+    |
+586 |         let dispatcher = kernel_dispatcher();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dispatcher`
+
+warning: unused variable: `cache`
+   --> src/generator_model.rs:705:55
+    |
+705 |     fn get_token_hidden_states(&self, tokens: &[i64], cache: &mut KVCache) -> Result<Vec<f32>> {
+    |                                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_cache`
+
+warning: unused variable: `current_tokens`
+   --> src/generator_model.rs:733:9
+    |
+733 |         current_tokens: &[i64],
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_tokens`
+
+warning: variable `qs_idx` is assigned to, but never used
+   --> src/quantized.rs:246:17
+    |
+246 |             let mut qs_idx = 0usize;
+    |                 ^^^^^^^^^^
+    |
+    = note: consider using `_qs_idx` instead
+
+warning: value assigned to `qs_idx` is never read
+   --> src/quantized.rs:279:21
+    |
+279 |                     qs_idx += 32;
+    |                     ^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `is_deterministic_mode` is never used
+   --> src/attention/deterministic.rs:138:8
+    |
+138 | pub fn is_deterministic_mode() -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: trait `DeterministicExecution` is never used
+   --> src/attention/deterministic.rs:143:11
+    |
+143 | pub trait DeterministicExecution {
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `verify_deterministic` is never used
+   --> src/attention/deterministic.rs:173:8
+    |
+173 | pub fn verify_deterministic<T, F>(_config: &DeterministicConfig, f: F) -> T
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StrictOrderIterator` is never constructed
+   --> src/attention/deterministic.rs:184:12
+    |
+184 | pub struct StrictOrderIterator<I> {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `current_index` are never used
+   --> src/attention/deterministic.rs:190:12
+    |
+189 | impl<I: Iterator> StrictOrderIterator<I> {
+    | ---------------------------------------- associated items in this implementation
+190 |     pub fn new(iter: I) -> Self {
+    |            ^^^
+...
+198 |     pub fn current_index(&self) -> usize {
+    |            ^^^^^^^^^^^^^
+
+warning: trait `StrictOrderExt` is never used
+   --> src/attention/deterministic.rs:219:11
+    |
+219 | pub trait StrictOrderExt: Iterator + Sized {
+    |           ^^^^^^^^^^^^^^
+
+warning: enum `AggregationStrategy` is never used
+   --> src/distributed/coordinator.rs:172:10
+    |
+172 | pub enum AggregationStrategy {
+    |          ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AggregationPlan` is never constructed
+   --> src/distributed/coordinator.rs:188:12
+    |
+188 | pub struct AggregationPlan {
+    |            ^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_strategy`, `with_strict_order`, `ordered_shards`, `strategy`, and `num_shards` are never used
+   --> src/distributed/coordinator.rs:199:12
+    |
+197 | impl AggregationPlan {
+    | -------------------- associated items in this implementation
+198 |     /// Create a new aggregation plan.
+199 |     pub fn new(shards: Vec<ShardLocation>) -> Self {
+    |            ^^^
+...
+208 |     pub fn with_strategy(mut self, strategy: AggregationStrategy) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+214 |     pub fn with_strict_order(mut self, strict: bool) -> Self {
+    |            ^^^^^^^^^^^^^^^^^
+...
+220 |     pub fn ordered_shards(&self) -> Vec<&ShardLocation> {
+    |            ^^^^^^^^^^^^^^
+...
+229 |     pub fn strategy(&self) -> AggregationStrategy {
+    |            ^^^^^^^^
+...
+234 |     pub fn num_shards(&self) -> usize {
+    |            ^^^^^^^^^^
+
+warning: fields `hidden_size` and `sliding_window` are never read
+   --> src/causal_attention.rs:111:16
+    |
+102 | pub struct CausalAttention {
+    |            --------------- fields in this struct
+...
+111 |     pub(crate) hidden_size: usize,
+    |                ^^^^^^^^^^^
+112 |     pub(crate) sliding_window: Option<usize>,
+    |                ^^^^^^^^^^^^^^
+    |
+    = note: `CausalAttention` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `rope` is never read
+   --> src/dynamic_bert.rs:137:16
+    |
+129 | pub struct DynamicBertModel {
+    |            ---------------- field in this struct
+...
+137 |     pub(crate) rope: Option<Arc<RotaryPositionEmbedding>>,
+    |                ^^^^
+    |
+    = note: `DynamicBertModel` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `hidden_size` is never used
+   --> src/dynamic_bert.rs:223:12
+    |
+143 | impl DynamicBertModel {
+    | --------------------- method in this implementation
+...
+223 |     pub fn hidden_size(&self) -> usize {
+    |            ^^^^^^^^^^^
+
+warning: method `hidden_size` is never used
+   --> src/engine.rs:344:8
+    |
+320 | impl EmbeddingModel {
+    | ------------------- method in this implementation
+...
+344 |     fn hidden_size(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: method `hidden_size` is never used
+   --> src/engine.rs:400:12
+    |
+357 | impl EmbeddingEngine {
+    | -------------------- method in this implementation
+...
+400 |     pub fn hidden_size(&self) -> usize {
+    |            ^^^^^^^^^^^
+
+warning: method `max_position_embeddings` is never used
+  --> src/generator_engine.rs:50:8
+   |
+16 | impl GeneratorVariant {
+   | --------------------- method in this implementation
+...
+50 |     fn max_position_embeddings(&self) -> usize {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_medusa_head_weights` is never used
+   --> src/generator_model.rs:700:8
+    |
+113 | impl GeneratorModel {
+    | ------------------- method in this implementation
+...
+700 |     fn get_medusa_head_weights(&self) -> Vec<f32> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `batch_size`, `memory_limit`, and `gpu_memory_fraction` are never read
+  --> src/performance_optimizer.rs:7:9
+   |
+ 6 | pub struct PerformanceOptimizer {
+   |            -------------------- fields in this struct
+ 7 |     pub batch_size: usize,
+   |         ^^^^^^^^^^
+ 8 |     pub max_sequence_length: usize,
+ 9 |     pub memory_limit: usize,
+   |         ^^^^^^^^^^^^
+10 |     pub gpu_memory_fraction: f32,
+   |         ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `PerformanceOptimizer` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `from_config`, `optimize_batch_size`, and `validate_sequence` are never used
+  --> src/performance_optimizer.rs:14:12
+   |
+13 | impl PerformanceOptimizer {
+   | ------------------------- associated items in this implementation
+14 |     pub fn from_config(config: &ModelConfig) -> Self {
+   |            ^^^^^^^^^^^
+...
+25 |     pub fn optimize_batch_size(&self, input_length: usize) -> usize {
+   |            ^^^^^^^^^^^^^^^^^^^
+...
+38 |     pub fn validate_sequence(&self, seq_len: usize) -> Result<()> {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: method `with_gguf` is never used
+   --> src/registry.rs:181:8
+    |
+159 | impl RegistryEntry {
+    | ------------------ method in this implementation
+...
+181 |     fn with_gguf(mut self, gguf_repo: &str) -> Self {
+    |        ^^^^^^^^^
+
+warning: `gllm-kernels` (lib) generated 336 warnings (run `cargo fix --lib -p gllm-kernels` to apply 270 suggestions)
+warning: `gllm` (lib) generated 29 warnings (run `cargo fix --lib -p gllm` to apply 8 suggestions)
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio`
+ --> examples/benchmark_llm.rs:5:3
+  |
+5 | #[tokio::main]
+  |   ^^^^^ use of unresolved module or unlinked crate `tokio`
+
+error[E0277]: `Result<Client, gllm::Error>` is not a future
+  --> examples/benchmark_llm.rs:32:62
+   |
+32 |     let client_cpu = Client::with_config(&model, cpu_config).await?;
+   |                      --------------------------------------- ^^^^^ `Result<Client, gllm::Error>` is not a future
+   |                      |
+   |                      this call returns `Result<Client, gllm::Error>`
+   |
+   = help: the trait `Future` is not implemented for `Result<Client, gllm::Error>`
+   = note: Result<Client, gllm::Error> must be a future or must implement `IntoFuture` to be awaited
+   = note: required for `Result<Client, gllm::Error>` to implement `IntoFuture`
+help: remove the `.await`
+   |
+32 -     let client_cpu = Client::with_config(&model, cpu_config).await?;
+32 +     let client_cpu = Client::with_config(&model, cpu_config)?;
+   |
+
+error[E0282]: type annotations needed
+  --> examples/benchmark_llm.rs:32:9
+   |
+32 |     let client_cpu = Client::with_config(&model, cpu_config).await?;
+   |         ^^^^^^^^^^
+...
+35 |     let resp_cpu = client_cpu.generate(prompt)
+   |                    ---------- type must be known at this point
+   |
+help: consider giving `client_cpu` an explicit type
+   |
+32 |     let client_cpu: /* Type */ = Client::with_config(&model, cpu_config).await?;
+   |                   ++++++++++++
+
+error[E0277]: `Result<Client, gllm::Error>` is not a future
+  --> examples/benchmark_llm.rs:53:62
+   |
+53 |     let client_gpu = Client::with_config(&model, gpu_config).await?;
+   |                      --------------------------------------- ^^^^^ `Result<Client, gllm::Error>` is not a future
+   |                      |
+   |                      this call returns `Result<Client, gllm::Error>`
+   |
+   = help: the trait `Future` is not implemented for `Result<Client, gllm::Error>`
+   = note: Result<Client, gllm::Error> must be a future or must implement `IntoFuture` to be awaited
+   = note: required for `Result<Client, gllm::Error>` to implement `IntoFuture`
+help: remove the `.await`
+   |
+53 -     let client_gpu = Client::with_config(&model, gpu_config).await?;
+53 +     let client_gpu = Client::with_config(&model, gpu_config)?;
+   |
+
+error[E0282]: type annotations needed
+  --> examples/benchmark_llm.rs:53:9
+   |
+53 |     let client_gpu = Client::with_config(&model, gpu_config).await?;
+   |         ^^^^^^^^^^
+...
+56 |     let resp_gpu = client_gpu.generate(prompt)
+   |                    ---------- type must be known at this point
+   |
+help: consider giving `client_gpu` an explicit type
+   |
+53 |     let client_gpu: /* Type */ = Client::with_config(&model, gpu_config).await?;
+   |                   ++++++++++++
+
+error[E0752]: `main` function is not allowed to be `async`
+ --> examples/benchmark_llm.rs:6:1
+  |
+6 | async fn main() -> Result<()> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `main` function is not allowed to be `async`
+
+Some errors have detailed explanations: E0277, E0282, E0433, E0752.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `gllm` (example "benchmark_llm") due to 6 previous errors

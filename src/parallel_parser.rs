@@ -1,3 +1,4 @@
+use crate::quantized::{NativeQLinear, QuantizedWeight};
 use crate::types::{Error, Result};
 use crate::weight_loader::{
     LayerNormWeights, LinearWeights, LoadedTensor, MultiHeadAttentionWeights, RawTensor, WeightLoader,
@@ -309,21 +310,54 @@ pub(crate) fn load_linear<L: TensorLoader>(
     weight_name: &str,
     bias_name: Option<&str>,
 ) -> Result<LinearWeights> {
-    let weight_tensor = loader.load_tensor(weight_name)?;
-    let weight = weight_tensor.to_weight_matrix()?;
+    if loader.has_tensor(weight_name) {
+        let weight_tensor = loader.load_tensor(weight_name)?;
+        let weight = weight_tensor.to_weight_matrix()?;
 
-    let bias = if let Some(bias_name) = bias_name {
-        if loader.has_tensor(bias_name) {
-            let bias_tensor = loader.load_tensor(bias_name)?;
-            Some(bias_tensor.to_weight_vector()?)
+        let bias = if let Some(bias_name) = bias_name {
+            if loader.has_tensor(bias_name) {
+                let bias_tensor = loader.load_tensor(bias_name)?;
+                Some(bias_tensor.to_weight_vector()?)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    Ok(LinearWeights { weight, bias })
+        return Ok(LinearWeights::from_dense(weight, bias));
+    }
+
+    let prefix = weight_name
+        .strip_suffix(".weight")
+        .ok_or_else(|| Error::LoadError("Quantized weight name missing .weight suffix".into()))?;
+
+    if loader.is_awq_model() {
+        let awq = crate::awq::AwqQuantizedWeight::from_safetensors(loader, prefix)?;
+        let bias = if let Some(bias_name) = bias_name {
+            if loader.has_tensor(bias_name) {
+                let bias_tensor = loader.load_tensor(bias_name)?;
+                Some(bias_tensor.to_weight_vector()?.data)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let native = NativeQLinear::new(
+            QuantizedWeight::Awq {
+                weight: awq.weight,
+                shape: awq.shape,
+            },
+            bias,
+        )?;
+        return Ok(LinearWeights::from_quantized(native));
+    }
+
+    Err(Error::LoadError(format!(
+        "Linear weight '{}' not found",
+        weight_name
+    )))
 }
 
 pub(crate) fn load_embedding<L: TensorLoader>(loader: &L, weight_name: &str) -> Result<gllm_kernels::WeightMatrix> {

@@ -4,10 +4,11 @@
 //! tensors and dequantizing them into f32 for inference. The implementation is
 //! intentionally CPU-only and pure Rust to match the gllm design constraints.
 
-use crate::quantized_ops::{DefaultQuantizedBackend, MatmulInput, QuantizedBackend};
 use crate::types::{Error, Result};
-use half::f16;
+use gllm_kernels::backend::Backend;
 use gllm_kernels::linear_forward;
+use gllm_kernels::quantized::{AwqWeight, Q4_0Block, Q8_0Block};
+use half::f16;
 
 /// GGML data types used by GGUF tensors.
 #[allow(non_camel_case_types)]
@@ -139,6 +140,7 @@ impl QTensor {
             GgmlDType::F32 => self.dequant_f32(),
             GgmlDType::F16 => self.dequant_f16(),
             GgmlDType::Q4_0 => self.dequant_q4_0(),
+            GgmlDType::Q3_K_S | GgmlDType::Q3_K_M | GgmlDType::Q3_K_L => self.dequant_q3_k(),
             GgmlDType::Q4_K_S | GgmlDType::Q4_K_M => self.dequant_q4_k(),
             GgmlDType::Q8_0 => self.dequant_q8_0(),
             _ => unimplemented!("GGML dtype {:?} dequantization is not implemented", self.dtype),
@@ -206,6 +208,89 @@ impl QTensor {
         output
     }
 
+    /// Q3_K_S/Q3_K_M/Q3_K_L: block_size=256, each block = 110 bytes.
+    /// Layout: hmask[32] + qs[64] + scales[12] + d[2] (f16)
+    /// 
+    /// Each element is 3 bits: 2 bits from qs + 1 bit from hmask.
+    /// The scales array encodes 16 scale values for 16 sub-blocks of 16 elements.
+    fn dequant_q3_k(&self) -> Vec<f32> {
+        const QK_K: usize = 256;
+        const BLOCK_BYTES: usize = 110; // 32 + 64 + 12 + 2
+        let num_blocks = self.data.len() / BLOCK_BYTES;
+        let mut output = Vec::with_capacity(num_blocks * QK_K);
+
+        for block in self.data.chunks_exact(BLOCK_BYTES) {
+            // Block layout: hmask[0..32] + qs[32..96] + scales[96..108] + d[108..110]
+            let hmask = &block[0..32];
+            let qs = &block[32..96];
+            let scales_raw = &block[96..108];
+            let d = f16::from_bits(u16::from_le_bytes([block[108], block[109]])).to_f32();
+
+            // Decode 16 scale values from 12 packed bytes
+            let mut scales = [0i8; 16];
+            for i in 0..8 {
+                scales[i] = ((scales_raw[i] & 0x0F) as i8) - 8;
+                scales[i + 8] = ((scales_raw[i] >> 4) as i8) - 8;
+            }
+            // High bits of scales from bytes 8-11
+            for i in 0..4 {
+                let b = scales_raw[8 + i];
+                scales[i] = (scales[i] & 0x0F) | (((b & 0x03) as i8) << 4);
+                scales[i + 4] = (scales[i + 4] & 0x0F) | ((((b >> 2) & 0x03) as i8) << 4);
+                scales[i + 8] = (scales[i + 8] & 0x0F) | ((((b >> 4) & 0x03) as i8) << 4);
+                scales[i + 12] = (scales[i + 12] & 0x0F) | ((((b >> 6) & 0x03) as i8) << 4);
+            }
+
+            // Dequantize 256 elements
+            let mut m = 1u8;
+            let mut is = 0usize;
+            let mut qs_idx = 0usize;
+
+            for n in 0..QK_K {
+                let l = n % 256;
+                let j = l % 128;
+                let qb = j / 2;
+
+                // Extract 2-bit value from qs
+                let q2 = if j < 64 {
+                    (qs[qb] >> ((l % 2) * 4)) & 0x03
+                } else {
+                    (qs[qb] >> (((l % 2) * 4) + 2)) & 0x03
+                };
+
+                // Extract high bit from hmask
+                let hbit = if (hmask[j % 32] & m) != 0 { 4u8 } else { 0u8 };
+
+                // Combine to get 3-bit value
+                let q3 = (q2 | hbit) as i8 - 4;
+
+                // Apply scale
+                let scale_idx = is;
+                let value = d * (scales[scale_idx] as f32) * (q3 as f32);
+                output.push(value);
+
+                // Update indices
+                if (n + 1) % 16 == 0 {
+                    is += 1;
+                    if is >= 16 {
+                        is = 0;
+                    }
+                }
+                if (n + 1) % 32 == 0 {
+                    qs_idx += 32;
+                }
+                if (n + 1) % 128 == 0 {
+                    m <<= 1;
+                    if m == 0 {
+                        m = 1;
+                    }
+                }
+            }
+        }
+        output
+    }
+
+
     /// Q4_K_S/Q4_K_M: block_size=256, block layout matches ggml's BlockQ4K.
     fn dequant_q4_k(&self) -> Vec<f32> {
         const QK_K: usize = 256;
@@ -256,54 +341,286 @@ fn get_scale_min_k4(index: usize, scales: &[u8]) -> (u8, u8) {
     }
 }
 
-struct Q4Cache {
-    qweight: Vec<u8>,
-    scales: Vec<f16>,
+/// Supported quantized weight payloads for native matmul kernels.
+#[derive(Clone, Debug)]
+pub enum QuantizedWeight {
+    Q4 {
+        q_weight: Vec<u8>,
+        scales: Vec<f16>,
+        shape: [usize; 2],
+    },
+    Q8 {
+        q_weight: Vec<i8>,
+        scales: Vec<f16>,
+        shape: [usize; 2],
+    },
+    Awq {
+        weight: AwqWeight,
+        shape: [usize; 2],
+    },
 }
 
-/// Quantized linear layer that dequantizes weights on-the-fly.
+impl QuantizedWeight {
+    pub fn from_qtensor(tensor: &QTensor) -> Result<Self> {
+        let shape = shape_2d(&tensor.shape)?;
+        match tensor.dtype {
+            GgmlDType::Q4_0 => {
+                let blocks = parse_q4_0_blocks(tensor, shape)?;
+                let (q_weight, scales) = pack_q4_blocks(&blocks);
+                Ok(Self::Q4 {
+                    q_weight,
+                    scales,
+                    shape,
+                })
+            }
+            GgmlDType::Q8_0 => {
+                let blocks = parse_q8_0_blocks(tensor, shape)?;
+                let (q_weight, scales) = pack_q8_blocks(&blocks);
+                Ok(Self::Q8 {
+                    q_weight,
+                    scales,
+                    shape,
+                })
+            }
+            _ => Err(Error::LoadError(format!(
+                "GGML dtype {:?} is not supported for native quantized weights",
+                tensor.dtype
+            ))),
+        }
+    }
+
+    pub fn shape(&self) -> [usize; 2] {
+        match self {
+            Self::Q4 { shape, .. } | Self::Q8 { shape, .. } | Self::Awq { shape, .. } => *shape,
+        }
+    }
+
+    pub fn in_features(&self) -> usize {
+        self.shape()[1]
+    }
+
+    pub fn out_features(&self) -> usize {
+        self.shape()[0]
+    }
+}
+
+/// Native quantized Linear layer using backend quantized matmul kernels.
+#[derive(Clone, Debug)]
+pub struct NativeQLinear {
+    weight: QuantizedWeight,
+    bias: Option<Vec<f32>>,
+    in_features: usize,
+    out_features: usize,
+}
+
+impl NativeQLinear {
+    pub fn new(weight: QuantizedWeight, bias: Option<Vec<f32>>) -> Result<Self> {
+        let [out_features, in_features] = weight.shape();
+        if let Some(ref bias_vec) = bias {
+            if bias_vec.len() != out_features {
+                return Err(Error::LoadError(
+                    "NativeQLinear bias length does not match out_features".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            weight,
+            bias,
+            in_features,
+            out_features,
+        })
+    }
+
+    pub fn in_features(&self) -> usize {
+        self.in_features
+    }
+
+    pub fn out_features(&self) -> usize {
+        self.out_features
+    }
+
+    pub fn forward(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        batch: usize,
+        backend: &dyn Backend,
+    ) -> Result<()> {
+        if input.len() != batch * self.in_features {
+            return Err(Error::InferenceError(
+                "NativeQLinear input length mismatch".into(),
+            ));
+        }
+        if output.len() != batch * self.out_features {
+            return Err(Error::InferenceError(
+                "NativeQLinear output buffer size mismatch".into(),
+            ));
+        }
+
+        let mut result = match &self.weight {
+            QuantizedWeight::Q4 {
+                q_weight,
+                scales,
+                ..
+            } => backend
+                .q4_matmul(
+                    input,
+                    q_weight,
+                    scales,
+                    batch,
+                    self.out_features,
+                    self.in_features,
+                )
+                .map_err(Error::InferenceError)?,
+            QuantizedWeight::Q8 {
+                q_weight,
+                scales,
+                ..
+            } => backend
+                .q8_matmul(
+                    input,
+                    q_weight,
+                    scales,
+                    batch,
+                    self.out_features,
+                    self.in_features,
+                )
+                .map_err(Error::InferenceError)?,
+            QuantizedWeight::Awq { weight, .. } => backend
+                .awq_matmul(
+                    input,
+                    &weight.qweight,
+                    &weight.qzeros,
+                    &weight.scales,
+                    batch,
+                    self.out_features,
+                    self.in_features,
+                    weight.group_size,
+                )
+                .map_err(Error::InferenceError)?,
+        };
+
+        if let Some(ref bias) = self.bias {
+            for row in 0..batch {
+                let row_offset = row * self.out_features;
+                for col in 0..self.out_features {
+                    result[row_offset + col] += bias[col];
+                }
+            }
+        }
+
+        output.copy_from_slice(&result);
+        Ok(())
+    }
+
+    pub fn forward_alloc(
+        &self,
+        input: &[f32],
+        batch: usize,
+        backend: &dyn Backend,
+    ) -> Result<Vec<f32>> {
+        let mut output = vec![0.0f32; batch * self.out_features];
+        self.forward(input, &mut output, batch, backend)?;
+        Ok(output)
+    }
+}
+
+fn shape_2d(shape: &[usize]) -> Result<[usize; 2]> {
+    match shape {
+        [out, inn] => Ok([*out, *inn]),
+        _ => Err(Error::LoadError(
+            "Expected 2D tensor shape for quantized weights".into(),
+        )),
+    }
+}
+
+fn parse_q4_0_blocks(tensor: &QTensor, shape: [usize; 2]) -> Result<Vec<Q4_0Block>> {
+    const BLOCK_BYTES: usize = 18;
+    const BLOCK_SIZE: usize = 32;
+    if shape[1] % BLOCK_SIZE != 0 {
+        return Err(Error::LoadError(
+            "Q4_0 in_features must be a multiple of 32".into(),
+        ));
+    }
+    let blocks_per_row = shape[1] / BLOCK_SIZE;
+    let expected_blocks = shape[0]
+        .checked_mul(blocks_per_row)
+        .ok_or_else(|| Error::LoadError("Q4_0 block count overflow".into()))?;
+    if tensor.data.len() != expected_blocks * BLOCK_BYTES {
+        return Err(Error::LoadError(
+            "Q4_0 data length does not match tensor shape".into(),
+        ));
+    }
+    let mut blocks = Vec::with_capacity(expected_blocks);
+    for block in tensor.data.chunks_exact(BLOCK_BYTES) {
+        let scale = f16::from_bits(u16::from_le_bytes([block[0], block[1]]));
+        let mut qs = [0u8; 16];
+        qs.copy_from_slice(&block[2..18]);
+        blocks.push(Q4_0Block { scale, qs });
+    }
+    Ok(blocks)
+}
+
+fn parse_q8_0_blocks(tensor: &QTensor, shape: [usize; 2]) -> Result<Vec<Q8_0Block>> {
+    const BLOCK_BYTES: usize = 34;
+    const BLOCK_SIZE: usize = 32;
+    if shape[1] % BLOCK_SIZE != 0 {
+        return Err(Error::LoadError(
+            "Q8_0 in_features must be a multiple of 32".into(),
+        ));
+    }
+    let blocks_per_row = shape[1] / BLOCK_SIZE;
+    let expected_blocks = shape[0]
+        .checked_mul(blocks_per_row)
+        .ok_or_else(|| Error::LoadError("Q8_0 block count overflow".into()))?;
+    if tensor.data.len() != expected_blocks * BLOCK_BYTES {
+        return Err(Error::LoadError(
+            "Q8_0 data length does not match tensor shape".into(),
+        ));
+    }
+    let mut blocks = Vec::with_capacity(expected_blocks);
+    for block in tensor.data.chunks_exact(BLOCK_BYTES) {
+        let scale = f16::from_bits(u16::from_le_bytes([block[0], block[1]]));
+        let mut qs = [0i8; 32];
+        for (idx, value) in qs.iter_mut().enumerate() {
+            *value = block[2 + idx] as i8;
+        }
+        blocks.push(Q8_0Block { scale, qs });
+    }
+    Ok(blocks)
+}
+
+fn pack_q4_blocks(blocks: &[Q4_0Block]) -> (Vec<u8>, Vec<f16>) {
+    let mut q_weight = Vec::with_capacity(blocks.len() * 16);
+    let mut scales = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        scales.push(block.scale);
+        q_weight.extend_from_slice(&block.qs);
+    }
+    (q_weight, scales)
+}
+
+fn pack_q8_blocks(blocks: &[Q8_0Block]) -> (Vec<i8>, Vec<f16>) {
+    let mut q_weight = Vec::with_capacity(blocks.len() * 32);
+    let mut scales = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        scales.push(block.scale);
+        q_weight.extend_from_slice(&block.qs);
+    }
+    (q_weight, scales)
+}
+
 pub struct QLinear {
     /// Quantized weight matrix.
     weight: QTensor,
-    /// Cached Q4_0 scales and packed values.
-    q4_cache: Option<Q4Cache>,
+    /// Cached dequantized weights.
+    dequantized_weight: std::sync::OnceLock<Vec<f32>>,
     /// Optional bias vector.
     bias: Option<Vec<f32>>,
     /// Input feature dimension.
     in_features: usize,
     /// Output feature dimension.
     out_features: usize,
-}
-
-fn build_q4_cache(weight: &QTensor, in_features: usize, out_features: usize) -> Option<Q4Cache> {
-    if weight.dtype != GgmlDType::Q4_0 || in_features == 0 || out_features == 0 {
-        return None;
-    }
-    if in_features % 32 != 0 {
-        return None;
-    }
-    const BLOCK_BYTES: usize = 18;
-    const QBYTES: usize = 16;
-    if weight.data.len() % BLOCK_BYTES != 0 {
-        return None;
-    }
-    let blocks_per_row = in_features / 32;
-    let expected_blocks = out_features * blocks_per_row;
-    let actual_blocks = weight.data.len() / BLOCK_BYTES;
-    if expected_blocks != actual_blocks {
-        return None;
-    }
-
-    let mut scales = Vec::with_capacity(actual_blocks);
-    let mut qweight = Vec::with_capacity(actual_blocks * QBYTES);
-
-    for block in weight.data.chunks_exact(BLOCK_BYTES) {
-        let scale = f16::from_bits(u16::from_le_bytes([block[0], block[1]]));
-        scales.push(scale);
-        qweight.extend_from_slice(&block[2..]);
-    }
-
-    Some(Q4Cache { qweight, scales })
 }
 
 impl QLinear {
@@ -313,60 +630,43 @@ impl QLinear {
             [out, inn] => (*out, *inn),
             _ => (0, 0),
         };
-        let q4_cache = build_q4_cache(&weight, in_features, out_features);
         Self {
             weight,
-            q4_cache,
+            dequantized_weight: std::sync::OnceLock::new(),
             bias,
             in_features,
             out_features,
         }
     }
 
-    /// Forward pass using the optimized quantized matmul when available.
-    pub fn forward(&self, input: &[f32], batch: usize) -> Result<Vec<f32>> {
+    /// Forward pass using pre-allocated output buffer.
+    pub fn forward(&self, input: &[f32], output: &mut [f32], batch: usize) -> Result<()> {
         if input.len() != batch * self.in_features {
             return Err(Error::InferenceError(
                 "QLinear input length mismatch".into(),
             ));
         }
-        if self.weight.dtype == GgmlDType::Q4_0 {
-            if let Some(cache) = &self.q4_cache {
-                let mut output = DefaultQuantizedBackend::q4_matmul(
-                    MatmulInput::new(input, batch, self.in_features),
-                    &cache.qweight,
-                    &cache.scales,
-                );
-                if output.len() != batch * self.out_features {
-                    return Err(Error::InferenceError(
-                        "QLinear output length mismatch".into(),
-                    ));
-                }
-                if let Some(bias) = &self.bias {
-                    for b in 0..batch {
-                        let out_row = &mut output
-                            [b * self.out_features..(b + 1) * self.out_features];
-                        for o in 0..self.out_features {
-                            out_row[o] += bias[o];
-                        }
-                    }
-                }
-                return Ok(output);
-            }
+        if output.len() != batch * self.out_features {
+            return Err(Error::InferenceError(
+                "QLinear output buffer size mismatch".into(),
+            ));
         }
 
-        let weight_data = self.weight.dequantize();
-        let mut output = vec![0.0f32; batch * self.out_features];
+        // Use cached dequantized weights
+        let weight_data = self.dequantized_weight.get_or_init(|| {
+            self.weight.dequantize()
+        });
+
         linear_forward(
             input,
-            &weight_data,
+            weight_data,
             self.bias.as_deref(),
-            &mut output,
+            output,
             batch,
             self.in_features,
             self.out_features,
         );
-        Ok(output)
+        Ok(())
     }
 }
 

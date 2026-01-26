@@ -100,6 +100,25 @@ backend.readback_u32(&gpu_tensor, &mut indices)?;
 
 ---
 
+---
+
+## 待实现需求（性能优化）
+
+| 需求 ID | 描述 | 架构设计 | 状态 |
+|---------|------|----------|------|
+| REQ-LOAD-001 | 异步并行模型加载 | ARCH-ADR-010 | ✅ 架构设计完成，🔲 待实现 |
+| REQ-QUANT-001 | 原生量化推理 Kernel | ARCH-ADR-011 | ✅ 架构设计完成，🔲 待实现 |
+
+**依赖关系**：
+- REQ-QUANT-001 依赖 gllm-kernels 的量化 kernel 实现（Backend trait 扩展 q4/q8/awq_matmul）
+- REQ-LOAD-001 独立，可并行开发
+
+**实现优先级**：
+1. REQ-LOAD-001（异步并行加载）- 独立，无外部依赖
+2. REQ-QUANT-001（原生量化 Kernel）- 依赖 gllm-kernels Backend trait 扩展
+
+---
+
 ## 常用命令
 
 ```bash

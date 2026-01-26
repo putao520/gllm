@@ -1,11 +1,17 @@
 use crate::bert_variants::BertVariant;
 use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
 use crate::model_config::ModelConfig;
+use crate::parallel_parser::{
+    is_shard_index, load_embedding, load_layer_norm, load_linear, load_mha, parse_shards,
+    take_cached_shards, LoadConfig, ShardedTensorLoader, TensorLoader,
+};
 use crate::pooling::{DynamicPooler, PoolingConfig, PoolingStrategy};
 use crate::tensor::{Matrix, Tensor3};
 use crate::types::{Error, Result};
-use crate::weight_loader::{load_embedding, load_layer_norm, load_linear, load_mha, LayerNormWeights, LinearWeights, WeightLoader};
-use gllm_kernels::{gelu_inplace, layer_norm_forward, linear_forward, WeightMatrix, WeightVector};
+use crate::weight_loader::shards::ShardIndex;
+use crate::weight_loader::{LayerNormWeights, LinearWeights, WeightLoader};
+use gllm_kernels::backend::Backend;
+use gllm_kernels::{gelu_inplace, layer_norm_forward, WeightMatrix, WeightVector};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
@@ -32,10 +38,15 @@ pub struct DynamicBertLayer {
     pub(crate) attention_layernorm: LayerNormWeights,
     pub(crate) output_layernorm: LayerNormWeights,
     pub(crate) hidden_act: HiddenAct,
+    backend: Arc<dyn Backend>,
 }
 
 impl DynamicBertLayer {
-    pub fn new(config: &ModelConfig, rope: Option<Arc<RotaryPositionEmbedding>>) -> Result<Self> {
+    pub fn new(
+        config: &ModelConfig,
+        rope: Option<Arc<RotaryPositionEmbedding>>,
+        backend: Arc<dyn Backend>,
+    ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let intermediate_size = config.intermediate_size.unwrap_or(hidden_size * 4);
         let eps = config.layer_norm_eps.unwrap_or(1e-12) as f32;
@@ -46,17 +57,23 @@ impl DynamicBertLayer {
         };
 
         Ok(Self {
-            attention: CausalAttention::new(config, rope, false)?,
+            attention: CausalAttention::new(config, rope, false, backend.clone())?,
             ffn_1: LinearWeights::zeros(intermediate_size, hidden_size),
             ffn_2: LinearWeights::zeros(hidden_size, intermediate_size),
             attention_layernorm: default_layer_norm(hidden_size, eps),
             output_layernorm: default_layer_norm(hidden_size, eps),
             hidden_act,
+            backend,
         })
     }
 
     pub fn forward(&self, input: &Tensor3) -> Result<Tensor3> {
-        let attn_out = self.attention.forward(input, 0)?;
+        let (batch, seq_len, hidden) = input.shape();
+
+        // Attention (non-cached BERT style)
+        let attn_out_data = self.attention.forward(&input.data, batch, seq_len)?;
+        let attn_out = Tensor3::new(attn_out_data, batch, seq_len, hidden)?;
+
         let attn_residual = add_tensors(input, &attn_out)?;
         let attn_norm = apply_layer_norm(&attn_residual, &self.attention_layernorm)?;
 
@@ -68,36 +85,22 @@ impl DynamicBertLayer {
     fn ffn_forward(&self, input: &Tensor3) -> Result<Tensor3> {
         let (batch, seq_len, hidden) = input.shape();
         let rows = batch * seq_len;
-        if hidden != self.ffn_1.weight.cols {
+        if hidden != self.ffn_1.in_features() {
             return Err(Error::InferenceError(
                 "BERT FFN input hidden size mismatch".into(),
             ));
         }
 
-        let mut intermediate = vec![0.0f32; rows * self.ffn_1.weight.rows];
-        linear_forward(
-            &input.data,
-            self.ffn_1.weight.as_slice(),
-            self.ffn_1.bias.as_ref().map(|b| b.as_slice()),
-            &mut intermediate,
-            rows,
-            self.ffn_1.weight.cols,
-            self.ffn_1.weight.rows,
-        );
+        let mut intermediate = vec![0.0f32; rows * self.ffn_1.out_features()];
+        self.ffn_1
+            .forward(&input.data, &mut intermediate, rows, self.backend.as_ref())?;
         apply_activation(&self.hidden_act, &mut intermediate);
 
-        let mut output = vec![0.0f32; rows * self.ffn_2.weight.rows];
-        linear_forward(
-            &intermediate,
-            self.ffn_2.weight.as_slice(),
-            self.ffn_2.bias.as_ref().map(|b| b.as_slice()),
-            &mut output,
-            rows,
-            self.ffn_2.weight.cols,
-            self.ffn_2.weight.rows,
-        );
+        let mut output = vec![0.0f32; rows * self.ffn_2.out_features()];
+        self.ffn_2
+            .forward(&intermediate, &mut output, rows, self.backend.as_ref())?;
 
-        Tensor3::new(output, batch, seq_len, self.ffn_2.weight.rows)
+        Tensor3::new(output, batch, seq_len, self.ffn_2.out_features())
     }
 }
 
@@ -107,10 +110,14 @@ pub struct DynamicBertEncoder {
 }
 
 impl DynamicBertEncoder {
-    pub fn new(config: &ModelConfig, rope: Option<Arc<RotaryPositionEmbedding>>) -> Result<Self> {
+    pub fn new(
+        config: &ModelConfig,
+        rope: Option<Arc<RotaryPositionEmbedding>>,
+        backend: Arc<dyn Backend>,
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(DynamicBertLayer::new(config, rope.clone())?);
+            layers.push(DynamicBertLayer::new(config, rope.clone(), backend.clone())?);
         }
         Ok(Self { layers })
     }
@@ -118,7 +125,10 @@ impl DynamicBertEncoder {
     pub fn forward(&self, hidden_states: Tensor3) -> Result<Tensor3> {
         self.layers
             .iter()
-            .try_fold(hidden_states, |states, layer| layer.forward(&states))
+            .enumerate()
+            .try_fold(hidden_states, |states, (_i, layer)| {
+                layer.forward(&states)
+            })
     }
 }
 
@@ -135,10 +145,11 @@ pub struct DynamicBertModel {
     pub(crate) config: ModelConfig,
     pub(crate) max_position_embeddings: usize,
     pad_id: i64,
+    backend: Arc<dyn Backend>,
 }
 
 impl DynamicBertModel {
-    pub fn new(config: ModelConfig) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
         let variant = BertVariant::detect(&config);
         let hidden_size = config.hidden_size;
         let max_pos = config.max_position_embeddings;
@@ -166,7 +177,7 @@ impl DynamicBertModel {
             (type_vocab_size > 0).then(|| WeightMatrix::zeros(type_vocab_size, hidden_size));
         let embedding_layernorm =
             default_layer_norm(hidden_size, config.layer_norm_eps.unwrap_or(1e-12) as f32);
-        let encoder = DynamicBertEncoder::new(&config, rope.clone())?;
+        let encoder = DynamicBertEncoder::new(&config, rope.clone(), backend.clone())?;
         let pooler = DynamicPooler::new(
             variant.pooling_strategy(&config),
             PoolingConfig { normalize: true },
@@ -184,11 +195,13 @@ impl DynamicBertModel {
             config,
             max_position_embeddings: max_pos,
             pad_id,
+            backend,
         })
     }
 
     pub fn forward(&self, tokens: &[Vec<i64>]) -> Result<Tensor3> {
         let (batch, seq_len) = sequence_shape(tokens, self.max_position_embeddings)?;
+
         let mut embeddings = embed_tokens(
             &self.embeddings,
             tokens,
@@ -221,6 +234,10 @@ impl DynamicBertModel {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        if is_shard_index(safetensors_path) {
+            return self.load_sharded_safetensors(safetensors_path);
+        }
+
         let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to open SafeTensors file {}: {err}",
@@ -234,6 +251,23 @@ impl DynamicBertModel {
             ))
         })?;
         let loader = WeightLoader::from_bytes(&mmap)?;
+        self.load_from_loader(&loader)
+    }
+
+    fn load_sharded_safetensors(&mut self, index_path: &Path) -> Result<()> {
+        let model_dir = index_path.parent().ok_or_else(|| {
+            Error::LoadError("Shard index path is missing parent directory".into())
+        })?;
+        let index = ShardIndex::from_index_file(index_path)?;
+        let parsed = match take_cached_shards(model_dir) {
+            Some(parsed) => parsed,
+            None => parse_shards(index.shard_paths(model_dir), &LoadConfig::default())?,
+        };
+        let loader = ShardedTensorLoader::new(&parsed, &index)?;
+        self.load_from_loader(&loader)
+    }
+
+    fn load_from_loader<L: TensorLoader>(&mut self, loader: &L) -> Result<()> {
         let hidden_size = self.config.hidden_size;
         let num_heads = self.config.num_attention_heads;
         let dropout = self.config.attention_probs_dropout_prob.unwrap_or(0.1) as f64;
@@ -248,26 +282,26 @@ impl DynamicBertModel {
 
         let word_embed_name = format!("{}embeddings.word_embeddings.weight", model_prefix);
         if loader.has_tensor(&word_embed_name) {
-            self.embeddings = load_embedding(&loader, &word_embed_name)?;
+            self.embeddings = load_embedding(loader, &word_embed_name)?;
         }
 
         if self.position_type == PositionEmbeddingType::Absolute {
             let pos_embed_name = format!("{}embeddings.position_embeddings.weight", model_prefix);
             if loader.has_tensor(&pos_embed_name) {
-                self.position_embeddings = Some(load_embedding(&loader, &pos_embed_name)?);
+                self.position_embeddings = Some(load_embedding(loader, &pos_embed_name)?);
             }
         }
 
         let type_embed_name = format!("{}embeddings.token_type_embeddings.weight", model_prefix);
         if loader.has_tensor(&type_embed_name) {
-            self.token_type_embeddings = Some(load_embedding(&loader, &type_embed_name)?);
+            self.token_type_embeddings = Some(load_embedding(loader, &type_embed_name)?);
         }
 
         let embed_ln_weight = format!("{}embeddings.LayerNorm.weight", model_prefix);
         let embed_ln_bias = format!("{}embeddings.LayerNorm.bias", model_prefix);
         if loader.has_tensor(&embed_ln_weight) {
             self.embedding_layernorm = load_layer_norm(
-                &loader,
+                loader,
                 &embed_ln_weight,
                 Some(&embed_ln_bias),
                 hidden_size,
@@ -288,7 +322,7 @@ impl DynamicBertModel {
 
             if loader.has_tensor(&q_weight) {
                 let mha = load_mha(
-                    &loader,
+                    loader,
                     &q_weight,
                     Some(&q_bias),
                     &k_weight,
@@ -311,7 +345,7 @@ impl DynamicBertModel {
             let attn_ln_bias = format!("{}.attention.output.LayerNorm.bias", layer_prefix);
             if loader.has_tensor(&attn_ln_weight) {
                 layer.attention_layernorm = load_layer_norm(
-                    &loader,
+                    loader,
                     &attn_ln_weight,
                     Some(&attn_ln_bias),
                     hidden_size,
@@ -322,20 +356,20 @@ impl DynamicBertModel {
             let ffn1_weight = format!("{}.intermediate.dense.weight", layer_prefix);
             let ffn1_bias = format!("{}.intermediate.dense.bias", layer_prefix);
             if loader.has_tensor(&ffn1_weight) {
-                layer.ffn_1 = load_linear(&loader, &ffn1_weight, Some(&ffn1_bias))?;
+                layer.ffn_1 = load_linear(loader, &ffn1_weight, Some(&ffn1_bias))?;
             }
 
             let ffn2_weight = format!("{}.output.dense.weight", layer_prefix);
             let ffn2_bias = format!("{}.output.dense.bias", layer_prefix);
             if loader.has_tensor(&ffn2_weight) {
-                layer.ffn_2 = load_linear(&loader, &ffn2_weight, Some(&ffn2_bias))?;
+                layer.ffn_2 = load_linear(loader, &ffn2_weight, Some(&ffn2_bias))?;
             }
 
             let out_ln_weight = format!("{}.output.LayerNorm.weight", layer_prefix);
             let out_ln_bias = format!("{}.output.LayerNorm.bias", layer_prefix);
             if loader.has_tensor(&out_ln_weight) {
                 layer.output_layernorm = load_layer_norm(
-                    &loader,
+                    loader,
                     &out_ln_weight,
                     Some(&out_ln_bias),
                     hidden_size,
@@ -355,11 +389,12 @@ pub struct DynamicCrossEncoder {
     pooler: DynamicPooler,
     classifier_dense: Option<LinearWeights>,
     classifier_out: LinearWeights,
+    backend: Arc<dyn Backend>,
 }
 
 impl DynamicCrossEncoder {
-    pub fn new(config: ModelConfig) -> Result<Self> {
-        let encoder = DynamicBertModel::new(config.clone())?;
+    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+        let encoder = DynamicBertModel::new(config.clone(), backend.clone())?;
         let classifier_out = LinearWeights::zeros(1, config.hidden_size);
         let pooler = DynamicPooler::new(PoolingStrategy::Cls, PoolingConfig { normalize: false });
 
@@ -368,6 +403,7 @@ impl DynamicCrossEncoder {
             pooler,
             classifier_dense: None,
             classifier_out,
+            backend,
         })
     }
 
@@ -377,11 +413,11 @@ impl DynamicCrossEncoder {
         let mut pooled = self.pooler.pool(&hidden, Some(&mask));
 
         if let Some(dense) = &self.classifier_dense {
-            pooled = apply_linear(&pooled, dense)?;
+            pooled = apply_linear(&pooled, dense, self.backend.as_ref())?;
             apply_tanh_inplace(&mut pooled.data);
         }
 
-        let logits = apply_linear(&pooled, &self.classifier_out)?;
+        let logits = apply_linear(&pooled, &self.classifier_out, self.backend.as_ref())?;
         Ok(logits
             .data
             .chunks(logits.cols)
@@ -390,7 +426,9 @@ impl DynamicCrossEncoder {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
-        self.encoder.load_safetensors(safetensors_path)?;
+        if is_shard_index(safetensors_path) {
+            return self.load_sharded_safetensors(safetensors_path);
+        }
 
         let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
@@ -405,15 +443,35 @@ impl DynamicCrossEncoder {
             ))
         })?;
         let loader = WeightLoader::from_bytes(&mmap)?;
+        self.encoder.load_from_loader(&loader)?;
+        self.load_classifier_from_loader(&loader)
+    }
 
-        if loader.has_tensor("classifier.dense.weight") && loader.has_tensor("classifier.out_proj.weight") {
+    fn load_sharded_safetensors(&mut self, index_path: &Path) -> Result<()> {
+        let model_dir = index_path.parent().ok_or_else(|| {
+            Error::LoadError("Shard index path is missing parent directory".into())
+        })?;
+        let index = ShardIndex::from_index_file(index_path)?;
+        let parsed = match take_cached_shards(model_dir) {
+            Some(parsed) => parsed,
+            None => parse_shards(index.shard_paths(model_dir), &LoadConfig::default())?,
+        };
+        let loader = ShardedTensorLoader::new(&parsed, &index)?;
+        self.encoder.load_from_loader(&loader)?;
+        self.load_classifier_from_loader(&loader)
+    }
+
+    fn load_classifier_from_loader<L: TensorLoader>(&mut self, loader: &L) -> Result<()> {
+        if loader.has_tensor("classifier.dense.weight")
+            && loader.has_tensor("classifier.out_proj.weight")
+        {
             self.classifier_dense = Some(load_linear(
-                &loader,
+                loader,
                 "classifier.dense.weight",
                 Some("classifier.dense.bias"),
             )?);
             self.classifier_out = load_linear(
-                &loader,
+                loader,
                 "classifier.out_proj.weight",
                 Some("classifier.out_proj.bias"),
             )?;
@@ -422,12 +480,12 @@ impl DynamicCrossEncoder {
 
         if loader.has_tensor("classifier.weight") {
             self.classifier_out =
-                load_linear(&loader, "classifier.weight", Some("classifier.bias"))?;
+                load_linear(loader, "classifier.weight", Some("classifier.bias"))?;
             return Ok(());
         }
 
         if loader.has_tensor("score.weight") {
-            self.classifier_out = load_linear(&loader, "score.weight", Some("score.bias"))?;
+            self.classifier_out = load_linear(loader, "score.weight", Some("score.bias"))?;
         }
 
         Ok(())
@@ -617,22 +675,14 @@ fn build_token_mask(tokens: &[Vec<i64>], seq_len: usize, pad_id: i64) -> Vec<i64
     mask
 }
 
-fn apply_linear(input: &Matrix, weights: &LinearWeights) -> Result<Matrix> {
-    if input.cols != weights.weight.cols {
+fn apply_linear(input: &Matrix, weights: &LinearWeights, backend: &dyn Backend) -> Result<Matrix> {
+    if input.cols != weights.in_features() {
         return Err(Error::InferenceError(
             "Linear input feature mismatch".into(),
         ));
     }
     let rows = input.rows;
-    let mut output = vec![0.0f32; rows * weights.weight.rows];
-    linear_forward(
-        &input.data,
-        weights.weight.as_slice(),
-        weights.bias.as_ref().map(|b| b.as_slice()),
-        &mut output,
-        rows,
-        weights.weight.cols,
-        weights.weight.rows,
-    );
-    Matrix::new(output, rows, weights.weight.rows)
+    let mut output = vec![0.0f32; rows * weights.out_features()];
+    weights.forward(&input.data, &mut output, rows, backend)?;
+    Matrix::new(output, rows, weights.out_features())
 }

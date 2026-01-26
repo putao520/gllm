@@ -1,69 +1,46 @@
-//! RMS Normalization using gllm-kernels.
+//! RMS Normalization using gllm-kernels ops.
+//!
+//! RMSNorm(x) = x * weight / sqrt(mean(x^2) + eps)
 
-use crate::model_config::ModelConfig;
-use gllm_kernels::{rms_norm_forward, WeightVector};
+use gllm_kernels::{rms_norm_forward, rms_norm_inplace};
 
+/// RMS Normalization layer weights.
 #[derive(Clone)]
 pub struct RmsNorm {
-    pub gamma: WeightVector,
-    hidden_size: usize,
-    eps: f32,
+    pub weight: Vec<f32>,
+    pub eps: f32,
+    pub hidden_size: usize,
 }
 
 impl RmsNorm {
-    pub fn new(config: &ModelConfig) -> Self {
-        let hidden_size = config.hidden_size;
-        let eps = config.rms_norm_eps.unwrap_or(1e-5) as f32;
-        let gamma = WeightVector::ones(hidden_size);
+    pub fn new(hidden_size: usize, eps: f32) -> Self {
         Self {
-            gamma,
-            hidden_size,
+            weight: vec![1.0; hidden_size],
             eps,
+            hidden_size,
         }
     }
 
-    pub fn with_weight(gamma: WeightVector, hidden_size: usize, eps: f32) -> Self {
+    pub fn with_weight(weight: Vec<f32>, eps: f32) -> Self {
+        let hidden_size = weight.len();
         Self {
-            gamma,
-            hidden_size,
+            weight,
             eps,
+            hidden_size,
         }
     }
 
-    /// Forward pass for 2D input [batch, hidden].
-    pub fn forward_2d(&self, input: &[f32], batch: usize) -> Vec<f32> {
-        let mut output = vec![0.0f32; batch * self.hidden_size];
-        rms_norm_forward(
-            input,
-            self.gamma.as_slice(),
-            &mut output,
-            batch,
-            self.hidden_size,
-            self.eps,
-        );
+    /// Forward pass, returns normalized output.
+    pub fn forward(&self, input: &[f32]) -> Vec<f32> {
+        let batch = input.len() / self.hidden_size;
+        let mut output = vec![0.0f32; input.len()];
+        rms_norm_forward(input, &self.weight, &mut output, batch, self.hidden_size, self.eps);
         output
     }
 
-    /// Forward pass for 3D input [batch, seq_len, hidden].
-    pub fn forward_3d(&self, input: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
-        let rows = batch * seq_len;
-        let mut output = vec![0.0f32; rows * self.hidden_size];
-        rms_norm_forward(
-            input,
-            self.gamma.as_slice(),
-            &mut output,
-            rows,
-            self.hidden_size,
-            self.eps,
-        );
-        output
-    }
-
-    pub fn hidden_size(&self) -> usize {
-        self.hidden_size
-    }
-
-    pub fn eps(&self) -> f32 {
-        self.eps
+    /// In-place forward pass.
+    pub fn forward_inplace(&self, data: &mut [f32]) {
+        let batch = data.len() / self.hidden_size;
+        rms_norm_inplace(data, &self.weight, batch, self.hidden_size, self.eps);
     }
 }

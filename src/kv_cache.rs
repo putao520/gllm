@@ -1,127 +1,111 @@
+//! KV Cache for autoregressive generation.
+//!
+//! Stores key-value pairs for each layer to avoid recomputation during generation.
+
 use crate::types::{Error, Result};
 
-/// Simple KV cache storing keys/values in [batch, heads, seq, head_dim] layout.
+/// KV Cache for transformer layers.
 #[derive(Clone)]
 pub struct KVCache {
-    keys: Vec<Vec<f32>>,
-    values: Vec<Vec<f32>>,
+    /// Key cache: [num_layers, max_seq_len, num_kv_heads, head_dim]
+    k_cache: Vec<Vec<f32>>,
+    /// Value cache: [num_layers, max_seq_len, num_kv_heads, head_dim]
+    v_cache: Vec<Vec<f32>>,
     num_layers: usize,
-    max_len: usize,
-    batch_size: usize,
-    num_heads: usize,
+    num_kv_heads: usize,
     head_dim: usize,
+    max_seq_len: usize,
     current_len: usize,
 }
 
 impl KVCache {
-    pub fn preallocate(
+    pub fn new(
         num_layers: usize,
-        max_len: usize,
-        batch_size: usize,
-        num_heads: usize,
+        num_kv_heads: usize,
         head_dim: usize,
+        max_seq_len: usize,
     ) -> Self {
-        let layer_len = batch_size
-            .saturating_mul(num_heads)
-            .saturating_mul(max_len)
-            .saturating_mul(head_dim);
-        let mut keys = Vec::with_capacity(num_layers);
-        let mut values = Vec::with_capacity(num_layers);
-        for _ in 0..num_layers {
-            keys.push(vec![0.0; layer_len]);
-            values.push(vec![0.0; layer_len]);
-        }
+        let layer_size = max_seq_len * num_kv_heads * head_dim;
+        let k_cache = (0..num_layers).map(|_| vec![0.0f32; layer_size]).collect();
+        let v_cache = (0..num_layers).map(|_| vec![0.0f32; layer_size]).collect();
 
         Self {
-            keys,
-            values,
+            k_cache,
+            v_cache,
             num_layers,
-            max_len,
-            batch_size,
-            num_heads,
+            num_kv_heads,
             head_dim,
+            max_seq_len,
             current_len: 0,
         }
     }
 
-    pub fn update(&mut self, layer: usize, new_k: &[f32], new_v: &[f32]) -> Result<usize> {
+    /// Update cache for a layer with new k, v values.
+    /// k, v shape: [batch=1, seq_len, num_kv_heads * head_dim]
+    pub fn update(&mut self, layer: usize, k: &[f32], v: &[f32]) -> Result<()> {
         if layer >= self.num_layers {
-            return Err(Error::InferenceError(
-                "KV cache layer index out of range".into(),
-            ));
-        }
-        if self.max_len == 0 || self.num_heads == 0 || self.head_dim == 0 {
-            return Ok(self.current_len);
-        }
-        if new_k.len() != new_v.len() {
-            return Err(Error::InferenceError(
-                "KV cache update expects matching K/V lengths".into(),
-            ));
-        }
-
-        let stride = self
-            .batch_size
-            .saturating_mul(self.num_heads)
-            .saturating_mul(self.head_dim);
-        if stride == 0 || new_k.len() % stride != 0 {
-            return Err(Error::InferenceError(
-                "KV cache update length does not match shape".into(),
-            ));
-        }
-
-        let seq_len = new_k.len() / stride;
-        let start = self.current_len;
-        let end = start + seq_len;
-        if end > self.max_len {
-            return Err(Error::InferenceError(format!(
-                "KV cache exceeded max_len ({} > {})",
-                end, self.max_len
+            return Err(Error::InvalidConfig(format!(
+                "Layer {} out of bounds (max {})",
+                layer, self.num_layers
             )));
         }
 
-        let key_buf = &mut self.keys[layer];
-        let val_buf = &mut self.values[layer];
-        let per_head = seq_len * self.head_dim;
-        let max_stride = self.max_len * self.head_dim;
-
-        for b in 0..self.batch_size {
-            for h in 0..self.num_heads {
-                let src_base = (b * self.num_heads + h) * per_head;
-                let dst_base = (b * self.num_heads + h) * max_stride + start * self.head_dim;
-                let src_slice = &new_k[src_base..src_base + per_head];
-                let dst_slice = &mut key_buf[dst_base..dst_base + per_head];
-                dst_slice.copy_from_slice(src_slice);
-
-                let src_slice = &new_v[src_base..src_base + per_head];
-                let dst_slice = &mut val_buf[dst_base..dst_base + per_head];
-                dst_slice.copy_from_slice(src_slice);
-            }
+        let seq_tokens = k.len() / (self.num_kv_heads * self.head_dim);
+        if self.current_len + seq_tokens > self.max_seq_len {
+            return Err(Error::InvalidConfig(format!(
+                "Cache overflow: {} + {} > {}",
+                self.current_len, seq_tokens, self.max_seq_len
+            )));
         }
 
-        if layer + 1 == self.num_layers {
-            self.current_len = end;
+        let offset = self.current_len * self.num_kv_heads * self.head_dim;
+        self.k_cache[layer][offset..offset + k.len()].copy_from_slice(k);
+        self.v_cache[layer][offset..offset + v.len()].copy_from_slice(v);
+
+        // Only update current_len on layer 0 to avoid double counting
+        if layer == 0 {
+            self.current_len += seq_tokens;
         }
 
-        Ok(end)
+        Ok(())
     }
 
+    /// Get cached keys for a layer.
     pub fn layer_k(&self, layer: usize) -> Result<&[f32]> {
-        self.keys.get(layer).map(|v| v.as_slice()).ok_or_else(|| {
-            Error::InferenceError("KV cache layer index out of range".into())
-        })
+        if layer >= self.num_layers {
+            return Err(Error::InvalidConfig(format!(
+                "Layer {} out of bounds",
+                layer
+            )));
+        }
+        let len = self.current_len * self.num_kv_heads * self.head_dim;
+        Ok(&self.k_cache[layer][..len])
     }
 
+    /// Get cached values for a layer.
     pub fn layer_v(&self, layer: usize) -> Result<&[f32]> {
-        self.values.get(layer).map(|v| v.as_slice()).ok_or_else(|| {
-            Error::InferenceError("KV cache layer index out of range".into())
-        })
+        if layer >= self.num_layers {
+            return Err(Error::InvalidConfig(format!(
+                "Layer {} out of bounds",
+                layer
+            )));
+        }
+        let len = self.current_len * self.num_kv_heads * self.head_dim;
+        Ok(&self.v_cache[layer][..len])
     }
 
+    /// Current sequence length in cache.
     pub fn seq_len(&self) -> usize {
         self.current_len
     }
 
-    pub fn num_layers(&self) -> usize {
-        self.num_layers
+    /// Reset cache to empty.
+    pub fn reset(&mut self) {
+        self.current_len = 0;
+    }
+
+    /// Get max sequence length.
+    pub fn max_len(&self) -> usize {
+        self.max_seq_len
     }
 }

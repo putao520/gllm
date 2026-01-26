@@ -185,32 +185,59 @@ Backend: CUDA
 **已知问题**:
 - InternLM3 GGUF: Unsupported GGML dtype value: 23（模型使用了不支持的量化类型）
 
-#### TEST-INT-BACKEND-001: GPU/CPU 双后端测试 ✨ 新增
+#### TEST-INT-BACKEND-001: GPU/CPU 双后端测试 (Matrix E2E) ✨ 重要
 
-**覆盖需求**: REQ-BACKEND-001, REQ-BACKEND-002, REQ-KERN-001
+**覆盖需求**: REQ-BACKEND-001, REQ-BACKEND-002, REQ-KERN-001, REQ-INFER-003
 
 **业务流程**:
-1. 后端自动检测 (CUDA/WGPU/CPU)
-2. 强制指定 CPU 后端运行
-3. 验证量化运算一致性
-4. 对比 GPU/CPU 输出误差范围
+1. 遍历不同类型的模型 (Embedding, Rerank, Generator)
+2. 覆盖不同尺寸的模型 (Small: <1B, Large: >1B/8B)
+3. 在两种后端环境下运行:
+   - CPU 模式 (`GLLM_FORCE_CPU=1`)
+   - GPU 模式 (`GLLM_FORCE_CPU=0`)
+4. 验证推理结果的有效性、加载稳定性以及并行算子的正确性
 
-**测试矩阵**:
+**测试矩阵 (Matrix)**:
 
-| 运算类型 | GPU (CUDA/WGPU) | CPU | 精度要求 |
-|----------|-----------------|-----|----------|
-| Q4 MatMul | ✅ GpuQuantizedBackend | ✅ CpuQuantizedBackend | ε < 1e-5 |
-| AWQ MatMul | ✅ GpuQuantizedBackend | ✅ CpuQuantizedBackend | ε < 1e-5 |
-| Linear Forward | ✅ KernelDispatcher | ✅ CPU fallback | ε < 1e-6 |
-| RMS Norm | ✅ KernelDispatcher | ✅ CPU fallback | ε < 1e-6 |
+| 模型别名 | 类型 | 尺寸 | 后端 | 验收标准 |
+|----------|------|------|------|----------|
+| `qwen3-embedding-0.6b` | Embedding | Small | CPU/GPU | ✅ 维度对齐, 向量有效 |
+| `qwen3-embedding-8b` | Embedding | Large | CPU/GPU | ✅ 内存加载稳定, 结果有效 |
+| `qwen3-reranker-0.6b` | Rerank | Small | CPU/GPU | ✅ 分数逻辑正确 |
+| `jina-reranker-v3` | Rerank | Large | CPU/GPU | ✅ 处理长序列稳定性 |
+| `qwen3-next-0.6b` | Generator | Small | CPU/GPU | ✅ 生成文本连贯 |
+| `qwen3-8b:gguf` | Generator | Large | CPU/GPU | ✅ GGUF 加载正确, 生成成功 |
 
 **验收标准**:
-- ✅ 两种后端都能正确执行量化矩阵乘法
-- ✅ GPU 和 CPU 输出在允许误差范围内一致
-- ✅ 后端切换透明，用户无需修改代码
-- ✅ CPU fallback 在无 GPU 时自动启用
+- ✅ 所有测试用例在 `GLLM_FORCE_CPU=1` 下通过 (验证 Rayon 并行算子)
+- ✅ 所有测试用例在 `GLLM_FORCE_CPU=0` 下通过 (验证 GPU 加速)
+- ✅ Large 模型在 CPU 下虽慢但能稳定运行，无 OOM 或崩溃
+- ✅ 推理结果在不同后端间具有一致性 (误差在允许范围内)
 
-**测试文件**: `tests/quantized_backend_test.rs`
+**测试入口**: `cargo run --release --example matrix_test --features tokio`
+
+**最新回归记录**:
+- 2026-01-24: ✅ CPU 并行算子优化后回归通过 (qwen3-embedding-0.6b, qwen3-reranker-0.6b等)
+- 待办: 补全 GPU 模式下的基准测试对比
+
+#### TEST-PERF-BENCH-001: 性能基准测试 ✨ 新增
+
+**覆盖需求**: REQ-KERN-003, REQ-BACKEND-001/002
+
+**业务流程**:
+1. 针对 Embedding, Rerank, LLM 三大类模型分别建立基准
+2. 默认对比 CPU (基线) 与 最佳后端 (Auto/GPU) 的吞吐量
+3. 记录加速比 (Speedup)
+
+**测试入口**:
+*   `cargo run --release --example benchmark_embeddings`
+*   `cargo run --release --example benchmark_reranker`
+*   `cargo run --release --example benchmark_llm`
+
+**验收标准**:
+*   ✅ 基准测试无错误运行
+*   ✅ 输出 CPU 与 Best Backend 的 TPS/Latency 对比
+*   ✅ 确保工具能正确加载指定模型 (通过 GLLM_MODEL 环境变量)
 
 #### TEST-INT-ERROR-001: 错误处理测试
 

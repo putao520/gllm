@@ -70,6 +70,7 @@ impl DecoderModel {
                 hidden_size,
                 intermediate_size,
                 use_gelu: config.hidden_act.as_deref() == Some("gelu"),
+                backend: backend.clone(),
             };
             layers.push(layer);
         }
@@ -210,12 +211,21 @@ impl DecoderModel {
             }
 
             if loader.has_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
-                let gate = loader.load_tensor(&format!("{}.mlp.gate_proj.weight", prefix))?;
-                let up = loader.load_tensor(&format!("{}.mlp.up_proj.weight", prefix))?;
-                let down = loader.load_tensor(&format!("{}.mlp.down_proj.weight", prefix))?;
-                layer.ffn.gate_proj = gate.to_weight_vector()?.data;
-                layer.ffn.up_proj = up.to_weight_vector()?.data;
-                layer.ffn.down_proj = down.to_weight_vector()?.data;
+                layer.ffn.gate_proj = load_linear(
+                    loader,
+                    &format!("{}.mlp.gate_proj.weight", prefix),
+                    None,
+                )?;
+                layer.ffn.up_proj = load_linear(
+                    loader,
+                    &format!("{}.mlp.up_proj.weight", prefix),
+                    None,
+                )?;
+                layer.ffn.down_proj = load_linear(
+                    loader,
+                    &format!("{}.mlp.down_proj.weight", prefix),
+                    None,
+                )?;
             }
 
             if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {

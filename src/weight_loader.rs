@@ -8,7 +8,9 @@
 //! - Multi-shard file loading
 //! - Support for different model architectures
 
+use crate::quantized::{NativeQLinear, QuantizedWeight};
 use crate::types::{Error, Result};
+use gllm_kernels::backend::Backend;
 use gllm_kernels::{WeightMatrix, WeightVector};
 use safetensors::{Dtype, SafeTensors};
 use std::collections::HashMap;
@@ -53,6 +55,7 @@ impl LoadedTensor {
                 "Matrix data length does not match shape".into(),
             ));
         }
+
         Ok(WeightMatrix::new(self.data.clone(), rows, cols))
     }
 
@@ -187,16 +190,77 @@ fn convert_to_f32(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
 ///
 /// HuggingFace Linear weights are stored as [out_features, in_features].
 #[derive(Clone, Debug)]
-pub struct LinearWeights {
-    pub weight: WeightMatrix,
-    pub bias: Option<WeightVector>,
+pub enum LinearWeights {
+    Dense {
+        weight: WeightMatrix,
+        bias: Option<WeightVector>,
+    },
+    Quantized {
+        weight: NativeQLinear,
+    },
 }
 
 impl LinearWeights {
     pub fn zeros(rows: usize, cols: usize) -> Self {
-        Self {
+        Self::Dense {
             weight: WeightMatrix::zeros(rows, cols),
             bias: None,
+        }
+    }
+
+    pub fn from_dense(weight: WeightMatrix, bias: Option<WeightVector>) -> Self {
+        Self::Dense { weight, bias }
+    }
+
+    pub fn from_quantized(weight: NativeQLinear) -> Self {
+        Self::Quantized { weight }
+    }
+
+    pub fn in_features(&self) -> usize {
+        match self {
+            Self::Dense { weight, .. } => weight.cols,
+            Self::Quantized { weight } => weight.in_features(),
+        }
+    }
+
+    pub fn out_features(&self) -> usize {
+        match self {
+            Self::Dense { weight, .. } => weight.rows,
+            Self::Quantized { weight } => weight.out_features(),
+        }
+    }
+
+    pub fn forward(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        batch: usize,
+        backend: &dyn Backend,
+    ) -> Result<()> {
+        match self {
+            Self::Dense { weight, bias } => {
+                if input.len() != batch * weight.cols {
+                    return Err(Error::InferenceError(
+                        "Linear input length mismatch".into(),
+                    ));
+                }
+                if output.len() != batch * weight.rows {
+                    return Err(Error::InferenceError(
+                        "Linear output length mismatch".into(),
+                    ));
+                }
+                gllm_kernels::linear_forward(
+                    input,
+                    weight.as_slice(),
+                    bias.as_ref().map(|b| b.as_slice()),
+                    output,
+                    batch,
+                    weight.cols,
+                    weight.rows,
+                );
+                Ok(())
+            }
+            Self::Quantized { weight } => weight.forward(input, output, batch, backend),
         }
     }
 }
@@ -224,21 +288,54 @@ pub fn load_linear(
     weight_name: &str,
     bias_name: Option<&str>,
 ) -> Result<LinearWeights> {
-    let weight_tensor = loader.load_tensor(weight_name)?;
-    let weight = weight_tensor.to_weight_matrix()?;
+    if loader.has_tensor(weight_name) {
+        let weight_tensor = loader.load_tensor(weight_name)?;
+        let weight = weight_tensor.to_weight_matrix()?;
 
-    let bias = if let Some(bias_name) = bias_name {
-        if loader.has_tensor(bias_name) {
-            let bias_tensor = loader.load_tensor(bias_name)?;
-            Some(bias_tensor.to_weight_vector()?)
+        let bias = if let Some(bias_name) = bias_name {
+            if loader.has_tensor(bias_name) {
+                let bias_tensor = loader.load_tensor(bias_name)?;
+                Some(bias_tensor.to_weight_vector()?)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    Ok(LinearWeights { weight, bias })
+        return Ok(LinearWeights::from_dense(weight, bias));
+    }
+
+    let prefix = weight_name
+        .strip_suffix(".weight")
+        .ok_or_else(|| Error::LoadError("Quantized weight name missing .weight suffix".into()))?;
+
+    if loader.is_awq_model() {
+        let awq = crate::awq::AwqQuantizedWeight::from_safetensors(loader, prefix)?;
+        let bias = if let Some(bias_name) = bias_name {
+            if loader.has_tensor(bias_name) {
+                let bias_tensor = loader.load_tensor(bias_name)?;
+                Some(bias_tensor.to_weight_vector()?.data)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let native = NativeQLinear::new(
+            QuantizedWeight::Awq {
+                weight: awq.weight,
+                shape: awq.shape,
+            },
+            bias,
+        )?;
+        return Ok(LinearWeights::from_quantized(native));
+    }
+
+    Err(Error::LoadError(format!(
+        "Linear weight '{}' not found",
+        weight_name
+    )))
 }
 
 /// Load Embedding layer weights from SafeTensors.

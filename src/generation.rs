@@ -14,6 +14,8 @@ pub struct GenerationConfig {
     pub top_p: f32,
     pub top_k: usize,
     pub stop_tokens: Vec<i64>,
+    /// Optional speculative decoding configuration
+    pub speculative_decoding: Option<SpeculativeDecodingConfig>,
 }
 
 impl Default for GenerationConfig {
@@ -24,6 +26,47 @@ impl Default for GenerationConfig {
             top_p: 1.0,
             top_k: 0,
             stop_tokens: Vec::new(),
+            speculative_decoding: None,
+        }
+    }
+}
+
+/// Speculative Decoding algorithm selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeculativeDecodingAlgorithm {
+    /// EAGLE-3: Adaptive draft length with multi-layer feature fusion
+    Eagle3,
+    /// SpecEE / LayerSkip: Early-exit speculation
+    SpecEE,
+    /// Medusa: Multi-head parallel draft generation
+    Medusa,
+    /// DeFT/Talon: Tree-structured speculation
+    TreeAttention,
+}
+
+/// Configuration for speculative decoding
+#[derive(Debug, Clone)]
+pub struct SpeculativeDecodingConfig {
+    /// Algorithm to use
+    pub algorithm: SpeculativeDecodingAlgorithm,
+    /// Maximum draft length (tokens to speculate ahead)
+    pub max_draft_length: usize,
+    /// Confidence threshold for draft acceptance (EAGLE-3 / SpecEE)
+    pub confidence_threshold: f32,
+    /// Number of Medusa heads (only for Medusa algorithm)
+    pub num_medusa_heads: usize,
+    /// Top-k for candidate selection (Medusa)
+    pub medusa_top_k: usize,
+}
+
+impl Default for SpeculativeDecodingConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: SpeculativeDecodingAlgorithm::Eagle3,
+            max_draft_length: 5,
+            confidence_threshold: 0.8,
+            num_medusa_heads: 3,
+            medusa_top_k: 4,
         }
     }
 }
@@ -73,7 +116,42 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
-    fn run(self) -> Result<GenerationOutput> {
+    /// Enable speculative decoding with custom configuration
+    pub fn speculative_decoding(mut self, config: SpeculativeDecodingConfig) -> Self {
+        self.config.speculative_decoding = Some(config);
+        self
+    }
+
+    /// Enable EAGLE-3 speculative decoding with default parameters
+    pub fn eagle3(mut self) -> Self {
+        self.config.speculative_decoding = Some(SpeculativeDecodingConfig {
+            algorithm: SpeculativeDecodingAlgorithm::Eagle3,
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable Medusa speculative decoding
+    pub fn medusa(mut self, num_heads: usize) -> Self {
+        self.config.speculative_decoding = Some(SpeculativeDecodingConfig {
+            algorithm: SpeculativeDecodingAlgorithm::Medusa,
+            num_medusa_heads: num_heads,
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable SpecEE/LayerSkip early-exit speculation
+    pub fn spec_ee(mut self, confidence_threshold: f32) -> Self {
+        self.config.speculative_decoding = Some(SpeculativeDecodingConfig {
+            algorithm: SpeculativeDecodingAlgorithm::SpecEE,
+            confidence_threshold,
+            ..Default::default()
+        });
+        self
+    }
+
+    pub fn run(self) -> Result<GenerationOutput> {
         if self.prompt.trim().is_empty() {
             return Err(Error::InvalidConfig(
                 "Prompt is required for generation".into(),

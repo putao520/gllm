@@ -9,7 +9,7 @@ use log::warn;
 /// Client for embeddings, reranking, and generation.
 pub struct Client {
     engine: EngineBackend,
-    tokenizer: TokenizerAdapter,
+    pub tokenizer: TokenizerAdapter,
     #[allow(dead_code)]
     artifacts: ModelArtifacts,
 }
