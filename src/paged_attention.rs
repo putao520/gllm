@@ -67,6 +67,12 @@ impl PagedKVCache {
         let layer = self.layers.get_mut(layer).ok_or("invalid layer")?;
         let keys = layer.keys.get_mut(seq_id).ok_or("invalid sequence")?;
         let values = layer.values.get_mut(seq_id).ok_or("invalid sequence")?;
+        let per_token = self.num_heads * self.head_dim;
+        let reserve = seq_len.saturating_mul(per_token);
+        if reserve > 0 {
+            keys.reserve(reserve);
+            values.reserve(reserve);
+        }
         keys.extend_from_slice(k);
         values.extend_from_slice(v);
         layer.seq_lens[seq_id] += seq_len;

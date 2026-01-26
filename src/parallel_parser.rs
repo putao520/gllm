@@ -1,11 +1,13 @@
 use crate::quantized::{NativeQLinear, QuantizedWeight};
 use crate::types::{Error, Result};
 use crate::weight_loader::{
-    LayerNormWeights, LinearWeights, LoadedTensor, MultiHeadAttentionWeights, RawTensor, WeightLoader,
+    convert_to_f32_cow, LayerNormWeights, LinearWeights, LoadedTensor, LoadedTensorView,
+    MultiHeadAttentionWeights, RawTensor, RawTensorView, WeightLoader,
 };
 use memmap2::Mmap;
 use rayon::prelude::*;
 use safetensors::{Dtype, SafeTensors};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -219,6 +221,21 @@ pub trait TensorLoader {
     fn has_tensor(&self, name: &str) -> bool;
     fn load_tensor(&self, name: &str) -> Result<LoadedTensor>;
     fn load_raw_tensor(&self, name: &str) -> Result<RawTensor>;
+    fn load_tensor_view(&self, name: &str) -> Result<LoadedTensorView<'_>> {
+        let LoadedTensor { data, shape } = self.load_tensor(name)?;
+        Ok(LoadedTensorView {
+            data: Cow::Owned(data),
+            shape,
+        })
+    }
+    fn load_raw_tensor_view(&self, name: &str) -> Result<RawTensorView<'_>> {
+        let RawTensor { data, shape, dtype } = self.load_raw_tensor(name)?;
+        Ok(RawTensorView {
+            data: Cow::Owned(data),
+            shape,
+            dtype,
+        })
+    }
     fn is_awq_model(&self) -> bool;
 }
 
@@ -233,6 +250,14 @@ impl<'a> TensorLoader for WeightLoader<'a> {
 
     fn load_raw_tensor(&self, name: &str) -> Result<RawTensor> {
         self.load_raw_tensor(name)
+    }
+
+    fn load_tensor_view(&self, name: &str) -> Result<LoadedTensorView<'_>> {
+        WeightLoader::load_tensor_view(self, name)
+    }
+
+    fn load_raw_tensor_view(&self, name: &str) -> Result<RawTensorView<'_>> {
+        WeightLoader::load_raw_tensor_view(self, name)
     }
 
     fn is_awq_model(&self) -> bool {
@@ -278,6 +303,14 @@ impl<'a> TensorLoader for ShardedTensorLoader<'a> {
     }
 
     fn load_tensor(&self, name: &str) -> Result<LoadedTensor> {
+        self.load_tensor_view(name).map(LoadedTensorView::into_owned)
+    }
+
+    fn load_raw_tensor(&self, name: &str) -> Result<RawTensor> {
+        self.load_raw_tensor_view(name).map(RawTensorView::into_owned)
+    }
+
+    fn load_tensor_view(&self, name: &str) -> Result<LoadedTensorView<'_>> {
         let tensors = self.shard_tensors(name)?;
         let tensor_view = tensors.tensor(name).map_err(|err| {
             Error::LoadError(format!("Failed to load tensor '{}': {err}", name))
@@ -285,19 +318,19 @@ impl<'a> TensorLoader for ShardedTensorLoader<'a> {
         let shape = tensor_view.shape().to_vec();
         let dtype = tensor_view.dtype();
         let raw_data = tensor_view.data();
-        let data = convert_to_f32(raw_data, dtype)?;
-        Ok(LoadedTensor { data, shape })
+        let data = convert_to_f32_cow(raw_data, dtype)?;
+        Ok(LoadedTensorView { data, shape })
     }
 
-    fn load_raw_tensor(&self, name: &str) -> Result<RawTensor> {
+    fn load_raw_tensor_view(&self, name: &str) -> Result<RawTensorView<'_>> {
         let tensors = self.shard_tensors(name)?;
         let tensor_view = tensors.tensor(name).map_err(|err| {
             Error::LoadError(format!("Failed to load tensor '{}': {err}", name))
         })?;
         let shape = tensor_view.shape().to_vec();
         let dtype = tensor_view.dtype();
-        let data = tensor_view.data().to_vec();
-        Ok(RawTensor { data, shape, dtype })
+        let data = Cow::Borrowed(tensor_view.data());
+        Ok(RawTensorView { data, shape, dtype })
     }
 
     fn is_awq_model(&self) -> bool {

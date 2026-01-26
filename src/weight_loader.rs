@@ -13,6 +13,7 @@ use crate::types::{Error, Result};
 use gllm_kernels::backend::Backend;
 use gllm_kernels::{WeightMatrix, WeightVector};
 use safetensors::{Dtype, SafeTensors};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -28,6 +29,13 @@ pub struct LoadedTensor {
     pub shape: Vec<usize>,
 }
 
+/// Loaded tensor view with borrowed or owned data.
+#[derive(Debug)]
+pub struct LoadedTensorView<'a> {
+    pub data: Cow<'a, [f32]>,
+    pub shape: Vec<usize>,
+}
+
 /// Raw tensor data with shape and dtype information (no conversion).
 #[derive(Debug)]
 pub struct RawTensor {
@@ -37,6 +45,36 @@ pub struct RawTensor {
     pub shape: Vec<usize>,
     /// Tensor dtype.
     pub dtype: Dtype,
+}
+
+/// Raw tensor view with borrowed or owned data.
+#[derive(Debug)]
+pub struct RawTensorView<'a> {
+    /// Raw tensor bytes as stored in safetensors.
+    pub data: Cow<'a, [u8]>,
+    /// Tensor shape.
+    pub shape: Vec<usize>,
+    /// Tensor dtype.
+    pub dtype: Dtype,
+}
+
+impl<'a> LoadedTensorView<'a> {
+    pub fn into_owned(self) -> LoadedTensor {
+        LoadedTensor {
+            data: self.data.into_owned(),
+            shape: self.shape,
+        }
+    }
+}
+
+impl<'a> RawTensorView<'a> {
+    pub fn into_owned(self) -> RawTensor {
+        RawTensor {
+            data: self.data.into_owned(),
+            shape: self.shape,
+            dtype: self.dtype,
+        }
+    }
 }
 
 impl LoadedTensor {
@@ -57,6 +95,25 @@ impl LoadedTensor {
         }
 
         Ok(WeightMatrix::new(self.data.clone(), rows, cols))
+    }
+
+    /// Convert into a WeightMatrix without cloning the backing data.
+    pub fn into_weight_matrix(self) -> Result<WeightMatrix> {
+        if self.shape.len() != 2 {
+            return Err(Error::LoadError(format!(
+                "Expected 2D tensor for matrix, got {}D",
+                self.shape.len()
+            )));
+        }
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if self.data.len() != rows * cols {
+            return Err(Error::LoadError(
+                "Matrix data length does not match shape".into(),
+            ));
+        }
+
+        Ok(WeightMatrix::new(self.data, rows, cols))
     }
 
     /// Convert to a WeightVector (accepts 1D or 2D with a singleton dimension).
@@ -84,6 +141,32 @@ impl LoadedTensor {
             ))),
         }
     }
+
+    /// Convert into a WeightVector without cloning the backing data.
+    pub fn into_weight_vector(self) -> Result<WeightVector> {
+        match self.shape.as_slice() {
+            [len] => {
+                if self.data.len() != *len {
+                    return Err(Error::LoadError(
+                        "Vector data length does not match shape".into(),
+                    ));
+                }
+                Ok(WeightVector::new(self.data))
+            }
+            [1, len] | [len, 1] => {
+                if self.data.len() != *len {
+                    return Err(Error::LoadError(
+                        "Vector data length does not match shape".into(),
+                    ));
+                }
+                Ok(WeightVector::new(self.data))
+            }
+            _ => Err(Error::LoadError(format!(
+                "Expected 1D tensor for vector, got shape {:?}",
+                self.shape
+            ))),
+        }
+    }
 }
 
 impl<'a> WeightLoader<'a> {
@@ -102,6 +185,16 @@ impl<'a> WeightLoader<'a> {
 
     /// Load a tensor by name.
     pub fn load_tensor(&self, name: &str) -> Result<LoadedTensor> {
+        self.load_tensor_view(name).map(LoadedTensorView::into_owned)
+    }
+
+    /// Load a raw tensor by name without dtype conversion.
+    pub fn load_raw_tensor(&self, name: &str) -> Result<RawTensor> {
+        self.load_raw_tensor_view(name).map(RawTensorView::into_owned)
+    }
+
+    /// Load a tensor by name as a borrowed view when possible.
+    pub fn load_tensor_view(&self, name: &str) -> Result<LoadedTensorView<'_>> {
         let tensor_view = self.tensors.tensor(name).map_err(|e| {
             Error::LoadError(format!("Failed to load tensor '{}': {}", name, e))
         })?;
@@ -110,22 +203,21 @@ impl<'a> WeightLoader<'a> {
         let dtype = tensor_view.dtype();
         let raw_data = tensor_view.data();
 
-        // Convert to f32
-        let data = convert_to_f32(&raw_data, dtype)?;
+        let data = convert_to_f32_cow(raw_data, dtype)?;
 
-        Ok(LoadedTensor { data, shape })
+        Ok(LoadedTensorView { data, shape })
     }
 
-    /// Load a raw tensor by name without dtype conversion.
-    pub fn load_raw_tensor(&self, name: &str) -> Result<RawTensor> {
+    /// Load a raw tensor by name as a borrowed view when possible.
+    pub fn load_raw_tensor_view(&self, name: &str) -> Result<RawTensorView<'_>> {
         let tensor_view = self.tensors.tensor(name).map_err(|e| {
             Error::LoadError(format!("Failed to load tensor '{}': {}", name, e))
         })?;
         let shape = tensor_view.shape().to_vec();
         let dtype = tensor_view.dtype();
-        let data = tensor_view.data().to_vec();
+        let data = Cow::Borrowed(tensor_view.data());
 
-        Ok(RawTensor { data, shape, dtype })
+        Ok(RawTensorView { data, shape, dtype })
     }
 
     /// Check if a tensor exists.
@@ -139,8 +231,29 @@ impl<'a> WeightLoader<'a> {
     }
 }
 
-/// Convert raw bytes to f32 based on dtype.
-fn convert_to_f32(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
+/// Convert raw bytes to f32 based on dtype with optional zero-copy for f32.
+pub(crate) fn convert_to_f32_cow<'a>(data: &'a [u8], dtype: Dtype) -> Result<Cow<'a, [f32]>> {
+    match dtype {
+        Dtype::F32 => {
+            if data.len() % 4 != 0 {
+                return Err(Error::LoadError(
+                    "F32 tensor byte length is not divisible by 4".into(),
+                ));
+            }
+            // SAFETY: We've verified the data length is divisible by 4, and align_to
+            // will return slices that maintain memory safety.
+            let (head, body, tail) = unsafe { data.align_to::<f32>() };
+            if head.is_empty() && tail.is_empty() {
+                return Ok(Cow::Borrowed(body));
+            }
+            Ok(Cow::Owned(convert_to_f32_owned(data, dtype)?))
+        }
+        _ => Ok(Cow::Owned(convert_to_f32_owned(data, dtype)?)),
+    }
+}
+
+/// Convert raw bytes to f32 with an owned output buffer.
+fn convert_to_f32_owned(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
     match dtype {
         Dtype::F32 => {
             let floats: Vec<f32> = data
@@ -290,12 +403,12 @@ pub fn load_linear(
 ) -> Result<LinearWeights> {
     if loader.has_tensor(weight_name) {
         let weight_tensor = loader.load_tensor(weight_name)?;
-        let weight = weight_tensor.to_weight_matrix()?;
+        let weight = weight_tensor.into_weight_matrix()?;
 
         let bias = if let Some(bias_name) = bias_name {
             if loader.has_tensor(bias_name) {
                 let bias_tensor = loader.load_tensor(bias_name)?;
-                Some(bias_tensor.to_weight_vector()?)
+                Some(bias_tensor.into_weight_vector()?)
             } else {
                 None
             }
@@ -315,7 +428,7 @@ pub fn load_linear(
         let bias = if let Some(bias_name) = bias_name {
             if loader.has_tensor(bias_name) {
                 let bias_tensor = loader.load_tensor(bias_name)?;
-                Some(bias_tensor.to_weight_vector()?.data)
+                Some(bias_tensor.into_weight_vector()?.data)
             } else {
                 None
             }
@@ -341,7 +454,7 @@ pub fn load_linear(
 /// Load Embedding layer weights from SafeTensors.
 pub fn load_embedding(loader: &WeightLoader, weight_name: &str) -> Result<WeightMatrix> {
     let weight_tensor = loader.load_tensor(weight_name)?;
-    weight_tensor.to_weight_matrix()
+    weight_tensor.into_weight_matrix()
 }
 
 /// Load LayerNorm weights from SafeTensors.
@@ -355,7 +468,7 @@ pub fn load_layer_norm(
     epsilon: f64,
 ) -> Result<LayerNormWeights> {
     let gamma_tensor = loader.load_tensor(weight_name)?;
-    let gamma = gamma_tensor.to_weight_vector()?;
+    let gamma = gamma_tensor.into_weight_vector()?;
     if gamma.len() != d_model {
         return Err(Error::LoadError(format!(
             "LayerNorm gamma length mismatch: expected {}, got {}",
@@ -366,8 +479,8 @@ pub fn load_layer_norm(
 
     let beta = if let Some(bias_name) = bias_name {
         if loader.has_tensor(bias_name) {
-            let beta_tensor = loader.load_tensor(bias_name)?;
-            let beta_vec = beta_tensor.to_weight_vector()?;
+                let beta_tensor = loader.load_tensor(bias_name)?;
+                let beta_vec = beta_tensor.into_weight_vector()?;
             if beta_vec.len() != d_model {
                 return Err(Error::LoadError(format!(
                     "LayerNorm beta length mismatch: expected {}, got {}",
@@ -798,8 +911,8 @@ mod tests {
     #[test]
     fn test_convert_f32() {
         let data: Vec<u8> = vec![0x00, 0x00, 0x80, 0x3f]; // 1.0f32 in little-endian
-        let result = convert_to_f32(&data, Dtype::F32).unwrap();
-        assert_eq!(result, vec![1.0f32]);
+        let result = convert_to_f32_cow(&data, Dtype::F32).unwrap();
+        assert_eq!(result.as_ref(), &[1.0f32]);
     }
 
     #[test]

@@ -255,7 +255,10 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，基于 gllm-
 
 **关联设计**: ARCH-ADR-010
 
-**状态**: 🔲 待实现（架构设计已完成）
+**状态**: ✅ 已实现 (2026-01-26) [commit: cd9338f]
+- rayon + mmap 并行解析实现
+- parallel_parser.rs 新增
+- ModelManager 集成
 
 ### REQ-QUANT-001: 原生量化推理 Kernel
 
@@ -277,4 +280,7 @@ gllm 是一个纯 Rust 实现的本地嵌入和重排序推理库，基于 gllm-
 
 **关联设计**: ARCH-ADR-011, gllm-kernels/ARCH-QUANT-001
 
-**状态**: 🔲 待实现（架构设计已完成）
+**状态**: ✅ 已实现 (2026-01-26) [commit: 66af66e, e94a31ee]
+- gllm-kernels: Backend trait 扩展 (q4/q8/awq_matmul)
+- gllm-kernels: CPU 参考实现 (ops/quantized.rs)
+- gllm: NativeQLinear + QuantizedWeight 集成

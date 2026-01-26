@@ -61,12 +61,11 @@ impl DecoderLayer {
         // Self-attention
         let attn_output = self.attention.forward_with_cache(&normed, position_offset, cache, layer_idx)?;
 
-        // Residual connection
-        let mut hidden: Vec<f32> = hidden_states
-            .iter()
-            .zip(attn_output.iter())
-            .map(|(a, b)| a + b)
-            .collect();
+        // Residual connection (in-place to avoid allocation)
+        let mut hidden = attn_output;
+        for (h, s) in hidden.iter_mut().zip(hidden_states.iter()) {
+            *h += s;
+        }
 
         // Post-attention norm
         let normed = self.post_attn_norm.forward(&hidden);

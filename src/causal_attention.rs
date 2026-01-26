@@ -6,6 +6,7 @@ use crate::types::{Error, Result};
 use crate::weight_loader::LinearWeights;
 use gllm_kernels::backend::{Backend, TensorSlice, TensorSliceMut};
 use gllm_kernels::{rope_apply_inplace, rope_precompute, FlashAttentionConfig, RoPEConfig as KernelRoPEConfig};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 /// RoPE configuration.
@@ -182,7 +183,7 @@ impl CausalAttention {
         let key_len = cache.seq_len();
 
         // Expand KV for GQA if needed
-        let (k_expanded, v_expanded) = self.repeat_kv(cached_k, cached_v, batch, key_len);
+        let (k_expanded, v_expanded) = self.expand_kv(cached_k, cached_v, batch, key_len);
 
         // Flash Attention via Backend trait
         let mut attn_out = vec![0.0f32; batch * seq_len * q_size];
@@ -199,8 +200,8 @@ impl CausalAttention {
         self.backend
             .flash_attention(
                 TensorSlice::F32(&q),
-                TensorSlice::F32(&k_expanded),
-                TensorSlice::F32(&v_expanded),
+                TensorSlice::F32(k_expanded.as_ref()),
+                TensorSlice::F32(v_expanded.as_ref()),
                 TensorSliceMut::F32(&mut attn_out),
                 config,
             )
@@ -223,10 +224,16 @@ impl CausalAttention {
         weights.forward(input, output, rows, self.backend.as_ref())
     }
 
-    fn repeat_kv(&self, k: &[f32], v: &[f32], batch: usize, seq_len: usize) -> (Vec<f32>, Vec<f32>) {
+    fn expand_kv<'a>(
+        &self,
+        k: &'a [f32],
+        v: &'a [f32],
+        batch: usize,
+        seq_len: usize,
+    ) -> (Cow<'a, [f32]>, Cow<'a, [f32]>) {
         let repeat = self.num_attention_heads / self.num_key_value_heads;
         if repeat == 1 {
-            return (k.to_vec(), v.to_vec());
+            return (Cow::Borrowed(k), Cow::Borrowed(v));
         }
 
         let head_stride = seq_len * self.head_dim;
@@ -246,7 +253,7 @@ impl CausalAttention {
                 }
             }
         }
-        (k_out, v_out)
+        (Cow::Owned(k_out), Cow::Owned(v_out))
     }
 
     /// Forward without KV cache (for BERT-style bidirectional attention).
@@ -276,7 +283,7 @@ impl CausalAttention {
         }
 
         // Expand KV for GQA if needed
-        let (k_expanded, v_expanded) = self.repeat_kv(&k, &v, batch, seq_len);
+        let (k_expanded, v_expanded) = self.expand_kv(&k, &v, batch, seq_len);
 
         // Flash Attention via Backend trait
         let mut attn_out = vec![0.0f32; batch * seq_len * q_size];
@@ -293,8 +300,8 @@ impl CausalAttention {
         self.backend
             .flash_attention(
                 TensorSlice::F32(&q),
-                TensorSlice::F32(&k_expanded),
-                TensorSlice::F32(&v_expanded),
+                TensorSlice::F32(k_expanded.as_ref()),
+                TensorSlice::F32(v_expanded.as_ref()),
                 TensorSliceMut::F32(&mut attn_out),
                 config,
             )

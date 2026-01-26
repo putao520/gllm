@@ -15,7 +15,18 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokenizers::Tokenizer;
+
+/// Cached backend detection result (OnceLock for single initialization).
+/// This avoids repeated GPU capability probing which can be expensive.
+static CACHED_BACKEND_TYPE: OnceLock<BackendType> = OnceLock::new();
+
+/// Get cached backend type, detecting only once on first call.
+#[inline]
+fn get_cached_backend_type() -> BackendType {
+    *CACHED_BACKEND_TYPE.get_or_init(detect_backend)
+}
 
 pub(crate) const MAX_SEQ_LEN: usize = 512;
 
@@ -507,7 +518,7 @@ pub(crate) fn build_embedding_backend(
     device: &Device,
 ) -> Result<EmbeddingEngine> {
     if should_use_gpu_for_model(model_dir, device) {
-        let detected = detect_backend();
+        let detected = get_cached_backend_type();
         if !matches!(detected, BackendType::Cpu) {
             let engine = EmbeddingEngine::new(model_dir, info)?;
             return Ok(engine);
@@ -526,7 +537,7 @@ pub(crate) fn build_rerank_backend(
     device: &Device,
 ) -> Result<RerankEngine> {
     if should_use_gpu_for_model(model_dir, device) {
-        let detected = detect_backend();
+        let detected = get_cached_backend_type();
         if !matches!(detected, BackendType::Cpu) {
             let engine = RerankEngine::new(model_dir, info)?;
             return Ok(engine);
@@ -592,7 +603,7 @@ pub(crate) fn build_generator_backend(
     device: &Device,
 ) -> Result<EngineBackend> {
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let detected = detect_backend();
+        let detected = get_cached_backend_type();
         if !matches!(detected, BackendType::Cpu) {
             let engine = GeneratorEngine::new(model_dir, info)?;
             return Ok(EngineBackend {
@@ -628,7 +639,7 @@ pub(crate) fn build_backend(
     }
 
     if matches!(device, Device::Gpu(_) | Device::Auto) {
-        let detected = detect_backend();
+        let detected = get_cached_backend_type();
         if !matches!(detected, BackendType::Cpu) {
             let embedding = EmbeddingEngine::new(model_dir, info)?;
             let rerank = RerankEngine::new(model_dir, info)?;
