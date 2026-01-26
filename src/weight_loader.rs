@@ -10,7 +10,7 @@
 
 use crate::quantized::{NativeQLinear, QuantizedWeight};
 use crate::types::{Error, Result};
-use gllm_kernels::backend::Backend;
+use gllm_kernels::backend::BackendImpl;
 use gllm_kernels::{WeightMatrix, WeightVector};
 use safetensors::{Dtype, SafeTensors};
 use std::borrow::Cow;
@@ -348,7 +348,7 @@ impl LinearWeights {
         input: &[f32],
         output: &mut [f32],
         batch: usize,
-        backend: &dyn Backend,
+        backend: &BackendImpl,
     ) -> Result<()> {
         match self {
             Self::Dense { weight, bias } => {

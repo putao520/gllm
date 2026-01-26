@@ -2,9 +2,8 @@
 
 use crate::types::{Error, Result};
 use crate::weight_loader::LinearWeights;
-use gllm_kernels::backend::{Backend, TensorSlice};
+use gllm_kernels::backend::{Backend, BackendImpl, TensorSlice};
 use gllm_kernels::{moe_route, silu_inplace, MoERoutingConfig};
-use std::sync::Arc;
 
 /// Expert FFN weights.
 #[derive(Clone)]
@@ -32,7 +31,7 @@ pub struct MoELayer {
     pub num_experts_per_tok: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
 }
 
 impl MoELayer {
@@ -41,7 +40,7 @@ impl MoELayer {
         num_experts_per_tok: usize,
         hidden_size: usize,
         intermediate_size: usize,
-        backend: Arc<dyn Backend>,
+        backend: BackendImpl,
     ) -> Self {
         let experts = (0..num_experts)
             .map(|_| ExpertWeights::zeros(hidden_size, intermediate_size))
@@ -133,12 +132,12 @@ impl MoELayer {
         // Gate projection
         expert
             .gate_proj
-            .forward(input, gate, 1, self.backend.as_ref())?;
+            .forward(input, gate, 1, &self.backend)?;
 
         // Up projection
         expert
             .up_proj
-            .forward(input, up, 1, self.backend.as_ref())?;
+            .forward(input, up, 1, &self.backend)?;
 
         // SiLU activation on gate
         silu_inplace(gate);
@@ -151,7 +150,7 @@ impl MoELayer {
         // Down projection
         expert
             .down_proj
-            .forward(gate, output, 1, self.backend.as_ref())?;
+            .forward(gate, output, 1, &self.backend)?;
 
         Ok(())
     }

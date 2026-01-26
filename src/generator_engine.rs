@@ -5,24 +5,15 @@ use crate::moe_generator_model::MoEGeneratorModel;
 use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, Quantization};
 use crate::types::{Error, Result};
-use gllm_kernels::backend::auto_select_backend;
+use gllm_kernels::backend::auto_select_static;
 use std::path::Path;
 
-pub(crate) trait GeneratorModelTrait {
-    fn generate(
-        &self,
-        prompt_ids: Vec<i64>,
-        config: &GenerationConfig,
-        tokenizer: &TokenizerAdapter,
-        options: &GenerationOptions,
-    ) -> Result<GenerationOutput>;
-    fn load_safetensors(&mut self, path: &Path) -> Result<()>;
-    fn load_awq(&mut self, path: &Path) -> Result<()>;
-    fn load_gguf(&mut self, path: &Path) -> Result<()>;
-    fn max_position_embeddings(&self) -> usize;
+pub(crate) enum GeneratorModelImpl {
+    Dense(GeneratorModel),
+    MoE(MoEGeneratorModel),
 }
 
-impl GeneratorModelTrait for GeneratorModel {
+impl GeneratorModelImpl {
     fn generate(
         &self,
         prompt_ids: Vec<i64>,
@@ -30,56 +21,45 @@ impl GeneratorModelTrait for GeneratorModel {
         tokenizer: &TokenizerAdapter,
         options: &GenerationOptions,
     ) -> Result<GenerationOutput> {
-        GeneratorModel::generate(self, prompt_ids, config, tokenizer, options)
+        match self {
+            GeneratorModelImpl::Dense(model) => {
+                model.generate(prompt_ids, config, tokenizer, options)
+            }
+            GeneratorModelImpl::MoE(model) => model.generate(prompt_ids, config, tokenizer, options),
+        }
     }
 
     fn load_safetensors(&mut self, path: &Path) -> Result<()> {
-        GeneratorModel::load_safetensors(self, path)
+        match self {
+            GeneratorModelImpl::Dense(model) => model.load_safetensors(path),
+            GeneratorModelImpl::MoE(model) => model.load_safetensors(path),
+        }
     }
 
     fn load_awq(&mut self, path: &Path) -> Result<()> {
-        GeneratorModel::load_awq(self, path)
+        match self {
+            GeneratorModelImpl::Dense(model) => model.load_awq(path),
+            GeneratorModelImpl::MoE(model) => model.load_awq(path),
+        }
     }
 
     fn load_gguf(&mut self, path: &Path) -> Result<()> {
-        GeneratorModel::load_gguf(self, path)
+        match self {
+            GeneratorModelImpl::Dense(model) => model.load_gguf(path),
+            GeneratorModelImpl::MoE(model) => model.load_gguf(path),
+        }
     }
 
     fn max_position_embeddings(&self) -> usize {
-        GeneratorModel::max_position_embeddings(self)
-    }
-}
-
-impl GeneratorModelTrait for MoEGeneratorModel {
-    fn generate(
-        &self,
-        prompt_ids: Vec<i64>,
-        config: &GenerationConfig,
-        tokenizer: &TokenizerAdapter,
-        options: &GenerationOptions,
-    ) -> Result<GenerationOutput> {
-        MoEGeneratorModel::generate(self, prompt_ids, config, tokenizer, options)
-    }
-
-    fn load_safetensors(&mut self, path: &Path) -> Result<()> {
-        MoEGeneratorModel::load_safetensors(self, path)
-    }
-
-    fn load_awq(&mut self, path: &Path) -> Result<()> {
-        MoEGeneratorModel::load_awq(self, path)
-    }
-
-    fn load_gguf(&mut self, path: &Path) -> Result<()> {
-        MoEGeneratorModel::load_gguf(self, path)
-    }
-
-    fn max_position_embeddings(&self) -> usize {
-        MoEGeneratorModel::max_position_embeddings(self)
+        match self {
+            GeneratorModelImpl::Dense(model) => model.max_position_embeddings(),
+            GeneratorModelImpl::MoE(model) => model.max_position_embeddings(),
+        }
     }
 }
 
 pub(crate) struct GeneratorEngine {
-    model: Box<dyn GeneratorModelTrait>,
+    model: GeneratorModelImpl,
 }
 
 impl GeneratorEngine {
@@ -100,15 +80,17 @@ impl GeneratorEngine {
         }
 
         // Create backend ONCE at engine level
-        let backend = auto_select_backend();
+        let backend = auto_select_static();
 
-        let mut model: Box<dyn GeneratorModelTrait> = match info.architecture {
+        let mut model = match info.architecture {
             Architecture::GLM4MoE
             | Architecture::Qwen3MoE
             | Architecture::Mixtral
             | Architecture::DeepSeekV3
-            | Architecture::GptOss => Box::new(MoEGeneratorModel::new(config.clone(), backend)?),
-            _ => Box::new(GeneratorModel::new(config.clone(), backend)?),
+            | Architecture::GptOss => {
+                GeneratorModelImpl::MoE(MoEGeneratorModel::new(config.clone(), backend)?)
+            }
+            _ => GeneratorModelImpl::Dense(GeneratorModel::new(config.clone(), backend)?),
         };
 
         if let Some(model_path) = find_model_file(model_dir, &info.quantization) {

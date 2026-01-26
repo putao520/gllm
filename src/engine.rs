@@ -6,7 +6,7 @@ use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
 use crate::tensor::Matrix;
 use crate::types::{Device, Error, Result};
-use gllm_kernels::backend::auto_select_backend;
+use gllm_kernels::backend::auto_select_static;
 use gllm_kernels::{detect_backend, BackendType};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -360,9 +360,9 @@ impl TokenizerAdapter {
     }
 }
 
-pub(crate) trait EmbeddingModelTrait {
-    fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>>;
-    fn hidden_size(&self) -> usize;
+pub(crate) enum EmbeddingModel {
+    Bert(DynamicBertModel),
+    Decoder(DecoderModel),
 }
 
 fn pooled_rows(pooled: Matrix) -> Vec<Vec<f32>> {
@@ -373,32 +373,32 @@ fn pooled_rows(pooled: Matrix) -> Vec<Vec<f32>> {
         .collect()
 }
 
-impl EmbeddingModelTrait for DynamicBertModel {
+impl EmbeddingModel {
     fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
-        let hidden_states = DynamicBertModel::forward(self, tokens)?;
-        let pooled = DynamicBertModel::pool_hidden_states(self, &hidden_states, tokens);
-        Ok(pooled_rows(pooled))
+        match self {
+            EmbeddingModel::Bert(model) => {
+                let hidden_states = model.forward(tokens)?;
+                let pooled = model.pool_hidden_states(&hidden_states, tokens);
+                Ok(pooled_rows(pooled))
+            }
+            EmbeddingModel::Decoder(model) => {
+                let hidden_states = model.forward(tokens)?;
+                let pooled = model.pool_hidden_states(&hidden_states, tokens);
+                Ok(pooled_rows(pooled))
+            }
+        }
     }
 
     fn hidden_size(&self) -> usize {
-        DynamicBertModel::hidden_size(self)
-    }
-}
-
-impl EmbeddingModelTrait for DecoderModel {
-    fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
-        let hidden_states = DecoderModel::forward(self, tokens)?;
-        let pooled = DecoderModel::pool_hidden_states(self, &hidden_states, tokens);
-        Ok(pooled_rows(pooled))
-    }
-
-    fn hidden_size(&self) -> usize {
-        DecoderModel::hidden_size(self)
+        match self {
+            EmbeddingModel::Bert(model) => model.hidden_size(),
+            EmbeddingModel::Decoder(model) => model.hidden_size(),
+        }
     }
 }
 
 pub(crate) struct EmbeddingEngine {
-    model: Box<dyn EmbeddingModelTrait>,
+    model: EmbeddingModel,
 }
 
 impl EmbeddingEngine {
@@ -415,9 +415,9 @@ impl EmbeddingEngine {
         let model_path = find_model_file(model_dir, &info.quantization);
 
         // Create backend ONCE at engine level
-        let backend = auto_select_backend();
+        let backend = auto_select_static();
 
-        let model: Box<dyn EmbeddingModelTrait> = match info.architecture {
+        let model = match info.architecture {
             Architecture::Bert
             | Architecture::CrossEncoder
             | Architecture::Qwen3Embedding
@@ -431,14 +431,14 @@ impl EmbeddingEngine {
                 if let Some(model_path) = model_path.as_ref() {
                     model.load_safetensors(model_path)?;
                 }
-                Box::new(model)
+                EmbeddingModel::Bert(model)
             }
             _ => {
                 let mut model = DecoderModel::new(config.clone(), backend)?;
                 if let Some(model_path) = model_path.as_ref() {
                     model.load_safetensors(model_path)?;
                 }
-                Box::new(model)
+                EmbeddingModel::Decoder(model)
             }
         };
 
@@ -476,7 +476,7 @@ impl RerankEngine {
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
         // Create backend ONCE at engine level
-        let backend = auto_select_backend();
+        let backend = auto_select_static();
 
         let mut model = DynamicCrossEncoder::new(config, backend)?;
         if let Some(model_path) = find_model_file(model_dir, &info.quantization) {

@@ -12,10 +12,11 @@ use crate::types::{Error, Result};
 use crate::engine::TokenizerAdapter;
 use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::scratch_buffer::{ScratchBuffer, ScratchConfig};
-use gllm_kernels::backend::{Backend, TensorSlice};
+use gllm_kernels::backend::{Backend, BackendImpl, TensorSlice};
 use gllm_kernels::linear_forward;
-use std::sync::Arc;
 use std::sync::Mutex;
+
+mod loader;
 
 /// Dense (non-MoE) Generator Model.
 pub struct GeneratorModel {
@@ -24,12 +25,12 @@ pub struct GeneratorModel {
     final_norm: RmsNorm,
     lm_head: Vec<f32>,
     config: ModelConfig,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
     prompt_cache: Mutex<PromptCache>,
 }
 
 impl GeneratorModel {
-    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: BackendImpl) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_layers = config.num_hidden_layers;
         let vocab_size = config.vocab_size;
@@ -213,7 +214,7 @@ impl GeneratorModel {
 }
 
 /// Trait for generator models (dense and MoE).
-pub trait GeneratorModelTrait: Send + Sync {
+pub trait GeneratorInferTrait: Send + Sync {
     fn forward(&self, input_ids: &[u32], cache: &mut KVCache) -> Result<Vec<f32>>;
     fn sample(&self, logits: &[f32], temperature: f32) -> Result<u32>;
     fn max_position_embeddings(&self) -> usize;
@@ -222,7 +223,7 @@ pub trait GeneratorModelTrait: Send + Sync {
     fn vocab_size(&self) -> usize;
 }
 
-impl GeneratorModelTrait for GeneratorModel {
+impl GeneratorInferTrait for GeneratorModel {
     fn forward(&self, input_ids: &[u32], cache: &mut KVCache) -> Result<Vec<f32>> {
         self.forward(input_ids, cache)
     }

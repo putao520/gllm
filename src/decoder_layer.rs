@@ -6,9 +6,8 @@ use crate::rms_norm::RmsNorm;
 use crate::scratch_buffer::ScratchBuffer;
 use crate::types::{Error, Result};
 use crate::weight_loader::LinearWeights;
-use gllm_kernels::backend::Backend;
+use gllm_kernels::backend::BackendImpl;
 use gllm_kernels::{gelu_inplace, silu_inplace};
-use std::sync::Arc;
 
 /// Feed-Forward Network weights.
 #[derive(Clone)]
@@ -42,7 +41,7 @@ pub struct DecoderLayer {
     pub hidden_size: usize,
     pub intermediate_size: usize,
     pub use_gelu: bool,
-    pub backend: Arc<dyn Backend>,
+    pub backend: BackendImpl,
 }
 
 impl DecoderLayer {
@@ -156,11 +155,11 @@ impl DecoderLayer {
     ) -> Result<()> {
         self.ffn
             .gate_proj
-            .forward(input, gate, batch, self.backend.as_ref())?;
+            .forward(input, gate, batch, &self.backend)?;
 
         self.ffn
             .up_proj
-            .forward(input, up, batch, self.backend.as_ref())?;
+            .forward(input, up, batch, &self.backend)?;
 
         if self.use_gelu {
             gelu_inplace(gate);
@@ -174,7 +173,7 @@ impl DecoderLayer {
 
         self.ffn
             .down_proj
-            .forward(gate, output, batch, self.backend.as_ref())?;
+            .forward(gate, output, batch, &self.backend)?;
 
         Ok(())
     }

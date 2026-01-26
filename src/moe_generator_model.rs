@@ -4,7 +4,7 @@ use crate::causal_attention::CausalAttention;
 use crate::engine::TokenizerAdapter;
 use crate::generation::{GenerationConfig, GenerationOptions, GenerationOutput};
 use crate::generation_loop::{generate_with_ops, ForwardOutput, GenerationOps};
-use crate::generator_model::GeneratorModelTrait;
+use crate::generator_model::GeneratorInferTrait;
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::moe_layer::MoELayer;
@@ -12,10 +12,11 @@ use crate::prompt_cache::PromptCache;
 use crate::rms_norm::RmsNorm;
 use crate::scratch_buffer::{ScratchBuffer, ScratchConfig};
 use crate::types::{Error, Result};
-use gllm_kernels::backend::{Backend, TensorSlice};
+use gllm_kernels::backend::{Backend, BackendImpl, TensorSlice};
 use gllm_kernels::linear_forward;
-use std::sync::Arc;
 use std::sync::Mutex;
+
+mod loader;
 
 /// MoE Decoder Layer with sparse routing.
 pub struct MoEDecoderLayer {
@@ -103,12 +104,12 @@ pub struct MoEGeneratorModel {
     final_norm: RmsNorm,
     lm_head: Vec<f32>,
     config: ModelConfig,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
     prompt_cache: Mutex<PromptCache>,
 }
 
 impl MoEGeneratorModel {
-    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: BackendImpl) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_layers = config.num_hidden_layers;
         let vocab_size = config.vocab_size;
@@ -131,7 +132,13 @@ impl MoEGeneratorModel {
                 attention,
                 input_norm: RmsNorm::new(hidden_size, eps),
                 post_attn_norm: RmsNorm::new(hidden_size, eps),
-                moe: MoELayer::new(num_experts, num_experts_per_tok, hidden_size, intermediate_size, backend.clone()),
+                moe: MoELayer::new(
+                    num_experts,
+                    num_experts_per_tok,
+                    hidden_size,
+                    intermediate_size,
+                    backend.clone(),
+                ),
                 hidden_size,
             };
             layers.push(layer);
@@ -292,7 +299,7 @@ impl MoEGeneratorModel {
     }
 }
 
-impl GeneratorModelTrait for MoEGeneratorModel {
+impl GeneratorInferTrait for MoEGeneratorModel {
     fn forward(&self, input_ids: &[u32], cache: &mut KVCache) -> Result<Vec<f32>> {
         self.forward(input_ids, cache)
     }

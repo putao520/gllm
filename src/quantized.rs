@@ -5,7 +5,7 @@
 //! intentionally CPU-only and pure Rust to match the gllm design constraints.
 
 use crate::types::{Error, Result};
-use gllm_kernels::backend::Backend;
+use gllm_kernels::backend::{Backend, BackendImpl};
 use gllm_kernels::linear_forward;
 use gllm_kernels::quantized::{AwqWeight, Q4_0Block, Q8_0Block};
 use half::f16;
@@ -444,7 +444,7 @@ impl NativeQLinear {
         input: &[f32],
         output: &mut [f32],
         batch: usize,
-        backend: &dyn Backend,
+        backend: &BackendImpl,
     ) -> Result<()> {
         if input.len() != batch * self.in_features {
             return Err(Error::InferenceError(
@@ -517,7 +517,7 @@ impl NativeQLinear {
         &self,
         input: &[f32],
         batch: usize,
-        backend: &dyn Backend,
+        backend: &BackendImpl,
     ) -> Result<Vec<f32>> {
         let mut output = vec![0.0f32; batch * self.out_features];
         self.forward(input, &mut output, batch, backend)?;

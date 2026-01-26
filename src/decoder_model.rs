@@ -3,7 +3,7 @@
 //! This model processes entire sequences at once without persistent KV cache.
 
 use crate::causal_attention::CausalAttention;
-use gllm_kernels::backend::Backend;
+use gllm_kernels::backend::BackendImpl;
 use crate::decoder_layer::{DecoderLayer, FFNWeights};
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
@@ -20,7 +20,6 @@ use gllm_kernels::WeightMatrix;
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct DecoderModel {
@@ -35,7 +34,7 @@ pub struct DecoderModel {
 }
 
 impl DecoderModel {
-    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: BackendImpl) -> Result<Self> {
         if config.num_hidden_layers == 0 {
             return Err(Error::InvalidConfig(
                 "num_hidden_layers must be greater than 0 for decoder model".into(),

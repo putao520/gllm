@@ -10,7 +10,7 @@ use crate::tensor::{Matrix, Tensor3};
 use crate::types::{Error, Result};
 use crate::weight_loader::shards::ShardIndex;
 use crate::weight_loader::{LayerNormWeights, LinearWeights, WeightLoader};
-use gllm_kernels::backend::Backend;
+use gllm_kernels::backend::BackendImpl;
 use gllm_kernels::{gelu_inplace, layer_norm_forward, WeightMatrix, WeightVector};
 use memmap2::Mmap;
 use std::fs::File;
@@ -38,14 +38,14 @@ pub struct DynamicBertLayer {
     pub(crate) attention_layernorm: LayerNormWeights,
     pub(crate) output_layernorm: LayerNormWeights,
     pub(crate) hidden_act: HiddenAct,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
 }
 
 impl DynamicBertLayer {
     pub fn new(
         config: &ModelConfig,
         rope: Option<Arc<RotaryPositionEmbedding>>,
-        backend: Arc<dyn Backend>,
+        backend: BackendImpl,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let intermediate_size = config.intermediate_size.unwrap_or(hidden_size * 4);
@@ -93,12 +93,12 @@ impl DynamicBertLayer {
 
         let mut intermediate = vec![0.0f32; rows * self.ffn_1.out_features()];
         self.ffn_1
-            .forward(&input.data, &mut intermediate, rows, self.backend.as_ref())?;
+            .forward(&input.data, &mut intermediate, rows, &self.backend)?;
         apply_activation(&self.hidden_act, &mut intermediate);
 
         let mut output = vec![0.0f32; rows * self.ffn_2.out_features()];
         self.ffn_2
-            .forward(&intermediate, &mut output, rows, self.backend.as_ref())?;
+            .forward(&intermediate, &mut output, rows, &self.backend)?;
 
         Tensor3::new(output, batch, seq_len, self.ffn_2.out_features())
     }
@@ -113,7 +113,7 @@ impl DynamicBertEncoder {
     pub fn new(
         config: &ModelConfig,
         rope: Option<Arc<RotaryPositionEmbedding>>,
-        backend: Arc<dyn Backend>,
+        backend: BackendImpl,
     ) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
@@ -145,11 +145,11 @@ pub struct DynamicBertModel {
     pub(crate) config: ModelConfig,
     pub(crate) max_position_embeddings: usize,
     pad_id: i64,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
 }
 
 impl DynamicBertModel {
-    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: BackendImpl) -> Result<Self> {
         let variant = BertVariant::detect(&config);
         let hidden_size = config.hidden_size;
         let max_pos = config.max_position_embeddings;
@@ -389,11 +389,11 @@ pub struct DynamicCrossEncoder {
     pooler: DynamicPooler,
     classifier_dense: Option<LinearWeights>,
     classifier_out: LinearWeights,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
 }
 
 impl DynamicCrossEncoder {
-    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: BackendImpl) -> Result<Self> {
         let encoder = DynamicBertModel::new(config.clone(), backend.clone())?;
         let classifier_out = LinearWeights::zeros(1, config.hidden_size);
         let pooler = DynamicPooler::new(PoolingStrategy::Cls, PoolingConfig { normalize: false });
@@ -413,11 +413,11 @@ impl DynamicCrossEncoder {
         let mut pooled = self.pooler.pool(&hidden, Some(&mask));
 
         if let Some(dense) = &self.classifier_dense {
-            pooled = apply_linear(&pooled, dense, self.backend.as_ref())?;
+            pooled = apply_linear(&pooled, dense, &self.backend)?;
             apply_tanh_inplace(&mut pooled.data);
         }
 
-        let logits = apply_linear(&pooled, &self.classifier_out, self.backend.as_ref())?;
+        let logits = apply_linear(&pooled, &self.classifier_out, &self.backend)?;
         Ok(logits
             .data
             .chunks(logits.cols)
@@ -675,7 +675,11 @@ fn build_token_mask(tokens: &[Vec<i64>], seq_len: usize, pad_id: i64) -> Vec<i64
     mask
 }
 
-fn apply_linear(input: &Matrix, weights: &LinearWeights, backend: &dyn Backend) -> Result<Matrix> {
+fn apply_linear(
+    input: &Matrix,
+    weights: &LinearWeights,
+    backend: &BackendImpl,
+) -> Result<Matrix> {
     if input.cols != weights.in_features() {
         return Err(Error::InferenceError(
             "Linear input feature mismatch".into(),

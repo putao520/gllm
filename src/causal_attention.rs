@@ -5,7 +5,7 @@ use crate::model_config::ModelConfig;
 use crate::scratch_buffer::ScratchBuffer;
 use crate::types::{Error, Result};
 use crate::weight_loader::LinearWeights;
-use gllm_kernels::backend::{Backend, TensorSlice, TensorSliceMut};
+use gllm_kernels::backend::{Backend, BackendImpl, TensorSlice, TensorSliceMut};
 use gllm_kernels::{rope_apply_inplace, rope_precompute, FlashAttentionConfig, RoPEConfig as KernelRoPEConfig};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ pub struct CausalAttention {
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
     pub(crate) causal: bool,
-    backend: Arc<dyn Backend>,
+    backend: BackendImpl,
 }
 
 impl CausalAttention {
@@ -113,7 +113,7 @@ impl CausalAttention {
         config: &ModelConfig,
         rope: Option<Arc<RotaryPositionEmbedding>>,
         causal: bool,
-        backend: Arc<dyn Backend>,
+        backend: BackendImpl,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_attention_heads = config.num_attention_heads;
@@ -281,7 +281,7 @@ impl CausalAttention {
         output: &mut [f32],
         rows: usize,
     ) -> Result<()> {
-        weights.forward(input, output, rows, self.backend.as_ref())
+        weights.forward(input, output, rows, &self.backend)
     }
 
     fn expand_kv<'a>(
