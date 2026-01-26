@@ -1,5 +1,5 @@
 use crate::engine::{find_model_file, TokenizerAdapter};
-use crate::generation::{GenerationConfig, GenerationOutput};
+use crate::generation::{GenerationConfig, GenerationOptions, GenerationOutput};
 use crate::generator_model::GeneratorModel;
 use crate::moe_generator_model::MoEGeneratorModel;
 use crate::model_config::ModelConfig;
@@ -14,6 +14,7 @@ pub(crate) trait GeneratorModelTrait {
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
     ) -> Result<GenerationOutput>;
     fn load_safetensors(&mut self, path: &Path) -> Result<()>;
     fn load_awq(&mut self, path: &Path) -> Result<()>;
@@ -27,8 +28,9 @@ impl GeneratorModelTrait for GeneratorModel {
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
     ) -> Result<GenerationOutput> {
-        GeneratorModel::generate(self, prompt_ids, config, tokenizer)
+        GeneratorModel::generate(self, prompt_ids, config, tokenizer, options)
     }
 
     fn load_safetensors(&mut self, path: &Path) -> Result<()> {
@@ -54,8 +56,9 @@ impl GeneratorModelTrait for MoEGeneratorModel {
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
     ) -> Result<GenerationOutput> {
-        MoEGeneratorModel::generate(self, prompt_ids, config, tokenizer)
+        MoEGeneratorModel::generate(self, prompt_ids, config, tokenizer, options)
     }
 
     fn load_safetensors(&mut self, path: &Path) -> Result<()> {
@@ -126,8 +129,9 @@ impl GeneratorEngine {
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
     ) -> Result<GenerationOutput> {
-        self.model.generate(prompt_ids, config, tokenizer)
+        self.model.generate(prompt_ids, config, tokenizer, options)
     }
 
     pub fn max_position_embeddings(&self) -> usize {

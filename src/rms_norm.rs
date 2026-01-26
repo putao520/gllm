@@ -32,15 +32,17 @@ impl RmsNorm {
 
     /// Forward pass, returns normalized output.
     pub fn forward(&self, input: &[f32]) -> Vec<f32> {
-        let batch = input.len() / self.hidden_size;
+        let hidden_size = self.weight.len();
+        let batch = input.len() / hidden_size;
         let mut output = vec![0.0f32; input.len()];
-        rms_norm_forward(input, &self.weight, &mut output, batch, self.hidden_size, self.eps);
+        rms_norm_forward(input, &self.weight, &mut output, batch, hidden_size, self.eps);
         output
     }
 
     /// In-place forward pass.
     pub fn forward_inplace(&self, data: &mut [f32]) {
-        let batch = data.len() / self.hidden_size;
-        rms_norm_inplace(data, &self.weight, batch, self.hidden_size, self.eps);
+        let hidden_size = self.weight.len();
+        let batch = data.len() / hidden_size;
+        rms_norm_inplace(data, &self.weight, batch, hidden_size, self.eps);
     }
 }

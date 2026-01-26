@@ -1,6 +1,6 @@
 use crate::decoder_model::DecoderModel;
 use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
-use crate::generation::{GenerationConfig, GenerationOutput};
+use crate::generation::{GenerationConfig, GenerationOptions, GenerationOutput};
 use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
@@ -168,9 +168,13 @@ fn resolve_pad_id(
 /// Lightweight tokenizer wrapper supporting both HF tokenizers and a deterministic fallback.
 #[derive(Clone)]
 pub struct TokenizerAdapter {
-    tokenizer: Option<Tokenizer>,
-    vocab_size: usize,
-    pad_id: i64,
+    inner: TokenizerAdapterInner,
+}
+
+#[derive(Clone)]
+enum TokenizerAdapterInner {
+    Tokenizer { tokenizer: Tokenizer, pad_id: i64 },
+    Fallback { vocab_size: usize, pad_id: i64 },
 }
 
 impl TokenizerAdapter {
@@ -183,7 +187,6 @@ impl TokenizerAdapter {
 
         if tokenizer_path.exists() {
             if let Ok(tokenizer) = Tokenizer::from_file(&tokenizer_path) {
-                let vocab_size = tokenizer.get_vocab_size(true);
                 let pad_id = resolve_pad_id(
                     Some(&tokenizer),
                     tokenizer_config.as_ref(),
@@ -191,9 +194,7 @@ impl TokenizerAdapter {
                     vocab_map.as_ref(),
                 );
                 return Ok(Self {
-                    tokenizer: Some(tokenizer),
-                    vocab_size,
-                    pad_id,
+                    inner: TokenizerAdapterInner::Tokenizer { tokenizer, pad_id },
                 });
             }
         }
@@ -211,79 +212,65 @@ impl TokenizerAdapter {
         );
 
         Ok(Self {
-            tokenizer: None,
-            vocab_size,
-            pad_id,
+            inner: TokenizerAdapterInner::Fallback { vocab_size, pad_id },
         })
     }
 
     /// Encode a single string into token ids.
     pub fn encode(&self, text: &str, max_len: usize) -> (Vec<i64>, usize) {
         let limit = max_len.max(1);
-        if let Some(tokenizer) = &self.tokenizer {
-            if let Ok(encoding) = tokenizer.encode(text, true) {
-                let mut ids: Vec<i64> = encoding.get_ids().iter().map(|id| *id as i64).collect();
-                let used = ids.len();
-                ids.truncate(limit);
-                return (self.pad(ids, limit), used);
+        match &self.inner {
+            TokenizerAdapterInner::Tokenizer { tokenizer, .. } => {
+                if let Ok(encoding) = tokenizer.encode(text, true) {
+                    let mut ids: Vec<i64> =
+                        encoding.get_ids().iter().map(|id| *id as i64).collect();
+                    let used = ids.len();
+                    ids.truncate(limit);
+                    return (self.pad(ids, limit), used);
+                }
+                self.fallback_encode(text, limit, tokenizer.get_vocab_size(true))
+            }
+            TokenizerAdapterInner::Fallback { vocab_size, .. } => {
+                self.fallback_encode(text, limit, *vocab_size)
             }
         }
-
-        // Fallback: hash-based tokenization per word for determinism.
-        let mut ids = Vec::new();
-        for word in text.split_whitespace() {
-            let mut hasher = DefaultHasher::new();
-            word.hash(&mut hasher);
-            let hash = hasher.finish();
-            ids.push(((hash % self.vocab_size as u64) as i64).max(1));
-            if ids.len() >= limit {
-                break;
-            }
-        }
-        let used = ids.len();
-        (self.pad(ids, limit), used)
     }
 
     /// Encode a string into token ids without padding.
     pub fn encode_unpadded(&self, text: &str, max_len: usize) -> Vec<i64> {
         let limit = max_len.max(1);
-        if let Some(tokenizer) = &self.tokenizer {
-            if let Ok(encoding) = tokenizer.encode(text, true) {
-                let mut ids: Vec<i64> = encoding.get_ids().iter().map(|id| *id as i64).collect();
-                ids.truncate(limit);
-                if ids.is_empty() {
-                    ids.push(self.pad_id);
+        match &self.inner {
+            TokenizerAdapterInner::Tokenizer { tokenizer, .. } => {
+                if let Ok(encoding) = tokenizer.encode(text, true) {
+                    let mut ids: Vec<i64> =
+                        encoding.get_ids().iter().map(|id| *id as i64).collect();
+                    ids.truncate(limit);
+                    if ids.is_empty() {
+                        ids.push(self.pad_id());
+                    }
+                    return ids;
                 }
-                return ids;
+                self.fallback_encode_unpadded(text, limit, tokenizer.get_vocab_size(true))
+            }
+            TokenizerAdapterInner::Fallback { vocab_size, .. } => {
+                self.fallback_encode_unpadded(text, limit, *vocab_size)
             }
         }
-
-        let mut ids = Vec::new();
-        for word in text.split_whitespace() {
-            let mut hasher = DefaultHasher::new();
-            word.hash(&mut hasher);
-            let hash = hasher.finish();
-            ids.push(((hash % self.vocab_size as u64) as i64).max(1));
-            if ids.len() >= limit {
-                break;
-            }
-        }
-        if ids.is_empty() {
-            ids.push(self.pad_id);
-        }
-        ids
     }
 
     /// Decode token ids into a string.
     pub fn decode(&self, tokens: &[i64]) -> String {
-        if let Some(tokenizer) = &self.tokenizer {
-            let ids: Vec<u32> = tokens
-                .iter()
-                .filter_map(|id| u32::try_from(*id).ok())
-                .collect();
-            if let Ok(text) = tokenizer.decode(&ids, true) {
-                return text;
+        match &self.inner {
+            TokenizerAdapterInner::Tokenizer { tokenizer, .. } => {
+                let ids: Vec<u32> = tokens
+                    .iter()
+                    .filter_map(|id| u32::try_from(*id).ok())
+                    .collect();
+                if let Ok(text) = tokenizer.decode(&ids, true) {
+                    return text;
+                }
             }
+            TokenizerAdapterInner::Fallback { .. } => {}
         }
 
         tokens
@@ -314,15 +301,60 @@ impl TokenizerAdapter {
     #[allow(dead_code)]
     pub fn vocab_size(&self) -> usize {
         // Reserve one additional slot for padding.
-        self.vocab_size + 1
+        let size = match &self.inner {
+            TokenizerAdapterInner::Tokenizer { tokenizer, .. } => tokenizer.get_vocab_size(true),
+            TokenizerAdapterInner::Fallback { vocab_size, .. } => *vocab_size,
+        };
+        size + 1
     }
 
     fn pad(&self, mut ids: Vec<i64>, len: usize) -> Vec<i64> {
         if ids.len() < len {
-            ids.resize(len, self.pad_id);
+            ids.resize(len, self.pad_id());
         }
         if ids.is_empty() {
-            ids.push(self.pad_id);
+            ids.push(self.pad_id());
+        }
+        ids
+    }
+
+    fn pad_id(&self) -> i64 {
+        match &self.inner {
+            TokenizerAdapterInner::Tokenizer { pad_id, .. } => *pad_id,
+            TokenizerAdapterInner::Fallback { pad_id, .. } => *pad_id,
+        }
+    }
+
+    fn fallback_encode(&self, text: &str, limit: usize, vocab_size: usize) -> (Vec<i64>, usize) {
+        let vocab_size = vocab_size.max(1);
+        let mut ids = Vec::new();
+        for word in text.split_whitespace() {
+            let mut hasher = DefaultHasher::new();
+            word.hash(&mut hasher);
+            let hash = hasher.finish();
+            ids.push(((hash % vocab_size as u64) as i64).max(1));
+            if ids.len() >= limit {
+                break;
+            }
+        }
+        let used = ids.len();
+        (self.pad(ids, limit), used)
+    }
+
+    fn fallback_encode_unpadded(&self, text: &str, limit: usize, vocab_size: usize) -> Vec<i64> {
+        let vocab_size = vocab_size.max(1);
+        let mut ids = Vec::new();
+        for word in text.split_whitespace() {
+            let mut hasher = DefaultHasher::new();
+            word.hash(&mut hasher);
+            let hash = hasher.finish();
+            ids.push(((hash % vocab_size as u64) as i64).max(1));
+            if ids.len() >= limit {
+                break;
+            }
+        }
+        if ids.is_empty() {
+            ids.push(self.pad_id());
         }
         ids
     }
@@ -490,14 +522,25 @@ impl EngineBackend {
         }
     }
 
+    #[allow(dead_code)]
     pub fn run_generate(
         &self,
         prompt_ids: Vec<i64>,
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
     ) -> Result<GenerationOutput> {
+        self.run_generate_with_options(prompt_ids, config, tokenizer, &GenerationOptions::default())
+    }
+
+    pub fn run_generate_with_options(
+        &self,
+        prompt_ids: Vec<i64>,
+        config: &GenerationConfig,
+        tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
+    ) -> Result<GenerationOutput> {
         match self.generator.as_ref() {
-            Some(generator) => generator.generate(prompt_ids, config, tokenizer),
+            Some(generator) => generator.generate(prompt_ids, config, tokenizer, options),
             None => Err(Error::InvalidConfig(
                 "Generation is not supported for this model".into(),
             )),

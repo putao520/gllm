@@ -1,4 +1,5 @@
 use crate::engine::{EngineBackend, TokenizerAdapter};
+use crate::kv_cache::KvCompressionStrategy;
 use crate::types::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,22 @@ pub struct GenerationConfig {
     pub speculative_decoding: Option<SpeculativeDecodingConfig>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct GenerationOptions {
+    pub use_scratch_buffer: bool,
+    pub prompt_cache_entries: Option<usize>,
+    pub kv_compression: Option<KvCompressionStrategy>,
+}
+
+impl Default for GenerationOptions {
+    fn default() -> Self {
+        Self {
+            use_scratch_buffer: true,
+            prompt_cache_entries: None,
+            kv_compression: None,
+        }
+    }
+}
 impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
@@ -83,6 +100,7 @@ pub struct GenerationBuilder<'a> {
     pub(crate) tokenizer: &'a TokenizerAdapter,
     pub(crate) prompt: String,
     pub(crate) config: GenerationConfig,
+    pub(crate) options: GenerationOptions,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -113,6 +131,24 @@ impl<'a> GenerationBuilder<'a> {
 
     pub fn add_stop_token(mut self, token: i64) -> Self {
         self.config.stop_tokens.push(token);
+        self
+    }
+
+    /// Enable or disable scratch buffer reuse in generation.
+    pub fn scratch_buffer(mut self, enabled: bool) -> Self {
+        self.options.use_scratch_buffer = enabled;
+        self
+    }
+
+    /// Enable prompt cache with a maximum number of entries.
+    pub fn prompt_cache_entries(mut self, max_entries: usize) -> Self {
+        self.options.prompt_cache_entries = Some(max_entries);
+        self
+    }
+
+    /// Enable KV cache compression strategy.
+    pub fn kv_compression(mut self, strategy: KvCompressionStrategy) -> Self {
+        self.options.kv_compression = Some(strategy);
         self
     }
 
@@ -178,7 +214,7 @@ impl<'a> GenerationBuilder<'a> {
         }
 
         self.engine
-            .run_generate(prompt_tokens, &self.config, self.tokenizer)
+            .run_generate_with_options(prompt_tokens, &self.config, self.tokenizer, &self.options)
     }
 }
 

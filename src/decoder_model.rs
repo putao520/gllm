@@ -2,7 +2,7 @@
 //!
 //! This model processes entire sequences at once without persistent KV cache.
 
-use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
+use crate::causal_attention::CausalAttention;
 use gllm_kernels::backend::Backend;
 use crate::decoder_layer::{DecoderLayer, FFNWeights};
 use crate::kv_cache::KVCache;
@@ -32,7 +32,6 @@ pub struct DecoderModel {
     pub(crate) hidden_size: usize,
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
-    rope: Option<Arc<RotaryPositionEmbedding>>,
 }
 
 impl DecoderModel {
@@ -84,7 +83,6 @@ impl DecoderModel {
             hidden_size,
             num_key_value_heads,
             head_dim,
-            rope,
         })
     }
 
@@ -230,12 +228,12 @@ impl DecoderModel {
 
             if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
                 let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
-                layer.input_norm.weight = norm_tensor.to_weight_vector()?.data;
+                layer.input_norm.weight = norm_tensor.into_weight_vector()?.data;
             }
             if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
                 let norm_tensor =
                     loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
-                layer.post_attn_norm.weight = norm_tensor.to_weight_vector()?.data;
+                layer.post_attn_norm.weight = norm_tensor.into_weight_vector()?.data;
             }
         }
 
@@ -247,7 +245,7 @@ impl DecoderModel {
         for name in final_norm_names {
             if loader.has_tensor(name) {
                 let norm_tensor = loader.load_tensor(name)?;
-                self.final_norm.weight = norm_tensor.to_weight_vector()?.data;
+                self.final_norm.weight = norm_tensor.into_weight_vector()?.data;
                 break;
             }
         }

@@ -74,6 +74,7 @@ impl Client {
             tokenizer: &self.tokenizer,
             prompt: prompt.to_string(),
             config: GenerationConfig::default(),
+            options: crate::generation::GenerationOptions::default(),
         }
     }
 }

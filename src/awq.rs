@@ -5,7 +5,7 @@
 
 use crate::parallel_parser::TensorLoader;
 use crate::types::{Error, Result};
-use crate::weight_loader::RawTensor;
+use crate::weight_loader::RawTensorView;
 use gllm_kernels::quantized::AwqWeight;
 use half::f16;
 use safetensors::Dtype;
@@ -20,8 +20,8 @@ pub struct AwqQuantizedWeight {
 impl AwqQuantizedWeight {
     /// Load AWQ weights from a tensor loader using the given prefix.
     pub fn from_safetensors<L: TensorLoader>(loader: &L, prefix: &str) -> Result<Self> {
-        let qweight_raw = loader.load_raw_tensor(&format!("{prefix}.qweight"))?;
-        let scales_raw = loader.load_raw_tensor(&format!("{prefix}.scales"))?;
+        let qweight_raw = loader.load_raw_tensor_view(&format!("{prefix}.qweight"))?;
+        let scales_raw = loader.load_raw_tensor_view(&format!("{prefix}.scales"))?;
         let qzeros_raw = load_qzeros(loader, prefix)?;
 
         let qweight = parse_u32_tensor(&qweight_raw, "qweight")?;
@@ -44,14 +44,14 @@ impl AwqQuantizedWeight {
     }
 }
 
-fn load_qzeros<L: TensorLoader>(loader: &L, prefix: &str) -> Result<RawTensor> {
+fn load_qzeros<'a, L: TensorLoader>(loader: &'a L, prefix: &str) -> Result<RawTensorView<'a>> {
     let qzeros_name = format!("{prefix}.qzeros");
     if loader.has_tensor(&qzeros_name) {
-        return loader.load_raw_tensor(&qzeros_name);
+        return loader.load_raw_tensor_view(&qzeros_name);
     }
     let zeros_name = format!("{prefix}.zeros");
     if loader.has_tensor(&zeros_name) {
-        return loader.load_raw_tensor(&zeros_name);
+        return loader.load_raw_tensor_view(&zeros_name);
     }
     Err(Error::LoadError(format!(
         "AWQ {prefix} is missing qzeros/zeros tensor"
@@ -59,7 +59,7 @@ fn load_qzeros<L: TensorLoader>(loader: &L, prefix: &str) -> Result<RawTensor> {
 }
 
 /// Parse a packed u32 tensor from raw safetensors data.
-fn parse_u32_tensor(raw: &RawTensor, label: &str) -> Result<Vec<u32>> {
+fn parse_u32_tensor(raw: &RawTensorView<'_>, label: &str) -> Result<Vec<u32>> {
     match raw.dtype {
         Dtype::I32 | Dtype::U32 => {}
         _ => {
@@ -69,41 +69,40 @@ fn parse_u32_tensor(raw: &RawTensor, label: &str) -> Result<Vec<u32>> {
             )))
         }
     }
-    if raw.data.len() % 4 != 0 {
+    let data = raw.data.as_ref();
+    if data.len() % 4 != 0 {
         return Err(Error::LoadError(format!(
             "AWQ {label} byte length is not divisible by 4"
         )));
     }
-    Ok(raw
-        .data
+    Ok(data
         .chunks_exact(4)
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
 
 /// Parse AWQ scales as f16 values.
-fn parse_scales(raw: &RawTensor) -> Result<Vec<f16>> {
+fn parse_scales(raw: &RawTensorView<'_>) -> Result<Vec<f16>> {
+    let data = raw.data.as_ref();
     match raw.dtype {
         Dtype::F16 => {
-            if raw.data.len() % 2 != 0 {
+            if data.len() % 2 != 0 {
                 return Err(Error::LoadError(
                     "AWQ scales byte length is not divisible by 2".into(),
                 ));
             }
-            Ok(raw
-                .data
+            Ok(data
                 .chunks_exact(2)
                 .map(|chunk| f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
                 .collect())
         }
         Dtype::F32 => {
-            if raw.data.len() % 4 != 0 {
+            if data.len() % 4 != 0 {
                 return Err(Error::LoadError(
                     "AWQ scales byte length is not divisible by 4".into(),
                 ));
             }
-            Ok(raw
-                .data
+            Ok(data
                 .chunks_exact(4)
                 .map(|chunk| {
                     let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -119,7 +118,7 @@ fn parse_scales(raw: &RawTensor) -> Result<Vec<f16>> {
 }
 
 /// Derive input/output dimensions from qweight shape.
-fn parse_qweight_shape(raw: &RawTensor) -> Result<(usize, usize, usize)> {
+fn parse_qweight_shape(raw: &RawTensorView<'_>) -> Result<(usize, usize, usize)> {
     if raw.shape.len() != 2 {
         return Err(Error::LoadError(
             "AWQ qweight must be a 2D tensor".into(),
@@ -136,7 +135,11 @@ fn parse_qweight_shape(raw: &RawTensor) -> Result<(usize, usize, usize)> {
 }
 
 /// Compute group size from scales shape and validate compatibility.
-fn parse_group_size(raw: &RawTensor, in_features: usize, out_features: usize) -> Result<usize> {
+fn parse_group_size(
+    raw: &RawTensorView<'_>,
+    in_features: usize,
+    out_features: usize,
+) -> Result<usize> {
     if raw.shape.len() != 2 {
         return Err(Error::LoadError(
             "AWQ scales must be a 2D tensor".into(),
@@ -164,7 +167,7 @@ fn parse_group_size(raw: &RawTensor, in_features: usize, out_features: usize) ->
 
 /// Validate qzeros tensor shape against AWQ expectations.
 fn validate_qzeros_shape(
-    raw: &RawTensor,
+    raw: &RawTensorView<'_>,
     packed_out: usize,
     in_features: usize,
     out_features: usize,

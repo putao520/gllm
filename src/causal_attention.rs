@@ -2,6 +2,7 @@
 
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
+use crate::scratch_buffer::ScratchBuffer;
 use crate::types::{Error, Result};
 use crate::weight_loader::LinearWeights;
 use gllm_kernels::backend::{Backend, TensorSlice, TensorSliceMut};
@@ -34,7 +35,6 @@ impl Default for RopeConfig {
 pub struct RotaryPositionEmbedding {
     cos_cached: Vec<f32>,
     sin_cached: Vec<f32>,
-    dim: usize,
     max_cached_len: usize,
 }
 
@@ -58,7 +58,6 @@ impl RotaryPositionEmbedding {
         Self {
             cos_cached: cos_vals,
             sin_cached: sin_vals,
-            dim,
             max_cached_len: max_seq_len,
         }
     }
@@ -105,7 +104,6 @@ pub struct CausalAttention {
     pub(crate) num_attention_heads: usize,
     pub(crate) num_key_value_heads: usize,
     pub(crate) head_dim: usize,
-    pub(crate) hidden_size: usize,
     pub(crate) causal: bool,
     backend: Arc<dyn Backend>,
 }
@@ -142,7 +140,6 @@ impl CausalAttention {
             num_attention_heads,
             num_key_value_heads,
             head_dim,
-            hidden_size,
             causal,
             backend,
         })
@@ -157,36 +154,101 @@ impl CausalAttention {
         layer: usize,
     ) -> Result<Vec<f32>> {
         let batch = 1;
-        let seq_len = input.len() / self.hidden_size;
+        let hidden_size = self.hidden_size();
+        if hidden_size == 0 || input.len() % hidden_size != 0 {
+            return Err(Error::InferenceError(
+                "Attention input length must align with hidden size".into(),
+            ));
+        }
+        let seq_len = input.len() / hidden_size;
         let q_size = self.num_attention_heads * self.head_dim;
         let kv_size = self.num_key_value_heads * self.head_dim;
 
-        // Projections
         let mut q = vec![0.0f32; batch * seq_len * q_size];
         let mut k = vec![0.0f32; batch * seq_len * kv_size];
         let mut v = vec![0.0f32; batch * seq_len * kv_size];
+        let mut attn_out = vec![0.0f32; batch * seq_len * q_size];
+        let mut output = vec![0.0f32; batch * seq_len * hidden_size];
 
-        self.project(input, &self.q_proj, &mut q, batch * seq_len)?;
-        self.project(input, &self.k_proj, &mut k, batch * seq_len)?;
-        self.project(input, &self.v_proj, &mut v, batch * seq_len)?;
+        self.forward_with_cache_buffers(
+            input,
+            position_offset,
+            cache,
+            layer,
+            &mut q,
+            &mut k,
+            &mut v,
+            &mut attn_out,
+            &mut output,
+            hidden_size,
+        )?;
 
-        // RoPE
+        Ok(output)
+    }
+
+    pub(crate) fn forward_with_cache_scratch(
+        &self,
+        input: &[f32],
+        position_offset: usize,
+        cache: &mut KVCache,
+        layer: usize,
+        scratch: &mut ScratchBuffer,
+        output: &mut [f32],
+    ) -> Result<()> {
+        let batch = 1;
+        let hidden_size = self.hidden_size();
+        if hidden_size == 0 || input.len() % hidden_size != 0 {
+            return Err(Error::InferenceError(
+                "Attention input length must align with hidden size".into(),
+            ));
+        }
+        let seq_len = input.len() / hidden_size;
+        let workspace = scratch.attn_workspace(batch, seq_len);
+        self.forward_with_cache_buffers(
+            input,
+            position_offset,
+            cache,
+            layer,
+            workspace.q,
+            workspace.k,
+            workspace.v,
+            workspace.out,
+            output,
+            hidden_size,
+        )
+    }
+
+    fn forward_with_cache_buffers(
+        &self,
+        input: &[f32],
+        position_offset: usize,
+        cache: &mut KVCache,
+        layer: usize,
+        q: &mut [f32],
+        k: &mut [f32],
+        v: &mut [f32],
+        attn_out: &mut [f32],
+        output: &mut [f32],
+        hidden_size: usize,
+    ) -> Result<()> {
+        let batch = 1;
+        let seq_len = input.len() / hidden_size;
+        self.project(input, &self.q_proj, q, batch * seq_len)?;
+        self.project(input, &self.k_proj, k, batch * seq_len)?;
+        self.project(input, &self.v_proj, v, batch * seq_len)?;
+
         if let Some(rope) = &self.rope {
-            rope.apply_inplace(&mut q, batch, seq_len, self.num_attention_heads, self.head_dim, position_offset);
-            rope.apply_inplace(&mut k, batch, seq_len, self.num_key_value_heads, self.head_dim, position_offset);
+            rope.apply_inplace(q, batch, seq_len, self.num_attention_heads, self.head_dim, position_offset);
+            rope.apply_inplace(k, batch, seq_len, self.num_key_value_heads, self.head_dim, position_offset);
         }
 
-        // Update cache
-        cache.update(layer, &k, &v)?;
+        cache.update(layer, k, v)?;
         let cached_k = cache.layer_k(layer)?;
         let cached_v = cache.layer_v(layer)?;
-        let key_len = cache.seq_len();
+        let key_len = cache.cached_len();
 
-        // Expand KV for GQA if needed
         let (k_expanded, v_expanded) = self.expand_kv(cached_k, cached_v, batch, key_len);
 
-        // Flash Attention via Backend trait
-        let mut attn_out = vec![0.0f32; batch * seq_len * q_size];
         let config = FlashAttentionConfig {
             causal: self.causal && seq_len == key_len,
             num_heads: self.num_attention_heads,
@@ -199,19 +261,17 @@ impl CausalAttention {
 
         self.backend
             .flash_attention(
-                TensorSlice::F32(&q),
+                TensorSlice::F32(q),
                 TensorSlice::F32(k_expanded.as_ref()),
                 TensorSlice::F32(v_expanded.as_ref()),
-                TensorSliceMut::F32(&mut attn_out),
+                TensorSliceMut::F32(attn_out),
                 config,
             )
             .map_err(|e| Error::InferenceError(e))?;
 
-        // Output projection
-        let mut output = vec![0.0f32; batch * seq_len * self.hidden_size];
-        self.project(&attn_out, &self.o_proj, &mut output, batch * seq_len)?;
+        self.project(attn_out, &self.o_proj, output, batch * seq_len)?;
 
-        Ok(output)
+        Ok(())
     }
 
     fn project(
@@ -264,6 +324,12 @@ impl CausalAttention {
         batch: usize,
         seq_len: usize,
     ) -> Result<Vec<f32>> {
+        let hidden_size = self.hidden_size();
+        if hidden_size == 0 || input.len() != batch * seq_len * hidden_size {
+            return Err(Error::InferenceError(
+                "Attention input length must align with hidden size".into(),
+            ));
+        }
         let q_size = self.num_attention_heads * self.head_dim;
         let kv_size = self.num_key_value_heads * self.head_dim;
 
@@ -308,7 +374,7 @@ impl CausalAttention {
             .map_err(|e| Error::InferenceError(e))?;
 
         // Output projection
-        let mut output = vec![0.0f32; batch * seq_len * self.hidden_size];
+        let mut output = vec![0.0f32; batch * seq_len * hidden_size];
         self.project(&attn_out, &self.o_proj, &mut output, batch * seq_len)?;
 
         Ok(output)
@@ -337,5 +403,9 @@ impl CausalAttention {
             ntk_factor,
         };
         Some(Arc::new(RotaryPositionEmbedding::new(rope_config)))
+    }
+
+    fn hidden_size(&self) -> usize {
+        self.q_proj.in_features()
     }
 }

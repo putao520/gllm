@@ -6,7 +6,7 @@ use crate::weight_loader::{
 };
 use memmap2::Mmap;
 use rayon::prelude::*;
-use safetensors::{Dtype, SafeTensors};
+use safetensors::SafeTensors;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -345,12 +345,12 @@ pub(crate) fn load_linear<L: TensorLoader>(
 ) -> Result<LinearWeights> {
     if loader.has_tensor(weight_name) {
         let weight_tensor = loader.load_tensor(weight_name)?;
-        let weight = weight_tensor.to_weight_matrix()?;
+        let weight = weight_tensor.into_weight_matrix()?;
 
         let bias = if let Some(bias_name) = bias_name {
             if loader.has_tensor(bias_name) {
                 let bias_tensor = loader.load_tensor(bias_name)?;
-                Some(bias_tensor.to_weight_vector()?)
+                Some(bias_tensor.into_weight_vector()?)
             } else {
                 None
             }
@@ -370,7 +370,7 @@ pub(crate) fn load_linear<L: TensorLoader>(
         let bias = if let Some(bias_name) = bias_name {
             if loader.has_tensor(bias_name) {
                 let bias_tensor = loader.load_tensor(bias_name)?;
-                Some(bias_tensor.to_weight_vector()?.data)
+                Some(bias_tensor.into_weight_vector()?.data)
             } else {
                 None
             }
@@ -395,7 +395,7 @@ pub(crate) fn load_linear<L: TensorLoader>(
 
 pub(crate) fn load_embedding<L: TensorLoader>(loader: &L, weight_name: &str) -> Result<gllm_kernels::WeightMatrix> {
     let weight_tensor = loader.load_tensor(weight_name)?;
-    weight_tensor.to_weight_matrix()
+    weight_tensor.into_weight_matrix()
 }
 
 pub(crate) fn load_layer_norm<L: TensorLoader>(
@@ -406,7 +406,7 @@ pub(crate) fn load_layer_norm<L: TensorLoader>(
     epsilon: f64,
 ) -> Result<LayerNormWeights> {
     let gamma_tensor = loader.load_tensor(weight_name)?;
-    let gamma = gamma_tensor.to_weight_vector()?;
+    let gamma = gamma_tensor.into_weight_vector()?;
     if gamma.len() != d_model {
         return Err(Error::LoadError(format!(
             "LayerNorm gamma length mismatch: expected {}, got {}",
@@ -418,7 +418,7 @@ pub(crate) fn load_layer_norm<L: TensorLoader>(
     let beta = if let Some(bias_name) = bias_name {
         if loader.has_tensor(bias_name) {
             let beta_tensor = loader.load_tensor(bias_name)?;
-            let beta_vec = beta_tensor.to_weight_vector()?;
+            let beta_vec = beta_tensor.into_weight_vector()?;
             if beta_vec.len() != d_model {
                 return Err(Error::LoadError(format!(
                     "LayerNorm beta length mismatch: expected {}, got {}",
@@ -463,50 +463,4 @@ pub(crate) fn load_mha<L: TensorLoader>(
         d_model,
         n_heads,
     })
-}
-
-fn convert_to_f32(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
-    match dtype {
-        Dtype::F32 => {
-            let floats: Vec<f32> = data
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-            Ok(floats)
-        }
-        Dtype::F16 => {
-            let floats: Vec<f32> = data
-                .chunks_exact(2)
-                .map(|chunk| {
-                    let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    half::f16::from_bits(bits).to_f32()
-                })
-                .collect();
-            Ok(floats)
-        }
-        Dtype::BF16 => {
-            let floats: Vec<f32> = data
-                .chunks_exact(2)
-                .map(|chunk| {
-                    let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    half::bf16::from_bits(bits).to_f32()
-                })
-                .collect();
-            Ok(floats)
-        }
-        Dtype::F64 => {
-            let floats: Vec<f32> = data
-                .chunks_exact(8)
-                .map(|chunk| {
-                    let arr: [u8; 8] = chunk.try_into().unwrap();
-                    f64::from_le_bytes(arr) as f32
-                })
-                .collect();
-            Ok(floats)
-        }
-        _ => Err(Error::LoadError(format!(
-            "Unsupported dtype for weight loading: {:?}",
-            dtype
-        ))),
-    }
 }

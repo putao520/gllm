@@ -1,15 +1,21 @@
 //! MoE Generator Model for text generation using gllm-kernels Backend.
 
-use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
+use crate::causal_attention::CausalAttention;
+use crate::engine::TokenizerAdapter;
+use crate::generation::{GenerationConfig, GenerationOptions, GenerationOutput};
+use crate::generation_loop::{generate_with_ops, ForwardOutput, GenerationOps};
 use crate::generator_model::GeneratorModelTrait;
 use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
 use crate::moe_layer::MoELayer;
+use crate::prompt_cache::PromptCache;
 use crate::rms_norm::RmsNorm;
+use crate::scratch_buffer::{ScratchBuffer, ScratchConfig};
 use crate::types::{Error, Result};
 use gllm_kernels::backend::{Backend, TensorSlice};
 use gllm_kernels::linear_forward;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// MoE Decoder Layer with sparse routing.
 pub struct MoEDecoderLayer {
@@ -55,6 +61,39 @@ impl MoEDecoderLayer {
 
         Ok(hidden)
     }
+
+    pub fn forward_with_scratch(
+        &self,
+        hidden_states: &[f32],
+        position_offset: usize,
+        cache: &mut KVCache,
+        layer_idx: usize,
+        scratch: &mut ScratchBuffer,
+    ) -> Result<Vec<f32>> {
+        let normed = self.input_norm.forward(hidden_states);
+        let mut hidden = vec![0.0f32; hidden_states.len()];
+        self.attention.forward_with_cache_scratch(
+            &normed,
+            position_offset,
+            cache,
+            layer_idx,
+            scratch,
+            &mut hidden,
+        )?;
+
+        for (h, s) in hidden.iter_mut().zip(hidden_states.iter()) {
+            *h += s;
+        }
+
+        let normed = self.post_attn_norm.forward(&hidden);
+        let moe_out = self.moe.forward(&normed)?;
+
+        for (h, m) in hidden.iter_mut().zip(moe_out.iter()) {
+            *h += m;
+        }
+
+        Ok(hidden)
+    }
 }
 
 /// MoE Generator Model with sparse expert routing.
@@ -64,8 +103,8 @@ pub struct MoEGeneratorModel {
     final_norm: RmsNorm,
     lm_head: Vec<f32>,
     config: ModelConfig,
-    rope: Option<Arc<RotaryPositionEmbedding>>,
     backend: Arc<dyn Backend>,
+    prompt_cache: Mutex<PromptCache>,
 }
 
 impl MoEGeneratorModel {
@@ -104,54 +143,26 @@ impl MoEGeneratorModel {
             final_norm: RmsNorm::new(hidden_size, eps),
             lm_head: vec![0.0; vocab_size * hidden_size],
             config,
-            rope,
             backend,
+            prompt_cache: Mutex::new(PromptCache::new(0)),
         })
     }
 
     /// Forward pass for generation.
     pub fn forward(&self, input_ids: &[u32], cache: &mut KVCache) -> Result<Vec<f32>> {
-        let seq_len = input_ids.len();
-        let position_offset = cache.seq_len();
+        Ok(self
+            .forward_with_hidden_internal(input_ids, cache, None)?
+            .logits)
+    }
 
-        // Embedding lookup
-        let mut hidden = vec![0.0f32; seq_len * self.config.hidden_size];
-        for (i, &token_id) in input_ids.iter().enumerate() {
-            let token_id = token_id as usize;
-            if token_id >= self.config.vocab_size {
-                return Err(Error::InvalidConfig(format!(
-                    "Token ID {} exceeds vocab size {}",
-                    token_id, self.config.vocab_size
-                )));
-            }
-            let src_start = token_id * self.config.hidden_size;
-            let dst_start = i * self.config.hidden_size;
-            hidden[dst_start..dst_start + self.config.hidden_size]
-                .copy_from_slice(&self.embedding[src_start..src_start + self.config.hidden_size]);
-        }
-
-        // Transformer layers
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, position_offset, cache, layer_idx)?;
-        }
-
-        // Final norm
-        self.final_norm.forward_inplace(&mut hidden);
-
-        // LM head (only last token for generation)
-        let last_hidden = &hidden[(seq_len - 1) * self.config.hidden_size..];
-        let mut logits = vec![0.0f32; self.config.vocab_size];
-        linear_forward(
-            last_hidden,
-            &self.lm_head,
-            None,
-            &mut logits,
-            1,
-            self.config.hidden_size,
-            self.config.vocab_size,
-        );
-
-        Ok(logits)
+    pub(crate) fn generate(
+        &self,
+        prompt_ids: Vec<i64>,
+        config: &GenerationConfig,
+        tokenizer: &TokenizerAdapter,
+        options: &GenerationOptions,
+    ) -> Result<GenerationOutput> {
+        generate_with_ops(self, prompt_ids, config, tokenizer, options, Some(&self.prompt_cache))
     }
 
     /// Sample next token from logits.
@@ -208,6 +219,77 @@ impl MoEGeneratorModel {
     pub fn final_norm_mut(&mut self) -> &mut RmsNorm {
         &mut self.final_norm
     }
+
+    fn forward_with_hidden_internal(
+        &self,
+        input_ids: &[u32],
+        cache: &mut KVCache,
+        mut scratch: Option<&mut ScratchBuffer>,
+    ) -> Result<ForwardOutput> {
+        let seq_len = input_ids.len();
+        if seq_len == 0 {
+            return Err(Error::InvalidConfig(
+                "Input IDs cannot be empty".into(),
+            ));
+        }
+        let position_offset = cache.seq_len();
+        let hidden_size = self.config.hidden_size;
+
+        let mut hidden = vec![0.0f32; seq_len * hidden_size];
+        for (i, &token_id) in input_ids.iter().enumerate() {
+            let token_id = token_id as usize;
+            if token_id >= self.config.vocab_size {
+                return Err(Error::InvalidConfig(format!(
+                    "Token ID {} exceeds vocab size {}",
+                    token_id, self.config.vocab_size
+                )));
+            }
+            let src_start = token_id * hidden_size;
+            let dst_start = i * hidden_size;
+            hidden[dst_start..dst_start + hidden_size]
+                .copy_from_slice(&self.embedding[src_start..src_start + hidden_size]);
+        }
+
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            if let Some(scratch) = scratch.as_deref_mut() {
+                hidden = layer.forward_with_scratch(
+                    &hidden,
+                    position_offset,
+                    cache,
+                    layer_idx,
+                    scratch,
+                )?;
+            } else {
+                hidden = layer.forward(&hidden, position_offset, cache, layer_idx)?;
+            }
+        }
+
+        self.final_norm.forward_inplace(&mut hidden);
+
+        let last_hidden = hidden[(seq_len - 1) * hidden_size..].to_vec();
+        let logits = self.logits_from_hidden(&last_hidden)?;
+
+        Ok(ForwardOutput { logits, last_hidden })
+    }
+
+    fn logits_from_hidden(&self, hidden: &[f32]) -> Result<Vec<f32>> {
+        if hidden.len() != self.config.hidden_size {
+            return Err(Error::InferenceError(
+                "Hidden state length does not match model hidden size".into(),
+            ));
+        }
+        let mut logits = vec![0.0f32; self.config.vocab_size];
+        linear_forward(
+            hidden,
+            &self.lm_head,
+            None,
+            &mut logits,
+            1,
+            self.config.hidden_size,
+            self.config.vocab_size,
+        );
+        Ok(logits)
+    }
 }
 
 impl GeneratorModelTrait for MoEGeneratorModel {
@@ -233,5 +315,48 @@ impl GeneratorModelTrait for MoEGeneratorModel {
 
     fn vocab_size(&self) -> usize {
         self.vocab_size()
+    }
+}
+
+impl GenerationOps for MoEGeneratorModel {
+    fn forward_with_hidden(
+        &self,
+        input_ids: &[u32],
+        cache: &mut KVCache,
+        scratch: Option<&mut ScratchBuffer>,
+    ) -> Result<ForwardOutput> {
+        self.forward_with_hidden_internal(input_ids, cache, scratch)
+    }
+
+    fn logits_from_hidden(&self, hidden: &[f32]) -> Result<Vec<f32>> {
+        self.logits_from_hidden(hidden)
+    }
+
+    fn vocab_size(&self) -> usize {
+        self.vocab_size()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.num_layers()
+    }
+
+    fn num_kv_heads(&self) -> usize {
+        self.config
+            .num_key_value_heads
+            .unwrap_or(self.config.num_attention_heads)
+    }
+
+    fn head_dim(&self) -> usize {
+        self.config
+            .head_dim
+            .unwrap_or(self.config.hidden_size / self.config.num_attention_heads)
+    }
+
+    fn max_position_embeddings(&self) -> usize {
+        self.max_position_embeddings()
+    }
+
+    fn scratch_config(&self) -> ScratchConfig {
+        ScratchConfig::from_model_config(&self.config)
     }
 }
