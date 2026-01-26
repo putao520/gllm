@@ -1937,82 +1937,88 @@ for (i, layer) in self.layers.iter().enumerate() {
 #### 一、P0-GPU: GPU 核心算子加速（gllm-kernels）
 
 > **来源**：ARCH-OPT-001 GPU 加速优化空间
+> **状态**: ✅ 已完成 (2026-01-26) - 所有核心算子已有 GPU 实现
 
-| ID | 任务 | 后端 | 影响 | 预期收益 |
-|----|------|------|------|----------|
-| P0-GPU-1 | linear_forward GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | 计算量 70% | 8-16x 加速 |
-| P0-GPU-2 | rms_norm GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | 每层 2 次调用 | 2-5x 加速 |
-| P0-GPU-3 | silu_inplace GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | element-wise | 3-5x 加速 |
+| ID | 任务 | 后端 | 影响 | 预期收益 | 状态 |
+|----|------|------|------|----------|------|
+| P0-GPU-1 | linear_forward GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | 计算量 70% | 8-16x 加速 | ✅ |
+| P0-GPU-2 | rms_norm GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | 每层 2 次调用 | 2-5x 加速 | ✅ |
+| P0-GPU-3 | silu_inplace GPU 实现 | **[WGPU]** **[CUDA]** **[Metal]** **[ROCm]** | element-wise | 3-5x 加速 | ✅ |
 
 ---
 
 #### 二、P0-MEM: 内存与 Buffer 管理优化
 
 > **来源**：ARCH-AUDIT-002 内存-GPU 数据移动违规（12 处）
+> **状态**: ✅ CPU 部分已完成 (2026-01-26) [commit: 10cb10a], WGPU 部分待实现
 
-| ID | 任务 | 后端 | 位置 | 问题 |
-|----|------|------|------|------|
-| P0-MEM-1 | BufferPool 单例实现 | **[WGPU]** | wgpu_backend.rs:127-145 | 每次 forward 重新分配 |
-| P0-MEM-2 | StagingBuffer 复用 | **[WGPU]** | wgpu_backend.rs:89-125 | 每次 map_read 重新创建 |
-| P0-MEM-3 | PagedAttention dispatch 优化 | **[WGPU]** | paged_attn/dispatch.rs:234 | 热路径 Vec 分配 |
-| P0-MEM-4 | KV Cache buffer 预分配 | **[CPU]** | generator_model.rs:445-467 | 逐 token 扩展 |
-| P0-MEM-5 | decoder attention 输出复用 | **[CPU]** | decoder_layer.rs:178-195 | 重复 .to_vec() |
-| P0-MEM-6 | WeightLoader 零拷贝 | **[CPU]** | weight_loader.rs:89-156 | SafeTensor 多次克隆 |
-| P0-MEM-7 | PagedAttention 索引预分配 | **[CPU]** | paged_attention.rs:234-278 | 循环内 Vec 扩展 |
-| P0-MEM-8 | MoE routing 批量计算 | **[CPU]** | moe_layer.rs:123-189 | 逐 token .to_vec() |
+| ID | 任务 | 后端 | 位置 | 问题 | 状态 |
+|----|------|------|------|------|------|
+| P0-MEM-1 | BufferPool 单例实现 | **[WGPU]** | wgpu_backend.rs:127-145 | 每次 forward 重新分配 | 🔲 |
+| P0-MEM-2 | StagingBuffer 复用 | **[WGPU]** | wgpu_backend.rs:89-125 | 每次 map_read 重新创建 | 🔲 |
+| P0-MEM-3 | PagedAttention dispatch 优化 | **[WGPU]** | paged_attn/dispatch.rs:234 | 热路径 Vec 分配 | 🔲 |
+| P0-MEM-4 | KV Cache buffer 预分配 | **[CPU]** | generator_model.rs:445-467 | 逐 token 扩展 | ✅ 已实现 |
+| P0-MEM-5 | decoder attention 输出复用 | **[CPU]** | decoder_layer.rs:178-195 | 重复 .to_vec() | ✅ |
+| P0-MEM-6 | WeightLoader 零拷贝 | **[CPU]** | weight_loader.rs:89-156 | SafeTensor 多次克隆 | ✅ |
+| P0-MEM-7 | PagedAttention 索引预分配 | **[CPU]** | paged_attention.rs:234-278 | 循环内 Vec 扩展 | ✅ |
+| P0-MEM-8 | MoE routing 批量计算 | **[CPU]** | moe_layer.rs:123-189 | 逐 token .to_vec() | ✅ |
 
 ---
 
 #### 三、P0-ARCH: 架构层优化
 
 > **来源**：ARCH-AUDIT-002 后端选择违规（4 处）
+> **状态**: ✅ 已完成 (2026-01-26) [commit: 10cb10a]
 
-| ID | 任务 | 后端 | 位置 | 问题 |
-|----|------|------|------|------|
-| P0-ARCH-1 | OnceLock 单次后端检测 | **[全后端]** | engine.rs:505-635 | 每次初始化重复检测 |
-| P0-ARCH-2 | BackendType 静态确定 | **[全后端]** | engine.rs | 运行时重复判断 |
+| ID | 任务 | 后端 | 位置 | 问题 | 状态 |
+|----|------|------|------|------|------|
+| P0-ARCH-1 | OnceLock 单次后端检测 | **[全后端]** | engine.rs:505-635 | 每次初始化重复检测 | ✅ |
+| P0-ARCH-2 | BackendType 静态确定 | **[全后端]** | engine.rs | 运行时重复判断 | ✅ |
 
 ---
 
 #### 四、P0-OPS: 算子实现替换
 
 > **来源**：ARCH-AUDIT-002 未正确使用 gllm-kernels 算子（11 处）
+> **状态**: ✅ 已验证 (2026-01-26) - 代码已使用 gllm_kernels 算子
 
-| ID | 任务 | 后端 | 位置 | 当前实现 | 替换为 |
-|----|------|------|------|----------|--------|
-| P0-OPS-1 | softmax 替换 | **[CPU]** | decoder_layer.rs:234-256 | 手写循环 | gllm_kernels::softmax |
-| P0-OPS-2 | layer_norm 替换 | **[CPU]** | dynamic_bert.rs:178-201 | 手写循环 | gllm_kernels::layer_norm |
-| P0-OPS-3 | gelu 替换 | **[CPU]** | dynamic_bert.rs:156-167 | 手写 tanh 近似 | gllm_kernels::gelu |
-| P0-OPS-4 | rope_embedding 替换 | **[CPU]** | decoder_layer.rs:289-334 | 手写三角函数 | gllm_kernels::rope |
-| P0-OPS-5 | attention_scores 替换 | **[CPU]** | decoder_layer.rs:178-195 | 手写 matmul+scale | gllm_kernels::attention |
-| P0-OPS-6 | cross_entropy 替换 | **[CPU]** | generator_model.rs:234-256 | 手写循环 | gllm_kernels::cross_entropy |
+| ID | 任务 | 后端 | 位置 | 当前实现 | 替换为 | 状态 |
+|----|------|------|------|----------|--------|------|
+| P0-OPS-1 | softmax 替换 | **[CPU]** | decoder_layer.rs:234-256 | 手写循环 | gllm_kernels::softmax | ✅ 已使用 |
+| P0-OPS-2 | layer_norm 替换 | **[CPU]** | dynamic_bert.rs:178-201 | 手写循环 | gllm_kernels::layer_norm | ✅ 已使用 |
+| P0-OPS-3 | gelu 替换 | **[CPU]** | dynamic_bert.rs:156-167 | 手写 tanh 近似 | gllm_kernels::gelu | ✅ 已使用 |
+| P0-OPS-4 | rope_embedding 替换 | **[CPU]** | decoder_layer.rs:289-334 | 手写三角函数 | gllm_kernels::rope | ✅ 已使用 |
+| P0-OPS-5 | attention_scores 替换 | **[CPU]** | decoder_layer.rs:178-195 | 手写 matmul+scale | gllm_kernels::attention | ✅ FlashAttn |
+| P0-OPS-6 | cross_entropy 替换 | **[CPU]** | generator_model.rs:234-256 | 手写循环 | gllm_kernels::cross_entropy | N/A 无此场景 |
 
 ---
 
 #### 五、P1-LOAD: 模型加载优化
 
 > **来源**：ARCH-ADR-010 异步并行模型加载
+> **状态**: ✅ 已完成 (2026-01-26) [commit: cd9338f] REQ-LOAD-001
 
-| ID | 任务 | 后端 | 说明 |
-|----|------|------|------|
-| P1-LOAD-1 | AsyncShardLoader 实现 | **[CPU]** | 多分片并行下载 |
-| P1-LOAD-2 | MmapWeightLoader 实现 | **[CPU]** | 内存映射权重加载 |
-| P1-LOAD-3 | 进度回调接口 | **[CPU]** | LoadProgress trait |
+| ID | 任务 | 后端 | 说明 | 状态 |
+|----|------|------|------|------|
+| P1-LOAD-1 | AsyncShardLoader 实现 | **[CPU]** | 多分片并行下载 | ✅ parallel_parser.rs |
+| P1-LOAD-2 | MmapWeightLoader 实现 | **[CPU]** | 内存映射权重加载 | ✅ ShardBytes::Mmap |
+| P1-LOAD-3 | 进度回调接口 | **[CPU]** | LoadProgress trait | ✅ LoadProgress |
 
 ---
 
 #### 六、P2-QUANT: 原生量化推理
 
 > **来源**：ARCH-ADR-011 原生量化推理 Kernel
+> **状态**: ✅ CPU 参考实现已完成 (2026-01-26) [commit: 66af66e, e94a31ee] REQ-QUANT-001
 
-| ID | 任务 | 后端 | 说明 |
-|----|------|------|------|
-| P2-QUANT-1 | Q4_0 数据结构 | **[CPU]** | Block 定义 |
-| P2-QUANT-2 | Q4_0 WGSL kernel | **[WGPU]** | in-kernel dequant |
-| P2-QUANT-3 | Q4_0 CUDA kernel | **[CUDA]** | shared memory 优化 |
-| P2-QUANT-4 | AWQ 数据结构 | **[CPU]** | AwqPackedWeight |
-| P2-QUANT-5 | AWQ WGSL kernel | **[WGPU]** | 分组反量化 |
-| P2-QUANT-6 | AWQ CUDA kernel | **[CUDA]** | tensor core 利用 |
+| ID | 任务 | 后端 | 说明 | 状态 |
+|----|------|------|------|------|
+| P2-QUANT-1 | Q4_0 数据结构 | **[CPU]** | Block 定义 | ✅ gllm-kernels |
+| P2-QUANT-2 | Q4_0 WGSL kernel | **[WGPU]** | in-kernel dequant | 🔲 |
+| P2-QUANT-3 | Q4_0 CUDA kernel | **[CUDA]** | shared memory 优化 | 🔲 |
+| P2-QUANT-4 | AWQ 数据结构 | **[CPU]** | AwqPackedWeight | ✅ gllm-kernels |
+| P2-QUANT-5 | AWQ WGSL kernel | **[WGPU]** | 分组反量化 | 🔲 |
+| P2-QUANT-6 | AWQ CUDA kernel | **[CUDA]** | tensor core 利用 | 🔲 |
 
 ---
 
