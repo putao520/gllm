@@ -19,13 +19,9 @@
 //! let vector = embedder.embed("Hello world").await?;
 //! ```
 
-pub mod attention;
 pub mod distributed;
 mod bert_variants;
-pub mod causal_attention;
-pub mod flash_attention;
 mod client;
-pub mod decoder_layer;
 pub mod decoder_model;
 mod dynamic_bert;
 mod embeddings;
@@ -34,17 +30,11 @@ mod engine;
 mod fallback;
 pub mod generation;
 mod generator_engine;
-pub mod generator_model;
 pub mod hooks;
 pub mod gguf;
 pub mod quantized;
 pub mod awq;
-pub mod quantized_ops;
-pub mod moe_decoder_layer;
-pub mod moe_generator_model;
-pub mod moe_layer;
 mod handle;
-pub mod kv_cache;
 #[cfg(feature = "paged-attention")]
 pub mod paged_attention;
 mod model;
@@ -55,12 +45,19 @@ mod pooling;
 mod registry;
 mod rerank;
 mod tensor;
-// gllm-kernels wrappers for normalization and sampling
-// RoPE is now in causal_attention.rs (RopeConfig, RotaryPositionEmbedding)
-pub mod rms_norm;
 pub mod sampler;
 mod types;
+pub mod parallel_parser;
 pub mod weight_loader;
+
+// 基于新 Backend trait API 的核心模块
+pub mod kv_cache;
+pub mod rms_norm;
+pub mod causal_attention;
+pub mod decoder_layer;
+pub mod generator_model;
+pub mod moe_layer;
+pub mod moe_generator_model;
 
 pub use client::Client;
 pub use embeddings::EmbeddingsBuilder;
@@ -72,6 +69,7 @@ pub use gllm_kernels::{detect_backend, redetect_backend};
 pub use handle::{EmbedderHandle, RerankerHandle};
 pub use registry::{Architecture, ModelInfo, ModelRegistry, ModelType, Quantization};
 pub use rerank::RerankBuilder;
+pub use parallel_parser::{LoadConfig, LoadProgress, ProgressStage};
 pub use types::{
     ClientConfig, Device, Embedding, EmbeddingResponse, Error, GraphCodeInput, RerankResponse, RerankResult,
     Result, Usage,

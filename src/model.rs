@@ -1,6 +1,8 @@
 use crate::engine::TokenizerAdapter;
+use crate::parallel_parser::{self, LoadConfig};
 use crate::registry::{ModelInfo, ModelRegistry, Quantization};
 use crate::types::{ClientConfig, Error, Result};
+use crate::weight_loader::shards::ShardIndex as WeightShardIndex;
 use hf_hub::api::sync::Api;
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -74,10 +76,22 @@ impl ModelManager {
     pub fn prepare(&self, model: &str) -> Result<ModelArtifacts> {
         let info = self.registry.resolve(model)?;
         let model_dir = self.repo_dir(&info.repo_id);
-        if !model_dir.exists() {
+        
+        let needs_download = if !model_dir.exists() {
+            true
+        } else {
+            // Check if critical files are missing
+            let has_weights = self.has_complete_weights(&model_dir, &info);
+            let has_config = model_dir.join("config.json").exists();
+            !has_weights || !has_config
+        };
+
+        if needs_download {
             fs::create_dir_all(&model_dir)?;
             self.download_model(&info, &model_dir)?;
         }
+
+        self.parse_sharded_weights(&model_dir)?;
 
         let tokenizer = TokenizerAdapter::from_dir(&model_dir)?;
         Ok(ModelArtifacts {
@@ -339,6 +353,40 @@ impl ModelManager {
     fn repo_dir(&self, repo_id: &str) -> PathBuf {
         let safe = repo_id.replace('/', "--");
         self.config.models_dir.join(safe)
+    }
+
+    fn parse_sharded_weights(&self, model_dir: &Path) -> Result<()> {
+        let shard_index_path = model_dir.join("model.safetensors.index.json");
+        if !shard_index_path.exists() {
+            return Ok(());
+        }
+
+        let index = WeightShardIndex::from_index_file(&shard_index_path)?;
+        let shard_paths = index.shard_paths(model_dir);
+        let load_config = LoadConfig::default();
+        let parsed = parallel_parser::parse_shards(shard_paths, &load_config)?;
+        parallel_parser::cache_parsed_shards(model_dir.to_path_buf(), parsed);
+        Ok(())
+    }
+
+    fn has_complete_weights(&self, model_dir: &Path, info: &ModelInfo) -> bool {
+        if matches!(info.quantization, Quantization::GGUF) {
+            return crate::engine::find_model_file(model_dir, &info.quantization).is_some();
+        }
+
+        let shard_index_path = model_dir.join("model.safetensors.index.json");
+        if shard_index_path.exists() {
+            let index = match WeightShardIndex::from_index_file(&shard_index_path) {
+                Ok(index) => index,
+                Err(_) => return false,
+            };
+            return index
+                .shard_paths(model_dir)
+                .iter()
+                .all(|path| path.exists());
+        }
+
+        model_dir.join("model.safetensors").exists()
     }
 }
 

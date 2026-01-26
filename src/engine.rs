@@ -4,7 +4,9 @@ use crate::generation::{GenerationConfig, GenerationOutput};
 use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
 use crate::registry::{Architecture, ModelInfo, ModelType, Quantization};
+use crate::tensor::Matrix;
 use crate::types::{Device, Error, Result};
+use gllm_kernels::backend::auto_select_backend;
 use gllm_kernels::{detect_backend, BackendType};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -55,6 +57,10 @@ pub(crate) fn find_model_file(model_dir: &Path, quantization: &Quantization) -> 
             None
         }
         _ => {
+            let shard_index = model_dir.join("model.safetensors.index.json");
+            if shard_index.exists() {
+                return Some(shard_index);
+            }
             let safetensors = model_dir.join("model.safetensors");
             safetensors.exists().then_some(safetensors)
         }
@@ -150,7 +156,7 @@ fn resolve_pad_id(
 
 /// Lightweight tokenizer wrapper supporting both HF tokenizers and a deterministic fallback.
 #[derive(Clone)]
-pub(crate) struct TokenizerAdapter {
+pub struct TokenizerAdapter {
     tokenizer: Option<Tokenizer>,
     vocab_size: usize,
     pad_id: i64,
@@ -311,47 +317,45 @@ impl TokenizerAdapter {
     }
 }
 
-#[derive(Clone)]
-enum EmbeddingModel {
-    Encoder(DynamicBertModel),
-    Decoder(DecoderModel),
+pub(crate) trait EmbeddingModelTrait {
+    fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>>;
+    fn hidden_size(&self) -> usize;
 }
 
-impl EmbeddingModel {
+fn pooled_rows(pooled: Matrix) -> Vec<Vec<f32>> {
+    pooled
+        .data
+        .chunks(pooled.cols)
+        .map(|row| row.to_vec())
+        .collect()
+}
+
+impl EmbeddingModelTrait for DynamicBertModel {
     fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
-        match self {
-            EmbeddingModel::Encoder(model) => {
-                let hidden_states = model.forward(tokens)?;
-                let pooled = model.pool_hidden_states(&hidden_states, tokens);
-                Ok(pooled
-                    .data
-                    .chunks(pooled.cols)
-                    .map(|row| row.to_vec())
-                    .collect())
-            }
-            EmbeddingModel::Decoder(model) => {
-                let hidden_states = model.forward(tokens)?;
-                let pooled = model.pool_hidden_states(&hidden_states, tokens);
-                Ok(pooled
-                    .data
-                    .chunks(pooled.cols)
-                    .map(|row| row.to_vec())
-                    .collect())
-            }
-        }
+        let hidden_states = DynamicBertModel::forward(self, tokens)?;
+        let pooled = DynamicBertModel::pool_hidden_states(self, &hidden_states, tokens);
+        Ok(pooled_rows(pooled))
     }
 
     fn hidden_size(&self) -> usize {
-        match self {
-            EmbeddingModel::Encoder(model) => model.hidden_size(),
-            EmbeddingModel::Decoder(model) => model.hidden_size(),
-        }
+        DynamicBertModel::hidden_size(self)
     }
 }
 
-#[derive(Clone)]
+impl EmbeddingModelTrait for DecoderModel {
+    fn forward(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
+        let hidden_states = DecoderModel::forward(self, tokens)?;
+        let pooled = DecoderModel::pool_hidden_states(self, &hidden_states, tokens);
+        Ok(pooled_rows(pooled))
+    }
+
+    fn hidden_size(&self) -> usize {
+        DecoderModel::hidden_size(self)
+    }
+}
+
 pub(crate) struct EmbeddingEngine {
-    model: EmbeddingModel,
+    model: Box<dyn EmbeddingModelTrait>,
 }
 
 impl EmbeddingEngine {
@@ -365,7 +369,12 @@ impl EmbeddingEngine {
         let config_file = config_path.exists().then_some(config_path.as_path());
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
-        let mut model = match info.architecture {
+        let model_path = find_model_file(model_dir, &info.quantization);
+
+        // Create backend ONCE at engine level
+        let backend = auto_select_backend();
+
+        let model: Box<dyn EmbeddingModelTrait> = match info.architecture {
             Architecture::Bert
             | Architecture::CrossEncoder
             | Architecture::Qwen3Embedding
@@ -374,16 +383,21 @@ impl EmbeddingEngine {
             | Architecture::JinaRerankerV3
             | Architecture::NVIDIANemotron
             | Architecture::Gemma3n
-            | Architecture::GLM4 => EmbeddingModel::Encoder(DynamicBertModel::new(config.clone())?),
-            _ => EmbeddingModel::Decoder(DecoderModel::new(config.clone())?),
-        };
-
-        if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
-            match &mut model {
-                EmbeddingModel::Encoder(enc) => enc.load_safetensors(&model_path)?,
-                EmbeddingModel::Decoder(dec) => dec.load_safetensors(&model_path)?,
+            | Architecture::GLM4 => {
+                let mut model = DynamicBertModel::new(config.clone(), backend)?;
+                if let Some(model_path) = model_path.as_ref() {
+                    model.load_safetensors(model_path)?;
+                }
+                Box::new(model)
             }
-        }
+            _ => {
+                let mut model = DecoderModel::new(config.clone(), backend)?;
+                if let Some(model_path) = model_path.as_ref() {
+                    model.load_safetensors(model_path)?;
+                }
+                Box::new(model)
+            }
+        };
 
         Ok(Self { model })
     }
@@ -418,7 +432,10 @@ impl RerankEngine {
         let config_file = config_path.exists().then_some(config_path.as_path());
         let (config, _) = ModelConfig::load(&repo_name, config_file)?;
 
-        let mut model = DynamicCrossEncoder::new(config)?;
+        // Create backend ONCE at engine level
+        let backend = auto_select_backend();
+
+        let mut model = DynamicCrossEncoder::new(config, backend)?;
         if let Some(model_path) = find_model_file(model_dir, &info.quantization) {
             model.load_safetensors(&model_path)?;
         }
@@ -437,35 +454,28 @@ impl RerankEngine {
 }
 
 /// Backend-specific engine bundle.
-pub(crate) enum EngineBackend {
-    Gpu { embedding: EmbeddingEngine, rerank: RerankEngine },
-    Cpu { embedding: EmbeddingEngine, rerank: RerankEngine },
-    GeneratorGpu { generator: GeneratorEngine },
-    GeneratorCpu { generator: GeneratorEngine },
+pub(crate) struct EngineBackend {
+    embedding: Option<EmbeddingEngine>,
+    rerank: Option<RerankEngine>,
+    generator: Option<GeneratorEngine>,
 }
 
 impl EngineBackend {
     pub fn run_embeddings(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
-        match self {
-            EngineBackend::Gpu { embedding, .. } => embedding.embed(tokens),
-            EngineBackend::Cpu { embedding, .. } => embedding.embed(tokens),
-            EngineBackend::GeneratorGpu { .. } | EngineBackend::GeneratorCpu { .. } => {
-                Err(Error::InvalidConfig(
-                    "Embeddings are not supported for generator models".into(),
-                ))
-            }
+        match self.embedding.as_ref() {
+            Some(embedding) => embedding.embed(tokens),
+            None => Err(Error::InvalidConfig(
+                "Embeddings are not supported for generator models".into(),
+            )),
         }
     }
 
     pub fn run_rerank(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
-        match self {
-            EngineBackend::Gpu { rerank, .. } => rerank.score(tokens),
-            EngineBackend::Cpu { rerank, .. } => rerank.score(tokens),
-            EngineBackend::GeneratorGpu { .. } | EngineBackend::GeneratorCpu { .. } => {
-                Err(Error::InvalidConfig(
-                    "Rerank is not supported for generator models".into(),
-                ))
-            }
+        match self.rerank.as_ref() {
+            Some(rerank) => rerank.score(tokens),
+            None => Err(Error::InvalidConfig(
+                "Rerank is not supported for generator models".into(),
+            )),
         }
     }
 
@@ -475,56 +485,18 @@ impl EngineBackend {
         config: &GenerationConfig,
         tokenizer: &TokenizerAdapter,
     ) -> Result<GenerationOutput> {
-        match self {
-            EngineBackend::GeneratorGpu { generator } => {
-                generator.generate(prompt_ids, config, tokenizer)
-            }
-            EngineBackend::GeneratorCpu { generator } => {
-                generator.generate(prompt_ids, config, tokenizer)
-            }
-            _ => Err(Error::InvalidConfig(
+        match self.generator.as_ref() {
+            Some(generator) => generator.generate(prompt_ids, config, tokenizer),
+            None => Err(Error::InvalidConfig(
                 "Generation is not supported for this model".into(),
             )),
         }
     }
 
     pub fn max_position_embeddings(&self) -> Option<usize> {
-        match self {
-            EngineBackend::GeneratorGpu { generator } | EngineBackend::GeneratorCpu { generator } => {
-                Some(generator.max_position_embeddings())
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Embedding-only engine backend.
-pub(crate) enum EmbeddingBackend {
-    Gpu(EmbeddingEngine),
-    Cpu(EmbeddingEngine),
-}
-
-impl EmbeddingBackend {
-    pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
-        match self {
-            EmbeddingBackend::Gpu(engine) => engine.embed(tokens),
-            EmbeddingBackend::Cpu(engine) => engine.embed(tokens),
-        }
-    }
-}
-
-/// Reranking-only engine backend.
-pub(crate) enum RerankingBackend {
-    Gpu(RerankEngine),
-    Cpu(RerankEngine),
-}
-
-impl RerankingBackend {
-    pub fn score(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
-        match self {
-            RerankingBackend::Gpu(engine) => engine.score(tokens),
-            RerankingBackend::Cpu(engine) => engine.score(tokens),
-        }
+        self.generator
+            .as_ref()
+            .map(|generator| generator.max_position_embeddings())
     }
 }
 
@@ -533,23 +505,18 @@ pub(crate) fn build_embedding_backend(
     info: &ModelInfo,
     model_dir: &PathBuf,
     device: &Device,
-) -> Result<EmbeddingBackend> {
-    if matches!(device, Device::Gpu(_) | Device::Auto) {
+) -> Result<EmbeddingEngine> {
+    if should_use_gpu_for_model(model_dir, device) {
         let detected = detect_backend();
         if !matches!(detected, BackendType::Cpu) {
             let engine = EmbeddingEngine::new(model_dir, info)?;
-            return Ok(EmbeddingBackend::Gpu(engine));
+            return Ok(engine);
         }
     }
 
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let embedding = EmbeddingEngine::new(model_dir, info)?;
-        return Ok(EmbeddingBackend::Cpu(embedding));
-    }
-
-    Err(Error::InvalidConfig(
-        "No compatible backend available".into(),
-    ))
+    // Fallback to CPU
+    let embedding = EmbeddingEngine::new(model_dir, info)?;
+    Ok(embedding)
 }
 
 /// Build a reranking-only backend according to device preference.
@@ -557,23 +524,65 @@ pub(crate) fn build_rerank_backend(
     info: &ModelInfo,
     model_dir: &PathBuf,
     device: &Device,
-) -> Result<RerankingBackend> {
-    if matches!(device, Device::Gpu(_) | Device::Auto) {
+) -> Result<RerankEngine> {
+    if should_use_gpu_for_model(model_dir, device) {
         let detected = detect_backend();
         if !matches!(detected, BackendType::Cpu) {
             let engine = RerankEngine::new(model_dir, info)?;
-            return Ok(RerankingBackend::Gpu(engine));
+            return Ok(engine);
         }
     }
 
-    if matches!(device, Device::Cpu | Device::Auto) {
-        let rerank = RerankEngine::new(model_dir, info)?;
-        return Ok(RerankingBackend::Cpu(rerank));
+    // Fallback to CPU
+    let rerank = RerankEngine::new(model_dir, info)?;
+    Ok(rerank)
+}
+
+fn should_use_gpu_for_model(model_dir: &Path, device: &Device) -> bool {
+    if matches!(device, Device::Gpu(_)) {
+        return true;
+    }
+    if matches!(device, Device::Cpu) {
+        return false;
     }
 
-    Err(Error::InvalidConfig(
-        "No compatible backend available".into(),
-    ))
+    // Device::Auto logic: check model parameters
+    let config_path = model_dir.join("config.json");
+    if !config_path.exists() {
+        return true;
+    }
+
+    let repo_name = model_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    if let Ok((config, _)) = ModelConfig::load(repo_name, Some(&config_path)) {
+        let params = estimate_model_params(&config);
+        // Threshold: 80M parameters. Below this, CPU is usually faster for small batches
+        // and saves GPU memory.
+        if params < 800_000_000 {
+            log::debug!("Auto-routing small model ({} params) to CPU", params);
+            return false;
+        }
+    }
+
+    true
+}
+
+fn estimate_model_params(config: &ModelConfig) -> usize {
+    let hidden = config.hidden_size;
+    let vocab = config.vocab_size;
+    let layers = config.num_hidden_layers;
+
+    // Estimate parameters:
+    // Embeddings: vocab * hidden
+    // Layers: layers * 12 * hidden^2 (approximate for Transformer: 4*h^2 attention + 8*h^2 MLP)
+    // This is a rough order-of-magnitude estimation.
+    let embedding_params = vocab * hidden;
+    let layer_params = layers * 12 * hidden * hidden;
+
+    embedding_params + layer_params
 }
 
 /// Build a generator backend according to device preference.
@@ -586,13 +595,21 @@ pub(crate) fn build_generator_backend(
         let detected = detect_backend();
         if !matches!(detected, BackendType::Cpu) {
             let engine = GeneratorEngine::new(model_dir, info)?;
-            return Ok(EngineBackend::GeneratorGpu { generator: engine });
+            return Ok(EngineBackend {
+                embedding: None,
+                rerank: None,
+                generator: Some(engine),
+            });
         }
     }
 
     if matches!(device, Device::Cpu | Device::Auto) {
         let generator = GeneratorEngine::new(model_dir, info)?;
-        return Ok(EngineBackend::GeneratorCpu { generator });
+        return Ok(EngineBackend {
+            embedding: None,
+            rerank: None,
+            generator: Some(generator),
+        });
     }
 
     Err(Error::InvalidConfig(
@@ -615,17 +632,65 @@ pub(crate) fn build_backend(
         if !matches!(detected, BackendType::Cpu) {
             let embedding = EmbeddingEngine::new(model_dir, info)?;
             let rerank = RerankEngine::new(model_dir, info)?;
-            return Ok(EngineBackend::Gpu { embedding, rerank });
+            return Ok(EngineBackend {
+                embedding: Some(embedding),
+                rerank: Some(rerank),
+                generator: None,
+            });
         }
     }
 
     if matches!(device, Device::Cpu | Device::Auto) {
         let embedding = EmbeddingEngine::new(model_dir, info)?;
         let rerank = RerankEngine::new(model_dir, info)?;
-        return Ok(EngineBackend::Cpu { embedding, rerank });
+        return Ok(EngineBackend {
+            embedding: Some(embedding),
+            rerank: Some(rerank),
+            generator: None,
+        });
     }
 
     Err(Error::InvalidConfig(
         "No compatible backend available".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ModelManager;
+    use crate::types::ClientConfig;
+
+    #[test]
+    fn test_real_model_full_routing_small() {
+        // Use a very small model as requested: all-MiniLM-L6-v2 (~22M params)
+        // This ensures fast "full real" testing without waiting for gigabytes.
+        let config = ClientConfig::default();
+        let manager = ModelManager::new(config);
+        
+        let model_id = "sentence-transformers/all-MiniLM-L6-v2";
+        println!("Preparing model {}...", model_id);
+        
+        let artifacts = manager.prepare(model_id).expect("Model preparation failed");
+        
+        // Test Routing Logic
+        let use_gpu = should_use_gpu_for_model(&artifacts.model_dir, &Device::Auto);
+        assert_eq!(use_gpu, false, "MiniLM (22M) should route to CPU");
+    }
+
+    #[test]
+    fn test_real_model_full_routing_large() {
+        // Model: Qwen2.5-1.5B (~1.0B Params)
+        // Expected: Route to GPU (> 800M)
+        let config = ClientConfig::default();
+        let manager = ModelManager::new(config);
+        
+        let model_id = "Qwen/Qwen2.5-1.5B-Instruct";
+        println!("Preparing model {}...", model_id);
+        
+        let artifacts = manager.prepare(model_id).expect("Model preparation failed");
+        
+        let use_gpu = should_use_gpu_for_model(&artifacts.model_dir, &Device::Auto);
+        assert_eq!(use_gpu, true, "Qwen 1.5B (Large) should route to GPU");
+    }
 }

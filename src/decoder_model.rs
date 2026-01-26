@@ -1,14 +1,26 @@
-use crate::causal_attention::CausalAttention;
-use crate::decoder_layer::DecoderLayer;
+//! Decoder Model for encoder-style inference (embeddings, reranking).
+//!
+//! This model processes entire sequences at once without persistent KV cache.
+
+use crate::causal_attention::{CausalAttention, RotaryPositionEmbedding};
+use gllm_kernels::backend::Backend;
+use crate::decoder_layer::{DecoderLayer, FFNWeights};
+use crate::kv_cache::KVCache;
 use crate::model_config::ModelConfig;
+use crate::parallel_parser::{
+    is_shard_index, load_embedding, load_linear, parse_shards, take_cached_shards, LoadConfig,
+    ShardedTensorLoader, TensorLoader,
+};
 use crate::rms_norm::RmsNorm;
 use crate::tensor::{Matrix, Tensor3};
 use crate::types::{Error, Result};
-use crate::weight_loader::{load_embedding, load_linear, WeightLoader};
+use crate::weight_loader::shards::ShardIndex;
+use crate::weight_loader::WeightLoader;
 use gllm_kernels::WeightMatrix;
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct DecoderModel {
@@ -18,10 +30,13 @@ pub struct DecoderModel {
     pub(crate) pad_token_id: i64,
     pub(crate) max_position_embeddings: usize,
     pub(crate) hidden_size: usize,
+    pub(crate) num_key_value_heads: usize,
+    pub(crate) head_dim: usize,
+    rope: Option<Arc<RotaryPositionEmbedding>>,
 }
 
 impl DecoderModel {
-    pub fn new(config: ModelConfig) -> Result<Self> {
+    pub fn new(config: ModelConfig, backend: Arc<dyn Backend>) -> Result<Self> {
         if config.num_hidden_layers == 0 {
             return Err(Error::InvalidConfig(
                 "num_hidden_layers must be greater than 0 for decoder model".into(),
@@ -33,35 +48,76 @@ impl DecoderModel {
             ));
         }
 
-        let embeddings = WeightMatrix::zeros(config.vocab_size, config.hidden_size);
+        let hidden_size = config.hidden_size;
+        let intermediate_size = config.intermediate_size.unwrap_or(hidden_size * 4);
         let head_dim = config
             .head_dim
-            .unwrap_or_else(|| config.hidden_size / config.num_attention_heads);
+            .unwrap_or_else(|| hidden_size / config.num_attention_heads);
+        let num_key_value_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
+        let eps = config.rms_norm_eps.unwrap_or(1e-6) as f32;
+
+        let embeddings = WeightMatrix::zeros(config.vocab_size, hidden_size);
         let rope = CausalAttention::build_rope(&config, head_dim);
+
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(&config, rope.clone())?);
+            let attention = CausalAttention::new(&config, rope.clone(), false, backend.clone())?;
+            let layer = DecoderLayer {
+                attention,
+                input_norm: RmsNorm::new(hidden_size, eps),
+                post_attn_norm: RmsNorm::new(hidden_size, eps),
+                ffn: FFNWeights::zeros(hidden_size, intermediate_size),
+                hidden_size,
+                intermediate_size,
+                use_gelu: config.hidden_act.as_deref() == Some("gelu"),
+            };
+            layers.push(layer);
         }
 
         Ok(Self {
             embeddings,
             layers,
-            final_norm: RmsNorm::new(&config),
+            final_norm: RmsNorm::new(hidden_size, eps),
             pad_token_id: config.pad_token_id.unwrap_or(0),
             max_position_embeddings: config.max_position_embeddings,
-            hidden_size: config.hidden_size,
+            hidden_size,
+            num_key_value_heads,
+            head_dim,
+            rope,
         })
     }
 
     pub fn forward(&self, tokens: &[Vec<i64>]) -> Result<Tensor3> {
         let (batch, seq_len) = self.sequence_shape(tokens)?;
         let mut hidden_states = self.embed_tokens(tokens, batch, seq_len)?;
-        for layer in &self.layers {
-            hidden_states = layer.forward(&hidden_states, 0)?;
+
+        // Create a temporary KV cache for this forward pass
+        let mut cache = KVCache::new(
+            self.layers.len(),
+            self.num_key_value_heads,
+            self.head_dim,
+            seq_len,
+        );
+
+        // Process each batch item separately
+        for b in 0..batch {
+            let start = b * seq_len * self.hidden_size;
+            let end = start + seq_len * self.hidden_size;
+            let mut batch_hidden = hidden_states.data[start..end].to_vec();
+
+            // Reset cache for each batch item
+            cache.reset();
+
+            for (layer_idx, layer) in self.layers.iter().enumerate() {
+                batch_hidden = layer.forward(&batch_hidden, 0, &mut cache, layer_idx)?;
+            }
+
+            hidden_states.data[start..end].copy_from_slice(&batch_hidden);
         }
 
-        let normed = self.final_norm.forward_3d(&hidden_states.data, batch, seq_len);
-        Tensor3::new(normed, batch, seq_len, self.hidden_size)
+        // Final norm
+        self.final_norm.forward_inplace(&mut hidden_states.data);
+        Ok(hidden_states)
     }
 
     pub fn pool_hidden_states(&self, hidden_states: &Tensor3, tokens: &[Vec<i64>]) -> Matrix {
@@ -82,6 +138,10 @@ impl DecoderModel {
     }
 
     pub fn load_safetensors(&mut self, safetensors_path: &Path) -> Result<()> {
+        if is_shard_index(safetensors_path) {
+            return self.load_sharded_safetensors(safetensors_path);
+        }
+
         let file = File::open(safetensors_path).map_err(|err| {
             Error::LoadError(format!(
                 "Failed to open SafeTensors file {}: {err}",
@@ -95,7 +155,23 @@ impl DecoderModel {
             ))
         })?;
         let loader = WeightLoader::from_bytes(&mmap)?;
+        self.load_from_loader(&loader)
+    }
 
+    fn load_sharded_safetensors(&mut self, index_path: &Path) -> Result<()> {
+        let model_dir = index_path.parent().ok_or_else(|| {
+            Error::LoadError("Shard index path is missing parent directory".into())
+        })?;
+        let index = ShardIndex::from_index_file(index_path)?;
+        let parsed = match take_cached_shards(model_dir) {
+            Some(parsed) => parsed,
+            None => parse_shards(index.shard_paths(model_dir), &LoadConfig::default())?,
+        };
+        let loader = ShardedTensorLoader::new(&parsed, &index)?;
+        self.load_from_loader(&loader)
+    }
+
+    fn load_from_loader<L: TensorLoader>(&mut self, loader: &L) -> Result<()> {
         let embed_names = [
             "model.embed_tokens.weight",
             "transformer.wte.weight",
@@ -103,7 +179,7 @@ impl DecoderModel {
         ];
         for name in embed_names {
             if loader.has_tensor(name) {
-                self.embeddings = load_embedding(&loader, name)?;
+                self.embeddings = load_embedding(loader, name)?;
                 break;
             }
         }
@@ -112,53 +188,44 @@ impl DecoderModel {
             let prefix = format!("model.layers.{}", layer_idx);
             if loader.has_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
                 layer.attention.q_proj = load_linear(
-                    &loader,
+                    loader,
                     &format!("{}.self_attn.q_proj.weight", prefix),
                     Some(&format!("{}.self_attn.q_proj.bias", prefix)),
                 )?;
                 layer.attention.k_proj = load_linear(
-                    &loader,
+                    loader,
                     &format!("{}.self_attn.k_proj.weight", prefix),
                     Some(&format!("{}.self_attn.k_proj.bias", prefix)),
                 )?;
                 layer.attention.v_proj = load_linear(
-                    &loader,
+                    loader,
                     &format!("{}.self_attn.v_proj.weight", prefix),
                     Some(&format!("{}.self_attn.v_proj.bias", prefix)),
                 )?;
                 layer.attention.o_proj = load_linear(
-                    &loader,
+                    loader,
                     &format!("{}.self_attn.o_proj.weight", prefix),
                     Some(&format!("{}.self_attn.o_proj.bias", prefix)),
                 )?;
             }
 
             if loader.has_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
-                layer.gate_proj = load_linear(
-                    &loader,
-                    &format!("{}.mlp.gate_proj.weight", prefix),
-                    None,
-                )?;
-                layer.up_proj = load_linear(
-                    &loader,
-                    &format!("{}.mlp.up_proj.weight", prefix),
-                    None,
-                )?;
-                layer.down_proj = load_linear(
-                    &loader,
-                    &format!("{}.mlp.down_proj.weight", prefix),
-                    None,
-                )?;
+                let gate = loader.load_tensor(&format!("{}.mlp.gate_proj.weight", prefix))?;
+                let up = loader.load_tensor(&format!("{}.mlp.up_proj.weight", prefix))?;
+                let down = loader.load_tensor(&format!("{}.mlp.down_proj.weight", prefix))?;
+                layer.ffn.gate_proj = gate.to_weight_vector()?.data;
+                layer.ffn.up_proj = up.to_weight_vector()?.data;
+                layer.ffn.down_proj = down.to_weight_vector()?.data;
             }
 
             if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
                 let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
-                layer.attention_norm.gamma = norm_tensor.to_weight_vector()?;
+                layer.input_norm.weight = norm_tensor.to_weight_vector()?.data;
             }
             if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
                 let norm_tensor =
                     loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
-                layer.ffn_norm.gamma = norm_tensor.to_weight_vector()?;
+                layer.post_attn_norm.weight = norm_tensor.to_weight_vector()?.data;
             }
         }
 
@@ -170,7 +237,7 @@ impl DecoderModel {
         for name in final_norm_names {
             if loader.has_tensor(name) {
                 let norm_tensor = loader.load_tensor(name)?;
-                self.final_norm.gamma = norm_tensor.to_weight_vector()?;
+                self.final_norm.weight = norm_tensor.to_weight_vector()?.data;
                 break;
             }
         }

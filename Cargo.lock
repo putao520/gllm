@@ -799,6 +799,7 @@ dependencies = [
  "log",
  "memmap2",
  "rand 0.8.5",
+ "rayon",
  "safetensors",
  "serde",
  "serde_json",
