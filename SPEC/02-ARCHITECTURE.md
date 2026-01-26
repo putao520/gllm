@@ -1950,13 +1950,13 @@ for (i, layer) in self.layers.iter().enumerate() {
 #### 二、P0-MEM: 内存与 Buffer 管理优化
 
 > **来源**：ARCH-AUDIT-002 内存-GPU 数据移动违规（12 处）
-> **状态**: ✅ CPU 部分已完成 (2026-01-26) [commit: 10cb10a], WGPU 部分待实现
+> **状态**: ✅ 全部完成 (2026-01-26) [commit: 10cb10a, c34ff82]
 
 | ID | 任务 | 后端 | 位置 | 问题 | 状态 |
 |----|------|------|------|------|------|
-| P0-MEM-1 | BufferPool 单例实现 | **[WGPU]** | wgpu_backend.rs:127-145 | 每次 forward 重新分配 | 🔲 |
-| P0-MEM-2 | StagingBuffer 复用 | **[WGPU]** | wgpu_backend.rs:89-125 | 每次 map_read 重新创建 | 🔲 |
-| P0-MEM-3 | PagedAttention dispatch 优化 | **[WGPU]** | paged_attn/dispatch.rs:234 | 热路径 Vec 分配 | 🔲 |
+| P0-MEM-1 | BufferPool 单例实现 | **[WGPU]** | wgpu_backend.rs | 每次 forward 重新分配 | ✅ |
+| P0-MEM-2 | StagingBuffer 复用 | **[WGPU]** | wgpu_backend.rs | 每次 map_read 重新创建 | ✅ |
+| P0-MEM-3 | PagedAttention dispatch 优化 | **[WGPU]** | paged_attn/dispatch.rs | 热路径 Vec 分配 | ✅ |
 | P0-MEM-4 | KV Cache buffer 预分配 | **[CPU]** | generator_model.rs:445-467 | 逐 token 扩展 | ✅ 已实现 |
 | P0-MEM-5 | decoder attention 输出复用 | **[CPU]** | decoder_layer.rs:178-195 | 重复 .to_vec() | ✅ |
 | P0-MEM-6 | WeightLoader 零拷贝 | **[CPU]** | weight_loader.rs:89-156 | SafeTensor 多次克隆 | ✅ |
