@@ -2026,13 +2026,13 @@ for (i, layer) in self.layers.iter().enumerate() {
 
 > **来源**：ARCH-AUDIT-001 数据结构审计、ARCH-OPT-001 无状态算法
 
-| ID | 任务 | 后端 | 说明 |
-|----|------|------|------|
-| P1-MISC-1 | TokenizerWrapper 简化 | **[CPU]** | 移除冗余字段 |
-| P1-MISC-2 | ScratchBuffer 实现 | **[CPU]** | 热路径预分配工作区 |
-| P1-MISC-3 | PromptCache 实现 | **[CPU]** | 相同 prompt 复用 |
-| P1-MISC-4 | 算子纯函数化 | **[CPU]** | 无状态算法集合 |
-| P1-MISC-5 | KV 压缩策略 | **[CPU]** | 长序列内存优化 |
+| ID | 任务 | 后端 | 说明 | 状态 |
+|----|------|------|------|------|
+| P1-MISC-1 | TokenizerWrapper 简化 | **[CPU]** | 移除冗余字段 | ✅ 821a601 |
+| P1-MISC-2 | ScratchBuffer 实现 | **[CPU]** | 热路径预分配工作区 | ✅ 821a601 |
+| P1-MISC-3 | PromptCache 实现 | **[CPU]** | 相同 prompt 复用 | ✅ 821a601 |
+| P1-MISC-4 | 算子纯函数化 | **[CPU]** | 无状态算法集合 | ✅ 821a601 |
+| P1-MISC-5 | KV 压缩策略 | **[CPU]** | 长序列内存优化 | ✅ 821a601 |
 
 ---
 
