@@ -2014,11 +2014,11 @@ for (i, layer) in self.layers.iter().enumerate() {
 | ID | 任务 | 后端 | 说明 | 状态 |
 |----|------|------|------|------|
 | P2-QUANT-1 | Q4_0 数据结构 | **[CPU]** | Block 定义 | ✅ gllm-kernels |
-| P2-QUANT-2 | Q4_0 WGSL kernel | **[WGPU]** | in-kernel dequant | 🔲 |
-| P2-QUANT-3 | Q4_0 CUDA kernel | **[CUDA]** | shared memory 优化 | 🔲 |
+| P2-QUANT-2 | Q4_0 WGSL kernel | **[WGPU]** | in-kernel dequant | ✅ 8198e0c1 |
+| P2-QUANT-3 | Q4_0 CUDA kernel | **[CUDA]** | shared memory 优化 | ✅ 8198e0c1 |
 | P2-QUANT-4 | AWQ 数据结构 | **[CPU]** | AwqPackedWeight | ✅ gllm-kernels |
-| P2-QUANT-5 | AWQ WGSL kernel | **[WGPU]** | 分组反量化 | 🔲 |
-| P2-QUANT-6 | AWQ CUDA kernel | **[CUDA]** | tensor core 利用 | 🔲 |
+| P2-QUANT-5 | AWQ WGSL kernel | **[WGPU]** | 分组反量化 | ✅ 8198e0c1 |
+| P2-QUANT-6 | AWQ CUDA kernel | **[CUDA]** | tensor core 利用 | ✅ 8198e0c1 |
 
 ---
 
