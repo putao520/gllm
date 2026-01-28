@@ -5,7 +5,7 @@
 //! - **Embedding**: Text-to-vector conversion using BERT-based models
 //! - **Reranking**: Cross-encoder based document reranking
 //! - **Runtime Fallback**: Automatic GPU→CPU fallback on memory errors
-//! - **Multi-backend**: CUDA → ROCm → Metal → WGPU → CPU (auto-detect priority)
+//! - **Multi-backend**: CUDA → ROCm → Metal → CPU (auto-detect priority)
 //!
 //! ## Quick Start
 //!
@@ -20,16 +20,12 @@
 //! ```
 
 pub mod distributed;
-mod bert_variants;
 mod client;
-pub mod decoder_model;
-mod dynamic_bert;
 mod embeddings;
 pub mod engram;
 mod engine;
 mod fallback;
 pub mod generation;
-mod generation_loop;
 mod generator_engine;
 pub mod hooks;
 pub mod gguf;
@@ -43,7 +39,6 @@ mod model_config;
 mod model_presets;
 mod performance_optimizer;
 mod pooling;
-mod prompt_cache;
 mod registry;
 mod rerank;
 mod scratch_buffer;
@@ -53,14 +48,22 @@ mod types;
 pub mod parallel_parser;
 pub mod weight_loader;
 
-// 基于新 Backend trait API 的核心模块
-pub mod kv_cache;
-pub mod rms_norm;
-pub mod causal_attention;
-pub mod decoder_layer;
+// 基于 Backend trait L3 API 的核心模块
+pub mod embedding_model;
+pub mod rerank_model;
 pub mod generator_model;
-pub mod moe_layer;
 pub mod moe_generator_model;
+
+// KV Cache 类型（被 generation API 使用）
+// Implements 2026 SOTA: PagedAttention + RocketKV + SqueezeAttention
+pub mod kv_cache;
+pub mod scheduler;
+
+// Advanced KV Cache exports (2026 algorithms)
+pub use kv_cache::{
+    AdvancedKvCache, CompressionStrategy, KvCacheBuilder, KvCacheConfig,
+    LayerKvCache, TokenImportance,
+};
 
 pub use client::Client;
 pub use embeddings::EmbeddingsBuilder;
