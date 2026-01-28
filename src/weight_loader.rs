@@ -11,6 +11,7 @@
 use crate::quantized::{NativeQLinear, QuantizedWeight};
 use crate::types::{Error, Result};
 use gllm_kernels::backend::BackendImpl;
+use gllm_kernels::kernel_types::MatmulConfig;
 use gllm_kernels::{WeightMatrix, WeightVector};
 use safetensors::{Dtype, SafeTensors};
 use std::borrow::Cow;
@@ -64,6 +65,16 @@ impl<'a> LoadedTensorView<'a> {
             data: self.data.into_owned(),
             shape: self.shape,
         }
+    }
+
+    /// Split a 2D tensor view into row chunks matching the provided row sizes.
+    pub fn split_rows(&self, row_sizes: &[usize]) -> Result<Vec<&[f32]>> {
+        split_rows_by_sizes(self.data.as_ref(), &self.shape, row_sizes)
+    }
+
+    /// Split a 1D vector tensor view into chunks matching the provided sizes.
+    pub fn split_vector(&self, sizes: &[usize]) -> Result<Vec<&[f32]>> {
+        split_vector_by_sizes(self.data.as_ref(), &self.shape, sizes)
     }
 }
 
@@ -166,6 +177,16 @@ impl LoadedTensor {
                 self.shape
             ))),
         }
+    }
+
+    /// Split a 2D tensor into row chunks matching the provided row sizes.
+    pub fn split_rows(&self, row_sizes: &[usize]) -> Result<Vec<&[f32]>> {
+        split_rows_by_sizes(&self.data, &self.shape, row_sizes)
+    }
+
+    /// Split a 1D vector tensor into chunks matching the provided sizes.
+    pub fn split_vector(&self, sizes: &[usize]) -> Result<Vec<&[f32]>> {
+        split_vector_by_sizes(&self.data, &self.shape, sizes)
     }
 }
 
@@ -299,6 +320,95 @@ fn convert_to_f32_owned(data: &[u8], dtype: Dtype) -> Result<Vec<f32>> {
     }
 }
 
+fn split_rows_by_sizes<'a>(
+    data: &'a [f32],
+    shape: &[usize],
+    row_sizes: &[usize],
+) -> Result<Vec<&'a [f32]>> {
+    if shape.len() != 2 {
+        return Err(Error::LoadError(format!(
+            "Expected 2D tensor for row split, got shape {:?}",
+            shape
+        )));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    if data.len() != rows * cols {
+        return Err(Error::LoadError(format!(
+            "Tensor data length {} does not match shape {:?}",
+            data.len(),
+            shape
+        )));
+    }
+    let total_rows: usize = row_sizes.iter().sum();
+    if total_rows != rows {
+        return Err(Error::LoadError(format!(
+            "Row split sizes {:?} do not sum to total rows {}",
+            row_sizes, rows
+        )));
+    }
+    let mut chunks = Vec::with_capacity(row_sizes.len());
+    let mut offset = 0usize;
+    for &rows_in_chunk in row_sizes {
+        let len = rows_in_chunk
+            .checked_mul(cols)
+            .ok_or_else(|| Error::LoadError("Row split size overflow".into()))?;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| Error::LoadError("Row split offset overflow".into()))?;
+        if end > data.len() {
+            return Err(Error::LoadError("Row split exceeds tensor length".into()));
+        }
+        chunks.push(&data[offset..end]);
+        offset = end;
+    }
+    Ok(chunks)
+}
+
+fn split_vector_by_sizes<'a>(
+    data: &'a [f32],
+    shape: &[usize],
+    sizes: &[usize],
+) -> Result<Vec<&'a [f32]>> {
+    let len = match shape {
+        [len] => *len,
+        [1, len] | [len, 1] => *len,
+        _ => {
+            return Err(Error::LoadError(format!(
+                "Expected 1D tensor for vector split, got shape {:?}",
+                shape
+            )))
+        }
+    };
+    if data.len() != len {
+        return Err(Error::LoadError(format!(
+            "Vector data length {} does not match shape {:?}",
+            data.len(),
+            shape
+        )));
+    }
+    let total: usize = sizes.iter().sum();
+    if total != len {
+        return Err(Error::LoadError(format!(
+            "Vector split sizes {:?} do not sum to total length {}",
+            sizes, len
+        )));
+    }
+    let mut chunks = Vec::with_capacity(sizes.len());
+    let mut offset = 0usize;
+    for &size in sizes {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| Error::LoadError("Vector split offset overflow".into()))?;
+        if end > data.len() {
+            return Err(Error::LoadError("Vector split exceeds tensor length".into()));
+        }
+        chunks.push(&data[offset..end]);
+        offset = end;
+    }
+    Ok(chunks)
+}
+
 /// Load Linear layer weights from SafeTensors.
 ///
 /// HuggingFace Linear weights are stored as [out_features, in_features].
@@ -327,6 +437,29 @@ impl LinearWeights {
 
     pub fn from_quantized(weight: NativeQLinear) -> Self {
         Self::Quantized { weight }
+    }
+
+    /// Get raw weight slice for dense weights (L2/L3 API compatibility).
+    /// Returns None for quantized weights.
+    pub fn as_dense_slice(&self) -> Option<&[f32]> {
+        match self {
+            Self::Dense { weight, .. } => Some(weight.as_slice()),
+            Self::Quantized { .. } => None,
+        }
+    }
+
+    /// Check if this is a quantized weight.
+    pub fn is_quantized(&self) -> bool {
+        matches!(self, Self::Quantized { .. })
+    }
+
+    /// Get bias slice if available (for BERT-style models with bias).
+    pub fn bias_slice(&self) -> Option<&[f32]> {
+        match self {
+            Self::Dense { bias: Some(b), .. } => Some(b.as_slice()),
+            Self::Dense { bias: None, .. } => None,
+            Self::Quantized { weight } => weight.bias(),
+        }
     }
 
     pub fn in_features(&self) -> usize {
@@ -362,15 +495,33 @@ impl LinearWeights {
                         "Linear output length mismatch".into(),
                     ));
                 }
-                gllm_kernels::linear_forward(
+
+                // Use CPU matmul directly (L0 ops are now internal)
+                // Linear: output = input @ weight^T
+                // input: [batch, in_features], weight: [out_features, in_features]
+                // matmul with trans_b: C = A @ B^T where B is [n, k]
+                let config = MatmulConfig {
+                    m: batch,
+                    n: weight.rows,     // out_features
+                    k: weight.cols,     // in_features
+                    transpose_a: false,
+                    transpose_b: true,  // weight needs transpose
+                    alpha: 1.0,
+                    beta: 0.0,
+                };
+
+                gllm_kernels::ops::matmul::cpu_matmul(
                     input,
                     weight.as_slice(),
-                    bias.as_ref().map(|b| b.as_slice()),
                     output,
-                    batch,
-                    weight.cols,
-                    weight.rows,
+                    config,
                 );
+
+                // Add bias if present
+                if let Some(bias) = bias {
+                    gllm_kernels::add_bias(output, bias.as_slice(), batch, weight.rows);
+                }
+
                 Ok(())
             }
             Self::Quantized { weight } => weight.forward(input, output, batch, backend),
@@ -539,6 +690,8 @@ pub mod mappings {
         Llama,
         /// GPT-2, GPT-Neo, etc.
         Gpt2,
+        /// GPT-OSS (OpenAI).
+        GptOss,
         /// BERT, RoBERTa, etc.
         Bert,
         /// GLM models
@@ -555,6 +708,8 @@ pub mod mappings {
                 || lower.contains("deepseek")
                 || lower.contains("mixtral") {
                 Architecture::Llama
+            } else if lower.contains("gpt_oss") || lower.contains("gpt-oss") || lower.contains("gptoss") {
+                Architecture::GptOss
             } else if lower.contains("gpt2") || lower.contains("gpt-neo") {
                 Architecture::Gpt2
             } else if lower.contains("glm") || lower.contains("chatglm") {
@@ -568,9 +723,29 @@ pub mod mappings {
         pub fn embedding_weight(&self) -> &'static str {
             match self {
                 Architecture::Llama => "model.embed_tokens.weight",
-                Architecture::Gpt2 => "transformer.wte.weight",
+                Architecture::Gpt2 | Architecture::GptOss => "transformer.wte.weight",
                 Architecture::Bert => "embeddings.word_embeddings.weight",
                 Architecture::Glm => "transformer.embedding.word_embeddings.weight",
+            }
+        }
+
+        /// Get embedding weight names to try for this architecture.
+        pub fn embedding_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Llama => vec![
+                    "model.embed_tokens.weight",
+                    "embed_tokens.weight",
+                ],
+                Architecture::Gpt2 | Architecture::GptOss => vec![
+                    "transformer.wte.weight",
+                    "wte.weight",
+                ],
+                Architecture::Bert => vec![
+                    "embeddings.word_embeddings.weight",
+                    "bert.embeddings.word_embeddings.weight",
+                    "roberta.embeddings.word_embeddings.weight",
+                ],
+                Architecture::Glm => vec![self.embedding_weight()],
             }
         }
 
@@ -578,9 +753,25 @@ pub mod mappings {
         pub fn layer_prefix(&self, layer_idx: usize) -> String {
             match self {
                 Architecture::Llama => format!("model.layers.{}", layer_idx),
-                Architecture::Gpt2 => format!("transformer.h.{}", layer_idx),
+                Architecture::Gpt2 | Architecture::GptOss => format!("transformer.h.{}", layer_idx),
                 Architecture::Bert => format!("encoder.layer.{}", layer_idx),
                 Architecture::Glm => format!("transformer.encoder.layers.{}", layer_idx),
+            }
+        }
+
+        /// Get layer prefixes to try for this architecture.
+        pub fn layer_prefix_candidates(&self, layer_idx: usize) -> Vec<String> {
+            match self {
+                Architecture::Llama => vec![
+                    format!("model.layers.{}", layer_idx),
+                    format!("layers.{}", layer_idx),
+                ],
+                Architecture::Bert => vec![
+                    format!("encoder.layer.{}", layer_idx),
+                    format!("bert.encoder.layer.{}", layer_idx),
+                    format!("roberta.encoder.layer.{}", layer_idx),
+                ],
+                _ => vec![self.layer_prefix(layer_idx)],
             }
         }
 
@@ -597,7 +788,7 @@ pub mod mappings {
                     v_proj_bias: None,
                     o_proj_bias: None,
                 },
-                Architecture::Gpt2 => AttentionWeights {
+                Architecture::Gpt2 | Architecture::GptOss => AttentionWeights {
                     q_proj_weight: format!("{}.attn.c_attn.weight", layer_prefix),
                     k_proj_weight: format!("{}.attn.c_attn.weight", layer_prefix),
                     v_proj_weight: format!("{}.attn.c_attn.weight", layer_prefix),
@@ -641,7 +832,7 @@ pub mod mappings {
                     up_proj_bias: None,
                     down_proj_bias: None,
                 },
-                Architecture::Gpt2 => FfnWeights {
+                Architecture::Gpt2 | Architecture::GptOss => FfnWeights {
                     gate_proj_weight: format!("{}.mlp.c_fc.weight", layer_prefix),
                     up_proj_weight: format!("{}.mlp.c_fc.weight", layer_prefix),
                     down_proj_weight: format!("{}.mlp.c_proj.weight", layer_prefix),
@@ -677,7 +868,7 @@ pub mod mappings {
                     attention_norm_bias: None,
                     ffn_norm_bias: None,
                 },
-                Architecture::Gpt2 => LayerNormWeights {
+                Architecture::Gpt2 | Architecture::GptOss => LayerNormWeights {
                     attention_norm_weight: format!("{}.ln_1.weight", layer_prefix),
                     ffn_norm_weight: format!("{}.ln_2.weight", layer_prefix),
                     attention_norm_bias: Some(format!("{}.ln_1.bias", layer_prefix)),
@@ -702,9 +893,77 @@ pub mod mappings {
         pub fn final_norm_weight(&self) -> &'static str {
             match self {
                 Architecture::Llama => "model.norm.weight",
-                Architecture::Gpt2 => "transformer.ln_f.weight",
+                Architecture::Gpt2 | Architecture::GptOss => "transformer.ln_f.weight",
                 Architecture::Bert => "embeddings.LayerNorm.weight",
                 Architecture::Glm => "transformer.encoder.final_layernorm.weight",
+            }
+        }
+
+        /// Get final layer norm weight names to try for this architecture.
+        pub fn final_norm_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Llama => vec![
+                    "model.norm.weight",
+                    "norm.weight",
+                ],
+                Architecture::Bert => vec![
+                    "encoder.layer_norm.weight",
+                    "embeddings.LayerNorm.weight",
+                    "bert.embeddings.LayerNorm.weight",
+                    "roberta.embeddings.LayerNorm.weight",
+                ],
+                _ => vec![self.final_norm_weight()],
+            }
+        }
+
+        /// Get position embedding weight names to try for this architecture.
+        pub fn position_embedding_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "embeddings.position_embeddings.weight",
+                    "bert.embeddings.position_embeddings.weight",
+                    "roberta.embeddings.position_embeddings.weight",
+                ],
+                Architecture::Gpt2 | Architecture::GptOss => vec![
+                    "transformer.wpe.weight",
+                ],
+                _ => Vec::new(),
+            }
+        }
+
+        /// Get token type embedding weight names to try for this architecture.
+        pub fn token_type_embedding_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "embeddings.token_type_embeddings.weight",
+                    "bert.embeddings.token_type_embeddings.weight",
+                    "roberta.embeddings.token_type_embeddings.weight",
+                ],
+                _ => Vec::new(),
+            }
+        }
+
+        /// Get embedding LayerNorm weight names for BERT-style models.
+        pub fn embedding_layer_norm_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "embeddings.LayerNorm.weight",
+                    "bert.embeddings.LayerNorm.weight",
+                    "roberta.embeddings.LayerNorm.weight",
+                ],
+                _ => Vec::new(),
+            }
+        }
+
+        /// Get embedding LayerNorm bias names for BERT-style models.
+        pub fn embedding_layer_norm_bias_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "embeddings.LayerNorm.bias",
+                    "bert.embeddings.LayerNorm.bias",
+                    "roberta.embeddings.LayerNorm.bias",
+                ],
+                _ => Vec::new(),
             }
         }
 
@@ -712,9 +971,38 @@ pub mod mappings {
         pub fn lm_head_weight(&self) -> &'static str {
             match self {
                 Architecture::Llama => "lm_head.weight",
-                Architecture::Gpt2 => "lm_head.weight",
+                Architecture::Gpt2 | Architecture::GptOss => "lm_head.weight",
                 Architecture::Bert => "cls.predictions.decoder.weight",
                 Architecture::Glm => "transformer.output_layer.weight",
+            }
+        }
+
+        /// Get LM head weight names to try for this architecture.
+        pub fn lm_head_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "cls.predictions.decoder.weight",
+                    "bert.cls.predictions.decoder.weight",
+                ],
+                _ => vec![self.lm_head_weight()],
+            }
+        }
+
+        /// Get rerank score head weight names to try for this architecture.
+        pub fn rerank_score_weight_candidates(&self) -> Vec<&'static str> {
+            match self {
+                Architecture::Bert => vec![
+                    "classifier.weight",
+                    "classifier.dense.weight",
+                    "score.weight",
+                    "cls.predictions.decoder.weight",
+                    "bert.cls.predictions.decoder.weight",
+                ],
+                _ => vec![
+                    "classifier.weight",
+                    "classifier.dense.weight",
+                    "score.weight",
+                ],
             }
         }
     }
@@ -955,6 +1243,75 @@ mod tests {
         assert_eq!(
             Architecture::from_model_type("chatglm"),
             Architecture::Glm
+        );
+        assert_eq!(
+            Architecture::from_model_type("gpt_oss"),
+            Architecture::GptOss
+        );
+    }
+
+    #[test]
+    fn test_split_rows_and_vector() {
+        let tensor = LoadedTensor {
+            data: vec![
+                1.0, 2.0, 3.0,
+                4.0, 5.0, 6.0,
+                7.0, 8.0, 9.0,
+            ],
+            shape: vec![3, 3],
+        };
+
+        let chunks = tensor.split_rows(&[1, 2]).expect("split rows");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], &[1.0, 2.0, 3.0]);
+        assert_eq!(chunks[1], &[4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+
+        let bias = LoadedTensor {
+            data: vec![0.5, 1.5, 2.5, 3.5],
+            shape: vec![4],
+        };
+        let bias_chunks = bias.split_vector(&[2, 2]).expect("split vector");
+        assert_eq!(bias_chunks.len(), 2);
+        assert_eq!(bias_chunks[0], &[0.5, 1.5]);
+        assert_eq!(bias_chunks[1], &[2.5, 3.5]);
+    }
+
+    #[test]
+    fn test_bert_mapping_candidates() {
+        use mappings::Architecture;
+
+        let arch = Architecture::Bert;
+        assert_eq!(
+            arch.embedding_weight_candidates(),
+            vec![
+                "embeddings.word_embeddings.weight",
+                "bert.embeddings.word_embeddings.weight",
+                "roberta.embeddings.word_embeddings.weight",
+            ]
+        );
+        assert_eq!(
+            arch.layer_prefix_candidates(0),
+            vec![
+                "encoder.layer.0".to_string(),
+                "bert.encoder.layer.0".to_string(),
+                "roberta.encoder.layer.0".to_string()
+            ]
+        );
+        assert_eq!(
+            arch.final_norm_weight_candidates(),
+            vec![
+                "encoder.layer_norm.weight",
+                "embeddings.LayerNorm.weight",
+                "bert.embeddings.LayerNorm.weight",
+                "roberta.embeddings.LayerNorm.weight"
+            ]
+        );
+        assert_eq!(
+            arch.lm_head_weight_candidates(),
+            vec![
+                "cls.predictions.decoder.weight",
+                "bert.cls.predictions.decoder.weight",
+            ]
         );
     }
 
