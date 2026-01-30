@@ -88,7 +88,7 @@ impl GeneratorEngine {
             | Architecture::Mixtral
             | Architecture::DeepSeekV3
             | Architecture::GptOss => {
-                GeneratorModelImpl::MoE(MoEGeneratorModel::new(config.clone(), backend)?)
+                GeneratorModelImpl::MoE(MoEGeneratorModel::new(config.clone(), backend, info.architecture)?)
             }
             _ => GeneratorModelImpl::Dense(GeneratorModel::new(config.clone(), backend)?),
         };

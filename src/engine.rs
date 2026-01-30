@@ -1,5 +1,6 @@
-use crate::decoder_model::DecoderModel;
-use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
+// TODO: 这些模块已被删除，需要迁移到新的 embedding_model/rerank_model 模块
+// use crate::decoder_model::DecoderModel;
+// use crate::dynamic_bert::{DynamicBertModel, DynamicCrossEncoder};
 use crate::generation::{GenerationConfig, GenerationOptions, GenerationOutput};
 use crate::generator_engine::GeneratorEngine;
 use crate::model_config::ModelConfig;
@@ -360,6 +361,11 @@ impl TokenizerAdapter {
     }
 }
 
+// TODO: 旧的 embedding/rerank 引擎实现，模块已删除
+// 已迁移到新的 embedding_model/rerank_model 模块
+// 以下是使用新模块的实现
+
+/*
 pub(crate) enum EmbeddingModel {
     Bert(DynamicBertModel),
     Decoder(DecoderModel),
@@ -495,8 +501,96 @@ impl RerankEngine {
         self.model.score(tokens)
     }
 }
+*/
 
 /// Backend-specific engine bundle.
+
+// 使用新 embedding_model 模块的 EmbeddingEngine
+pub(crate) struct EmbeddingEngine {
+    model: crate::embedding_model::EmbeddingModel,
+}
+
+impl EmbeddingEngine {
+    pub fn new(model_dir: &Path, info: &ModelInfo) -> Result<Self> {
+        let config_path = model_dir.join("config.json");
+        let repo_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .replace("--", "/");
+        let config_file = config_path.exists().then_some(config_path.as_path());
+        let (config, _) = ModelConfig::load(&repo_name, config_file)?;
+
+        let model_path = find_model_file(model_dir, &info.quantization);
+
+        // Create backend
+        let backend = auto_select_static();
+
+        let mut model = crate::embedding_model::EmbeddingModel::new(config, backend)?;
+
+        // Load weights if path provided
+        if let Some(path) = model_path.as_ref() {
+            model.load_safetensors(path)?;
+        }
+
+        Ok(Self { model })
+    }
+
+    pub fn embed(&self, tokens: &[Vec<i64>]) -> Result<Vec<Vec<f32>>> {
+        if tokens.is_empty() {
+            return Err(Error::InferenceError(
+                "At least one input is required".into(),
+            ));
+        }
+        self.model.forward(tokens)
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.model.hidden_size()
+    }
+}
+
+// 使用新 rerank_model 模块的 RerankEngine
+pub(crate) struct RerankEngine {
+    model: crate::rerank_model::RerankModel,
+}
+
+impl RerankEngine {
+    pub fn new(model_dir: &Path, info: &ModelInfo) -> Result<Self> {
+        let config_path = model_dir.join("config.json");
+        let repo_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .replace("--", "/");
+        let config_file = config_path.exists().then_some(config_path.as_path());
+        let (config, _) = ModelConfig::load(&repo_name, config_file)?;
+
+        let model_path = find_model_file(model_dir, &info.quantization);
+
+        // Create backend
+        let backend = auto_select_static();
+
+        let mut model = crate::rerank_model::RerankModel::new(config, backend)?;
+
+        // Load weights if path provided
+        if let Some(path) = model_path.as_ref() {
+            model.load_safetensors(path)?;
+        }
+
+        Ok(Self { model })
+    }
+
+    pub fn score(&self, tokens: &[Vec<i64>]) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
+            return Err(Error::InferenceError(
+                "At least one query-document pair is required".into(),
+            ));
+        }
+        self.model.score(tokens)
+    }
+}
+
 pub(crate) struct EngineBackend {
     embedding: Option<EmbeddingEngine>,
     rerank: Option<RerankEngine>,
