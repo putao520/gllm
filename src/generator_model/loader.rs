@@ -76,6 +76,22 @@ impl GeneratorModel {
                         expected_embed_len
                     )));
                 }
+
+                // DEBUG: Check embedding weights
+                static EMB_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+                if EMB_DEBUG.fetch_and(false, std::sync::atomic::Ordering::SeqCst) {
+                    let data = &embedding.data;
+                    let min_val = data.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max_val = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let mean_val = data.iter().sum::<f32>() / data.len() as f32;
+                    eprintln!("=== EMBEDDING WEIGHT DEBUG ===");
+                    eprintln!("  source: {}", name);
+                    eprintln!("  len: {}", data.len());
+                    eprintln!("  min: {}, max: {}, mean: {}", min_val, max_val, mean_val);
+                    eprintln!("  first 10: {:?}", &data[..10.min(data.len())]);
+                    eprintln!("==============================");
+                }
+
                 self.embedding_mut().copy_from_slice(&embedding.data);
                 embed_loaded = true;
                 break;
@@ -189,30 +205,94 @@ fn load_layer_weights<L: TensorLoader>(
     }
 
     // Load layer norms
-    if loader.has_tensor(&format!("{}.input_layernorm.weight", prefix)) {
-        let norm_tensor = loader.load_tensor(&format!("{}.input_layernorm.weight", prefix))?;
-        let norm_data = norm_tensor.into_weight_vector()?.data;
-        if norm_data.len() != layer.input_norm.len() {
-            return Err(Error::LoadError(format!(
-                "Input norm weight has {} elements, expected {}",
-                norm_data.len(),
-                layer.input_norm.len()
-            )));
+    let input_norm_names = [
+        format!("{}.input_layernorm.weight", prefix),
+        format!("{}.norm1.weight", prefix),
+    ];
+    for name in input_norm_names {
+        if loader.has_tensor(&name) {
+            let norm_tensor = loader.load_tensor(&name)?;
+            let norm_data = norm_tensor.into_weight_vector()?.data;
+            if norm_data.len() != layer.input_norm.len() {
+                return Err(Error::LoadError(format!(
+                    "Input norm weight has {} elements, expected {}",
+                    norm_data.len(),
+                    layer.input_norm.len()
+                )));
+            }
+            layer.input_norm.copy_from_slice(&norm_data);
+            break;
         }
-        layer.input_norm.copy_from_slice(&norm_data);
     }
 
-    if loader.has_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
-        let norm_tensor = loader.load_tensor(&format!("{}.post_attention_layernorm.weight", prefix))?;
-        let norm_data = norm_tensor.into_weight_vector()?.data;
-        if norm_data.len() != layer.post_attn_norm.len() {
-            return Err(Error::LoadError(format!(
-                "Post attention norm weight has {} elements, expected {}",
-                norm_data.len(),
-                layer.post_attn_norm.len()
-            )));
+    let post_attn_norm_names = [
+        format!("{}.post_attention_layernorm.weight", prefix),
+        format!("{}.post_attention_norm.weight", prefix),
+        format!("{}.norm2.weight", prefix),
+    ];
+    for name in post_attn_norm_names {
+        if loader.has_tensor(&name) {
+            let norm_tensor = loader.load_tensor(&name)?;
+            let norm_data = norm_tensor.into_weight_vector()?.data;
+            if norm_data.len() != layer.post_attn_norm.len() {
+                return Err(Error::LoadError(format!(
+                    "Post attention norm weight has {} elements, expected {}",
+                    norm_data.len(),
+                    layer.post_attn_norm.len()
+                )));
+            }
+            layer.post_attn_norm.copy_from_slice(&norm_data);
+            break;
         }
-        layer.post_attn_norm.copy_from_slice(&norm_data);
+    }
+
+    // Load QK norm weights (Qwen3-style)
+    let q_norm_names = [
+        format!("{}.self_attn.q_norm.weight", prefix),
+        format!("{}.attention.q_norm.weight", prefix),
+    ];
+    for name in q_norm_names {
+        if loader.has_tensor(&name) {
+            let norm_tensor = loader.load_tensor(&name)?;
+            let norm_data = norm_tensor.into_weight_vector()?.data;
+            static Q_NORM_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if Q_NORM_DEBUG.fetch_and(false, std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("=== Q_NORM WEIGHT DEBUG ===");
+                eprintln!("  source: {}", name);
+                eprintln!("  len: {}", norm_data.len());
+                let min_val = norm_data.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_val = norm_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                eprintln!("  min: {}, max: {}", min_val, max_val);
+                eprintln!("  first 10: {:?}", &norm_data[..10.min(norm_data.len())]);
+                eprintln!("==============================");
+            }
+            layer.q_norm = Some(norm_data);
+            break;
+        }
+    }
+
+    let k_norm_names = [
+        format!("{}.self_attn.k_norm.weight", prefix),
+        format!("{}.attention.k_norm.weight", prefix),
+    ];
+    for name in k_norm_names {
+        if loader.has_tensor(&name) {
+            let norm_tensor = loader.load_tensor(&name)?;
+            let norm_data = norm_tensor.into_weight_vector()?.data;
+            static K_NORM_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if K_NORM_DEBUG.fetch_and(false, std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("=== K_NORM WEIGHT DEBUG ===");
+                eprintln!("  source: {}", name);
+                eprintln!("  len: {}", norm_data.len());
+                let min_val = norm_data.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_val = norm_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                eprintln!("  min: {}, max: {}", min_val, max_val);
+                eprintln!("  first 10: {:?}", &norm_data[..10.min(norm_data.len())]);
+                eprintln!("==============================");
+            }
+            layer.k_norm = Some(norm_data);
+            break;
+        }
     }
 
     Ok(())
@@ -296,6 +376,8 @@ fn load_attention_weights<L: TensorLoader>(
     prefix: &str,
     layer: &mut LayerWeights,
 ) -> Result<()> {
+    let first_layer = prefix.contains("layers.0");
+
     // Try different attention weight naming conventions
     let attn_prefixes = [
         format!("{}.self_attn", prefix),
@@ -303,6 +385,38 @@ fn load_attention_weights<L: TensorLoader>(
     ];
 
     for attn_prefix in attn_prefixes {
+        let qkv_name = format!("{}.qkv_proj.weight", attn_prefix);
+        if loader.has_tensor(&qkv_name) {
+            let hidden_size = layer.input_norm.len();
+            let q_rows = projection_rows(&layer.q_weight, hidden_size, "q_proj")?;
+            let k_rows = projection_rows(&layer.k_weight, hidden_size, "k_proj")?;
+            let v_rows = projection_rows(&layer.v_weight, hidden_size, "v_proj")?;
+
+            let qkv = loader.load_tensor(&qkv_name)?;
+            if qkv.shape.len() != 2 || qkv.shape[1] != hidden_size {
+                return Err(Error::LoadError(format!(
+                    "qkv_proj weight shape {:?} is incompatible with hidden_size {}",
+                    qkv.shape, hidden_size
+                )));
+            }
+            let chunks = qkv.split_rows(&[q_rows, k_rows, v_rows])?;
+            copy_slice_to_weights(chunks[0], &mut layer.q_weight, "q_proj")?;
+            copy_slice_to_weights(chunks[1], &mut layer.k_weight, "k_proj")?;
+            copy_slice_to_weights(chunks[2], &mut layer.v_weight, "v_proj")?;
+
+            let bias_name = format!("{}.qkv_proj.bias", attn_prefix);
+            if loader.has_tensor(&bias_name) {
+                let bias = loader.load_tensor(&bias_name)?;
+                let _ = bias.split_vector(&[q_rows, k_rows, v_rows])?;
+            }
+
+            let o_name = format!("{}.o_proj.weight", attn_prefix);
+            let o_linear = load_linear(loader, &o_name, Some(&format!("{}.o_proj.bias", attn_prefix)))?;
+            copy_linear_to_slice(&o_linear, &mut layer.o_weight)?;
+
+            return Ok(());
+        }
+
         let q_name = format!("{}.q_proj.weight", attn_prefix);
         if !loader.has_tensor(&q_name) {
             continue;
@@ -310,7 +424,24 @@ fn load_attention_weights<L: TensorLoader>(
 
         // Load Q projection
         let q_linear = load_linear(loader, &q_name, Some(&format!("{}.q_proj.bias", attn_prefix)))?;
+        static Q_PROJ_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        let should_debug = Q_PROJ_DEBUG.fetch_and(false, std::sync::atomic::Ordering::SeqCst) && first_layer;
+        if should_debug {
+            eprintln!("=== Q_PROJ WEIGHT DEBUG ===");
+            eprintln!("  source: {}", q_name);
+            eprintln!("  q_weight len: {}", layer.q_weight.len());
+            if let Some(dense) = q_linear.as_dense_slice() {
+                eprintln!("  dense len: {}", dense.len());
+                eprintln!("  dense first 5: {:?}", &dense[..5.min(dense.len())]);
+                eprintln!("  dense last 5: {:?}", &dense[dense.len().saturating_sub(5)..]);
+            }
+            eprintln!("  before copy - q_weight first 5: {:?}", &layer.q_weight[..5]);
+        }
         copy_linear_to_slice(&q_linear, &mut layer.q_weight)?;
+        if should_debug {
+            eprintln!("  after copy - q_weight first 5: {:?}", &layer.q_weight[..5]);
+            eprintln!("==============================");
+        }
 
         // Load K projection
         let k_name = format!("{}.k_proj.weight", attn_prefix);
@@ -348,6 +479,42 @@ fn load_ffn_weights<L: TensorLoader>(
     ];
 
     for ffn_prefix in ffn_prefixes {
+        // Try fused gate_up_proj naming (Phi-4 style)
+        let gate_up_name = format!("{}.gate_up_proj.weight", ffn_prefix);
+        if loader.has_tensor(&gate_up_name) {
+            let hidden_size = layer.input_norm.len();
+            let gate_rows = match layer.gate_weight {
+                Some(ref gate_weight) => projection_rows(gate_weight, hidden_size, "gate_proj")?,
+                None => {
+                    return Err(Error::LoadError(
+                        "gate_up_proj found but gate weights are disabled".into(),
+                    ))
+                }
+            };
+            let up_rows = projection_rows(&layer.up_weight, hidden_size, "up_proj")?;
+            let gate_up = loader.load_tensor(&gate_up_name)?;
+            if gate_up.shape.len() != 2 || gate_up.shape[1] != hidden_size {
+                return Err(Error::LoadError(format!(
+                    "gate_up_proj weight shape {:?} is incompatible with hidden_size {}",
+                    gate_up.shape, hidden_size
+                )));
+            }
+            let chunks = gate_up.split_rows(&[gate_rows, up_rows])?;
+            if let Some(ref mut gate_weight) = layer.gate_weight {
+                copy_slice_to_weights(chunks[0], gate_weight, "gate_proj")?;
+            }
+            copy_slice_to_weights(chunks[1], &mut layer.up_weight, "up_proj")?;
+
+            let down_name = format!("{}.down_proj.weight", ffn_prefix);
+            let down_linear = load_linear(
+                loader,
+                &down_name,
+                Some(&format!("{}.down_proj.bias", ffn_prefix)),
+            )?;
+            copy_linear_to_slice(&down_linear, &mut layer.down_weight)?;
+            return Ok(());
+        }
+
         // Try gate_proj/up_proj/down_proj naming (LLaMA style)
         let gate_name = format!("{}.gate_proj.weight", ffn_prefix);
         if loader.has_tensor(&gate_name) {

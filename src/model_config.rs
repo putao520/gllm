@@ -111,6 +111,8 @@ pub struct ModelConfig {
     pub rope_theta: Option<f64>,
     #[serde(default)]
     pub rope_scaling: Option<Value>,
+    #[serde(default, alias = "final_logit_soft_capping")]
+    pub final_logit_softcapping: Option<f32>,
     #[serde(default)]
     pub sliding_window: Option<usize>,
     #[serde(default)]
@@ -229,6 +231,7 @@ impl ModelConfig {
         merge_opt!(rms_norm_eps);
         merge_opt!(rope_theta);
         merge_opt!(rope_scaling);
+        merge_opt!(final_logit_softcapping);
         merge_opt!(sliding_window);
         merge_opt!(num_key_value_heads);
         merge_opt!(head_dim);
@@ -493,6 +496,7 @@ impl Default for ModelConfig {
             rms_norm_eps: None,
             rope_theta: None,
             rope_scaling: None,
+            final_logit_softcapping: None,
             sliding_window: None,
             num_key_value_heads: None,
             head_dim: None,

@@ -205,67 +205,7 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             0.1,
         ),
 
-        // Code Models
-        "microsoft/codebert-base" => preset(
-            768,
-            12,
-            12,
-            3072,
-            514,
-            50265,
-            "roberta",
-            &["RobertaModel"],
-            1e-5,
-            1,
-            1,
-            0.1,
-            0.1,
-        ),
-        "microsoft/graphcodebert-base" => preset(
-            768,
-            12,
-            12,
-            3072,
-            514,
-            50265,
-            "roberta",
-            &["RobertaModel"],
-            1e-5,
-            1,
-            1,
-            0.1,
-            0.1,
-        ),
-        "microsoft/unixcoder-base" => preset(
-            768,
-            12,
-            12,
-            3072,
-            514,
-            50265,
-            "roberta",
-            &["RobertaModel"],
-            1e-5,
-            1,
-            1,
-            0.1,
-            0.1,
-        ),
-        "bigcode/starencoder" => preset(
-            768,
-            12,
-            12,
-            3072,
-            512,
-            49152,
-            "bert",
-            &["BertModel"],
-            1e-12,
-            0, // type_vocab_size unknown for starencoder, usually 0 or 2 for BERT
-            0,
-            0.1,
-            0.1,
-        ),
+        // Code Models (CodeXEmbed)
         "salesforce/sfr-embedding-code-2b_r" => codex_embed_qwen2_preset(),
         "salesforce/sfr-embedding-code-7b_r" => codex_embed_mistral_preset(),
         "qwen/qwen2-7b-instruct" => qwen2_instruct_preset(),
@@ -347,11 +287,12 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             1e-6,
         ),
         // Qwen3 Generator Models
-        "qwen/qwen3-0.6b" => qwen3_preset(
+        "qwen/qwen3-0.6b" => qwen3_preset_with_head_dim(
             1024,
             28,
             16,
             8,
+            128,  // head_dim from config (not 1024/16=64)
             3072,
             151936,
             40960,
@@ -424,7 +365,7 @@ pub(crate) fn model_defaults(repo_id: &str) -> ModelConfig {
             40960,  // max_pos
             128,    // num_experts
             8,      // num_experts_per_tok
-            None,
+            Some(768),  // moe_intermediate_size (768, not 6144!)
             1_000_000.0,
             1e-6,
         ),
@@ -917,6 +858,7 @@ fn qwen3_embedding_preset(
         rms_norm_eps: Some(rms_norm_eps),
         rope_theta: Some(rope_theta),
         rope_scaling: None,
+        final_logit_softcapping: None,
         sliding_window: None,
         use_cache: Some(true),
         position_embedding_type: Some("rope".to_string()),
@@ -1007,7 +949,37 @@ fn qwen3_preset(
     rope_theta: f64,
     rms_norm_eps: f64,
 ) -> ModelConfig {
-    let head_dim = hidden_size / heads;
+    // Note: Qwen3 uses head_dim from config, not hidden_size / heads
+    // For Qwen3-0.6B: head_dim = 128, not 64
+    decoder_generation_preset(
+        hidden_size,
+        layers,
+        heads,
+        kv_heads,
+        hidden_size / heads, // Default fallback
+        intermediate,
+        max_pos,
+        vocab,
+        rope_theta,
+        rms_norm_eps,
+        None,
+        "qwen3",
+        &["Qwen3ForCausalLM"],
+    )
+}
+
+fn qwen3_preset_with_head_dim(
+    hidden_size: usize,
+    layers: usize,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate: usize,
+    vocab: usize,
+    max_pos: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> ModelConfig {
     decoder_generation_preset(
         hidden_size,
         layers,
@@ -1424,6 +1396,7 @@ fn decoder_embedding_preset(
         rms_norm_eps: Some(rms_norm_eps),
         rope_theta: Some(rope_theta),
         rope_scaling: None,
+        final_logit_softcapping: None,
         sliding_window,
         use_cache: Some(true),
         position_embedding_type: Some("rope".to_string()),
@@ -1490,6 +1463,7 @@ fn decoder_generation_preset(
         rms_norm_eps: Some(rms_norm_eps),
         rope_theta: Some(rope_theta),
         rope_scaling: None,
+        final_logit_softcapping: None,
         sliding_window,
         use_cache: Some(true),
         position_embedding_type: Some("rope".to_string()),
@@ -1582,6 +1556,7 @@ fn nvidia_nemotron_preset(
             "original_max_position_embeddings": 8192,
             "rope_type": "llama3",
         })),
+        final_logit_softcapping: None,
         sliding_window: None,
         use_cache: Some(false),
         position_embedding_type: Some("rope".to_string()),
@@ -1638,6 +1613,7 @@ fn jina_v4_preset() -> ModelConfig {
             "rope_type": "default",
             "type": "default",
         })),
+        final_logit_softcapping: None,
         sliding_window: Some(32768),
         use_cache: Some(true),
         position_embedding_type: Some("rope".to_string()),
@@ -1690,6 +1666,7 @@ fn jina_reranker_v3_preset() -> ModelConfig {
         rms_norm_eps: Some(1e-6),
         rope_theta: Some(1_000_000.0),
         rope_scaling: None,
+        final_logit_softcapping: None,
         sliding_window: None,
         use_cache: Some(false),
         position_embedding_type: Some("rope".to_string()),
@@ -1756,6 +1733,7 @@ fn preset(
         rms_norm_eps: None,
         rope_theta: None,
         rope_scaling: None,
+        final_logit_softcapping: None,
         sliding_window: None,
         use_cache: Some(true),
         position_embedding_type: Some("absolute".to_string()),

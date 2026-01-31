@@ -108,6 +108,8 @@ impl MoELayerWeights {
             router_weight: &self.router_weight,
             experts,
             num_experts_per_tok: self.num_experts_per_tok,
+            q_norm: None,
+            k_norm: None,
         }
     }
 }
@@ -240,19 +242,20 @@ impl MoEGeneratorModel {
 
     fn build_rope_cache(config: &ModelConfig, head_dim: usize, max_position: usize) -> (Vec<f32>, Vec<f32>) {
         let theta = config.rope_theta.unwrap_or(10000.0) as f32;
-        let mut cos_cache = vec![0.0f32; max_position * head_dim];
-        let mut sin_cache = vec![0.0f32; max_position * head_dim];
+        let half_dim = head_dim / 2;
+        // Cache size is max_position * half_dim (not head_dim!)
+        // This matches the indexing in rope_apply which uses pos * half_dim + i
+        let mut cos_cache = vec![0.0f32; max_position * half_dim];
+        let mut sin_cache = vec![0.0f32; max_position * half_dim];
 
         for pos in 0..max_position {
-            for i in 0..(head_dim / 2) {
+            for i in 0..half_dim {
                 let freq = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
                 let angle = pos as f32 * freq;
                 let cos_val = angle.cos();
                 let sin_val = angle.sin();
-                cos_cache[pos * head_dim + i] = cos_val;
-                cos_cache[pos * head_dim + head_dim / 2 + i] = cos_val;
-                sin_cache[pos * head_dim + i] = sin_val;
-                sin_cache[pos * head_dim + head_dim / 2 + i] = sin_val;
+                cos_cache[pos * half_dim + i] = cos_val;
+                sin_cache[pos * half_dim + i] = sin_val;
             }
         }
 
