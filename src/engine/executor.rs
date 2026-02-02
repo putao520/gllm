@@ -3,7 +3,9 @@
 use gllm_kernels::backend_trait::{
     AttentionTopology, Backend, BackendError, KvCacheHandle, LogitsHandle,
 };
-use gllm_kernels::kernel_types::{GeneratorForwardConfig, KvCacheConfig, PositionEncoding, SamplingConfig};
+use gllm_kernels::kernel_types::{
+    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, SamplingConfig,
+};
 use thiserror::Error;
 
 use crate::adapter::{AdapterError, AdapterWeights, Message, ModelAdapter};
@@ -284,5 +286,40 @@ impl<B: Backend + 'static> Executor<B> {
             self.kv_cache_slot = KvCacheSlot::Front;
         }
         Ok(self.kv_cache.as_mut().expect("kv cache just allocated"))
+    }
+
+    fn active_kv_handle(&mut self) -> ExecutorResult<KvCacheHandle> {
+        let slot = self.kv_cache_slot;
+        let cache = self.ensure_kv_cache()?;
+        Ok(cache.slot(slot).handle())
+    }
+
+    /// 异步友好的 swap-out；目前内部仍为同步调用，提供 async 接口方便集成。
+    pub async fn swap_out_pages_async(&mut self, page_indices: &[usize]) -> ExecutorResult<()> {
+        let mut handle = self.active_kv_handle()?;
+        self.backend.swap_out_pages(&mut handle, page_indices)?;
+        Ok(())
+    }
+
+    /// 异步友好的 swap-in，完成后通知调度器进入 Warm 保护。
+    pub async fn swap_in_pages_async(
+        &mut self,
+        request_id: RequestId,
+        page_indices: &[PageId],
+    ) -> ExecutorResult<()> {
+        let mut handle = self.active_kv_handle()?;
+        self.backend.swap_in_pages(&mut handle, page_indices)?;
+        self.scheduler.on_swap_in(request_id, page_indices);
+        Ok(())
+    }
+
+    /// 从 backend 同步页面状态到调度器（集成 get_page_states）。
+    pub fn refresh_page_states(&mut self) -> ExecutorResult<()> {
+        if self.kv_cache.is_some() {
+            let handle = self.active_kv_handle()?;
+            let states = self.backend.get_page_states(&handle)?;
+            self.scheduler.sync_page_states(&states);
+        }
+        Ok(())
     }
 }

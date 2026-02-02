@@ -7,6 +7,7 @@ pub mod adapter;
 pub mod engine;
 pub mod loader;
 pub mod backend;
+pub mod scheduler;
 
 pub mod client;
 pub mod embeddings;

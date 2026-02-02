@@ -7,6 +7,7 @@ fn paged_attention_allocates_pages() {
         total_pages: 6,
         max_batch: 4,
         max_tokens: 64,
+        ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
@@ -29,6 +30,7 @@ fn paged_attention_dynamic_batching_respects_limits() {
         total_pages: 10,
         max_batch: 2,
         max_tokens: 6,
+        ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 3);
@@ -53,6 +55,7 @@ fn paged_attention_prefetches_with_double_buffer() {
         total_pages: 4,
         max_batch: 1,
         max_tokens: 8,
+        ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 2);
@@ -80,6 +83,7 @@ fn paged_attention_rejects_oversized_request() {
         total_pages: 1,
         max_batch: 1,
         max_tokens: 32,
+        ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 9);
@@ -109,6 +113,7 @@ fn continuous_batching_improves_utilization_over_static() {
         total_pages: 64,
         max_batch,
         max_tokens,
+        ..SchedulerConfig::default()
     };
     let mut scheduler = Scheduler::with_config(config);
     for (idx, tokens) in lengths.iter().enumerate() {
