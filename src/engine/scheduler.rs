@@ -590,7 +590,299 @@ impl Scheduler {
         self.next_slot = self.next_slot.flip();
         Some(batch)
     }
+
+    // ========== 核心调度逻辑 (REQ-SCHED-001, REQ-SCHED-003) ==========
+
+    /// 处理页面错误 (页面不在 GPU 内存)
+    /// 当访问的页面已被换出到 CPU 时触发
+    pub fn handle_page_fault(&mut self, page_id: PageId, requesting_sequence: RequestId) -> PageLocation {
+        match self.page_pool.get_page_state(page_id) {
+            Some(PageState::Swapped) => {
+                // 页面已换出到 CPU，需要 swap-in
+                // 标记序列为暂停状态
+                self.pause_sequence(requesting_sequence);
+                // 添加到 swap-in 等待队列（通过 sequences 记录）
+                if let Some(seq) = self.sequences.get_mut(&requesting_sequence) {
+                    seq.state = SequenceState::Paused;
+                }
+                PageLocation::Cpu
+            }
+            Some(PageState::Active) => {
+                // 页面在 GPU 内存中
+                PageLocation::Gpu
+            }
+            Some(PageState::Standby) => {
+                // 页面在 GPU 中但未使用，标记为 Active
+                self.page_pool.set_page_state(page_id, PageState::Active);
+                self.page_pool.mark_accessed(&[page_id], requesting_sequence);
+                PageLocation::Gpu
+            }
+            None => {
+                // 页面不存在
+                PageLocation::Invalid
+            }
+        }
+    }
+
+    /// 获取批次的页表
+    /// 用于批处理前向传播，构建每个序列的页表映射
+    pub fn get_batch_page_table(&self, request_ids: &[RequestId]) -> BatchPageTable {
+        let mut page_table = BatchPageTable {
+            sequence_pages: HashMap::new(),
+            total_pages: 0,
+        };
+
+        for &request_id in request_ids {
+            if let Some(seq_info) = self.sequences.get(&request_id) {
+                let pages: Vec<_> = seq_info.allocated_pages.iter()
+                    .filter_map(|&pid| {
+                        self.page_pool.get_page_state(pid).map(|state| (pid, state))
+                    })
+                    .collect();
+                let page_count = pages.len();
+                page_table.sequence_pages.insert(request_id, pages);
+                page_table.total_pages += page_count;
+            }
+        }
+
+        page_table
+    }
+
+    /// 更新批次状态 (Continuous Batching 核心逻辑)
+    /// 根据生成结果决定序列继续/完成/暂停
+    pub fn update_batch(&mut self, batch: &ScheduledBatch, results: &BatchResult) -> BatchAction {
+        let mut continue_ids = Vec::new();
+        let mut complete_ids = Vec::new();
+        let mut pause_ids = Vec::new();
+
+        for (request, result) in batch.requests.iter().zip(results.results.iter()) {
+            match result {
+                SequenceResult::Continue => {
+                    // 序列继续生成
+                    if let Some(seq) = self.sequences.get_mut(&request.id) {
+                        seq.state = SequenceState::Running;
+                        seq.generated_tokens += 1;
+                    }
+                    continue_ids.push(request.id);
+                }
+                SequenceResult::Complete => {
+                    // 序列完成
+                    self.complete_sequence(request.id);
+                    complete_ids.push(request.id);
+                }
+                SequenceResult::PageFault { page_id } => {
+                    // 页面错误，需要暂停并等待 swap-in
+                    let location = self.handle_page_fault(*page_id, request.id);
+                    if location == PageLocation::Cpu {
+                        pause_ids.push(request.id);
+                    } else {
+                        // 页面应该可用，继续
+                        continue_ids.push(request.id);
+                    }
+                }
+                SequenceResult::Error { .. } => {
+                    // 序列失败
+                    if let Some(seq) = self.sequences.get_mut(&request.id) {
+                        seq.state = SequenceState::Failed;
+                    }
+                    complete_ids.push(request.id);
+                }
+            }
+        }
+
+        BatchAction {
+            continue_ids,
+            complete_ids,
+            pause_ids,
+        }
+    }
+
+    /// 为序列分配页面（带自动 swap 支持）
+    /// 如果 GPU 内存不足，会先换出 LRU 页面
+    pub fn allocate_pages_for_sequence(
+        &mut self,
+        request_id: RequestId,
+        token_count: usize,
+    ) -> Result<Vec<PageId>, SchedulerError> {
+        let pages_needed = (token_count + self.config.page_size - 1) / self.config.page_size;
+
+        // 尝试直接分配
+        let mut allocated = Vec::new();
+        for _ in 0..pages_needed {
+            if let Some(allocation) = self.page_pool.allocate(self.config.page_size) {
+                for page in allocation.pages {
+                    allocated.push(page);
+                }
+            } else {
+                // 内存不足，需要换出一些页面
+                break;
+            }
+        }
+
+        // 如果分配不足，尝试 swap-out
+        if allocated.len() < pages_needed {
+            let additional = pages_needed - allocated.len();
+            let victims = self.select_victim_pages_for_swap(additional);
+
+            // 注意：实际的 swap-out 操作需要由 executor 调用 backend 的 swap_out_pages
+            // 这里只是标记页面为可以换出的状态
+            for &page_id in &victims {
+                self.page_pool.set_page_state(page_id, PageState::Standby);
+            }
+
+            // 重新尝试分配
+            while allocated.len() < pages_needed {
+                if let Some(allocation) = self.page_pool.allocate(self.config.page_size) {
+                    for page in allocation.pages {
+                        allocated.push(page);
+                    }
+                } else {
+                    return Err(SchedulerError::OutOfMemory {
+                        requested: pages_needed,
+                        available: allocated.len(),
+                    });
+                }
+            }
+        }
+
+        // 记录分配给序列的页面
+        for &page_id in &allocated {
+            self.page_pool.mark_accessed(&[page_id], request_id);
+        }
+
+        Ok(allocated)
+    }
+
+    /// 为 swap 选择受害者页面
+    fn select_victim_pages_for_swap(&self, count: usize) -> Vec<PageId> {
+        self.page_pool.select_victim_pages(count)
+    }
 }
+
+/// 页面位置（用于页面错误处理）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageLocation {
+    /// 页面在 GPU 内存中
+    Gpu,
+    /// 页面在 CPU 内存中（已换出）
+    Cpu,
+    /// 页面无效
+    Invalid,
+}
+
+/// 批次页表
+/// 映射每个序列到其页面列表和状态
+#[derive(Debug, Clone)]
+pub struct BatchPageTable {
+    /// 序列 ID -> (PageId, PageState) 列表
+    pub sequence_pages: HashMap<RequestId, Vec<(PageId, PageState)>>,
+    /// 总页面数
+    pub total_pages: usize,
+}
+
+/// 序列生成结果
+#[derive(Debug, Clone)]
+pub enum SequenceResult {
+    /// 继续生成
+    Continue,
+    /// 生成完成
+    Complete,
+    /// 页面错误，需要 swap-in
+    PageFault { page_id: PageId },
+    /// 生成错误
+    Error { message: String },
+}
+
+/// 批次处理结果
+#[derive(Debug, Clone)]
+pub struct BatchResult {
+    /// 每个序列的生成结果
+    pub results: Vec<SequenceResult>,
+}
+
+impl BatchResult {
+    /// 创建成功批次结果（所有序列继续）
+    pub fn continued(count: usize) -> Self {
+        Self {
+            results: (0..count).map(|_| SequenceResult::Continue).collect(),
+        }
+    }
+
+    /// 创建完成批次结果
+    pub fn completed(indices: Vec<usize>) -> Self {
+        let max_idx = indices.iter().copied().max().unwrap_or(0);
+        let mut results = vec![SequenceResult::Continue; max_idx + 1];
+        for idx in indices {
+            if idx < results.len() {
+                results[idx] = SequenceResult::Complete;
+            }
+        }
+        Self { results }
+    }
+}
+
+/// 批次动作（Continuous Batching 决策）
+#[derive(Debug, Clone)]
+pub struct BatchAction {
+    /// 继续生成的序列 ID
+    pub continue_ids: Vec<RequestId>,
+    /// 完成的序列 ID
+    pub complete_ids: Vec<RequestId>,
+    /// 需要暂停的序列 ID（等待 swap-in）
+    pub pause_ids: Vec<RequestId>,
+}
+
+impl BatchAction {
+    /// 检查是否有任何动作
+    pub fn has_actions(&self) -> bool {
+        !self.continue_ids.is_empty()
+            || !self.complete_ids.is_empty()
+            || !self.pause_ids.is_empty()
+    }
+
+    /// 获取所有受影响的序列 ID
+    pub fn all_affected_ids(&self) -> Vec<RequestId> {
+        let mut ids = Vec::new();
+        ids.extend(&self.continue_ids);
+        ids.extend(&self.complete_ids);
+        ids.extend(&self.pause_ids);
+        ids
+    }
+}
+
+/// 调度器错误类型
+#[derive(Debug, Clone)]
+pub enum SchedulerError {
+    /// 内存不足
+    OutOfMemory { requested: usize, available: usize },
+    /// 页面不存在
+    PageNotFound { page_id: PageId },
+    /// 序列不存在
+    SequenceNotFound { request_id: RequestId },
+    /// 配置错误
+    InvalidConfig(String),
+}
+
+impl std::fmt::Display for SchedulerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SchedulerError::OutOfMemory { requested, available } => {
+                write!(f, "Out of memory: requested {}, available {}", requested, available)
+            }
+            SchedulerError::PageNotFound { page_id } => {
+                write!(f, "Page not found: {:?}", page_id)
+            }
+            SchedulerError::SequenceNotFound { request_id } => {
+                write!(f, "Sequence not found: {:?}", request_id)
+            }
+            SchedulerError::InvalidConfig(msg) => {
+                write!(f, "Invalid config: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchedulerError {}
 
 #[cfg(test)]
 mod tests {
@@ -745,5 +1037,168 @@ mod tests {
         // 恢复序列
         scheduler.resume_sequence(req_id);
         assert!(scheduler.is_sequence_running(req_id));
+    }
+
+    // ========== 新增：核心调度逻辑测试 ==========
+
+    #[test]
+    fn handle_page_fault_with_swapped_page() {
+        let mut scheduler = Scheduler::new();
+        let req_id = scheduler.enqueue(RequestKind::Generate, "test");
+        let page_id = PageId(0);
+
+        // 模拟页面已换出
+        scheduler.page_pool.set_page_state(page_id, PageState::Swapped);
+        scheduler.start_sequence(req_id, vec![page_id]);
+
+        // 处理页面错误
+        let location = scheduler.handle_page_fault(page_id, req_id);
+
+        // 应该返回 CPU 位置（页面已换出）
+        assert_eq!(location, PageLocation::Cpu);
+        // 序列应该被暂停
+        assert!(!scheduler.is_sequence_running(req_id));
+    }
+
+    #[test]
+    fn handle_page_fault_with_active_page() {
+        let mut scheduler = Scheduler::new();
+        let req_id = scheduler.enqueue(RequestKind::Generate, "test");
+        let page_id = PageId(0);
+
+        scheduler.start_sequence(req_id, vec![page_id]);
+        // 页面应该是 Active 状态
+
+        let location = scheduler.handle_page_fault(page_id, req_id);
+
+        // 应该返回 GPU 位置
+        assert_eq!(location, PageLocation::Gpu);
+    }
+
+    #[test]
+    fn get_batch_page_table_returns_correct_pages() {
+        let mut scheduler = Scheduler::new();
+        let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
+        let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
+
+        let pages1 = vec![PageId(0), PageId(1)];
+        let pages2 = vec![PageId(2), PageId(3)];
+
+        scheduler.start_sequence(req1, pages1.clone());
+        scheduler.start_sequence(req2, pages2.clone());
+
+        // 获取批次页表
+        let page_table = scheduler.get_batch_page_table(&[req1, req2]);
+
+        assert_eq!(page_table.sequence_pages.len(), 2);
+        assert!(page_table.sequence_pages.contains_key(&req1));
+        assert!(page_table.sequence_pages.contains_key(&req2));
+        assert_eq!(page_table.total_pages, 4);
+    }
+
+    #[test]
+    fn update_batch_continues_running_sequences() {
+        let mut scheduler = Scheduler::new();
+        let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
+        let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
+
+        scheduler.start_sequence(req1, vec![PageId(0)]);
+        scheduler.start_sequence(req2, vec![PageId(1)]);
+
+        let batch = ScheduledBatch {
+            id: BatchId(1),
+            requests: vec![
+                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1 },
+                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1 },
+            ],
+            allocations: vec![],
+            total_tokens: 2,
+            kv_cache_slot: KvCacheSlot::Front,
+        };
+
+        let results = BatchResult::continued(2);
+        let action = scheduler.update_batch(&batch, &results);
+
+        // 两个序列都应该继续
+        assert_eq!(action.continue_ids.len(), 2);
+        assert!(action.continue_ids.contains(&req1));
+        assert!(action.continue_ids.contains(&req2));
+        assert!(action.complete_ids.is_empty());
+        assert!(action.pause_ids.is_empty());
+    }
+
+    #[test]
+    fn update_batch_complies_finished_sequences() {
+        let mut scheduler = Scheduler::new();
+        let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
+        let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
+
+        scheduler.start_sequence(req1, vec![PageId(0)]);
+        scheduler.start_sequence(req2, vec![PageId(1)]);
+
+        let batch = ScheduledBatch {
+            id: BatchId(1),
+            requests: vec![
+                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1 },
+                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1 },
+            ],
+            allocations: vec![],
+            total_tokens: 2,
+            kv_cache_slot: KvCacheSlot::Front,
+        };
+
+        // 创建包含两个结果的批次：第一个完成，第二个继续
+        let results = BatchResult {
+            results: vec![
+                SequenceResult::Complete,
+                SequenceResult::Continue,
+            ],
+        };
+        let action = scheduler.update_batch(&batch, &results);
+
+        // req1 应该完成，req2 应该继续
+        assert!(action.complete_ids.contains(&req1));
+        assert!(action.continue_ids.contains(&req2));
+    }
+
+    #[test]
+    fn allocate_pages_for_sequence_with_sufficient_memory() {
+        let config = SchedulerConfig {
+            page_size: 4,
+            total_pages: 10,
+            max_batch: 4,
+            max_tokens: 32,
+        };
+        let mut scheduler = Scheduler::with_config(config);
+        let req_id = scheduler.enqueue(RequestKind::Generate, "test");
+
+        // 分配 2 个页面（8 个 token）
+        let pages = scheduler.allocate_pages_for_sequence(req_id, 8).expect("allocation");
+
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[test]
+    fn batch_action_has_actions_detection() {
+        let action = BatchAction {
+            continue_ids: vec![RequestId(1)],
+            complete_ids: vec![RequestId(2)],
+            pause_ids: vec![RequestId(3)],
+        };
+
+        assert!(action.has_actions());
+        assert_eq!(action.all_affected_ids().len(), 3);
+    }
+
+    #[test]
+    fn batch_action_empty() {
+        let action = BatchAction {
+            continue_ids: vec![],
+            complete_ids: vec![],
+            pause_ids: vec![],
+        };
+
+        assert!(!action.has_actions());
+        assert!(action.all_affected_ids().is_empty());
     }
 }
