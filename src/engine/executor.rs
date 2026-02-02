@@ -16,6 +16,7 @@ use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 
 use super::scheduler::{RequestId, RequestKind, ScheduledBatch, Scheduler};
+use super::vllm2024::Scheduler2024Config;
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -72,7 +73,11 @@ impl<B: Backend + 'static> Executor<B> {
             rope_precompute: true,
             position_encoding: PositionEncoding::Rope,
         };
-        let scheduler = Scheduler::new();
+        let mut scheduler = Scheduler::new();
+        scheduler.enable_vllm_2024(Scheduler2024Config {
+            enable_2024_optimizations: true,
+            ..Scheduler2024Config::default()
+        });
         let page_size = scheduler.config().page_size;
         let kv_cache_config = KvCacheConfig {
             num_layers: model_config.num_hidden_layers,
@@ -222,11 +227,30 @@ impl<B: Backend + 'static> Executor<B> {
             return Err(ExecutorError::EmptyPrompt);
         }
 
+        // LMCache lookup (ARCH-SCHED-LMCACHE). We simulate skipping prefill tokens by
+        // advancing the KV cache usage without GPU recompute to stay zero-copy/AOT.
+        let model_id = format!("{:?}", self.manifest.model_id);
+        let lmcache_hit = self.scheduler.lmcache_lookup(&model_id, prompt);
+
         let slot = self.kv_cache_slot;
         let kv_cache = self.ensure_kv_cache()?;
         kv_cache.slot_mut(slot).reset();
 
-        let mut logits = self.forward_step(&input_tokens)?;
+        let mut tokens_slice: &[u32] = &input_tokens;
+        if let Some(hit) = lmcache_hit {
+            let skip = hit.prefix_tokens.min(input_tokens.len());
+            if skip > 0 {
+                kv_cache.slot_mut(slot).advance(skip)?;
+                tokens_slice = &input_tokens[skip..];
+                if tokens_slice.is_empty() {
+                    // Ensure at least one token runs to produce logits.
+                    let last_idx = input_tokens.len().saturating_sub(1);
+                    tokens_slice = &input_tokens[last_idx..];
+                }
+            }
+        }
+
+        let mut logits = self.forward_step(tokens_slice)?;
 
         let mut generated = Vec::with_capacity(max_tokens);
         let eos_token = self.model_config.eos_token_id;
@@ -241,6 +265,9 @@ impl<B: Backend + 'static> Executor<B> {
 
         let text = self.decode_tokens(&generated)?;
         self.kv_cache_slot = self.kv_cache_slot.flip();
+
+        // Write back prefix cache
+        self.scheduler.lmcache_put(&model_id, prompt);
         Ok(text)
     }
 

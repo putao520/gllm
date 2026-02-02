@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::kv_cache::KvCacheSlot;
+use crate::engine::vllm2024::{ChunkedConfig, Scheduler2024Config, Scheduler2024State};
 use crate::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 pub use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 
@@ -23,12 +24,19 @@ pub struct ScheduledRequest {
     pub kind: RequestKind,
     pub prompt: String,
     pub tokens: usize,
+    pub chunk_info: Option<ChunkInfo>,
 }
 
 impl ScheduledRequest {
     fn token_len(&self) -> usize {
         self.tokens.max(1)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkInfo {
+    pub chunk_idx: usize,
+    pub total_chunks: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +353,8 @@ pub struct Scheduler {
     sequences: HashMap<RequestId, SequenceInfo>,
     /// 正在运行的序列 ID 列表
     running_sequences: Vec<RequestId>,
+    /// 2024 vLLM 优化状态（可选）
+    vllm24: Option<Scheduler2024State>,
 }
 
 impl Scheduler {
@@ -373,11 +383,46 @@ impl Scheduler {
             next_slot: KvCacheSlot::Front,
             sequences: HashMap::new(),
             running_sequences: Vec::new(),
+            vllm24: None,
         }
     }
 
     pub fn config(&self) -> SchedulerConfig {
         self.config
+    }
+
+    /// Enable 2024 vLLM optimizations (Chunked Prefill, SwiftKV, LMCache-aware scheduling hooks).
+    pub fn enable_vllm_2024(&mut self, config: Scheduler2024Config) {
+        self.vllm24 = Some(Scheduler2024State::new(config));
+    }
+
+    /// LMCache lookup; returns hit information when enabled.
+    pub fn lmcache_lookup(&mut self, model_id: &str, prompt: &str) -> Option<crate::engine::vllm2024::CacheHit> {
+        if let Some(v) = self.vllm24.as_mut() {
+            if v.config.enable_2024_optimizations {
+                let key = crate::engine::vllm2024::LmcacheState::cache_key(
+                    model_id,
+                    prompt,
+                    v.config.lmcache.cache_prefix_len,
+                );
+                return v.lmcache.get(&key);
+            }
+        }
+        None
+    }
+
+    /// Store prefix KV into LMCache (host side metadata only; zero-copy preserved).
+    pub fn lmcache_put(&mut self, model_id: &str, prompt: &str) {
+        if let Some(v) = self.vllm24.as_mut() {
+            if v.config.enable_2024_optimizations {
+                let key = crate::engine::vllm2024::LmcacheState::cache_key(
+                    model_id,
+                    prompt,
+                    v.config.lmcache.cache_prefix_len,
+                );
+                v.lmcache.put(key, v.config.lmcache.cache_prefix_len);
+            }
+        }
     }
 
     pub fn enqueue(&mut self, kind: RequestKind, prompt: impl Into<String>) -> RequestId {
@@ -392,11 +437,25 @@ impl Scheduler {
     ) -> RequestId {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
+        let prompt = prompt.into();
+
+        if let Some(v) = self.vllm24.as_mut() {
+            if v.config.enable_2024_optimizations && matches!(kind, RequestKind::Generate) {
+                let chunk_size = v.config.chunked.chunk_size.max(1);
+                if tokens > chunk_size {
+                    v.chunked.enqueue(id, prompt.clone(), tokens);
+                    self.drain_chunk_queue();
+                    return id;
+                }
+            }
+        }
+
         self.queue.push_back(ScheduledRequest {
             id,
             kind,
-            prompt: prompt.into(),
+            prompt,
             tokens,
+            chunk_info: None,
         });
         id
     }
@@ -429,6 +488,24 @@ impl Scheduler {
         }
         // 标记批次中的所有请求为完成（如果它们被跟踪）
         for request in &batch.requests {
+            // Chunked Prefill progress
+            if self
+                .vllm24
+                .as_ref()
+                .map(|v| v.config.enable_2024_optimizations && request.chunk_info.is_some())
+                .unwrap_or(false)
+            {
+                if let Some(v) = self.vllm24.as_mut() {
+                    v.chunked.on_chunk_finished(request.id);
+                }
+                self.drain_chunk_queue();
+                if let Some(v) = self.vllm24.as_mut() {
+                    if v.chunked.is_request_complete(&request.id) {
+                        v.chunked.remove_tracker(&request.id);
+                    }
+                }
+            }
+
             if self.sequences.contains_key(&request.id) {
                 self.complete_sequence(request.id);
             }
@@ -584,6 +661,12 @@ impl Scheduler {
     }
 
     fn build_batch(&mut self) -> Option<ScheduledBatch> {
+        if let Some(v) = &self.vllm24 {
+            if v.config.enable_2024_optimizations {
+                return self.build_chunked_batch();
+            }
+        }
+
         let candidates = self
             .batcher
             .drain_batch(&mut self.queue, |req| req.token_len());
@@ -607,6 +690,64 @@ impl Scheduler {
                 remainder.push_back(req);
                 remainder.extend(iter);
                 break;
+            }
+        }
+
+        if !remainder.is_empty() {
+            while let Some(req) = remainder.pop_back() {
+                self.queue.push_front(req);
+            }
+        }
+
+        if requests.is_empty() {
+            return None;
+        }
+
+        let batch = ScheduledBatch {
+            id: BatchId(self.next_batch_id),
+            requests,
+            allocations,
+            total_tokens,
+            kv_cache_slot: self.next_slot,
+        };
+        self.next_batch_id = self.next_batch_id.saturating_add(1);
+        self.next_slot = self.next_slot.flip();
+        Some(batch)
+    }
+
+    /// Chunked Prefill + Decode interleaving (REQ-SCHED-007).
+    fn build_chunked_batch(&mut self) -> Option<ScheduledBatch> {
+        let chunk_cfg = self
+            .vllm24
+            .as_ref()
+            .map(|v| v.config.chunked)
+            .unwrap_or(ChunkedConfig::default());
+
+        let mut requests = Vec::new();
+        let mut allocations = Vec::new();
+        let mut total_tokens = 0usize;
+        let mut decode_taken = 0usize;
+        let mut remainder = VecDeque::new();
+
+        while let Some(req) = self.queue.pop_front() {
+            let is_decode = req.token_len() <= 1 && decode_taken < chunk_cfg.decode_slots;
+            let fits_batch = requests.len() < self.config.max_batch;
+            let fits_tokens = total_tokens + req.token_len() <= self.config.max_tokens;
+
+            if (is_decode || fits_batch) && fits_tokens {
+                if is_decode {
+                    decode_taken += 1;
+                }
+                if let Some(allocation) = self.page_pool.allocate(req.token_len()) {
+                    total_tokens = total_tokens.saturating_add(req.token_len());
+                    allocations.push(allocation);
+                    requests.push(req);
+                } else {
+                    remainder.push_back(req);
+                    break;
+                }
+            } else {
+                remainder.push_back(req);
             }
         }
 
@@ -781,6 +922,11 @@ impl Scheduler {
                 if let Some(seq) = self.sequences.get_mut(&victim_id) {
                     let pages = seq.allocated_pages.clone();
                     self.page_pool.swap_out_pages(&pages);
+                    if let Some(v) = self.vllm24.as_mut() {
+                        if v.config.enable_2024_optimizations {
+                            v.swift_kv.distill_pages(pages.len());
+                        }
+                    }
                     for pid in &pages {
                         self.hgal.update_page_state(*pid, Some(victim_id), PageState::Swapped);
                     }
@@ -794,6 +940,11 @@ impl Scheduler {
                     .map(|group| (group.pages.clone(), group.is_pinned))
                 {
                     self.page_pool.swap_out_pages(&pages);
+                    if let Some(v) = self.vllm24.as_mut() {
+                        if v.config.enable_2024_optimizations {
+                            v.swift_kv.distill_pages(pages.len());
+                        }
+                    }
                     for pid in &pages {
                         self.hgal.update_page_state(*pid, Some(victim_id), PageState::Swapped);
                     }
@@ -860,6 +1011,24 @@ impl Scheduler {
             is_pinned: pinned,
         };
         self.hgal.upsert_group(group);
+    }
+
+    /// Drain prepared prefill chunks (Chunked Prefill) into the scheduling queue.
+    fn drain_chunk_queue(&mut self) {
+        if let Some(v) = self.vllm24.as_mut() {
+            while let Some(chunk) = v.chunked.pop_chunk() {
+                self.queue.push_back(ScheduledRequest {
+                    id: chunk.request_id,
+                    kind: RequestKind::Generate,
+                    prompt: chunk.prompt.clone(),
+                    tokens: chunk.tokens,
+                    chunk_info: Some(ChunkInfo {
+                        chunk_idx: chunk.chunk_idx,
+                        total_chunks: chunk.total_chunks,
+                    }),
+                });
+            }
+        }
     }
 }
 
@@ -1217,8 +1386,8 @@ mod tests {
         let batch = ScheduledBatch {
             id: BatchId(1),
             requests: vec![
-                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1 },
-                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1 },
+                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1, chunk_info: None },
+                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1, chunk_info: None },
             ],
             allocations: vec![],
             total_tokens: 2,
@@ -1248,8 +1417,8 @@ mod tests {
         let batch = ScheduledBatch {
             id: BatchId(1),
             requests: vec![
-                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1 },
-                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1 },
+                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1, chunk_info: None },
+                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1, chunk_info: None },
             ],
             allocations: vec![],
             total_tokens: 2,
@@ -1286,6 +1455,41 @@ mod tests {
         let pages = scheduler.allocate_pages_for_sequence(req_id, 8).expect("allocation");
 
         assert_eq!(pages.len(), 2);
+    }
+
+    #[test]
+    fn chunked_prefill_progresses() {
+        let mut scheduler = Scheduler::with_config(SchedulerConfig {
+            page_size: 4,
+            total_pages: 16,
+            max_batch: 4,
+            max_tokens: 64,
+            ..SchedulerConfig::default()
+        });
+        scheduler.enable_vllm_2024(Scheduler2024Config {
+            enable_2024_optimizations: true,
+            chunked: ChunkedConfig {
+                chunk_size: 4,
+                decode_slots: 1,
+                enable_splitfuse: true,
+            },
+            ..Scheduler2024Config::default()
+        });
+
+        let req_id = scheduler.enqueue_with_tokens(RequestKind::Generate, "long", 8);
+        let batch1 = scheduler.next_batch().expect("first batch");
+        assert_eq!(batch1.requests.len(), 1);
+        assert_eq!(batch1.requests[0].chunk_info.unwrap().chunk_idx, 0);
+        scheduler.complete_batch(batch1);
+
+        let batch2 = scheduler.next_batch().expect("second batch");
+        assert_eq!(batch2.requests.len(), 1);
+        assert_eq!(batch2.requests[0].chunk_info.unwrap().chunk_idx, 1);
+        let batch2_copy = batch2.clone();
+        scheduler.complete_batch(batch2);
+
+        assert!(scheduler.next_batch().is_none());
+        assert_eq!(batch2_copy.requests[0].id, req_id);
     }
 
     #[test]
