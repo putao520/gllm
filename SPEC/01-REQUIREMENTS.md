@@ -48,8 +48,8 @@
 | **REQ-SCHED-007** | Chunked Prefill / SplitFuse | vLLM 2024 优化：消除 Prefill-Decode 阶段隔离 | 1. **Chunked Prefill**: Prefill 请求切分为 Chunk，与 Decode 交织调度<br>2. **SplitFuse**: Q/K/V 分离计算 + 融合 Attention<br>3. Tail Latency (P99) 降低 30-50%<br>4. **AOT CUBIN 兼容** (纯调度优化，无需新 Kernel) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
 | **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | 1. **SingleInputKV**: 连续 N 个 KV 蒸馏为 1 个 (减少 50-75%)<br>2. **AcrossKV**: 跨层 KV 共享 (进一步减少 50%)<br>3. 精度损失 < 0.1% PPL<br>4. **AOT CUBIN 兼容** (蒸馏在 CPU/Swap 时执行) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
 | **REQ-SCHED-009** | LMCache 跨请求共享 | vLLM 2024 优化：L1/L2 KV Cache 架构 | 1. **L1 GPU** / **L2 CPU** 两层缓存<br>2. 相同提示命中时跳过 Prefill<br>3. 重复提示吞吐提升 10×+，命中率 > 70%<br>4. **AOT CUBIN 兼容** (使用现有 Memcpy Kernel) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
-| **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 缓存命中时跳过 GPU 前向计算 | 1. 缓存命中时直接复用已有 KV handle<br>2. 跳过 embedding + attention + ffn 计算<br>3. 仅执行 sampling 生成第一个 token<br>4. 保持零拷贝原则 | 🔵 待实现 |
-| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🔵 待实现 |
+| **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 缓存命中时跳过 GPU 前向计算 | 1. 缓存命中时直接复用已有 KV handle<br>2. 跳过 embedding + attention + ffn 计算<br>3. 仅执行 sampling 生成第一个 token<br>4. 保持零拷贝原则 | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
+| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
 
 > **详细设计**: 见 [SPEC/02-ARCHITECTURE.md §2024 vLLM 优化](./02-ARCHITECTURE.md#2024-vllm-优化-arch-sched-2024)
 
