@@ -11,6 +11,7 @@ fn make_state(backend: &CpuBackend, max_seq_len: usize) -> KvCacheState {
         max_seq_len,
         dtype_size: std::mem::size_of::<f32>(),
         page_size: 0,
+        swap_config: None,
     };
     let handle = backend.alloc_kv_cache(&config).expect("alloc kv cache");
     KvCacheState::new(handle, config)

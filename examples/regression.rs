@@ -487,6 +487,7 @@ fn kv_cache_check() -> InternalCheck {
         max_seq_len: 4,
         dtype_size: std::mem::size_of::<f32>(),
         page_size: 0,
+        swap_config: None,
     };
     let handle_front = match backend.alloc_kv_cache(&config) {
         Ok(handle) => handle,

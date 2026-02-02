@@ -79,6 +79,7 @@ impl<B: Backend + 'static> Executor<B> {
             max_seq_len: model_config.max_position_embeddings,
             dtype_size: model_config.dtype_size,
             page_size,
+            swap_config: None, // 暂不启用 swap
         };
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = adapter.load_weights(loader, &backend)?;
