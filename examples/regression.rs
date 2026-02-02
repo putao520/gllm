@@ -11,6 +11,7 @@
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
 use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
+use std::time::Duration;
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 use gllm::loader::pytorch::convert_bins_to_safetensors;
 use gllm::loader::PytorchConversionConfig;
@@ -424,6 +425,10 @@ fn scheduler_check() -> InternalCheck {
         total_pages: 4,
         max_batch: 2,
         max_tokens: 16,
+        warmup_duration: Duration::from_millis(100),
+        working_set_window: Duration::from_secs(1),
+        hot_threshold: 3,
+        lir_ratio: 0.3,
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
