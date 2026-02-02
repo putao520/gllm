@@ -14,19 +14,14 @@ categories = ["algorithms", "science", "text-processing"]
 name = "gllm"
 path = "src/lib.rs"
 
-[[bin]]
-name = "test_models"
-path = "test_models.rs"
-
-[[bin]]
-name = "stress_test"
-path = "stress_test.rs"
+# Binary targets removed (test_models.rs deleted in TABULA RASA)
+# Will be re-added when implementing CLI/examples
 
 [features]
-# 默认配置：Fat Binary - 所有后端编译，运行时选择
+# Default: Auto-detect backend at runtime
 default = []
 
-# 可选 features
+# Optional features
 tokio = ["dep:tokio"]
 paged-attention = []
 flash-attention = []
@@ -49,18 +44,26 @@ rand = "0.8"
 half = "2.4"
 memmap2 = "0.9"
 rayon = "1.10"
+sha2 = "0.10"
+candle-core = { version = "0.9.2", default-features = false }
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11.8"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+ahash = "0.8"
 
-[[bench]]
-name = "moe_layer"
-harness = false
-
-[[bench]]
-name = "quantized_matmul"
-harness = false
+# NOTE: benches temporarily disabled - files not yet created
+# [[bench]]
+# name = "moe_layer"
+# harness = false
+#
+# [[bench]]
+# name = "quantized_matmul"
+# harness = false
 
 [profile.release]
 lto = "thin"

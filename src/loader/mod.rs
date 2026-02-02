@@ -1,0 +1,1467 @@
+//! Layer 2/3: Loader (HF + SafeTensors + fused splits).
+
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
+
+use gllm_kernels::backend_trait::{Backend, TensorLookup};
+use half::{bf16, f16};
+use ::safetensors::Dtype;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::manifest::{ModelManifest, TensorNamingRule};
+use crate::quantization::dequantize_int8_with_zero;
+use crate::registry;
+
+pub mod hf_hub;
+pub mod parallel;
+pub mod pytorch;
+pub mod safetensors;
+
+pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
+pub use parallel::ParallelLoader;
+pub use pytorch::{PytorchConversionConfig, PytorchConversionOutput};
+pub use safetensors::{SafeTensorsLoader, TensorSlice};
+
+pub type Result<T> = std::result::Result<T, LoaderError>;
+
+#[derive(Debug, Error)]
+pub enum LoaderError {
+    #[error("missing weights")]
+    MissingWeights,
+    #[error("missing tensor: {0}")]
+    MissingTensor(String),
+    #[error("duplicate tensor name: {0}")]
+    DuplicateTensor(String),
+    #[error("unsupported dtype: {0:?}")]
+    UnsupportedDtype(Dtype),
+    #[error("invalid fused tensor shape for {0}")]
+    InvalidFusedShape(String),
+    #[error("checksum mismatch for {0}")]
+    ChecksumMismatch(String),
+    #[error("safetensors error: {0}")]
+    SafeTensors(#[from] ::safetensors::SafeTensorError),
+    #[error("invalid quantization: {0}")]
+    InvalidQuantization(String),
+    #[error("pytorch bin error: {0}")]
+    Pytorch(String),
+    #[error("hf hub error: {0}")]
+    HfHub(String),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("backend error: {0}")]
+    Backend(String),
+    #[error("home directory not available")]
+    HomeDirUnavailable,
+    #[error("weights format not supported: {0:?}")]
+    UnsupportedWeights(WeightFormat),
+    #[error("unsupported weight extension: {0}")]
+    UnsupportedWeightExtension(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumPolicy {
+    VerifyOnLoad,
+    StoreIfMissing,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelPolicy {
+    Auto,
+    Force,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSource {
+    HuggingFace,
+    ModelScope,
+}
+
+impl ModelSource {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hf" | "huggingface" | "h" => Some(ModelSource::HuggingFace),
+            "modelscope" | "ms" | "m" => Some(ModelSource::ModelScope),
+            _ => None,
+        }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        std::env::var("GLLM_MODEL_SOURCE")
+            .or_else(|_| std::env::var("GLLM_SOURCE"))
+            .ok()
+            .and_then(|value| Self::parse(&value))
+    }
+}
+
+impl Default for ModelSource {
+    fn default() -> Self {
+        ModelSource::HuggingFace
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoaderConfig {
+    pub cache_dir: Option<PathBuf>,
+    pub checksum: ChecksumPolicy,
+    pub parallel: ParallelPolicy,
+    pub source: ModelSource,
+    pub modelscope_endpoint: Option<String>,
+}
+
+impl Default for LoaderConfig {
+    fn default() -> Self {
+        Self {
+            cache_dir: None,
+            checksum: ChecksumPolicy::VerifyOnLoad,
+            parallel: ParallelPolicy::Auto,
+            source: ModelSource::HuggingFace,
+            modelscope_endpoint: None,
+        }
+    }
+}
+
+impl LoaderConfig {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Some(source) = ModelSource::from_env() {
+            config.source = source;
+        }
+        if let Ok(endpoint) = std::env::var("GLLM_MODELSCOPE_ENDPOINT") {
+            if !endpoint.trim().is_empty() {
+                config.modelscope_endpoint = Some(endpoint);
+            }
+        }
+        config
+    }
+}
+
+const DEFAULT_MODELSCOPE_ENDPOINT: &str = "https://modelscope.cn";
+
+#[derive(Debug, Clone)]
+pub struct CacheLayout {
+    root: PathBuf,
+    hf_cache: PathBuf,
+    checksum_db: PathBuf,
+    models_dir: PathBuf,
+}
+
+impl CacheLayout {
+    pub fn new(root: Option<PathBuf>) -> Result<Self> {
+        let base = match root {
+            Some(path) => path,
+            None => {
+                let mut base = dirs::home_dir().ok_or(LoaderError::HomeDirUnavailable)?;
+                base.push(".gllm");
+                base.push("cache");
+                base
+            }
+        };
+        let hf_cache = base.join("hf-hub");
+        let checksum_db = base.join("checksums.json");
+        let mut models_dir = dirs::home_dir().ok_or(LoaderError::HomeDirUnavailable)?;
+        models_dir.push(".gllm");
+        models_dir.push("models");
+        Ok(Self {
+            root: base,
+            hf_cache,
+            checksum_db,
+            models_dir,
+        })
+    }
+
+    pub fn ensure(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        std::fs::create_dir_all(&self.hf_cache)?;
+        std::fs::create_dir_all(&self.models_dir)?;
+        Ok(())
+    }
+
+    pub fn hf_cache_dir(&self) -> PathBuf {
+        self.hf_cache.clone()
+    }
+
+    pub fn checksum_db(&self) -> &Path {
+        &self.checksum_db
+    }
+
+    pub fn models_dir(&self) -> &Path {
+        &self.models_dir
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChecksumRecord {
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ChecksumStore {
+    records: HashMap<String, ChecksumRecord>,
+    path: PathBuf,
+}
+
+impl ChecksumStore {
+    fn load(path: &Path) -> Result<Self> {
+        if path.exists() {
+            let bytes = std::fs::read(path)?;
+            let records: HashMap<String, ChecksumRecord> = serde_json::from_slice(&bytes)?;
+            Ok(Self {
+                records,
+                path: path.to_path_buf(),
+            })
+        } else {
+            Ok(Self {
+                records: HashMap::new(),
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    fn save(&self) -> Result<()> {
+        let data = serde_json::to_vec_pretty(&self.records)?;
+        std::fs::write(&self.path, data)?;
+        Ok(())
+    }
+
+    fn verify_or_store(&mut self, path: &Path, policy: ChecksumPolicy) -> Result<()> {
+        if matches!(policy, ChecksumPolicy::Disabled) {
+            return Ok(());
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let key = canonical.to_string_lossy().to_string();
+        let size = std::fs::metadata(&canonical)?.len();
+
+        if let Some(record) = self.records.get(&key) {
+            if matches!(policy, ChecksumPolicy::StoreIfMissing) {
+                return Ok(());
+            }
+            let sha256 = hash_file(&canonical)?;
+            if sha256 != record.sha256 || size != record.size {
+                return Err(LoaderError::ChecksumMismatch(key));
+            }
+            return Ok(());
+        }
+
+        let sha256 = hash_file(&canonical)?;
+        self.records.insert(
+            key,
+            ChecksumRecord {
+                sha256,
+                size,
+            },
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Loader {
+    manifest: Option<&'static ModelManifest>,
+    repo: String,
+    source: ModelSource,
+    config: LoaderConfig,
+    #[allow(dead_code)]
+    cache: CacheLayout,
+    #[allow(dead_code)]
+    hf: HfHubClient,
+    files: HfModelFiles,
+    safetensors: Option<SafeTensorsLoader>,
+}
+
+impl Loader {
+    pub fn from_hf(repo_or_alias: &str) -> Result<Self> {
+        let mut config = LoaderConfig::default();
+        config.source = ModelSource::HuggingFace;
+        Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    pub fn from_env(repo_or_alias: &str) -> Result<Self> {
+        let config = LoaderConfig::from_env();
+        Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    pub fn from_source(repo_or_alias: &str, source: ModelSource) -> Result<Self> {
+        let mut config = LoaderConfig::default();
+        config.source = source;
+        Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    pub fn from_hf_with_config(repo_or_alias: &str, mut config: LoaderConfig) -> Result<Self> {
+        config.source = ModelSource::HuggingFace;
+        Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    /// Create a loader from local files without downloading.
+    pub fn from_local_files(
+        repo_or_alias: &str,
+        weights: Vec<PathBuf>,
+        aux_files: Vec<PathBuf>,
+    ) -> Result<Self> {
+        let manifest = registry::lookup(repo_or_alias);
+        let repo = repo_or_alias.to_string();
+        let config = LoaderConfig::default();
+        let cache = CacheLayout::new(config.cache_dir.clone())?;
+        cache.ensure()?;
+        let hf = HfHubClient::new(cache.hf_cache_dir())?;
+        let format = detect_weight_format(&weights)?;
+        Ok(Self {
+            manifest,
+            repo,
+            source: ModelSource::HuggingFace,
+            config,
+            cache,
+            hf,
+            files: HfModelFiles {
+                repo: repo_or_alias.to_string(),
+                weights,
+                format,
+                aux_files,
+            },
+            safetensors: None,
+        })
+    }
+
+    pub fn from_source_with_config(repo_or_alias: &str, config: LoaderConfig) -> Result<Self> {
+        let manifest = registry::lookup(repo_or_alias);
+        let repo = resolve_repo(repo_or_alias, manifest, config.source);
+        let cache = CacheLayout::new(config.cache_dir.clone())?;
+        cache.ensure()?;
+
+        let parallel_download = ParallelLoader::new(match config.parallel {
+            ParallelPolicy::Force => true,
+            ParallelPolicy::Disabled => false,
+            ParallelPolicy::Auto => manifest.map(|m| m.is_moe()).unwrap_or(false),
+        });
+
+        let endpoint = match config.source {
+            ModelSource::HuggingFace => None,
+            ModelSource::ModelScope => Some(
+                config
+                    .modelscope_endpoint
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MODELSCOPE_ENDPOINT.to_string()),
+            ),
+        };
+        let hf = HfHubClient::with_endpoint(cache.hf_cache_dir(), endpoint)?;
+        let files = hf.download_model_files(
+            &repo,
+            manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
+            parallel_download,
+        )?;
+
+        let mut checksum_store = ChecksumStore::load(cache.checksum_db())?;
+        for path in &files.weights {
+            checksum_store.verify_or_store(path, config.checksum)?;
+        }
+        checksum_store.save()?;
+
+        let mut all_files = files.weights.clone();
+        all_files.extend(files.aux_files.iter().cloned());
+        if !all_files.is_empty() {
+            materialize_model_dir(cache.models_dir(), &repo, &all_files)?;
+        }
+
+        Ok(Self {
+            manifest,
+            repo,
+            source: config.source,
+            config,
+            cache,
+            hf,
+            files,
+            safetensors: None,
+        })
+    }
+
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    pub fn source(&self) -> ModelSource {
+        self.source
+    }
+
+    pub fn manifest(&self) -> Option<&'static ModelManifest> {
+        self.manifest
+    }
+
+    pub fn weight_format(&self) -> WeightFormat {
+        self.files.format
+    }
+
+    pub fn aux_files(&self) -> &[PathBuf] {
+        &self.files.aux_files
+    }
+
+    pub fn find_aux_file(&self, filename: &str) -> Option<&Path> {
+        self.files.aux_files.iter().find_map(|path| {
+            if path.file_name().is_some_and(|name| name == filename) {
+                Some(path.as_path())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn find_aux_file_any(&self, filenames: &[&str]) -> Option<&Path> {
+        for &name in filenames {
+            if let Some(path) = self.find_aux_file(name) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    pub fn config_path(&self) -> Option<&Path> {
+        self.find_aux_file_any(&["config.json", "configuration.json"])
+    }
+
+    pub fn tokenizer_path(&self) -> Option<&Path> {
+        self.find_aux_file("tokenizer.json")
+    }
+
+    pub fn ensure_safetensors(&mut self) -> Result<()> {
+        if self.safetensors.is_some() {
+            return Ok(());
+        }
+        if self.files.format != WeightFormat::SafeTensors {
+            if self.files.format == WeightFormat::Bin {
+                if let Some(paths) = find_safetensors_sidecar(&self.files.weights) {
+                    self.files.weights = paths;
+                    self.files.format = WeightFormat::SafeTensors;
+                } else {
+                    let index_path = find_bin_index(&self.files.aux_files);
+                    let output = pytorch::convert_bins_to_safetensors(
+                        &self.files.weights,
+                        index_path,
+                        &PytorchConversionConfig::default(),
+                    )?;
+                    self.files.weights = output.safetensors;
+                    if let Some(index_path) = output.index {
+                        self.files.aux_files.push(index_path);
+                    }
+                    self.files.format = WeightFormat::SafeTensors;
+                }
+            } else {
+                return Err(LoaderError::UnsupportedWeights(self.files.format));
+            }
+        }
+
+        let is_moe = self.manifest.map(|m| m.is_moe()).unwrap_or(false);
+        let parallel_enabled = match self.config.parallel {
+            ParallelPolicy::Force => true,
+            ParallelPolicy::Disabled => false,
+            ParallelPolicy::Auto => is_moe || self.files.weights.len() > 1,
+        };
+        let parallel_enabled = parallel::enforce_parallel(is_moe, parallel_enabled);
+        let parallel_loader = ParallelLoader::new(parallel_enabled);
+
+        let safetensors = SafeTensorsLoader::from_files(&self.files.weights, parallel_loader)?;
+        self.safetensors = Some(safetensors);
+        Ok(())
+    }
+
+    pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
+        self.ensure_safetensors()?;
+        let loader = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
+        let quantized = QuantizedIndex::from_loader(loader);
+        let mut quantized_seen = HashSet::new();
+
+        let is_moe = self.manifest.map(|m| m.is_moe()).unwrap_or(false);
+        let parallel_enabled = match self.config.parallel {
+            ParallelPolicy::Force => true,
+            ParallelPolicy::Disabled => false,
+            ParallelPolicy::Auto => is_moe || self.files.weights.len() > 1,
+        };
+        let parallel_enabled = parallel::enforce_parallel(is_moe, parallel_enabled);
+        loader.prefetch_parallel(ParallelLoader::new(parallel_enabled))?;
+
+        let mut handle = WeightsHandle::default();
+        let mut visited = HashSet::new();
+        let tensor_names = loader.names();
+        for name in tensor_names {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if let Some(group) = quantized.group_for(&name) {
+                if quantized_seen.insert(group.base_name.clone()) {
+                    let owned = group.dequantize(loader)?;
+                    for output in maybe_split_fused_owned(self.rules(), owned) {
+                        upload_owned_tensor(backend, &mut handle, output)?;
+                    }
+                }
+                continue;
+            }
+            let tensor = loader.tensor(&name)?;
+            if let Some(outputs) = maybe_split_fused(self.rules(), &name, &tensor) {
+                for output in outputs {
+                    upload_owned_tensor(backend, &mut handle, output)?;
+                }
+                continue;
+            }
+            upload_tensor_slice(backend, &mut handle, &name, tensor)?;
+        }
+
+        Ok(handle)
+    }
+
+    fn rules(&self) -> Option<TensorNamingRule> {
+        self.manifest.map(|m| m.tensor_rules)
+    }
+}
+
+fn resolve_repo(
+    repo_or_alias: &str,
+    manifest: Option<&'static ModelManifest>,
+    source: ModelSource,
+) -> String {
+    match source {
+        ModelSource::HuggingFace => manifest
+            .map(|manifest| manifest.hf_repo)
+            .unwrap_or(repo_or_alias)
+            .to_string(),
+        ModelSource::ModelScope => manifest
+            .and_then(|manifest| manifest.model_scope_repo)
+            .or_else(|| manifest.map(|manifest| manifest.hf_repo))
+            .unwrap_or(repo_or_alias)
+            .to_string(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalShardIndex {
+    weight_map: HashMap<String, String>,
+}
+
+impl LocalShardIndex {
+    fn shard_files(&self) -> Vec<String> {
+        let mut shards: Vec<String> = self.weight_map.values().cloned().collect();
+        shards.sort();
+        shards.dedup();
+        shards
+    }
+}
+
+fn find_safetensors_sidecar(weights: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let first = weights.first()?;
+    let dir = first.parent()?;
+    let index_path = dir.join("model.safetensors.index.json");
+    if index_path.exists() {
+        if let Ok(bytes) = std::fs::read(&index_path) {
+            if let Ok(index) = serde_json::from_slice::<LocalShardIndex>(&bytes) {
+                let mut shards = Vec::new();
+                for shard in index.shard_files() {
+                    let path = dir.join(&shard);
+                    if path.exists() {
+                        shards.push(path);
+                    }
+                }
+                if !shards.is_empty() {
+                    return Some(shards);
+                }
+            }
+        }
+    }
+
+    let single = dir.join("model.safetensors");
+    if single.exists() {
+        return Some(vec![single]);
+    }
+    None
+}
+
+fn find_bin_index(aux_files: &[PathBuf]) -> Option<&Path> {
+    aux_files.iter().find_map(|path| {
+        let name = path.file_name()?.to_string_lossy();
+        if name.ends_with(".bin.index.json") {
+            Some(path.as_path())
+        } else {
+            None
+        }
+    })
+}
+
+fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
+    if weights.is_empty() {
+        return Err(LoaderError::MissingWeights);
+    }
+    let mut format = None;
+    for path in weights {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let detected = match ext.as_str() {
+            "safetensors" => WeightFormat::SafeTensors,
+            "bin" => WeightFormat::Bin,
+            _ => {
+                return Err(LoaderError::UnsupportedWeightExtension(ext));
+            }
+        };
+        match format {
+            Some(existing) if existing != detected => {
+                return Err(LoaderError::UnsupportedWeights(detected));
+            }
+            _ => format = Some(detected),
+        }
+    }
+    Ok(format.unwrap_or(WeightFormat::SafeTensors))
+}
+
+/// Convenience: create a loader from a HuggingFace repo or alias.
+pub fn from_hf(repo_or_alias: &str) -> Result<Loader> {
+    Loader::from_hf(repo_or_alias)
+}
+
+/// Convenience: create a loader using environment-driven source selection.
+pub fn from_env(repo_or_alias: &str) -> Result<Loader> {
+    Loader::from_env(repo_or_alias)
+}
+
+/// Convenience: create a loader from the selected source.
+pub fn from_source(repo_or_alias: &str, source: ModelSource) -> Result<Loader> {
+    Loader::from_source(repo_or_alias, source)
+}
+
+#[derive(Debug)]
+pub struct TensorInfo {
+    pub shape: Vec<usize>,
+    pub dtype: Dtype,
+}
+
+pub enum UploadedTensor<B: Backend> {
+    F32(B::Tensor<f32>),
+}
+
+pub struct WeightsHandle<B: Backend> {
+    pub tensors: HashMap<String, UploadedTensor<B>>,
+    pub meta: HashMap<String, TensorInfo>,
+}
+
+impl<B: Backend> Default for WeightsHandle<B> {
+    fn default() -> Self {
+        Self {
+            tensors: HashMap::new(),
+            meta: HashMap::new(),
+        }
+    }
+}
+
+impl<B: Backend> WeightsHandle<B> {
+    pub fn get(&self, name: &str) -> Option<&UploadedTensor<B>> {
+        self.tensors.get(name)
+    }
+}
+
+impl<B: Backend> TensorLookup<B> for WeightsHandle<B> {
+    fn tensor_f32(&self, name: &str) -> Option<&B::Tensor<f32>> {
+        match self.tensors.get(name)? {
+            UploadedTensor::F32(tensor) => Some(tensor),
+        }
+    }
+
+    fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
+        self.meta.get(name).map(|info| info.shape.as_slice())
+    }
+}
+
+enum OwnedTensor {
+    F16 { name: String, shape: Vec<usize>, data: Vec<f16> },
+    BF16 { name: String, shape: Vec<usize>, data: Vec<bf16> },
+    F32 { name: String, shape: Vec<usize>, data: Vec<f32> },
+}
+
+fn upload_f32_data<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    name: &str,
+    shape: Vec<usize>,
+    data: &[f32],
+) -> Result<()> {
+    let uploaded = backend
+        .upload_weights(data)
+        .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
+    insert_tensor(
+        handle,
+        name.to_string(),
+        shape,
+        Dtype::F32,
+        UploadedTensor::F32(uploaded),
+    )
+}
+
+fn upload_tensor_slice<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    name: &str,
+    tensor: TensorSlice<'_>,
+) -> Result<()> {
+    match tensor.dtype {
+        Dtype::F16 => {
+            let data = tensor.as_f16()?;
+            let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::BF16 => {
+            let data = tensor.as_bf16()?;
+            let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::F32 => {
+            let data = tensor.as_f32()?;
+            upload_f32_data(backend, handle, name, tensor.shape, data.as_ref())?;
+        }
+        Dtype::F64 => {
+            let data = tensor.as_f64()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::I8 => {
+            let data = tensor.as_i8()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::U8 => {
+            let data = tensor.as_u8()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::I16 => {
+            let data = tensor.as_i16()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::U16 => {
+            let data = tensor.as_u16()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::I32 => {
+            let data = tensor.as_i32()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::U32 => {
+            let data = tensor.as_u32()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::I64 => {
+            let data = tensor.as_i64()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        Dtype::U64 => {
+            let data = tensor.as_u64()?;
+            let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+        }
+        other => return Err(LoaderError::UnsupportedDtype(other)),
+    }
+    Ok(())
+}
+
+fn upload_owned_tensor<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    tensor: OwnedTensor,
+) -> Result<()> {
+    match tensor {
+        OwnedTensor::F16 { name, shape, data } => {
+            let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
+            upload_f32_data(backend, handle, &name, shape, &converted)
+        }
+        OwnedTensor::BF16 { name, shape, data } => {
+            let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
+            upload_f32_data(backend, handle, &name, shape, &converted)
+        }
+        OwnedTensor::F32 { name, shape, data } => {
+            upload_f32_data(backend, handle, &name, shape, &data)
+        }
+    }
+}
+
+fn insert_tensor<B: Backend>(
+    handle: &mut WeightsHandle<B>,
+    name: String,
+    shape: Vec<usize>,
+    dtype: Dtype,
+    tensor: UploadedTensor<B>,
+) -> Result<()> {
+    if handle.tensors.contains_key(&name) {
+        return Err(LoaderError::DuplicateTensor(name));
+    }
+    handle
+        .meta
+        .insert(name.clone(), TensorInfo { shape, dtype });
+    handle.tensors.insert(name, tensor);
+    Ok(())
+}
+
+fn maybe_split_fused(
+    rules: Option<TensorNamingRule>,
+    name: &str,
+    tensor: &TensorSlice<'_>,
+) -> Option<Vec<OwnedTensor>> {
+    let rules = rules?;
+    let fused = fused_spec(rules, name, &tensor.shape)?;
+    let axis = split_axis(&tensor.shape, fused.split)?;
+    let mut out_shape = tensor.shape.clone();
+    out_shape[axis] /= fused.split;
+
+    match tensor.dtype {
+        Dtype::F16 => {
+            let data = tensor.as_f16().ok()?;
+            let parts = split_tensor(data.as_ref(), &tensor.shape, axis, fused.split);
+            Some(
+                fused
+                    .targets
+                    .into_iter()
+                    .zip(parts.into_iter())
+                    .map(|(name, data)| OwnedTensor::F16 {
+                        name,
+                        shape: out_shape.clone(),
+                        data,
+                    })
+                    .collect(),
+            )
+        }
+        Dtype::BF16 => {
+            let data = tensor.as_bf16().ok()?;
+            let parts = split_tensor(data.as_ref(), &tensor.shape, axis, fused.split);
+            Some(
+                fused
+                    .targets
+                    .into_iter()
+                    .zip(parts.into_iter())
+                    .map(|(name, data)| OwnedTensor::BF16 {
+                        name,
+                        shape: out_shape.clone(),
+                        data,
+                    })
+                    .collect(),
+            )
+        }
+        Dtype::F32 => {
+            let data = tensor.as_f32().ok()?;
+            let parts = split_tensor(data.as_ref(), &tensor.shape, axis, fused.split);
+            Some(
+                fused
+                    .targets
+                    .into_iter()
+                    .zip(parts.into_iter())
+                    .map(|(name, data)| OwnedTensor::F32 {
+                        name,
+                        shape: out_shape.clone(),
+                        data,
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn maybe_split_fused_owned(
+    rules: Option<TensorNamingRule>,
+    tensor: OwnedTensor,
+) -> Vec<OwnedTensor> {
+    let (name, shape, data) = match tensor {
+        OwnedTensor::F32 { name, shape, data } => (name, shape, data),
+        other => return vec![other],
+    };
+    let Some(rules) = rules else {
+        return vec![OwnedTensor::F32 { name, shape, data }];
+    };
+    let Some(fused) = fused_spec(rules, &name, &shape) else {
+        return vec![OwnedTensor::F32 { name, shape, data }];
+    };
+    let Some(axis) = split_axis(&shape, fused.split) else {
+        return vec![OwnedTensor::F32 { name, shape, data }];
+    };
+    let mut out_shape = shape.clone();
+    out_shape[axis] /= fused.split;
+    let parts = split_tensor(&data, &shape, axis, fused.split);
+    fused
+        .targets
+        .into_iter()
+        .zip(parts.into_iter())
+        .map(|(name, data)| OwnedTensor::F32 {
+            name,
+            shape: out_shape.clone(),
+            data,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct QuantizedGroup {
+    base_name: String,
+    qweight: String,
+    scales: String,
+    zeros: Option<String>,
+    bits: u8,
+    signed: bool,
+}
+
+impl QuantizedGroup {
+    fn dequantize(&self, loader: &SafeTensorsLoader) -> Result<OwnedTensor> {
+        let qweight = loader.tensor(&self.qweight)?;
+        let scales = loader.tensor(&self.scales)?;
+        let zeros = if let Some(name) = &self.zeros {
+            Some(loader.tensor(name)?)
+        } else {
+            None
+        };
+
+        let (values, out_shape) = decode_quantized_values(&qweight, self.bits, self.signed)?;
+        let scales = tensor_to_f32(&scales)?;
+        if scales.is_empty() {
+            return Err(LoaderError::InvalidQuantization(format!(
+                "missing scales for {}",
+                self.base_name
+            )));
+        }
+        let zeros = if let Some(tensor) = zeros {
+            let zeros = tensor_to_f32(&tensor)?;
+            if zeros.is_empty() {
+                vec![0.0]
+            } else {
+                zeros
+            }
+        } else {
+            vec![0.0]
+        };
+
+        let total = values.len();
+        let block_size = (total / scales.len().max(1)).max(1);
+        let mut out = Vec::with_capacity(total);
+        for (idx, value) in values.into_iter().enumerate() {
+            let block = idx / block_size;
+            let scale = scales
+                .get(block)
+                .copied()
+                .unwrap_or_else(|| *scales.last().unwrap_or(&1.0));
+            let zero = zeros
+                .get(block)
+                .copied()
+                .unwrap_or_else(|| *zeros.last().unwrap_or(&0.0));
+            out.push((value as f32 - zero) * scale);
+        }
+
+        Ok(OwnedTensor::F32 {
+            name: self.base_name.clone(),
+            shape: out_shape,
+            data: out,
+        })
+    }
+}
+
+#[derive(Default)]
+struct QuantizedIndex {
+    groups: HashMap<String, QuantizedGroup>,
+    member_to_base: HashMap<String, String>,
+}
+
+impl QuantizedIndex {
+    fn from_loader(loader: &SafeTensorsLoader) -> Self {
+        let mut index = QuantizedIndex::default();
+        let packed_bits = loader.packed_bits();
+        let names = loader.names();
+        let name_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+
+        for name in &names {
+            if !is_qweight_name(name) {
+                continue;
+            }
+            let base = match quantized_base_name(name) {
+                Some(base) => base,
+                None => continue,
+            };
+            let scales = match find_quantized_companion(&name_set, name, &["scales", "scale"]) {
+                Some(scales) => scales,
+                None => continue,
+            };
+            let zeros = find_quantized_companion(&name_set, name, &["qzeros", "zeros", "zero"]);
+            let bits = infer_bits(name, packed_bits.get(name.as_str()).copied());
+            let signed = infer_signed(name);
+            let group = QuantizedGroup {
+                base_name: base.clone(),
+                qweight: name.to_string(),
+                scales,
+                zeros,
+                bits,
+                signed,
+            };
+            for member in [&group.qweight, &group.scales] {
+                index
+                    .member_to_base
+                    .insert(member.to_string(), base.clone());
+            }
+            if let Some(zeros) = &group.zeros {
+                index
+                    .member_to_base
+                    .insert(zeros.to_string(), base.clone());
+            }
+            index.groups.insert(base, group);
+        }
+
+        index
+    }
+
+    fn group_for(&self, name: &str) -> Option<&QuantizedGroup> {
+        let base = self.member_to_base.get(name)?;
+        self.groups.get(base)
+    }
+}
+
+fn is_qweight_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("qweight") || lower.contains("q_weight")
+}
+
+fn quantized_base_name(name: &str) -> Option<String> {
+    if name.contains("qweight") {
+        return replace_last(name, "qweight", "weight");
+    }
+    if name.contains("q_weight") {
+        return replace_last(name, "q_weight", "weight");
+    }
+    None
+}
+
+fn find_quantized_companion(
+    names: &HashSet<&str>,
+    source: &str,
+    candidates: &[&str],
+) -> Option<String> {
+    for candidate in candidates {
+        if let Some(name) = replace_last(source, "qweight", candidate) {
+            if names.contains(name.as_str()) {
+                return Some(name);
+            }
+        }
+        if let Some(name) = replace_last(source, "q_weight", candidate) {
+            if names.contains(name.as_str()) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn infer_bits(name: &str, packed_bits: Option<u8>) -> u8 {
+    if let Some(bits) = packed_bits {
+        return bits;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("int4") || lower.contains("q4") {
+        4
+    } else if lower.contains("int8") || lower.contains("q8") {
+        8
+    } else {
+        8
+    }
+}
+
+fn infer_signed(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("signed") || lower.contains("s4") || lower.contains("s8")
+}
+
+fn decode_quantized_values(
+    tensor: &TensorSlice<'_>,
+    bits: u8,
+    signed: bool,
+) -> Result<(Vec<i32>, Vec<usize>)> {
+    if bits == 8 {
+        match tensor.dtype {
+            Dtype::I8 => {
+                let data = tensor.as_i8()?;
+                let values = data.iter().map(|v| *v as i32).collect::<Vec<_>>();
+                return Ok((values, tensor.shape.clone()));
+            }
+            Dtype::U8 => {
+                let data = tensor.as_u8()?;
+                let values = data.iter().map(|v| *v as i32).collect::<Vec<_>>();
+                return Ok((values, tensor.shape.clone()));
+            }
+            _ => {
+                return Err(LoaderError::InvalidQuantization(format!(
+                    "unsupported int8 dtype {:?}",
+                    tensor.dtype
+                )))
+            }
+        }
+    }
+
+    if bits == 4 {
+        let data = tensor.as_u8()?;
+        let unpacked_shape = unpacked_shape(&tensor.shape, bits);
+        let mut values = Vec::with_capacity(data.len() * 2);
+        for &byte in data.iter() {
+            let lo = (byte & 0x0f) as i32;
+            let hi = ((byte >> 4) & 0x0f) as i32;
+            values.push(if signed && lo >= 8 { lo - 16 } else { lo });
+            values.push(if signed && hi >= 8 { hi - 16 } else { hi });
+        }
+        let needed = unpacked_shape.iter().product::<usize>();
+        if values.len() < needed {
+            return Err(LoaderError::InvalidQuantization(format!(
+                "packed int4 data too short for {:?}",
+                tensor.shape
+            )));
+        }
+        values.truncate(needed);
+        return Ok((values, unpacked_shape));
+    }
+
+    Err(LoaderError::InvalidQuantization(format!(
+        "unsupported quantization bits {bits}"
+    )))
+}
+
+fn unpacked_shape(shape: &[usize], bits: u8) -> Vec<usize> {
+    if bits >= 8 {
+        return shape.to_vec();
+    }
+    let pack = (8 / bits) as usize;
+    let mut out = shape.to_vec();
+    if let Some(last) = out.last_mut() {
+        *last = last.saturating_mul(pack);
+    }
+    out
+}
+
+fn tensor_to_f32(tensor: &TensorSlice<'_>) -> Result<Vec<f32>> {
+    match tensor.dtype {
+        Dtype::F16 => Ok(tensor.as_f16()?.iter().map(|v| v.to_f32()).collect()),
+        Dtype::BF16 => Ok(tensor.as_bf16()?.iter().map(|v| v.to_f32()).collect()),
+        Dtype::F32 => Ok(tensor.as_f32()?.iter().copied().collect()),
+        Dtype::I8 => {
+            let data = tensor.as_i8()?;
+            Ok(dequantize_int8_with_zero(data.as_ref(), 1.0, 0.0))
+        }
+        Dtype::U8 => Ok(tensor.as_u8()?.iter().map(|v| *v as f32).collect()),
+        other => Err(LoaderError::InvalidQuantization(format!(
+            "unsupported quantization tensor dtype {other:?}"
+        ))),
+    }
+}
+
+struct FusedSpec {
+    split: usize,
+    targets: Vec<String>,
+}
+
+fn fused_spec(rules: TensorNamingRule, name: &str, shape: &[usize]) -> Option<FusedSpec> {
+    match rules {
+        TensorNamingRule::GPT2Next => {
+            if name.contains("c_attn") {
+                return Some(FusedSpec {
+                    split: 3,
+                    targets: qkv_targets(name, "c_attn")?,
+                });
+            }
+            if name.contains("c_fc") && name.contains("mlp") {
+                if !shape_ratio_ok(shape, 2) {
+                    return None;
+                }
+                return Some(FusedSpec {
+                    split: 2,
+                    targets: gate_up_targets(name, "c_fc")?,
+                });
+            }
+        }
+        TensorNamingRule::Qwen3 => {
+            if name.contains("W_pack") || name.contains("w_pack") {
+                return Some(FusedSpec {
+                    split: 3,
+                    targets: qkv_targets(name, "W_pack").or_else(|| qkv_targets(name, "w_pack"))?,
+                });
+            }
+            if name.contains("gate_up_proj") {
+                return Some(FusedSpec {
+                    split: 2,
+                    targets: gate_up_targets(name, "gate_up_proj")?,
+                });
+            }
+        }
+        _ => {
+            if name.contains("qkv_proj") {
+                return Some(FusedSpec {
+                    split: 3,
+                    targets: qkv_targets(name, "qkv_proj")?,
+                });
+            }
+            if name.contains("gate_up_proj") {
+                return Some(FusedSpec {
+                    split: 2,
+                    targets: gate_up_targets(name, "gate_up_proj")?,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn qkv_targets(name: &str, token: &str) -> Option<Vec<String>> {
+    Some(vec![
+        replace_last(name, token, "q_proj")?,
+        replace_last(name, token, "k_proj")?,
+        replace_last(name, token, "v_proj")?,
+    ])
+}
+
+fn gate_up_targets(name: &str, token: &str) -> Option<Vec<String>> {
+    Some(vec![
+        replace_last(name, token, "gate_proj")?,
+        replace_last(name, token, "up_proj")?,
+    ])
+}
+
+fn replace_last(haystack: &str, needle: &str, with: &str) -> Option<String> {
+    let pos = haystack.rfind(needle)?;
+    let mut out = String::with_capacity(haystack.len() - needle.len() + with.len());
+    out.push_str(&haystack[..pos]);
+    out.push_str(with);
+    out.push_str(&haystack[pos + needle.len()..]);
+    Some(out)
+}
+
+fn split_axis(shape: &[usize], split: usize) -> Option<usize> {
+    shape.iter().position(|dim| *dim % split == 0)
+}
+
+fn shape_ratio_ok(shape: &[usize], ratio: usize) -> bool {
+    shape.iter().any(|dim| *dim % ratio == 0)
+}
+
+fn split_tensor<T: Copy>(
+    data: &[T],
+    shape: &[usize],
+    axis: usize,
+    split: usize,
+) -> Vec<Vec<T>> {
+    let axis_dim = shape[axis];
+    let chunk = axis_dim / split;
+    let inner = shape[axis + 1..].iter().product::<usize>();
+    let outer = shape[..axis].iter().product::<usize>();
+    let part_len = outer * chunk * inner;
+    let mut parts: Vec<Vec<T>> = (0..split).map(|_| Vec::with_capacity(part_len)).collect();
+
+    for outer_idx in 0..outer {
+        for split_idx in 0..split {
+            let offset = outer_idx * axis_dim * inner + split_idx * chunk * inner;
+            let slice = &data[offset..offset + chunk * inner];
+            parts[split_idx].extend_from_slice(slice);
+        }
+    }
+    parts
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = BufReader::new(File::open(path)?);
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    const LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(LUT[(b >> 4) as usize] as char);
+        out.push(LUT[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn materialize_model_dir(base: &Path, repo: &str, files: &[PathBuf]) -> Result<PathBuf> {
+    let dir_name = repo.replace('/', "--");
+    let model_dir = base.join(dir_name);
+    std::fs::create_dir_all(&model_dir)?;
+    for src in files {
+        let file_name = match src.file_name() {
+            Some(name) => name,
+            None => continue,
+        };
+        let dest = model_dir.join(file_name);
+        if dest.exists() {
+            continue;
+        }
+        link_or_copy(src, &dest)?;
+    }
+    Ok(model_dir)
+}
+
+fn link_or_copy(src: &Path, dest: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if let Err(err) = symlink(src, dest) {
+            std::fs::copy(src, dest).map_err(|_| err)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(src, dest)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_tensor_axis0() {
+        let data = vec![1u32, 2, 3, 4, 5, 6];
+        let shape = vec![3, 2];
+        let parts = split_tensor(&data, &shape, 0, 3);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], vec![1, 2]);
+        assert_eq!(parts[1], vec![3, 4]);
+        assert_eq!(parts[2], vec![5, 6]);
+    }
+
+    #[test]
+    fn split_tensor_axis1() {
+        let data = vec![1u32, 2, 3, 4, 5, 6];
+        let shape = vec![2, 3];
+        let parts = split_tensor(&data, &shape, 1, 3);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], vec![1, 4]);
+        assert_eq!(parts[1], vec![2, 5]);
+        assert_eq!(parts[2], vec![3, 6]);
+    }
+
+    #[test]
+    fn replace_last_token() {
+        let name = "model.layers.0.self_attn.c_attn.weight";
+        let replaced = replace_last(name, "c_attn", "q_proj").unwrap();
+        assert_eq!(
+            replaced,
+            "model.layers.0.self_attn.q_proj.weight"
+        );
+    }
+
+    #[test]
+    fn gpt2next_split_c_attn() {
+        let name = "transformer.h.0.attn.c_attn.weight";
+        let shape = vec![6, 2];
+        let values: Vec<f32> = (0..12).map(|v| v as f32).collect();
+        let mut data = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let tensor = TensorSlice {
+            dtype: Dtype::F32,
+            shape: shape.clone(),
+            data: &data,
+        };
+
+        let outputs = maybe_split_fused(Some(TensorNamingRule::GPT2Next), name, &tensor)
+            .expect("expected split outputs");
+        assert_eq!(outputs.len(), 3);
+
+        match &outputs[0] {
+            OwnedTensor::F32 { name, shape, data } => {
+                assert_eq!(name, "transformer.h.0.attn.q_proj.weight");
+                assert_eq!(shape.as_slice(), &[2, 2]);
+                assert_eq!(data.as_slice(), &[0.0, 1.0, 2.0, 3.0]);
+            }
+            _ => panic!("unexpected tensor type"),
+        }
+        match &outputs[1] {
+            OwnedTensor::F32 { name, shape, data } => {
+                assert_eq!(name, "transformer.h.0.attn.k_proj.weight");
+                assert_eq!(shape.as_slice(), &[2, 2]);
+                assert_eq!(data.as_slice(), &[4.0, 5.0, 6.0, 7.0]);
+            }
+            _ => panic!("unexpected tensor type"),
+        }
+        match &outputs[2] {
+            OwnedTensor::F32 { name, shape, data } => {
+                assert_eq!(name, "transformer.h.0.attn.v_proj.weight");
+                assert_eq!(shape.as_slice(), &[2, 2]);
+                assert_eq!(data.as_slice(), &[8.0, 9.0, 10.0, 11.0]);
+            }
+            _ => panic!("unexpected tensor type"),
+        }
+    }
+
+    #[test]
+    fn gpt2next_split_c_fc() {
+        let name = "transformer.h.0.mlp.c_fc.weight";
+        let shape = vec![4, 2];
+        let values: Vec<f32> = (0..8).map(|v| v as f32).collect();
+        let mut data = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let tensor = TensorSlice {
+            dtype: Dtype::F32,
+            shape: shape.clone(),
+            data: &data,
+        };
+
+        let outputs = maybe_split_fused(Some(TensorNamingRule::GPT2Next), name, &tensor)
+            .expect("expected split outputs");
+        assert_eq!(outputs.len(), 2);
+
+        match &outputs[0] {
+            OwnedTensor::F32 { name, shape, data } => {
+                assert_eq!(name, "transformer.h.0.mlp.gate_proj.weight");
+                assert_eq!(shape.as_slice(), &[2, 2]);
+                assert_eq!(data.as_slice(), &[0.0, 1.0, 2.0, 3.0]);
+            }
+            _ => panic!("unexpected tensor type"),
+        }
+        match &outputs[1] {
+            OwnedTensor::F32 { name, shape, data } => {
+                assert_eq!(name, "transformer.h.0.mlp.up_proj.weight");
+                assert_eq!(shape.as_slice(), &[2, 2]);
+                assert_eq!(data.as_slice(), &[4.0, 5.0, 6.0, 7.0]);
+            }
+            _ => panic!("unexpected tensor type"),
+        }
+    }
+
+    #[test]
+    fn gpt2next_skip_c_proj_split() {
+        let name = "transformer.h.0.mlp.c_proj.weight";
+        let shape = vec![4, 2];
+        let values: Vec<f32> = (0..8).map(|v| v as f32).collect();
+        let mut data = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let tensor = TensorSlice {
+            dtype: Dtype::F32,
+            shape,
+            data: &data,
+        };
+
+        let outputs = maybe_split_fused(Some(TensorNamingRule::GPT2Next), name, &tensor);
+        assert!(outputs.is_none());
+    }
+}

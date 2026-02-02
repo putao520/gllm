@@ -1,6 +1,6 @@
 #!/bin/bash
-# Regression Test Script for gllm
-# Tests all supported models on CPU backend
+# Regression Test Script for gllm (CUDA Backend)
+# Tests all supported models on CUDA backend
 
 set -e
 
@@ -10,8 +10,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 echo "════════════════════════════════════════════════════════════════"
-echo "  gllm Regression Test (CPU Backend)"
+echo "  gllm Regression Test (CUDA Backend)"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 
-cargo run --release --example regression "$@"
+cargo run --release --example regression -- --cuda "$@"
