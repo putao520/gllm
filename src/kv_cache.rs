@@ -63,6 +63,21 @@ impl KvCacheState {
         self.config.max_seq_len.saturating_sub(self.used)
     }
 
+    /// For LMCache reuse we sometimes need to restore the consumed length to
+    /// a previously snapshotted value without touching the underlying GPU
+    /// storage. This keeps zero-copy semantics while making the logical
+    /// cursor reusable.
+    pub fn set_used(&mut self, used: usize) -> KvCacheResult<()> {
+        if used > self.config.max_seq_len {
+            return Err(KvCacheError::Exhausted {
+                requested: used,
+                available: self.config.max_seq_len,
+            });
+        }
+        self.used = used;
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         self.used = 0;
     }
@@ -118,6 +133,13 @@ impl KvCacheDoubleBuffer {
         match slot {
             KvCacheSlot::Front => &mut self.front,
             KvCacheSlot::Back => &mut self.back,
+        }
+    }
+
+    pub fn overwrite_slot(&mut self, slot: KvCacheSlot, state: KvCacheState) {
+        match slot {
+            KvCacheSlot::Front => self.front = state,
+            KvCacheSlot::Back => self.back = state,
         }
     }
 

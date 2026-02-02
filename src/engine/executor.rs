@@ -236,21 +236,38 @@ impl<B: Backend + 'static> Executor<B> {
         let kv_cache = self.ensure_kv_cache()?;
         kv_cache.slot_mut(slot).reset();
 
-        let mut tokens_slice: &[u32] = &input_tokens;
-        if let Some(hit) = lmcache_hit {
-            let skip = hit.prefix_tokens.min(input_tokens.len());
-            if skip > 0 {
-                kv_cache.slot_mut(slot).advance(skip)?;
-                tokens_slice = &input_tokens[skip..];
+        // LMCache fast path: reuse existing KV/logits handles to skip GPU forward.
+        let mut logits = if let Some(hit) = lmcache_hit.clone() {
+            if let Some(kv_handle) = hit.kv_handle {
+                // Rebind current slot to cached handle and logical cursor.
+                let state = KvCacheState::new(kv_handle, self.kv_cache_config);
+                self.kv_cache
+                    .as_mut()
+                    .expect("kv cache should be allocated")
+                    .overwrite_slot(slot, state);
+                self.kv_cache
+                    .as_mut()
+                    .expect("kv cache should be allocated")
+                    .slot_mut(slot)
+                    .set_used(hit.prefix_tokens)
+                    .map_err(ExecutorError::from)?;
+            }
+            if let Some(logits_handle) = hit.logits_handle {
+                // Only sampling for the first token; skip forward compute.
+                logits_handle
+            } else {
+                // No cached logits; fall back to computing the final token of the prefix.
+                let mut tokens_slice: &[u32] = &input_tokens[hit.prefix_tokens.min(input_tokens.len())..];
                 if tokens_slice.is_empty() {
-                    // Ensure at least one token runs to produce logits.
                     let last_idx = input_tokens.len().saturating_sub(1);
                     tokens_slice = &input_tokens[last_idx..];
                 }
+                self.forward_step(tokens_slice)?
             }
-        }
-
-        let mut logits = self.forward_step(tokens_slice)?;
+        } else {
+            // Cold path: regular forward over the whole prompt.
+            self.forward_step(&input_tokens)?
+        };
 
         let mut generated = Vec::with_capacity(max_tokens);
         let eos_token = self.model_config.eos_token_id;
@@ -266,8 +283,13 @@ impl<B: Backend + 'static> Executor<B> {
         let text = self.decode_tokens(&generated)?;
         self.kv_cache_slot = self.kv_cache_slot.flip();
 
-        // Write back prefix cache
-        self.scheduler.lmcache_put(&model_id, prompt);
+        // Write back prefix cache; store the active KV handle/logits for reuse.
+        let kv_handle = self
+            .kv_cache
+            .as_ref()
+            .map(|c| c.slot(self.kv_cache_slot.flip()).handle());
+        self.scheduler
+            .lmcache_put(&model_id, prompt, kv_handle, Some(logits));
         Ok(text)
     }
 

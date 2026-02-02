@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use sha2::{Digest, Sha256};
 
+use gllm_kernels::backend_trait::{KvCacheHandle, LogitsHandle};
 use gllm_kernels::kernel_types::RequestId;
 
 /// Chunked Prefill configuration (ARCH-SCHED-CHUNKED).
@@ -210,6 +211,16 @@ pub struct DistillResult {
     pub distilled_pages: usize,
 }
 
+/// Detailed CPU distillation outcome with optional precision signal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistillOutcome {
+    pub result: DistillResult,
+    /// Approximated perplexity delta between original and distilled KV.
+    pub ppl_diff: f32,
+    /// Whether precision guard forced a fallback to original KV.
+    pub precision_fallback: bool,
+}
+
 #[derive(Debug)]
 pub struct SwiftKvState {
     pub config: SwiftKVConfig,
@@ -249,6 +260,124 @@ impl SwiftKvState {
         self.last_result = Some(result);
         result
     }
+
+    /// CPU-side SIKV + AKV distillation over concrete KV page vectors.
+    /// This keeps zero-copy on GPU: only CPU buffers are manipulated.
+    pub fn distill_cpu(&mut self, pages: &[Vec<f32>]) -> DistillOutcome {
+        if !self.config.enabled || pages.is_empty() {
+            let res = DistillResult {
+                original_pages: pages.len(),
+                distilled_pages: pages.len(),
+            };
+            return DistillOutcome {
+                result: res,
+                ppl_diff: 0.0,
+                precision_fallback: false,
+            };
+        }
+
+        // 1) SIKV: sliding-window merge.
+        let mut merged: Vec<Vec<f32>> = Vec::new();
+        let w = self.config.window_size.max(1);
+        for chunk in pages.chunks(w) {
+            let mut acc = vec![0f32; chunk[0].len()];
+            let mut weight_sum = 0f32;
+            for page in chunk {
+                let w = 1.0; // simple average; attention weights unknown on CPU-only path.
+                weight_sum += w;
+                for (dst, src) in acc.iter_mut().zip(page.iter()) {
+                    *dst += w * *src;
+                }
+            }
+            if weight_sum > 0.0 {
+                for v in acc.iter_mut() {
+                    *v /= weight_sum;
+                }
+            }
+            merged.push(acc);
+        }
+
+        // 2) AKV: cosine similarity across adjacent layers.
+        let mut akv_shared: Vec<Vec<f32>> = Vec::new();
+        let mut precision_fallback = false;
+        for i in 0..merged.len() {
+            if i > 0 && self.config.enable_across_kv {
+                let sim = cosine_similarity(&merged[i - 1], &merged[i]);
+                if sim >= self.config.similarity_threshold {
+                    // Share previous layer; no extra storage needed.
+                    continue;
+                }
+            }
+            akv_shared.push(merged[i].clone());
+        }
+
+        // 3) Precision guard: compare reconstruction error as proxy for PPL diff.
+        let ppl_diff = approx_ppl_delta(pages, &akv_shared);
+        if ppl_diff > self.config.precision_guard {
+            // Fallback to original pages for correctness.
+            precision_fallback = true;
+            let res = DistillResult {
+                original_pages: pages.len(),
+                distilled_pages: pages.len(),
+            };
+            self.last_result = Some(res);
+            return DistillOutcome {
+                result: res,
+                ppl_diff,
+                precision_fallback,
+            };
+        }
+
+        let res = DistillResult {
+            original_pages: pages.len(),
+            distilled_pages: akv_shared.len().max(1),
+        };
+        self.last_result = Some(res);
+        DistillOutcome {
+            result: res,
+            ppl_diff,
+            precision_fallback,
+        }
+    }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0f32;
+    let mut na = 0f32;
+    let mut nb = 0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+fn approx_ppl_delta(original: &[Vec<f32>], distilled: &[Vec<f32>]) -> f32 {
+    // Use normalized L2 reconstruction error as a proxy; small -> low PPL shift.
+    let mut total = 0f32;
+    let mut count = 0usize;
+    for (i, page) in original.iter().enumerate() {
+        let distilled_page = distilled.get(i.min(distilled.len().saturating_sub(1)));
+        if let Some(dp) = distilled_page {
+            let mut l2 = 0f32;
+            for (x, y) in page.iter().zip(dp.iter()) {
+                let d = x - y;
+                l2 += d * d;
+            }
+            let norm = page.iter().map(|v| v * v).sum::<f32>().max(1e-6);
+            total += (l2 / norm).sqrt();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f32
+    }
 }
 
 // -------------------------------- LMCache ---------------------------------
@@ -264,6 +393,8 @@ pub enum CacheLevel {
 pub struct CacheHit {
     pub level: CacheLevel,
     pub prefix_tokens: usize,
+    pub kv_handle: Option<KvCacheHandle>,
+    pub logits_handle: Option<LogitsHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +402,8 @@ struct CacheEntry {
     key: String,
     prefix_tokens: usize,
     bytes: usize,
+    kv_handle: Option<KvCacheHandle>,
+    logits_handle: Option<LogitsHandle>,
 }
 
 #[derive(Debug)]
@@ -309,18 +442,22 @@ impl LmcacheState {
     }
 
     pub fn get(&mut self, key: &str) -> Option<CacheHit> {
-        if let Some(prefix_tokens) = self.l1.get(key).map(|e| e.prefix_tokens) {
+        if let Some(entry) = self.l1.get(key).cloned() {
             self.touch_l1(key);
             return Some(CacheHit {
                 level: CacheLevel::L1,
-                prefix_tokens,
+                prefix_tokens: entry.prefix_tokens,
+                kv_handle: entry.kv_handle,
+                logits_handle: entry.logits_handle,
             });
         }
-        if let Some(prefix_tokens) = self.l2.get(key).map(|e| e.prefix_tokens) {
+        if let Some(entry) = self.l2.get(key).cloned() {
             self.promote_l2_to_l1(key.to_owned());
             return Some(CacheHit {
                 level: CacheLevel::L2,
-                prefix_tokens,
+                prefix_tokens: entry.prefix_tokens,
+                kv_handle: entry.kv_handle,
+                logits_handle: entry.logits_handle,
             });
         }
         if self.config.l3_backend != L3Backend::Disabled {
@@ -330,18 +467,28 @@ impl LmcacheState {
                 return Some(CacheHit {
                     level: CacheLevel::L3,
                     prefix_tokens: entry.prefix_tokens,
+                    kv_handle: entry.kv_handle,
+                    logits_handle: entry.logits_handle,
                 });
             }
         }
         None
     }
 
-    pub fn put(&mut self, key: String, prefix_tokens: usize) {
+    pub fn put(
+        &mut self,
+        key: String,
+        prefix_tokens: usize,
+        kv_handle: Option<KvCacheHandle>,
+        logits_handle: Option<LogitsHandle>,
+    ) {
         let bytes = self.approx_bytes(prefix_tokens);
         let entry = CacheEntry {
             key: key.clone(),
             prefix_tokens,
             bytes,
+            kv_handle,
+            logits_handle,
         };
         self.insert_l1(entry.clone());
         self.insert_l2(entry.clone());
@@ -363,6 +510,12 @@ impl LmcacheState {
     }
 
     fn insert_l1(&mut self, entry: CacheEntry) {
+        if let Some(existing) = self.l1.remove(&entry.key) {
+            self.l1_bytes = self.l1_bytes.saturating_sub(existing.bytes);
+            if let Some(pos) = self.l1_order.iter().position(|k| k == &entry.key) {
+                self.l1_order.remove(pos);
+            }
+        }
         self.evict_until_fit(entry.bytes, true);
         self.l1_bytes += entry.bytes;
         self.l1_order.push_back(entry.key.clone());
@@ -370,6 +523,12 @@ impl LmcacheState {
     }
 
     fn insert_l2(&mut self, entry: CacheEntry) {
+        if let Some(existing) = self.l2.remove(&entry.key) {
+            self.l2_bytes = self.l2_bytes.saturating_sub(existing.bytes);
+            if let Some(pos) = self.l2_order.iter().position(|k| k == &entry.key) {
+                self.l2_order.remove(pos);
+            }
+        }
         self.evict_until_fit(entry.bytes, false);
         self.l2_bytes += entry.bytes;
         self.l2_order.push_back(entry.key.clone());

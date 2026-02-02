@@ -412,7 +412,13 @@ impl Scheduler {
     }
 
     /// Store prefix KV into LMCache (host side metadata only; zero-copy preserved).
-    pub fn lmcache_put(&mut self, model_id: &str, prompt: &str) {
+    pub fn lmcache_put(
+        &mut self,
+        model_id: &str,
+        prompt: &str,
+        kv_handle: Option<gllm_kernels::backend_trait::KvCacheHandle>,
+        logits_handle: Option<gllm_kernels::backend_trait::LogitsHandle>,
+    ) {
         if let Some(v) = self.vllm24.as_mut() {
             if v.config.enable_2024_optimizations {
                 let key = crate::engine::vllm2024::LmcacheState::cache_key(
@@ -420,7 +426,12 @@ impl Scheduler {
                     prompt,
                     v.config.lmcache.cache_prefix_len,
                 );
-                v.lmcache.put(key, v.config.lmcache.cache_prefix_len);
+                v.lmcache.put(
+                    key,
+                    v.config.lmcache.cache_prefix_len,
+                    kv_handle,
+                    logits_handle,
+                );
             }
         }
     }
