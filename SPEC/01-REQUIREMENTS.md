@@ -60,7 +60,46 @@
 | **自适应 Chunk 大小** | 根据负载动态调整 chunk_size | 📋 未来计划 |
 | **KV 增量更新** | 仅蒸馏变化的 KV 部分 | 📋 未来计划 |
 
-## 5. 架构约束 (REQ-ARCH)
+## 5. 测试矩阵 (REQ-TEST)
+
+> **测试策略**: 三维测试网格 - 后端 × 模型 × 功能
+
+### 测试维度定义
+
+| 维度 | 选项 | 说明 |
+|------|------|------|
+| **后端** | `cpu`, `cuda` | ROCm/Metal 未来支持 |
+| **模型类型** | `generator`, `embedding`, `rerank` | 三种核心功能 |
+| **模型大小** | `mini` (最小) | 快速回归，CI 友好 |
+| **功能模块** | `loader`, `inference`, `scheduler`, `quantization`, `vllm2024` | 分层验证 |
+
+### 测试矩阵需求
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-TEST-001** | 后端覆盖测试 | CPU 和 CUDA 后端功能验证 | 1. 所有单元测试在 CPU 后端通过<br>2. 所有 E2E 测试在 CPU 后端通过<br>3. CUDA 后端可用时通过相同测试 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-002** | Generator 模型矩阵 | 覆盖所有 Generator 模型类型 | 1. qwen3-7b (基准)<br>2. llama-4-8b (多模态)<br>3. phi-4-mini (轻量)<br>4. qwen3-moe (MoE) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-003** | Embedding 模型矩阵 | 覆盖所有 Embedding 模型 | 1. qwen3-embed<br>2. bge-m4 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-004** | Reranker 模型矩阵 | 覆盖所有 Reranker 模型 | 1. qwen3-rerank<br>2. bge-rerank-v3 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-005** | 功能模块覆盖 | 分层功能测试 | 1. Loader: 权重加载、格式转换<br>2. Inference: 生成、嵌入、重排序<br>3. Scheduler: PagedAttention、CB、Swap<br>4. Quantization: AWQ/GPTQ<br>5. vllm2024: Chunked、SwiftKV、LMCache | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-006** | 量化格式测试 | 多种量化格式验证 | 1. AWQ (已实现)<br>2. GPTQ<br>3. SmoothQuant<br>4. 动态量化 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-007** | 错误处理测试 | 边界条件和错误场景 | 1. OOM 处理<br>2. 无效输入<br>3. 权重损坏<br>4. 不支持的架构 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-008** | 性能基准测试 | 吞吐量和延迟验证 | 1. Tokens/sec 吞吐量<br>2. 首token 延迟 (TTFT)<br>3. 内存占用<br>4. 性能回归检测 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-009** | MoE 专项测试 | MoE 模型特殊验证 | 1. 专家路由正确性<br>2. 负载均衡<br>3. 动态专家选择 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-010** | 后端一致性测试 | CPU vs CUDA 结果一致性 | 1. 相同输入产生相同输出<br>2. 数值精度在容差范围内 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+
+### 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|---------|------|
+| `tests/test_model_matrix.rs` | 模型矩阵 (REQ-TEST-002/003/004) | 🔵 新增 |
+| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 🔵 新增 |
+| `tests/test_quantization.rs` | 量化格式 (REQ-TEST-006) | 🔵 新增 |
+| `tests/test_error_handling.rs` | 错误处理 (REQ-TEST-007) | 🔵 新增 |
+| `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🔵 新增 |
+| `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🔵 新增 |
+
+## 6. 架构约束 (REQ-ARCH)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
