@@ -74,3 +74,25 @@ src/
 cargo check
 cargo test
 ```
+
+## 🧪 E2E 测试约束
+
+**单线程运行强制要求**：
+- ❌ E2E 测试禁止并行运行（`--test-threads=1` 强制）
+- ✅ E2E 测试必须串行执行，避免资源竞争
+
+**理由**：E2E 测试涉及真实模型下载、文件 I/O、CPU 推理，并行运行会导致：
+- 磁盘 I/O 竞争
+- 模型缓存冲突
+- CPU 内存超限
+- 测试结果不可预测
+
+**运行命令**：
+```bash
+# 正确：E2E 测试单线程运行
+cargo test --test test_e2e -- --test-threads=1
+cargo test --test test_real_models -- --test-threads=1
+
+# 单元测试可以并行（不涉及真实 I/O）
+cargo test --lib
+```
