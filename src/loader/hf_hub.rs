@@ -223,12 +223,17 @@ impl HfHubClient {
     }
 
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
-        let repo = self.api.model(repo.to_string());
+        let repo_api = self.api.model(repo.to_string());
 
-        // 使用通用进度报告器
+        // 先检查文件是否已缓存（避免显示不必要的进度）
+        if let Ok(path) = repo_api.get(filename) {
+            return Ok(path);
+        }
+
+        // 文件不存在，使用进度报告器下载
         let mut progress = ProgressBar::new(filename.to_string());
         let adapter = HfProgressAdapter::new(&mut progress);
-        repo.download_with_progress(filename, adapter)
+        repo_api.download_with_progress(filename, adapter)
             .map_err(|err| LoaderError::HfHub(err.to_string()))
     }
 
@@ -263,15 +268,23 @@ impl HfHubClient {
             eprintln!("   ✅ 并行下载完成");
             Ok(shard_paths)
         } else {
-            // 串行下载：使用通用进度报告器
+            // 串行下载：检查文件是否已缓存
             let mut result = Vec::new();
             for (idx, shard_path) in shard_paths_list.iter().enumerate() {
                 let filename = shard_path.to_string_lossy().to_string();
-                eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
+                let repo_api = api.model(repo_id.clone());
 
+                // 先检查文件是否已缓存
+                if let Ok(path) = repo_api.get(&filename) {
+                    result.push(path);
+                    continue;
+                }
+
+                // 文件不存在，使用进度报告器下载
+                eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
                 let mut progress = ProgressBar::new(filename.clone());
                 let adapter = HfProgressAdapter::new(&mut progress);
-                let path = api.model(repo_id.clone())
+                let path = repo_api
                     .download_with_progress(&filename, adapter)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
                 result.push(path);
