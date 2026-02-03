@@ -1,13 +1,11 @@
-//! 真实模型回归测试
+//! E2E 回归测试
 //!
 //! 测试策略：按**架构类型**分组，每组测试一个代表模型
 //! 同架构的不同参数量模型共享适配器逻辑，无需重复测试
+//!
+//! **重要**：E2E 测试使用公开 Client API，像真实用户一样调用库
 
-use gllm::adapter::adapter_for;
-use gllm::engine::executor::Executor;
-use gllm::loader;
-use gllm::registry;
-use gllm_kernels::cpu_backend::CpuBackend;
+use gllm::Client;
 
 /// 回归测试模型列表 (按架构分组)
 ///
@@ -34,72 +32,65 @@ const REGRESSION_MODELS: &[(&str, &str)] = &[
     ("BGE-Rerank", "bge-rerank-v3"),          // BGE Reranker
 ];
 
-/// 使用 HuggingFace 自动下载测试单个模型
-///
-/// 注意：需要 HF_TOKEN 的 gated 模型会提示错误
-/// 可用的公开模型：smollm2-135m, phi-4-mini, internlm3-8b, bge-m3, e5-small
+/// E2E 测试 - 使用 Client API 测试单个模型
 ///
 /// ⚠️ CPU性能警告：大模型(>3B参数)在CPU上运行极慢，测试时只生成1个token
-fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
-    let manifest = registry::lookup(alias)
-        .ok_or_else(|| format!("manifest not found: {}", alias))?;
-
-    let adapter = adapter_for::<CpuBackend>(manifest)
-        .ok_or_else(|| format!("no adapter for {:?}", manifest.model_id))?;
-
-    println!("  测试: {} (架构: {:?})", alias, manifest.arch);
-
-    // 使用 Loader::from_hf 自动下载模型（内部会自动 fallback 到 ModelScope）
-    let mut loader = loader::Loader::from_hf(alias)
-        .map_err(|e| format!("loader failed: {}", e))?;
-    println!("    ✅ Loader 创建成功");
-
-    let backend = CpuBackend::new();
-    let mut executor = Executor::from_loader(backend, manifest, adapter, &mut loader)
-        .map_err(|e| format!("executor failed: {}", e))?;
-    println!("    ✅ Executor 创建成功");
+fn test_model_with_client_api(alias: &str) -> Result<(), String> {
+    // E2E 测试入口：Client::new()
+    let client = Client::new(alias)
+        .map_err(|e| format!("Client::new failed: {}", e))?;
+    println!("  测试: {} (架构: {:?})", alias, client.manifest().arch);
 
     // 根据模型类型执行相应测试
-    if manifest.model_id.is_generator() {
-        println!("    🔄 开始生成测试 (1 token, CPU模式)...");
-        let output = executor.generate("Hello", 1, 0.0)
+    if client.manifest().model_id.is_generator() {
+        println!("    🔄 开始生成测试 (1 token)...");
+        // E2E API: client.generate().max_tokens().generate()
+        let response = client.generate("Hello")
+            .max_tokens(1)
+            .generate()
             .map_err(|e| format!("generate failed: {}", e))?;
-        assert!(!output.trim().is_empty(), "generator output empty");
-        println!("    ✅ 生成测试通过: '{}'", output.trim());
-    } else if manifest.model_id.is_embedding() {
+        assert!(!response.text.trim().is_empty(), "generator output empty");
+        println!("    ✅ 生成测试通过: '{}'", response.text.trim());
+    } else if client.manifest().model_id.is_embedding() {
         println!("    🔄 开始嵌入测试...");
-        let embedding = executor.embed("test text")
+        // E2E API: client.embeddings().generate()
+        let response = client.embeddings(["test text"])
+            .generate()
             .map_err(|e| format!("embed failed: {}", e))?;
+        assert!(!response.embeddings.is_empty(), "embeddings empty");
+        let embedding = &response.embeddings[0].embedding;
         assert!(!embedding.is_empty(), "embedding empty");
         let sum: f32 = embedding.iter().sum();
         assert!(sum.abs() > 0.01, "embedding is all zeros");
         println!("    ✅ 嵌入测试通过 (维度: {})", embedding.len());
-    } else if manifest.model_id.is_reranker() {
+    } else if client.manifest().model_id.is_reranker() {
         println!("    🔄 开始重排序测试...");
-        let scores = executor.rerank("query text")
+        // E2E API: client.rerank().generate()
+        let response = client.rerank("query text", ["doc1", "doc2"])
+            .generate()
             .map_err(|e| format!("rerank failed: {}", e))?;
-        assert!(!scores.is_empty(), "rerank scores empty");
-        println!("    ✅ 重排序测试通过");
+        assert!(!response.results.is_empty(), "rerank results empty");
+        println!("    ✅ 重排序测试通过 ({} 个结果)", response.results.len());
     } else {
-        return Err(format!("未知模型类型: {:?}", manifest.model_id));
+        return Err(format!("未知模型类型: {:?}", client.manifest().model_id));
     }
 
     Ok(())
 }
 
-/// 回归测试 - 测试所有架构代表模型
+/// E2E 回归测试 - 测试所有架构代表模型
 ///
 /// 覆盖率：11个架构 → 32个模型
 #[test]
 fn regression_all_architectures() {
-    println!("🚀 回归测试 - {} 个架构代表", REGRESSION_MODELS.len());
+    println!("🚀 E2E 回归测试 - {} 个架构代表", REGRESSION_MODELS.len());
     let mut passed = 0;
     let mut failed = Vec::new();
     let mut skipped = 0;
 
     for (arch_name, alias) in REGRESSION_MODELS {
         print!("[{}] ", arch_name);
-        match test_model_with_auto_download(alias) {
+        match test_model_with_client_api(alias) {
             Ok(()) => passed += 1,
             Err(e) => {
                 // 某些模型可能不存在或下载失败
@@ -114,7 +105,7 @@ fn regression_all_architectures() {
         }
     }
 
-    println!("\n📊 回归测试汇总:");
+    println!("\n📊 E2E 回归测试汇总:");
     println!("  通过: {} / {}", passed, REGRESSION_MODELS.len());
     println!("  跳过: {}", skipped);
 
@@ -129,7 +120,6 @@ fn regression_all_architectures() {
     let total_tested = passed + failed.len();
     if total_tested > 0 {
         assert!(passed >= total_tested / 2,
-            "回归测试通过率太低: {} / {}", passed, total_tested);
+            "E2E 回归测试通过率太低: {} / {}", passed, total_tested);
     }
 }
-
