@@ -50,6 +50,9 @@ pub enum LoaderError {
     Pytorch(String),
     #[error("hf hub error: {0}")]
     HfHub(String),
+    #[error("authentication required: {hint}")]
+    #[non_exhaustive]
+    AuthenticationError { hint: String },
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("io error: {0}")]

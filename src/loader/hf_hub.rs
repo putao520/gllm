@@ -1,6 +1,7 @@
 //! HuggingFace integration.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use hf_hub::api::sync::Api;
@@ -9,6 +10,54 @@ use serde::Deserialize;
 use crate::manifest::FileMap;
 
 use super::{parallel::ParallelLoader, LoaderError, Result};
+
+/// Token 缓存文件位置 (与 huggingface-cli 一致)
+const HF_TOKEN_PATH: &str = ".huggingface/token";
+
+/// 从多个来源读取 HuggingFace Token
+///
+/// 优先级:
+/// 1. 环境变量 HF_TOKEN
+/// 2. 环境变量 HUGGING_FACE_HUB_TOKEN
+/// 3. ~/.huggingface/token 文件
+fn read_hf_token() -> Option<String> {
+    // 1. 从环境变量读取
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+
+    if let Ok(token) = std::env::var("HUGGING_FACE_HUB_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+
+    // 2. 从 ~/.huggingface/token 文件读取
+    if let Some(home) = std::env::var("HOME").ok() {
+        let token_path = PathBuf::from(home).join(HF_TOKEN_PATH);
+        if let Ok(token) = fs::read_to_string(&token_path) {
+            let token = token.trim();
+            if !token.is_empty() && token.starts_with("hf_") {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// 检查错误消息是否为认证错误
+fn is_auth_error(err: &str) -> bool {
+    let err_lower = err.to_lowercase();
+    err_lower.contains("401")
+        || err_lower.contains("403")
+        || err_lower.contains("unauthorized")
+        || err_lower.contains("forbidden")
+        || err_lower.contains("invalid username or password")
+        || err_lower.contains("authentication")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
@@ -35,10 +84,8 @@ impl HfHubClient {
     }
 
     pub fn with_endpoint(cache_dir: PathBuf, endpoint: Option<String>) -> Result<Self> {
-        // 优先从环境变量读取 token (HF_TOKEN)
-        let token = std::env::var("HF_TOKEN")
-            .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
-            .ok();
+        // 从多个来源读取 token
+        let token = read_hf_token();
 
         let mut builder = hf_hub::api::sync::ApiBuilder::new()
             .with_cache_dir(cache_dir);
@@ -54,7 +101,22 @@ impl HfHubClient {
 
         let api = builder
             .build()
-            .map_err(|err| LoaderError::HfHub(err.to_string()))?;
+            .map_err(|err| {
+                // 检查是否为认证错误，提供更好的错误提示
+                let err_msg = err.to_string();
+                if is_auth_error(&err_msg) {
+                    LoaderError::AuthenticationError {
+                        hint: "This model requires authentication. Please:\n\
+                              1. Visit https://huggingface.co/settings/tokens to create a token\n\
+                              2. Accept the model's license on the model page\n\
+                              3. Set the HF_TOKEN environment variable:\n\
+                                 export HF_TOKEN=hf_xxx...\n\
+                              4. Or add the token to ~/.huggingface/token".to_string(),
+                    }
+                } else {
+                    LoaderError::HfHub(err_msg)
+                }
+            })?;
         Ok(Self { api })
     }
 
@@ -235,5 +297,50 @@ mod tests {
         assert!(candidates.iter().any(|c| c == "configuration.json"));
         assert!(candidates.iter().any(|c| c == "model/config.json"));
         assert!(candidates.iter().any(|c| c == "model/configuration.json"));
+    }
+
+    #[test]
+    fn test_is_auth_error() {
+        assert!(is_auth_error("Error: 401 Unauthorized"));
+        assert!(is_auth_error("Error: 403 Forbidden"));
+        assert!(is_auth_error("Invalid username or password"));
+        assert!(is_auth_error("Authentication failed"));
+        assert!(is_auth_error("Access forbidden"));
+
+        // 非认证错误
+        assert!(!is_auth_error("File not found"));
+        assert!(!is_auth_error("Connection timeout"));
+        assert!(!is_auth_error("Network error"));
+    }
+
+    #[test]
+    fn test_read_hf_token_priority() {
+        // 清理环境
+        std::env::remove_var("HF_TOKEN");
+        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
+
+        // 优先级 1: HF_TOKEN
+        std::env::set_var("HF_TOKEN", "hf_test_from_hf_token");
+        assert_eq!(read_hf_token(), Some("hf_test_from_hf_token".to_string()));
+
+        // 优先级 2: HUGGING_FACE_HUB_TOKEN (当 HF_TOKEN 不存在时)
+        std::env::remove_var("HF_TOKEN");
+        std::env::set_var("HUGGING_FACE_HUB_TOKEN", "hf_test_from_legacy");
+        assert_eq!(read_hf_token(), Some("hf_test_from_legacy".to_string()));
+
+        // HF_TOKEN 优先于 HUGGING_FACE_HUB_TOKEN
+        std::env::set_var("HF_TOKEN", "hf_priority_test");
+        assert_eq!(read_hf_token(), Some("hf_priority_test".to_string()));
+
+        // 清理
+        std::env::remove_var("HF_TOKEN");
+        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
+    }
+
+    #[test]
+    fn test_read_hf_token_no_token() {
+        std::env::remove_var("HF_TOKEN");
+        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
+        assert!(read_hf_token().is_none());
     }
 }
