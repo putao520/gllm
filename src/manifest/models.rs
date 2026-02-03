@@ -4,6 +4,19 @@ use super::types::{
     KnownModel, ModelArchitecture, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 
+pub const QWEN2_5_0_5B_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::Qwen2_5_0_5B,
+    aliases: &["qwen2.5-0.5b", "qwen2.5:0.5b", "qwen2.5:0.5b-instruct"],
+    hf_repo: "Qwen/Qwen2.5-0.5B-Instruct",
+    model_scope_repo: Some("Qwen/Qwen2.5-0.5B-Instruct"),
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::Qwen2_5,
+    tensor_rules: TensorNamingRule::Llama4, // Qwen2.5 使用类似 Llama 的命名规则
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
 pub const QWEN3_7B_MANIFEST: ModelManifest = ModelManifest {
     model_id: KnownModel::Qwen3_7B,
     aliases: &["qwen3-7b"],
@@ -435,6 +448,7 @@ pub const BGE_RERANK_V2_M3_MANIFEST: ModelManifest = ModelManifest {
 };
 
 pub const ALL_MANIFESTS: &[&ModelManifest] = &[
+    &QWEN2_5_0_5B_MANIFEST,
     &QWEN3_7B_MANIFEST,
     &QWEN3_1_7B_MANIFEST,
     &QWEN3_MOE_A22B_MANIFEST,
@@ -472,6 +486,7 @@ pub const ALL_MANIFESTS: &[&ModelManifest] = &[
 
 pub fn manifest_by_id(model: KnownModel) -> &'static ModelManifest {
     match model {
+        KnownModel::Qwen2_5_0_5B => &QWEN2_5_0_5B_MANIFEST,
         KnownModel::Qwen3_7B => &QWEN3_7B_MANIFEST,
         KnownModel::Qwen3_MoE_A22B => &QWEN3_MOE_A22B_MANIFEST,
         KnownModel::Qwen3_Thinking => &QWEN3_THINKING_MANIFEST,

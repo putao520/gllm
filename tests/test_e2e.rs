@@ -1,7 +1,7 @@
 //! E2E 测试 - 最小测试矩阵
 //!
 //! 测试策略：
-//! - 2 大类功能 × 1 个最小模型 (ModelScope 可用)
+//! - 3 大类功能 × 1 个最小模型 (ModelScope 可用)
 //! - Reranker: 需要 HF_TOKEN (HuggingFace)
 //!
 //! **E2E 测试原则**：像真实用户一样使用公开 Client API
@@ -11,7 +11,7 @@ use gllm::Client;
 /// E2E 测试矩阵：功能 × 最小模型
 const E2E_MATRIX: &[(&str, &str)] = &[
     // Generator - 最小模型
-    ("Generator", "smollm2-135m"),
+    ("Generator", "qwen2.5-0.5b"),
     // Embedding - 最小模型
     ("Embedding", "e5-small"),
 ];

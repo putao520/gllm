@@ -11,6 +11,7 @@ pub mod llama4;
 pub mod ministral;
 pub mod mistral3;
 pub mod phi4;
+pub mod qwen2_5;
 pub mod qwen3;
 pub mod qwen3_embed;
 pub mod qwen3_moe;
@@ -25,6 +26,7 @@ pub use llama4::Llama4Adapter;
 pub use ministral::MinistralAdapter;
 pub use mistral3::Mistral3Adapter;
 pub use phi4::Phi4Adapter;
+pub use qwen2_5::Qwen2_5Adapter;
 pub use qwen3::Qwen3Adapter;
 pub use qwen3_embed::Qwen3EmbedAdapter;
 pub use qwen3_moe::Qwen3MoEAdapter;
@@ -34,6 +36,7 @@ pub use r#trait::{
 };
 pub use xlm_r::XlmRAdapter;
 
+static QWEN2_5: Qwen2_5Adapter = Qwen2_5Adapter;
 static QWEN3: Qwen3Adapter = Qwen3Adapter;
 static QWEN3_EMBED: Qwen3EmbedAdapter = Qwen3EmbedAdapter;
 static QWEN3_RERANK: Qwen3RerankAdapter = Qwen3RerankAdapter;
@@ -62,6 +65,9 @@ pub fn adapter_for<B: Backend>(manifest: &ModelManifest) -> Option<&'static dyn 
     }
     if <Qwen3Adapter as ModelAdapter<B>>::supports(&QWEN3, manifest) {
         return Some(&QWEN3);
+    }
+    if <Qwen2_5Adapter as ModelAdapter<B>>::supports(&QWEN2_5, manifest) {
+        return Some(&QWEN2_5);
     }
     if <Llama4Adapter as ModelAdapter<B>>::supports(&LLAMA4, manifest) {
         return Some(&LLAMA4);

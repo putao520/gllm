@@ -9,6 +9,7 @@ pub const EMPTY_FILE_MAP: FileMap = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelArchitecture {
+    Qwen2_5,
     Qwen3,
     Qwen3MoE,
     Llama4,
@@ -87,6 +88,7 @@ impl ModelManifest {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KnownModel {
+    Qwen2_5_0_5B,
     Qwen3_7B,
     Qwen3_MoE_A22B,
     Qwen3_Thinking,
@@ -126,7 +128,8 @@ impl KnownModel {
     pub fn is_generator(&self) -> bool {
         matches!(
             self,
-            Self::Qwen3_7B
+            Self::Qwen2_5_0_5B
+                | Self::Qwen3_7B
                 | Self::Qwen3_MoE_A22B
                 | Self::Qwen3_Thinking
                 | Self::Llama4_8B
