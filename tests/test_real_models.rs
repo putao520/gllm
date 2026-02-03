@@ -21,8 +21,8 @@ const REGRESSION_MODELS: &[(&str, &str)] = &[
     ("Llama4", "llama-4-8b"),                 // Llama 4 系列
     ("SmolLM", "smollm2-135m"),               // SmolLM 系列 (超轻量，CI友好)
     ("Phi4", "phi-4-mini"),                   // Phi4 系列
-    // ("Gemma2", "gemma-2-2b-it"),        // Gemma2 系列 - 暂时跳过 (HuggingFace 权重不可用)
-    ("InternLM3", "internlm3-8b"),          // InternLM3 系列
+    ("Gemma2", "gemma-2-9b"),                // Gemma2 系列
+    ("InternLM3", "internlm3-8b"),            // InternLM3 系列
     ("GPT-OSS", "gpt-oss-1.5b"),             // GPT-OSS (Fused QKV)
     ("GLM4", "glm-4.7-flash"),               // GLM-4/5 系列
     ("Mistral3", "ministral-8b"),            // Mistral3/Ministral
@@ -38,6 +38,7 @@ const REGRESSION_MODELS: &[(&str, &str)] = &[
 ];
 
 /// 使用 HuggingFace 自动下载测试单个模型
+/// 失败时自动回退到 ModelScope（魔搭社区）
 fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
     let manifest = registry::lookup(alias)
         .ok_or_else(|| format!("manifest not found: {}", alias))?;
@@ -47,8 +48,9 @@ fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
 
     println!("  测试: {} (架构: {:?})", alias, manifest.arch);
 
-    // 使用 Loader::from_hf 自动下载模型
-    let mut loader = loader::Loader::from_hf(alias)
+    // 使用 Loader::from_hf_with_fallback 自动下载模型
+    // HF 失败时自动尝试 ModelScope（对中国用户更友好）
+    let mut loader = loader::Loader::from_hf_with_fallback(alias)
         .map_err(|e| format!("loader failed: {}", e))?;
 
     let backend = CpuBackend::new();

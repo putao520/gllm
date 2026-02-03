@@ -281,6 +281,15 @@ impl Loader {
         Self::from_source_with_config(repo_or_alias, config)
     }
 
+    /// 从 ModelScope（魔搭社区）加载模型
+    ///
+    /// 许多中国模型（Qwen、GLM、InternLM 等）在 ModelScope 上公开可用
+    pub fn from_ms(repo_or_alias: &str) -> Result<Self> {
+        let mut config = LoaderConfig::default();
+        config.source = ModelSource::ModelScope;
+        Self::from_source_with_config(repo_or_alias, config)
+    }
+
     pub fn from_env(repo_or_alias: &str) -> Result<Self> {
         let config = LoaderConfig::from_env();
         Self::from_source_with_config(repo_or_alias, config)
@@ -290,6 +299,20 @@ impl Loader {
         let mut config = LoaderConfig::default();
         config.source = source;
         Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    /// 从 HuggingFace 加载，失败时自动回退到 ModelScope
+    ///
+    /// 这对中国用户特别有用，许多模型在 ModelScope 上是公开的
+    pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Self> {
+        Self::from_hf(repo_or_alias).or_else(|err| {
+            if is_recoverable_error(&err) {
+                eprintln!("⚠️  HuggingFace 下载失败，尝试 ModelScope...");
+                Self::from_ms(repo_or_alias)
+            } else {
+                Err(err)
+            }
+        })
     }
 
     pub fn from_hf_with_config(repo_or_alias: &str, mut config: LoaderConfig) -> Result<Self> {
@@ -662,6 +685,18 @@ pub fn from_hf(repo_or_alias: &str) -> Result<Loader> {
     Loader::from_hf(repo_or_alias)
 }
 
+/// Convenience: create a loader from ModelScope (魔搭社区).
+///
+/// ModelScope 对中国用户更友好，许多模型在那里是公开的。
+pub fn from_ms(repo_or_alias: &str) -> Result<Loader> {
+    Loader::from_ms(repo_or_alias)
+}
+
+/// Convenience: create a loader with automatic HF->MS fallback.
+pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Loader> {
+    Loader::from_hf_with_fallback(repo_or_alias)
+}
+
 /// Convenience: create a loader using environment-driven source selection.
 pub fn from_env(repo_or_alias: &str) -> Result<Loader> {
     Loader::from_env(repo_or_alias)
@@ -670,6 +705,28 @@ pub fn from_env(repo_or_alias: &str) -> Result<Loader> {
 /// Convenience: create a loader from the selected source.
 pub fn from_source(repo_or_alias: &str, source: ModelSource) -> Result<Loader> {
     Loader::from_source(repo_or_alias, source)
+}
+
+/// 判断错误是否可以回退到 ModelScope
+///
+/// 以下情况可以回退：
+/// - 认证错误 (401/403)
+/// - 权重缺失
+/// - 网络超时
+fn is_recoverable_error(err: &LoaderError) -> bool {
+    match err {
+        LoaderError::AuthenticationError { .. } => true,
+        LoaderError::MissingWeights => true,
+        LoaderError::HfHub(msg) => {
+            let msg_lower = msg.to_lowercase();
+            msg_lower.contains("401")
+                || msg_lower.contains("403")
+                || msg_lower.contains("timeout")
+                || msg_lower.contains("unauthorized")
+                || msg_lower.contains("forbidden")
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
