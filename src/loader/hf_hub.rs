@@ -35,11 +35,34 @@ impl HfHubClient {
     }
 
     pub fn with_endpoint(cache_dir: PathBuf, endpoint: Option<String>) -> Result<Self> {
-        let mut builder = hf_hub::api::sync::ApiBuilder::new().with_cache_dir(cache_dir);
+        // 优先从环境变量读取 token (HF_TOKEN)
+        let token = std::env::var("HF_TOKEN")
+            .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
+            .ok();
+
+        let mut builder = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir);
+
+        // 设置 token 用于 gated 模型访问
+        if let Some(token) = token {
+            builder = builder.with_token(Some(token));
+        }
+
         if let Some(endpoint) = endpoint {
             builder = builder.with_endpoint(endpoint);
         }
+
         let api = builder
+            .build()
+            .map_err(|err| LoaderError::HfHub(err.to_string()))?;
+        Ok(Self { api })
+    }
+
+    /// 使用指定 token 创建客户端（用于测试或显式传入 token）
+    pub fn with_token(cache_dir: PathBuf, token: String) -> Result<Self> {
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .with_token(Some(token))
             .build()
             .map_err(|err| LoaderError::HfHub(err.to_string()))?;
         Ok(Self { api })
