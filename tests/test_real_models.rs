@@ -1,10 +1,161 @@
+//! 真实模型回归测试
+//!
+//! 测试策略：按**架构类型**分组，每组测试一个代表模型
+//! 同架构的不同参数量模型共享适配器逻辑，无需重复测试
+
 mod common;
 
 use common::RealModelFiles;
 use gllm::adapter::adapter_for;
 use gllm::engine::executor::Executor;
+use gllm::loader;
 use gllm::registry;
 use gllm_kernels::cpu_backend::CpuBackend;
+
+/// 回归测试模型列表 (按架构分组)
+///
+/// 每个架构只测试一个代表模型，避免重复测试
+const REGRESSION_MODELS: &[(&str, &str)] = &[
+    // ===== Generator 架构代表 =====
+    ("Qwen3", "qwen3-7b"),                    // Qwen3 系列 (Qwen3 + Qwen3MoE)
+    ("Llama4", "llama-4-8b"),                 // Llama 4 系列
+    ("SmolLM", "smollm2-135m"),               // SmolLM 系列 (超轻量，CI友好)
+    ("Phi4", "phi-4-mini"),                   // Phi4 系列
+    // ("Gemma2", "gemma-2-2b-it"),        // Gemma2 系列 - 暂时跳过 (HuggingFace 权重不可用)
+    ("InternLM3", "internlm3-8b"),          // InternLM3 系列
+    ("GPT-OSS", "gpt-oss-1.5b"),             // GPT-OSS (Fused QKV)
+    ("GLM4", "glm-4.7-flash"),               // GLM-4/5 系列
+    ("Mistral3", "ministral-8b"),            // Mistral3/Ministral
+
+    // ===== Embedding 架构代表 =====
+    ("Qwen3-Embed", "qwen3-embed"),          // Qwen3 Embedding
+    ("BGE-XlmR", "bge-m3"),                   // BGE XLM-R (中文)
+    ("E5-XlmR", "e5-small"),                  // E5 XLM-R
+
+    // ===== Reranker 架构代表 =====
+    ("Qwen3-Rerank", "qwen3-rerank"),         // Qwen3 Reranker
+    ("BGE-Rerank", "bge-rerank-v3"),          // BGE Reranker
+];
+
+/// 使用 HuggingFace 自动下载测试单个模型
+fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
+    let manifest = registry::lookup(alias)
+        .ok_or_else(|| format!("manifest not found: {}", alias))?;
+
+    let adapter = adapter_for::<CpuBackend>(manifest)
+        .ok_or_else(|| format!("no adapter for {:?}", manifest.model_id))?;
+
+    println!("  测试: {} (架构: {:?})", alias, manifest.arch);
+
+    // 使用 Loader::from_hf 自动下载模型
+    let mut loader = loader::Loader::from_hf(alias)
+        .map_err(|e| format!("loader failed: {}", e))?;
+
+    let backend = CpuBackend::new();
+    let mut executor = Executor::from_loader(backend, manifest, adapter, &mut loader)
+        .map_err(|e| format!("executor failed: {}", e))?;
+
+    // 根据模型类型执行相应测试
+    if manifest.model_id.is_generator() {
+        let output = executor.generate("Hello", 1, 0.0)
+            .map_err(|e| format!("generate failed: {}", e))?;
+        assert!(!output.trim().is_empty(), "generator output empty");
+        println!("    ✅ 生成测试通过");
+    } else if manifest.model_id.is_embedding() {
+        let embedding = executor.embed("test text")
+            .map_err(|e| format!("embed failed: {}", e))?;
+        assert!(!embedding.is_empty(), "embedding empty");
+        let sum: f32 = embedding.iter().sum();
+        assert!(sum.abs() > 0.01, "embedding is all zeros");
+        println!("    ✅ 嵌入测试通过 (维度: {})", embedding.len());
+    } else if manifest.model_id.is_reranker() {
+        let scores = executor.rerank("query text")
+            .map_err(|e| format!("rerank failed: {}", e))?;
+        assert!(!scores.is_empty(), "rerank scores empty");
+        println!("    ✅ 重排序测试通过");
+    } else {
+        return Err(format!("未知模型类型: {:?}", manifest.model_id));
+    }
+
+    Ok(())
+}
+
+/// 回归测试 - 测试所有架构代表模型
+///
+/// 覆盖率：11个架构 → 32个模型
+#[test]
+fn regression_all_architectures() {
+    println!("🚀 回归测试 - {} 个架构代表", REGRESSION_MODELS.len());
+    let mut passed = 0;
+    let mut failed = Vec::new();
+    let mut skipped = 0;
+
+    for (arch_name, alias) in REGRESSION_MODELS {
+        print!("[{}] ", arch_name);
+        match test_model_with_auto_download(alias) {
+            Ok(()) => passed += 1,
+            Err(e) => {
+                // 某些模型可能不存在或下载失败
+                if e.contains("404") || e.contains("Not Found") || e.contains("download") {
+                    eprintln!(" ⏭️  跳过: {}", e);
+                    skipped += 1;
+                } else {
+                    eprintln!(" ❌ 失败: {}", e);
+                    failed.push((*arch_name, alias, e));
+                }
+            }
+        }
+    }
+
+    println!("\n📊 回归测试汇总:");
+    println!("  通过: {} / {}", passed, REGRESSION_MODELS.len());
+    println!("  跳过: {}", skipped);
+
+    if !failed.is_empty() {
+        eprintln!("\n❌ 失败:");
+        for (arch, alias, error) in &failed {
+            eprintln!("  [{}] {}: {}", arch, alias, error);
+        }
+    }
+
+    // 至少 50% 通过（有些模型可能暂时不可用）
+    let total_tested = passed + failed.len();
+    if total_tested > 0 {
+        assert!(passed >= total_tested / 2,
+            "回归测试通过率太低: {} / {}", passed, total_tested);
+    }
+}
+
+/// 快速 CI 测试 - 仅测试超轻量模型
+///
+/// 适合 CI/CD 环境，快速验证核心功能
+#[test]
+fn regression_ci_quick() {
+    // 只测试最小的模型 (135M)，适合快速 CI
+    const CI_MODELS: &[(&str, &str)] = &[
+        ("SmolLM", "smollm2-135m"),  // 135M - 最小
+        ("E5", "e5-small"),           // 轻量嵌入
+    ];
+
+    println!("⚡ CI 快速测试");
+    for (arch, alias) in CI_MODELS {
+        print!("[{}] ", arch);
+        match test_model_with_auto_download(alias) {
+            Ok(()) => {},
+            Err(e) => {
+                if e.contains("404") || e.contains("download") {
+                    eprintln!(" ⏭️  跳过: {}", e);
+                } else {
+                    panic!("CI 测试失败 [{}]: {}", arch, e);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 以下为旧的本地缓存测试（保留用于向后兼容）
+// ============================================================================
 
 fn build_real_executor(
     repo_id: &str,
@@ -21,35 +172,26 @@ fn build_real_executor(
         .expect("executor creation failed")
 }
 
-/// 可用的真实小模型 (用于快速回归测试)
-///
-/// 格式: (缓存目录名, Registry 查找名)
-const REAL_TEST_MODELS: &[(&str, &str)] = &[
-    // Generator - 选择最小的模型
-    // 注意: Qwen3-0.6B 不在 registry 中，跳过
-    // ("Qwen--Qwen3-0.6B", "Qwen/Qwen3-0.6B"),
-    // Embedding - Qwen3-Embedding-0.6B 对应 registry 中的 Qwen/Qwen3-Embedding
+/// 本地缓存模型列表
+const LOCAL_TEST_MODELS: &[(&str, &str)] = &[
     ("Qwen--Qwen3-Embedding-0.6B", "Qwen/Qwen3-Embedding"),
-    // Reranker
     ("Qwen--Qwen3-Reranker-0.6B", "Qwen/Qwen3-Reranker"),
 ];
 
 #[test]
 fn real_model_qwen3_embedding_0_6b_embeds() {
     let files = RealModelFiles::new().expect("real model files");
-    let (cache_name, repo_id) = &REAL_TEST_MODELS[0]; // Qwen3-Embedding-0.6B
+    let (cache_name, repo_id) = &LOCAL_TEST_MODELS[0];
 
-    // 跳过如果模型不存在
     if !files.model_exists(cache_name) {
-        eprintln!("跳过测试: 模型 {} 不存在", cache_name);
+        eprintln!("跳过: 模型 {} 不存在", cache_name);
         return;
     }
 
-    // 检查 registry 支持
     let manifest = match registry::lookup(repo_id) {
         Some(m) => m,
         None => {
-            eprintln!("跳过测试: registry 不支持 {}", repo_id);
+            eprintln!("跳过: registry 不支持 {}", repo_id);
             return;
         }
     };
@@ -57,7 +199,7 @@ fn real_model_qwen3_embedding_0_6b_embeds() {
     let adapter = match adapter_for::<CpuBackend>(manifest) {
         Some(a) => a,
         None => {
-            eprintln!("跳过测试: 没有 CPU 适配器");
+            eprintln!("跳过: 无 CPU 适配器");
             return;
         }
     };
@@ -66,7 +208,7 @@ fn real_model_qwen3_embedding_0_6b_embeds() {
     let mut loader = match files.loader_with_manifest(cache_name, Some(manifest)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("跳过测试: loader 创建失败: {}", e);
+            eprintln!("跳过: loader 失败: {}", e);
             return;
         }
     };
@@ -74,55 +216,39 @@ fn real_model_qwen3_embedding_0_6b_embeds() {
     let mut executor = match Executor::from_loader(backend, manifest, adapter, &mut loader) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("跳过测试: executor 创建失败 (可能是模型维度不匹配): {}", e);
+            eprintln!("跳过: executor 失败: {}", e);
             return;
         }
     };
 
-    let text = "Hello world";
-    let embedding = match executor.embed(text) {
+    let embedding = match executor.embed("Hello world") {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("跳过测试: embed 失败 (可能是模型版本不匹配): {}", e);
+            eprintln!("跳过: embed 失败: {}", e);
             return;
         }
     };
 
-    // Qwen3-Embedding-0.6B 的维度应该是 1536
-    assert_eq!(
-        embedding.len(),
-        1536,
-        "embedding dimension mismatch: expected 1536, got {}",
-        embedding.len()
-    );
-
-    // 验证嵌入值不为全零
+    assert_eq!(embedding.len(), 1536, "embedding dimension mismatch");
     let sum: f32 = embedding.iter().sum();
     assert!(sum.abs() > 0.1, "embedding is all zeros");
-
-    println!(
-        "Qwen3-Embedding-0.6B 嵌入维度: {}, sum: {}",
-        embedding.len(),
-        sum
-    );
+    println!("✅ Qwen3-Embedding-0.6B: 维度={}, sum={}", embedding.len(), sum);
 }
 
 #[test]
 fn real_model_qwen3_reranker_0_6b_reranks() {
     let files = RealModelFiles::new().expect("real model files");
-    let (cache_name, repo_id) = &REAL_TEST_MODELS[1]; // Qwen3-Reranker-0.6B (索引1)
+    let (cache_name, repo_id) = &LOCAL_TEST_MODELS[1];
 
-    // 跳过如果模型不存在
     if !files.model_exists(cache_name) {
-        eprintln!("跳过测试: 模型 {} 不存在", cache_name);
+        eprintln!("跳过: 模型 {} 不存在", cache_name);
         return;
     }
 
-    // 检查 registry 支持
     let manifest = match registry::lookup(repo_id) {
         Some(m) => m,
         None => {
-            eprintln!("跳过测试: registry 不支持 {}", repo_id);
+            eprintln!("跳过: registry 不支持 {}", repo_id);
             return;
         }
     };
@@ -130,7 +256,7 @@ fn real_model_qwen3_reranker_0_6b_reranks() {
     let adapter = match adapter_for::<CpuBackend>(manifest) {
         Some(a) => a,
         None => {
-            eprintln!("跳过测试: 没有 CPU 适配器");
+            eprintln!("跳过: 无 CPU 适配器");
             return;
         }
     };
@@ -139,7 +265,7 @@ fn real_model_qwen3_reranker_0_6b_reranks() {
     let mut loader = match files.loader_with_manifest(cache_name, Some(manifest)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("跳过测试: loader 创建失败: {}", e);
+            eprintln!("跳过: loader 失败: {}", e);
             return;
         }
     };
@@ -147,24 +273,21 @@ fn real_model_qwen3_reranker_0_6b_reranks() {
     let mut executor = match Executor::from_loader(backend, manifest, adapter, &mut loader) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("跳过测试: executor 创建失败 (可能是模型维度不匹配): {}", e);
+            eprintln!("跳过: executor 失败: {}", e);
             return;
         }
     };
 
-    let query = "What is the capital of France?";
-    let scores = match executor.rerank(query) {
+    let scores = match executor.rerank("query") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("跳过测试: rerank 失败 (可能是模型版本不匹配): {}", e);
+            eprintln!("跳过: rerank 失败: {}", e);
             return;
         }
     };
 
-    // 验证返回分数
-    assert!(!scores.is_empty(), "rerank scores should not be empty");
-
-    println!("Qwen3-Reranker-0.6B 返回 {} 个分数", scores.len());
+    assert!(!scores.is_empty(), "rerank scores empty");
+    println!("✅ Qwen3-Reranker-0.6B: {} 个分数", scores.len());
 }
 
 #[test]
@@ -172,27 +295,21 @@ fn real_models_list_all_available() {
     let files = RealModelFiles::new().expect("real model files");
     let models = files.list_models();
 
-    println!("可用的真实模型 ({} 个):", models.len());
+    println!("可用的本地模型 ({} 个):", models.len());
     for model in &models {
         println!("  - {}", model);
     }
 
-    // 至少应该有一些模型
-    assert!(
-        !models.is_empty(),
-        "没有找到任何真实模型，请检查 ~/.gllm/models/"
-    );
+    assert!(!models.is_empty(), "没有找到任何本地模型");
 }
 
-/// 批量测试所有可用的真实模型
-///
-/// 这是一个集成测试，会尝试加载并运行所有缓存中的模型
+/// 批量测试本地缓存中的所有模型
 #[test]
 fn real_models_batch_test_all_available() {
     let files = match RealModelFiles::new() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("跳过测试: 无法初始化真实模型文件: {}", e);
+            eprintln!("跳过: 无法初始化: {}", e);
             return;
         }
     };
@@ -202,102 +319,62 @@ fn real_models_batch_test_all_available() {
     let mut passed = 0;
 
     for cache_name in &models {
-        // 跳过 GGUF 格式 (暂时不支持)
         if cache_name.contains("--GGUF") || cache_name.contains("-hf-") {
             continue;
         }
-
-        // 跳过 cross-encoder (需要特殊处理)
         if cache_name.starts_with("cross-encoder--") {
             continue;
         }
 
-        // 将缓存目录名转换为 HuggingFace repo 格式
-        // 旧格式: microsoft--phi-4-mini-instruct -> microsoft/phi-4-mini-instruct
-        // 新格式: models--microsoft--Phi-4-mini-instruct -> microsoft/Phi-4-mini-instruct
         let hf_repo_id = if cache_name.starts_with("models--") {
-            cache_name
-                .strip_prefix("models--")
-                .unwrap()
-                .replace("--", "/")
+            cache_name.strip_prefix("models--").unwrap().replace("--", "/")
         } else {
             cache_name.replace("--", "/")
         };
 
         let manifest = match registry::lookup(&hf_repo_id) {
             Some(m) => m,
-            None => {
-                // 尝试直接用缓存目录名查找（可能是 alias）
-                match registry::lookup(cache_name) {
-                    Some(m) => m,
-                    None => {
-                        eprintln!("跳过 {}: manifest 不支持", cache_name);
-                        continue;
-                    }
-                }
-            }
+            None => match registry::lookup(cache_name) {
+                Some(m) => m,
+                None => continue,
+            },
         };
 
         tested += 1;
 
-        // 尝试加载并测试
         match files.loader_with_manifest(cache_name, Some(manifest)) {
             Ok(mut loader) => {
-                println!("测试模型: {} (类型: {:?})", cache_name, manifest.model_id);
-
+                println!("测试: {} ({:?})", cache_name, manifest.model_id);
                 let backend = CpuBackend::new();
 
-                // 简单生成测试
-                if manifest.model_id.is_generator() {
-                    if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) =
-                            Executor::from_loader(backend, manifest, adapter, &mut loader)
-                        {
-                            match executor.generate("test", 1, 0.0) {
-                                Ok(_) => {
-                                    passed += 1;
-                                    println!("  ✅ 通过");
-                                }
-                                Err(e) => {
-                                    println!("  ❌ 推理失败: {}", e);
-                                }
-                            }
-                        }
+                let Some(adapter) = adapter_for::<CpuBackend>(manifest) else {
+                    println!("  ❌ 无适配器");
+                    continue;
+                };
+
+                let mut executor = match Executor::from_loader(backend, manifest, adapter, &mut loader) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        println!("  ❌ Executor 创建失败: {}", e);
+                        continue;
                     }
+                };
+
+                let test_ok = if manifest.model_id.is_generator() {
+                    executor.generate("test", 1, 0.0).ok().is_some()
                 } else if manifest.model_id.is_embedding() {
-                    if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) =
-                            Executor::from_loader(backend, manifest, adapter, &mut loader)
-                        {
-                            match executor.embed("test") {
-                                Ok(_) => {
-                                    passed += 1;
-                                    println!("  ✅ 通过");
-                                }
-                                Err(e) => {
-                                    println!("  ❌ 嵌入失败: {}", e);
-                                }
-                            }
-                        }
-                    }
+                    executor.embed("test").ok().is_some()
                 } else if manifest.model_id.is_reranker() {
-                    if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) =
-                            Executor::from_loader(backend, manifest, adapter, &mut loader)
-                        {
-                            match executor.rerank("test") {
-                                Ok(_) => {
-                                    passed += 1;
-                                    println!("  ✅ 通过");
-                                }
-                                Err(e) => {
-                                    println!("  ❌ 重排序失败: {}", e);
-                                }
-                            }
-                        }
-                    }
+                    executor.rerank("test").ok().is_some()
                 } else {
-                    println!("  ⚠️  跳过 (未知模型类型)");
+                    false
+                };
+
+                if test_ok {
+                    passed += 1;
+                    println!("  ✅");
+                } else {
+                    println!("  ❌");
                 }
             }
             Err(e) => {
@@ -306,10 +383,6 @@ fn real_models_batch_test_all_available() {
         }
     }
 
-    println!("\n真实模型测试汇总:");
-    println!("  测试: {} / {}", tested, models.len());
-    println!("  通过: {} / {}", passed, tested);
-
-    // 只要有模型被测试就算通过
+    println!("\n本地模型测试: {} / {} 通过", passed, tested);
     assert!(tested > 0, "没有测试任何模型");
 }

@@ -14,6 +14,9 @@ fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
     Executor::from_loader(backend, manifest, adapter, &mut loader).expect("executor")
 }
 
+/// 使用虚拟小模型进行快速单元测试
+///
+/// 这些测试使用 mock 权重，不下载真实模型，适合快速 CI 验证
 #[test]
 fn generator_matrix_covers_required_models() {
     let files = TestModelFiles::new().expect("test model files");
