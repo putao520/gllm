@@ -5,44 +5,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hf_hub::api::sync::Api;
-use hf_hub::api::Progress;
 use serde::Deserialize;
 
 use crate::manifest::FileMap;
 
 use super::{
-    downloader::{ProgressBar, ProgressCallback},
     parallel::ParallelLoader,
     LoaderError, Result,
 };
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const HF_TOKEN_PATH: &str = ".huggingface/token";
-
-/// 适配器：将我们的 ProgressCallback 转换为 hf_hub::api::Progress
-struct HfProgressAdapter<'a> {
-    inner: &'a mut ProgressBar,
-}
-
-impl<'a> HfProgressAdapter<'a> {
-    fn new(inner: &'a mut ProgressBar) -> Self {
-        Self { inner }
-    }
-}
-
-impl<'a> Progress for HfProgressAdapter<'a> {
-    fn init(&mut self, total: usize, filename: &str) {
-        self.inner.init(total, filename);
-    }
-
-    fn update(&mut self, current: usize) {
-        self.inner.update(current);
-    }
-
-    fn finish(&mut self) {
-        self.inner.finish();
-    }
-}
 
 /// 从多个来源读取 HuggingFace Token
 ///
@@ -224,16 +197,8 @@ impl HfHubClient {
 
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
         let repo_api = self.api.model(repo.to_string());
-
-        // 先检查文件是否已缓存（避免显示不必要的进度）
-        if let Ok(path) = repo_api.get(filename) {
-            return Ok(path);
-        }
-
-        // 文件不存在，使用进度报告器下载
-        let mut progress = ProgressBar::new(filename.to_string());
-        let adapter = HfProgressAdapter::new(&mut progress);
-        repo_api.download_with_progress(filename, adapter)
+        // get() 会自动检查缓存，不存在则下载（无进度显示）
+        repo_api.get(filename)
             .map_err(|err| LoaderError::HfHub(err.to_string()))
     }
 
@@ -268,24 +233,13 @@ impl HfHubClient {
             eprintln!("   ✅ 并行下载完成");
             Ok(shard_paths)
         } else {
-            // 串行下载：检查文件是否已缓存
+            // 串行下载：get() 会自动检查缓存
             let mut result = Vec::new();
-            for (idx, shard_path) in shard_paths_list.iter().enumerate() {
+            for shard_path in shard_paths_list {
                 let filename = shard_path.to_string_lossy().to_string();
                 let repo_api = api.model(repo_id.clone());
 
-                // 先检查文件是否已缓存
-                if let Ok(path) = repo_api.get(&filename) {
-                    result.push(path);
-                    continue;
-                }
-
-                // 文件不存在，使用进度报告器下载
-                eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
-                let mut progress = ProgressBar::new(filename.clone());
-                let adapter = HfProgressAdapter::new(&mut progress);
-                let path = repo_api
-                    .download_with_progress(&filename, adapter)
+                let path = repo_api.get(&filename)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
                 result.push(path);
             }
