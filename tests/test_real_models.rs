@@ -38,7 +38,9 @@ const REGRESSION_MODELS: &[(&str, &str)] = &[
 ];
 
 /// 使用 HuggingFace 自动下载测试单个模型
-/// 失败时自动回退到 ModelScope（魔搭社区）
+///
+/// 注意：需要 HF_TOKEN 的 gated 模型会提示错误
+/// 可用的公开模型：smollm2-135m, phi-4-mini, internlm3-8b, bge-m3, e5-small
 fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
     let manifest = registry::lookup(alias)
         .ok_or_else(|| format!("manifest not found: {}", alias))?;
@@ -48,9 +50,8 @@ fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
 
     println!("  测试: {} (架构: {:?})", alias, manifest.arch);
 
-    // 使用 Loader::from_hf_with_fallback 自动下载模型
-    // HF 失败时自动尝试 ModelScope（对中国用户更友好）
-    let mut loader = loader::Loader::from_hf_with_fallback(alias)
+    // 使用 Loader::from_hf 自动下载模型
+    let mut loader = loader::Loader::from_hf(alias)
         .map_err(|e| format!("loader failed: {}", e))?;
 
     let backend = CpuBackend::new();
