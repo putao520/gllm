@@ -306,7 +306,18 @@ impl Loader {
         weights: Vec<PathBuf>,
         aux_files: Vec<PathBuf>,
     ) -> Result<Self> {
-        let manifest = registry::lookup(repo_or_alias);
+        Self::from_local_files_with_manifest(repo_or_alias, weights, aux_files, None)
+    }
+
+    /// Create a loader from local files with an explicit manifest.
+    /// This is useful when the manifest is already known (e.g., from registry lookup by a different name).
+    pub fn from_local_files_with_manifest(
+        repo_or_alias: &str,
+        weights: Vec<PathBuf>,
+        aux_files: Vec<PathBuf>,
+        manifest: Option<&'static ModelManifest>,
+    ) -> Result<Self> {
+        let resolved_manifest = manifest.or_else(|| registry::lookup(repo_or_alias));
         let repo = repo_or_alias.to_string();
         let config = LoaderConfig::default();
         let cache = CacheLayout::new(config.cache_dir.clone())?;
@@ -314,7 +325,7 @@ impl Loader {
         let hf = HfHubClient::new(cache.hf_cache_dir())?;
         let format = detect_weight_format(&weights)?;
         Ok(Self {
-            manifest,
+            manifest: resolved_manifest,
             repo,
             source: ModelSource::HuggingFace,
             config,
@@ -503,10 +514,33 @@ impl Loader {
             }
             let tensor = loader.tensor(&name)?;
             if let Some(outputs) = maybe_split_fused(self.rules(), &name, &tensor) {
+                // DEBUG: 打印分解信息
+                if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+                    eprintln!("  [SPLIT] {} -> {} 个输出 (dtype: {:?})", name, outputs.len(), tensor.dtype);
+                    for out in &outputs {
+                        let (name, shape) = match out {
+                            OwnedTensor::F16 { name, shape, .. } => (name, shape),
+                            OwnedTensor::BF16 { name, shape, .. } => (name, shape),
+                            OwnedTensor::F32 { name, shape, .. } => (name, shape),
+                        };
+                        eprintln!("    -> {} shape={:?}", name, shape);
+                    }
+                }
                 for output in outputs {
                     upload_owned_tensor(backend, &mut handle, output)?;
                 }
                 continue;
+            }
+
+            // DEBUG: 没有分解时打印
+            if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+                let dtype_str = match tensor.dtype {
+                    Dtype::F16 => "f16",
+                    Dtype::BF16 => "bf16",
+                    Dtype::F32 => "f32",
+                    _ => "unknown",
+                };
+                eprintln!("  [NOSPLIT] {} dtype={}", name, dtype_str);
             }
             upload_tensor_slice(backend, &mut handle, &name, tensor)?;
         }
@@ -813,8 +847,25 @@ fn maybe_split_fused(
     name: &str,
     tensor: &TensorSlice<'_>,
 ) -> Option<Vec<OwnedTensor>> {
+    // DEBUG: 跟踪融合权重分解
+    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+        eprintln!("  [FUSED_CHECK] name={}, rules={:?}", name, rules);
+    }
     let rules = rules?;
+
+    // Phi4 GQA 特殊处理: qkv_proj 权重不是等分的
+    // Phi-4-mini: Q=3072, K=1024, V=1024, total=5120
+    if matches!(rules, TensorNamingRule::Phi4) && name.contains("qkv_proj") {
+        if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+            eprintln!("  [PHI4_GQA] 手动分割 qkv_proj weight shape={:?}", tensor.shape);
+        }
+        return split_phi4_qkv(name, tensor);
+    }
+
     let fused = fused_spec(rules, name, &tensor.shape)?;
+    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+        eprintln!("  [FUSED_SPEC] matched! split={}, targets={:?}", fused.split, fused.targets);
+    }
     let axis = split_axis(&tensor.shape, fused.split)?;
     let mut out_shape = tensor.shape.clone();
     out_shape[axis] /= fused.split;
@@ -1165,6 +1216,9 @@ struct FusedSpec {
 }
 
 fn fused_spec(rules: TensorNamingRule, name: &str, shape: &[usize]) -> Option<FusedSpec> {
+    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+        eprintln!("    [fused_spec] rules={:?}, name={}", rules, name);
+    }
     match rules {
         TensorNamingRule::GPT2Next => {
             if name.contains("c_attn") {
@@ -1237,6 +1291,161 @@ fn replace_last(haystack: &str, needle: &str, with: &str) -> Option<String> {
     out.push_str(with);
     out.push_str(&haystack[pos + needle.len()..]);
     Some(out)
+}
+
+/// Phi-4 GQA QKV 权重手动分割
+///
+/// Phi-4 使用 GQA (Grouped Query Attention)，QKV 融合权重的形状是 [5120, 3072]：
+/// - Q: [3072, 3072] - query 投影
+/// - K: [1024, 3072] - key 投影 (num_kv_heads * head_dim)
+/// - V: [1024, 3072] - value 投影
+///
+/// 由于不是等分，需要手动按行分割。
+fn split_phi4_qkv(name: &str, tensor: &TensorSlice<'_>) -> Option<Vec<OwnedTensor>> {
+    // 从原始形状 [5120, 3072] 推断各部分大小
+    let [out_dim, in_dim] = [tensor.shape[0], tensor.shape[1]];
+
+    // Phi-4-mini: Q=3072, K=1024, V=1024
+    // 通过 in_dim (hidden_size) 推断各部分
+    // hidden_size = 3072, num_kv_heads * head_dim = 1024
+    let q_dim = in_dim;  // Q 投影输出 = hidden_size
+    let kv_dim = (out_dim - q_dim) / 2;  // K 和 V 各占剩余的一半
+
+    if q_dim + kv_dim * 2 != out_dim {
+        if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+            eprintln!("  [PHI4_GQA] 警告: 形状不匹配 out_dim={}, q_dim={}, kv_dim={}", out_dim, q_dim, kv_dim);
+        }
+        return None;
+    }
+
+    let targets = qkv_targets(name, "qkv_proj")?;
+    let q_name = &targets[0];
+    let k_name = &targets[1];
+    let v_name = &targets[2];
+
+    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
+        eprintln!("  [PHI4_GQA] 分割: Q={}, K={}, V={}", q_dim, kv_dim, kv_dim);
+    }
+
+    match tensor.dtype {
+        Dtype::BF16 => {
+            let data = tensor.as_bf16().ok()?;
+            let row_size = in_dim * 2;  // 每行字节数 (bf16 = 2 bytes)
+            let mut q_data = Vec::with_capacity(q_dim * in_dim);
+            let mut k_data = Vec::with_capacity(kv_dim * in_dim);
+            let mut v_data = Vec::with_capacity(kv_dim * in_dim);
+
+            // 按行分割
+            for row in 0..out_dim {
+                let start = row * in_dim;
+                let end = start + in_dim;
+                let row_data = &data[start..end];
+
+                if row < q_dim {
+                    q_data.extend_from_slice(row_data);
+                } else if row < q_dim + kv_dim {
+                    k_data.extend_from_slice(row_data);
+                } else {
+                    v_data.extend_from_slice(row_data);
+                }
+            }
+
+            Some(vec![
+                OwnedTensor::BF16 {
+                    name: q_name.clone(),
+                    shape: vec![q_dim, in_dim],
+                    data: q_data,
+                },
+                OwnedTensor::BF16 {
+                    name: k_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: k_data,
+                },
+                OwnedTensor::BF16 {
+                    name: v_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: v_data,
+                },
+            ])
+        }
+        Dtype::F16 => {
+            let data = tensor.as_f16().ok()?;
+            let mut q_data = Vec::with_capacity(q_dim * in_dim);
+            let mut k_data = Vec::with_capacity(kv_dim * in_dim);
+            let mut v_data = Vec::with_capacity(kv_dim * in_dim);
+
+            for row in 0..out_dim {
+                let start = row * in_dim;
+                let end = start + in_dim;
+                let row_data = &data[start..end];
+
+                if row < q_dim {
+                    q_data.extend_from_slice(row_data);
+                } else if row < q_dim + kv_dim {
+                    k_data.extend_from_slice(row_data);
+                } else {
+                    v_data.extend_from_slice(row_data);
+                }
+            }
+
+            Some(vec![
+                OwnedTensor::F16 {
+                    name: q_name.clone(),
+                    shape: vec![q_dim, in_dim],
+                    data: q_data,
+                },
+                OwnedTensor::F16 {
+                    name: k_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: k_data,
+                },
+                OwnedTensor::F16 {
+                    name: v_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: v_data,
+                },
+            ])
+        }
+        Dtype::F32 => {
+            let data = tensor.as_f32().ok()?;
+            let mut q_data = Vec::with_capacity(q_dim * in_dim);
+            let mut k_data = Vec::with_capacity(kv_dim * in_dim);
+            let mut v_data = Vec::with_capacity(kv_dim * in_dim);
+
+            for row in 0..out_dim {
+                let start = row * in_dim;
+                let end = start + in_dim;
+                let row_data = &data[start..end];
+
+                if row < q_dim {
+                    q_data.extend_from_slice(row_data);
+                } else if row < q_dim + kv_dim {
+                    k_data.extend_from_slice(row_data);
+                } else {
+                    v_data.extend_from_slice(row_data);
+                }
+            }
+
+            Some(vec![
+                OwnedTensor::F32 {
+                    name: q_name.clone(),
+                    shape: vec![q_dim, in_dim],
+                    data: q_data,
+                },
+                OwnedTensor::F32 {
+                    name: k_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: k_data,
+                },
+                OwnedTensor::F32 {
+                    name: v_name.clone(),
+                    shape: vec![kv_dim, in_dim],
+                    data: v_data,
+                },
+            ])
+        }
+        _ => None,
+    }
 }
 
 fn split_axis(shape: &[usize], split: usize) -> Option<usize> {

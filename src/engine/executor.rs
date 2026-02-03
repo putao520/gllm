@@ -3,6 +3,7 @@
 use gllm_kernels::backend_trait::{
     AttentionTopology, Backend, BackendError, KvCacheHandle, LogitsHandle,
 };
+use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::{
     GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, SamplingConfig,
 };
@@ -79,12 +80,21 @@ impl<B: Backend + 'static> Executor<B> {
             ..Scheduler2024Config::default()
         });
         let page_size = scheduler.config().page_size;
+
+        // CPU backend 只支持 f32 dtype for KV cache
+        // 如果模型配置是 f16/bf16，需要强制转换为 f32
+        let cpu_dtype_size = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>() {
+            Some(4) // f32
+        } else {
+            None
+        };
+
         let kv_cache_config = KvCacheConfig {
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_key_value_heads,
             head_dim: model_config.head_dim,
             max_seq_len: model_config.max_position_embeddings,
-            dtype_size: model_config.dtype_size,
+            dtype_size: cpu_dtype_size.unwrap_or(model_config.dtype_size),
             page_size,
             swap_config: None, // 暂不启用 swap
         };

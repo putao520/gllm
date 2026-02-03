@@ -17,6 +17,20 @@ pub const QWEN3_7B_MANIFEST: ModelManifest = ModelManifest {
     moe_config: None,
 };
 
+/// Qwen3-1.7B (实际存在的小型 Qwen3 模型)
+pub const QWEN3_1_7B_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::Qwen3_7B,  // 复用相同的架构
+    aliases: &["qwen3-1.7b", "qwen3-1.7b-instruct"],
+    hf_repo: "Qwen/Qwen3-1.7B",
+    model_scope_repo: Some("qwen/Qwen3-1.7B"),
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::Qwen3,
+    tensor_rules: TensorNamingRule::Qwen3,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
 pub const QWEN3_MOE_A22B_MANIFEST: ModelManifest = ModelManifest {
     model_id: KnownModel::Qwen3_MoE_A22B,
     aliases: &["qwen3-moe"],
@@ -277,8 +291,22 @@ pub const BGE_RERANK_V3_MANIFEST: ModelManifest = ModelManifest {
     moe_config: None,
 };
 
+pub const BGE_RERANK_V2_M3_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::Bge_Rerank_V2_M3,
+    aliases: &["bge-reranker-v2-m3"],
+    hf_repo: "BAAI/bge-reranker-v2-m3",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
 pub const ALL_MANIFESTS: &[&ModelManifest] = &[
     &QWEN3_7B_MANIFEST,
+    &QWEN3_1_7B_MANIFEST,
     &QWEN3_MOE_A22B_MANIFEST,
     &QWEN3_THINKING_MANIFEST,
     &LLAMA4_8B_MANIFEST,
@@ -299,6 +327,7 @@ pub const ALL_MANIFESTS: &[&ModelManifest] = &[
     &BGE_M4_MANIFEST,
     &QWEN3_RERANK_MANIFEST,
     &BGE_RERANK_V3_MANIFEST,
+    &BGE_RERANK_V2_M3_MANIFEST,
 ];
 
 pub fn manifest_by_id(model: KnownModel) -> &'static ModelManifest {
@@ -324,5 +353,6 @@ pub fn manifest_by_id(model: KnownModel) -> &'static ModelManifest {
         KnownModel::Bge_M4 => &BGE_M4_MANIFEST,
         KnownModel::Qwen3_Rerank => &QWEN3_RERANK_MANIFEST,
         KnownModel::Bge_Rerank_V3 => &BGE_RERANK_V3_MANIFEST,
+        KnownModel::Bge_Rerank_V2_M3 => &BGE_RERANK_V2_M3_MANIFEST,
     }
 }

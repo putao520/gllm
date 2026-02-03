@@ -105,4 +105,40 @@ pub enum KnownModel {
     Bge_M4,
     Qwen3_Rerank,
     Bge_Rerank_V3,
+    Bge_Rerank_V2_M3,
+}
+
+impl KnownModel {
+    /// 判断是否为生成模型 (Generator)
+    pub fn is_generator(&self) -> bool {
+        matches!(
+            self,
+            Self::Qwen3_7B
+                | Self::Qwen3_MoE_A22B
+                | Self::Qwen3_Thinking
+                | Self::Llama4_8B
+                | Self::Llama4_Scout_17B
+                | Self::Ministral_8B
+                | Self::MistralSmall_3
+                | Self::GLM4_7_Flash
+                | Self::GLM5_9B
+                | Self::GptOss_1_5B
+                | Self::GptOss_12B
+                | Self::Phi4
+                | Self::Phi4_Mini
+                | Self::Gemma2_2B_It
+                | Self::Gemma2_9B
+                | Self::Gemma2_27B
+        )
+    }
+
+    /// 判断是否为嵌入模型 (Embedding)
+    pub fn is_embedding(&self) -> bool {
+        matches!(self, Self::Qwen3_Embed | Self::Bge_M3 | Self::Bge_M4)
+    }
+
+    /// 判断是否为重排序模型 (Reranker)
+    pub fn is_reranker(&self) -> bool {
+        matches!(self, Self::Qwen3_Rerank | Self::Bge_Rerank_V3 | Self::Bge_Rerank_V2_M3)
+    }
 }

@@ -14,8 +14,9 @@ categories = ["algorithms", "science", "text-processing"]
 name = "gllm"
 path = "src/lib.rs"
 
-# Binary targets removed (test_models.rs deleted in TABULA RASA)
-# Will be re-added when implementing CLI/examples
+[[bin]]
+name = "download"
+path = "src/bin/download.rs"
 
 [features]
 # Default: Auto-detect backend at runtime

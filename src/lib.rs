@@ -20,8 +20,12 @@ pub mod tokenizer;
 pub mod quantization;
 
 pub use manifest::{
-    KnownModel, ModelArchitecture, ModelManifest, MoEConfig, RouterType, TensorNamingRule,
+    FileMap, KnownModel, ModelArchitecture, ModelManifest, MoEConfig, RouterType,
+    TensorNamingRule,
 };
+
+// Re-export EMPTY_FILE_MAP for convenience
+pub use manifest::EMPTY_FILE_MAP;
 pub use client::{AsyncClient, Client};
 pub use adapter::{Message, Role};
 pub use tokenizer::{TokenizerError, TokenizerHandle};
