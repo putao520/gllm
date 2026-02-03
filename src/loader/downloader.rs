@@ -95,6 +95,9 @@ impl ProgressCallback for ProgressBar {
     fn init(&mut self, total: usize, filename: &str) {
         self.total = total;
         self.filename = filename.to_string();
+        let now = std::time::Instant::now();
+        self.start = now;  // 重置开始时间
+        self.last_print = now;  // 重置上次打印时间
         eprintln!("📥 下载: {} ({:.2} MB)", filename, total as f64 / 1e6);
     }
 
