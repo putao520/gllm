@@ -16,12 +16,14 @@ use crate::manifest::{ModelManifest, TensorNamingRule};
 use crate::quantization::dequantize_int8_with_zero;
 use crate::registry;
 
+pub mod downloader;
 pub mod hf_hub;
 pub mod modelscope;
 pub mod parallel;
 pub mod pytorch;
 pub mod safetensors;
 
+pub use downloader::{Downloader, HfHubDownloader, ModelScopeDownloader, NoProgress, ProgressBar, ProgressCallback};
 pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
 pub use modelscope::{ModelScopeClient, MsModelFiles};
 pub use parallel::ParallelLoader;
@@ -97,13 +99,6 @@ impl ModelSource {
             _ => None,
         }
     }
-
-    pub fn from_env() -> Option<Self> {
-        std::env::var("GLLM_MODEL_SOURCE")
-            .or_else(|_| std::env::var("GLLM_SOURCE"))
-            .ok()
-            .and_then(|value| Self::parse(&value))
-    }
 }
 
 impl Default for ModelSource {
@@ -118,7 +113,8 @@ pub struct LoaderConfig {
     pub checksum: ChecksumPolicy,
     pub parallel: ParallelPolicy,
     pub source: ModelSource,
-    pub modelscope_endpoint: Option<String>,
+    /// 当 HF 下载失败时是否自动回退到 ModelScope
+    pub enable_fallback: bool,
 }
 
 impl Default for LoaderConfig {
@@ -128,77 +124,70 @@ impl Default for LoaderConfig {
             checksum: ChecksumPolicy::VerifyOnLoad,
             parallel: ParallelPolicy::Auto,
             source: ModelSource::HuggingFace,
-            modelscope_endpoint: None,
+            enable_fallback: true,  // 默认启用 HF → ModelScope 回退
         }
     }
 }
 
 impl LoaderConfig {
     pub fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(source) = ModelSource::from_env() {
-            config.source = source;
-        }
-        if let Ok(endpoint) = std::env::var("GLLM_MODELSCOPE_ENDPOINT") {
-            if !endpoint.trim().is_empty() {
-                config.modelscope_endpoint = Some(endpoint);
-            }
-        }
-        config
+        Self::default()
     }
 }
 
-const DEFAULT_MODELSCOPE_ENDPOINT: &str = "https://modelscope.cn";
-
+/// 模型缓存目录: `~/.gllm/models/`
+///
+/// 内部子目录结构由下载库（hf-hub/ModelScope）管理
 #[derive(Debug, Clone)]
 pub struct CacheLayout {
     root: PathBuf,
-    hf_cache: PathBuf,
     checksum_db: PathBuf,
-    models_dir: PathBuf,
 }
 
 impl CacheLayout {
     pub fn new(root: Option<PathBuf>) -> Result<Self> {
-        let base = match root {
-            Some(path) => path,
-            None => {
-                let mut base = dirs::home_dir().ok_or(LoaderError::HomeDirUnavailable)?;
-                base.push(".gllm");
-                base.push("cache");
-                base
-            }
+        // 支持环境变量 GLLM_CACHE_DIR 自定义路径
+        let base = if let Ok(custom) = std::env::var("GLLM_CACHE_DIR") {
+            PathBuf::from(custom)
+        } else if let Some(path) = root {
+            path
+        } else {
+            let mut base = dirs::home_dir().ok_or(LoaderError::HomeDirUnavailable)?;
+            base.push(".gllm");
+            base.push("models");
+            base
         };
-        let hf_cache = base.join("hf-hub");
+
         let checksum_db = base.join("checksums.json");
-        let mut models_dir = dirs::home_dir().ok_or(LoaderError::HomeDirUnavailable)?;
-        models_dir.push(".gllm");
-        models_dir.push("models");
+
         Ok(Self {
             root: base,
-            hf_cache,
             checksum_db,
-            models_dir,
         })
     }
 
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
-        std::fs::create_dir_all(&self.hf_cache)?;
-        std::fs::create_dir_all(&self.models_dir)?;
         Ok(())
     }
 
+    /// 获取 HuggingFace 下载缓存目录（直接使用根目录）
     pub fn hf_cache_dir(&self) -> PathBuf {
-        self.hf_cache.clone()
+        self.root.clone()
+    }
+
+    /// 获取 ModelScope 下载缓存目录（直接使用根目录）
+    pub fn modelscope_cache_dir(&self) -> PathBuf {
+        self.root.clone()
     }
 
     pub fn checksum_db(&self) -> &Path {
         &self.checksum_db
     }
 
+    /// 获取模型根目录（用于材料化模型文件）
     pub fn models_dir(&self) -> &Path {
-        &self.models_dir
+        &self.root
     }
 }
 
@@ -364,6 +353,31 @@ impl Loader {
     }
 
     pub fn from_source_with_config(repo_or_alias: &str, config: LoaderConfig) -> Result<Self> {
+        // 当 source 是 HuggingFace 且启用 fallback 时，尝试自动回退
+        let should_try_fallback = config.source == ModelSource::HuggingFace && config.enable_fallback;
+
+        let result = Self::load_from_source(repo_or_alias, &config);
+
+        if should_try_fallback {
+            result.or_else(|err| {
+                if is_recoverable_error(&err) {
+                    eprintln!("⚠️  HuggingFace 下载失败，尝试 ModelScope...");
+                    // 创建使用 ModelSource::ModelScope 的配置
+                    let mut ms_config = config.clone();
+                    ms_config.source = ModelSource::ModelScope;
+                    ms_config.enable_fallback = false;  // 避免循环
+                    Self::load_from_source(repo_or_alias, &ms_config)
+                } else {
+                    Err(err)
+                }
+            })
+        } else {
+            result
+        }
+    }
+
+    /// 实际的加载逻辑（不包含 fallback）
+    fn load_from_source(repo_or_alias: &str, config: &LoaderConfig) -> Result<Self> {
         let manifest = registry::lookup(repo_or_alias);
         let repo = resolve_repo(repo_or_alias, manifest, config.source);
         let cache = CacheLayout::new(config.cache_dir.clone())?;
@@ -375,21 +389,37 @@ impl Loader {
             ParallelPolicy::Auto => manifest.map(|m| m.is_moe()).unwrap_or(false),
         });
 
-        let endpoint = match config.source {
-            ModelSource::HuggingFace => None,
-            ModelSource::ModelScope => Some(
-                config
-                    .modelscope_endpoint
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_MODELSCOPE_ENDPOINT.to_string()),
-            ),
+        // 根据源类型选择下载方式
+        let files = if config.source == ModelSource::ModelScope {
+            // 使用 ModelScope 客户端，使用专门的 ModelScope 缓存目录
+            let ms_cache = cache.modelscope_cache_dir();
+            let ms_client = ModelScopeClient::new(ms_cache)?;
+            let ms_files = ms_client.download_model_files(
+                &repo,
+                manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
+                parallel_download,
+            ).map_err(|e| LoaderError::HfHub(format!("ModelScope download failed: {}", e)))?;
+
+            // 转换 MsModelFiles 为 HfModelFiles
+            HfModelFiles {
+                repo: ms_files.repo,
+                weights: ms_files.weights,
+                format: if matches!(ms_files.format, modelscope::WeightFormat::SafeTensors) {
+                    WeightFormat::SafeTensors
+                } else {
+                    WeightFormat::Bin
+                },
+                aux_files: ms_files.aux_files,
+            }
+        } else {
+            // 使用 HuggingFace 客户端
+            let hf = HfHubClient::new(cache.hf_cache_dir())?;
+            hf.download_model_files(
+                &repo,
+                manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
+                parallel_download,
+            )?
         };
-        let hf = HfHubClient::with_endpoint(cache.hf_cache_dir(), endpoint)?;
-        let files = hf.download_model_files(
-            &repo,
-            manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
-            parallel_download,
-        )?;
 
         let mut checksum_store = ChecksumStore::load(cache.checksum_db())?;
         for path in &files.weights {
@@ -403,11 +433,14 @@ impl Loader {
             materialize_model_dir(cache.models_dir(), &repo, &all_files)?;
         }
 
+        // 创建 HfHubClient（用于后续操作）
+        let hf = HfHubClient::new(cache.hf_cache_dir())?;
+
         Ok(Self {
             manifest,
             repo,
             source: config.source,
-            config,
+            config: config.clone(),
             cache,
             hf,
             files,
@@ -539,39 +572,12 @@ impl Loader {
             }
             let tensor = loader.tensor(&name)?;
             if let Some(outputs) = maybe_split_fused(self.rules(), &name, &tensor) {
-                // DEBUG: 打印分解信息
-                if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-                    eprintln!(
-                        "  [SPLIT] {} -> {} 个输出 (dtype: {:?})",
-                        name,
-                        outputs.len(),
-                        tensor.dtype
-                    );
-                    for out in &outputs {
-                        let (name, shape) = match out {
-                            OwnedTensor::F16 { name, shape, .. } => (name, shape),
-                            OwnedTensor::BF16 { name, shape, .. } => (name, shape),
-                            OwnedTensor::F32 { name, shape, .. } => (name, shape),
-                        };
-                        eprintln!("    -> {} shape={:?}", name, shape);
-                    }
-                }
                 for output in outputs {
                     upload_owned_tensor(backend, &mut handle, output)?;
                 }
                 continue;
             }
 
-            // DEBUG: 没有分解时打印
-            if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-                let dtype_str = match tensor.dtype {
-                    Dtype::F16 => "f16",
-                    Dtype::BF16 => "bf16",
-                    Dtype::F32 => "f32",
-                    _ => "unknown",
-                };
-                eprintln!("  [NOSPLIT] {} dtype={}", name, dtype_str);
-            }
             upload_tensor_slice(backend, &mut handle, &name, tensor)?;
         }
 
@@ -923,31 +929,15 @@ fn maybe_split_fused(
     name: &str,
     tensor: &TensorSlice<'_>,
 ) -> Option<Vec<OwnedTensor>> {
-    // DEBUG: 跟踪融合权重分解
-    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-        eprintln!("  [FUSED_CHECK] name={}, rules={:?}", name, rules);
-    }
     let rules = rules?;
 
     // Phi4 GQA 特殊处理: qkv_proj 权重不是等分的
     // Phi-4-mini: Q=3072, K=1024, V=1024, total=5120
     if matches!(rules, TensorNamingRule::Phi4) && name.contains("qkv_proj") {
-        if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-            eprintln!(
-                "  [PHI4_GQA] 手动分割 qkv_proj weight shape={:?}",
-                tensor.shape
-            );
-        }
         return split_phi4_qkv(name, tensor);
     }
 
     let fused = fused_spec(rules, name, &tensor.shape)?;
-    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-        eprintln!(
-            "  [FUSED_SPEC] matched! split={}, targets={:?}",
-            fused.split, fused.targets
-        );
-    }
     let axis = split_axis(&tensor.shape, fused.split)?;
     let mut out_shape = tensor.shape.clone();
     out_shape[axis] /= fused.split;
@@ -1296,9 +1286,6 @@ struct FusedSpec {
 }
 
 fn fused_spec(rules: TensorNamingRule, name: &str, shape: &[usize]) -> Option<FusedSpec> {
-    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-        eprintln!("    [fused_spec] rules={:?}, name={}", rules, name);
-    }
     match rules {
         TensorNamingRule::GPT2Next => {
             if name.contains("c_attn") {
@@ -1392,12 +1379,6 @@ fn split_phi4_qkv(name: &str, tensor: &TensorSlice<'_>) -> Option<Vec<OwnedTenso
     let kv_dim = (out_dim - q_dim) / 2; // K 和 V 各占剩余的一半
 
     if q_dim + kv_dim * 2 != out_dim {
-        if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-            eprintln!(
-                "  [PHI4_GQA] 警告: 形状不匹配 out_dim={}, q_dim={}, kv_dim={}",
-                out_dim, q_dim, kv_dim
-            );
-        }
         return None;
     }
 
@@ -1406,14 +1387,10 @@ fn split_phi4_qkv(name: &str, tensor: &TensorSlice<'_>) -> Option<Vec<OwnedTenso
     let k_name = &targets[1];
     let v_name = &targets[2];
 
-    if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-        eprintln!("  [PHI4_GQA] 分割: Q={}, K={}, V={}", q_dim, kv_dim, kv_dim);
-    }
-
     match tensor.dtype {
         Dtype::BF16 => {
             let data = tensor.as_bf16().ok()?;
-            let row_size = in_dim * 2; // 每行字节数 (bf16 = 2 bytes)
+            let _row_size = in_dim * 2; // 每行字节数 (bf16 = 2 bytes)
             let mut q_data = Vec::with_capacity(q_dim * in_dim);
             let mut k_data = Vec::with_capacity(kv_dim * in_dim);
             let mut v_data = Vec::with_capacity(kv_dim * in_dim);

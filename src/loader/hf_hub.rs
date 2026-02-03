@@ -3,7 +3,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use hf_hub::api::sync::Api;
 use hf_hub::api::Progress;
@@ -11,99 +10,37 @@ use serde::Deserialize;
 
 use crate::manifest::FileMap;
 
-use super::{parallel::ParallelLoader, LoaderError, Result};
+use super::{
+    downloader::{ProgressBar, ProgressCallback},
+    parallel::ParallelLoader,
+    LoaderError, Result,
+};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const HF_TOKEN_PATH: &str = ".huggingface/token";
 
-/// 简单的进度报告器 - 确保输出立即可见
-struct ProgressReporter {
-    filename: String,
-    total: usize,
-    start: Instant,
-    last_print: Instant,
-    last_bytes: usize,
+/// 适配器：将我们的 ProgressCallback 转换为 hf_hub::api::Progress
+struct HfProgressAdapter<'a> {
+    inner: &'a mut ProgressBar,
 }
 
-impl ProgressReporter {
-    fn new(filename: String, total: usize) -> Self {
-        eprintln!("📥 下载: {} ({:.2} GB)", filename, total as f64 / 1e9);
-        Self {
-            filename,
-            total,
-            start: Instant::now(),
-            last_print: Instant::now(),
-            last_bytes: 0,
-        }
-    }
-
-    fn print_progress(&mut self, current: usize) {
-        let now = Instant::now();
-        let elapsed_since_last_print = now.saturating_duration_since(self.last_print).as_secs_f64();
-
-        // 每秒至少打印一次进度
-        if elapsed_since_last_print >= 1.0 || current >= self.total {
-            let percent = (current as f64 / self.total as f64 * 100.0).min(100.0);
-            let total_elapsed = self.start.elapsed().as_secs_f64();
-            let speed = if total_elapsed > 0.0 {
-                (current as f64 / total_elapsed) / 1e6 // MB/s
-            } else {
-                0.0
-            };
-
-            let eta_secs = if speed > 0.0 {
-                ((self.total - current) as f64 / (speed * 1e6)) as u64
-            } else {
-                0
-            };
-
-            eprint!(
-                "\r   进度: {:.1}% ({:.1} MB / {:.1} MB) - {:.2} MB/s",
-                percent,
-                current as f64 / 1e6,
-                self.total as f64 / 1e6,
-                speed
-            );
-
-            if eta_secs > 0 {
-                let eta_mins = eta_secs / 60;
-                let eta_secs_rem = eta_secs % 60;
-                eprint!(" - ETA: {}m{}s", eta_mins, eta_secs_rem);
-            }
-
-            eprintln!();
-
-            self.last_print = now;
-        }
-        self.last_bytes = current;
+impl<'a> HfProgressAdapter<'a> {
+    fn new(inner: &'a mut ProgressBar) -> Self {
+        Self { inner }
     }
 }
 
-impl Progress for ProgressReporter {
+impl<'a> Progress for HfProgressAdapter<'a> {
     fn init(&mut self, total: usize, filename: &str) {
-        self.total = total;
-        self.filename = filename.to_string();
-        eprintln!("📥 下载: {} ({:.2} MB)", filename, total as f64 / 1e6);
+        self.inner.init(total, filename);
     }
 
     fn update(&mut self, current: usize) {
-        self.print_progress(current);
+        self.inner.update(current);
     }
 
     fn finish(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            (self.total as f64 / elapsed) / 1e6 // MB/s
-        } else {
-            0.0
-        };
-        eprintln!(
-            "   ✅ 完成下载: {} ({:.2} MB, {:.2} MB/s, {:.1}s)",
-            self.filename,
-            self.total as f64 / 1e6,
-            speed,
-            elapsed
-        );
+        self.inner.finish();
     }
 }
 
@@ -111,17 +48,10 @@ impl Progress for ProgressReporter {
 ///
 /// 优先级:
 /// 1. 环境变量 HF_TOKEN
-/// 2. 环境变量 HUGGING_FACE_HUB_TOKEN
-/// 3. ~/.huggingface/token 文件
+/// 2. ~/.huggingface/token 文件
 fn read_hf_token() -> Option<String> {
     // 1. 从环境变量读取
     if let Ok(token) = std::env::var("HF_TOKEN") {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-
-    if let Ok(token) = std::env::var("HUGGING_FACE_HUB_TOKEN") {
         if !token.is_empty() {
             return Some(token);
         }
@@ -295,10 +225,10 @@ impl HfHubClient {
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
         let repo = self.api.model(repo.to_string());
 
-        // 使用自定义进度下载（内部会检查缓存）
-        // 注意：这会显示进度，即使文件已存在
-        let progress = ProgressReporter::new(filename.to_string(), 0);
-        repo.download_with_progress(filename, progress)
+        // 使用通用进度报告器
+        let mut progress = ProgressBar::new(filename.to_string());
+        let adapter = HfProgressAdapter::new(&mut progress);
+        repo.download_with_progress(filename, adapter)
             .map_err(|err| LoaderError::HfHub(err.to_string()))
     }
 
@@ -333,15 +263,16 @@ impl HfHubClient {
             eprintln!("   ✅ 并行下载完成");
             Ok(shard_paths)
         } else {
-            // 串行下载：使用自定义进度报告
+            // 串行下载：使用通用进度报告器
             let mut result = Vec::new();
             for (idx, shard_path) in shard_paths_list.iter().enumerate() {
                 let filename = shard_path.to_string_lossy().to_string();
                 eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
 
-                let progress = ProgressReporter::new(filename.clone(), 0);
+                let mut progress = ProgressBar::new(filename.clone());
+                let adapter = HfProgressAdapter::new(&mut progress);
                 let path = api.model(repo_id.clone())
-                    .download_with_progress(&filename, progress)
+                    .download_with_progress(&filename, adapter)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
                 result.push(path);
             }
@@ -433,24 +364,13 @@ mod tests {
     fn test_read_hf_token_priority() {
         // 清理环境
         std::env::remove_var("HF_TOKEN");
-        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
 
         // 优先级 1: HF_TOKEN
         std::env::set_var("HF_TOKEN", "hf_test_from_hf_token");
         assert_eq!(read_hf_token(), Some("hf_test_from_hf_token".to_string()));
 
-        // 优先级 2: HUGGING_FACE_HUB_TOKEN (当 HF_TOKEN 不存在时)
-        std::env::remove_var("HF_TOKEN");
-        std::env::set_var("HUGGING_FACE_HUB_TOKEN", "hf_test_from_legacy");
-        assert_eq!(read_hf_token(), Some("hf_test_from_legacy".to_string()));
-
-        // HF_TOKEN 优先于 HUGGING_FACE_HUB_TOKEN
-        std::env::set_var("HF_TOKEN", "hf_priority_test");
-        assert_eq!(read_hf_token(), Some("hf_priority_test".to_string()));
-
         // 清理
         std::env::remove_var("HF_TOKEN");
-        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
     }
 
     #[test]
@@ -458,7 +378,6 @@ mod tests {
         // 注意：如果 ~/.huggingface/token 文件存在，此测试会跳过
         // 这是有意为之 - 在有实际 token 的环境中跳过此测试
         std::env::remove_var("HF_TOKEN");
-        std::env::remove_var("HUGGING_FACE_HUB_TOKEN");
 
         // 检查 token 文件是否存在
         if let Some(home) = std::env::var("HOME").ok() {

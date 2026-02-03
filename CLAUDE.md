@@ -46,6 +46,28 @@ src/
     └── mod.rs
 ```
 
+## Cache Directory
+
+**Model Cache Root**: `~/.gllm/models/`
+
+下载的模型文件存储在此目录。内部子目录结构由下载库（hf-hub/ModelScope）管理。
+
+**Environment Variables**:
+- `GLLM_CACHE_DIR`: 自定义缓存路径（默认：`~/.gllm/models`）
+- `HF_TOKEN`: HuggingFace 认证 token
+
+> **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定来源。
+
+## 🚨 环境变量铁律
+
+**禁止擅自添加环境变量**：
+- ❌ AI 禁止擅自引入新的环境变量
+- ❌ AI 禁止为"灵活性"或"可配置性"添加环境变量
+- ✅ 新增环境变量必须由用户明确要求
+- ✅ 环境变量必须有明确的、不可替代的使用场景
+
+**理由**：环境变量是公开 API，添加容易删除难。过度使用环境变量会导致配置爆炸和用户体验下降。
+
 ## Common Commands
 
 ```bash

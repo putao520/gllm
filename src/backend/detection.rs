@@ -1,5 +1,3 @@
-use std::env;
-
 use gllm_kernels::backend_trait::BackendError;
 use gllm_kernels::{CpuBackend, CudaBackend};
 
@@ -26,14 +24,6 @@ impl DetectedBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendRequest {
-    Cuda { ordinal: usize },
-    Rocm,
-    Metal,
-    Cpu,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct BackendAvailability {
     cuda: bool,
@@ -42,15 +32,7 @@ struct BackendAvailability {
 }
 
 pub fn detect_backend() -> Result<DetectedBackend, BackendError> {
-    if let Ok(value) = env::var("GLLM_DEVICE") {
-        return detect_from_override(&value);
-    }
     detect_from_system()
-}
-
-fn detect_from_override(value: &str) -> Result<DetectedBackend, BackendError> {
-    let request = parse_backend_override(value)?;
-    init_backend(request)
 }
 
 fn detect_from_system() -> Result<DetectedBackend, BackendError> {
@@ -68,40 +50,6 @@ fn detect_from_system() -> Result<DetectedBackend, BackendError> {
         BackendType::Rocm => Err(BackendError::Unimplemented("rocm backend")),
         BackendType::Metal => Err(BackendError::Unimplemented("metal backend")),
         BackendType::Cpu => Ok(DetectedBackend::Cpu(CpuBackend::new())),
-    }
-}
-
-fn parse_backend_override(value: &str) -> Result<BackendRequest, BackendError> {
-    let trimmed = value.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == "cpu" {
-        return Ok(BackendRequest::Cpu);
-    }
-    if lower.starts_with("cuda") {
-        let ordinal = if let Some((_, idx)) = trimmed.split_once(':') {
-            idx.parse::<usize>()
-                .map_err(|_| BackendError::InvalidBackendOverride(trimmed.to_string()))?
-        } else {
-            0
-        };
-        return Ok(BackendRequest::Cuda { ordinal });
-    }
-    if lower == "rocm" {
-        return Ok(BackendRequest::Rocm);
-    }
-    if lower == "metal" {
-        return Ok(BackendRequest::Metal);
-    }
-
-    Err(BackendError::InvalidBackendOverride(trimmed.to_string()))
-}
-
-fn init_backend(request: BackendRequest) -> Result<DetectedBackend, BackendError> {
-    match request {
-        BackendRequest::Cuda { ordinal } => CudaBackend::new(ordinal).map(DetectedBackend::Cuda),
-        BackendRequest::Cpu => Ok(DetectedBackend::Cpu(CpuBackend::new())),
-        BackendRequest::Rocm => Err(BackendError::Unimplemented("rocm backend")),
-        BackendRequest::Metal => Err(BackendError::Unimplemented("metal backend")),
     }
 }
 
@@ -167,51 +115,5 @@ mod tests {
             metal: false,
         };
         assert_eq!(select_backend_type(availability), BackendType::Cpu);
-    }
-
-    #[test]
-    fn parse_backend_override_cpu() {
-        assert_eq!(parse_backend_override("cpu").unwrap(), BackendRequest::Cpu);
-        assert_eq!(
-            parse_backend_override(" CPU ").unwrap(),
-            BackendRequest::Cpu
-        );
-    }
-
-    #[test]
-    fn parse_backend_override_cuda_with_ordinal() {
-        assert_eq!(
-            parse_backend_override("cuda:2").unwrap(),
-            BackendRequest::Cuda { ordinal: 2 }
-        );
-    }
-
-    #[test]
-    fn parse_backend_override_cuda_default_ordinal() {
-        assert_eq!(
-            parse_backend_override("cuda").unwrap(),
-            BackendRequest::Cuda { ordinal: 0 }
-        );
-    }
-
-    #[test]
-    fn parse_backend_override_rocm_metal() {
-        assert_eq!(
-            parse_backend_override("rocm").unwrap(),
-            BackendRequest::Rocm
-        );
-        assert_eq!(
-            parse_backend_override("metal").unwrap(),
-            BackendRequest::Metal
-        );
-    }
-
-    #[test]
-    fn parse_backend_override_invalid() {
-        let err = parse_backend_override("tpu").unwrap_err();
-        match err {
-            BackendError::InvalidBackendOverride(value) => assert_eq!(value, "tpu"),
-            other => panic!("unexpected error: {other:?}"),
-        }
     }
 }

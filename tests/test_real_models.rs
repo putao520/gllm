@@ -52,7 +52,7 @@ fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
 
     println!("  测试: {} (架构: {:?})", alias, manifest.arch);
 
-    // 使用 Loader::from_hf 自动下载模型
+    // 使用 Loader::from_hf 自动下载模型（内部会自动 fallback 到 ModelScope）
     let mut loader = loader::Loader::from_hf(alias)
         .map_err(|e| format!("loader failed: {}", e))?;
     println!("    ✅ Loader 创建成功");

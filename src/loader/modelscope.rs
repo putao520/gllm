@@ -1,9 +1,6 @@
 //! ModelScope (魔搭社区) 集成
 //!
 //! ModelScope 是中国的模型托管平台，许多中国模型在那里公开可用
-//!
-//! 当前实现：从已缓存的 ModelScope 文件加载
-//! TODO: 实现从 ModelScope API 直接下载
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -12,13 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::manifest::FileMap;
-use super::{LoaderError, Result};
-
-/// ModelScope 缓存目录结构：
-/// ~/.gllm/cache/modelscope/
-///   └── models--<org>--<name>/
-///       └── snapshots/<hash>/
-///           └── model.safetensors
+use super::{LoaderError, Result, ParallelLoader, ProgressBar, ModelScopeDownloader};
+use super::downloader::Downloader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
@@ -43,11 +35,165 @@ impl ModelScopeClient {
         Ok(Self { cache_dir })
     }
 
+    /// 下载模型文件（支持从 ModelScope API 直接下载）
+    pub fn download_model_files(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        _parallel: ParallelLoader,
+    ) -> Result<MsModelFiles> {
+        use super::ModelScopeDownloader;
+
+        let repo = repo.to_string();
+        let mut aux_files = Vec::new();
+
+        // 创建 ModelScope 下载器
+        let downloader = ModelScopeDownloader::new(self.cache_dir.clone(), Some("https://www.modelscope.cn".to_string()))?;
+
+        // 下载辅助文件
+        for name in [
+            "config.json",
+            "configuration.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+        ] {
+            if let Ok(path) = self.get_file_any(&repo, file_map, name, &downloader) {
+                aux_files.push(path);
+            }
+        }
+
+        // 尝试下载 safetensors 分片
+        if let Ok(index_path) = self.get_file_any(&repo, file_map, "model.safetensors.index.json", &downloader) {
+            let shard_index = self.parse_safetensors_index(&index_path)?;
+            let shard_files = shard_index.shard_files();
+            let weights = self.download_shards(&repo, &shard_files, &downloader)?;
+            aux_files.push(index_path);
+            return Ok(MsModelFiles {
+                repo,
+                weights,
+                format: WeightFormat::SafeTensors,
+                aux_files,
+            });
+        }
+
+        // 尝试下载单个 safetensors 文件
+        if let Ok(path) = self.get_file_any(&repo, file_map, "model.safetensors", &downloader) {
+            return Ok(MsModelFiles {
+                repo,
+                weights: vec![path],
+                format: WeightFormat::SafeTensors,
+                aux_files,
+            });
+        }
+
+        // 尝试下载 pytorch 分片
+        if let Ok(index_path) = self.get_file_any(&repo, file_map, "pytorch_model.bin.index.json", &downloader) {
+            let shard_index = self.parse_safetensors_index(&index_path)?;
+            let shard_files = shard_index.shard_files();
+            let weights = self.download_shards(&repo, &shard_files, &downloader)?;
+            aux_files.push(index_path);
+            return Ok(MsModelFiles {
+                repo,
+                weights,
+                format: WeightFormat::Bin,
+                aux_files,
+            });
+        }
+
+        // 尝试下载单个 pytorch 文件
+        if let Ok(path) = self.get_file_any(&repo, file_map, "pytorch_model.bin", &downloader) {
+            return Ok(MsModelFiles {
+                repo,
+                weights: vec![path],
+                format: WeightFormat::Bin,
+                aux_files,
+            });
+        }
+
+        Err(LoaderError::MissingWeights)
+    }
+
+    fn get_file_any(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        logical: &str,
+        downloader: &ModelScopeDownloader,
+    ) -> Result<PathBuf> {
+        for candidate in self.candidate_names(file_map, logical) {
+            if let Ok(path) = self.get_file(repo, &candidate, downloader) {
+                return Ok(path);
+            }
+        }
+        Err(LoaderError::MissingWeights)
+    }
+
+    fn get_file(
+        &self,
+        repo: &str,
+        filename: &str,
+        downloader: &ModelScopeDownloader,
+    ) -> Result<PathBuf> {
+        let mut progress = ProgressBar::new(filename.to_string());
+        downloader.download_file_with_progress(repo, filename, &self.cache_dir, &mut progress)
+    }
+
+    fn download_shards(
+        &self,
+        repo: &str,
+        shards: &[String],
+        downloader: &ModelScopeDownloader,
+    ) -> Result<Vec<PathBuf>> {
+        let mut result = Vec::new();
+        for (idx, shard_path) in shards.iter().enumerate() {
+            let filename = shard_path;
+            eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
+
+            let mut progress = ProgressBar::new(filename.clone());
+            let path = downloader.download_file_with_progress(repo, filename, &self.cache_dir, &mut progress)?;
+            result.push(path);
+        }
+        Ok(result)
+    }
+
+    fn candidate_names(&self, file_map: FileMap, logical: &str) -> Vec<String> {
+        let mut base_names = Vec::new();
+        base_names.push(self.map_name(file_map, logical).to_string());
+        if logical == "config.json" {
+            base_names.push(self.map_name(file_map, "configuration.json").to_string());
+        }
+
+        let mut out = Vec::new();
+        for base in base_names {
+            if !out.contains(&base) {
+                out.push(base.clone());
+            }
+            for prefix in ["model/", "weights/"] {
+                let candidate = format!("{}{}", prefix, base);
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+
+    fn map_name<'a>(&'a self, file_map: FileMap, logical: &'a str) -> &'a str {
+        for (source, target) in file_map {
+            if *source == logical {
+                return target;
+            }
+        }
+        logical
+    }
+
     /// 从缓存目录加载已下载的 ModelScope 模型
     pub fn load_from_cache(
         &self,
         repo: &str,
-        file_map: FileMap,
+        _file_map: FileMap,
     ) -> Result<MsModelFiles> {
         // 标准化仓库名: org/name → models--org--name
         let normalized_repo = repo.replace('/', "--");

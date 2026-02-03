@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repo_id = &args[1];
 
-    // 使用 ~/.gllm/models 作为缓存目录
+    // 使用统一的缓存目录: ~/.gllm/models/
     let cache_dir = PathBuf::from(std::env::var("HOME")?).join(".gllm/models");
     std::fs::create_dir_all(&cache_dir)?;
 
