@@ -28,11 +28,12 @@ fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
 
     match feature {
         "Generator" => {
-            let response = client.generate("Hello")
-                .max_tokens(1)
+            let response = client.generate("The capital of")
+                .max_tokens(10)
                 .generate()
                 .map_err(|e| format!("generate failed: {}", e))?;
             assert!(!response.text.trim().is_empty(), "generator output empty");
+            assert!(response.text.len() >= 5, "generator output too short (< 5 chars)");
             println!("    ✅ 生成: '{}'", response.text.trim());
         }
         "Embedding" => {
