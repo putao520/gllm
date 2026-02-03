@@ -41,6 +41,8 @@ const REGRESSION_MODELS: &[(&str, &str)] = &[
 ///
 /// 注意：需要 HF_TOKEN 的 gated 模型会提示错误
 /// 可用的公开模型：smollm2-135m, phi-4-mini, internlm3-8b, bge-m3, e5-small
+///
+/// ⚠️ CPU性能警告：大模型(>3B参数)在CPU上运行极慢，测试时只生成1个token
 fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
     let manifest = registry::lookup(alias)
         .ok_or_else(|| format!("manifest not found: {}", alias))?;
@@ -53,18 +55,22 @@ fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
     // 使用 Loader::from_hf 自动下载模型
     let mut loader = loader::Loader::from_hf(alias)
         .map_err(|e| format!("loader failed: {}", e))?;
+    println!("    ✅ Loader 创建成功");
 
     let backend = CpuBackend::new();
     let mut executor = Executor::from_loader(backend, manifest, adapter, &mut loader)
         .map_err(|e| format!("executor failed: {}", e))?;
+    println!("    ✅ Executor 创建成功");
 
     // 根据模型类型执行相应测试
     if manifest.model_id.is_generator() {
+        println!("    🔄 开始生成测试 (1 token, CPU模式)...");
         let output = executor.generate("Hello", 1, 0.0)
             .map_err(|e| format!("generate failed: {}", e))?;
         assert!(!output.trim().is_empty(), "generator output empty");
-        println!("    ✅ 生成测试通过");
+        println!("    ✅ 生成测试通过: '{}'", output.trim());
     } else if manifest.model_id.is_embedding() {
+        println!("    🔄 开始嵌入测试...");
         let embedding = executor.embed("test text")
             .map_err(|e| format!("embed failed: {}", e))?;
         assert!(!embedding.is_empty(), "embedding empty");
@@ -72,6 +78,7 @@ fn test_model_with_auto_download(alias: &str) -> Result<(), String> {
         assert!(sum.abs() > 0.01, "embedding is all zeros");
         println!("    ✅ 嵌入测试通过 (维度: {})", embedding.len());
     } else if manifest.model_id.is_reranker() {
+        println!("    🔄 开始重排序测试...");
         let scores = executor.rerank("query text")
             .map_err(|e| format!("rerank failed: {}", e))?;
         assert!(!scores.is_empty(), "rerank scores empty");
