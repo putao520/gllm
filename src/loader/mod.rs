@@ -17,11 +17,13 @@ use crate::quantization::dequantize_int8_with_zero;
 use crate::registry;
 
 pub mod hf_hub;
+pub mod modelscope;
 pub mod parallel;
 pub mod pytorch;
 pub mod safetensors;
 
 pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
+pub use modelscope::{ModelScopeClient, MsModelFiles};
 pub use parallel::ParallelLoader;
 pub use pytorch::{PytorchConversionConfig, PytorchConversionOutput};
 pub use safetensors::{SafeTensorsLoader, TensorSlice};

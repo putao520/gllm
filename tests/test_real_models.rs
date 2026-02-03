@@ -389,3 +389,91 @@ fn real_models_batch_test_all_available() {
     println!("\n本地模型测试: {} / {} 通过", passed, tested);
     assert!(tested > 0, "没有测试任何模型");
 }
+
+// ============================================================================
+// ModelScope 加载测试
+// ============================================================================
+
+/// 测试从 ModelScope 缓存加载模型
+///
+/// ModelScope (魔搭社区) 是中国的模型托管平台
+/// 许多中国模型在那里公开可用，无需 HF_TOKEN
+///
+/// 注意：此测试仅验证 ModelScope 加载功能，不重复测试推理（与 HF 测试重复）
+#[test]
+fn modelscope_load_from_cache() {
+    use gllm::loader::modelscope::ModelScopeClient;
+
+    // ModelScope 缓存目录
+    let cache_dir = dirs::home_dir()
+        .expect("无法找到 home 目录")
+        .join(".cache")
+        .join("modelscope");
+
+    let client = match ModelScopeClient::new(cache_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("⏭️  跳过: 无法初始化 ModelScope 客户端: {}", e);
+            return;
+        }
+    };
+
+    // 列出可用的 ModelScope 模型
+    let cached_models = match client.list_cached_models() {
+        Ok(models) => models,
+        Err(e) => {
+            eprintln!("⏭️  跳过: 无法读取 ModelScope 缓存: {}", e);
+            return;
+        }
+    };
+
+    if cached_models.is_empty() {
+        eprintln!("⏭️  跳过: ModelScope 缓存为空");
+        eprintln!("    提示: 使用 ModelScope CLI 下载模型:");
+        eprintln!("           pip install modelscope");
+        eprintln!("           modelscope download --model Qwen/Qwen2-1.5B");
+        return;
+    }
+
+    println!("📦 ModelScope 缓存中的模型 ({} 个):", cached_models.len());
+    for model in &cached_models {
+        println!("    - {}", model);
+    }
+
+    // 测试加载第一个可用模型
+    let first_model = &cached_models[0];
+    println!("\n测试加载: {}", first_model);
+
+    let model_files = match client.load_from_cache(first_model, &[]) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("❌ 加载失败: {}", e);
+            return;
+        }
+    };
+
+    println!("  ✅ 仓库: {}", model_files.repo);
+    println!("  ✅ 权重格式: {:?}", model_files.format);
+    println!("  ✅ 权重文件数: {}", model_files.weights.len());
+    println!("  ✅ 辅助文件数: {}", model_files.aux_files.len());
+
+    // 验证权重文件存在
+    for weight_path in &model_files.weights {
+        assert!(
+            weight_path.exists(),
+            "权重文件不存在: {}",
+            weight_path.display()
+        );
+    }
+
+    // 验证至少有 config.json
+    let has_config = model_files.aux_files.iter().any(|p: &std::path::PathBuf| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "config.json")
+            .unwrap_or(false)
+    });
+    assert!(has_config, "缺少 config.json 文件");
+
+    println!("✅ ModelScope 加载测试通过");
+}

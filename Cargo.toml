@@ -33,6 +33,7 @@ nccl = ["gllm-kernels/nccl"]
 [dependencies]
 gllm-kernels = { path = "../gllm-kernels", default-features = false }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +43,7 @@ log = "0.4"
 dirs = "5"
 safetensors = "0.4"
 rand = "0.8"
+urlencoding = "2"
 half = "2.4"
 memmap2 = "0.9"
 rayon = "1.10"
