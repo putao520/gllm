@@ -19,9 +19,7 @@ fn generator_matrix_covers_required_models() {
     let files = TestModelFiles::new().expect("test model files");
     for alias in ["qwen3-7b", "llama-4-8b", "phi-4-mini"] {
         let mut executor = build_executor(alias, &files);
-        let output = executor
-            .generate("tok1 tok2", 1, 0.0)
-            .expect("generate");
+        let output = executor.generate("tok1 tok2", 1, 0.0).expect("generate");
         assert!(
             !output.trim().is_empty(),
             "generator output empty for {alias}"

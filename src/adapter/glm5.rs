@@ -11,14 +11,13 @@ pub struct Glm5Adapter;
 
 impl<B: Backend> ModelAdapter<B> for Glm5Adapter {
     fn supports(&self, manifest: &ModelManifest) -> bool {
-        matches!(manifest.arch, ModelArchitecture::GLM4 | ModelArchitecture::GLM5)
+        matches!(
+            manifest.arch,
+            ModelArchitecture::GLM4 | ModelArchitecture::GLM5
+        )
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }

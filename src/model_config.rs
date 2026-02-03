@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::manifest::ModelManifest;
 use crate::loader::Loader;
+use crate::manifest::ModelManifest;
 
 #[derive(Debug, Error)]
 pub enum ModelConfigError {
@@ -40,7 +40,9 @@ pub struct ModelConfig {
 
 impl ModelConfig {
     pub fn from_loader(manifest: &ModelManifest, loader: &Loader) -> ModelConfigResult<Self> {
-        let path = loader.config_path().ok_or(ModelConfigError::MissingConfig)?;
+        let path = loader
+            .config_path()
+            .ok_or(ModelConfigError::MissingConfig)?;
         Self::from_path(manifest, path)
     }
 
@@ -87,13 +89,12 @@ impl ModelConfig {
             find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]).unwrap_or(10000.0)
         });
 
-        let head_dim = find_usize(value, &["head_dim", "kv_channels"]).unwrap_or_else(|| {
-            hidden_size
-                .checked_div(num_attention_heads)
-                .unwrap_or(0)
-        });
+        let head_dim = find_usize(value, &["head_dim", "kv_channels"])
+            .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
         if head_dim == 0 {
-            return Err(ModelConfigError::InvalidConfig("invalid head_dim".to_string()));
+            return Err(ModelConfigError::InvalidConfig(
+                "invalid head_dim".to_string(),
+            ));
         }
 
         let dtype_size = dtype_size_from_config(value).unwrap_or(2);

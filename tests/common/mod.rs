@@ -43,7 +43,6 @@ impl TestModelFiles {
             vec![self.config.clone(), self.tokenizer.clone()],
         )
     }
-
 }
 
 fn write_config(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -193,8 +192,9 @@ impl RealModelFiles {
     }
 
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let home = std::env::var("HOME")
-            .map_err(|_| Box::from("无法获取 HOME 目录") as Box<dyn std::error::Error + Send + Sync>)?;
+        let home = std::env::var("HOME").map_err(|_| {
+            Box::from("无法获取 HOME 目录") as Box<dyn std::error::Error + Send + Sync>
+        })?;
         let cache_dir = PathBuf::from(home).join(".gllm/models");
 
         if !cache_dir.exists() {
@@ -285,12 +285,10 @@ impl RealModelFiles {
         let new_repo_id = format!("models--{}", repo_id.replace('/', "--"));
         let new_path = self.cache_dir.join(&new_repo_id);
         if !new_path.exists() {
-            return Err(gllm::loader::LoaderError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("模型目录不存在: {}", new_path.display()),
-                )
-            ));
+            return Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("模型目录不存在: {}", new_path.display()),
+            )));
         }
 
         // 找到有效的 snapshot 目录
@@ -314,16 +312,18 @@ impl RealModelFiles {
             return self.loader_from_path_with_manifest(repo_id, &snapshot_path, manifest);
         }
 
-        Err(gllm::loader::LoaderError::Io(
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("权重文件不存在于: {}", snapshot_path.display()),
-            )
-        ))
+        Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("权重文件不存在于: {}", snapshot_path.display()),
+        )))
     }
 
     /// 从指定路径创建 Loader
-    fn loader_from_path(&self, repo_id: &str, model_path: &Path) -> Result<Loader, gllm::loader::LoaderError> {
+    fn loader_from_path(
+        &self,
+        repo_id: &str,
+        model_path: &Path,
+    ) -> Result<Loader, gllm::loader::LoaderError> {
         self.loader_from_path_with_manifest(repo_id, model_path, None)
     }
 
@@ -342,12 +342,14 @@ impl RealModelFiles {
         } else if config_alt.exists() {
             config_alt
         } else {
-            return Err(gllm::loader::LoaderError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("配置文件不存在: {} 或 {}", config.display(), config_alt.display()),
-                )
-            ));
+            return Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "配置文件不存在: {} 或 {}",
+                    config.display(),
+                    config_alt.display()
+                ),
+            )));
         };
 
         // 查找 tokenizer
@@ -358,12 +360,14 @@ impl RealModelFiles {
         } else if tokenizer_config.exists() {
             tokenizer_config
         } else {
-            return Err(gllm::loader::LoaderError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("tokenizer 文件不存在: {} 或 {}", tokenizer.display(), tokenizer_config.display()),
-                )
-            ));
+            return Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "tokenizer 文件不存在: {} 或 {}",
+                    tokenizer.display(),
+                    tokenizer_config.display()
+                ),
+            )));
         };
 
         // 查找权重文件
@@ -389,23 +393,19 @@ impl RealModelFiles {
             // 按文件名排序确保分片顺序正确
             shards.sort();
             if shards.is_empty() {
-                return Err(gllm::loader::LoaderError::Io(
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("分片权重文件不存在于: {}", model_path.display()),
-                    )
-                ));
+                return Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("分片权重文件不存在于: {}", model_path.display()),
+                )));
             }
             shards
         } else if pytorch_path.exists() {
             vec![pytorch_path]
         } else {
-            return Err(gllm::loader::LoaderError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("权重文件不存在: {}", model_path.display()),
-                )
-            ));
+            return Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("权重文件不存在: {}", model_path.display()),
+            )));
         };
 
         Loader::from_local_files_with_manifest(
@@ -431,12 +431,10 @@ impl RealModelFiles {
                 }
             }
         }
-        Err(gllm::loader::LoaderError::Io(
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("未找到有效的 snapshot: {}", model_dir.display()),
-            )
-        ))
+        Err(gllm::loader::LoaderError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("未找到有效的 snapshot: {}", model_dir.display()),
+        )))
     }
 
     /// 列出所有可用的模型
@@ -469,7 +467,9 @@ impl RealModelFiles {
 
                                 if has_weights {
                                     // 返回不带 models-- 前缀的名字
-                                    models.push(name.strip_prefix("models--").unwrap_or(&name).to_string());
+                                    models.push(
+                                        name.strip_prefix("models--").unwrap_or(&name).to_string(),
+                                    );
                                     break; // 找到一个有效的 snapshot 就停止
                                 }
                             }

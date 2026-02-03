@@ -275,8 +275,9 @@ fn tensor_info_from_object(
             module_name,
             class_name,
         } if module_name == "torch._tensor" && class_name == "_rebuild_from_type_v2" => {
-            let mut args =
-                args.tuple().map_err(|err| LoaderError::Pytorch(format!("{err:?}")))?;
+            let mut args = args
+                .tuple()
+                .map_err(|err| LoaderError::Pytorch(format!("{err:?}")))?;
             let callable = args.remove(0);
             let args = args.remove(1);
             (callable, args)
@@ -285,8 +286,9 @@ fn tensor_info_from_object(
             module_name,
             class_name,
         } if module_name == "torch._utils" && class_name == "_rebuild_parameter" => {
-            let mut args =
-                args.tuple().map_err(|err| LoaderError::Pytorch(format!("{err:?}")))?;
+            let mut args = args
+                .tuple()
+                .map_err(|err| LoaderError::Pytorch(format!("{err:?}")))?;
             args.remove(0)
                 .reduce()
                 .map_err(|err| LoaderError::Pytorch(format!("{err:?}")))?
@@ -496,9 +498,10 @@ fn write_safetensors_index(
         .iter()
         .filter_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
         .sum();
-    index
-        .metadata
-        .insert("total_size".to_string(), serde_json::Value::Number(total_size.into()));
+    index.metadata.insert(
+        "total_size".to_string(),
+        serde_json::Value::Number(total_size.into()),
+    );
 
     let file_name = bin_index_path
         .file_name()

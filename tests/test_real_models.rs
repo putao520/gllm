@@ -6,12 +6,19 @@ use gllm::engine::executor::Executor;
 use gllm::registry;
 use gllm_kernels::cpu_backend::CpuBackend;
 
-fn build_real_executor(repo_id: &str, cache_name: &str, files: &RealModelFiles) -> Executor<CpuBackend> {
+fn build_real_executor(
+    repo_id: &str,
+    cache_name: &str,
+    files: &RealModelFiles,
+) -> Executor<CpuBackend> {
     let manifest = registry::lookup(repo_id).expect("manifest not found in registry");
     let adapter = adapter_for::<CpuBackend>(manifest).expect("adapter not found for CPU backend");
     let backend = CpuBackend::new();
-    let mut loader = files.loader_with_manifest(cache_name, Some(manifest)).expect("loader creation failed");
-    Executor::from_loader(backend, manifest, adapter, &mut loader).expect("executor creation failed")
+    let mut loader = files
+        .loader_with_manifest(cache_name, Some(manifest))
+        .expect("loader creation failed");
+    Executor::from_loader(backend, manifest, adapter, &mut loader)
+        .expect("executor creation failed")
 }
 
 /// 可用的真实小模型 (用于快速回归测试)
@@ -91,12 +98,13 @@ fn real_model_qwen3_embedding_0_6b_embeds() {
 
     // 验证嵌入值不为全零
     let sum: f32 = embedding.iter().sum();
-    assert!(
-        sum.abs() > 0.1,
-        "embedding is all zeros"
-    );
+    assert!(sum.abs() > 0.1, "embedding is all zeros");
 
-    println!("Qwen3-Embedding-0.6B 嵌入维度: {}, sum: {}", embedding.len(), sum);
+    println!(
+        "Qwen3-Embedding-0.6B 嵌入维度: {}, sum: {}",
+        embedding.len(),
+        sum
+    );
 }
 
 #[test]
@@ -154,10 +162,7 @@ fn real_model_qwen3_reranker_0_6b_reranks() {
     };
 
     // 验证返回分数
-    assert!(
-        !scores.is_empty(),
-        "rerank scores should not be empty"
-    );
+    assert!(!scores.is_empty(), "rerank scores should not be empty");
 
     println!("Qwen3-Reranker-0.6B 返回 {} 个分数", scores.len());
 }
@@ -211,7 +216,10 @@ fn real_models_batch_test_all_available() {
         // 旧格式: microsoft--phi-4-mini-instruct -> microsoft/phi-4-mini-instruct
         // 新格式: models--microsoft--Phi-4-mini-instruct -> microsoft/Phi-4-mini-instruct
         let hf_repo_id = if cache_name.starts_with("models--") {
-            cache_name.strip_prefix("models--").unwrap().replace("--", "/")
+            cache_name
+                .strip_prefix("models--")
+                .unwrap()
+                .replace("--", "/")
         } else {
             cache_name.replace("--", "/")
         };
@@ -242,12 +250,9 @@ fn real_models_batch_test_all_available() {
                 // 简单生成测试
                 if manifest.model_id.is_generator() {
                     if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) = Executor::from_loader(
-                            backend,
-                            manifest,
-                            adapter,
-                            &mut loader,
-                        ) {
+                        if let Ok(mut executor) =
+                            Executor::from_loader(backend, manifest, adapter, &mut loader)
+                        {
                             match executor.generate("test", 1, 0.0) {
                                 Ok(_) => {
                                     passed += 1;
@@ -261,12 +266,9 @@ fn real_models_batch_test_all_available() {
                     }
                 } else if manifest.model_id.is_embedding() {
                     if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) = Executor::from_loader(
-                            backend,
-                            manifest,
-                            adapter,
-                            &mut loader,
-                        ) {
+                        if let Ok(mut executor) =
+                            Executor::from_loader(backend, manifest, adapter, &mut loader)
+                        {
                             match executor.embed("test") {
                                 Ok(_) => {
                                     passed += 1;
@@ -280,12 +282,9 @@ fn real_models_batch_test_all_available() {
                     }
                 } else if manifest.model_id.is_reranker() {
                     if let Some(adapter) = adapter_for::<CpuBackend>(manifest) {
-                        if let Ok(mut executor) = Executor::from_loader(
-                            backend,
-                            manifest,
-                            adapter,
-                            &mut loader,
-                        ) {
+                        if let Ok(mut executor) =
+                            Executor::from_loader(backend, manifest, adapter, &mut loader)
+                        {
                             match executor.rerank("test") {
                                 Ok(_) => {
                                     passed += 1;

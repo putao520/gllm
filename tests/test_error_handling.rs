@@ -4,8 +4,8 @@ use common::TestModelFiles;
 use gllm::adapter::adapter_for;
 use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
-use gllm::registry;
 use gllm::loader::{Loader, LoaderError};
+use gllm::registry;
 use gllm_kernels::backend_trait::BackendError;
 use gllm_kernels::cpu_backend::CpuBackend;
 use tempfile::TempDir;
@@ -41,9 +41,11 @@ fn corrupted_weights_surface_loader_errors() {
     };
     assert!(
         matches!(
-        err,
-        LoaderError::SafeTensors(_) | LoaderError::InvalidQuantization(_) | LoaderError::MissingTensor(_)
-    ),
+            err,
+            LoaderError::SafeTensors(_)
+                | LoaderError::InvalidQuantization(_)
+                | LoaderError::MissingTensor(_)
+        ),
         "unexpected loader error: {err:?}"
     );
 }
@@ -58,13 +60,12 @@ fn unsupported_architecture_is_flagged() {
 
 #[test]
 fn oom_errors_are_detected_for_fallback() {
-    let err = BackendContextError::Loader(LoaderError::Backend(
-        "CUDA_ERROR_OUT_OF_MEMORY".to_string(),
-    ));
+    let err =
+        BackendContextError::Loader(LoaderError::Backend("CUDA_ERROR_OUT_OF_MEMORY".to_string()));
     assert!(fallback::is_oom_context_error(&err));
 
-    let backend_err = BackendContextError::Executor(ExecutorError::Backend(
-        BackendError::Cuda("device out of memory".into()),
-    ));
+    let backend_err = BackendContextError::Executor(ExecutorError::Backend(BackendError::Cuda(
+        "device out of memory".into(),
+    )));
     assert!(fallback::is_oom_context_error(&backend_err));
 }

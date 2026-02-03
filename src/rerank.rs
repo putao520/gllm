@@ -10,7 +10,11 @@ pub struct RerankBuilder<'a> {
 }
 
 impl<'a> RerankBuilder<'a> {
-    pub(crate) fn new(client: &'a Client, query: impl Into<String>, documents: Vec<String>) -> Self {
+    pub(crate) fn new(
+        client: &'a Client,
+        query: impl Into<String>,
+        documents: Vec<String>,
+    ) -> Self {
         Self {
             client,
             query: query.into(),

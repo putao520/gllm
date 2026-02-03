@@ -131,9 +131,7 @@ impl HGALScheduler {
     /// LIRS-style priority computation for a sequence group.
     fn compute_group_priority(&self, group: &SequenceGroup) -> isize {
         let now = Instant::now();
-        let time_penalty = now
-            .saturating_duration_since(group.last_access)
-            .as_millis() as isize;
+        let time_penalty = now.saturating_duration_since(group.last_access).as_millis() as isize;
 
         let recency_penalty: isize = group
             .pages
@@ -177,16 +175,15 @@ impl HGALScheduler {
         let now = Instant::now();
         for meta in self.page_metadata.values_mut() {
             let hot = meta.access_count >= self.config.hot_threshold
-                && now
-                    .saturating_duration_since(meta.last_access)
-                    < self.config.working_set_window;
+                && now.saturating_duration_since(meta.last_access) < self.config.working_set_window;
 
             match (hot, meta.state) {
                 (true, PageState::Active | PageState::Standby | PageState::Warm) => {
                     meta.state = PageState::Protected;
                 }
                 (false, PageState::Protected)
-                    if now.saturating_duration_since(meta.last_access) >= self.config.working_set_window =>
+                    if now.saturating_duration_since(meta.last_access)
+                        >= self.config.working_set_window =>
                 {
                     // Protection expires; return to Standby so it can be considered for eviction.
                     meta.state = PageState::Standby;
@@ -211,10 +208,7 @@ impl HGALScheduler {
             entry.last_access = now;
             if entry.state == PageState::Warm
                 && (entry.access_count >= 2
-                    || entry
-                        .warm_until
-                        .map(|end| now >= end)
-                        .unwrap_or(false))
+                    || entry.warm_until.map(|end| now >= end).unwrap_or(false))
             {
                 entry.state = PageState::Active;
                 entry.warm_until = None;
@@ -252,7 +246,8 @@ impl HGALScheduler {
     fn group_has_protection(&self, group: &SequenceGroup) -> bool {
         group.pages.iter().any(|pid| {
             if let Some(meta) = self.page_metadata.get(pid) {
-                matches!(meta.state, PageState::Warm | PageState::Protected) || self.is_in_warmup_period(*pid)
+                matches!(meta.state, PageState::Warm | PageState::Protected)
+                    || self.is_in_warmup_period(*pid)
             } else {
                 false
             }
@@ -339,11 +334,7 @@ mod tests {
 
         scheduler.detect_working_set();
         assert_eq!(
-            scheduler
-                .page_metadata
-                .get(&3)
-                .map(|m| m.state)
-                .unwrap(),
+            scheduler.page_metadata.get(&3).map(|m| m.state).unwrap(),
             PageState::Protected
         );
     }

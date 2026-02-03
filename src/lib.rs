@@ -4,29 +4,28 @@ pub mod manifest;
 pub mod registry;
 
 pub mod adapter;
+pub mod backend;
 pub mod engine;
 pub mod loader;
-pub mod backend;
 pub mod scheduler;
 
 pub mod client;
 pub mod embeddings;
-pub mod rerank;
 pub mod generation;
 pub mod kv_cache;
-pub mod weight_loader;
 pub mod model_config;
-pub mod tokenizer;
 pub mod quantization;
+pub mod rerank;
+pub mod tokenizer;
+pub mod weight_loader;
 
 pub use manifest::{
-    FileMap, KnownModel, ModelArchitecture, ModelManifest, MoEConfig, RouterType,
-    TensorNamingRule,
+    FileMap, KnownModel, MoEConfig, ModelArchitecture, ModelManifest, RouterType, TensorNamingRule,
 };
 
 // Re-export EMPTY_FILE_MAP for convenience
-pub use manifest::EMPTY_FILE_MAP;
-pub use client::{AsyncClient, Client};
 pub use adapter::{Message, Role};
+pub use backend::{detect_backend, BackendType};
+pub use client::{AsyncClient, Client};
+pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
-pub use backend::{BackendType, detect_backend};

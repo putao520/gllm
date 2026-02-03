@@ -27,10 +27,8 @@ fn gptq_signed_int4_dequantizes_with_metadata_bits() {
     let zeros = vec![0u8];
     let scale_bytes = f16_bytes(&scales);
 
-    let qweight_view =
-        TensorView::new(Dtype::U8, vec![1, 1], &qweight).expect("qweight view");
-    let scales_view =
-        TensorView::new(Dtype::F16, vec![1], &scale_bytes).expect("scales view");
+    let qweight_view = TensorView::new(Dtype::U8, vec![1, 1], &qweight).expect("qweight view");
+    let scales_view = TensorView::new(Dtype::F16, vec![1], &scale_bytes).expect("scales view");
     let zeros_view = TensorView::new(Dtype::U8, vec![1], &zeros).expect("zeros view");
 
     let mut metadata = HashMap::new();
@@ -75,10 +73,7 @@ fn smoothquant_block_scales_reduce_activation_range() {
         let block = idx / 2;
         scaled.push(value * quant.scale_for_block(block));
     }
-    let peak = scaled
-        .iter()
-        .copied()
-        .fold(f32::MIN, f32::max);
+    let peak = scaled.iter().copied().fold(f32::MIN, f32::max);
     assert!(peak <= 4.0, "expected scaled activations to be clipped");
     assert_eq!(scaled[0], 2.0);
 }

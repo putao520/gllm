@@ -39,7 +39,10 @@ fn performance_harness_reports_throughput_and_latency() {
 fn performance_harness_checks_memory_pressure() {
     let files = TestModelFiles::new().expect("test model files");
     let executor = build_executor("qwen3-7b", &files);
-    let pressure = executor.backend().get_memory_pressure().expect("memory pressure");
+    let pressure = executor
+        .backend()
+        .get_memory_pressure()
+        .expect("memory pressure");
     assert!(
         (0.0..=1.0).contains(&pressure),
         "memory pressure should be normalized"

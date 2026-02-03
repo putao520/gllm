@@ -94,11 +94,7 @@ impl<B: Backend> TensorLookup<B> for AdapterWeights<B> {
 pub trait ModelAdapter<B: Backend> {
     fn supports(&self, manifest: &ModelManifest) -> bool;
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>>;
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>>;
 
     fn apply_chat_template(&self, messages: &[Message]) -> String {
         default_chat_template(messages)

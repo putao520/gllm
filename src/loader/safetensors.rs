@@ -146,7 +146,11 @@ impl MappedSafetensors {
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.tensors.names().into_iter().map(|s| s.to_string()).collect()
+        self.tensors
+            .names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     pub fn tensor(&self, name: &str) -> Result<TensorSlice<'_>> {

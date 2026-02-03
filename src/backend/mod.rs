@@ -97,9 +97,7 @@ impl BackendContext {
         let executor = match build_executor(backend, manifest, &model_ref) {
             Ok(executor) => executor,
             Err(err) => {
-                if backend_type == BackendType::Cuda
-                    && fallback::is_oom_context_error(&err)
-                {
+                if backend_type == BackendType::Cuda && fallback::is_oom_context_error(&err) {
                     build_cpu_executor(manifest, &model_ref)?
                 } else {
                     return Err(err);

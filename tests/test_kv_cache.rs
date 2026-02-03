@@ -38,7 +38,10 @@ fn kv_cache_state_advances_and_bounds() {
 
     let err = state.advance(3).expect_err("should exhaust");
     match err {
-        KvCacheError::Exhausted { requested, available } => {
+        KvCacheError::Exhausted {
+            requested,
+            available,
+        } => {
             assert_eq!(requested, 3);
             assert_eq!(available, 2);
         }

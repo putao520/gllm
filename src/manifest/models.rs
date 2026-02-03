@@ -1,7 +1,7 @@
 //! Layer 1: Static model manifests (SSOT).
 
 use super::types::{
-    ModelArchitecture, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP, KnownModel,
+    KnownModel, ModelArchitecture, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 
 pub const QWEN3_7B_MANIFEST: ModelManifest = ModelManifest {
@@ -19,7 +19,7 @@ pub const QWEN3_7B_MANIFEST: ModelManifest = ModelManifest {
 
 /// Qwen3-1.7B (实际存在的小型 Qwen3 模型)
 pub const QWEN3_1_7B_MANIFEST: ModelManifest = ModelManifest {
-    model_id: KnownModel::Qwen3_7B,  // 复用相同的架构
+    model_id: KnownModel::Qwen3_7B, // 复用相同的架构
     aliases: &["qwen3-1.7b", "qwen3-1.7b-instruct"],
     hf_repo: "Qwen/Qwen3-1.7B",
     model_scope_repo: Some("qwen/Qwen3-1.7B"),
@@ -75,6 +75,45 @@ pub const LLAMA4_SCOUT_17B_MANIFEST: ModelManifest = ModelManifest {
     aliases: &["llama-4-scout"],
     hf_repo: "meta-llama/Llama-4-Scout",
     model_scope_repo: Some("LLM-Research/Llama-4-Scout"),
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::Llama4,
+    tensor_rules: TensorNamingRule::Llama4,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const SMOLLM2_135M_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::SmolLM2_135M,
+    aliases: &["smollm2-135m"],
+    hf_repo: "HuggingFaceTB/SmolLM2-135M-Instruct",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::Llama4,
+    tensor_rules: TensorNamingRule::Llama4,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const SMOLLM3_3B_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::SmolLM3_3B,
+    aliases: &["smollm3-3b"],
+    hf_repo: "HuggingFaceTB/SmolLM3-3B",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::Llama4,
+    tensor_rules: TensorNamingRule::Llama4,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const INTERNLM3_8B_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::Internlm3_8B,
+    aliases: &["internlm3-8b"],
+    hf_repo: "internlm/internlm3-8b-instruct",
+    model_scope_repo: None,
     hf_file_map: EMPTY_FILE_MAP,
     arch: ModelArchitecture::Llama4,
     tensor_rules: TensorNamingRule::Llama4,
@@ -265,6 +304,97 @@ pub const BGE_M4_MANIFEST: ModelManifest = ModelManifest {
     moe_config: None,
 };
 
+pub const E5_SMALL_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::E5_Small,
+    aliases: &["e5-small"],
+    hf_repo: "intfloat/e5-small",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const E5_BASE_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::E5_Base,
+    aliases: &["e5-base"],
+    hf_repo: "intfloat/e5-base",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const E5_LARGE_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::E5_Large,
+    aliases: &["e5-large"],
+    hf_repo: "intfloat/e5-large",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const M3E_BASE_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::M3e_Base,
+    aliases: &["m3e-base"],
+    hf_repo: "moka-ai/m3e-base",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const JINA_EMBEDDINGS_V2_BASE_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::JinaEmbeddingsV2_Base,
+    aliases: &["jina-embeddings-v2-base"],
+    hf_repo: "jinaai/jina-embeddings-v2-base-en",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const JINA_EMBEDDINGS_V2_SMALL_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::JinaEmbeddingsV2_Small,
+    aliases: &["jina-embeddings-v2-small"],
+    hf_repo: "jinaai/jina-embeddings-v2-small-en",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
+pub const JINA_EMBEDDINGS_V4_MANIFEST: ModelManifest = ModelManifest {
+    model_id: KnownModel::JinaEmbeddingsV4,
+    aliases: &["jina-embeddings-v4"],
+    hf_repo: "jinaai/jina-embeddings-v4",
+    model_scope_repo: None,
+    hf_file_map: EMPTY_FILE_MAP,
+    arch: ModelArchitecture::XlmR,
+    tensor_rules: TensorNamingRule::XlmR,
+    rope_base_override: None,
+    max_context_override: None,
+    moe_config: None,
+};
+
 pub const QWEN3_RERANK_MANIFEST: ModelManifest = ModelManifest {
     model_id: KnownModel::Qwen3_Rerank,
     aliases: &["qwen3-rerank"],
@@ -311,6 +441,9 @@ pub const ALL_MANIFESTS: &[&ModelManifest] = &[
     &QWEN3_THINKING_MANIFEST,
     &LLAMA4_8B_MANIFEST,
     &LLAMA4_SCOUT_17B_MANIFEST,
+    &SMOLLM2_135M_MANIFEST,
+    &SMOLLM3_3B_MANIFEST,
+    &INTERNLM3_8B_MANIFEST,
     &MINISTRAL_8B_MANIFEST,
     &MISTRAL_SMALL_3_MANIFEST,
     &GLM_4_7_FLASH_MANIFEST,
@@ -325,6 +458,13 @@ pub const ALL_MANIFESTS: &[&ModelManifest] = &[
     &QWEN3_EMBED_MANIFEST,
     &BGE_M3_MANIFEST,
     &BGE_M4_MANIFEST,
+    &E5_SMALL_MANIFEST,
+    &E5_BASE_MANIFEST,
+    &E5_LARGE_MANIFEST,
+    &M3E_BASE_MANIFEST,
+    &JINA_EMBEDDINGS_V2_BASE_MANIFEST,
+    &JINA_EMBEDDINGS_V2_SMALL_MANIFEST,
+    &JINA_EMBEDDINGS_V4_MANIFEST,
     &QWEN3_RERANK_MANIFEST,
     &BGE_RERANK_V3_MANIFEST,
     &BGE_RERANK_V2_M3_MANIFEST,
@@ -337,6 +477,9 @@ pub fn manifest_by_id(model: KnownModel) -> &'static ModelManifest {
         KnownModel::Qwen3_Thinking => &QWEN3_THINKING_MANIFEST,
         KnownModel::Llama4_8B => &LLAMA4_8B_MANIFEST,
         KnownModel::Llama4_Scout_17B => &LLAMA4_SCOUT_17B_MANIFEST,
+        KnownModel::SmolLM2_135M => &SMOLLM2_135M_MANIFEST,
+        KnownModel::SmolLM3_3B => &SMOLLM3_3B_MANIFEST,
+        KnownModel::Internlm3_8B => &INTERNLM3_8B_MANIFEST,
         KnownModel::Ministral_8B => &MINISTRAL_8B_MANIFEST,
         KnownModel::MistralSmall_3 => &MISTRAL_SMALL_3_MANIFEST,
         KnownModel::GLM4_7_Flash => &GLM_4_7_FLASH_MANIFEST,
@@ -351,6 +494,13 @@ pub fn manifest_by_id(model: KnownModel) -> &'static ModelManifest {
         KnownModel::Qwen3_Embed => &QWEN3_EMBED_MANIFEST,
         KnownModel::Bge_M3 => &BGE_M3_MANIFEST,
         KnownModel::Bge_M4 => &BGE_M4_MANIFEST,
+        KnownModel::E5_Small => &E5_SMALL_MANIFEST,
+        KnownModel::E5_Base => &E5_BASE_MANIFEST,
+        KnownModel::E5_Large => &E5_LARGE_MANIFEST,
+        KnownModel::M3e_Base => &M3E_BASE_MANIFEST,
+        KnownModel::JinaEmbeddingsV2_Base => &JINA_EMBEDDINGS_V2_BASE_MANIFEST,
+        KnownModel::JinaEmbeddingsV2_Small => &JINA_EMBEDDINGS_V2_SMALL_MANIFEST,
+        KnownModel::JinaEmbeddingsV4 => &JINA_EMBEDDINGS_V4_MANIFEST,
         KnownModel::Qwen3_Rerank => &QWEN3_RERANK_MANIFEST,
         KnownModel::Bge_Rerank_V3 => &BGE_RERANK_V3_MANIFEST,
         KnownModel::Bge_Rerank_V2_M3 => &BGE_RERANK_V2_M3_MANIFEST,

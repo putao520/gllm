@@ -5,9 +5,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use ::safetensors::Dtype;
 use gllm_kernels::backend_trait::{Backend, TensorLookup};
 use half::{bf16, f16};
-use ::safetensors::Dtype;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -252,13 +252,7 @@ impl ChecksumStore {
         }
 
         let sha256 = hash_file(&canonical)?;
-        self.records.insert(
-            key,
-            ChecksumRecord {
-                sha256,
-                size,
-            },
-        );
+        self.records.insert(key, ChecksumRecord { sha256, size });
         Ok(())
     }
 }
@@ -483,7 +477,10 @@ impl Loader {
 
     pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
         self.ensure_safetensors()?;
-        let loader = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
+        let loader = self
+            .safetensors
+            .as_ref()
+            .ok_or(LoaderError::MissingWeights)?;
         let quantized = QuantizedIndex::from_loader(loader);
         let mut quantized_seen = HashSet::new();
 
@@ -516,7 +513,12 @@ impl Loader {
             if let Some(outputs) = maybe_split_fused(self.rules(), &name, &tensor) {
                 // DEBUG: 打印分解信息
                 if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-                    eprintln!("  [SPLIT] {} -> {} 个输出 (dtype: {:?})", name, outputs.len(), tensor.dtype);
+                    eprintln!(
+                        "  [SPLIT] {} -> {} 个输出 (dtype: {:?})",
+                        name,
+                        outputs.len(),
+                        tensor.dtype
+                    );
                     for out in &outputs {
                         let (name, shape) = match out {
                             OwnedTensor::F16 { name, shape, .. } => (name, shape),
@@ -710,9 +712,21 @@ impl<B: Backend> TensorLookup<B> for WeightsHandle<B> {
 }
 
 enum OwnedTensor {
-    F16 { name: String, shape: Vec<usize>, data: Vec<f16> },
-    BF16 { name: String, shape: Vec<usize>, data: Vec<bf16> },
-    F32 { name: String, shape: Vec<usize>, data: Vec<f32> },
+    F16 {
+        name: String,
+        shape: Vec<usize>,
+        data: Vec<f16>,
+    },
+    BF16 {
+        name: String,
+        shape: Vec<usize>,
+        data: Vec<bf16>,
+    },
+    F32 {
+        name: String,
+        shape: Vec<usize>,
+        data: Vec<f32>,
+    },
 }
 
 fn upload_f32_data<B: Backend>(
@@ -857,14 +871,20 @@ fn maybe_split_fused(
     // Phi-4-mini: Q=3072, K=1024, V=1024, total=5120
     if matches!(rules, TensorNamingRule::Phi4) && name.contains("qkv_proj") {
         if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-            eprintln!("  [PHI4_GQA] 手动分割 qkv_proj weight shape={:?}", tensor.shape);
+            eprintln!(
+                "  [PHI4_GQA] 手动分割 qkv_proj weight shape={:?}",
+                tensor.shape
+            );
         }
         return split_phi4_qkv(name, tensor);
     }
 
     let fused = fused_spec(rules, name, &tensor.shape)?;
     if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-        eprintln!("  [FUSED_SPEC] matched! split={}, targets={:?}", fused.split, fused.targets);
+        eprintln!(
+            "  [FUSED_SPEC] matched! split={}, targets={:?}",
+            fused.split, fused.targets
+        );
     }
     let axis = split_axis(&tensor.shape, fused.split)?;
     let mut out_shape = tensor.shape.clone();
@@ -1060,9 +1080,7 @@ impl QuantizedIndex {
                     .insert(member.to_string(), base.clone());
             }
             if let Some(zeros) = &group.zeros {
-                index
-                    .member_to_base
-                    .insert(zeros.to_string(), base.clone());
+                index.member_to_base.insert(zeros.to_string(), base.clone());
             }
             index.groups.insert(base, group);
         }
@@ -1308,12 +1326,15 @@ fn split_phi4_qkv(name: &str, tensor: &TensorSlice<'_>) -> Option<Vec<OwnedTenso
     // Phi-4-mini: Q=3072, K=1024, V=1024
     // 通过 in_dim (hidden_size) 推断各部分
     // hidden_size = 3072, num_kv_heads * head_dim = 1024
-    let q_dim = in_dim;  // Q 投影输出 = hidden_size
-    let kv_dim = (out_dim - q_dim) / 2;  // K 和 V 各占剩余的一半
+    let q_dim = in_dim; // Q 投影输出 = hidden_size
+    let kv_dim = (out_dim - q_dim) / 2; // K 和 V 各占剩余的一半
 
     if q_dim + kv_dim * 2 != out_dim {
         if std::env::var("GLLM_DEBUG_SPLIT").is_ok() {
-            eprintln!("  [PHI4_GQA] 警告: 形状不匹配 out_dim={}, q_dim={}, kv_dim={}", out_dim, q_dim, kv_dim);
+            eprintln!(
+                "  [PHI4_GQA] 警告: 形状不匹配 out_dim={}, q_dim={}, kv_dim={}",
+                out_dim, q_dim, kv_dim
+            );
         }
         return None;
     }
@@ -1330,7 +1351,7 @@ fn split_phi4_qkv(name: &str, tensor: &TensorSlice<'_>) -> Option<Vec<OwnedTenso
     match tensor.dtype {
         Dtype::BF16 => {
             let data = tensor.as_bf16().ok()?;
-            let row_size = in_dim * 2;  // 每行字节数 (bf16 = 2 bytes)
+            let row_size = in_dim * 2; // 每行字节数 (bf16 = 2 bytes)
             let mut q_data = Vec::with_capacity(q_dim * in_dim);
             let mut k_data = Vec::with_capacity(kv_dim * in_dim);
             let mut v_data = Vec::with_capacity(kv_dim * in_dim);
@@ -1456,12 +1477,7 @@ fn shape_ratio_ok(shape: &[usize], ratio: usize) -> bool {
     shape.iter().any(|dim| *dim % ratio == 0)
 }
 
-fn split_tensor<T: Copy>(
-    data: &[T],
-    shape: &[usize],
-    axis: usize,
-    split: usize,
-) -> Vec<Vec<T>> {
+fn split_tensor<T: Copy>(data: &[T], shape: &[usize], axis: usize, split: usize) -> Vec<Vec<T>> {
     let axis_dim = shape[axis];
     let chunk = axis_dim / split;
     let inner = shape[axis + 1..].iter().product::<usize>();
@@ -1567,10 +1583,7 @@ mod tests {
     fn replace_last_token() {
         let name = "model.layers.0.self_attn.c_attn.weight";
         let replaced = replace_last(name, "c_attn", "q_proj").unwrap();
-        assert_eq!(
-            replaced,
-            "model.layers.0.self_attn.q_proj.weight"
-        );
+        assert_eq!(replaced, "model.layers.0.self_attn.q_proj.weight");
     }
 
     #[test]

@@ -18,11 +18,7 @@ impl<B: Backend> ModelAdapter<B> for Qwen3Adapter {
             )
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         let thinking_tensors: Vec<String> = handle
             .meta

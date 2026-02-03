@@ -14,11 +14,7 @@ impl<B: Backend> ModelAdapter<B> for Llama4Adapter {
         matches!(manifest.arch, ModelArchitecture::Llama4)
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }

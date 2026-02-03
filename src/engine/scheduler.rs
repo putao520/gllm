@@ -3,8 +3,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::kv_cache::KvCacheSlot;
 use crate::engine::vllm2024::{ChunkedConfig, Scheduler2024Config, Scheduler2024State};
+use crate::kv_cache::KvCacheSlot;
 use crate::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 pub use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 
@@ -108,12 +108,15 @@ impl PagePool {
             let page_id = idx;
             free.push_back(page_id);
             // 初始化所有页面为 Standby 状态
-            page_states.insert(page_id, PageEntry {
+            page_states.insert(
                 page_id,
-                state: PageState::Standby,
-                last_access: Instant::now(),
-                owner_request: None,
-            });
+                PageEntry {
+                    page_id,
+                    state: PageState::Standby,
+                    last_access: Instant::now(),
+                    owner_request: None,
+                },
+            );
         }
         Self {
             page_size: page_size.max(1),
@@ -168,7 +171,8 @@ impl PagePool {
 
     /// 获取所有页面状态（用于调试）
     pub fn page_states_snapshot(&self) -> Vec<(PageId, PageState, Option<RequestId>)> {
-        self.page_states.values()
+        self.page_states
+            .values()
             .map(|entry| (entry.page_id, entry.state, entry.owner_request))
             .collect()
     }
@@ -397,7 +401,11 @@ impl Scheduler {
     }
 
     /// LMCache lookup; returns hit information when enabled.
-    pub fn lmcache_lookup(&mut self, model_id: &str, prompt: &str) -> Option<crate::engine::vllm2024::CacheHit> {
+    pub fn lmcache_lookup(
+        &mut self,
+        model_id: &str,
+        prompt: &str,
+    ) -> Option<crate::engine::vllm2024::CacheHit> {
         if let Some(v) = self.vllm24.as_mut() {
             if v.config.enable_2024_optimizations {
                 let key = crate::engine::vllm2024::LmcacheState::cache_key(
@@ -539,7 +547,8 @@ impl Scheduler {
     pub fn mark_pages_accessed(&mut self, request_id: RequestId, page_ids: Vec<PageId>) {
         self.page_pool.mark_accessed(&page_ids, request_id);
         for &pid in &page_ids {
-            self.hgal.update_page_state(pid, Some(request_id), PageState::Active);
+            self.hgal
+                .update_page_state(pid, Some(request_id), PageState::Active);
             self.hgal.mark_accessed(pid);
         }
         // 更新序列信息
@@ -580,7 +589,8 @@ impl Scheduler {
     pub fn on_swap_in(&mut self, request_id: RequestId, page_ids: &[PageId]) {
         self.page_pool.mark_swap_in(page_ids, request_id);
         for &pid in page_ids {
-            self.hgal.update_page_state(pid, Some(request_id), PageState::Warm);
+            self.hgal
+                .update_page_state(pid, Some(request_id), PageState::Warm);
             self.hgal.on_swap_in(pid);
         }
     }
@@ -600,13 +610,16 @@ impl Scheduler {
     /// 开始跟踪一个序列
     pub fn start_sequence(&mut self, request_id: RequestId, initial_pages: Vec<PageId>) {
         let pages = initial_pages.clone();
-        self.sequences.insert(request_id, SequenceInfo {
-            id: request_id,
-            state: SequenceState::Running,
-            generated_tokens: 0,
-            position: 0,
-            allocated_pages: initial_pages,
-        });
+        self.sequences.insert(
+            request_id,
+            SequenceInfo {
+                id: request_id,
+                state: SequenceState::Running,
+                generated_tokens: 0,
+                position: 0,
+                allocated_pages: initial_pages,
+            },
+        );
         self.running_sequences.push(request_id);
         self.mark_pages_accessed(request_id, pages);
     }
@@ -788,7 +801,11 @@ impl Scheduler {
 
     /// 处理页面错误 (页面不在 GPU 内存)
     /// 当访问的页面已被换出到 CPU 时触发
-    pub fn handle_page_fault(&mut self, page_id: PageId, requesting_sequence: RequestId) -> PageLocation {
+    pub fn handle_page_fault(
+        &mut self,
+        page_id: PageId,
+        requesting_sequence: RequestId,
+    ) -> PageLocation {
         match self.page_pool.get_page_state(page_id) {
             Some(PageState::Swapped) => {
                 // 页面已换出到 CPU，需要 swap-in
@@ -818,7 +835,8 @@ impl Scheduler {
             Some(PageState::Standby) => {
                 // 页面在 GPU 中但未使用，标记为 Active
                 self.set_page_state(page_id, PageState::Active);
-                self.page_pool.mark_accessed(&[page_id], requesting_sequence);
+                self.page_pool
+                    .mark_accessed(&[page_id], requesting_sequence);
                 self.hgal.mark_accessed(page_id);
                 PageLocation::Gpu
             }
@@ -839,10 +857,10 @@ impl Scheduler {
 
         for &request_id in request_ids {
             if let Some(seq_info) = self.sequences.get(&request_id) {
-                let pages: Vec<_> = seq_info.allocated_pages.iter()
-                    .filter_map(|&pid| {
-                        self.page_pool.get_page_state(pid).map(|state| (pid, state))
-                    })
+                let pages: Vec<_> = seq_info
+                    .allocated_pages
+                    .iter()
+                    .filter_map(|&pid| self.page_pool.get_page_state(pid).map(|state| (pid, state)))
                     .collect();
                 let page_count = pages.len();
                 page_table.sequence_pages.insert(request_id, pages);
@@ -939,7 +957,8 @@ impl Scheduler {
                         }
                     }
                     for pid in &pages {
-                        self.hgal.update_page_state(*pid, Some(victim_id), PageState::Swapped);
+                        self.hgal
+                            .update_page_state(*pid, Some(victim_id), PageState::Swapped);
                     }
                     seq.state = SequenceState::Paused;
                     self.update_group_tracking(victim_id, pages, GroupState::Swapped, false);
@@ -957,14 +976,10 @@ impl Scheduler {
                         }
                     }
                     for pid in &pages {
-                        self.hgal.update_page_state(*pid, Some(victim_id), PageState::Swapped);
+                        self.hgal
+                            .update_page_state(*pid, Some(victim_id), PageState::Swapped);
                     }
-                    self.update_group_tracking(
-                        victim_id,
-                        pages,
-                        GroupState::Swapped,
-                        pinned,
-                    );
+                    self.update_group_tracking(victim_id, pages, GroupState::Swapped, pinned);
                     self.running_sequences.retain(|&id| id != victim_id);
                 }
             }
@@ -987,7 +1002,8 @@ impl Scheduler {
         // 记录分配给序列的页面
         for &page_id in &allocated {
             self.page_pool.mark_accessed(&[page_id], request_id);
-            self.hgal.update_page_state(page_id, Some(request_id), PageState::Active);
+            self.hgal
+                .update_page_state(page_id, Some(request_id), PageState::Active);
             self.hgal.mark_accessed(page_id);
         }
 
@@ -1119,9 +1135,7 @@ pub struct BatchAction {
 impl BatchAction {
     /// 检查是否有任何动作
     pub fn has_actions(&self) -> bool {
-        !self.continue_ids.is_empty()
-            || !self.complete_ids.is_empty()
-            || !self.pause_ids.is_empty()
+        !self.continue_ids.is_empty() || !self.complete_ids.is_empty() || !self.pause_ids.is_empty()
     }
 
     /// 获取所有受影响的序列 ID
@@ -1150,8 +1164,15 @@ pub enum SchedulerError {
 impl std::fmt::Display for SchedulerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchedulerError::OutOfMemory { requested, available } => {
-                write!(f, "Out of memory: requested {}, available {}", requested, available)
+            SchedulerError::OutOfMemory {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "Out of memory: requested {}, available {}",
+                    requested, available
+                )
             }
             SchedulerError::PageNotFound { page_id } => {
                 write!(f, "Page not found: {:?}", page_id)
@@ -1304,7 +1325,8 @@ mod tests {
 
         // 检查页面状态
         let snapshot = scheduler.page_states_snapshot();
-        let active_pages: Vec<_> = snapshot.iter()
+        let active_pages: Vec<_> = snapshot
+            .iter()
             .filter(|(_, state, _)| *state == PageState::Active)
             .collect();
 
@@ -1397,8 +1419,20 @@ mod tests {
         let batch = ScheduledBatch {
             id: BatchId(1),
             requests: vec![
-                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1, chunk_info: None },
-                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1, chunk_info: None },
+                ScheduledRequest {
+                    id: req1,
+                    kind: RequestKind::Generate,
+                    prompt: "a".into(),
+                    tokens: 1,
+                    chunk_info: None,
+                },
+                ScheduledRequest {
+                    id: req2,
+                    kind: RequestKind::Generate,
+                    prompt: "b".into(),
+                    tokens: 1,
+                    chunk_info: None,
+                },
             ],
             allocations: vec![],
             total_tokens: 2,
@@ -1428,8 +1462,20 @@ mod tests {
         let batch = ScheduledBatch {
             id: BatchId(1),
             requests: vec![
-                ScheduledRequest { id: req1, kind: RequestKind::Generate, prompt: "a".into(), tokens: 1, chunk_info: None },
-                ScheduledRequest { id: req2, kind: RequestKind::Generate, prompt: "b".into(), tokens: 1, chunk_info: None },
+                ScheduledRequest {
+                    id: req1,
+                    kind: RequestKind::Generate,
+                    prompt: "a".into(),
+                    tokens: 1,
+                    chunk_info: None,
+                },
+                ScheduledRequest {
+                    id: req2,
+                    kind: RequestKind::Generate,
+                    prompt: "b".into(),
+                    tokens: 1,
+                    chunk_info: None,
+                },
             ],
             allocations: vec![],
             total_tokens: 2,
@@ -1438,10 +1484,7 @@ mod tests {
 
         // 创建包含两个结果的批次：第一个完成，第二个继续
         let results = BatchResult {
-            results: vec![
-                SequenceResult::Complete,
-                SequenceResult::Continue,
-            ],
+            results: vec![SequenceResult::Complete, SequenceResult::Continue],
         };
         let action = scheduler.update_batch(&batch, &results);
 
@@ -1463,7 +1506,9 @@ mod tests {
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
 
         // 分配 2 个页面（8 个 token）
-        let pages = scheduler.allocate_pages_for_sequence(req_id, 8).expect("allocation");
+        let pages = scheduler
+            .allocate_pages_for_sequence(req_id, 8)
+            .expect("allocation");
 
         assert_eq!(pages.len(), 2);
     }

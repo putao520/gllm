@@ -15,11 +15,7 @@ impl<B: Backend> ModelAdapter<B> for Qwen3EmbedAdapter {
             && matches!(manifest.model_id, KnownModel::Qwen3_Embed)
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }

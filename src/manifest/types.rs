@@ -77,7 +77,10 @@ pub struct ModelManifest {
 impl ModelManifest {
     pub fn is_moe(&self) -> bool {
         self.moe_config.is_some()
-            || matches!(self.arch, ModelArchitecture::Qwen3MoE | ModelArchitecture::Llama4)
+            || matches!(
+                self.arch,
+                ModelArchitecture::Qwen3MoE | ModelArchitecture::Llama4
+            )
     }
 }
 
@@ -89,6 +92,9 @@ pub enum KnownModel {
     Qwen3_Thinking,
     Llama4_8B,
     Llama4_Scout_17B,
+    SmolLM2_135M,
+    SmolLM3_3B,
+    Internlm3_8B,
     Ministral_8B,
     MistralSmall_3,
     GLM4_7_Flash,
@@ -103,6 +109,13 @@ pub enum KnownModel {
     Qwen3_Embed,
     Bge_M3,
     Bge_M4,
+    E5_Small,
+    E5_Base,
+    E5_Large,
+    M3e_Base,
+    JinaEmbeddingsV2_Base,
+    JinaEmbeddingsV2_Small,
+    JinaEmbeddingsV4,
     Qwen3_Rerank,
     Bge_Rerank_V3,
     Bge_Rerank_V2_M3,
@@ -118,6 +131,9 @@ impl KnownModel {
                 | Self::Qwen3_Thinking
                 | Self::Llama4_8B
                 | Self::Llama4_Scout_17B
+                | Self::SmolLM2_135M
+                | Self::SmolLM3_3B
+                | Self::Internlm3_8B
                 | Self::Ministral_8B
                 | Self::MistralSmall_3
                 | Self::GLM4_7_Flash
@@ -134,11 +150,26 @@ impl KnownModel {
 
     /// 判断是否为嵌入模型 (Embedding)
     pub fn is_embedding(&self) -> bool {
-        matches!(self, Self::Qwen3_Embed | Self::Bge_M3 | Self::Bge_M4)
+        matches!(
+            self,
+            Self::Qwen3_Embed
+                | Self::Bge_M3
+                | Self::Bge_M4
+                | Self::E5_Small
+                | Self::E5_Base
+                | Self::E5_Large
+                | Self::M3e_Base
+                | Self::JinaEmbeddingsV2_Base
+                | Self::JinaEmbeddingsV2_Small
+                | Self::JinaEmbeddingsV4
+        )
     }
 
     /// 判断是否为重排序模型 (Reranker)
     pub fn is_reranker(&self) -> bool {
-        matches!(self, Self::Qwen3_Rerank | Self::Bge_Rerank_V3 | Self::Bge_Rerank_V2_M3)
+        matches!(
+            self,
+            Self::Qwen3_Rerank | Self::Bge_Rerank_V3 | Self::Bge_Rerank_V2_M3
+        )
     }
 }

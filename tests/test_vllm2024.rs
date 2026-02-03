@@ -44,7 +44,12 @@ fn swift_kv_sikv_reduces_pages() {
         similarity_threshold: 0.9,
         precision_guard: 2.0,
     });
-    let pages = vec![vec![1.0f32, 0.0], vec![0.0, 1.0], vec![1.0, 1.0], vec![0.5, 0.5]];
+    let pages = vec![
+        vec![1.0f32, 0.0],
+        vec![0.0, 1.0],
+        vec![1.0, 1.0],
+        vec![0.5, 0.5],
+    ];
     let outcome = swift.distill_cpu(&pages);
     assert_eq!(outcome.result.distilled_pages, 2);
     assert!(!outcome.precision_fallback);

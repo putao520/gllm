@@ -172,7 +172,10 @@ mod tests {
     #[test]
     fn parse_backend_override_cpu() {
         assert_eq!(parse_backend_override("cpu").unwrap(), BackendRequest::Cpu);
-        assert_eq!(parse_backend_override(" CPU ").unwrap(), BackendRequest::Cpu);
+        assert_eq!(
+            parse_backend_override(" CPU ").unwrap(),
+            BackendRequest::Cpu
+        );
     }
 
     #[test]
@@ -193,8 +196,14 @@ mod tests {
 
     #[test]
     fn parse_backend_override_rocm_metal() {
-        assert_eq!(parse_backend_override("rocm").unwrap(), BackendRequest::Rocm);
-        assert_eq!(parse_backend_override("metal").unwrap(), BackendRequest::Metal);
+        assert_eq!(
+            parse_backend_override("rocm").unwrap(),
+            BackendRequest::Rocm
+        );
+        assert_eq!(
+            parse_backend_override("metal").unwrap(),
+            BackendRequest::Metal
+        );
     }
 
     #[test]

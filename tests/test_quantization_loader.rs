@@ -1,10 +1,10 @@
-use std::collections::HashMap;
 use gllm::loader::Loader;
 use gllm::loader::UploadedTensor;
 use gllm_kernels::cpu_backend::CpuBackend;
 use half::f16;
 use safetensors::tensor::{serialize_to_file, TensorView};
 use safetensors::Dtype;
+use std::collections::HashMap;
 use tempfile::TempDir;
 
 fn f16_bytes(values: &[f16]) -> Vec<u8> {
@@ -26,8 +26,7 @@ fn quantized_awq_like_weights_are_dequantized() {
 
     let qweight_view = TensorView::new(Dtype::U8, vec![1, 2], &qweight).expect("qweight view");
     let scales_bytes = f16_bytes(&scales);
-    let scales_view =
-        TensorView::new(Dtype::F16, vec![2], &scales_bytes).expect("scales view");
+    let scales_view = TensorView::new(Dtype::F16, vec![2], &scales_bytes).expect("scales view");
     let zeros_view = TensorView::new(Dtype::U8, vec![2], &zeros).expect("zeros view");
 
     let mut metadata = HashMap::new();
@@ -47,8 +46,7 @@ fn quantized_awq_like_weights_are_dequantized() {
     )
     .expect("serialize safetensors");
 
-    let loader = Loader::from_local_files("qwen3-7b", vec![weights_path], vec![])
-        .expect("loader");
+    let loader = Loader::from_local_files("qwen3-7b", vec![weights_path], vec![]).expect("loader");
     let mut loader = loader;
     let backend = CpuBackend::new();
     let handle = loader.upload_weights(&backend).expect("upload weights");

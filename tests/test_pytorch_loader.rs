@@ -225,9 +225,7 @@ fn read_tensor_infos(
         stack
             .read_loop(&mut reader)
             .map_err(|err| TestError(err.to_string()))?;
-        let obj = stack
-            .finalize()
-            .map_err(|err| TestError(err.to_string()))?;
+        let obj = stack.finalize().map_err(|err| TestError(err.to_string()))?;
         let obj = unwrap_module(obj);
         let obj = resolve_state_dict(obj, key)?;
         let dict = match obj {
@@ -277,10 +275,7 @@ fn resolve_state_dict(obj: Object, key: Option<&str>) -> TestResult<Object> {
                         }
                     }
                 }
-                return Err(TestError(format!(
-                    "state dict key '{key}' not found"
-                ))
-                .into());
+                return Err(TestError(format!("state dict key '{key}' not found")).into());
             }
             for (k, v) in dict.iter() {
                 if let Object::Unicode(name) = k {
@@ -313,9 +308,7 @@ fn tensor_info_from_object(
             module_name,
             class_name,
         } if module_name == "torch._tensor" && class_name == "_rebuild_from_type_v2" => {
-            let mut args =
-                args.tuple()
-                    .map_err(|err| TestError(format!("{err:?}")))?;
+            let mut args = args.tuple().map_err(|err| TestError(format!("{err:?}")))?;
             let callable = args.remove(0);
             let args = args.remove(1);
             (callable, args)
@@ -324,9 +317,7 @@ fn tensor_info_from_object(
             module_name,
             class_name,
         } if module_name == "torch._utils" && class_name == "_rebuild_parameter" => {
-            let mut args =
-                args.tuple()
-                    .map_err(|err| TestError(format!("{err:?}")))?;
+            let mut args = args.tuple().map_err(|err| TestError(format!("{err:?}")))?;
             args.remove(0)
                 .reduce()
                 .map_err(|err| TestError(format!("{err:?}")))?
@@ -350,9 +341,7 @@ fn tensor_info_from_object(
 }
 
 fn rebuild_args(args: Object) -> TestResult<(Layout, PytorchDtype, String)> {
-    let mut args = args
-        .tuple()
-        .map_err(|err| TestError(format!("{err:?}")))?;
+    let mut args = args.tuple().map_err(|err| TestError(format!("{err:?}")))?;
     let stride = Vec::<usize>::try_from(args.remove(3))
         .map_err(|err| TestError(format!("invalid stride {err:?}")))?;
     let size = Vec::<usize>::try_from(args.remove(2))
@@ -361,8 +350,8 @@ fn rebuild_args(args: Object) -> TestResult<(Layout, PytorchDtype, String)> {
         .remove(1)
         .int_or_long()
         .map_err(|err| TestError(format!("{err:?}")))?;
-    let offset = usize::try_from(offset)
-        .map_err(|_| TestError("negative storage offset".to_string()))?;
+    let offset =
+        usize::try_from(offset).map_err(|_| TestError("negative storage offset".to_string()))?;
     let storage = args
         .remove(0)
         .persistent_load()
@@ -393,12 +382,7 @@ fn rebuild_args(args: Object) -> TestResult<(Layout, PytorchDtype, String)> {
         "IntStorage" => PytorchDtype::I32,
         "LongStorage" => PytorchDtype::I64,
         "BoolStorage" => PytorchDtype::Bool,
-        other => {
-            return Err(TestError(format!(
-                "unsupported storage type {other}"
-            ))
-            .into())
-        }
+        other => return Err(TestError(format!("unsupported storage type {other}")).into()),
     };
     let layout = Layout::new(
         Shape::from(size),
@@ -441,11 +425,7 @@ fn read_tensor_bytes(
             info.dtype.size_in_bytes(),
         ));
     }
-    Err(TestError(format!(
-        "non-contiguous tensor layout for {}",
-        info.name
-    ))
-    .into())
+    Err(TestError(format!("non-contiguous tensor layout for {}", info.name)).into())
 }
 
 fn reorder_fortran_to_c(data: &[u8], shape: &[usize], elem_size: usize) -> Vec<u8> {

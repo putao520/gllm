@@ -31,9 +31,8 @@ impl TokenizerHandle {
     }
 
     pub fn from_path(path: &Path) -> TokenizerResult<Self> {
-        let tokenizer = Tokenizer::from_file(path).map_err(|err| {
-            TokenizerError::Tokenizers(format!("{err}"))
-        })?;
+        let tokenizer = Tokenizer::from_file(path)
+            .map_err(|err| TokenizerError::Tokenizers(format!("{err}")))?;
         Ok(Self { tokenizer })
     }
 

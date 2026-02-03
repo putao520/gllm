@@ -11,7 +11,6 @@
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
 use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
-use std::time::Duration;
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 use gllm::loader::pytorch::convert_bins_to_safetensors;
 use gllm::loader::PytorchConversionConfig;
@@ -22,6 +21,7 @@ use gllm_kernels::kernel_types::KvCacheConfig;
 use hf_hub::api::sync::ApiBuilder;
 use safetensors::SafeTensors;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::Instant;
 
 /// Test configuration for a single model
@@ -311,10 +311,7 @@ fn test_rerank_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
             "The sky is blue during the day.".to_string(),
         ];
 
-        let results = match client
-            .rerank(test.test_prompt, documents)
-            .generate()
-        {
+        let results = match client.rerank(test.test_prompt, documents).generate() {
             Ok(r) => r,
             Err(e) => {
                 return TestResult {
@@ -359,7 +356,10 @@ fn run_regression_test(use_cuda: bool, filter: Option<&str>) -> Vec<TestResult> 
 
     println!("\n════════════════════════════════════════════════════════════════");
     println!("  gllm Regression Test Suite");
-    println!("  Backend: {}", if use_cuda { "CUDA" } else { "CPU (Auto)" });
+    println!(
+        "  Backend: {}",
+        if use_cuda { "CUDA" } else { "CPU (Auto)" }
+    );
     if let Some(f) = filter {
         println!("  Filter: {}", f);
     }

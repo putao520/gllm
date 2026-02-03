@@ -14,8 +14,8 @@ use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
 use crate::loader::LoaderError;
 use crate::manifest::{ModelArchitecture, ModelManifest};
-use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 use crate::registry;
+use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -157,7 +157,11 @@ impl Client {
             .map(|(index, score)| RerankResult { index, score })
             .collect::<Vec<_>>();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if top_n < results.len() {
             results.truncate(top_n);
         }
@@ -169,7 +173,9 @@ impl Client {
     }
 
     fn lock_backend(&self) -> Result<std::sync::MutexGuard<'_, BackendContext>, ClientError> {
-        self.backend.lock().map_err(|_| ClientError::ExecutorPoisoned)
+        self.backend
+            .lock()
+            .map_err(|_| ClientError::ExecutorPoisoned)
     }
 }
 

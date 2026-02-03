@@ -39,9 +39,7 @@ pub fn dequantize_int8(data: &[i8], scale: f32) -> Vec<f32> {
 }
 
 pub fn dequantize_int8_with_zero(data: &[i8], scale: f32, zero: f32) -> Vec<f32> {
-    data.iter()
-        .map(|v| (*v as f32 - zero) * scale)
-        .collect()
+    data.iter().map(|v| (*v as f32 - zero) * scale).collect()
 }
 
 pub fn dequantize_int4(packed: &[u8], scale: f32, signed: bool) -> Vec<f32> {

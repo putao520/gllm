@@ -89,9 +89,7 @@ impl HfHubClient {
             });
         }
 
-        if let Ok(index_path) =
-            self.get_file_any(&repo, file_map, "pytorch_model.bin.index.json")
-        {
+        if let Ok(index_path) = self.get_file_any(&repo, file_map, "pytorch_model.bin.index.json") {
             let shard_index = ShardIndex::from_path(&index_path)?;
             let shard_files = shard_index.shard_files();
             let weights = self.download_shards(&repo, &shard_files, parallel)?;

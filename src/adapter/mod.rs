@@ -4,26 +4,23 @@ use gllm_kernels::backend_trait::Backend;
 
 use crate::manifest::ModelManifest;
 
-pub mod r#trait;
+pub mod gemma2;
+pub mod glm5;
+pub mod gpt_oss;
+pub mod llama4;
+pub mod ministral;
+pub mod mistral3;
+pub mod phi4;
 pub mod qwen3;
 pub mod qwen3_embed;
 pub mod qwen3_moe;
 pub mod qwen3_rerank;
-pub mod llama4;
-pub mod gemma2;
-pub mod ministral;
-pub mod mistral3;
-pub mod phi4;
+pub mod r#trait;
 pub mod xlm_r;
-pub mod gpt_oss;
-pub mod glm5;
 
-pub use r#trait::{
-    AdapterError, AdapterResult, AdapterWeights, Message, ModelAdapter, Role, ThinkingHead,
-};
-pub use gpt_oss::GptOssAdapter;
-pub use glm5::Glm5Adapter;
 pub use gemma2::Gemma2Adapter;
+pub use glm5::Glm5Adapter;
+pub use gpt_oss::GptOssAdapter;
 pub use llama4::Llama4Adapter;
 pub use ministral::MinistralAdapter;
 pub use mistral3::Mistral3Adapter;
@@ -32,6 +29,9 @@ pub use qwen3::Qwen3Adapter;
 pub use qwen3_embed::Qwen3EmbedAdapter;
 pub use qwen3_moe::Qwen3MoEAdapter;
 pub use qwen3_rerank::Qwen3RerankAdapter;
+pub use r#trait::{
+    AdapterError, AdapterResult, AdapterWeights, Message, ModelAdapter, Role, ThinkingHead,
+};
 pub use xlm_r::XlmRAdapter;
 
 static QWEN3: Qwen3Adapter = Qwen3Adapter;
@@ -47,9 +47,7 @@ static XLMR: XlmRAdapter = XlmRAdapter;
 static GPT_OSS: GptOssAdapter = GptOssAdapter;
 static GLM5: Glm5Adapter = Glm5Adapter;
 
-pub fn adapter_for<B: Backend>(
-    manifest: &ModelManifest,
-) -> Option<&'static dyn ModelAdapter<B>> {
+pub fn adapter_for<B: Backend>(manifest: &ModelManifest) -> Option<&'static dyn ModelAdapter<B>> {
     if <Qwen3EmbedAdapter as ModelAdapter<B>>::supports(&QWEN3_EMBED, manifest) {
         return Some(&QWEN3_EMBED);
     }

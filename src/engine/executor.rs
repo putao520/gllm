@@ -83,7 +83,8 @@ impl<B: Backend + 'static> Executor<B> {
 
         // CPU backend 只支持 f32 dtype for KV cache
         // 如果模型配置是 f16/bf16，需要强制转换为 f32
-        let cpu_dtype_size = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>() {
+        let cpu_dtype_size = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+        {
             Some(4) // f32
         } else {
             None
@@ -142,7 +143,12 @@ impl<B: Backend + 'static> Executor<B> {
         let back = KvCacheState::new(back, *config);
         self.kv_cache = Some(KvCacheDoubleBuffer::new(front, back));
         self.kv_cache_slot = KvCacheSlot::Front;
-        Ok(self.kv_cache.as_ref().expect("kv cache set").front().handle())
+        Ok(self
+            .kv_cache
+            .as_ref()
+            .expect("kv cache set")
+            .front()
+            .handle())
     }
 
     pub fn kv_cache(&self) -> Option<KvCacheHandle> {
@@ -206,13 +212,20 @@ impl<B: Backend + 'static> Executor<B> {
 
         // Advance the cache after forward completes
         let slot = self.kv_cache_slot;
-        let kv_cache = self.kv_cache.as_mut().expect("kv cache should be allocated");
+        let kv_cache = self
+            .kv_cache
+            .as_mut()
+            .expect("kv cache should be allocated");
         let active = kv_cache.slot_mut(slot);
         active.advance(tokens.len())?;
         Ok(logits)
     }
 
-    pub fn sample_from_logits(&self, logits: &LogitsHandle, temperature: f32) -> ExecutorResult<u32> {
+    pub fn sample_from_logits(
+        &self,
+        logits: &LogitsHandle,
+        temperature: f32,
+    ) -> ExecutorResult<u32> {
         let sampling = SamplingConfig {
             temperature,
             ..SamplingConfig::default()
@@ -267,7 +280,8 @@ impl<B: Backend + 'static> Executor<B> {
                 logits_handle
             } else {
                 // No cached logits; fall back to computing the final token of the prefix.
-                let mut tokens_slice: &[u32] = &input_tokens[hit.prefix_tokens.min(input_tokens.len())..];
+                let mut tokens_slice: &[u32] =
+                    &input_tokens[hit.prefix_tokens.min(input_tokens.len())..];
                 if tokens_slice.is_empty() {
                     let last_idx = input_tokens.len().saturating_sub(1);
                     tokens_slice = &input_tokens[last_idx..];

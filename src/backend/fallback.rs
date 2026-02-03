@@ -87,11 +87,7 @@ impl<'a> FallbackEmbedder<'a> {
                 payload.push_str(query);
                 payload.push('\n');
                 payload.push_str(doc);
-                let score = executor
-                    .rerank(&payload)?
-                    .first()
-                    .copied()
-                    .unwrap_or(0.0);
+                let score = executor.rerank(&payload)?.first().copied().unwrap_or(0.0);
                 scores.push(score);
             }
             Ok(scores)
@@ -155,9 +151,8 @@ mod tests {
 
     #[test]
     fn detects_backend_oom_messages() {
-        let err = ExecutorError::Backend(BackendError::Cuda(
-            "CUDA_ERROR_OUT_OF_MEMORY".to_string(),
-        ));
+        let err =
+            ExecutorError::Backend(BackendError::Cuda("CUDA_ERROR_OUT_OF_MEMORY".to_string()));
         assert!(is_oom_error(&err));
 
         let err = ExecutorError::Backend(BackendError::Cuda("unknown".to_string()));

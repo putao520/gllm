@@ -1,11 +1,11 @@
 //! Layer 1: Manifest system (SSOT).
 
-pub mod types;
 mod models;
+pub mod types;
 
 pub use types::{
-    FileMap, KnownModel, ModelArchitecture, ModelManifest, MoEConfig, RouterType,
-    TensorNamingRule, EMPTY_FILE_MAP,
+    FileMap, KnownModel, MoEConfig, ModelArchitecture, ModelManifest, RouterType, TensorNamingRule,
+    EMPTY_FILE_MAP,
 };
 
 pub fn all_manifests() -> &'static [&'static ModelManifest] {

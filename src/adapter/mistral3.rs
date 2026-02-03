@@ -14,11 +14,7 @@ impl<B: Backend> ModelAdapter<B> for Mistral3Adapter {
         matches!(manifest.arch, ModelArchitecture::Mistral3)
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }
