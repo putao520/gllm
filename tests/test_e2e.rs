@@ -16,8 +16,8 @@ const E2E_MATRIX: &[(&str, &str)] = &[
     ("Embedding", "e5-small"),
 ];
 
-/// Reranker 测试 (需要 HF_TOKEN)
-const RERANKER_MODEL: (&str, &str) = ("Reranker", "bge-rerank-v3");
+/// Reranker 测试 (HuggingFace 模型)
+const RERANKER_MODEL: (&str, &str) = ("Reranker", "bge-reranker-v2-m3");
 
 /// E2E 测试 - 验证单个功能端到端流程
 fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
@@ -81,25 +81,21 @@ fn e2e_features() {
         }
     }
 
-    // 测试 Reranker (需要 HF_TOKEN)
-    if std::env::var("HF_TOKEN").is_ok() {
-        print!("[Reranker] ");
-        match test_e2e_feature(RERANKER_MODEL.0, RERANKER_MODEL.1) {
-            Ok(()) => {
-                passed += 1;
-                println!();
-            }
-            Err(e) => {
-                eprintln!(" ❌ 失败: {}", e);
-                failed.push((RERANKER_MODEL.0, RERANKER_MODEL.1, e));
-            }
+    // 测试 Reranker (HuggingFace，自动读取 ~/.huggingface/token)
+    print!("[Reranker] ");
+    match test_e2e_feature(RERANKER_MODEL.0, RERANKER_MODEL.1) {
+        Ok(()) => {
+            passed += 1;
+            println!();
         }
-    } else {
-        println!("[Reranker] ⏭️  跳过 (需要 HF_TOKEN)");
+        Err(e) => {
+            eprintln!(" ❌ 失败: {}", e);
+            failed.push((RERANKER_MODEL.0, RERANKER_MODEL.1, e));
+        }
     }
 
     println!("\n📊 E2E 测试汇总:");
-    println!("  通过: {} / {}", passed, E2E_MATRIX.len() + 1);
+    println!("  通过: {} / 3", passed);
 
     if !failed.is_empty() {
         eprintln!("\n❌ 失败:");
