@@ -12,7 +12,7 @@ struct ModelTestCase {
 
 const MODELS_TO_TEST: &[ModelTestCase] = &[
     ModelTestCase {
-        alias: "smollm2-135m",
+        alias: "HuggingFaceTB/SmolLM2-135M-Instruct",
         description: "SmolLM2-135M - Llama4 architecture, GQA (9:3)",
         architecture: "Llama4",
     },

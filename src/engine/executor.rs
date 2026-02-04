@@ -13,6 +13,7 @@ use crate::adapter::{AdapterError, AdapterWeights, Message, ModelAdapter};
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::Loader;
 use crate::manifest::ModelManifest;
+use std::sync::Arc;
 use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 
@@ -42,7 +43,7 @@ pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
 pub struct Executor<B: Backend + 'static> {
     backend: B,
     scheduler: Scheduler,
-    manifest: &'static ModelManifest,
+    manifest: Arc<ModelManifest>,
     adapter: &'static dyn ModelAdapter<B>,
     weights: AdapterWeights<B>,
     model_config: ModelConfig,
@@ -56,11 +57,11 @@ pub struct Executor<B: Backend + 'static> {
 impl<B: Backend + 'static> Executor<B> {
     pub fn from_loader(
         backend: B,
-        manifest: &'static ModelManifest,
+        manifest: Arc<ModelManifest>,
         adapter: &'static dyn ModelAdapter<B>,
         loader: &mut Loader,
     ) -> ExecutorResult<Self> {
-        let model_config = ModelConfig::from_loader(manifest, loader)?;
+        let model_config = ModelConfig::from_loader(manifest.as_ref(), loader)?;
         let forward_config = GeneratorForwardConfig {
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_attention_heads,
@@ -120,8 +121,8 @@ impl<B: Backend + 'static> Executor<B> {
         &self.backend
     }
 
-    pub fn manifest(&self) -> &'static ModelManifest {
-        self.manifest
+    pub fn manifest(&self) -> &ModelManifest {
+        self.manifest.as_ref()
     }
 
     pub fn weights(&self) -> &AdapterWeights<B> {
@@ -252,7 +253,7 @@ impl<B: Backend + 'static> Executor<B> {
 
         // LMCache lookup (ARCH-SCHED-LMCACHE). We simulate skipping prefill tokens by
         // advancing the KV cache usage without GPU recompute to stay zero-copy/AOT.
-        let model_id = format!("{:?}", self.manifest.model_id);
+        let model_id = self.manifest.model_id.to_string();
         let lmcache_hit = self.scheduler.lmcache_lookup(&model_id, prompt);
 
         let slot = self.kv_cache_slot;

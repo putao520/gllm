@@ -1,6 +1,6 @@
 //! Client API skeleton.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use gllm_kernels::BackendError;
 use thiserror::Error;
@@ -12,8 +12,8 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::loader::LoaderError;
-use crate::manifest::{ModelArchitecture, ModelManifest};
+use crate::loader::{config as loader_config, LoaderConfig, LoaderError};
+use crate::manifest::{ModelArchitecture, ModelManifest, EMPTY_FILE_MAP};
 use crate::registry;
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
@@ -30,18 +30,43 @@ pub enum ClientError {
     #[error(transparent)]
     Loader(#[from] LoaderError),
     #[error(transparent)]
+    Config(#[from] loader_config::ConfigError),
+    #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
     Executor(#[from] ExecutorError),
 }
 
 pub struct Client {
-    manifest: &'static ModelManifest,
-    backend: Mutex<BackendContext>,
+    model_id: String,
+    manifest: Arc<ModelManifest>,
+    backend: Mutex<Option<BackendContext>>,
 }
 
 pub struct AsyncClient {
     inner: Client,
+}
+
+struct BackendGuard<'a> {
+    guard: std::sync::MutexGuard<'a, Option<BackendContext>>,
+}
+
+impl<'a> std::ops::Deref for BackendGuard<'a> {
+    type Target = BackendContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_ref()
+            .expect("backend context initialized")
+    }
+}
+
+impl<'a> std::ops::DerefMut for BackendGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .as_mut()
+            .expect("backend context initialized")
+    }
 }
 
 impl From<BackendContextError> for ClientError {
@@ -58,20 +83,28 @@ impl From<BackendContextError> for ClientError {
 
 impl Client {
     pub fn new(model_or_alias: &str) -> Result<Self, ClientError> {
-        let manifest = registry::lookup(model_or_alias)
-            .ok_or_else(|| ClientError::UnknownModel(model_or_alias.to_string()))?;
+        let model_id = model_or_alias.trim();
+        if model_id.is_empty() {
+            return Err(ClientError::UnknownModel(model_or_alias.to_string()));
+        }
 
-        let backend = detect_backend()?;
-        let backend = BackendContext::new(model_or_alias.to_string(), manifest, backend)?;
+        let overrides = registry::lookup(model_id);
+        let file_map = overrides.map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
+        let loader_config = LoaderConfig::from_env();
+        let config_files =
+            loader_config::download_config_files(model_id, &loader_config, file_map)?;
+        let config_value = loader_config::load_config_value(&config_files.config_path)?;
+        let manifest = loader_config::manifest_from_config(model_id, &config_value, overrides)?;
 
         Ok(Self {
-            manifest,
-            backend: Mutex::new(backend),
+            model_id: model_id.to_string(),
+            manifest: Arc::new(manifest),
+            backend: Mutex::new(None),
         })
     }
 
-    pub fn manifest(&self) -> &'static ModelManifest {
-        self.manifest
+    pub fn manifest(&self) -> &ModelManifest {
+        self.manifest.as_ref()
     }
 
     pub fn generate(&self, prompt: impl Into<String>) -> GenerationBuilder<'_> {
@@ -172,10 +205,18 @@ impl Client {
         })
     }
 
-    fn lock_backend(&self) -> Result<std::sync::MutexGuard<'_, BackendContext>, ClientError> {
-        self.backend
+    fn lock_backend(&self) -> Result<BackendGuard<'_>, ClientError> {
+        let mut guard = self
+            .backend
             .lock()
-            .map_err(|_| ClientError::ExecutorPoisoned)
+            .map_err(|_| ClientError::ExecutorPoisoned)?;
+        if guard.is_none() {
+            let backend = detect_backend()?;
+            let context =
+                BackendContext::new(self.model_id.clone(), self.manifest.clone(), backend)?;
+            *guard = Some(context);
+        }
+        Ok(BackendGuard { guard })
     }
 }
 

@@ -11,13 +11,13 @@ use gllm::Client;
 /// E2E 测试矩阵：功能 × 最小模型
 const E2E_MATRIX: &[(&str, &str)] = &[
     // Generator - 最小模型
-    ("Generator", "qwen2.5-0.5b"),
+    ("Generator", "Qwen/Qwen2.5-0.5B-Instruct"),
     // Embedding - 最小模型
-    ("Embedding", "e5-small"),
+    ("Embedding", "intfloat/e5-small"),
 ];
 
 /// Reranker 测试 (HuggingFace 模型)
-const RERANKER_MODEL: (&str, &str) = ("Reranker", "bge-reranker-v2-m3");
+const RERANKER_MODEL: (&str, &str) = ("Reranker", "BAAI/bge-reranker-v2-m3");
 
 /// E2E 测试 - 验证单个功能端到端流程
 fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {

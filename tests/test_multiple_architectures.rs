@@ -14,13 +14,13 @@ struct ModelTest {
 const MODEL_TESTS: &[ModelTest] = &[
     // Qwen2.5 - GQA architecture (14 heads, 2 KV heads)
     ModelTest {
-        alias: "qwen2.5-0.5b",
+        alias: "Qwen/Qwen2.5-0.5B-Instruct",
         prompt: "The capital of China is",
         expected_contains: "Beijing",
     },
     // SmolLM2 - GQA architecture (9 heads, 3 KV heads)
     ModelTest {
-        alias: "smollm2-135m",
+        alias: "HuggingFaceTB/SmolLM2-135M-Instruct",
         prompt: "1 + 2 equals",
         expected_contains: "3",
     },
@@ -101,7 +101,7 @@ fn test_multiple_architectures_generation() {
 fn test_qwen25_gqa_specific() {
     println!("🔍 Testing Qwen2.5 GQA architecture specifically\n");
 
-    match Client::new("qwen2.5-0.5b") {
+    match Client::new("Qwen/Qwen2.5-0.5B-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded: {:?}", client.manifest().arch);
 
@@ -132,7 +132,7 @@ fn test_qwen25_gqa_specific() {
 fn test_smollm2_gqa_specific() {
     println!("🔍 Testing SmolLM2 GQA architecture specifically\n");
 
-    match Client::new("smollm2-135m") {
+    match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded: {:?}", client.manifest().arch);
 
@@ -166,7 +166,7 @@ fn test_smollm2_gqa_specific() {
 fn test_multiple_sequences_same_model() {
     println!("🔍 Testing multiple sequential generations with same model\n");
 
-    match Client::new("smollm2-135m") {
+    match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded");
 

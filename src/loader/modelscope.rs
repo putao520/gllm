@@ -115,6 +115,22 @@ impl ModelScopeClient {
         Err(LoaderError::MissingWeights)
     }
 
+    pub fn download_config_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
+        let downloader = ModelScopeDownloader::new(
+            self.cache_dir.clone(),
+            Some("https://www.modelscope.cn".to_string()),
+        )?;
+        self.get_file_any(repo, file_map, "config.json", &downloader)
+    }
+
+    pub fn download_tokenizer_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
+        let downloader = ModelScopeDownloader::new(
+            self.cache_dir.clone(),
+            Some("https://www.modelscope.cn".to_string()),
+        )?;
+        self.get_file_any(repo, file_map, "tokenizer.json", &downloader)
+    }
+
     fn get_file_any(
         &self,
         repo: &str,

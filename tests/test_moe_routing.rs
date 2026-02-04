@@ -8,7 +8,7 @@ use gllm_kernels::kernel_types::PageState;
 
 #[test]
 fn qwen3_moe_manifest_selects_moe_adapter() {
-    let manifest = registry::lookup("qwen3-moe").expect("manifest");
+    let manifest = registry::lookup("Qwen/Qwen3-235B-A22B-Instruct").expect("manifest");
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
     let adapter = adapter_for::<CpuBackend>(manifest);
     assert!(

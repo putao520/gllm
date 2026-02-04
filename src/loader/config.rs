@@ -1,0 +1,257 @@
+//! config.json parsing and architecture resolution.
+
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+use thiserror::Error;
+
+use crate::manifest::{
+    FileMap, ModelArchitecture, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+};
+
+use super::{
+    CacheLayout, HfHubClient, LoaderConfig, LoaderError, ModelScopeClient, ModelSource,
+};
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("config.json not found for model: {model_id}")]
+    MissingConfig { model_id: String },
+    #[error("unsupported architecture: {0}")]
+    UnsupportedArchitecture(String),
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigFiles {
+    pub config_path: PathBuf,
+    pub tokenizer_path: Option<PathBuf>,
+    pub source: ModelSource,
+}
+
+pub fn download_config_files(
+    model_id: &str,
+    config: &LoaderConfig,
+    file_map: FileMap,
+) -> Result<ConfigFiles, ConfigError> {
+    let cache = CacheLayout::new(config.cache_dir.clone())?;
+    cache.ensure()?;
+
+    let result = download_from_source(model_id, config.source, &cache, file_map);
+
+    if config.source == ModelSource::HuggingFace && config.enable_fallback {
+        result.or_else(|err| {
+            if should_fallback(&err) {
+                download_from_source(model_id, ModelSource::ModelScope, &cache, file_map)
+            } else {
+                Err(err)
+            }
+        })
+    } else {
+        result
+    }
+}
+
+pub fn load_config_value(path: &Path) -> Result<Value, ConfigError> {
+    let bytes = std::fs::read(path)?;
+    let value = serde_json::from_slice(&bytes)?;
+    Ok(value)
+}
+
+pub fn manifest_from_config(
+    model_id: &str,
+    config: &Value,
+    overrides: Option<&ModelManifest>,
+) -> Result<ModelManifest, ConfigError> {
+    let arch = resolve_architecture(config, model_id)?;
+    let tensor_rules = tensor_rules_for_arch(arch);
+    let file_map = overrides.map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
+
+    Ok(ModelManifest {
+        model_id: Cow::Owned(model_id.to_string()),
+        file_map,
+        arch,
+        tensor_rules,
+        rope_base_override: overrides.and_then(|m| m.rope_base_override),
+        max_context_override: overrides.and_then(|m| m.max_context_override),
+        moe_config: overrides.and_then(|m| m.moe_config),
+    })
+}
+
+pub fn resolve_architecture(config: &Value, model_id: &str) -> Result<ModelArchitecture, ConfigError> {
+    let mut candidates = Vec::new();
+
+    if let Some(architectures) = config.get("architectures") {
+        collect_architectures(architectures, &mut candidates);
+    }
+
+    if let Some(model_type) = config.get("model_type").and_then(|v| v.as_str()) {
+        candidates.push(model_type.to_string());
+    }
+
+    for candidate in &candidates {
+        if let Some(arch) = map_architecture_token(candidate) {
+            return Ok(arch);
+        }
+    }
+
+    if let Some(arch) = map_architecture_token(model_id) {
+        return Ok(arch);
+    }
+
+    if candidates.is_empty() {
+        return Err(ConfigError::UnsupportedArchitecture(
+            "missing architectures/model_type".to_string(),
+        ));
+    }
+
+    Err(ConfigError::UnsupportedArchitecture(candidates.join(", ")))
+}
+
+pub fn tensor_rules_for_arch(arch: ModelArchitecture) -> TensorNamingRule {
+    match arch {
+        ModelArchitecture::Qwen2_5 => TensorNamingRule::Llama4,
+        ModelArchitecture::Qwen3 => TensorNamingRule::Qwen3,
+        ModelArchitecture::Qwen3MoE => TensorNamingRule::Qwen3,
+        ModelArchitecture::Llama4 => TensorNamingRule::Llama4,
+        ModelArchitecture::Mistral3 => TensorNamingRule::Mistral3,
+        ModelArchitecture::Ministral => TensorNamingRule::Ministral,
+        ModelArchitecture::GLM4 => TensorNamingRule::GLM4,
+        ModelArchitecture::GLM5 => TensorNamingRule::GLM5,
+        ModelArchitecture::GPT2Next => TensorNamingRule::GPT2Next,
+        ModelArchitecture::Phi4 => TensorNamingRule::Phi4,
+        ModelArchitecture::Gemma2 => TensorNamingRule::Gemma2,
+        ModelArchitecture::XlmR => TensorNamingRule::XlmR,
+        ModelArchitecture::XlmRNext => TensorNamingRule::XlmRNext,
+    }
+}
+
+fn download_from_source(
+    model_id: &str,
+    source: ModelSource,
+    cache: &CacheLayout,
+    file_map: FileMap,
+) -> Result<ConfigFiles, ConfigError> {
+    match source {
+        ModelSource::HuggingFace => {
+            let hf = HfHubClient::new(cache.hf_cache_dir())?;
+            let config_path = hf
+                .download_config_file(model_id, file_map)
+                .map_err(|err| map_missing_config(model_id, err))?;
+            let tokenizer_path = hf.download_tokenizer_file(model_id, file_map).ok();
+            Ok(ConfigFiles {
+                config_path,
+                tokenizer_path,
+                source,
+            })
+        }
+        ModelSource::ModelScope => {
+            let ms = ModelScopeClient::new(cache.modelscope_cache_dir())?;
+            let config_path = ms
+                .download_config_file(model_id, file_map)
+                .map_err(|err| map_missing_config(model_id, err))?;
+            let tokenizer_path = ms.download_tokenizer_file(model_id, file_map).ok();
+            Ok(ConfigFiles {
+                config_path,
+                tokenizer_path,
+                source,
+            })
+        }
+    }
+}
+
+fn map_missing_config(model_id: &str, err: LoaderError) -> ConfigError {
+    match err {
+        LoaderError::MissingWeights => ConfigError::MissingConfig {
+            model_id: model_id.to_string(),
+        },
+        other => ConfigError::Loader(other),
+    }
+}
+
+fn should_fallback(err: &ConfigError) -> bool {
+    match err {
+        ConfigError::MissingConfig { .. } => true,
+        ConfigError::Loader(loader) => super::is_recoverable_error(loader),
+        _ => false,
+    }
+}
+
+fn collect_architectures(value: &Value, out: &mut Vec<String>) {
+    if let Some(array) = value.as_array() {
+        for item in array {
+            if let Some(name) = item.as_str() {
+                out.push(name.to_string());
+                continue;
+            }
+            if let Some(obj) = item.as_object() {
+                if let Some(name) = obj.get("type").and_then(|v| v.as_str()) {
+                    out.push(name.to_string());
+                }
+                if let Some(name) = obj.get("architecture").and_then(|v| v.as_str()) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    } else if let Some(name) = value.as_str() {
+        out.push(name.to_string());
+    }
+}
+
+fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
+    let lower = token.to_ascii_lowercase();
+
+    if lower.contains("ministral") {
+        return Some(ModelArchitecture::Ministral);
+    }
+    if lower.contains("mistral") {
+        return Some(ModelArchitecture::Mistral3);
+    }
+    if lower.contains("qwen") && lower.contains("moe") {
+        return Some(ModelArchitecture::Qwen3MoE);
+    }
+    if lower.contains("qwen3") {
+        return Some(ModelArchitecture::Qwen3);
+    }
+    if lower.contains("qwen2.5") || lower.contains("qwen2_5") || lower.contains("qwen2-5") {
+        return Some(ModelArchitecture::Qwen2_5);
+    }
+    if lower.contains("qwen2") {
+        return Some(ModelArchitecture::Qwen3);
+    }
+    if lower.contains("llama") {
+        return Some(ModelArchitecture::Llama4);
+    }
+    if lower.contains("phi3") || lower.contains("phi4") {
+        return Some(ModelArchitecture::Phi4);
+    }
+    if lower.contains("gemma2") || lower.contains("gemma-2") {
+        return Some(ModelArchitecture::Gemma2);
+    }
+    if lower.contains("glm5") || lower.contains("glm-5") {
+        return Some(ModelArchitecture::GLM5);
+    }
+    if lower.contains("glm4") || lower.contains("glm-4") || lower.contains("chatglm") {
+        return Some(ModelArchitecture::GLM4);
+    }
+    if lower.contains("glm") {
+        return Some(ModelArchitecture::GLM5);
+    }
+    if lower.contains("gpt2") || lower.contains("gpt-oss") || lower.contains("gptoss") {
+        return Some(ModelArchitecture::GPT2Next);
+    }
+    if lower.contains("xlm-roberta") || lower.contains("xlm_roberta") || lower.contains("xlmr") {
+        return Some(ModelArchitecture::XlmR);
+    }
+    if lower.contains("roberta") || lower.contains("bert") {
+        return Some(ModelArchitecture::XlmR);
+    }
+
+    None
+}

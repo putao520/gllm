@@ -2,21 +2,16 @@
 
 use crate::manifest::{all_manifests, manifest_by_id, KnownModel, ModelManifest};
 
-pub fn lookup(alias: &str) -> Option<&'static ModelManifest> {
-    let alias = alias.trim();
-    if alias.is_empty() {
+pub fn lookup(model_id: &str) -> Option<&'static ModelManifest> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
         return None;
     }
 
     all_manifests().iter().copied().find(|manifest| {
         manifest
-            .aliases
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(alias))
-            || manifest.hf_repo.eq_ignore_ascii_case(alias)
-            || manifest
-                .model_scope_repo
-                .map_or(false, |repo| repo.eq_ignore_ascii_case(alias))
+            .model_id
+            .eq_ignore_ascii_case(model_id)
     })
 }
 

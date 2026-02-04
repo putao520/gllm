@@ -49,7 +49,7 @@ fn gptq_signed_int4_dequantizes_with_metadata_bits() {
     .expect("serialize safetensors");
 
     let mut loader =
-        Loader::from_local_files("phi-4-mini", vec![weights_path], vec![]).expect("loader");
+        Loader::from_local_files("microsoft/Phi-4-mini-instruct", vec![weights_path], vec![]).expect("loader");
     let backend = CpuBackend::new();
     let handle = loader.upload_weights(&backend).expect("upload weights");
 

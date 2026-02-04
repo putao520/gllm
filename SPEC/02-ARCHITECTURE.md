@@ -150,7 +150,61 @@ Client::new("bge-m3")
     → 初始化模型 → 返回 Client
 ```
 
-### 3. 模型清单 SSOT (ARCH-MANIFEST)
+### 3. 模型配置覆盖 (ARCH-MANIFEST)
+
+> **📌 重构中 (REQ-LOADER-006/007/008)**: Manifest 从"模型注册表"重构为"配置覆盖层"
+
+**重构目标**：
+- ❌ **旧设计**: 每个模型必须在 `KnownModel` 枚举中注册，硬编码 `hf_repo`、`aliases` 等
+- ✅ **新设计**: 用户直接使用 HF Model ID，系统自动下载并识别架构
+
+**重构后流程**：
+```
+Client::new("Qwen/Qwen3-0.6B")
+    ↓
+1. 构造 HF 地址: huggingface.co/Qwen/Qwen3-0.6B
+2. 下载模型文件 (config.json, tokenizer.json, safetensors)
+3. 读取 config.json → 识别架构 (Qwen3)
+4. 匹配 Qwen3Adapter → 加载权重
+5. (可选) 应用 Manifest 中的配置覆盖
+```
+
+**Manifest 重新定位**：
+
+| 旧定位 (模型注册表) | 新定位 (配置覆盖层) |
+|-------------------|-------------------|
+| 每个模型必须注册 | 仅用于特殊配置覆盖 |
+| `model_id` 枚举值 | 移除（由用户输入指定） |
+| `aliases` 别名列表 | 移除（用户直接用 HF ID） |
+| `hf_repo` 硬编码仓库 | 移除（由用户输入构造） |
+| `model_scope_repo` 硬编码 | 移除（自动回退） |
+| `arch` 架构类型 | 从 config.json 自动识别 |
+| `tensor_rules` 命名规则 | 从架构类型推断 |
+| `rope_base_override` | ✅ 保留（特殊配置） |
+| `max_context_override` | ✅ 保留（特殊配置） |
+| `moe_config` | ✅ 保留（特殊配置） |
+
+**架构识别规则**：
+
+| config.json 字段 | 架构识别 |
+|------------------|----------|
+| `model_type == "qwen3"` | Qwen3 |
+| `model_type == "llama"` | Llama4 |
+| `model_type == "ministral"` / `mistral` | Ministral/Mistral3 |
+| `model_type == "glm"` | GLM4/GLM5 |
+| `architectures[0]["type"]` | 回退字段 |
+
+**约束**：
+1. ✅ 支持任意有效的 HF Model ID
+2. ✅ 自动回退 ModelScope（HF 失败时）
+3. ✅ 新模型无需修改代码即可使用
+4. ✅ Manifest 仅用于特殊配置覆盖（如非标准 RoPE base）
+
+---
+
+#### 旧版 Manifest 文档 (重构前)
+
+> **注意**: 以下描述的是旧版 Manifest 系统，正在重构中。
 
 为了实现"只改配置支持新模型"，我们将注册表(Registry)、HF标准化(Downloading)和推理配置(Inference)融合为一个统一的 **Model Manifest** 系统。
 
@@ -174,6 +228,8 @@ Client::new("bge-m3")
 | | `router_type` | 路由算法 |
 
 **约束**：所有逻辑（下载、加载、计算）由静态配置驱动，禁止代码逻辑中散落模型判断。
+
+---
 
 #### 权重加载策略 (ARCH-LOADER)
 

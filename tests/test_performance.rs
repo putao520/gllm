@@ -8,19 +8,21 @@ use gllm::engine::executor::Executor;
 use gllm::registry;
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::Backend;
+use std::sync::Arc;
 
 fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
     let manifest = registry::lookup(alias).expect("manifest");
     let adapter = adapter_for::<CpuBackend>(manifest).expect("adapter");
     let backend = CpuBackend::new();
     let mut loader = files.loader(alias).expect("loader");
-    Executor::from_loader(backend, manifest, adapter, &mut loader).expect("executor")
+    Executor::from_loader(backend, Arc::new(manifest.clone()), adapter, &mut loader)
+        .expect("executor")
 }
 
 #[test]
 fn performance_harness_reports_throughput_and_latency() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut executor = build_executor("qwen3-7b", &files);
+    let mut executor = build_executor("Qwen/Qwen3-0.6B", &files);
 
     let mut total_dims = 0usize;
     let start = Instant::now();
@@ -38,7 +40,7 @@ fn performance_harness_reports_throughput_and_latency() {
 #[test]
 fn performance_harness_checks_memory_pressure() {
     let files = TestModelFiles::new().expect("test model files");
-    let executor = build_executor("qwen3-7b", &files);
+    let executor = build_executor("Qwen/Qwen3-0.6B", &files);
     let pressure = executor
         .backend()
         .get_memory_pressure()

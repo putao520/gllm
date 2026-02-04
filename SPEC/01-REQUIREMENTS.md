@@ -24,6 +24,37 @@
 | **REQ-LOADER-003** | 并发加载 | 支持多线程并发下载和张量加载 | 大模型加载速度显著提升 | 🟢 已实现 |
 | **REQ-LOADER-004** | 权重转换 | 支持 safetensors/bin 自动探测与转换 | 兼容主流权重格式 | 🟢 已实现 |
 | **REQ-LOADER-005** | ModelScope 支持 | 支持从魔搭社区(ModelScope)下载模型 | 1. `source` 配置项支持切换源<br>2. 自动处理 ModelScope 特有的文件结构 | 🟢 已实现 |
+| **REQ-LOADER-006** | 动态模型发现 | 支持任意 HF Model ID，无需预注册 | 1. `Client::new("org/model-name")` 自动下载<br>2. 从 `config.json` 自动识别架构<br>3. 无需修改代码即可支持新模型 | 🟢 已实现 |
+| **REQ-LOADER-007** | 架构自动识别 | 从模型配置文件自动推断架构类型 | 1. 读取 `config.json` 的 `model_type`/`architectures`<br>2. 匹配到对应的 Adapter<br>3. 支持常见架构的自动探测 | 🟢 已实现 |
+| **REQ-LOADER-008** | Manifest 降级为配置覆盖 | Manifest 仅用于特殊配置覆盖 | 1. 默认流程无需 Manifest<br>2. Manifest 仅用于 `rope_base` 等特殊覆盖<br>3. 新模型无需添加 Manifest 即可用 | 🟢 已实现 |
+
+### 重构说明 (REQ-LOADER-REFACTOR)
+
+**当前问题**：
+- 每个模型需要在 `KnownModel` 枚举中注册
+- `hf_repo`、`model_scope_repo` 等信息硬编码
+- 添加新模型需要修改代码并重新编译
+
+**目标架构**：
+```
+用户输入: Client::new("Qwen/Qwen3-0.6B")
+  ↓
+1. 构造 HF 下载地址: huggingface.co/Qwen/Qwen3-0.6B
+  ↓
+2. 下载模型文件 (config.json, tokenizer.json, safetensors)
+  ↓
+3. 读取 config.json → 识别架构 (Qwen3)
+  ↓
+4. 匹配 Qwen3Adapter → 加载权重
+  ↓
+5. (可选) 应用 Manifest 中的配置覆盖
+```
+
+**Manifest 重新定位**：
+- **从**：模型注册表（每个模型都必须注册）
+- **到**：配置覆盖层（仅用于特殊配置）
+- **保留字段**：`rope_base_override`、`max_context_override`、`moe_config`
+- **移除字段**：`hf_repo`、`model_scope_repo`、`aliases`（由用户输入直接指定）
 
 ## 3. 核心功能 (REQ-CORE)
 

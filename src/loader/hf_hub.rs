@@ -195,6 +195,14 @@ impl HfHubClient {
         Err(LoaderError::MissingWeights)
     }
 
+    pub fn download_config_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
+        self.get_file_any(repo, file_map, "config.json")
+    }
+
+    pub fn download_tokenizer_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
+        self.get_file_any(repo, file_map, "tokenizer.json")
+    }
+
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
         let repo_api = self.api.model(repo.to_string());
         // get() 会自动检查缓存，不存在则下载（无进度显示）

@@ -1,5 +1,7 @@
 //! Layer 1: Manifest types (SSOT).
 
+use std::borrow::Cow;
+
 /// HuggingFace file rename map.
 ///
 /// Each pair is (logical_name, repo_name).
@@ -53,15 +55,13 @@ pub struct MoEConfig {
     pub router_type: RouterType,
 }
 
-/// Model manifest (static data only).
-#[derive(Debug)]
+/// Model manifest (runtime data + optional overrides).
+#[derive(Debug, Clone)]
 pub struct ModelManifest {
-    // Identity & download
-    pub model_id: KnownModel,
-    pub aliases: &'static [&'static str],
-    pub hf_repo: &'static str,
-    pub model_scope_repo: Option<&'static str>,
-    pub hf_file_map: FileMap,
+    // Identity (HF Model ID)
+    pub model_id: Cow<'static, str>,
+    // Optional file rename overrides for non-standard repos.
+    pub file_map: FileMap,
 
     // Architecture
     pub arch: ModelArchitecture,
@@ -103,6 +103,7 @@ pub enum KnownModel {
     GLM5_9B,
     GptOss_1_5B,
     GptOss_12B,
+    GPT2,
     Phi4,
     Phi4_Mini,
     Gemma2_2B_It,
@@ -143,6 +144,7 @@ impl KnownModel {
                 | Self::GLM5_9B
                 | Self::GptOss_1_5B
                 | Self::GptOss_12B
+                | Self::GPT2
                 | Self::Phi4
                 | Self::Phi4_Mini
                 | Self::Gemma2_2B_It

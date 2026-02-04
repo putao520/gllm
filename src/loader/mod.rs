@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ::safetensors::Dtype;
 use gllm_kernels::backend_trait::{Backend, TensorLookup};
@@ -12,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::manifest::{ModelManifest, TensorNamingRule};
+use crate::manifest::{ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
 use crate::quantization::dequantize_int8_with_zero;
 use crate::registry;
 
 pub mod downloader;
+pub mod config;
 pub mod hf_hub;
 pub mod modelscope;
 pub mod parallel;
@@ -253,7 +255,7 @@ impl ChecksumStore {
 
 #[derive(Debug)]
 pub struct Loader {
-    manifest: Option<&'static ModelManifest>,
+    manifest: Option<Arc<ModelManifest>>,
     repo: String,
     source: ModelSource,
     config: LoaderConfig,
@@ -284,6 +286,14 @@ impl Loader {
     pub fn from_env(repo_or_alias: &str) -> Result<Self> {
         let config = LoaderConfig::from_env();
         Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    pub fn from_env_with_manifest(
+        repo_or_alias: &str,
+        manifest: Option<&ModelManifest>,
+    ) -> Result<Self> {
+        let config = LoaderConfig::from_env();
+        Self::from_source_with_config_and_manifest(repo_or_alias, config, manifest)
     }
 
     pub fn from_source(repo_or_alias: &str, source: ModelSource) -> Result<Self> {
@@ -326,9 +336,11 @@ impl Loader {
         repo_or_alias: &str,
         weights: Vec<PathBuf>,
         aux_files: Vec<PathBuf>,
-        manifest: Option<&'static ModelManifest>,
+        manifest: Option<&ModelManifest>,
     ) -> Result<Self> {
-        let resolved_manifest = manifest.or_else(|| registry::lookup(repo_or_alias));
+        let resolved_manifest = manifest
+            .map(|manifest| Arc::new(manifest.clone()))
+            .or_else(|| registry::lookup(repo_or_alias).map(|manifest| Arc::new(manifest.clone())));
         let repo = repo_or_alias.to_string();
         let config = LoaderConfig::default();
         let cache = CacheLayout::new(config.cache_dir.clone())?;
@@ -353,10 +365,17 @@ impl Loader {
     }
 
     pub fn from_source_with_config(repo_or_alias: &str, config: LoaderConfig) -> Result<Self> {
+        Self::from_source_with_config_and_manifest(repo_or_alias, config, None)
+    }
+
+    pub fn from_source_with_config_and_manifest(
+        repo_or_alias: &str,
+        config: LoaderConfig,
+        manifest: Option<&ModelManifest>,
+    ) -> Result<Self> {
         // 当 source 是 HuggingFace 且启用 fallback 时，尝试自动回退
         let should_try_fallback = config.source == ModelSource::HuggingFace && config.enable_fallback;
-
-        let result = Self::load_from_source(repo_or_alias, &config);
+        let result = Self::load_from_source(repo_or_alias, &config, manifest);
 
         if should_try_fallback {
             result.or_else(|err| {
@@ -366,7 +385,7 @@ impl Loader {
                     let mut ms_config = config.clone();
                     ms_config.source = ModelSource::ModelScope;
                     ms_config.enable_fallback = false;  // 避免循环
-                    Self::load_from_source(repo_or_alias, &ms_config)
+                    Self::load_from_source(repo_or_alias, &ms_config, manifest)
                 } else {
                     Err(err)
                 }
@@ -377,16 +396,22 @@ impl Loader {
     }
 
     /// 实际的加载逻辑（不包含 fallback）
-    fn load_from_source(repo_or_alias: &str, config: &LoaderConfig) -> Result<Self> {
-        let manifest = registry::lookup(repo_or_alias);
-        let repo = resolve_repo(repo_or_alias, manifest, config.source);
+    fn load_from_source(
+        repo_or_alias: &str,
+        config: &LoaderConfig,
+        manifest: Option<&ModelManifest>,
+    ) -> Result<Self> {
+        let manifest = manifest
+            .map(|manifest| Arc::new(manifest.clone()))
+            .or_else(|| registry::lookup(repo_or_alias).map(|manifest| Arc::new(manifest.clone())));
+        let repo = resolve_repo(repo_or_alias);
         let cache = CacheLayout::new(config.cache_dir.clone())?;
         cache.ensure()?;
 
         let parallel_download = ParallelLoader::new(match config.parallel {
             ParallelPolicy::Force => true,
             ParallelPolicy::Disabled => false,
-            ParallelPolicy::Auto => manifest.map(|m| m.is_moe()).unwrap_or(false),
+            ParallelPolicy::Auto => manifest.as_ref().map(|m| m.is_moe()).unwrap_or(false),
         });
 
         // 根据源类型选择下载方式
@@ -394,11 +419,16 @@ impl Loader {
             // 使用 ModelScope 客户端，使用专门的 ModelScope 缓存目录
             let ms_cache = cache.modelscope_cache_dir();
             let ms_client = ModelScopeClient::new(ms_cache)?;
-            let ms_files = ms_client.download_model_files(
-                &repo,
-                manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
-                parallel_download,
-            ).map_err(|e| LoaderError::HfHub(format!("ModelScope download failed: {}", e)))?;
+            let ms_files = ms_client
+                .download_model_files(
+                    &repo,
+                    manifest
+                        .as_ref()
+                        .map(|m| m.file_map)
+                        .unwrap_or(EMPTY_FILE_MAP),
+                    parallel_download,
+                )
+                .map_err(|e| LoaderError::HfHub(format!("ModelScope download failed: {}", e)))?;
 
             // 转换 MsModelFiles 为 HfModelFiles
             HfModelFiles {
@@ -416,7 +446,10 @@ impl Loader {
             let hf = HfHubClient::new(cache.hf_cache_dir())?;
             hf.download_model_files(
                 &repo,
-                manifest.map(|m| m.hf_file_map).unwrap_or(&[]),
+                manifest
+                    .as_ref()
+                    .map(|m| m.file_map)
+                    .unwrap_or(EMPTY_FILE_MAP),
                 parallel_download,
             )?
         };
@@ -456,8 +489,8 @@ impl Loader {
         self.source
     }
 
-    pub fn manifest(&self) -> Option<&'static ModelManifest> {
-        self.manifest
+    pub fn manifest(&self) -> Option<&ModelManifest> {
+        self.manifest.as_deref()
     }
 
     pub fn weight_format(&self) -> WeightFormat {
@@ -522,7 +555,7 @@ impl Loader {
             }
         }
 
-        let is_moe = self.manifest.map(|m| m.is_moe()).unwrap_or(false);
+        let is_moe = self.manifest.as_ref().map(|m| m.is_moe()).unwrap_or(false);
         let parallel_enabled = match self.config.parallel {
             ParallelPolicy::Force => true,
             ParallelPolicy::Disabled => false,
@@ -545,7 +578,7 @@ impl Loader {
         let quantized = QuantizedIndex::from_loader(loader);
         let mut quantized_seen = HashSet::new();
 
-        let is_moe = self.manifest.map(|m| m.is_moe()).unwrap_or(false);
+        let is_moe = self.manifest.as_ref().map(|m| m.is_moe()).unwrap_or(false);
         let parallel_enabled = match self.config.parallel {
             ParallelPolicy::Force => true,
             ParallelPolicy::Disabled => false,
@@ -585,26 +618,12 @@ impl Loader {
     }
 
     fn rules(&self) -> Option<TensorNamingRule> {
-        self.manifest.map(|m| m.tensor_rules)
+        self.manifest.as_ref().map(|m| m.tensor_rules)
     }
 }
 
-fn resolve_repo(
-    repo_or_alias: &str,
-    manifest: Option<&'static ModelManifest>,
-    source: ModelSource,
-) -> String {
-    match source {
-        ModelSource::HuggingFace => manifest
-            .map(|manifest| manifest.hf_repo)
-            .unwrap_or(repo_or_alias)
-            .to_string(),
-        ModelSource::ModelScope => manifest
-            .and_then(|manifest| manifest.model_scope_repo)
-            .or_else(|| manifest.map(|manifest| manifest.hf_repo))
-            .unwrap_or(repo_or_alias)
-            .to_string(),
-    }
+fn resolve_repo(repo_or_alias: &str) -> String {
+    repo_or_alias.to_string()
 }
 
 #[derive(Debug, Deserialize)]
