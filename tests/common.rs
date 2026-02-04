@@ -1,12 +1,13 @@
 //! Common test utilities for gllm tests.
 
 use std::path::PathBuf;
-use gllm::loader::{Loader, LoaderConfig, ModelSource, Result};
+use gllm::loader::{Loader, LoaderConfig, Result};
+use gllm::registry;
 
 /// Test model files helper for unit tests.
 ///
 /// This provides a simple way to create loaders for test models
-/// without requiring the full model files to be present.
+/// using the model registry.
 pub struct TestModelFiles {
     /// Base directory for test models
     pub base_dir: PathBuf,
@@ -29,19 +30,32 @@ impl TestModelFiles {
 
     /// Create a loader for the given model alias.
     ///
-    /// The alias is looked up in the model registry.
-    pub fn loader(&self, _alias: &str) -> Result<Loader> {
-        // For now, create a basic loader that uses the default config
-        // The actual model files will be loaded from the cache
+    /// The alias is looked up in the model registry, and the loader
+    /// is configured to download from HuggingFace (with ModelScope fallback).
+    pub fn loader(&self, alias: &str) -> Result<Loader> {
+        // Look up the manifest to get the actual HF repo
+        let manifest = registry::lookup(alias)
+            .or_else(|| {
+                // Try with common prefixes
+                registry::lookup(&format!("qwen2.5-{}", alias))
+                    .or_else(|| registry::lookup(&format!("qwen3-{}", alias)))
+            });
+
+        let repo = if let Some(m) = manifest {
+            m.hf_repo
+        } else {
+            // Default to using alias as repo name
+            alias
+        };
+
         let config = LoaderConfig {
             cache_dir: Some(self.base_dir.clone()),
             ..Default::default()
         };
 
-        // Note: This creates a loader without a specific model
-        // The caller is responsible for setting up the correct repo/alias
-        Loader::from_hf_with_config("test", config)
-            .or_else(|_| Loader::from_ms("test"))
+        // Try HuggingFace first, fallback to ModelScope
+        Loader::from_hf_with_config(repo, config)
+            .or_else(|_| Loader::from_ms(repo))
     }
 
     /// Get the base directory for test models.
