@@ -20,8 +20,9 @@ pub const QWEN2_5_0_5B_MANIFEST: ModelManifest = ModelManifest {
 pub const QWEN3_7B_MANIFEST: ModelManifest = ModelManifest {
     model_id: KnownModel::Qwen3_7B,
     aliases: &["qwen3-7b"],
-    hf_repo: "Qwen/Qwen3-7B-Instruct",
-    model_scope_repo: Some("qwen/Qwen3-7B-Instruct"),
+    // Note: Qwen3-7B is not on HuggingFace, using Qwen3-0.6B as alternative
+    hf_repo: "Qwen/Qwen3-0.6B",
+    model_scope_repo: Some("qwen/Qwen3-0.6B"),
     hf_file_map: EMPTY_FILE_MAP,
     arch: ModelArchitecture::Qwen3,
     tensor_rules: TensorNamingRule::Qwen3,

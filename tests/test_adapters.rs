@@ -58,6 +58,8 @@ fn adapters_load_weights_with_local_files() {
             }
             Err(e) => {
                 // Models that exist but fail to load are test failures
+                // Show the error for debugging
+                eprintln!("✗ {} failed to load: {}", alias, e);
                 panic!("adapter {} failed to load: {}", alias, e);
             }
         }
