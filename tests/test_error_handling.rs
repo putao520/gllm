@@ -4,7 +4,8 @@ use common::TestModelFiles;
 use gllm::adapter::adapter_for;
 use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
-use gllm::loader::{Loader, LoaderError};
+use gllm::loader::{config as loader_config, Loader, LoaderError};
+use gllm::manifest::ModelManifest;
 use gllm::registry;
 use gllm_kernels::backend_trait::BackendError;
 use gllm_kernels::cpu_backend::CpuBackend;
@@ -12,12 +13,20 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
-    let manifest = registry::lookup(alias).expect("manifest");
-    let adapter = adapter_for::<CpuBackend>(manifest).expect("adapter");
-    let backend = CpuBackend::new();
     let mut loader = files.loader(alias).expect("loader");
+    let manifest = manifest_from_loader(alias, &loader);
+    loader.set_manifest_if_missing(&manifest);
+    let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
+    let backend = CpuBackend::new();
     Executor::from_loader(backend, Arc::new(manifest.clone()), adapter, &mut loader)
         .expect("executor")
+}
+
+fn manifest_from_loader(alias: &str, loader: &Loader) -> ModelManifest {
+    let overrides = registry::lookup(alias);
+    let config_path = loader.config_path().expect("config path");
+    let config_value = loader_config::load_config_value(config_path).expect("config");
+    loader_config::manifest_from_config(alias, &config_value, overrides).expect("manifest")
 }
 
 #[test]
@@ -53,10 +62,10 @@ fn corrupted_weights_surface_loader_errors() {
 }
 
 #[test]
-fn unsupported_architecture_is_flagged() {
+fn unknown_override_returns_none() {
     assert!(
         registry::lookup("unknown-model").is_none(),
-        "unknown model ids should be rejected early"
+        "unknown override ids should return None"
     );
 }
 

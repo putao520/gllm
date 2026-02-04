@@ -61,6 +61,7 @@ impl<B: Backend + 'static> Executor<B> {
         adapter: &'static dyn ModelAdapter<B>,
         loader: &mut Loader,
     ) -> ExecutorResult<Self> {
+        loader.set_manifest_if_missing(manifest.as_ref());
         let model_config = ModelConfig::from_loader(manifest.as_ref(), loader)?;
         let forward_config = GeneratorForwardConfig {
             num_layers: model_config.num_hidden_layers,

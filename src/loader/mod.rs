@@ -331,16 +331,14 @@ impl Loader {
     }
 
     /// Create a loader from local files with an explicit manifest.
-    /// This is useful when the manifest is already known (e.g., from registry lookup by a different name).
+    /// This is useful when the manifest is already known (e.g., from config parsing).
     pub fn from_local_files_with_manifest(
         repo_or_alias: &str,
         weights: Vec<PathBuf>,
         aux_files: Vec<PathBuf>,
         manifest: Option<&ModelManifest>,
     ) -> Result<Self> {
-        let resolved_manifest = manifest
-            .map(|manifest| Arc::new(manifest.clone()))
-            .or_else(|| registry::lookup(repo_or_alias).map(|manifest| Arc::new(manifest.clone())));
+        let resolved_manifest = manifest.map(|manifest| Arc::new(manifest.clone()));
         let repo = repo_or_alias.to_string();
         let config = LoaderConfig::default();
         let cache = CacheLayout::new(config.cache_dir.clone())?;
@@ -401,9 +399,8 @@ impl Loader {
         config: &LoaderConfig,
         manifest: Option<&ModelManifest>,
     ) -> Result<Self> {
-        let manifest = manifest
-            .map(|manifest| Arc::new(manifest.clone()))
-            .or_else(|| registry::lookup(repo_or_alias).map(|manifest| Arc::new(manifest.clone())));
+        let overrides = registry::lookup(repo_or_alias);
+        let manifest = manifest.map(|manifest| Arc::new(manifest.clone()));
         let repo = resolve_repo(repo_or_alias);
         let cache = CacheLayout::new(config.cache_dir.clone())?;
         cache.ensure()?;
@@ -422,7 +419,7 @@ impl Loader {
             let ms_files = ms_client
                 .download_model_files(
                     &repo,
-                    manifest
+                    overrides
                         .as_ref()
                         .map(|m| m.file_map)
                         .unwrap_or(EMPTY_FILE_MAP),
@@ -446,7 +443,7 @@ impl Loader {
             let hf = HfHubClient::new(cache.hf_cache_dir())?;
             hf.download_model_files(
                 &repo,
-                manifest
+                overrides
                     .as_ref()
                     .map(|m| m.file_map)
                     .unwrap_or(EMPTY_FILE_MAP),
@@ -491,6 +488,12 @@ impl Loader {
 
     pub fn manifest(&self) -> Option<&ModelManifest> {
         self.manifest.as_deref()
+    }
+
+    pub fn set_manifest_if_missing(&mut self, manifest: &ModelManifest) {
+        if self.manifest.is_none() {
+            self.manifest = Some(Arc::new(manifest.clone()));
+        }
     }
 
     pub fn weight_format(&self) -> WeightFormat {

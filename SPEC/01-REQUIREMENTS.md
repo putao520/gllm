@@ -27,6 +27,7 @@
 | **REQ-LOADER-006** | 动态模型发现 | 支持任意 HF Model ID，无需预注册 | 1. `Client::new("org/model-name")` 自动下载<br>2. 从 `config.json` 自动识别架构<br>3. 无需修改代码即可支持新模型 | 🟢 已实现 |
 | **REQ-LOADER-007** | 架构自动识别 | 从模型配置文件自动推断架构类型 | 1. 读取 `config.json` 的 `model_type`/`architectures`<br>2. 匹配到对应的 Adapter<br>3. 支持常见架构的自动探测 | 🟢 已实现 |
 | **REQ-LOADER-008** | Manifest 降级为配置覆盖 | Manifest 仅用于特殊配置覆盖 | 1. 默认流程无需 Manifest<br>2. Manifest 仅用于 `rope_base` 等特殊覆盖<br>3. 新模型无需添加 Manifest 即可用 | 🟢 已实现 |
+| **REQ-LOADER-009** | Registry 清理 | 移除 KnownModel 枚举，实现纯动态加载 | 1. 移除 KnownModel<br>2. 移除硬编码 Repo 信息<br>3. 仅保留 ManifestOverride | 🟢 已实现 |
 
 ### 重构说明 (REQ-LOADER-REFACTOR)
 

@@ -20,7 +20,8 @@ pub mod tokenizer;
 pub mod weight_loader;
 
 pub use manifest::{
-    FileMap, KnownModel, MoEConfig, ModelArchitecture, ModelManifest, RouterType, TensorNamingRule,
+    FileMap, ManifestOverride, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
+    TensorNamingRule,
 };
 
 // Re-export EMPTY_FILE_MAP for convenience

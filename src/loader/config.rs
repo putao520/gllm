@@ -7,7 +7,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::manifest::{
-    FileMap, ModelArchitecture, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+    FileMap, ManifestOverride, ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule,
+    EMPTY_FILE_MAP,
 };
 
 use super::{
@@ -67,17 +68,20 @@ pub fn load_config_value(path: &Path) -> Result<Value, ConfigError> {
 pub fn manifest_from_config(
     model_id: &str,
     config: &Value,
-    overrides: Option<&ModelManifest>,
+    overrides: Option<&ManifestOverride>,
 ) -> Result<ModelManifest, ConfigError> {
     let arch = resolve_architecture(config, model_id)?;
     let tensor_rules = tensor_rules_for_arch(arch);
     let file_map = overrides.map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
+    let kind_override = kind_override_from_config(config).or_else(|| overrides.and_then(|m| m.kind));
+    let kind = kind_override.unwrap_or_else(|| default_kind_for_arch(arch));
 
     Ok(ModelManifest {
         model_id: Cow::Owned(model_id.to_string()),
         file_map,
         arch,
         tensor_rules,
+        kind,
         rope_base_override: overrides.and_then(|m| m.rope_base_override),
         max_context_override: overrides.and_then(|m| m.max_context_override),
         moe_config: overrides.and_then(|m| m.moe_config),
@@ -130,6 +134,42 @@ pub fn tensor_rules_for_arch(arch: ModelArchitecture) -> TensorNamingRule {
         ModelArchitecture::XlmR => TensorNamingRule::XlmR,
         ModelArchitecture::XlmRNext => TensorNamingRule::XlmRNext,
     }
+}
+
+fn default_kind_for_arch(arch: ModelArchitecture) -> ModelKind {
+    match arch {
+        ModelArchitecture::XlmR | ModelArchitecture::XlmRNext => ModelKind::Embedding,
+        _ => ModelKind::Chat,
+    }
+}
+
+fn kind_override_from_config(config: &Value) -> Option<ModelKind> {
+    if let Some(gllm) = config.get("gllm") {
+        if let Some(kind) = gllm.get("override").and_then(kind_from_block) {
+            return Some(kind);
+        }
+        if let Some(kind) = gllm.get("overrides").and_then(kind_from_block) {
+            return Some(kind);
+        }
+        if let Some(kind) = kind_from_block(gllm) {
+            return Some(kind);
+        }
+    }
+
+    if let Some(kind) = config
+        .get("gllm_override")
+        .and_then(kind_from_block)
+        .or_else(|| config.get("gllm_overrides").and_then(kind_from_block))
+    {
+        return Some(kind);
+    }
+
+    None
+}
+
+fn kind_from_block(block: &Value) -> Option<ModelKind> {
+    let kind = block.get("kind")?.as_str()?;
+    ModelKind::from_str(kind)
 }
 
 fn download_from_source(

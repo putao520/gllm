@@ -7,9 +7,123 @@
 //!
 //! Models are discovered dynamically from the manifest registry.
 
+use gllm::loader::config as loader_config;
+use gllm::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use gllm::Client;
-use gllm::manifest::{all_manifests, ModelArchitecture};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+
+struct ModelEntry {
+    arch: ModelArchitecture,
+    kind: ModelKind,
+    model_id: &'static str,
+}
+
+const E2E_MODEL_MATRIX: &[ModelEntry] = &[
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Chat,
+        model_id: "Qwen/Qwen3-0.6B",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Llama4,
+        kind: ModelKind::Chat,
+        model_id: "meta-llama/Llama-4-8B-Instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Phi4,
+        kind: ModelKind::Chat,
+        model_id: "microsoft/Phi-4-mini-instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Embedding,
+        model_id: "Qwen/Qwen3-Embedding",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::XlmRNext,
+        kind: ModelKind::Embedding,
+        model_id: "BAAI/bge-m4",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Reranker,
+        model_id: "Qwen/Qwen3-Reranker",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::XlmRNext,
+        kind: ModelKind::Reranker,
+        model_id: "BAAI/bge-reranker-v3",
+    },
+];
+
+const ADAPTER_MODEL_MATRIX: &[ModelEntry] = &[
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Embedding,
+        model_id: "Qwen/Qwen3-Embedding",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Reranker,
+        model_id: "Qwen/Qwen3-Reranker",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::XlmR,
+        kind: ModelKind::Embedding,
+        model_id: "BAAI/bge-m3",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3MoE,
+        kind: ModelKind::Chat,
+        model_id: "Qwen/Qwen3-235B-A22B-Instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen3,
+        kind: ModelKind::Chat,
+        model_id: "Qwen/Qwen3-0.6B",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Qwen2_5,
+        kind: ModelKind::Chat,
+        model_id: "Qwen/Qwen2.5-0.5B-Instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Llama4,
+        kind: ModelKind::Chat,
+        model_id: "meta-llama/Llama-4-8B-Instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Gemma2,
+        kind: ModelKind::Chat,
+        model_id: "google/gemma-2-2b-it",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Phi4,
+        kind: ModelKind::Chat,
+        model_id: "microsoft/Phi-4-mini-instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Ministral,
+        kind: ModelKind::Chat,
+        model_id: "mistralai/Ministral-8B-Instruct",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::Mistral3,
+        kind: ModelKind::Chat,
+        model_id: "mistralai/Mistral-Small-3.2",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::GLM5,
+        kind: ModelKind::Chat,
+        model_id: "THUDM/glm-5-9b-chat",
+    },
+    ModelEntry {
+        arch: ModelArchitecture::GPT2Next,
+        kind: ModelKind::Chat,
+        model_id: "openai-community/gpt2",
+    },
+];
 
 /// Test that all registered manifests have a corresponding adapter.
 #[test]
@@ -17,12 +131,13 @@ fn registry_manifests_have_adapters() {
     use gllm::adapter::adapter_for;
     use gllm_kernels::cpu_backend::CpuBackend;
 
-    for manifest in all_manifests() {
-        let adapter = adapter_for::<CpuBackend>(manifest);
+    for entry in ADAPTER_MODEL_MATRIX {
+        let manifest = build_manifest(entry);
+        let adapter = adapter_for::<CpuBackend>(&manifest);
         assert!(
             adapter.is_some(),
             "missing adapter for {:?}",
-            manifest.model_id
+            entry.model_id
         );
     }
 }
@@ -81,9 +196,13 @@ enum TestStatus {
 fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
     let mut results = HashMap::new();
     let cuda_available = is_cuda_available();
+    let kind = match function_kind(function_type) {
+        Some(kind) => kind,
+        None => return results,
+    };
 
     // Get models grouped by architecture
-    let models_by_arch = group_models_by_architecture(function_type);
+    let models_by_arch = group_models_by_architecture(kind);
 
     for (arch, alias) in models_by_arch {
         let arch_str = format!("{:?}", arch);
@@ -157,48 +276,45 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
 }
 
 /// Group models by architecture, returning one representative alias per architecture.
-fn group_models_by_architecture(function_type: &str) -> Vec<(ModelArchitecture, String)> {
+fn group_models_by_architecture(kind: ModelKind) -> Vec<(ModelArchitecture, String)> {
     let mut seen_archs = HashSet::new();
     let mut result = Vec::new();
 
-    for manifest in all_manifests() {
+    for entry in E2E_MODEL_MATRIX {
+        if entry.kind != kind {
+            continue;
+        }
         // Skip if we've already seen this architecture
-        if !seen_archs.insert(manifest.arch) {
+        if !seen_archs.insert(entry.arch) {
             continue;
         }
 
-        // Check if model matches the requested function type
-        let kind = classify_model(manifest.model_id.as_ref());
-        let matches = match function_type {
-            "generation" => kind == "generation",
-            "embeddings" => kind == "embeddings",
-            "rerank" => kind == "rerank",
-            _ => false,
-        };
-
-        if matches {
-            result.push((manifest.arch, manifest.model_id.to_string()));
-        }
+        result.push((entry.arch, entry.model_id.to_string()));
     }
 
     result
 }
 
-fn classify_model(model_id: &str) -> &'static str {
-    let lower = model_id.to_ascii_lowercase();
-    if lower.contains("rerank") {
-        return "rerank";
+fn function_kind(function_type: &str) -> Option<ModelKind> {
+    match function_type {
+        "generation" => Some(ModelKind::Chat),
+        "embeddings" => Some(ModelKind::Embedding),
+        "rerank" => Some(ModelKind::Reranker),
+        _ => None,
     }
-    if lower.contains("embed")
-        || lower.contains("embedding")
-        || lower.contains("bge")
-        || lower.contains("e5")
-        || lower.contains("m3e")
-        || lower.contains("jina")
-    {
-        return "embeddings";
+}
+
+fn build_manifest(entry: &ModelEntry) -> ModelManifest {
+    ModelManifest {
+        model_id: Cow::Borrowed(entry.model_id),
+        file_map: EMPTY_FILE_MAP,
+        arch: entry.arch,
+        tensor_rules: loader_config::tensor_rules_for_arch(entry.arch),
+        kind: entry.kind,
+        rope_base_override: None,
+        max_context_override: None,
+        moe_config: None,
     }
-    "generation"
 }
 
 fn test_model(alias: &str, func_type: &str, arch: &str, backend: &str) -> TestStatus {

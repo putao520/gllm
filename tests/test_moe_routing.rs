@@ -1,16 +1,28 @@
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use gllm::adapter::adapter_for;
-use gllm::registry;
+use gllm::manifest::{
+    ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+};
 use gllm::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::PageState;
 
 #[test]
 fn qwen3_moe_manifest_selects_moe_adapter() {
-    let manifest = registry::lookup("Qwen/Qwen3-235B-A22B-Instruct").expect("manifest");
+    let manifest = ModelManifest {
+        model_id: Cow::Borrowed("Qwen/Qwen3-235B-A22B-Instruct"),
+        file_map: EMPTY_FILE_MAP,
+        arch: ModelArchitecture::Qwen3MoE,
+        tensor_rules: TensorNamingRule::Qwen3,
+        kind: ModelKind::Chat,
+        rope_base_override: None,
+        max_context_override: None,
+        moe_config: None,
+    };
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
-    let adapter = adapter_for::<CpuBackend>(manifest);
+    let adapter = adapter_for::<CpuBackend>(&manifest);
     assert!(
         adapter.is_some(),
         "MoE adapter should be available for qwen3-moe"
