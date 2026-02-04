@@ -399,7 +399,7 @@ pub const JINA_EMBEDDINGS_V2_SMALL_MANIFEST: ModelManifest = ModelManifest {
 pub const JINA_EMBEDDINGS_V4_MANIFEST: ModelManifest = ModelManifest {
     model_id: KnownModel::JinaEmbeddingsV4,
     aliases: &["jina-embeddings-v4"],
-    hf_repo: "jinaai/jina-embeddings-v4",
+    hf_repo: "jinaai/jina-embeddings-v3",
     model_scope_repo: None,
     hf_file_map: EMPTY_FILE_MAP,
     arch: ModelArchitecture::XlmR,
