@@ -1,12 +1,43 @@
-mod common;
+//! E2E tests using the actual Client API (what users use).
 
-use common::TestModelFiles;
-use gllm::adapter::adapter_for;
-use gllm::registry;
-use gllm_kernels::cpu_backend::CpuBackend;
+use gllm::Client;
 
+/// E2E test: Validate complete model loading pipeline.
+///
+/// Uses the actual Client API that users use:
+/// 1. Model lookup via registry
+/// 2. Auto-download (HF → ModelScope fallback)
+/// 3. Backend initialization
+/// 4. Weight loading and upload
+///
+/// Model: SmolLM2_135M (~280MB) - smallest for quick validation.
 #[test]
-fn adapter_registry_covers_all_manifests() {
+fn e2e_client_loads_model() {
+    let model_alias = "smollm2-135m";
+
+    println!("=== E2E Test: Client::new() ===");
+    println!("Model: {}", model_alias);
+
+    // This single call tests the entire pipeline:
+    // - registry lookup
+    // - manifest validation
+    // - backend detection
+    // - download (if needed)
+    // - weight loading
+    let client = Client::new(model_alias).expect("Client::new() should succeed");
+
+    println!("✅ Client created successfully");
+    println!("   Manifest: {:?}", client.manifest().model_id);
+    println!("   Architecture: {:?}", client.manifest().arch);
+}
+
+/// Verify all registered models have a corresponding adapter.
+#[test]
+fn registry_manifests_have_adapters() {
+    use gllm::adapter::adapter_for;
+    use gllm::registry;
+    use gllm_kernels::cpu_backend::CpuBackend;
+
     for manifest in registry::all() {
         let adapter = adapter_for::<CpuBackend>(manifest);
         assert!(
@@ -15,56 +46,4 @@ fn adapter_registry_covers_all_manifests() {
             manifest.model_id
         );
     }
-}
-
-/// Test that adapters can load weights for models that are already downloaded.
-///
-/// This test only checks models that are already present in the cache directory.
-/// Missing models are skipped with a warning rather than failing the test.
-#[test]
-fn adapters_load_weights_with_local_files() {
-    let files = TestModelFiles::new().expect("test model files");
-    let backend = CpuBackend::new();
-
-    let mut tested = 0;
-    let mut passed = 0;
-
-    for manifest in registry::all() {
-        let alias = manifest.aliases.first().copied().expect("manifest alias");
-        println!("Testing adapter for: {} (hf_repo: {})", alias, manifest.hf_repo);
-
-        // Check if the model directory exists in cache
-        let cache_path = files.base_dir().join(manifest.hf_repo.replace('/', "--"));
-        let model_exists = cache_path.exists();
-
-        if !model_exists {
-            println!("⚠️  {} skipped (not downloaded)", alias);
-            continue;
-        }
-
-        tested += 1;
-        let adapter = adapter_for::<CpuBackend>(manifest).expect("adapter");
-        let mut loader = files.loader(alias).expect("loader");
-
-        match adapter.load_weights(&mut loader, &backend) {
-            Ok(weights) => {
-                assert!(
-                    !weights.handle.tensors.is_empty(),
-                    "adapter {} returned empty weights",
-                    alias
-                );
-                println!("✓ {} loaded successfully", alias);
-                passed += 1;
-            }
-            Err(e) => {
-                // Models that exist but fail to load are test failures
-                // Show the error for debugging
-                eprintln!("✗ {} failed to load: {}", alias, e);
-                panic!("adapter {} failed to load: {}", alias, e);
-            }
-        }
-    }
-
-    println!("\nTested {} models, {} passed", tested, passed);
-    assert!(tested > 0, "No models found in cache - please download at least one model first");
 }
