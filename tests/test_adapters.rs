@@ -5,7 +5,7 @@
 //! - All Architectures: each tested with one representative model
 //! - 2 Backends: CPU (required), CUDA (conditional)
 //!
-//! Models are discovered dynamically from the manifest registry.
+//! Models are discovered dynamically from the test matrix.
 
 use gllm::loader::config as loader_config;
 use gllm::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
@@ -125,9 +125,9 @@ const ADAPTER_MODEL_MATRIX: &[ModelEntry] = &[
     },
 ];
 
-/// Test that all registered manifests have a corresponding adapter.
+/// Test that all manifests have a corresponding adapter.
 #[test]
-fn registry_manifests_have_adapters() {
+fn manifests_have_adapters() {
     use gllm::adapter::adapter_for;
     use gllm_kernels::cpu_backend::CpuBackend;
 
@@ -192,7 +192,6 @@ enum TestStatus {
 }
 
 /// Run test matrix for a specific function type.
-/// Dynamically discovers models from manifest registry.
 fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
     let mut results = HashMap::new();
     let cuda_available = is_cuda_available();
@@ -208,7 +207,7 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
         let arch_str = format!("{:?}", arch);
 
         // Test CPU backend
-        match test_model(&alias, function_type, &arch_str, "CPU") {
+        match test_model(&alias, kind, function_type, &arch_str, "CPU") {
             TestStatus::Passed => {
                 results.insert(format!("CPU:{}", alias), TestResult {
                     alias: alias.clone(),
@@ -240,7 +239,7 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
 
         // Test CUDA backend (if available)
         if cuda_available {
-            match test_model(&alias, function_type, &arch_str, "CUDA") {
+            match test_model(&alias, kind, function_type, &arch_str, "CUDA") {
                 TestStatus::Passed => {
                     results.insert(format!("CUDA:{}", alias), TestResult {
                         alias: alias.clone(),
@@ -317,13 +316,23 @@ fn build_manifest(entry: &ModelEntry) -> ModelManifest {
     }
 }
 
-fn test_model(alias: &str, func_type: &str, arch: &str, backend: &str) -> TestStatus {
+fn test_model(
+    alias: &str,
+    kind: ModelKind,
+    func_type: &str,
+    arch: &str,
+    backend: &str,
+) -> TestStatus {
     println!("Testing: {} ({}, {}, {})", alias, func_type, arch, backend);
 
     // Try to create client (this triggers download if needed)
-    let client = match Client::new(alias) {
+    let client = match kind {
+        ModelKind::Chat => Client::new_chat(alias),
+        ModelKind::Embedding => Client::new_embedding(alias),
+        ModelKind::Reranker => Client::new(alias, ModelKind::Reranker),
+    } {
         Ok(c) => c,
-        Err(e) => return TestStatus::Skipped(format!("Client::new failed: {}", e)),
+        Err(e) => return TestStatus::Skipped(format!("Client init failed: {}", e)),
     };
 
     // Run the appropriate function

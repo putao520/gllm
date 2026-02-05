@@ -9,7 +9,7 @@ use gllm::Client;
 fn test_smollm2_generation_simple() {
     println!("🚀 Loading SmolLM2-135M...");
 
-    let client = match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    let client = match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("⚠️  Failed to load model: {}", e);
@@ -55,7 +55,7 @@ fn test_smollm2_generation_simple() {
 fn test_smollm2_generation_multiple_tokens() {
     println!("🚀 Loading SmolLM2-135M...");
 
-    let client = match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    let client = match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("⚠️  Failed to load model: {}", e);
@@ -89,7 +89,7 @@ fn test_smollm2_generation_multiple_tokens() {
 fn test_smollm2_qkv_layout_fix() {
     println!("🚀 Testing QKV layout fix with SmolLM2-135M...");
 
-    let client = match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    let client = match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("⚠️  Failed to load model: {}", e);
@@ -122,7 +122,7 @@ fn test_smollm2_qkv_layout_fix() {
 fn test_smollm2_chat_template() {
     println!("🚀 Testing SmolLM2 chat template...");
 
-    let client = match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    let client = match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(c) => c,
         Err(e) => {
             eprintln!("⚠️  Failed to load model: {}", e);

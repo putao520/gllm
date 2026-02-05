@@ -13,8 +13,7 @@ use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
 use crate::loader::{config as loader_config, LoaderConfig, LoaderError};
-use crate::manifest::{ModelArchitecture, ModelManifest, EMPTY_FILE_MAP};
-use crate::registry;
+use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
 #[derive(Debug, Error)]
@@ -82,25 +81,32 @@ impl From<BackendContextError> for ClientError {
 }
 
 impl Client {
-    pub fn new(model_or_alias: &str) -> Result<Self, ClientError> {
-        let model_id = model_or_alias.trim();
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
+        let raw_model_id = model_id;
+        let model_id = model_id.trim();
         if model_id.is_empty() {
-            return Err(ClientError::UnknownModel(model_or_alias.to_string()));
+            return Err(ClientError::UnknownModel(raw_model_id.to_string()));
         }
 
-        let overrides = registry::lookup(model_id);
-        let file_map = overrides.map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
         let loader_config = LoaderConfig::from_env();
         let config_files =
-            loader_config::download_config_files(model_id, &loader_config, file_map)?;
+            loader_config::download_config_files(model_id, &loader_config, EMPTY_FILE_MAP)?;
         let config_value = loader_config::load_config_value(&config_files.config_path)?;
-        let manifest = loader_config::manifest_from_config(model_id, &config_value, overrides)?;
+        let manifest = loader_config::manifest_from_config(model_id, &config_value, kind)?;
 
         Ok(Self {
             model_id: model_id.to_string(),
             manifest: Arc::new(manifest),
             backend: Mutex::new(None),
         })
+    }
+
+    pub fn new_chat(model_id: &str) -> Result<Self, ClientError> {
+        Self::new(model_id, ModelKind::Chat)
+    }
+
+    pub fn new_embedding(model_id: &str) -> Result<Self, ClientError> {
+        Self::new(model_id, ModelKind::Embedding)
     }
 
     pub fn manifest(&self) -> &ModelManifest {
@@ -221,9 +227,9 @@ impl Client {
 }
 
 impl AsyncClient {
-    pub fn new(model_or_alias: &str) -> Result<Self, ClientError> {
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         Ok(Self {
-            inner: Client::new(model_or_alias)?,
+            inner: Client::new(model_id, kind)?,
         })
     }
 

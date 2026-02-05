@@ -14,7 +14,7 @@ use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 use gllm::loader::pytorch::convert_bins_to_safetensors;
 use gllm::loader::PytorchConversionConfig;
-use gllm::Client;
+use gllm::{Client, ModelKind};
 use gllm_kernels::backend_trait::Backend;
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::KvCacheConfig;
@@ -44,68 +44,68 @@ enum ModelType {
 const MODEL_TESTS: &[ModelTest] = &[
     // === Generator Models (with working adapters) ===
     ModelTest {
-        alias: "qwen3-7b",
-        model_id: "Qwen3_7B",
+        alias: "Qwen/Qwen3-7B-Instruct",
+        model_id: "qwen3-7b",
         model_type: ModelType::Generator,
         test_prompt: "What is the capital of France?",
         min_tokens: 10,
     },
     ModelTest {
-        alias: "gpt-oss-1.5b",
-        model_id: "GptOss_1_5B",
+        alias: "openai/gpt-oss-1.5b",
+        model_id: "gpt-oss-1.5b",
         model_type: ModelType::Generator,
         test_prompt: "Complete: The sky is",
         min_tokens: 5,
     },
     // === Generator Models (NEW - need adapters) ===
     ModelTest {
-        alias: "phi-4-mini",
-        model_id: "Phi4_Mini",
+        alias: "microsoft/Phi-4-mini-instruct",
+        model_id: "phi-4-mini",
         model_type: ModelType::Generator,
         test_prompt: "What is 2+2?",
         min_tokens: 5,
     },
     ModelTest {
-        alias: "gemma-2-2b-it",
-        model_id: "Gemma2_2B_It",
+        alias: "google/gemma-2-2b-it",
+        model_id: "gemma-2-2b-it",
         model_type: ModelType::Generator,
         test_prompt: "Hello, how are you?",
         min_tokens: 10,
     },
     // === Embedding Models ===
     ModelTest {
-        alias: "qwen3-embed",
-        model_id: "Qwen3_Embed",
+        alias: "Qwen/Qwen3-Embedding",
+        model_id: "qwen3-embed",
         model_type: ModelType::Embedding,
         test_prompt: "This is a test sentence for embedding.",
         min_tokens: 1,
     },
     // === Embedding Models (NEW - need adapters) ===
     ModelTest {
-        alias: "bge-m3",
-        model_id: "Bge_M3",
+        alias: "BAAI/bge-m3",
+        model_id: "bge-m3",
         model_type: ModelType::Embedding,
         test_prompt: "测试文本嵌入向量生成。", // Chinese text test
         min_tokens: 1,
     },
     ModelTest {
-        alias: "bge-m4",
-        model_id: "Bge_M4",
+        alias: "BAAI/bge-m4",
+        model_id: "bge-m4",
         model_type: ModelType::Embedding,
         test_prompt: "Multilingual embedding test.",
         min_tokens: 1,
     },
     // === Rerank Models ===
     ModelTest {
-        alias: "qwen3-rerank",
-        model_id: "Qwen3_Rerank",
+        alias: "Qwen/Qwen3-Reranker",
+        model_id: "qwen3-rerank",
         model_type: ModelType::Rerank,
         test_prompt: "What is machine learning?",
         min_tokens: 1,
     },
     ModelTest {
-        alias: "bge-reranker-v3",
-        model_id: "Bge_Rerank_V3",
+        alias: "BAAI/bge-reranker-v3",
+        model_id: "bge-rerank-v3",
         model_type: ModelType::Rerank,
         test_prompt: "machine learning",
         min_tokens: 1,
@@ -161,7 +161,7 @@ fn test_generator_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
 
     let result = std::panic::catch_unwind(|| {
         // Try to load and run the model
-        let client = match Client::new(test.alias) {
+        let client = match Client::new_chat(test.alias) {
             Ok(c) => c,
             Err(e) => {
                 return TestResult {
@@ -226,7 +226,7 @@ fn test_embedding_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
     let model_id_clone = model_id.clone();
 
     let result = std::panic::catch_unwind(|| {
-        let client = match Client::new(test.alias) {
+        let client = match Client::new_embedding(test.alias) {
             Ok(c) => c,
             Err(e) => {
                 return TestResult {
@@ -292,7 +292,7 @@ fn test_rerank_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
     let model_id_clone = model_id.clone();
 
     let result = std::panic::catch_unwind(|| {
-        let client = match Client::new(test.alias) {
+        let client = match Client::new(test.alias, ModelKind::Reranker) {
             Ok(c) => c,
             Err(e) => {
                 return TestResult {

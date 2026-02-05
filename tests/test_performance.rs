@@ -6,15 +6,14 @@ use common::TestModelFiles;
 use gllm::adapter::adapter_for;
 use gllm::engine::executor::Executor;
 use gllm::loader::{config as loader_config, Loader};
-use gllm::manifest::ModelManifest;
-use gllm::registry;
+use gllm::manifest::{ModelKind, ModelManifest};
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::Backend;
 use std::sync::Arc;
 
-fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
+fn build_executor(alias: &str, kind: ModelKind, files: &TestModelFiles) -> Executor<CpuBackend> {
     let mut loader = files.loader(alias).expect("loader");
-    let manifest = manifest_from_loader(alias, &loader);
+    let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
     let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
@@ -22,17 +21,16 @@ fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
         .expect("executor")
 }
 
-fn manifest_from_loader(alias: &str, loader: &Loader) -> ModelManifest {
-    let overrides = registry::lookup(alias);
+fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelManifest {
     let config_path = loader.config_path().expect("config path");
     let config_value = loader_config::load_config_value(config_path).expect("config");
-    loader_config::manifest_from_config(alias, &config_value, overrides).expect("manifest")
+    loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
 }
 
 #[test]
 fn performance_harness_reports_throughput_and_latency() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut executor = build_executor("Qwen/Qwen3-0.6B", &files);
+    let mut executor = build_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
 
     let mut total_dims = 0usize;
     let start = Instant::now();
@@ -50,7 +48,7 @@ fn performance_harness_reports_throughput_and_latency() {
 #[test]
 fn performance_harness_checks_memory_pressure() {
     let files = TestModelFiles::new().expect("test model files");
-    let executor = build_executor("Qwen/Qwen3-0.6B", &files);
+    let executor = build_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
     let pressure = executor
         .backend()
         .get_memory_pressure()

@@ -6,7 +6,7 @@
 //!
 //! **E2E 测试原则**：像真实用户一样使用公开 Client API
 
-use gllm::Client;
+use gllm::{Client, ModelKind};
 
 /// E2E 测试矩阵：功能 × 最小模型
 const E2E_MATRIX: &[(&str, &str)] = &[
@@ -21,9 +21,14 @@ const RERANKER_MODEL: (&str, &str) = ("Reranker", "BAAI/bge-reranker-v2-m3");
 
 /// E2E 测试 - 验证单个功能端到端流程
 fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
-    // E2E 入口：Client::new()
-    let client = Client::new(alias)
-        .map_err(|e| format!("Client::new failed: {}", e))?;
+    // E2E 入口：显式指定 ModelKind
+    let client = match feature {
+        "Generator" => Client::new_chat(alias),
+        "Embedding" => Client::new_embedding(alias),
+        "Reranker" => Client::new(alias, ModelKind::Reranker),
+        _ => return Err(format!("未知功能类型: {}", feature)),
+    }
+    .map_err(|e| format!("Client init failed: {}", e))?;
     println!("  [{}] 测试: {} (架构: {:?})", feature, alias, client.manifest().arch);
 
     match feature {

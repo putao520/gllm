@@ -41,7 +41,7 @@ use gllm::Client;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Automatically downloads from HF or ModelScope
     // Qwen3-7B (2026 SOTA)
-    let client = Client::new("qwen3-7b")?;
+    let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
 
     let response = client
         .generate("Explain the theory of relativity:")
@@ -61,7 +61,7 @@ use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Qwen3-Embedding (2048 dims)
-    let client = Client::new("qwen3-embed")?;
+    let client = Client::new_embedding("Qwen/Qwen3-Embedding")?;
 
     let response = client
         .embeddings(["Future of AI", "Rust programming"])
@@ -77,11 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Document Reranking
 
 ```rust
-use gllm::Client;
+use gllm::{Client, ModelKind};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // BGE-Reranker-v3 (XLM-R-Next architecture)
-    let client = Client::new("bge-rerank-v3")?;
+    let client = Client::new("BAAI/bge-reranker-v3", ModelKind::Reranker)?;
 
     let response = client
         .rerank("Efficient storage", [

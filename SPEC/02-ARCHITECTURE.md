@@ -142,8 +142,7 @@ tokens → upload一次 → [GPU全程计算] → readback一次 → 结果
 ### 模型加载流程
 
 ```
-Client::new("bge-m3")
-    → Registry 解析别名 → "BAAI/bge-m3"
+Client::new_embedding("BAAI/bge-m3")
     → 检查 ~/.gllm/models/ 是否存在
     → 不存在则 hf-hub 下载
     → SafeTensors 解析权重
@@ -160,7 +159,7 @@ Client::new("bge-m3")
 
 **重构后流程**：
 ```
-Client::new("Qwen/Qwen3-0.6B")
+Client::new_chat("Qwen/Qwen3-0.6B")
     ↓
 1. 构造 HF 地址: huggingface.co/Qwen/Qwen3-0.6B
 2. 下载模型文件 (config.json, tokenizer.json, safetensors)
@@ -206,7 +205,7 @@ Client::new("Qwen/Qwen3-0.6B")
 
 > **注意**: 以下描述的是旧版 Manifest 系统，正在重构中。
 
-为了实现"只改配置支持新模型"，我们将注册表(Registry)、HF标准化(Downloading)和推理配置(Inference)融合为一个统一的 **Model Manifest** 系统。
+为了实现"只改配置支持新模型"，我们将 HF 标准化(Downloading)和推理配置(Inference)融合为一个统一的 **Model Manifest** 系统，并移除 Registry 依赖。
 
 **核心原则**: `KnownModel` 枚举是整个系统的 SSOT。
 
@@ -273,7 +272,6 @@ src/
 ├── client.rs        # Client / AsyncClient
 ├── embeddings.rs    # Embeddings API
 ├── rerank.rs        # Rerank API
-├── registry.rs      # 别名注册表
 ├── engine.rs        # 推理引擎
 ├── generation.rs    # 生成循环
 ├── kv_cache.rs      # KV Cache

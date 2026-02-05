@@ -33,7 +33,7 @@ fn test_all_available_models() {
         println!("   {}", model.description);
         println!();
 
-        match Client::new(model.alias) {
+        match Client::new_chat(model.alias) {
             Ok(client) => {
                 let actual_arch = format!("{:?}", client.manifest().arch);
                 println!("   ✅ Loaded successfully");

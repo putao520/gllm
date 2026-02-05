@@ -103,14 +103,3 @@ impl ModelManifest {
             )
     }
 }
-
-/// Override-only manifest entries (registry layer).
-#[derive(Debug, Clone)]
-pub struct ManifestOverride {
-    pub model_id: &'static str,
-    pub file_map: FileMap,
-    pub rope_base_override: Option<f32>,
-    pub max_context_override: Option<usize>,
-    pub moe_config: Option<MoEConfig>,
-    pub kind: Option<ModelKind>,
-}

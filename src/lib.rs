@@ -1,7 +1,6 @@
 //! gllm - inference client library (skeleton).
 
 pub mod manifest;
-pub mod registry;
 
 pub mod adapter;
 pub mod backend;
@@ -20,8 +19,7 @@ pub mod tokenizer;
 pub mod weight_loader;
 
 pub use manifest::{
-    FileMap, ManifestOverride, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
-    TensorNamingRule,
+    FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType, TensorNamingRule,
 };
 
 // Re-export EMPTY_FILE_MAP for convenience

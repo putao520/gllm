@@ -15,7 +15,6 @@ use thiserror::Error;
 
 use crate::manifest::{ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
 use crate::quantization::dequantize_int8_with_zero;
-use crate::registry;
 
 pub mod downloader;
 pub mod config;
@@ -399,8 +398,8 @@ impl Loader {
         config: &LoaderConfig,
         manifest: Option<&ModelManifest>,
     ) -> Result<Self> {
-        let overrides = registry::lookup(repo_or_alias);
         let manifest = manifest.map(|manifest| Arc::new(manifest.clone()));
+        let file_map = manifest.as_ref().map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
         let repo = resolve_repo(repo_or_alias);
         let cache = CacheLayout::new(config.cache_dir.clone())?;
         cache.ensure()?;
@@ -419,10 +418,7 @@ impl Loader {
             let ms_files = ms_client
                 .download_model_files(
                     &repo,
-                    overrides
-                        .as_ref()
-                        .map(|m| m.file_map)
-                        .unwrap_or(EMPTY_FILE_MAP),
+                    file_map,
                     parallel_download,
                 )
                 .map_err(|e| LoaderError::HfHub(format!("ModelScope download failed: {}", e)))?;
@@ -443,10 +439,7 @@ impl Loader {
             let hf = HfHubClient::new(cache.hf_cache_dir())?;
             hf.download_model_files(
                 &repo,
-                overrides
-                    .as_ref()
-                    .map(|m| m.file_map)
-                    .unwrap_or(EMPTY_FILE_MAP),
+                file_map,
                 parallel_download,
             )?
         };

@@ -37,7 +37,7 @@ fn test_multiple_architectures_generation() {
     for test in MODEL_TESTS {
         print!("[{}] Loading '{}'... ", test.alias, test.prompt);
 
-        match Client::new(test.alias) {
+        match Client::new_chat(test.alias) {
             Ok(client) => {
                 println!("✓");
 
@@ -101,7 +101,7 @@ fn test_multiple_architectures_generation() {
 fn test_qwen25_gqa_specific() {
     println!("🔍 Testing Qwen2.5 GQA architecture specifically\n");
 
-    match Client::new("Qwen/Qwen2.5-0.5B-Instruct") {
+    match Client::new_chat("Qwen/Qwen2.5-0.5B-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded: {:?}", client.manifest().arch);
 
@@ -132,7 +132,7 @@ fn test_qwen25_gqa_specific() {
 fn test_smollm2_gqa_specific() {
     println!("🔍 Testing SmolLM2 GQA architecture specifically\n");
 
-    match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded: {:?}", client.manifest().arch);
 
@@ -166,7 +166,7 @@ fn test_smollm2_gqa_specific() {
 fn test_multiple_sequences_same_model() {
     println!("🔍 Testing multiple sequential generations with same model\n");
 
-    match Client::new("HuggingFaceTB/SmolLM2-135M-Instruct") {
+    match Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct") {
         Ok(client) => {
             println!("✅ Model loaded");
 

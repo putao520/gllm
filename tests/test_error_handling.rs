@@ -5,16 +5,15 @@ use gllm::adapter::adapter_for;
 use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
 use gllm::loader::{config as loader_config, Loader, LoaderError};
-use gllm::manifest::ModelManifest;
-use gllm::registry;
+use gllm::manifest::{ModelKind, ModelManifest};
 use gllm_kernels::backend_trait::BackendError;
 use gllm_kernels::cpu_backend::CpuBackend;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
+fn build_executor(alias: &str, kind: ModelKind, files: &TestModelFiles) -> Executor<CpuBackend> {
     let mut loader = files.loader(alias).expect("loader");
-    let manifest = manifest_from_loader(alias, &loader);
+    let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
     let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
@@ -22,17 +21,16 @@ fn build_executor(alias: &str, files: &TestModelFiles) -> Executor<CpuBackend> {
         .expect("executor")
 }
 
-fn manifest_from_loader(alias: &str, loader: &Loader) -> ModelManifest {
-    let overrides = registry::lookup(alias);
+fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelManifest {
     let config_path = loader.config_path().expect("config path");
     let config_value = loader_config::load_config_value(config_path).expect("config");
-    loader_config::manifest_from_config(alias, &config_value, overrides).expect("manifest")
+    loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
 }
 
 #[test]
 fn empty_prompt_returns_error() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut executor = build_executor("Qwen/Qwen3-0.6B", &files);
+    let mut executor = build_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
     let err = executor.generate("", 1, 0.8).unwrap_err();
     assert!(matches!(err, ExecutorError::EmptyPrompt));
 }
@@ -58,14 +56,6 @@ fn corrupted_weights_surface_loader_errors() {
                 | LoaderError::MissingTensor(_)
         ),
         "unexpected loader error: {err:?}"
-    );
-}
-
-#[test]
-fn unknown_override_returns_none() {
-    assert!(
-        registry::lookup("unknown-model").is_none(),
-        "unknown override ids should return None"
     );
 }
 
