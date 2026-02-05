@@ -125,7 +125,17 @@ const ADAPTER_MODEL_MATRIX: &[ModelEntry] = &[
     },
 ];
 
-/// Test that all manifests have a corresponding adapter.
+/// TEST-ADAPTER-001: 所有 manifest 都有对应的 adapter
+///
+/// **关联需求**: REQ-TEST-002, REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 遍历 ADAPTER_MODEL_MATRIX 中的所有模型
+/// 2. 为每个模型创建 manifest
+/// 3. 验证 adapter_for() 返回 Some
+///
+/// **期望结果**: 所有模型都有对应的 adapter
 #[test]
 fn manifests_have_adapters() {
     use gllm::adapter::adapter_for;
@@ -142,30 +152,60 @@ fn manifests_have_adapters() {
     }
 }
 
-/// E2E test matrix: Generation models
+/// TEST-ADAPTER-002: 生成模型架构 E2E 测试矩阵
 ///
-/// Tests one model per generation architecture.
-/// Validates: manifest lookup → download → backend init → weight loading → generation.
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: E2E_MODEL_MATRIX 中的模型已缓存
+///
+/// **测试步骤**:
+/// 1. 遍历 E2E_MODEL_MATRIX 中的生成模型
+/// 2. 为每个架构执行: manifest 查找 → 下载 → backend 初始化 → 权重加载 → 生成
+/// 3. 测试 CPU backend（强制）和 CUDA backend（条件）
+///
+/// **期望结果**: 所有生成架构完成端到端流程，输出非空文本
 #[test]
 fn e2e_generation_architectures() {
     let results = run_test_matrix("generation");
     print_test_summary("Generation", results);
 }
 
-/// E2E test matrix: Embedding
+/// TEST-ADAPTER-003: 嵌入模型架构 E2E 测试矩阵
 ///
-/// Tests embedding models.
-/// Validates: manifest lookup → download → backend init → weight loading → embeddings.
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: E2E_MODEL_MATRIX 中的嵌入模型已缓存
+///
+/// **测试步骤**:
+/// 1. 遍历 E2E_MODEL_MATRIX 中的嵌入模型
+/// 2. 为每个架构执行: manifest 查找 → 下载 → backend 初始化 → 权重加载 → 嵌入
+/// 3. 测试 CPU backend（强制）和 CUDA backend（条件）
+///
+/// **期望结果**: 所有嵌入架构完成端到端流程，返回非空向量
 #[test]
 fn e2e_embedding_architectures() {
     let results = run_test_matrix("embeddings");
     print_test_summary("Embedding", results);
 }
 
-/// E2E test matrix: Rerank
+/// TEST-ADAPTER-004: 重排序模型架构 E2E 测试矩阵
 ///
-/// Tests rerank models.
-/// Validates: manifest lookup → download → backend init → weight loading → rerank.
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: E2E_MODEL_MATRIX 中的重排序模型已缓存
+///
+/// **测试步骤**:
+/// 1. 遍历 E2E_MODEL_MATRIX 中的重排序模型
+/// 2. 为每个架构执行: manifest 查找 → 下载 → backend 初始化 → 权重加载 → 重排序
+/// 3. 测试 CPU backend（强制）和 CUDA backend（条件）
+///
+/// **期望结果**: 所有重排序架构完成端到端流程，返回正确的排序结果
 #[test]
 fn e2e_rerank_architectures() {
     let results = run_test_matrix("rerank");
