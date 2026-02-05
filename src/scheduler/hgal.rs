@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 
-use super::types::{GroupState, PageMetadata, SequenceGroup};
+use super::types::{PageMetadata, SequenceGroup};
+#[cfg(test)]
+use super::types::GroupState;
 
 const FREQUENCY_WEIGHT: isize = 10;
 const PIN_BONUS: isize = 5_000;
@@ -274,20 +276,15 @@ impl HGALScheduler {
     }
 
     fn group_has_protection(&self, group: &SequenceGroup) -> bool {
-        let warmup_duration = self.config.warmup_duration;
-        let min_warm_access = self.config.min_warm_access;
         group.pages.iter().any(|pid| {
             if let Some(meta) = self.page_metadata.get(pid) {
-                matches!(meta.state, PageState::Warm | PageState::Protected)
-                    || Self::is_in_warmup_period_meta(
-                        meta,
-                        Instant::now(),
-                        warmup_duration,
-                        min_warm_access,
-                    )
+                if matches!(meta.state, PageState::Warm | PageState::Protected) {
+                    return true;
+                }
             } else {
-                false
+                return false;
             }
+            self.is_in_warmup_period(*pid)
         })
     }
 

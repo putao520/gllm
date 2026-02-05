@@ -97,12 +97,12 @@
 
 | 测试文件 | 覆盖维度 | 状态 |
 |----------|---------|------|
-| `tests/test_model_matrix.rs` | 模型矩阵 (REQ-TEST-002/003/004) | 🔵 新增 |
-| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 🔵 新增 |
-| `tests/test_quantization.rs` | 量化格式 (REQ-TEST-006) | 🔵 新增 |
-| `tests/test_error_handling.rs` | 错误处理 (REQ-TEST-007) | 🔵 新增 |
-| `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🔵 新增 |
-| `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🔵 新增 |
+| `tests/test_model_matrix.rs` | 模型矩阵 (REQ-TEST-002/003/004) | 🟢 已实现 (2026-02-05) |
+| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 🟢 已实现 (2026-02-05) |
+| `tests/test_quantization.rs` | 量化格式 (REQ-TEST-006) | 🟢 已实现 (2026-02-05) |
+| `tests/test_error_handling.rs` | 错误处理 (REQ-TEST-007) | 🟢 已实现 (2026-02-05) |
+| `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🟢 已实现 (2026-02-05) |
+| `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🟢 已实现 (2026-02-05) |
 
 ## 6. 架构约束 (REQ-ARCH)
 

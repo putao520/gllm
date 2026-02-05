@@ -349,6 +349,34 @@ impl ShardIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn candidate_names_include_modelscope_layouts() {
@@ -376,23 +404,20 @@ mod tests {
 
     #[test]
     fn test_read_hf_token_priority() {
-        // 清理环境
-        std::env::remove_var("HF_TOKEN");
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = EnvVarGuard::set("HF_TOKEN", Some("hf_test_from_hf_token"));
 
         // 优先级 1: HF_TOKEN
-        std::env::set_var("HF_TOKEN", "hf_test_from_hf_token");
         assert_eq!(read_hf_token(), Some("hf_test_from_hf_token".to_string()));
-
-        // 清理
-        std::env::remove_var("HF_TOKEN");
     }
 
     #[test]
     fn test_read_hf_token_no_token() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = EnvVarGuard::set("HF_TOKEN", None);
+
         // 注意：如果 ~/.huggingface/token 文件存在，此测试会跳过
         // 这是有意为之 - 在有实际 token 的环境中跳过此测试
-        std::env::remove_var("HF_TOKEN");
-
         // 检查 token 文件是否存在
         if let Some(home) = std::env::var("HOME").ok() {
             let token_path = PathBuf::from(home).join(HF_TOKEN_PATH);
