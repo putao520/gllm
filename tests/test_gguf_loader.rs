@@ -1,4 +1,4 @@
-//! E2E: GGUF loader + Q4_0 quantization + basic inference.
+//! E2E: GGUF loader + Q8_0 quantization + basic inference.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use gllm_kernels::QuantizedType;
 
 const BASE_REPO: &str = "HuggingFaceTB/SmolLM-135M-Instruct";
 const GGUF_REPO: &str = "mav23/SmolLM-135M-Instruct-GGUF";
-const GGUF_FILE: &str = "smollm-135m-instruct.Q4_0.gguf";
+const GGUF_FILE: &str = "smollm-135m-instruct.Q8_0.gguf";
 
 const GGUF_FILE_MAP: FileMap = &[("model.gguf", GGUF_FILE)];
 
@@ -37,7 +37,7 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
 }
 
 #[test]
-fn gguf_loader_smollm_q4_0_e2e() {
+fn gguf_loader_smollm_q8_0_e2e() {
     let (config_path, tokenizer_path, manifest) =
         download_base_files().expect("download base config/tokenizer");
     let gguf_path = download_gguf_file().expect("download gguf weights");
@@ -55,22 +55,22 @@ fn gguf_loader_smollm_q4_0_e2e() {
         Executor::from_loader(backend, Arc::new(manifest), &GGUF_ADAPTER, &mut loader)
             .expect("executor init");
 
-    let q4_tensors: Vec<_> = executor
+    let q8_tensors: Vec<_> = executor
         .weights()
         .handle
         .meta
         .iter()
-        .filter(|(_, info)| info.quantized == Some(QuantizedType::Q4_0))
+        .filter(|(_, info)| info.quantized == Some(QuantizedType::Q8_0))
         .collect();
-    assert!(!q4_tensors.is_empty(), "expected at least one Q4_0 tensor");
+    assert!(!q8_tensors.is_empty(), "expected at least one Q8_0 tensor");
 
-    let q4_name = q4_tensors[0].0.as_str();
-    match executor.weights().handle.get(q4_name) {
+    let q8_name = q8_tensors[0].0.as_str();
+    match executor.weights().handle.get(q8_name) {
         Some(UploadedTensor::F32(values)) => {
             let sum: f32 = values.iter().map(|v| v.abs()).sum();
             assert!(sum > 0.01, "dequantized tensor appears to be all zeros");
         }
-        _ => panic!("missing dequantized tensor for {q4_name}"),
+        _ => panic!("missing dequantized tensor for {q8_name}"),
     }
 
     let output = executor
@@ -104,6 +104,45 @@ fn download_gguf_file() -> Result<PathBuf, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "gguf weights missing".to_string())
+}
+
+// 调试函数：打印 GGUF 张量的量化类型
+#[test]
+fn debug_gguf_tensor_types() {
+    use gllm::loader::gguf::GgufLoader;
+
+    let gguf_path = download_gguf_file().expect("download gguf");
+    let gguf_loader = GgufLoader::from_files(&[gguf_path]).expect("gguf loader");
+
+    println!("=== GGUF Tensor Types ===");
+    let mut q4_count = 0;
+    let mut q8_count = 0;
+    let mut other_count = 0;
+
+    for name in gguf_loader.names() {
+        let tensor = gguf_loader.tensor(&name).expect("tensor");
+        let qtype = tensor.quantized_type();
+        match qtype {
+            Some(gllm_kernels::QuantizedType::Q4_0) => {
+                q4_count += 1;
+                if q4_count <= 5 {
+                    println!("Q4_0: {}", name);
+                }
+            }
+            Some(gllm_kernels::QuantizedType::Q8_0) => {
+                q8_count += 1;
+                if q8_count <= 5 {
+                    println!("Q8_0: {}", name);
+                }
+            }
+            None => {
+                // 非量化张量
+            }
+            _ => other_count += 1,
+        }
+    }
+
+    println!("Summary: Q4_0={}, Q8_0={}, Other={}", q4_count, q8_count, other_count);
 }
 
 fn remap_gguf_handle<B: Backend>(
