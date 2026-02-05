@@ -9,13 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::manifest::FileMap;
-use super::{LoaderError, Result, ParallelLoader, ProgressBar, ModelScopeDownloader};
+use super::{LoaderError, Result, ParallelLoader, ProgressBar, ModelScopeDownloader, WeightFormat};
 use super::downloader::Downloader;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeightFormat {
-    SafeTensors,
-}
 
 #[derive(Debug)]
 pub struct MsModelFiles {
@@ -85,6 +80,22 @@ impl ModelScopeClient {
                 format: WeightFormat::SafeTensors,
                 aux_files,
             });
+        }
+
+        for name in [
+            "model.gguf",
+            "ggml-model-q4_0.gguf",
+            "ggml-model-q8_0.gguf",
+            "ggml-model-f16.gguf",
+        ] {
+            if let Ok(path) = self.get_file_any(&repo, file_map, name, &downloader) {
+                return Ok(MsModelFiles {
+                    repo,
+                    weights: vec![path],
+                    format: WeightFormat::Gguf,
+                    aux_files,
+                });
+            }
         }
 
         Err(LoaderError::MissingWeights)
@@ -202,6 +213,7 @@ impl ModelScopeClient {
         let snapshot = self.find_latest_snapshot(&snapshots_dir)?;
 
         let mut weights = Vec::new();
+        let mut format = WeightFormat::SafeTensors;
         let mut aux_files = Vec::new();
 
         // 查找权重文件
@@ -239,13 +251,30 @@ impl ModelScopeClient {
         }
 
         if weights.is_empty() {
+            for name in [
+                "model.gguf",
+                "ggml-model-q4_0.gguf",
+                "ggml-model-q8_0.gguf",
+                "ggml-model-f16.gguf",
+            ] {
+                let candidate = snapshot.join(name);
+                if candidate.exists() {
+                    weights.push(candidate);
+                }
+            }
+            if !weights.is_empty() {
+                format = WeightFormat::Gguf;
+            }
+        }
+
+        if weights.is_empty() {
             return Err(LoaderError::MissingWeights);
         }
 
         Ok(MsModelFiles {
             repo: repo.to_string(),
             weights,
-            format: WeightFormat::SafeTensors,
+            format,
             aux_files,
         })
     }

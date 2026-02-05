@@ -60,6 +60,7 @@ fn is_auth_error(err: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
     SafeTensors,
+    Gguf,
 }
 
 #[derive(Debug)]
@@ -169,6 +170,22 @@ impl HfHubClient {
                 format: WeightFormat::SafeTensors,
                 aux_files,
             });
+        }
+
+        for name in [
+            "model.gguf",
+            "ggml-model-q4_0.gguf",
+            "ggml-model-q8_0.gguf",
+            "ggml-model-f16.gguf",
+        ] {
+            if let Ok(path) = self.get_file_any(&repo, file_map, name) {
+                return Ok(HfModelFiles {
+                    repo,
+                    weights: vec![path],
+                    format: WeightFormat::Gguf,
+                    aux_files,
+                });
+            }
         }
 
         #[cfg(feature = "candle")]

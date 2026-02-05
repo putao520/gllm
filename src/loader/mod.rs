@@ -19,6 +19,7 @@ use crate::quantization::dequantize_int8_with_zero;
 pub mod downloader;
 pub mod config;
 pub mod hf_hub;
+pub mod gguf;
 pub mod modelscope;
 pub mod onnx;
 pub mod parallel;
@@ -28,6 +29,7 @@ pub mod safetensors;
 
 pub use downloader::{Downloader, HfHubDownloader, ModelScopeDownloader, NoProgress, ProgressBar, ProgressCallback};
 pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
+pub use gguf::GgufLoader;
 pub use modelscope::{ModelScopeClient, MsModelFiles};
 pub use onnx::OnnxLoader;
 pub use parallel::ParallelLoader;
@@ -55,6 +57,8 @@ pub enum LoaderError {
     ChecksumMismatch(String),
     #[error("safetensors error: {0}")]
     SafeTensors(#[from] ::safetensors::SafeTensorError),
+    #[error("gguf error: {0}")]
+    Gguf(String),
     #[error("invalid quantization: {0}")]
     InvalidQuantization(String),
     #[error("onnx error: {0}")]
@@ -273,6 +277,7 @@ pub struct Loader {
     hf: HfHubClient,
     files: HfModelFiles,
     safetensors: Option<SafeTensorsLoader>,
+    gguf: Option<GgufLoader>,
 }
 
 impl Loader {
@@ -367,6 +372,7 @@ impl Loader {
                 aux_files,
             },
             safetensors: None,
+            gguf: None,
         })
     }
 
@@ -436,7 +442,7 @@ impl Loader {
             HfModelFiles {
                 repo: ms_files.repo,
                 weights: ms_files.weights,
-                format: WeightFormat::SafeTensors,
+                format: ms_files.format,
                 aux_files: ms_files.aux_files,
             }
         } else {
@@ -473,6 +479,7 @@ impl Loader {
             hf,
             files,
             safetensors: None,
+            gguf: None,
         })
     }
 
@@ -551,7 +558,26 @@ impl Loader {
         Ok(())
     }
 
+    pub fn ensure_gguf(&mut self) -> Result<()> {
+        if self.gguf.is_some() {
+            return Ok(());
+        }
+        if self.files.format != WeightFormat::Gguf {
+            return Err(LoaderError::UnsupportedWeights(self.files.format));
+        }
+        let gguf = GgufLoader::from_files(&self.files.weights)?;
+        self.gguf = Some(gguf);
+        Ok(())
+    }
+
     pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
+        match self.files.format {
+            WeightFormat::SafeTensors => self.upload_safetensors(backend),
+            WeightFormat::Gguf => self.upload_gguf(backend),
+        }
+    }
+
+    fn upload_safetensors<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
         self.ensure_safetensors()?;
         let loader = self
             .safetensors
@@ -580,7 +606,7 @@ impl Loader {
                 if quantized_seen.insert(group.base_name.clone()) {
                     let owned = group.dequantize(loader)?;
                     for output in maybe_split_fused_owned(self.rules(), owned) {
-                        upload_owned_tensor(backend, &mut handle, output)?;
+                        upload_owned_tensor(backend, &mut handle, output, None)?;
                     }
                 }
                 continue;
@@ -588,12 +614,98 @@ impl Loader {
             let tensor = loader.tensor(&name)?;
             if let Some(outputs) = maybe_split_fused(self.rules(), &name, &tensor) {
                 for output in outputs {
-                    upload_owned_tensor(backend, &mut handle, output)?;
+                    upload_owned_tensor(backend, &mut handle, output, None)?;
                 }
                 continue;
             }
 
             upload_tensor_slice(backend, &mut handle, &name, tensor)?;
+        }
+
+        Ok(handle)
+    }
+
+    fn upload_gguf<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
+        use gllm_kernels::{dequantize_q4_0, dequantize_q8_0, Q4_0Matrix, Q8_0Matrix};
+
+        self.ensure_gguf()?;
+        let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+
+        let mut handle = WeightsHandle::default();
+        let mut visited = HashSet::new();
+        let tensor_names = loader.names();
+
+        for name in tensor_names {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let tensor = loader.tensor(&name)?;
+            if let Some(qtype) = tensor.quantized_type() {
+                let owned = match qtype {
+                    gllm_kernels::QuantizedType::Q4_0 => {
+                        if matches!(tensor.byte_order, gguf_rs::ByteOrder::BE) {
+                            return Err(LoaderError::Gguf(
+                                "big-endian gguf quantized tensors are not supported".into(),
+                            ));
+                        }
+                        let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
+                        let blocks = parse_q4_0_blocks(tensor.data, rows, cols)?;
+                        let matrix = Q4_0Matrix { blocks, rows, cols };
+                        let total = rows
+                            .checked_mul(cols)
+                            .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                        let mut out = vec![0.0f32; total];
+                        dequantize_q4_0(&matrix, &mut out)
+                            .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
+                        OwnedTensor::F32 {
+                            name: name.clone(),
+                            shape: tensor.shape.clone(),
+                            data: out,
+                        }
+                    }
+                    gllm_kernels::QuantizedType::Q8_0 => {
+                        if matches!(tensor.byte_order, gguf_rs::ByteOrder::BE) {
+                            return Err(LoaderError::Gguf(
+                                "big-endian gguf quantized tensors are not supported".into(),
+                            ));
+                        }
+                        let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
+                        let blocks = parse_q8_0_blocks(tensor.data, rows, cols)?;
+                        let matrix = Q8_0Matrix { blocks, rows, cols };
+                        let total = rows
+                            .checked_mul(cols)
+                            .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                        let mut out = vec![0.0f32; total];
+                        dequantize_q8_0(&matrix, &mut out)
+                            .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
+                        OwnedTensor::F32 {
+                            name: name.clone(),
+                            shape: tensor.shape.clone(),
+                            data: out,
+                        }
+                    }
+                    gllm_kernels::QuantizedType::Q5_K => {
+                        return Err(LoaderError::InvalidQuantization(
+                            "q5_k gguf tensors are not supported yet".into(),
+                        ));
+                    }
+                };
+
+                for output in maybe_split_fused_owned(self.rules(), owned) {
+                    upload_owned_tensor(backend, &mut handle, output, Some(qtype))?;
+                }
+                continue;
+            }
+
+            let data = tensor.to_f32()?;
+            let owned = OwnedTensor::F32 {
+                name: name.clone(),
+                shape: tensor.shape.clone(),
+                data,
+            };
+            for output in maybe_split_fused_owned(self.rules(), owned) {
+                upload_owned_tensor(backend, &mut handle, output, None)?;
+            }
         }
 
         Ok(handle)
@@ -621,6 +733,7 @@ fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
             .to_ascii_lowercase();
         let detected = match ext.as_str() {
             "safetensors" => WeightFormat::SafeTensors,
+            "gguf" => WeightFormat::Gguf,
             _ => {
                 return Err(LoaderError::UnsupportedWeightExtension(ext));
             }
@@ -688,6 +801,7 @@ fn is_recoverable_error(err: &LoaderError) -> bool {
 pub struct TensorInfo {
     pub shape: Vec<usize>,
     pub dtype: Dtype,
+    pub quantized: Option<gllm_kernels::QuantizedType>,
 }
 
 pub enum UploadedTensor<B: Backend> {
@@ -750,6 +864,7 @@ fn upload_f32_data<B: Backend>(
     name: &str,
     shape: Vec<usize>,
     data: &[f32],
+    quantized: Option<gllm_kernels::QuantizedType>,
 ) -> Result<()> {
     let uploaded = backend
         .upload_weights(data)
@@ -759,6 +874,7 @@ fn upload_f32_data<B: Backend>(
         name.to_string(),
         shape,
         Dtype::F32,
+        quantized,
         UploadedTensor::F32(uploaded),
     )
 }
@@ -773,61 +889,61 @@ fn upload_tensor_slice<B: Backend>(
         Dtype::F16 => {
             let data = tensor.as_f16()?;
             let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::BF16 => {
             let data = tensor.as_bf16()?;
             let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::F32 => {
             let data = tensor.as_f32()?;
-            upload_f32_data(backend, handle, name, tensor.shape, data.as_ref())?;
+            upload_f32_data(backend, handle, name, tensor.shape, data.as_ref(), None)?;
         }
         Dtype::F64 => {
             let data = tensor.as_f64()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::I8 => {
             let data = tensor.as_i8()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::U8 => {
             let data = tensor.as_u8()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::I16 => {
             let data = tensor.as_i16()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::U16 => {
             let data = tensor.as_u16()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::I32 => {
             let data = tensor.as_i32()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::U32 => {
             let data = tensor.as_u32()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::I64 => {
             let data = tensor.as_i64()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         Dtype::U64 => {
             let data = tensor.as_u64()?;
             let converted: Vec<f32> = data.iter().map(|v| *v as f32).collect();
-            upload_f32_data(backend, handle, name, tensor.shape, &converted)?;
+            upload_f32_data(backend, handle, name, tensor.shape, &converted, None)?;
         }
         other => return Err(LoaderError::UnsupportedDtype(other)),
     }
@@ -838,18 +954,19 @@ fn upload_owned_tensor<B: Backend>(
     backend: &B,
     handle: &mut WeightsHandle<B>,
     tensor: OwnedTensor,
+    quantized: Option<gllm_kernels::QuantizedType>,
 ) -> Result<()> {
     match tensor {
         OwnedTensor::F16 { name, shape, data } => {
             let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
-            upload_f32_data(backend, handle, &name, shape, &converted)
+            upload_f32_data(backend, handle, &name, shape, &converted, quantized)
         }
         OwnedTensor::BF16 { name, shape, data } => {
             let converted: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
-            upload_f32_data(backend, handle, &name, shape, &converted)
+            upload_f32_data(backend, handle, &name, shape, &converted, quantized)
         }
         OwnedTensor::F32 { name, shape, data } => {
-            upload_f32_data(backend, handle, &name, shape, &data)
+            upload_f32_data(backend, handle, &name, shape, &data, quantized)
         }
     }
 }
@@ -859,6 +976,7 @@ fn insert_tensor<B: Backend>(
     name: String,
     shape: Vec<usize>,
     dtype: Dtype,
+    quantized: Option<gllm_kernels::QuantizedType>,
     tensor: UploadedTensor<B>,
 ) -> Result<()> {
     if handle.tensors.contains_key(&name) {
@@ -866,7 +984,7 @@ fn insert_tensor<B: Backend>(
     }
     handle
         .meta
-        .insert(name.clone(), TensorInfo { shape, dtype });
+        .insert(name.clone(), TensorInfo { shape, dtype, quantized });
     handle.tensors.insert(name, tensor);
     Ok(())
 }
@@ -1225,6 +1343,91 @@ fn tensor_to_f32(tensor: &TensorSlice<'_>) -> Result<Vec<f32>> {
             "unsupported quantization tensor dtype {other:?}"
         ))),
     }
+}
+
+fn gguf_matrix_dims(shape: &[usize]) -> Result<(usize, usize)> {
+    if shape.len() > 2 && shape[2..].iter().any(|&dim| dim != 1) {
+        return Err(LoaderError::InvalidQuantization(
+            "gguf quantized tensor has more than 2 dimensions".into(),
+        ));
+    }
+    let cols = *shape.get(0).unwrap_or(&1);
+    let rows = *shape.get(1).unwrap_or(&1);
+    Ok((rows.max(1), cols.max(1)))
+}
+
+fn parse_q4_0_blocks(
+    data: &[u8],
+    rows: usize,
+    cols: usize,
+) -> Result<Vec<gllm_kernels::Q4_0Block>> {
+    use gllm_kernels::{Q4_0Block, Q4_0_BLOCK_BYTES, QK4_0};
+
+    let blocks_per_row = (cols + QK4_0 - 1) / QK4_0;
+    let total_blocks = rows
+        .checked_mul(blocks_per_row)
+        .ok_or_else(|| LoaderError::InvalidQuantization("gguf block count overflow".into()))?;
+    let block_bytes = 2 + Q4_0_BLOCK_BYTES;
+    let expected = total_blocks
+        .checked_mul(block_bytes)
+        .ok_or_else(|| LoaderError::InvalidQuantization("gguf block size overflow".into()))?;
+    if data.len() != expected {
+        return Err(LoaderError::InvalidQuantization(format!(
+            "q4_0 tensor bytes {} do not match expected {}",
+            data.len(),
+            expected
+        )));
+    }
+
+    let mut blocks = Vec::with_capacity(total_blocks);
+    let mut offset = 0;
+    for _ in 0..total_blocks {
+        let scale_bits = u16::from_le_bytes([data[offset], data[offset + 1]]);
+        let scale = f16::from_bits(scale_bits);
+        offset += 2;
+        let mut payload = [0u8; Q4_0_BLOCK_BYTES];
+        payload.copy_from_slice(&data[offset..offset + Q4_0_BLOCK_BYTES]);
+        offset += Q4_0_BLOCK_BYTES;
+        blocks.push(Q4_0Block { scale, data: payload });
+    }
+    Ok(blocks)
+}
+
+fn parse_q8_0_blocks(
+    data: &[u8],
+    rows: usize,
+    cols: usize,
+) -> Result<Vec<gllm_kernels::Q8_0Block>> {
+    use gllm_kernels::{Q8_0Block, Q8_0_BLOCK_BYTES, QK8_0};
+
+    let blocks_per_row = (cols + QK8_0 - 1) / QK8_0;
+    let total_blocks = rows
+        .checked_mul(blocks_per_row)
+        .ok_or_else(|| LoaderError::InvalidQuantization("gguf block count overflow".into()))?;
+    let block_bytes = 2 + Q8_0_BLOCK_BYTES;
+    let expected = total_blocks
+        .checked_mul(block_bytes)
+        .ok_or_else(|| LoaderError::InvalidQuantization("gguf block size overflow".into()))?;
+    if data.len() != expected {
+        return Err(LoaderError::InvalidQuantization(format!(
+            "q8_0 tensor bytes {} do not match expected {}",
+            data.len(),
+            expected
+        )));
+    }
+
+    let mut blocks = Vec::with_capacity(total_blocks);
+    let mut offset = 0;
+    for _ in 0..total_blocks {
+        let scale_bits = u16::from_le_bytes([data[offset], data[offset + 1]]);
+        let scale = f16::from_bits(scale_bits);
+        offset += 2;
+        let mut payload = [0u8; Q8_0_BLOCK_BYTES];
+        payload.copy_from_slice(&data[offset..offset + Q8_0_BLOCK_BYTES]);
+        offset += Q8_0_BLOCK_BYTES;
+        blocks.push(Q8_0Block { scale, data: payload });
+    }
+    Ok(blocks)
 }
 
 struct FusedSpec {
