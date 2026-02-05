@@ -20,6 +20,7 @@ pub mod downloader;
 pub mod config;
 pub mod hf_hub;
 pub mod modelscope;
+pub mod onnx;
 pub mod parallel;
 #[cfg(feature = "candle")]
 pub mod pytorch;
@@ -28,6 +29,7 @@ pub mod safetensors;
 pub use downloader::{Downloader, HfHubDownloader, ModelScopeDownloader, NoProgress, ProgressBar, ProgressCallback};
 pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
 pub use modelscope::{ModelScopeClient, MsModelFiles};
+pub use onnx::OnnxLoader;
 pub use parallel::ParallelLoader;
 #[cfg(feature = "candle")]
 pub use pytorch::convert_bins_to_safetensors;
@@ -55,6 +57,8 @@ pub enum LoaderError {
     SafeTensors(#[from] ::safetensors::SafeTensorError),
     #[error("invalid quantization: {0}")]
     InvalidQuantization(String),
+    #[error("onnx error: {0}")]
+    Onnx(String),
     #[cfg(feature = "candle")]
     #[error("pytorch bin error: {0}")]
     Pytorch(String),

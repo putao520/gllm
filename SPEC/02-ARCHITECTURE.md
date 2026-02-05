@@ -249,6 +249,24 @@ Client::new_chat("Qwen/Qwen3-0.6B")
     - **核心逻辑**：利用多线程同时触发 Page Fault 和 CPU 处理，每个层独立并行加载。
     - **收益**：多线程同时触发缺页中断（Page Fault），操作系统能更有效地调度磁盘 I/O 队列；同时利用多核 CPU 并行处理 Fused 拆分。
 
+#### ONNX Adapter Architecture (ARCH-ONNX)
+
+**核心架构: Matcher -> Mapper -> Kernel**
+
+ONNX 加载器**严禁**进行 Naive 的 1:1 算子翻译（如将 `MatMul` + `Add` 分别执行）。必须采用图模式匹配（Graph Pattern Matching）将子图融合为高性能算子。
+
+**处理流程**:
+1.  **Proto Parsing**: 解析 `.onnx` 文件，构建原始计算图。
+2.  **Pattern Matching**: 使用子图同构算法识别融合模式（如 `MatMul` + `Add` + `Gelu`）。
+3.  **Kernel Mapping**: 将匹配到的子图映射为单一的 `FusedKernel` 调用（如 `GemmGelu`）。
+4.  **Fallback**: 仅当无法匹配任何模式时，降级为 Atomic Kernel 执行。
+
+**关键融合模式**:
+- `Linear` + `Bias` -> `FusedGemm`
+- `Gemm` + `Gelu`/`Silu` -> `FusedGemmAct`
+- `Attention` Subgraph -> `FlashAttention`
+- `LayerNorm` Subgraph -> `FusedLayerNorm`
+
 ### 推理流程
 
 ```
