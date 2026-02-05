@@ -84,9 +84,26 @@
 
 ### 3. 模型缓存 (ARCH-MODEL-CACHE)
 
+> **关联需求**: REQ-LOADER-002, REQ-LOADER-005, REQ-LOADER-016
+
 **缓存根目录**: `~/.gllm/models/`
 
-模型下载的内部目录结构由下载库（hf-hub/ModelScope）管理，本项目不规定。
+**源头隔离结构** (ARCH-MODEL-CACHE-001):
+```
+~/.gllm/models/
+├── hf/    # HuggingFace 下载的模型
+└── ms/    # ModelScope 下载的模型
+```
+
+| 源 | 缓存子目录 | 说明 |
+|---|-----------|------|
+| HuggingFace | `hf/` | HF 专用缓存，使用 hf-hub crate 管理 |
+| ModelScope | `ms/` | MS 专用缓存，使用 git-like 结构 |
+
+**隔离原则**:
+- 不同下载源的模型文件**互不干扰**
+- 即使同名模型，从不同源下载也存储在不同目录
+- 禁止跨源混用文件（config 从 HF 读，weights 从 MS 读）
 
 **环境变量**:
 | 变量 | 默认值 | 说明 |

@@ -196,18 +196,24 @@ impl CacheLayout {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.root)?;
+        // 创建根目录和源头隔离子目录（ARCH-MODEL-CACHE-001）
+        std::fs::create_dir_all(self.root.join("hf"))?;
+        std::fs::create_dir_all(self.root.join("ms"))?;
         Ok(())
     }
 
-    /// 获取 HuggingFace 下载缓存目录（直接使用根目录）
+    /// 获取 HuggingFace 下载缓存目录
+    ///
+    /// 返回 `root/hf/`，实现源头隔离（ARCH-MODEL-CACHE-001）
     pub fn hf_cache_dir(&self) -> PathBuf {
-        self.root.clone()
+        self.root.join("hf")
     }
 
-    /// 获取 ModelScope 下载缓存目录（直接使用根目录）
+    /// 获取 ModelScope 下载缓存目录
+    ///
+    /// 返回 `root/ms/`，实现源头隔离（ARCH-MODEL-CACHE-001）
     pub fn modelscope_cache_dir(&self) -> PathBuf {
-        self.root.clone()
+        self.root.join("ms")
     }
 
     pub fn checksum_db(&self) -> &Path {
