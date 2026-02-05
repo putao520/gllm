@@ -29,23 +29,19 @@ fn cuda_available() -> bool {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires network access and model download"]
 fn matrix_chat_safetensors_cpu() {
-    // 使用明确只有 SafeTensors 的模型 - Qwen3 在两个源都有
-    // 指定使用 HuggingFace 源，避免回退到 ModelScope
-    let model = "Qwen/Qwen3-0.6B-Instruct";
-    let loader = Loader::from_hf(model).expect("HF loader should succeed");
+    // 使用 HuggingFaceTB/SmolLM-135M-Instruct，明确指定 SafeTensors 格式
+    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
+    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
+        .expect("HF loader should succeed with SafeTensors format");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
 
-    // 如果 loader 创建成功，尝试创建 executor
-    // 注意：这要求模型已下载或网络可用
+    // 验证 manifest 创建
     if let Some(config_path) = loader.config_path() {
         let config_value = gllm::loader::config::load_config_value(config_path)
             .expect("load config");
         let manifest = gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Chat)
             .expect("create manifest");
-
-        // 验证 manifest 是 Chat 类型
         assert_eq!(manifest.kind, ModelKind::Chat);
     }
 }
@@ -58,10 +54,11 @@ fn matrix_chat_gguf_cpu() {
 }
 
 #[test]
-#[ignore = "Requires network access and model download"]
 fn matrix_embedding_safetensors_cpu() {
+    // 使用公开的 Embedding 模型，明确指定 SafeTensors 格式
     let model = "sentence-transformers/all-MiniLM-L6-v2";
-    let loader = Loader::from_hf(model).expect("HF loader should succeed");
+    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
+        .expect("HF loader should succeed for public model");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
 
     // 验证 manifest 类型
@@ -75,10 +72,11 @@ fn matrix_embedding_safetensors_cpu() {
 }
 
 #[test]
-#[ignore = "Requires network access and model download"]
 fn matrix_reranker_safetensors_cpu() {
+    // 使用公开的 Reranker 模型，明确指定 SafeTensors 格式
     let model = "BAAI/bge-reranker-v2-m3";
-    let loader = Loader::from_hf(model).expect("HF loader should succeed");
+    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
+        .expect("HF loader should succeed for public model");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
 
     // 验证 manifest 类型
@@ -98,15 +96,14 @@ fn matrix_reranker_safetensors_cpu() {
 #[test]
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_safetensors_cuda() {
-    // 使用明确只有 SafeTensors 的模型
-    let model = "Qwen/Qwen3-0.6B-Instruct";
-    let loader = Loader::from_hf(model).expect("HF loader should succeed");
+    // 使用 SmolLM，明确指定 SafeTensors 格式
+    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
+    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
+        .expect("HF loader should succeed");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
-
-    // CUDA 后端可用性检查
     assert!(cuda_available(), "CUDA backend should be available");
 
-    // 验证 manifest 创建
+    // 验证 manifest
     if let Some(config_path) = loader.config_path() {
         let config_value = gllm::loader::config::load_config_value(config_path)
             .expect("load config");
@@ -120,7 +117,8 @@ fn matrix_chat_safetensors_cuda() {
 #[ignore = "Requires CUDA backend"]
 fn matrix_embedding_safetensors_cuda() {
     let model = "sentence-transformers/all-MiniLM-L6-v2";
-    let loader = Loader::from_hf(model).expect("HF loader should succeed");
+    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
+        .expect("HF loader should succeed");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
     assert!(cuda_available(), "CUDA backend should be available");
 }
