@@ -10,7 +10,7 @@
 //!   cargo run --release --example regression              # Use CPU backend (auto)
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
-use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
+use gllm::engine::scheduler::{RequestKind, PagedScheduler, SchedulerConfig};
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 #[cfg(feature = "candle")]
 use gllm::loader::convert_bins_to_safetensors;
@@ -436,7 +436,7 @@ fn scheduler_check() -> InternalCheck {
         min_warm_access: 2,
         enable_clock_pro: true,
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 3);
 

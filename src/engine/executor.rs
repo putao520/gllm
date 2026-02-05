@@ -5,7 +5,7 @@ use gllm_kernels::backend_trait::{
 };
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::{
-    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, SamplingConfig,
+    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, SamplingConfig, SwapConfig,
 };
 use thiserror::Error;
 
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 
-use super::scheduler::{RequestId, RequestKind, ScheduledBatch, Scheduler};
+use super::scheduler::{RequestId, RequestKind, ScheduledBatch, PagedScheduler};
 use super::vllm2024::Scheduler2024Config;
 
 #[derive(Debug, Error)]
@@ -42,7 +42,7 @@ pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
 
 pub struct Executor<B: Backend + 'static> {
     backend: B,
-    scheduler: Scheduler,
+    scheduler: PagedScheduler,
     manifest: Arc<ModelManifest>,
     adapter: &'static dyn ModelAdapter<B>,
     weights: AdapterWeights<B>,
@@ -76,7 +76,7 @@ impl<B: Backend + 'static> Executor<B> {
             rope_precompute: true,
             position_encoding: PositionEncoding::Rope,
         };
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         scheduler.enable_vllm_2024(Scheduler2024Config {
             enable_2024_optimizations: true,
             ..Scheduler2024Config::default()
@@ -99,7 +99,7 @@ impl<B: Backend + 'static> Executor<B> {
             max_seq_len: model_config.max_position_embeddings,
             dtype_size: cpu_dtype_size.unwrap_or(model_config.dtype_size),
             page_size,
-            swap_config: None, // 暂不启用 swap
+            swap_config: Some(SwapConfig::default()),
         };
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = adapter.load_weights(loader, &backend)?;

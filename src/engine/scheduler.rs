@@ -1,4 +1,4 @@
-//! Scheduler (PagedAttention / Continuous Batching / Double Buffering).
+//! PagedScheduler (PagedAttention / Continuous Batching / Double Buffering).
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -58,6 +58,8 @@ pub struct SchedulerConfig {
     pub working_set_window: Duration,
     pub hot_threshold: usize,
     pub lir_ratio: f32,
+    pub min_warm_access: usize,
+    pub enable_clock_pro: bool,
 }
 
 impl Default for SchedulerConfig {
@@ -71,6 +73,8 @@ impl Default for SchedulerConfig {
             working_set_window: Duration::from_secs(1),
             hot_threshold: 3,
             lir_ratio: 0.3,
+            min_warm_access: 2,
+            enable_clock_pro: true,
         }
     }
 }
@@ -144,9 +148,13 @@ impl PagePool {
         for &page_id in page_ids {
             // 更新页面状态
             if let Some(entry) = self.page_states.get_mut(&page_id) {
-                entry.state = PageState::Active;
-                entry.last_access = now;
-                entry.owner_request = Some(owner);
+                if entry.state != PageState::Swapped {
+                    if entry.state == PageState::Standby {
+                        entry.state = PageState::Active;
+                    }
+                    entry.last_access = now;
+                    entry.owner_request = Some(owner);
+                }
             }
         }
     }
@@ -220,10 +228,9 @@ impl PagePool {
         for &page in pages {
             if let Some(entry) = self.page_states.get_mut(&page) {
                 entry.state = PageState::Swapped;
-                entry.owner_request = None;
                 entry.last_access = now;
             }
-            self.free.push_back(page);
+            self.free.retain(|&pid| pid != page);
         }
     }
 
@@ -343,7 +350,7 @@ pub struct SequenceInfo {
 }
 
 #[derive(Debug)]
-pub struct Scheduler {
+pub struct PagedScheduler {
     config: SchedulerConfig,
     next_id: RequestId,
     next_batch_id: u64,
@@ -361,7 +368,7 @@ pub struct Scheduler {
     vllm24: Option<Scheduler2024State>,
 }
 
-impl Scheduler {
+impl PagedScheduler {
     pub fn new() -> Self {
         Self::with_config(SchedulerConfig::default())
     }
@@ -374,6 +381,8 @@ impl Scheduler {
             working_set_window: config.working_set_window,
             hot_threshold: config.hot_threshold,
             lir_ratio: config.lir_ratio,
+            min_warm_access: config.min_warm_access,
+            enable_clock_pro: config.enable_clock_pro,
         });
         Self {
             config,
@@ -1231,7 +1240,7 @@ mod tests {
             max_tokens: 32,
             ..SchedulerConfig::default()
         };
-        let mut scheduler = Scheduler::with_config(config);
+        let mut scheduler = PagedScheduler::with_config(config);
         scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
         scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 3);
         let batch = scheduler.next_batch().expect("batch");
@@ -1249,7 +1258,7 @@ mod tests {
             max_tokens: 8,
             ..SchedulerConfig::default()
         };
-        let mut scheduler = Scheduler::with_config(config);
+        let mut scheduler = PagedScheduler::with_config(config);
         scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 2);
         scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 2);
         scheduler.prefetch_next();
@@ -1296,7 +1305,7 @@ mod tests {
 
     #[test]
     fn scheduler_tracks_sequences() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
 
         // 开始跟踪序列
@@ -1316,7 +1325,7 @@ mod tests {
 
     #[test]
     fn scheduler_page_state_integration() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
 
         // 模拟分配页面
@@ -1335,7 +1344,7 @@ mod tests {
 
     #[test]
     fn scheduler_pause_resume_sequence() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
 
         scheduler.start_sequence(req_id, vec![0]);
@@ -1354,7 +1363,7 @@ mod tests {
 
     #[test]
     fn handle_page_fault_with_swapped_page() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
         let page_id = 0;
 
@@ -1373,7 +1382,7 @@ mod tests {
 
     #[test]
     fn handle_page_fault_with_active_page() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
         let page_id = 0;
 
@@ -1388,7 +1397,7 @@ mod tests {
 
     #[test]
     fn get_batch_page_table_returns_correct_pages() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
         let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
 
@@ -1409,7 +1418,7 @@ mod tests {
 
     #[test]
     fn update_batch_continues_running_sequences() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
         let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
 
@@ -1452,7 +1461,7 @@ mod tests {
 
     #[test]
     fn update_batch_complies_finished_sequences() {
-        let mut scheduler = Scheduler::new();
+        let mut scheduler = PagedScheduler::new();
         let req1 = scheduler.enqueue(RequestKind::Generate, "test1");
         let req2 = scheduler.enqueue(RequestKind::Generate, "test2");
 
@@ -1502,7 +1511,7 @@ mod tests {
             max_tokens: 32,
             ..SchedulerConfig::default()
         };
-        let mut scheduler = Scheduler::with_config(config);
+        let mut scheduler = PagedScheduler::with_config(config);
         let req_id = scheduler.enqueue(RequestKind::Generate, "test");
 
         // 分配 2 个页面（8 个 token）
@@ -1515,7 +1524,7 @@ mod tests {
 
     #[test]
     fn chunked_prefill_progresses() {
-        let mut scheduler = Scheduler::with_config(SchedulerConfig {
+        let mut scheduler = PagedScheduler::with_config(SchedulerConfig {
             page_size: 4,
             total_pages: 16,
             max_batch: 4,

@@ -14,6 +14,8 @@ pub struct HGALConfig {
     pub working_set_window: Duration,
     pub hot_threshold: usize,
     pub lir_ratio: f32,
+    pub min_warm_access: usize,
+    pub enable_clock_pro: bool,
 }
 
 impl Default for HGALConfig {
@@ -23,6 +25,8 @@ impl Default for HGALConfig {
             working_set_window: Duration::from_secs(1),
             hot_threshold: 3,
             lir_ratio: 0.3,
+            min_warm_access: 2,
+            enable_clock_pro: true,
         }
     }
 }
@@ -37,8 +41,6 @@ pub struct HGALScheduler {
     /// Pages currently classified as LIR.
     pub(crate) lir_pages: HashSet<PageId>,
     pub(crate) config: HGALConfig,
-    /// Monotonic counter for IRR recency stamps.
-    recency_clock: usize,
 }
 
 impl HGALScheduler {
@@ -48,7 +50,6 @@ impl HGALScheduler {
             page_metadata: HashMap::new(),
             lir_pages: HashSet::new(),
             config,
-            recency_clock: 0,
         }
     }
 
@@ -85,10 +86,6 @@ impl HGALScheduler {
         });
         entry.sequence_id = sequence_id;
         entry.state = state;
-        if entry.last_access == Instant::now() {
-            // keep last_access monotonic even if called with identical timestamp
-            entry.last_access = Instant::now();
-        }
         if state == PageState::Swapped {
             entry.warm_until = None;
             entry.swap_in_time = None;
@@ -141,39 +138,60 @@ impl HGALScheduler {
             .sum();
 
         let freq_bonus = (group.access_count as isize) * FREQUENCY_WEIGHT;
-        let state_penalty = match group.state {
-            GroupState::Running => 0,
-            GroupState::Paused => 50,
-            GroupState::Swapped => 100,
-        };
         let pin_bonus = if group.is_pinned { PIN_BONUS } else { 0 };
 
-        time_penalty + recency_penalty + state_penalty - freq_bonus - pin_bonus
+        time_penalty + recency_penalty - freq_bonus - pin_bonus
     }
 
     /// Whether the page is currently protected by warm-up.
-    fn is_in_warmup_period(&self, page_id: PageId) -> bool {
-        if let Some(meta) = self.page_metadata.get(&page_id) {
-            if meta.state != PageState::Warm {
-                return false;
-            }
-            if meta.access_count >= 2 {
-                return false;
-            }
-            let warm_until = meta
-                .warm_until
-                .or_else(|| meta.swap_in_time.map(|t| t + self.config.warmup_duration));
-            if let Some(end) = warm_until {
-                return Instant::now() < end;
-            }
+    fn warm_until(meta: &PageMetadata, warmup_duration: Duration) -> Option<Instant> {
+        meta.warm_until
+            .or_else(|| meta.swap_in_time.map(|t| t + warmup_duration))
+    }
+
+    fn is_in_warmup_period_meta(
+        meta: &PageMetadata,
+        now: Instant,
+        warmup_duration: Duration,
+        min_warm_access: usize,
+    ) -> bool {
+        if meta.state != PageState::Warm {
+            return false;
         }
-        false
+        if meta.access_count >= min_warm_access {
+            return false;
+        }
+        Self::warm_until(meta, warmup_duration)
+            .map(|end| now < end)
+            .unwrap_or(false)
+    }
+
+    fn is_in_warmup_period(&self, page_id: PageId) -> bool {
+        self.page_metadata
+            .get(&page_id)
+            .map(|meta| {
+                Self::is_in_warmup_period_meta(
+                    meta,
+                    Instant::now(),
+                    self.config.warmup_duration,
+                    self.config.min_warm_access,
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Working set detection: promote hot pages to Protected, demote stale ones.
     pub fn detect_working_set(&mut self) {
         let now = Instant::now();
+        let warmup_duration = self.config.warmup_duration;
+        let min_warm_access = self.config.min_warm_access;
         for meta in self.page_metadata.values_mut() {
+            if meta.state == PageState::Warm
+                && !Self::is_in_warmup_period_meta(meta, now, warmup_duration, min_warm_access)
+            {
+                meta.state = PageState::Active;
+                meta.warm_until = None;
+            }
             let hot = meta.access_count >= self.config.hot_threshold
                 && now.saturating_duration_since(meta.last_access) < self.config.working_set_window;
 
@@ -195,30 +213,42 @@ impl HGALScheduler {
 
     /// Record a page access, updating LIRS metadata and group stats.
     pub fn mark_accessed(&mut self, page_id: PageId) {
-        self.recency_clock = self.recency_clock.saturating_add(1);
         let now = Instant::now();
+        let warmup_duration = self.config.warmup_duration;
+        let min_warm_access = self.config.min_warm_access;
         let sequence_id = {
             let entry = self.page_metadata.entry(page_id).or_insert_with(|| {
                 let mut meta = PageMetadata::default();
                 meta.page_id = page_id;
                 meta
             });
-            entry.recency = self.recency_clock;
+            let irr = now
+                .saturating_duration_since(entry.last_access)
+                .as_millis()
+                .try_into()
+                .unwrap_or(usize::MAX);
+            entry.recency = irr;
             entry.access_count = entry.access_count.saturating_add(1);
             entry.last_access = now;
-            if entry.state == PageState::Warm
-                && (entry.access_count >= 2
-                    || entry.warm_until.map(|end| now >= end).unwrap_or(false))
-            {
-                entry.state = PageState::Active;
-                entry.warm_until = None;
-            } else {
+            if entry.state == PageState::Warm {
+                if !Self::is_in_warmup_period_meta(
+                    entry,
+                    now,
+                    warmup_duration,
+                    min_warm_access,
+                ) {
+                    entry.state = PageState::Active;
+                    entry.warm_until = None;
+                }
+            } else if entry.state != PageState::Protected {
                 entry.state = PageState::Active;
             }
             entry.sequence_id
         };
 
-        self.update_lir_membership(page_id);
+        if self.config.enable_clock_pro {
+            self.update_lir_membership(page_id);
+        }
 
         if let Some(seq_id) = sequence_id {
             if let Some(group) = self.sequence_groups.get_mut(&seq_id) {
@@ -244,10 +274,17 @@ impl HGALScheduler {
     }
 
     fn group_has_protection(&self, group: &SequenceGroup) -> bool {
+        let warmup_duration = self.config.warmup_duration;
+        let min_warm_access = self.config.min_warm_access;
         group.pages.iter().any(|pid| {
             if let Some(meta) = self.page_metadata.get(pid) {
                 matches!(meta.state, PageState::Warm | PageState::Protected)
-                    || self.is_in_warmup_period(*pid)
+                    || Self::is_in_warmup_period_meta(
+                        meta,
+                        Instant::now(),
+                        warmup_duration,
+                        min_warm_access,
+                    )
             } else {
                 false
             }

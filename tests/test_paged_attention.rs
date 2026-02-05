@@ -1,4 +1,4 @@
-use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
+use gllm::engine::scheduler::{RequestKind, PagedScheduler, SchedulerConfig};
 
 #[test]
 fn paged_attention_allocates_pages() {
@@ -9,7 +9,7 @@ fn paged_attention_allocates_pages() {
         max_tokens: 64,
         ..SchedulerConfig::default()
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 8);
 
@@ -32,7 +32,7 @@ fn paged_attention_dynamic_batching_respects_limits() {
         max_tokens: 6,
         ..SchedulerConfig::default()
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 3);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 3);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "c", 3);
@@ -57,7 +57,7 @@ fn paged_attention_prefetches_with_double_buffer() {
         max_tokens: 8,
         ..SchedulerConfig::default()
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 2);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 2);
 
@@ -85,7 +85,7 @@ fn paged_attention_rejects_oversized_request() {
         max_tokens: 32,
         ..SchedulerConfig::default()
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 9);
 
     assert!(scheduler.next_batch().is_none());
@@ -115,7 +115,7 @@ fn continuous_batching_improves_utilization_over_static() {
         max_tokens,
         ..SchedulerConfig::default()
     };
-    let mut scheduler = Scheduler::with_config(config);
+    let mut scheduler = PagedScheduler::with_config(config);
     for (idx, tokens) in lengths.iter().enumerate() {
         scheduler.enqueue_with_tokens(RequestKind::Generate, format!("req{idx}"), *tokens);
     }
