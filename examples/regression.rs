@@ -433,6 +433,8 @@ fn scheduler_check() -> InternalCheck {
         working_set_window: Duration::from_secs(1),
         hot_threshold: 3,
         lir_ratio: 0.3,
+        min_warm_access: 2,
+        enable_clock_pro: true,
     };
     let mut scheduler = Scheduler::with_config(config);
     scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
