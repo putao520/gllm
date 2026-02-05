@@ -38,12 +38,13 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
 #[test]
 fn cpu_and_cuda_embeddings_align_within_tolerance() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut cpu_exec = build_cpu_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
-    let reference = cpu_exec.embed("tok1 tok2").expect("cpu embed");
+    // 使用 Embedding 模型测试 CPU 和 CUDA 后端的 embedding 结果一致性
+    let mut cpu_exec = build_cpu_executor("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &files);
+    let reference = cpu_exec.embed("test query").expect("cpu embed");
 
     if let Ok(cuda_backend) = CudaBackend::new(0) {
-        let mut loader = files.loader("Qwen/Qwen3-0.6B").expect("loader");
-        let manifest = manifest_from_loader("Qwen/Qwen3-0.6B", ModelKind::Chat, &loader);
+        let mut loader = files.loader("BAAI/bge-small-en-v1.5").expect("loader");
+        let manifest = manifest_from_loader("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &loader);
         loader.set_manifest_if_missing(&manifest);
         let adapter = adapter_for::<CudaBackend>(&manifest).expect("cuda adapter");
         let mut cuda_exec = Executor::from_loader(
@@ -53,7 +54,7 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
             &mut loader,
         )
         .expect("cuda exec");
-        let cuda_embedding = cuda_exec.embed("tok1 tok2").expect("cuda embed");
+        let cuda_embedding = cuda_exec.embed("test query").expect("cuda embed");
         assert_eq!(reference.len(), cuda_embedding.len());
         for (cpu, cuda) in reference.iter().zip(cuda_embedding.iter()) {
             assert!(
@@ -63,8 +64,8 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
         }
     } else {
         // Fallback: deterministic CPU vs CPU comparison to keep CI green without CUDA.
-        let mut second = build_cpu_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
-        let repeat = second.embed("tok1 tok2").expect("second embed");
+        let mut second = build_cpu_executor("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &files);
+        let repeat = second.embed("test query").expect("second embed");
         assert_eq!(reference, repeat);
     }
 }
