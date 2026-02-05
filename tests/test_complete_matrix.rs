@@ -123,7 +123,18 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
 // 矩阵 1: ModelKind × WeightFormat × CPU (真实推理验证)
 // ============================================================================
 
-/// SafeTensors 格式测试 - HuggingFaceTB/SmolLM-135M-Instruct
+/// TEST-MATRIX-GEN-001: SafeTensors 格式 Chat 模型 CPU 后端
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: HuggingFaceTB/SmolLM-135M-Instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 SafeTensors 格式的 Chat 模型
+/// 2. 使用 CPU 后端执行文本生成
+/// 3. 验证生成结果非空
+///
+/// **期望结果**: 模型成功生成非空文本
 #[test]
 fn matrix_chat_safetensors_cpu() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
@@ -154,7 +165,19 @@ fn matrix_chat_safetensors_cpu() {
     );
 }
 
-/// GGUF 格式测试 - SmolLM-135M GGUF (Q8_0)
+/// TEST-MATRIX-GEN-002: GGUF 格式 Chat 模型 CPU 后端
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: SmolLM-135M GGUF (Q8_0) 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 下载 base 配置文件
+/// 2. 下载 GGUF 权重文件
+/// 3. 组合 base config + GGUF weights
+/// 4. 使用 CPU 后端执行文本生成
+///
+/// **期望结果**: GGUF 模型成功生成非空文本
 #[test]
 fn matrix_chat_gguf_cpu() {
     const BASE_REPO: &str = "HuggingFaceTB/SmolLM-135M-Instruct";
@@ -209,8 +232,17 @@ fn matrix_chat_gguf_cpu() {
     );
 }
 
-/// ONNX 格式测试 - 暂时只验证格式检测
-/// ONNX 推理使用不同的执行路径，这里只验证能正确加载
+/// TEST-MATRIX-GEN-003: ONNX 格式检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: microsoft/Phi-3-mini-4k-instruct-onnx 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 ONNX 模型
+/// 2. 验证格式检测为 ONNX 或 SafeTensors
+///
+/// **期望结果**: 格式检测正确
 #[test]
 fn matrix_chat_onnx_cpu() {
     // ONNX 模型使用不同的适配器，这里只验证格式检测
@@ -222,7 +254,18 @@ fn matrix_chat_onnx_cpu() {
     );
 }
 
-/// Embedding 测试 - BAAI/bge-small-en-v1.5
+/// TEST-MATRIX-EMB-001: SafeTensors 格式 Embedding 模型 CPU 后端
+///
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向测试
+/// **前置条件**: BAAI/bge-small-en-v1.5 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 SafeTensors 格式的 Embedding 模型
+/// 2. 使用 CPU 后端执行 embedding
+/// 3. 验证输出向量维度和值
+///
+/// **期望结果**: Embedding 向量非空且维度合理
 #[test]
 fn matrix_embedding_safetensors_cpu() {
     let model = "BAAI/bge-small-en-v1.5";
@@ -255,7 +298,18 @@ fn matrix_embedding_safetensors_cpu() {
     );
 }
 
-/// Reranker 测试 - BAAI/bge-reranker-v2-m3
+/// TEST-MATRIX-RERANK-001: SafeTensors 格式 Reranker 模型 CPU 后端
+///
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向测试
+/// **前置条件**: BAAI/bge-reranker-v2-m3 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 SafeTensors 格式的 Reranker 模型
+/// 2. 使用 CPU 后端执行 rerank
+/// 3. 验证输出分数为有限浮点数
+///
+/// **期望结果**: Rerank 分数非空且为有限值
 #[test]
 fn matrix_reranker_safetensors_cpu() {
     let model = "BAAI/bge-reranker-v2-m3";
@@ -293,6 +347,17 @@ fn matrix_reranker_safetensors_cpu() {
 // 矩阵 2: ModelKind × CUDA (条件测试)
 // ============================================================================
 
+/// TEST-MATRIX-GEN-004: SafeTensors 格式 Chat 模型 CUDA 后端
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: CUDA 后端可用，模型已缓存
+///
+/// **测试步骤**:
+/// 1. 验证 CUDA 后端可用
+/// 2. 验证 SafeTensors 格式检测
+///
+/// **期望结果**: CUDA 后端可用且格式检测正确
 #[test]
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_safetensors_cuda() {
@@ -302,6 +367,17 @@ fn matrix_chat_safetensors_cuda() {
     assert!(cuda_available(), "CUDA backend should be available");
 }
 
+/// TEST-MATRIX-GEN-005: GGUF 格式 Chat 模型 CUDA 后端
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: CUDA 后端可用，GGUF 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 验证 CUDA 后端可用
+/// 2. 验证 GGUF 格式检测
+///
+/// **期望结果**: GGUF 格式检测正确
 #[test]
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_gguf_cuda() {
@@ -311,6 +387,17 @@ fn matrix_chat_gguf_cuda() {
     assert!(cuda_available(), "CUDA backend should be available");
 }
 
+/// TEST-MATRIX-GEN-006: ONNX 格式 Chat 模型 CUDA 后端
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **前置条件**: CUDA 后端可用，ONNX 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 验证 CUDA 后端可用
+/// 2. 验证 ONNX 格式检测
+///
+/// **期望结果**: ONNX 格式检测正确
 #[test]
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_onnx_cuda() {
@@ -327,13 +414,32 @@ fn matrix_chat_onnx_cuda() {
 // 矩阵 3: GGUF 量化类型测试 (单元测试)
 // ============================================================================
 
+/// TEST-MATRIX-GEN-007: GGUF 格式检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 加载 GGUF 模型
+/// 2. 验证格式检测为 GGUF
+///
+/// **期望结果**: 格式检测正确
 #[test]
 fn matrix_gguf_format_detection() {
     let gguf_model = "mav23/SmolLM-135M-Instruct-GGUF";
     let loader = Loader::from_hf(gguf_model).expect("GGUF loader");
     assert_eq!(loader.weight_format(), gllm::loader::WeightFormat::Gguf);
 }
-
+/// TEST-MATRIX-GEN-008: GGUF Q4_0 量化检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 Q4_0 文件名
+/// 2. 验证量化类型和优先级
+///
+/// **期望结果**: 正确解析为 Q4_0 且优先级最高
 #[test]
 fn matrix_gguf_q4_0_detection() {
     use gllm::loader::naming_parser;
@@ -344,7 +450,16 @@ fn matrix_gguf_q4_0_detection() {
     assert_eq!(rank.0, 1); // supported
     assert_eq!(rank.1, 1); // highest priority
 }
-
+/// TEST-MATRIX-GEN-009: GGUF Q8_0 量化检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 Q8_0 文件名
+/// 2. 验证量化类型
+///
+/// **期望结果**: 正确解析为 Q8_0
 #[test]
 fn matrix_gguf_q8_0_detection() {
     use gllm::loader::naming_parser;
@@ -354,7 +469,16 @@ fn matrix_gguf_q8_0_detection() {
         Some(naming_parser::GgufQuantization::Q8_0)
     );
 }
-
+/// TEST-MATRIX-GEN-010: GGUF F16 量化检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 F16 文件名
+/// 2. 验证量化类型
+///
+/// **期望结果**: 正确解析为 F16
 #[test]
 fn matrix_gguf_f16_detection() {
     use gllm::loader::naming_parser;
@@ -368,6 +492,16 @@ fn matrix_gguf_f16_detection() {
 // 矩阵 4: ONNX 精度类型测试 (单元测试)
 // ============================================================================
 
+/// TEST-MATRIX-EMB-002: ONNX 格式检测
+///
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 ONNX 路径
+/// 2. 验证精度类型为 FP32
+///
+/// **期望结果**: 正确解析为 FP32
 #[test]
 fn matrix_onnx_format_detection() {
     use gllm::loader::naming_parser;
@@ -376,7 +510,16 @@ fn matrix_onnx_format_detection() {
         Some(naming_parser::OnnxPrecision::Fp32)
     );
 }
-
+/// TEST-MATRIX-EMB-003: ONNX FP16 精度检测
+///
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 FP16 路径
+/// 2. 验证精度类型
+///
+/// **期望结果**: 正确解析为 FP16
 #[test]
 fn matrix_onnx_fp16_detection() {
     use gllm::loader::naming_parser;
@@ -385,7 +528,16 @@ fn matrix_onnx_fp16_detection() {
         Some(naming_parser::OnnxPrecision::Fp16)
     );
 }
-
+/// TEST-MATRIX-RERANK-002: ONNX INT8 精度检测
+///
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 INT8 路径
+/// 2. 验证精度类型
+///
+/// **期望结果**: 正确解析为 INT8
 #[test]
 fn matrix_onnx_int8_detection() {
     use gllm::loader::naming_parser;
@@ -394,7 +546,16 @@ fn matrix_onnx_int8_detection() {
         Some(naming_parser::OnnxPrecision::Int8)
     );
 }
-
+/// TEST-MATRIX-RERANK-003: ONNX Q4 精度检测
+///
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析 Q4 路径
+/// 2. 验证精度类型
+///
+/// **期望结果**: 正确解析为 Q4
 #[test]
 fn matrix_onnx_q4_detection() {
     use gllm::loader::naming_parser;
@@ -408,6 +569,16 @@ fn matrix_onnx_q4_detection() {
 // 矩阵 5: 格式优先级测试
 // ============================================================================
 
+/// TEST-MATRIX-GEN-011: 格式优先级 - SafeTensors 第一
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 提供 GGUF, ONNX, SafeTensors 格式列表
+/// 2. 选择优先格式
+///
+/// **期望结果**: SafeTensors 被选中
 #[test]
 fn matrix_format_preference_safe_tensors_first() {
     use gllm::loader::format_detector;
@@ -421,7 +592,16 @@ fn matrix_format_preference_safe_tensors_first() {
         gllm::loader::WeightFormat::SafeTensors
     );
 }
-
+/// TEST-MATRIX-GEN-012: 格式优先级 - GGUF 优于 ONNX
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 提供 ONNX, GGUF 格式列表
+/// 2. 选择优先格式
+///
+/// **期望结果**: GGUF 被选中
 #[test]
 fn matrix_format_preference_gguf_over_onnx() {
     use gllm::loader::format_detector;
@@ -439,6 +619,15 @@ fn matrix_format_preference_gguf_over_onnx() {
 // 矩阵 6: 量化优先级测试
 // ============================================================================
 
+/// TEST-MATRIX-GEN-013: GGUF 量化优先级
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 比较各量化类型的优先级
+///
+/// **期望结果**: Q4_0 < Q8_0 < F16 < F32 (数值越小优先级越高)
 #[test]
 fn matrix_gguf_quantization_preference() {
     use gllm::loader::naming_parser::GgufQuantization;
@@ -446,7 +635,15 @@ fn matrix_gguf_quantization_preference() {
     assert!(GgufQuantization::Q8_0.preference_rank() < GgufQuantization::F16.preference_rank());
     assert!(GgufQuantization::F16.preference_rank() < GgufQuantization::F32.preference_rank());
 }
-
+/// TEST-MATRIX-EMB-004: ONNX 精度优先级
+///
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 比较各精度类型的优先级
+///
+/// **期望结果**: Q4 < FP32, FP16 < FP32
 #[test]
 fn matrix_onnx_precision_preference() {
     use gllm::loader::naming_parser::OnnxPrecision;
@@ -458,12 +655,29 @@ fn matrix_onnx_precision_preference() {
 // 矩阵 7: 后端检测测试
 // ============================================================================
 
+/// TEST-BACKEND-003: CPU 后端始终可用
+///
+/// **关联需求**: REQ-TEST-001, REQ-TEST-010
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 CPU 后端
+///
+/// **期望结果**: 后端创建成功不 panic
 #[test]
 fn matrix_backend_cpu_always_available() {
     let _backend = CpuBackend::new();
     // 验证后端创建不 panic
 }
-
+/// TEST-BACKEND-004: CUDA 后端检测
+///
+/// **关联需求**: REQ-TEST-001, REQ-TEST-010
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 检测 CUDA 后端是否可用
+///
+/// **期望结果**: 检测逻辑不 panic
 #[test]
 fn matrix_backend_cuda_detection() {
     let available = cuda_available();
@@ -475,13 +689,32 @@ fn matrix_backend_cuda_detection() {
 // 矩阵 8: 源切换测试
 // ============================================================================
 
+/// TEST-MATRIX-GEN-014: HuggingFace 源检测
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 从 HuggingFace 加载模型
+/// 2. 验证源属性
+///
+/// **期望结果**: 源为 HuggingFace
 #[test]
 fn matrix_source_huggingface() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
     let loader = Loader::from_hf(model).expect("HF loader");
     assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
 }
-
+/// TEST-MATRIX-GEN-015: 自动源选择
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 使用 auto 模式加载模型
+/// 2. 验证源属性
+///
+/// **期望结果**: 源为 HuggingFace (可用源)
 #[test]
 fn matrix_source_auto_selection() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";

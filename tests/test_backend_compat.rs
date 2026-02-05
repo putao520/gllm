@@ -35,6 +35,18 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
     loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
 }
 
+/// TEST-BACKEND-001: CPU 和 CUDA 后端 embedding 结果一致性
+///
+/// **关联需求**: REQ-TEST-001, REQ-TEST-010
+/// **测试类型**: 正向测试
+/// **前置条件**: BAAI/bge-small-en-v1.5 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 使用 Embedding 模型在 CPU 后端执行 embedding
+/// 2. 使用 Embedding 模型在 CUDA 后端执行 embedding（如可用）
+/// 3. 比较两个后端的输出结果
+///
+/// **期望结果**: CPU 和 CUDA 后端输出在容差范围内一致
 #[test]
 fn cpu_and_cuda_embeddings_align_within_tolerance() {
     let files = TestModelFiles::new().expect("test model files");
@@ -70,6 +82,18 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
     }
 }
 
+/// TEST-BACKEND-002: 后端生成输出稳定性
+///
+/// **关联需求**: REQ-TEST-001, REQ-TEST-010
+/// **测试类型**: 正向测试
+/// **前置条件**: microsoft/Phi-4-mini-instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 使用相同模型创建两个独立的执行器
+/// 2. 对两个执行器执行相同的生成请求
+/// 3. 比较两个执行器的输出
+///
+/// **期望结果**: 相同输入产生相同输出（确定性采样）
 #[test]
 fn backend_generation_outputs_are_stable() {
     let files = TestModelFiles::new().expect("test model files");
