@@ -27,7 +27,10 @@ impl GraphIndex {
                 consumers.entry(input.clone()).or_default().push(idx);
             }
         }
-        Self { producers, consumers }
+        Self {
+            producers,
+            consumers,
+        }
     }
 
     pub(super) fn producer(&self, value: &str) -> Option<usize> {

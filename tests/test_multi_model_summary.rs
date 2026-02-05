@@ -10,13 +10,11 @@ struct ModelTestCase {
     architecture: &'static str,
 }
 
-const MODELS_TO_TEST: &[ModelTestCase] = &[
-    ModelTestCase {
-        alias: "HuggingFaceTB/SmolLM2-135M-Instruct",
-        description: "SmolLM2-135M - Llama4 architecture, GQA (9:3)",
-        architecture: "Llama4",
-    },
-];
+const MODELS_TO_TEST: &[ModelTestCase] = &[ModelTestCase {
+    alias: "HuggingFaceTB/SmolLM2-135M-Instruct",
+    description: "SmolLM2-135M - Llama4 architecture, GQA (9:3)",
+    architecture: "Llama4",
+}];
 
 #[test]
 #[ignore = "Run with: cargo test --test test_multi_model_summary -- --ignored"]
@@ -50,7 +48,12 @@ fn test_all_available_models() {
 
                 let mut passed = 0;
                 for (prompt, expected) in &test_cases {
-                    match client.generate(*prompt).max_tokens(10).temperature(0.0).generate() {
+                    match client
+                        .generate(*prompt)
+                        .max_tokens(10)
+                        .temperature(0.0)
+                        .generate()
+                    {
                         Ok(response) => {
                             let text = response.text.trim();
                             let contains = text.to_lowercase().contains(&expected.to_lowercase())
@@ -81,7 +84,9 @@ fn test_all_available_models() {
             }
         }
         println!();
-        for _ in 0..80 { print!("─"); }
+        for _ in 0..80 {
+            print!("─");
+        }
         println!();
         println!();
     }

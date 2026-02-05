@@ -35,9 +35,9 @@ pub struct OnnxMapType {
 
 impl OnnxType {
     pub fn from_proto(proto: proto::TypeProto) -> Result<Self> {
-        let value = proto.value.ok_or_else(|| {
-            LoaderError::Onnx("unsupported or empty TypeProto".to_string())
-        })?;
+        let value = proto
+            .value
+            .ok_or_else(|| LoaderError::Onnx("unsupported or empty TypeProto".to_string()))?;
         use proto::type_proto::Value;
         match value {
             Value::TensorType(tensor) => {
@@ -53,9 +53,9 @@ impl OnnxType {
                 Ok(OnnxType::Sequence(Box::new(OnnxType::from_proto(*elem)?)))
             }
             Value::MapType(map) => {
-                let value = map.value_type.ok_or_else(|| {
-                    LoaderError::Onnx("map type missing value_type".to_string())
-                })?;
+                let value = map
+                    .value_type
+                    .ok_or_else(|| LoaderError::Onnx("map type missing value_type".to_string()))?;
                 let key_type = parse_data_type(
                     map.key_type.ok_or_else(|| {
                         LoaderError::Onnx("map type missing key_type".to_string())
@@ -80,9 +80,9 @@ impl OnnxType {
 impl OnnxTensorType {
     fn from_tensor_proto(proto: proto::type_proto::Tensor) -> Result<Self> {
         let elem_type = parse_data_type(
-            proto.elem_type.ok_or_else(|| {
-                LoaderError::Onnx("tensor type missing elem_type".to_string())
-            })?,
+            proto
+                .elem_type
+                .ok_or_else(|| LoaderError::Onnx("tensor type missing elem_type".to_string()))?,
             "tensor",
         )?;
         let shape = proto
@@ -139,11 +139,7 @@ impl OnnxDim {
     }
 }
 
-fn parse_data_type(
-    value: i32,
-    context: &str,
-) -> Result<proto::tensor_proto::DataType> {
-    proto::tensor_proto::DataType::try_from(value).map_err(|_| {
-        LoaderError::Onnx(format!("unsupported data_type {value} in {context}"))
-    })
+fn parse_data_type(value: i32, context: &str) -> Result<proto::tensor_proto::DataType> {
+    proto::tensor_proto::DataType::try_from(value)
+        .map_err(|_| LoaderError::Onnx(format!("unsupported data_type {value} in {context}")))
 }

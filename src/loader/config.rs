@@ -10,9 +10,7 @@ use crate::manifest::{
     FileMap, ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 
-use super::{
-    CacheLayout, HfHubClient, LoaderConfig, LoaderError, ModelScopeClient, ModelSource,
-};
+use super::{CacheLayout, HfHubClient, LoaderConfig, LoaderError, ModelScopeClient, ModelSource};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -45,10 +43,11 @@ pub fn download_config_files(
 
     let result = download_from_source(model_id, config.source, &cache, file_map);
 
-    if config.source == ModelSource::HuggingFace && config.enable_fallback {
+    if config.enable_fallback {
         result.or_else(|err| {
             if should_fallback(&err) {
-                download_from_source(model_id, ModelSource::ModelScope, &cache, file_map)
+                let fallback = super::fallback_source(config.source);
+                download_from_source(model_id, fallback, &cache, file_map)
             } else {
                 Err(err)
             }
@@ -84,7 +83,10 @@ pub fn manifest_from_config(
     })
 }
 
-pub fn resolve_architecture(config: &Value, model_id: &str) -> Result<ModelArchitecture, ConfigError> {
+pub fn resolve_architecture(
+    config: &Value,
+    model_id: &str,
+) -> Result<ModelArchitecture, ConfigError> {
     let mut candidates = Vec::new();
 
     if let Some(architectures) = config.get("architectures") {

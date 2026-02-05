@@ -4,12 +4,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use gguf_rs::{
-    ByteOrder, GGMLType, GGUFContainer, FILE_MAGIC_GGUF_BE, FILE_MAGIC_GGUF_LE,
-};
+use gguf_rs::{ByteOrder, GGMLType, GGUFContainer, FILE_MAGIC_GGUF_BE, FILE_MAGIC_GGUF_LE};
 use half::{bf16, f16};
 use memmap2::MmapOptions;
 
@@ -114,20 +112,16 @@ impl MappedGguf {
         let byte_order = match magic {
             FILE_MAGIC_GGUF_LE => ByteOrder::LE,
             FILE_MAGIC_GGUF_BE => ByteOrder::BE,
-            _ => {
-                return Err(LoaderError::Gguf(
-                    "invalid gguf magic number".into(),
-                ))
-            }
+            _ => return Err(LoaderError::Gguf("invalid gguf magic number".into())),
         };
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let reader = CountingReader::new(
-            MmapReader::new(arc.clone(), 4),
-            counter.clone(),
-        );
-        let mut container = GGUFContainer::new(byte_order.clone(), Box::new(reader), GGUF_MAX_ARRAY);
-        let model = container.decode().map_err(|err| LoaderError::Gguf(err.to_string()))?;
+        let reader = CountingReader::new(MmapReader::new(arc.clone(), 4), counter.clone());
+        let mut container =
+            GGUFContainer::new(byte_order.clone(), Box::new(reader), GGUF_MAX_ARRAY);
+        let model = container
+            .decode()
+            .map_err(|err| LoaderError::Gguf(err.to_string()))?;
 
         let header_len = 4 + counter.load(Ordering::Relaxed);
         let alignment = model
@@ -186,13 +180,12 @@ impl GgufLoader {
         let mut index = HashMap::new();
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let reader = CountingReader::new(
-            MmapReader::new(file.mmap.clone(), 4),
-            counter.clone(),
-        );
+        let reader = CountingReader::new(MmapReader::new(file.mmap.clone(), 4), counter.clone());
         let mut container =
             GGUFContainer::new(file.byte_order.clone(), Box::new(reader), GGUF_MAX_ARRAY);
-        let model = container.decode().map_err(|err| LoaderError::Gguf(err.to_string()))?;
+        let model = container
+            .decode()
+            .map_err(|err| LoaderError::Gguf(err.to_string()))?;
 
         for tensor in model.tensors() {
             let name = tensor.name.clone();
@@ -210,11 +203,7 @@ impl GgufLoader {
                 .data_start()
                 .checked_add(offset)
                 .ok_or_else(|| LoaderError::Gguf("tensor offset overflow".into()))?;
-            if absolute
-                .checked_add(size)
-                .map(|end| end <= file.mmap.len())
-                != Some(true)
-            {
+            if absolute.checked_add(size).map(|end| end <= file.mmap.len()) != Some(true) {
                 return Err(LoaderError::Gguf(format!(
                     "tensor {name} exceeds file bounds"
                 )));
@@ -251,8 +240,8 @@ impl GgufLoader {
             .map_err(|_| LoaderError::Gguf("tensor size overflow".into()))?;
         let end = start + size;
         let data = &self.file.mmap[start..end];
-        let kind = GGMLType::try_from(info.kind)
-            .map_err(|err| LoaderError::Gguf(err.to_string()))?;
+        let kind =
+            GGMLType::try_from(info.kind).map_err(|err| LoaderError::Gguf(err.to_string()))?;
         Ok(GgufTensorSlice {
             kind,
             shape: info.shape.clone(),
@@ -269,8 +258,8 @@ impl GgufLoader {
 fn normalize_shape(shape: &[u64]) -> Result<Vec<usize>> {
     let mut out = Vec::with_capacity(shape.len());
     for &dim in shape {
-        let value = usize::try_from(dim)
-            .map_err(|_| LoaderError::Gguf("tensor shape overflow".into()))?;
+        let value =
+            usize::try_from(dim).map_err(|_| LoaderError::Gguf("tensor shape overflow".into()))?;
         out.push(value);
     }
     while out.len() > 1 && out.last() == Some(&1) {

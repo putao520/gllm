@@ -6,6 +6,6 @@ pub mod vllm2024;
 
 pub use scheduler::{
     BatchId, DoubleBuffer, DynamicBatcher, PageAllocation, PageEntry, PageId, PagePool, PageState,
-    RequestId, RequestKind, ScheduledBatch, ScheduledRequest, PagedScheduler, SchedulerConfig,
+    PagedScheduler, RequestId, RequestKind, ScheduledBatch, ScheduledRequest, SchedulerConfig,
     SequenceInfo, SequenceState,
 };

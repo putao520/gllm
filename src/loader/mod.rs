@@ -16,20 +16,24 @@ use thiserror::Error;
 use crate::manifest::{ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
 use crate::quantization::dequantize_int8_with_zero;
 
-pub mod downloader;
 pub mod config;
-pub mod hf_hub;
+pub mod downloader;
+pub mod format_detector;
 pub mod gguf;
+pub mod hf_hub;
 pub mod modelscope;
+pub mod naming_parser;
 pub mod onnx;
 pub mod parallel;
 #[cfg(feature = "candle")]
 pub mod pytorch;
 pub mod safetensors;
 
-pub use downloader::{Downloader, HfHubDownloader, ModelScopeDownloader, NoProgress, ProgressBar, ProgressCallback};
-pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
+pub use downloader::{
+    Downloader, HfHubDownloader, ModelScopeDownloader, NoProgress, ProgressBar, ProgressCallback,
+};
 pub use gguf::GgufLoader;
+pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
 pub use modelscope::{ModelScopeClient, MsModelFiles};
 pub use onnx::OnnxLoader;
 pub use parallel::ParallelLoader;
@@ -81,6 +85,10 @@ pub enum LoaderError {
     HomeDirUnavailable,
     #[error("weights format not supported: {0:?}")]
     UnsupportedWeights(WeightFormat),
+    #[error("weights format not found: {0:?}")]
+    FormatNotFound(WeightFormat),
+    #[error("multiple weight formats detected: {0:?}")]
+    MultipleWeightFormats(Vec<WeightFormat>),
     #[error("unsupported weight extension: {0}")]
     UnsupportedWeightExtension(String),
 }
@@ -113,6 +121,13 @@ impl ModelSource {
             _ => None,
         }
     }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModelSource::HuggingFace => "HuggingFace",
+            ModelSource::ModelScope => "ModelScope",
+        }
+    }
 }
 
 impl Default for ModelSource {
@@ -138,7 +153,7 @@ impl Default for LoaderConfig {
             checksum: ChecksumPolicy::VerifyOnLoad,
             parallel: ParallelPolicy::Auto,
             source: ModelSource::HuggingFace,
-            enable_fallback: true,  // 默认启用 HF → ModelScope 回退
+            enable_fallback: true, // 默认启用 HF → ModelScope 回退
         }
     }
 }
@@ -278,6 +293,7 @@ pub struct Loader {
     files: HfModelFiles,
     safetensors: Option<SafeTensorsLoader>,
     gguf: Option<GgufLoader>,
+    onnx: Option<OnnxLoader>,
 }
 
 impl Loader {
@@ -319,14 +335,7 @@ impl Loader {
     ///
     /// 这对中国用户特别有用，许多模型在 ModelScope 上是公开的
     pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Self> {
-        Self::from_hf(repo_or_alias).or_else(|err| {
-            if is_recoverable_error(&err) {
-                eprintln!("⚠️  HuggingFace 下载失败，尝试 ModelScope...");
-                Self::from_ms(repo_or_alias)
-            } else {
-                Err(err)
-            }
-        })
+        Self::from_hf(repo_or_alias)
     }
 
     pub fn from_hf_with_config(repo_or_alias: &str, mut config: LoaderConfig) -> Result<Self> {
@@ -373,6 +382,7 @@ impl Loader {
             },
             safetensors: None,
             gguf: None,
+            onnx: None,
         })
     }
 
@@ -385,19 +395,76 @@ impl Loader {
         config: LoaderConfig,
         manifest: Option<&ModelManifest>,
     ) -> Result<Self> {
-        // 当 source 是 HuggingFace 且启用 fallback 时，尝试自动回退
-        let should_try_fallback = config.source == ModelSource::HuggingFace && config.enable_fallback;
-        let result = Self::load_from_source(repo_or_alias, &config, manifest);
+        Self::from_source_with_config_and_manifest_and_format(repo_or_alias, config, manifest, None)
+    }
+
+    pub fn auto(repo_or_alias: &str) -> Result<Self> {
+        let config = LoaderConfig::from_env();
+        Self::auto_with_config(repo_or_alias, config, None)
+    }
+
+    pub fn auto_with_format(repo_or_alias: &str, format: WeightFormat) -> Result<Self> {
+        let config = LoaderConfig::from_env();
+        Self::auto_with_config(repo_or_alias, config, Some(format))
+    }
+
+    pub fn auto_with_source(repo_or_alias: &str, source: ModelSource) -> Result<Self> {
+        let mut config = LoaderConfig::from_env();
+        config.source = source;
+        Self::auto_with_config(repo_or_alias, config, None)
+    }
+
+    fn auto_with_config(
+        repo_or_alias: &str,
+        config: LoaderConfig,
+        format_hint: Option<WeightFormat>,
+    ) -> Result<Self> {
+        let path = Path::new(repo_or_alias);
+        if path.exists() {
+            let local = format_detector::collect_local_files(path, format_hint)?;
+            return Self::from_local_files_with_manifest(
+                repo_or_alias,
+                local.weights,
+                local.aux_files,
+                None,
+            );
+        }
+        Self::from_source_with_config_and_manifest_and_format(
+            repo_or_alias,
+            config,
+            None,
+            format_hint,
+        )
+    }
+
+    fn from_source_with_config_and_manifest_and_format(
+        repo_or_alias: &str,
+        config: LoaderConfig,
+        manifest: Option<&ModelManifest>,
+        format_hint: Option<WeightFormat>,
+    ) -> Result<Self> {
+        let should_try_fallback = config.enable_fallback;
+        let result =
+            Self::load_from_source_with_format(repo_or_alias, &config, manifest, format_hint);
 
         if should_try_fallback {
             result.or_else(|err| {
                 if is_recoverable_error(&err) {
-                    eprintln!("⚠️  HuggingFace 下载失败，尝试 ModelScope...");
-                    // 创建使用 ModelSource::ModelScope 的配置
-                    let mut ms_config = config.clone();
-                    ms_config.source = ModelSource::ModelScope;
-                    ms_config.enable_fallback = false;  // 避免循环
-                    Self::load_from_source(repo_or_alias, &ms_config, manifest)
+                    let fallback = fallback_source(config.source);
+                    eprintln!(
+                        "⚠️  {} 下载失败，尝试 {}...",
+                        config.source.label(),
+                        fallback.label()
+                    );
+                    let mut fallback_config = config.clone();
+                    fallback_config.source = fallback;
+                    fallback_config.enable_fallback = false;
+                    Self::load_from_source_with_format(
+                        repo_or_alias,
+                        &fallback_config,
+                        manifest,
+                        format_hint,
+                    )
                 } else {
                     Err(err)
                 }
@@ -407,14 +474,17 @@ impl Loader {
         }
     }
 
-    /// 实际的加载逻辑（不包含 fallback）
-    fn load_from_source(
+    fn load_from_source_with_format(
         repo_or_alias: &str,
         config: &LoaderConfig,
         manifest: Option<&ModelManifest>,
+        format_hint: Option<WeightFormat>,
     ) -> Result<Self> {
         let manifest = manifest.map(|manifest| Arc::new(manifest.clone()));
-        let file_map = manifest.as_ref().map(|m| m.file_map).unwrap_or(EMPTY_FILE_MAP);
+        let file_map = manifest
+            .as_ref()
+            .map(|m| m.file_map)
+            .unwrap_or(EMPTY_FILE_MAP);
         let repo = resolve_repo(repo_or_alias);
         let cache = CacheLayout::new(config.cache_dir.clone())?;
         cache.ensure()?;
@@ -431,11 +501,7 @@ impl Loader {
             let ms_cache = cache.modelscope_cache_dir();
             let ms_client = ModelScopeClient::new(ms_cache)?;
             let ms_files = ms_client
-                .download_model_files(
-                    &repo,
-                    file_map,
-                    parallel_download,
-                )
+                .download_model_files_with_format(&repo, file_map, parallel_download, format_hint)
                 .map_err(|e| LoaderError::HfHub(format!("ModelScope download failed: {}", e)))?;
 
             // 转换 MsModelFiles 为 HfModelFiles
@@ -448,11 +514,7 @@ impl Loader {
         } else {
             // 使用 HuggingFace 客户端
             let hf = HfHubClient::new(cache.hf_cache_dir())?;
-            hf.download_model_files(
-                &repo,
-                file_map,
-                parallel_download,
-            )?
+            hf.download_model_files_with_format(&repo, file_map, parallel_download, format_hint)?
         };
 
         let mut checksum_store = ChecksumStore::load(cache.checksum_db())?;
@@ -480,6 +542,7 @@ impl Loader {
             files,
             safetensors: None,
             gguf: None,
+            onnx: None,
         })
     }
 
@@ -570,10 +633,38 @@ impl Loader {
         Ok(())
     }
 
+    pub fn ensure_onnx(&mut self) -> Result<()> {
+        if self.onnx.is_some() {
+            return Ok(());
+        }
+        if self.files.format != WeightFormat::Onnx {
+            return Err(LoaderError::UnsupportedWeights(self.files.format));
+        }
+        if self.files.weights.len() != 1 {
+            return Err(LoaderError::Onnx(
+                "onnx loader expects a single weight file".into(),
+            ));
+        }
+        let path = self
+            .files
+            .weights
+            .get(0)
+            .ok_or(LoaderError::MissingWeights)?;
+        let onnx = OnnxLoader::from_path(path)?;
+        self.onnx = Some(onnx);
+        Ok(())
+    }
+
+    pub fn onnx(&mut self) -> Result<&OnnxLoader> {
+        self.ensure_onnx()?;
+        self.onnx.as_ref().ok_or(LoaderError::MissingWeights)
+    }
+
     pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
         match self.files.format {
             WeightFormat::SafeTensors => self.upload_safetensors(backend),
             WeightFormat::Gguf => self.upload_gguf(backend),
+            WeightFormat::Onnx => Err(LoaderError::UnsupportedWeights(self.files.format)),
         }
     }
 
@@ -651,9 +742,9 @@ impl Loader {
                         let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
                         let blocks = parse_q4_0_blocks(tensor.data, rows, cols)?;
                         let matrix = Q4_0Matrix { blocks, rows, cols };
-                        let total = rows
-                            .checked_mul(cols)
-                            .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                        let total = rows.checked_mul(cols).ok_or_else(|| {
+                            LoaderError::InvalidQuantization("gguf output overflow".into())
+                        })?;
                         let mut out = vec![0.0f32; total];
                         dequantize_q4_0(&matrix, &mut out)
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
@@ -672,9 +763,9 @@ impl Loader {
                         let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
                         let blocks = parse_q8_0_blocks(tensor.data, rows, cols)?;
                         let matrix = Q8_0Matrix { blocks, rows, cols };
-                        let total = rows
-                            .checked_mul(cols)
-                            .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                        let total = rows.checked_mul(cols).ok_or_else(|| {
+                            LoaderError::InvalidQuantization("gguf output overflow".into())
+                        })?;
                         let mut out = vec![0.0f32; total];
                         dequantize_q8_0(&matrix, &mut out)
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
@@ -720,32 +811,15 @@ fn resolve_repo(repo_or_alias: &str) -> String {
     repo_or_alias.to_string()
 }
 
+fn fallback_source(source: ModelSource) -> ModelSource {
+    match source {
+        ModelSource::HuggingFace => ModelSource::ModelScope,
+        ModelSource::ModelScope => ModelSource::HuggingFace,
+    }
+}
+
 fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
-    if weights.is_empty() {
-        return Err(LoaderError::MissingWeights);
-    }
-    let mut format = None;
-    for path in weights {
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let detected = match ext.as_str() {
-            "safetensors" => WeightFormat::SafeTensors,
-            "gguf" => WeightFormat::Gguf,
-            _ => {
-                return Err(LoaderError::UnsupportedWeightExtension(ext));
-            }
-        };
-        match format {
-            Some(existing) if existing != detected => {
-                return Err(LoaderError::UnsupportedWeights(detected));
-            }
-            _ => format = Some(detected),
-        }
-    }
-    Ok(format.unwrap_or(WeightFormat::SafeTensors))
+    format_detector::detect_format_from_paths(weights)
 }
 
 /// Convenience: create a loader from a HuggingFace repo or alias.
@@ -982,9 +1056,14 @@ fn insert_tensor<B: Backend>(
     if handle.tensors.contains_key(&name) {
         return Err(LoaderError::DuplicateTensor(name));
     }
-    handle
-        .meta
-        .insert(name.clone(), TensorInfo { shape, dtype, quantized });
+    handle.meta.insert(
+        name.clone(),
+        TensorInfo {
+            shape,
+            dtype,
+            quantized,
+        },
+    );
     handle.tensors.insert(name, tensor);
     Ok(())
 }
@@ -1388,7 +1467,10 @@ fn parse_q4_0_blocks(
         let mut payload = [0u8; Q4_0_BLOCK_BYTES];
         payload.copy_from_slice(&data[offset..offset + Q4_0_BLOCK_BYTES]);
         offset += Q4_0_BLOCK_BYTES;
-        blocks.push(Q4_0Block { scale, data: payload });
+        blocks.push(Q4_0Block {
+            scale,
+            data: payload,
+        });
     }
     Ok(blocks)
 }
@@ -1425,7 +1507,10 @@ fn parse_q8_0_blocks(
         let mut payload = [0u8; Q8_0_BLOCK_BYTES];
         payload.copy_from_slice(&data[offset..offset + Q8_0_BLOCK_BYTES]);
         offset += Q8_0_BLOCK_BYTES;
-        blocks.push(Q8_0Block { scale, data: payload });
+        blocks.push(Q8_0Block {
+            scale,
+            data: payload,
+        });
     }
     Ok(blocks)
 }

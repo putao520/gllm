@@ -51,13 +51,9 @@ fn gguf_loader_smollm_q4_0_e2e() {
     .expect("gguf loader");
 
     let backend = CpuBackend::new();
-    let mut executor = Executor::from_loader(
-        backend,
-        Arc::new(manifest),
-        &GGUF_ADAPTER,
-        &mut loader,
-    )
-    .expect("executor init");
+    let mut executor =
+        Executor::from_loader(backend, Arc::new(manifest), &GGUF_ADAPTER, &mut loader)
+            .expect("executor init");
 
     let q4_tensors: Vec<_> = executor
         .weights()
@@ -66,10 +62,7 @@ fn gguf_loader_smollm_q4_0_e2e() {
         .iter()
         .filter(|(_, info)| info.quantized == Some(QuantizedType::Q4_0))
         .collect();
-    assert!(
-        !q4_tensors.is_empty(),
-        "expected at least one Q4_0 tensor"
-    );
+    assert!(!q4_tensors.is_empty(), "expected at least one Q4_0 tensor");
 
     let q4_name = q4_tensors[0].0.as_str();
     match executor.weights().handle.get(q4_name) {
@@ -88,18 +81,15 @@ fn gguf_loader_smollm_q4_0_e2e() {
 
 fn download_base_files() -> Result<(PathBuf, PathBuf, ModelManifest), String> {
     let config = LoaderConfig::default();
-    let files =
-        loader_config::download_config_files(BASE_REPO, &config, EMPTY_FILE_MAP).map_err(|e| {
-            format!("download config files for {BASE_REPO} failed: {e}")
-        })?;
+    let files = loader_config::download_config_files(BASE_REPO, &config, EMPTY_FILE_MAP)
+        .map_err(|e| format!("download config files for {BASE_REPO} failed: {e}"))?;
     let tokenizer_path = files
         .tokenizer_path
         .ok_or_else(|| "tokenizer.json missing in base repo".to_string())?;
     let config_value =
         loader_config::load_config_value(&files.config_path).map_err(|e| e.to_string())?;
-    let manifest =
-        loader_config::manifest_from_config(BASE_REPO, &config_value, ModelKind::Chat)
-            .map_err(|e| e.to_string())?;
+    let manifest = loader_config::manifest_from_config(BASE_REPO, &config_value, ModelKind::Chat)
+        .map_err(|e| e.to_string())?;
     Ok((files.config_path, tokenizer_path, manifest))
 }
 
@@ -116,7 +106,9 @@ fn download_gguf_file() -> Result<PathBuf, String> {
         .ok_or_else(|| "gguf weights missing".to_string())
 }
 
-fn remap_gguf_handle<B: Backend>(handle: WeightsHandle<B>) -> Result<WeightsHandle<B>, LoaderError> {
+fn remap_gguf_handle<B: Backend>(
+    handle: WeightsHandle<B>,
+) -> Result<WeightsHandle<B>, LoaderError> {
     let WeightsHandle { tensors, meta } = handle;
     let mut out = WeightsHandle::default();
 

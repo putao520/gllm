@@ -11,7 +11,8 @@ pub struct Qwen3RerankAdapter;
 
 impl<B: Backend> ModelAdapter<B> for Qwen3RerankAdapter {
     fn supports(&self, manifest: &ModelManifest) -> bool {
-        matches!(manifest.arch, ModelArchitecture::Qwen3) && is_qwen3_rerank_id(manifest.model_id.as_ref())
+        matches!(manifest.arch, ModelArchitecture::Qwen3)
+            && is_qwen3_rerank_id(manifest.model_id.as_ref())
     }
 
     fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {

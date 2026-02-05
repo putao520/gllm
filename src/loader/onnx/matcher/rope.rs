@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use super::index::{is_constant_value, GraphIndex};
-use super::{FusedKernel, FusedOp, FusedQkvRopeSpec, RopeSpec};
 use super::super::model::{OnnxGraph, OnnxNode};
 use super::super::Result;
+use super::index::{is_constant_value, GraphIndex};
+use super::{FusedKernel, FusedOp, FusedQkvRopeSpec, RopeSpec};
 
 pub(super) fn match_rope(
     graph: &OnnxGraph,
@@ -24,7 +24,8 @@ pub(super) fn match_rope(
             None => continue,
         };
         let attrs = rope_attrs(node);
-        if let Some((spec, extra)) = fused_qkv_rope_candidate(graph, index, &input, &output, attrs) {
+        if let Some((spec, extra)) = fused_qkv_rope_candidate(graph, index, &input, &output, attrs)
+        {
             let mut nodes = vec![id];
             nodes.extend(extra);
             for node_id in &nodes {
@@ -80,11 +81,7 @@ fn fused_qkv_rope_candidate(
     ))
 }
 
-fn linear_qkv_source(
-    graph: &OnnxGraph,
-    index: &GraphIndex,
-    value: &str,
-) -> Option<LinearSource> {
+fn linear_qkv_source(graph: &OnnxGraph, index: &GraphIndex, value: &str) -> Option<LinearSource> {
     let producer = index.producer(value)?;
     let node = &graph.nodes[producer];
     if node.op_type == "Add" && node.inputs.len() >= 2 {

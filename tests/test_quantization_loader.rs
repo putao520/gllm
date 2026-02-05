@@ -46,7 +46,8 @@ fn quantized_awq_like_weights_are_dequantized() {
     )
     .expect("serialize safetensors");
 
-    let loader = Loader::from_local_files("Qwen/Qwen3-0.6B", vec![weights_path], vec![]).expect("loader");
+    let loader =
+        Loader::from_local_files("Qwen/Qwen3-0.6B", vec![weights_path], vec![]).expect("loader");
     let mut loader = loader;
     let backend = CpuBackend::new();
     let handle = loader.upload_weights(&backend).expect("upload weights");

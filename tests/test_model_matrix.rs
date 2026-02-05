@@ -30,7 +30,11 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
 #[test]
 fn generator_matrix_covers_required_models() {
     let files = TestModelFiles::new().expect("test model files");
-    for alias in ["Qwen/Qwen3-0.6B", "meta-llama/Llama-4-8B-Instruct", "microsoft/Phi-4-mini-instruct"] {
+    for alias in [
+        "Qwen/Qwen3-0.6B",
+        "meta-llama/Llama-4-8B-Instruct",
+        "microsoft/Phi-4-mini-instruct",
+    ] {
         let mut executor = build_executor(alias, ModelKind::Chat, &files);
         let output = executor.generate("tok1 tok2", 1, 0.0).expect("generate");
         assert!(

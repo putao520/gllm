@@ -4,19 +4,12 @@ use safetensors::Dtype;
 use super::super::external::ExternalDataResolver;
 use super::super::{proto, LoaderError, Result};
 
-pub(super) fn parse_data_type(
-    value: i32,
-    name: &str,
-) -> Result<proto::tensor_proto::DataType> {
-    proto::tensor_proto::DataType::try_from(value).map_err(|_| {
-        LoaderError::Onnx(format!("unsupported data_type {value} for tensor {name}"))
-    })
+pub(super) fn parse_data_type(value: i32, name: &str) -> Result<proto::tensor_proto::DataType> {
+    proto::tensor_proto::DataType::try_from(value)
+        .map_err(|_| LoaderError::Onnx(format!("unsupported data_type {value} for tensor {name}")))
 }
 
-pub(super) fn map_dtype(
-    data_type: proto::tensor_proto::DataType,
-    name: &str,
-) -> Result<Dtype> {
+pub(super) fn map_dtype(data_type: proto::tensor_proto::DataType, name: &str) -> Result<Dtype> {
     use proto::tensor_proto::DataType as OnnxType;
 
     match data_type {
@@ -48,9 +41,8 @@ pub(super) fn parse_dims(dims: &[i64], name: &str) -> Result<Vec<usize>> {
                 "negative dimension {dim} in tensor {name}"
             )));
         }
-        let dim = usize::try_from(dim).map_err(|_| {
-            LoaderError::Onnx(format!("dimension overflow {dim} in tensor {name}"))
-        })?;
+        let dim = usize::try_from(dim)
+            .map_err(|_| LoaderError::Onnx(format!("dimension overflow {dim} in tensor {name}")))?;
         shape.push(dim);
     }
     Ok(shape)
@@ -62,9 +54,9 @@ pub(super) fn element_count(shape: &[usize], name: &str) -> Result<usize> {
     }
     let mut count: usize = 1;
     for &dim in shape {
-        count = count.checked_mul(dim).ok_or_else(|| {
-            LoaderError::Onnx(format!("tensor size overflow for {name}"))
-        })?;
+        count = count
+            .checked_mul(dim)
+            .ok_or_else(|| LoaderError::Onnx(format!("tensor size overflow for {name}")))?;
     }
     Ok(count)
 }
@@ -77,16 +69,16 @@ pub(super) fn load_external_data(
     name: &str,
 ) -> Result<Bytes> {
     let entries = external_data_map(external_data);
-    let location = entries.get("location").ok_or_else(|| {
-        LoaderError::Onnx(format!("external tensor {name} missing location"))
-    })?;
-    let offset = parse_optional_usize(entries.get("offset"), "offset", name)?
-        .unwrap_or(0);
+    let location = entries
+        .get("location")
+        .ok_or_else(|| LoaderError::Onnx(format!("external tensor {name} missing location")))?;
+    let offset = parse_optional_usize(entries.get("offset"), "offset", name)?.unwrap_or(0);
     let length = parse_optional_usize(entries.get("length"), "length", name)?
         .unwrap_or_else(|| dtype.size() * element_count);
-    let expected = dtype.size().checked_mul(element_count).ok_or_else(|| {
-        LoaderError::Onnx(format!("tensor byte size overflow for {name}"))
-    })?;
+    let expected = dtype
+        .size()
+        .checked_mul(element_count)
+        .ok_or_else(|| LoaderError::Onnx(format!("tensor byte size overflow for {name}")))?;
     if length != expected {
         return Err(LoaderError::Onnx(format!(
             "external tensor {name} length {length} does not match expected {expected}"
@@ -154,16 +146,14 @@ fn external_data_map(
     map
 }
 
-fn parse_optional_usize(
-    value: Option<&String>,
-    label: &str,
-    name: &str,
-) -> Result<Option<usize>> {
+fn parse_optional_usize(value: Option<&String>, label: &str, name: &str) -> Result<Option<usize>> {
     let Some(value) = value else {
         return Ok(None);
     };
     let parsed = value.parse::<usize>().map_err(|_| {
-        LoaderError::Onnx(format!("invalid external {label} {value} for tensor {name}"))
+        LoaderError::Onnx(format!(
+            "invalid external {label} {value} for tensor {name}"
+        ))
     })?;
     Ok(Some(parsed))
 }

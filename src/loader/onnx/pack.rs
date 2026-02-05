@@ -115,9 +115,8 @@ fn pack_u32_from_u64(data: Vec<u64>, element_count: usize, name: &str) -> Result
     ensure_len(name, element_count, data.len(), "uint64_data")?;
     let mut out = Vec::with_capacity(data.len() * 4);
     for value in data {
-        let value = u32::try_from(value).map_err(|_| {
-            LoaderError::Onnx(format!("uint32 overflow in tensor {name}"))
-        })?;
+        let value = u32::try_from(value)
+            .map_err(|_| LoaderError::Onnx(format!("uint32 overflow in tensor {name}")))?;
         out.extend_from_slice(&value.to_le_bytes());
     }
     Ok(Bytes::from(out))
@@ -161,9 +160,8 @@ fn pack_u16_from_i32(data: Vec<i32>, element_count: usize, name: &str) -> Result
 
 fn pack_f16_bits_from_i32(data: Vec<i32>, element_count: usize, name: &str) -> Result<Bytes> {
     pack_i32_with(data, element_count, name, 2, |value, out| {
-        let value = u16::try_from(value).map_err(|_| {
-            LoaderError::Onnx(format!("float16 bits overflow in tensor {name}"))
-        })?;
+        let value = u16::try_from(value)
+            .map_err(|_| LoaderError::Onnx(format!("float16 bits overflow in tensor {name}")))?;
         out.extend_from_slice(&value.to_le_bytes());
         Ok(())
     })
@@ -171,9 +169,8 @@ fn pack_f16_bits_from_i32(data: Vec<i32>, element_count: usize, name: &str) -> R
 
 fn pack_bf16_bits_from_i32(data: Vec<i32>, element_count: usize, name: &str) -> Result<Bytes> {
     pack_i32_with(data, element_count, name, 2, |value, out| {
-        let value = u16::try_from(value).map_err(|_| {
-            LoaderError::Onnx(format!("bfloat16 bits overflow in tensor {name}"))
-        })?;
+        let value = u16::try_from(value)
+            .map_err(|_| LoaderError::Onnx(format!("bfloat16 bits overflow in tensor {name}")))?;
         out.extend_from_slice(&value.to_le_bytes());
         Ok(())
     })

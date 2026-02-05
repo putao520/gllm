@@ -55,7 +55,9 @@ impl ProgressBar {
         // 每秒至少打印一次进度，或者当有显著进度时（>5%）
         let should_print = elapsed_since_last_print >= 1.0
             || current >= self.total
-            || (self.total > 0 && (current as f64 / self.total as f64) >= 0.05 && elapsed_since_last_print >= 0.5);
+            || (self.total > 0
+                && (current as f64 / self.total as f64) >= 0.05
+                && elapsed_since_last_print >= 0.5);
 
         if should_print {
             let percent = (current as f64 / self.total as f64 * 100.0).min(100.0);
@@ -65,7 +67,8 @@ impl ProgressBar {
                 0.0
             };
 
-            let eta_secs = if speed > 0.001 { // 避免除以极小值
+            let eta_secs = if speed > 0.001 {
+                // 避免除以极小值
                 ((self.total - current) as f64 / (speed * 1e6)) as u64
             } else {
                 0
@@ -79,7 +82,8 @@ impl ProgressBar {
                 speed
             );
 
-            if eta_secs > 0 && eta_secs < 3600 { // 只显示小于1小时的ETA
+            if eta_secs > 0 && eta_secs < 3600 {
+                // 只显示小于1小时的ETA
                 let eta_mins = eta_secs / 60;
                 let eta_secs_rem = eta_secs % 60;
                 eprint!(" - ETA: {}m{}s", eta_mins, eta_secs_rem);
@@ -96,8 +100,8 @@ impl ProgressCallback for ProgressBar {
         self.total = total;
         self.filename = filename.to_string();
         let now = std::time::Instant::now();
-        self.start = now;  // 重置开始时间
-        self.last_print = now;  // 重置上次打印时间
+        self.start = now; // 重置开始时间
+        self.last_print = now; // 重置上次打印时间
         eprintln!("📥 下载: {} ({:.2} MB)", filename, total as f64 / 1e6);
     }
 
@@ -127,12 +131,7 @@ pub trait Downloader: Send + Sync {
     /// 下载单个文件到缓存目录
     ///
     /// 返回本地文件路径
-    fn download_file(
-        &self,
-        repo: &str,
-        filename: &str,
-        cache_dir: &Path,
-    ) -> Result<PathBuf>;
+    fn download_file(&self, repo: &str, filename: &str, cache_dir: &Path) -> Result<PathBuf>;
 
     /// 带进度的下载
     fn download_file_with_progress(
@@ -154,8 +153,7 @@ pub struct HfHubDownloader {
 
 impl HfHubDownloader {
     pub fn new(cache_dir: PathBuf, token: Option<String>) -> Result<Self> {
-        let mut builder = hf_hub::api::sync::ApiBuilder::new()
-            .with_cache_dir(cache_dir);
+        let mut builder = hf_hub::api::sync::ApiBuilder::new().with_cache_dir(cache_dir);
 
         if let Some(token) = token {
             builder = builder.with_token(Some(token));
@@ -170,12 +168,7 @@ impl HfHubDownloader {
 }
 
 impl Downloader for HfHubDownloader {
-    fn download_file(
-        &self,
-        repo: &str,
-        filename: &str,
-        _cache_dir: &Path,
-    ) -> Result<PathBuf> {
+    fn download_file(&self, repo: &str, filename: &str, _cache_dir: &Path) -> Result<PathBuf> {
         let model_api = self.api.model(repo.to_string());
         model_api
             .download(filename)
@@ -212,10 +205,7 @@ struct ProgressAdapter<'a> {
 
 impl<'a> ProgressAdapter<'a> {
     fn new(inner: &'a mut dyn ProgressCallback, _filename: &'a str) -> Self {
-        Self {
-            inner,
-            total: 0,
-        }
+        Self { inner, total: 0 }
     }
 }
 
@@ -259,9 +249,7 @@ impl ModelScopeDownloader {
         let endpoint = endpoint.unwrap_or_else(|| "https://www.modelscope.cn".to_string());
 
         // 配置 ureq agent
-        let agent = ureq::builder()
-            .try_proxy_from_env(true)
-            .build();
+        let agent = ureq::builder().try_proxy_from_env(true).build();
 
         Ok(Self {
             agent,
@@ -272,7 +260,12 @@ impl ModelScopeDownloader {
 
     /// 获取文件的下载 URL
     fn get_url(&self, repo: &str, filename: &str) -> String {
-        format!("{}/{}/resolve/main/{}", self.endpoint, repo.replace('/', "--"), filename)
+        format!(
+            "{}/{}/resolve/main/{}",
+            self.endpoint,
+            repo.replace('/', "--"),
+            filename
+        )
     }
 
     /// 分块下载文件
@@ -285,14 +278,13 @@ impl ModelScopeDownloader {
     ) -> Result<()> {
         // 创建目录
         if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| crate::loader::LoaderError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(|e| crate::loader::LoaderError::Io(e))?;
         }
 
         // 检查是否需要续传
         let start_pos = if dest_path.exists() {
-            let metadata = std::fs::metadata(dest_path)
-                .map_err(|e| crate::loader::LoaderError::Io(e))?;
+            let metadata =
+                std::fs::metadata(dest_path).map_err(|e| crate::loader::LoaderError::Io(e))?;
             metadata.len()
         } else {
             0
@@ -333,8 +325,7 @@ impl ModelScopeDownloader {
 
             // 追加写入文件
             let mut file = if current == 0 && !dest_path.exists() {
-                std::fs::File::create(dest_path)
-                    .map_err(|e| crate::loader::LoaderError::Io(e))?
+                std::fs::File::create(dest_path).map_err(|e| crate::loader::LoaderError::Io(e))?
             } else {
                 std::fs::OpenOptions::new()
                     .append(true)
@@ -385,15 +376,14 @@ impl ModelScopeDownloader {
             ));
         }
 
-        let content_range = response
-            .header("Content-Range")
-            .ok_or_else(|| crate::loader::LoaderError::HfHub("missing Content-Range".to_string()))?;
+        let content_range = response.header("Content-Range").ok_or_else(|| {
+            crate::loader::LoaderError::HfHub("missing Content-Range".to_string())
+        })?;
 
         // Content-Range: bytes 0-1048575/1048576
-        let size_str = content_range
-            .split('/')
-            .nth(1)
-            .ok_or_else(|| crate::loader::LoaderError::HfHub("invalid Content-Range".to_string()))?;
+        let size_str = content_range.split('/').nth(1).ok_or_else(|| {
+            crate::loader::LoaderError::HfHub("invalid Content-Range".to_string())
+        })?;
 
         size_str
             .parse::<u64>()
@@ -402,12 +392,7 @@ impl ModelScopeDownloader {
 }
 
 impl Downloader for ModelScopeDownloader {
-    fn download_file(
-        &self,
-        repo: &str,
-        filename: &str,
-        cache_dir: &Path,
-    ) -> Result<PathBuf> {
+    fn download_file(&self, repo: &str, filename: &str, cache_dir: &Path) -> Result<PathBuf> {
         // 标准化仓库名: org/name → org--name
         let normalized_repo = repo.replace('/', "--");
         let model_dir = cache_dir.join("models--").join(&normalized_repo);
@@ -481,8 +466,8 @@ impl ModelScopeDownloader {
         let mut latest = None;
         let mut latest_mtime: std::time::SystemTime = std::time::SystemTime::UNIX_EPOCH;
 
-        for entry in std::fs::read_dir(snapshots_dir)
-            .map_err(|e| crate::loader::LoaderError::Io(e))?
+        for entry in
+            std::fs::read_dir(snapshots_dir).map_err(|e| crate::loader::LoaderError::Io(e))?
         {
             let entry = entry?;
             let metadata = entry.metadata()?;
@@ -506,7 +491,11 @@ struct ModelScopeProgress {
 impl ProgressCallback for ModelScopeProgress {
     fn init(&mut self, total: usize, filename: &str) {
         self.total = total;
-        eprintln!("📥 [ModelScope] 下载: {} ({:.2} MB)", filename, total as f64 / 1e6);
+        eprintln!(
+            "📥 [ModelScope] 下载: {} ({:.2} MB)",
+            filename,
+            total as f64 / 1e6
+        );
     }
 
     fn update(&mut self, current: usize) {

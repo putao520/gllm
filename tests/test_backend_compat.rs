@@ -11,13 +11,22 @@ use std::sync::Arc;
 
 const TOLERANCE: f32 = 1e-3;
 
-fn build_cpu_executor(alias: &str, kind: ModelKind, files: &TestModelFiles) -> Executor<CpuBackend> {
+fn build_cpu_executor(
+    alias: &str,
+    kind: ModelKind,
+    files: &TestModelFiles,
+) -> Executor<CpuBackend> {
     let mut loader = files.loader(alias).expect("loader");
     let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
     let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
-    Executor::from_loader(CpuBackend::new(), Arc::new(manifest.clone()), adapter, &mut loader)
-        .expect("executor")
+    Executor::from_loader(
+        CpuBackend::new(),
+        Arc::new(manifest.clone()),
+        adapter,
+        &mut loader,
+    )
+    .expect("executor")
 }
 
 fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelManifest {
@@ -37,9 +46,13 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
         let manifest = manifest_from_loader("Qwen/Qwen3-0.6B", ModelKind::Chat, &loader);
         loader.set_manifest_if_missing(&manifest);
         let adapter = adapter_for::<CudaBackend>(&manifest).expect("cuda adapter");
-        let mut cuda_exec =
-            Executor::from_loader(cuda_backend, Arc::new(manifest.clone()), adapter, &mut loader)
-                .expect("cuda exec");
+        let mut cuda_exec = Executor::from_loader(
+            cuda_backend,
+            Arc::new(manifest.clone()),
+            adapter,
+            &mut loader,
+        )
+        .expect("cuda exec");
         let cuda_embedding = cuda_exec.embed("tok1 tok2").expect("cuda embed");
         assert_eq!(reference.len(), cuda_embedding.len());
         for (cpu, cuda) in reference.iter().zip(cuda_embedding.iter()) {

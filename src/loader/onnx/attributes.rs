@@ -55,9 +55,10 @@ fn parse_attribute(
     attr: proto::AttributeProto,
     resolver: &mut ExternalDataResolver,
 ) -> Result<OnnxAttribute> {
-    let name = attr.name.clone().ok_or_else(|| {
-        LoaderError::Onnx("attribute missing name".to_string())
-    })?;
+    let name = attr
+        .name
+        .clone()
+        .ok_or_else(|| LoaderError::Onnx("attribute missing name".to_string()))?;
     let doc_string = attr.doc_string.clone().unwrap_or_default();
     let ref_attr_name = match attr.ref_attr_name.clone() {
         Some(value) if !value.is_empty() => Some(value),
@@ -110,15 +111,19 @@ fn parse_by_type(
             .map(OnnxAttributeValue::Int)
             .ok_or_else(|| missing_attr_value(name, "int")),
         AttrType::String => {
-            let value = attr.s.as_ref().ok_or_else(|| missing_attr_value(name, "string"))?;
+            let value = attr
+                .s
+                .as_ref()
+                .ok_or_else(|| missing_attr_value(name, "string"))?;
             Ok(OnnxAttributeValue::String(parse_utf8(value, name)?))
         }
         AttrType::Tensor => {
-            let tensor = attr.t.clone().ok_or_else(|| missing_attr_value(name, "tensor"))?;
+            let tensor = attr
+                .t
+                .clone()
+                .ok_or_else(|| missing_attr_value(name, "tensor"))?;
             Ok(OnnxAttributeValue::Tensor(OnnxTensor::from_attribute(
-                tensor,
-                resolver,
-                name,
+                tensor, resolver, name,
             )?))
         }
         AttrType::SparseTensor => {
@@ -126,16 +131,22 @@ fn parse_by_type(
                 .sparse_tensor
                 .clone()
                 .ok_or_else(|| missing_attr_value(name, "sparse_tensor"))?;
-            Ok(OnnxAttributeValue::SparseTensor(OnnxSparseTensor::from_proto(
-                tensor, resolver,
-            )?))
+            Ok(OnnxAttributeValue::SparseTensor(
+                OnnxSparseTensor::from_proto(tensor, resolver)?,
+            ))
         }
         AttrType::TypeProto => {
-            let tp = attr.tp.clone().ok_or_else(|| missing_attr_value(name, "type_proto"))?;
+            let tp = attr
+                .tp
+                .clone()
+                .ok_or_else(|| missing_attr_value(name, "type_proto"))?;
             Ok(OnnxAttributeValue::Type(OnnxType::from_proto(tp)?))
         }
         AttrType::Graph => {
-            let graph = attr.g.clone().ok_or_else(|| missing_attr_value(name, "graph"))?;
+            let graph = attr
+                .g
+                .clone()
+                .ok_or_else(|| missing_attr_value(name, "graph"))?;
             Ok(OnnxAttributeValue::Graph(Box::new(graph)))
         }
         AttrType::Floats => Ok(OnnxAttributeValue::Floats(attr.floats.clone())),
@@ -202,7 +213,10 @@ fn parse_by_presence(
         return Ok(OnnxAttributeValue::Ints(attr.ints.clone()));
     }
     if !attr.strings.is_empty() {
-        return Ok(OnnxAttributeValue::Strings(parse_strings(&attr.strings, name)?));
+        return Ok(OnnxAttributeValue::Strings(parse_strings(
+            &attr.strings,
+            name,
+        )?));
     }
     if !attr.tensors.is_empty() {
         let mut tensors = Vec::with_capacity(attr.tensors.len());
@@ -219,9 +233,9 @@ fn parse_by_presence(
         return Ok(OnnxAttributeValue::Type(OnnxType::from_proto(value)?));
     }
     if let Some(value) = attr.sparse_tensor.clone() {
-        return Ok(OnnxAttributeValue::SparseTensor(OnnxSparseTensor::from_proto(
-            value, resolver,
-        )?));
+        return Ok(OnnxAttributeValue::SparseTensor(
+            OnnxSparseTensor::from_proto(value, resolver)?,
+        ));
     }
     if !attr.sparse_tensors.is_empty() {
         let mut tensors = Vec::with_capacity(attr.sparse_tensors.len());
@@ -237,15 +251,12 @@ fn parse_by_presence(
         }
         return Ok(OnnxAttributeValue::Types(types));
     }
-    Err(LoaderError::Onnx(format!(
-        "attribute {name} missing value"
-    )))
+    Err(LoaderError::Onnx(format!("attribute {name} missing value")))
 }
 
 fn parse_utf8(value: &[u8], name: &str) -> Result<String> {
-    String::from_utf8(value.to_vec()).map_err(|_| {
-        LoaderError::Onnx(format!("attribute {name} has invalid utf8 string"))
-    })
+    String::from_utf8(value.to_vec())
+        .map_err(|_| LoaderError::Onnx(format!("attribute {name} has invalid utf8 string")))
 }
 
 fn parse_strings(values: &[Vec<u8>], name: &str) -> Result<Vec<String>> {
@@ -260,8 +271,6 @@ fn missing_attr_value(name: &str, kind: &str) -> LoaderError {
     LoaderError::Onnx(format!("attribute {name} missing {kind} value"))
 }
 
-fn parse_attr_type(
-    value: Option<i32>,
-) -> Option<proto::attribute_proto::AttributeType> {
+fn parse_attr_type(value: Option<i32>) -> Option<proto::attribute_proto::AttributeType> {
     value.and_then(|value| proto::attribute_proto::AttributeType::try_from(value).ok())
 }

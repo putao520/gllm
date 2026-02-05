@@ -209,31 +209,40 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
         // Test CPU backend
         match test_model(&alias, kind, function_type, &arch_str, "CPU") {
             TestStatus::Passed => {
-                results.insert(format!("CPU:{}", alias), TestResult {
-                    alias: alias.clone(),
-                    function_type: function_type.to_string(),
-                    architecture: arch_str.clone(),
-                    backend: "CPU".to_string(),
-                    status: TestStatus::Passed,
-                });
+                results.insert(
+                    format!("CPU:{}", alias),
+                    TestResult {
+                        alias: alias.clone(),
+                        function_type: function_type.to_string(),
+                        architecture: arch_str.clone(),
+                        backend: "CPU".to_string(),
+                        status: TestStatus::Passed,
+                    },
+                );
             }
             TestStatus::Skipped(reason) => {
-                results.insert(format!("CPU:{}", alias), TestResult {
-                    alias: alias.clone(),
-                    function_type: function_type.to_string(),
-                    architecture: arch_str.clone(),
-                    backend: "CPU".to_string(),
-                    status: TestStatus::Skipped(reason),
-                });
+                results.insert(
+                    format!("CPU:{}", alias),
+                    TestResult {
+                        alias: alias.clone(),
+                        function_type: function_type.to_string(),
+                        architecture: arch_str.clone(),
+                        backend: "CPU".to_string(),
+                        status: TestStatus::Skipped(reason),
+                    },
+                );
             }
             TestStatus::Failed(err) => {
-                results.insert(format!("CPU:{}", alias), TestResult {
-                    alias: alias.clone(),
-                    function_type: function_type.to_string(),
-                    architecture: arch_str.clone(),
-                    backend: "CPU".to_string(),
-                    status: TestStatus::Failed(err),
-                });
+                results.insert(
+                    format!("CPU:{}", alias),
+                    TestResult {
+                        alias: alias.clone(),
+                        function_type: function_type.to_string(),
+                        architecture: arch_str.clone(),
+                        backend: "CPU".to_string(),
+                        status: TestStatus::Failed(err),
+                    },
+                );
             }
         }
 
@@ -241,31 +250,40 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
         if cuda_available {
             match test_model(&alias, kind, function_type, &arch_str, "CUDA") {
                 TestStatus::Passed => {
-                    results.insert(format!("CUDA:{}", alias), TestResult {
-                        alias: alias.clone(),
-                        function_type: function_type.to_string(),
-                        architecture: arch_str,
-                        backend: "CUDA".to_string(),
-                        status: TestStatus::Passed,
-                    });
+                    results.insert(
+                        format!("CUDA:{}", alias),
+                        TestResult {
+                            alias: alias.clone(),
+                            function_type: function_type.to_string(),
+                            architecture: arch_str,
+                            backend: "CUDA".to_string(),
+                            status: TestStatus::Passed,
+                        },
+                    );
                 }
                 TestStatus::Skipped(reason) => {
-                    results.insert(format!("CUDA:{}", alias), TestResult {
-                        alias,
-                        function_type: function_type.to_string(),
-                        architecture: arch_str,
-                        backend: "CUDA".to_string(),
-                        status: TestStatus::Skipped(reason),
-                    });
+                    results.insert(
+                        format!("CUDA:{}", alias),
+                        TestResult {
+                            alias,
+                            function_type: function_type.to_string(),
+                            architecture: arch_str,
+                            backend: "CUDA".to_string(),
+                            status: TestStatus::Skipped(reason),
+                        },
+                    );
                 }
                 TestStatus::Failed(err) => {
-                    results.insert(format!("CUDA:{}", alias), TestResult {
-                        alias,
-                        function_type: function_type.to_string(),
-                        architecture: arch_str,
-                        backend: "CUDA".to_string(),
-                        status: TestStatus::Failed(err),
-                    });
+                    results.insert(
+                        format!("CUDA:{}", alias),
+                        TestResult {
+                            alias,
+                            function_type: function_type.to_string(),
+                            architecture: arch_str,
+                            backend: "CUDA".to_string(),
+                            status: TestStatus::Failed(err),
+                        },
+                    );
                 }
             }
         }
@@ -352,29 +370,34 @@ fn test_model(
 
 fn test_generation(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = String::from("Hello, world!");
-    let response = client
-        .generate(prompt)
-        .max_tokens(5)
-        .generate()?;
+    let response = client.generate(prompt).max_tokens(5).generate()?;
 
-    assert!(!response.text.is_empty(), "generation produced empty output");
+    assert!(
+        !response.text.is_empty(),
+        "generation produced empty output"
+    );
     println!("  ✓ Generation: {}", response.text.trim());
     Ok(())
 }
 
 fn test_embeddings(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-    let inputs = vec![
-        String::from("Hello, world!"),
-        String::from("Test text"),
-    ];
-    let response = client
-        .embeddings(inputs)
-        .generate()?;
+    let inputs = vec![String::from("Hello, world!"), String::from("Test text")];
+    let response = client.embeddings(inputs).generate()?;
 
-    assert!(!response.embeddings.is_empty(), "embeddings produced empty results");
+    assert!(
+        !response.embeddings.is_empty(),
+        "embeddings produced empty results"
+    );
     assert_eq!(response.embeddings.len(), 2, "embeddings count mismatch");
-    assert!(response.embeddings[0].embedding.len() > 0, "embedding vector is empty");
-    println!("  ✓ Embeddings: {} vectors, dim={}", response.embeddings.len(), response.embeddings[0].embedding.len());
+    assert!(
+        response.embeddings[0].embedding.len() > 0,
+        "embedding vector is empty"
+    );
+    println!(
+        "  ✓ Embeddings: {} vectors, dim={}",
+        response.embeddings.len(),
+        response.embeddings[0].embedding.len()
+    );
     Ok(())
 }
 
@@ -385,22 +408,20 @@ fn test_rerank(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
         String::from("document 2"),
         String::from("document 3"),
     ];
-    let response = client
-        .rerank(query, documents)
-        .top_n(2)
-        .generate()?;
+    let response = client.rerank(query, documents).top_n(2).generate()?;
 
     assert_eq!(response.results.len(), 2, "rerank should return top 2");
-    println!("  ✓ Rerank: top1={}, top2={}", response.results[0].index, response.results[1].index);
+    println!(
+        "  ✓ Rerank: top1={}, top2={}",
+        response.results[0].index, response.results[1].index
+    );
     Ok(())
 }
 
 fn is_cuda_available() -> bool {
     // Check if CUDA backend is available by trying to detect it
     use gllm::backend::detect_backend;
-    detect_backend().map_or(false, |backend| {
-        format!("{:?}", backend).contains("Cuda")
-    })
+    detect_backend().map_or(false, |backend| format!("{:?}", backend).contains("Cuda"))
 }
 
 fn print_test_summary(function_name: &str, results: HashMap<String, TestResult>) {
@@ -423,12 +444,18 @@ fn print_test_summary(function_name: &str, results: HashMap<String, TestResult>)
                 entry.0 += 1;
             }
             TestStatus::Skipped(reason) => {
-                println!("  ⚠️  {} - {} ({}) - {}", key, result.alias, result.architecture, reason);
+                println!(
+                    "  ⚠️  {} - {} ({}) - {}",
+                    key, result.alias, result.architecture, reason
+                );
                 skipped += 1;
                 entry.1 += 1;
             }
             TestStatus::Failed(err) => {
-                println!("  ❌ {} - {} ({}) - {}", key, result.alias, result.architecture, err);
+                println!(
+                    "  ❌ {} - {} ({}) - {}",
+                    key, result.alias, result.architecture, err
+                );
                 failed += 1;
                 entry.2 += 1;
             }
@@ -440,5 +467,8 @@ fn print_test_summary(function_name: &str, results: HashMap<String, TestResult>)
         println!("  {}: {} passed, {} skipped, {} failed", backend, p, s, f);
     }
 
-    println!("\nTotal: {} passed, {} skipped, {} failed", passed, skipped, failed);
+    println!(
+        "\nTotal: {} passed, {} skipped, {} failed",
+        passed, skipped, failed
+    );
 }

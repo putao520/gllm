@@ -92,10 +92,7 @@ impl OnnxModel {
 }
 
 impl OnnxGraph {
-    fn from_proto(
-        proto: proto::GraphProto,
-        resolver: &mut ExternalDataResolver,
-    ) -> Result<Self> {
+    fn from_proto(proto: proto::GraphProto, resolver: &mut ExternalDataResolver) -> Result<Self> {
         let mut initializers = HashMap::new();
         for initializer in proto.initializer {
             let tensor = OnnxTensor::from_initializer(initializer, resolver)?;
@@ -166,9 +163,9 @@ fn parse_nodes(
 fn parse_value_info(values: Vec<proto::ValueInfoProto>) -> Result<Vec<OnnxValueInfo>> {
     let mut out = Vec::with_capacity(values.len());
     for value in values {
-        let name = value.name.ok_or_else(|| {
-            LoaderError::Onnx("value_info missing name".to_string())
-        })?;
+        let name = value
+            .name
+            .ok_or_else(|| LoaderError::Onnx("value_info missing name".to_string()))?;
         let value_type = match value.r#type {
             Some(tp) => Some(OnnxType::from_proto(tp)?),
             None => None,
@@ -193,9 +190,7 @@ fn parse_opsets(opsets: Vec<proto::OperatorSetIdProto>) -> Vec<OnnxOperatorSet> 
         .collect()
 }
 
-fn parse_metadata_props(
-    entries: Vec<proto::StringStringEntryProto>,
-) -> HashMap<String, String> {
+fn parse_metadata_props(entries: Vec<proto::StringStringEntryProto>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for entry in entries {
         let Some(key) = entry.key else {
@@ -210,9 +205,7 @@ fn parse_metadata_props(
     out
 }
 
-fn parse_quantization(
-    entries: Vec<proto::TensorAnnotation>,
-) -> Vec<OnnxQuantizationAnnotation> {
+fn parse_quantization(entries: Vec<proto::TensorAnnotation>) -> Vec<OnnxQuantizationAnnotation> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         out.push(OnnxQuantizationAnnotation {

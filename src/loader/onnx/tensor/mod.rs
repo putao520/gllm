@@ -90,9 +90,8 @@ impl OnnxTensor {
 
         let name = resolve_name(name.unwrap_or_default(), name_policy)?;
         let data_type = parse::parse_data_type(
-            data_type.ok_or_else(|| {
-                LoaderError::Onnx(format!("tensor {name} missing data_type"))
-            })?,
+            data_type
+                .ok_or_else(|| LoaderError::Onnx(format!("tensor {name} missing data_type")))?,
             &name,
         )?;
         let dtype = parse::map_dtype(data_type, &name)?;
@@ -107,13 +106,7 @@ impl OnnxTensor {
 
         let data_location = data_location.unwrap_or_default();
         let data = if data_location == proto::tensor_proto::DataLocation::External as i32 {
-            parse::load_external_data(
-                resolver,
-                &external_data,
-                dtype,
-                element_count,
-                &name,
-            )?
+            parse::load_external_data(resolver, &external_data, dtype, element_count, &name)?
         } else {
             pack::build_tensor_bytes(
                 data_type,
@@ -156,12 +149,10 @@ impl OnnxSparseTensor {
             indices,
             dims,
         } = proto;
-        let values = values.ok_or_else(|| {
-            LoaderError::Onnx("sparse tensor missing values tensor".to_string())
-        })?;
-        let indices = indices.ok_or_else(|| {
-            LoaderError::Onnx("sparse tensor missing indices tensor".to_string())
-        })?;
+        let values = values
+            .ok_or_else(|| LoaderError::Onnx("sparse tensor missing values tensor".to_string()))?;
+        let indices = indices
+            .ok_or_else(|| LoaderError::Onnx("sparse tensor missing indices tensor".to_string()))?;
         let values = OnnxTensor::from_initializer(values, resolver)?;
         let indices = OnnxTensor::from_attribute(indices, resolver, "sparse_indices")?;
         let dims = parse::parse_dims(&dims, "sparse_tensor")?;

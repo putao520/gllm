@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use super::index::{is_linear_value, GraphIndex};
-use super::{FusedKernel, FusedOp, SwiGluSpec};
 use super::super::model::{OnnxGraph, OnnxNode};
 use super::super::Result;
+use super::index::{is_linear_value, GraphIndex};
+use super::{FusedKernel, FusedOp, SwiGluSpec};
 
 pub(super) fn match_swiglu(
     graph: &OnnxGraph,

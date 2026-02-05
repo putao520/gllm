@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use super::index::{constant_scalar, other_input, single_consumer, GraphIndex};
-use super::{FlashAttentionSpec, FusedKernel, FusedOp};
 use super::super::model::{OnnxGraph, OnnxNode};
 use super::super::Result;
+use super::index::{constant_scalar, other_input, single_consumer, GraphIndex};
+use super::{FlashAttentionSpec, FusedKernel, FusedOp};
 
 pub(super) fn match_attention(
     graph: &OnnxGraph,

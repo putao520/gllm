@@ -25,8 +25,8 @@ fn loader_accepts_configuration_json() {
     std::fs::write(&weights, []).expect("write weights");
     write_config(&config);
 
-    let loader =
-        Loader::from_local_files("Qwen/Qwen3-0.6B", vec![weights], vec![config.clone()]).expect("loader");
+    let loader = Loader::from_local_files("Qwen/Qwen3-0.6B", vec![weights], vec![config.clone()])
+        .expect("loader");
 
     let path = loader.config_path().expect("config path");
     assert_eq!(path.file_name().unwrap(), "configuration.json");

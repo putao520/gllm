@@ -54,17 +54,13 @@ impl<'a> std::ops::Deref for BackendGuard<'a> {
     type Target = BackendContext;
 
     fn deref(&self) -> &Self::Target {
-        self.guard
-            .as_ref()
-            .expect("backend context initialized")
+        self.guard.as_ref().expect("backend context initialized")
     }
 }
 
 impl<'a> std::ops::DerefMut for BackendGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard
-            .as_mut()
-            .expect("backend context initialized")
+        self.guard.as_mut().expect("backend context initialized")
     }
 }
 

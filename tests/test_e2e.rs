@@ -29,20 +29,30 @@ fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
         _ => return Err(format!("未知功能类型: {}", feature)),
     }
     .map_err(|e| format!("Client init failed: {}", e))?;
-    println!("  [{}] 测试: {} (架构: {:?})", feature, alias, client.manifest().arch);
+    println!(
+        "  [{}] 测试: {} (架构: {:?})",
+        feature,
+        alias,
+        client.manifest().arch
+    );
 
     match feature {
         "Generator" => {
-            let response = client.generate("The capital of")
+            let response = client
+                .generate("The capital of")
                 .max_tokens(10)
                 .generate()
                 .map_err(|e| format!("generate failed: {}", e))?;
             assert!(!response.text.trim().is_empty(), "generator output empty");
-            assert!(response.text.len() >= 5, "generator output too short (< 5 chars)");
+            assert!(
+                response.text.len() >= 5,
+                "generator output too short (< 5 chars)"
+            );
             println!("    ✅ 生成: '{}'", response.text.trim());
         }
         "Embedding" => {
-            let response = client.embeddings(["test text"])
+            let response = client
+                .embeddings(["test text"])
                 .generate()
                 .map_err(|e| format!("embed failed: {}", e))?;
             assert!(!response.embeddings.is_empty(), "embeddings empty");
@@ -53,7 +63,8 @@ fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
             println!("    ✅ 嵌入维度: {}", embedding.len());
         }
         "Reranker" => {
-            let response = client.rerank("query", ["doc1", "doc2"])
+            let response = client
+                .rerank("query", ["doc1", "doc2"])
                 .generate()
                 .map_err(|e| format!("rerank failed: {}", e))?;
             assert!(!response.results.is_empty(), "rerank results empty");
@@ -112,6 +123,10 @@ fn e2e_features() {
 
     // E2E 测试要求：ModelScope 可用模型必须 100% 通过
     // (Reranker 需要 HuggingFace token + gated 权限，失败不影响基本 E2E 功能)
-    let modelscope_failed: Vec<_> = failed.iter().filter(|(f, _, _)| *f != "Reranker").cloned().collect();
+    let modelscope_failed: Vec<_> = failed
+        .iter()
+        .filter(|(f, _, _)| *f != "Reranker")
+        .cloned()
+        .collect();
     assert_eq!(modelscope_failed.len(), 0, "E2E 测试失败 (ModelScope 模型)");
 }

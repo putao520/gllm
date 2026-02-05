@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::manifest::FileMap;
-use super::{LoaderError, Result, ParallelLoader, ProgressBar, ModelScopeDownloader, WeightFormat};
 use super::downloader::Downloader;
+use super::{
+    naming_parser::{gguf_candidate_rank, onnx_candidate_rank},
+    LoaderError, ModelScopeDownloader, ParallelLoader, ProgressBar, Result, WeightFormat,
+};
+use crate::manifest::FileMap;
 
 #[derive(Debug)]
 pub struct MsModelFiles {
@@ -34,68 +37,42 @@ impl ModelScopeClient {
         &self,
         repo: &str,
         file_map: FileMap,
-        _parallel: ParallelLoader,
+        parallel: ParallelLoader,
     ) -> Result<MsModelFiles> {
-        use super::ModelScopeDownloader;
+        self.download_model_files_with_format(repo, file_map, parallel, None)
+    }
 
+    pub fn download_model_files_with_format(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        parallel: ParallelLoader,
+        format_hint: Option<WeightFormat>,
+    ) -> Result<MsModelFiles> {
+        let _ = parallel;
         let repo = repo.to_string();
-        let mut aux_files = Vec::new();
+        let downloader = ModelScopeDownloader::new(
+            self.cache_dir.clone(),
+            Some("https://www.modelscope.cn".to_string()),
+        )?;
+        let aux_files = self.collect_aux_files(&repo, file_map, &downloader);
 
-        // 创建 ModelScope 下载器
-        let downloader = ModelScopeDownloader::new(self.cache_dir.clone(), Some("https://www.modelscope.cn".to_string()))?;
-
-        // 下载辅助文件
-        for name in [
-            "config.json",
-            "configuration.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "vocab.json",
-        ] {
-            if let Ok(path) = self.get_file_any(&repo, file_map, name, &downloader) {
-                aux_files.push(path);
-            }
+        if let Some(format) = format_hint {
+            let result =
+                self.download_by_format(&repo, file_map, &downloader, &aux_files, format)?;
+            return result.ok_or(LoaderError::MissingWeights);
         }
 
-        // 尝试下载 safetensors 分片
-        if let Ok(index_path) = self.get_file_any(&repo, file_map, "model.safetensors.index.json", &downloader) {
-            let shard_index = self.parse_safetensors_index(&index_path)?;
-            let shard_files = shard_index.shard_files();
-            let weights = self.download_shards(&repo, &shard_files, &downloader)?;
-            aux_files.push(index_path);
-            return Ok(MsModelFiles {
-                repo,
-                weights,
-                format: WeightFormat::SafeTensors,
-                aux_files,
-            });
+        if let Some(files) =
+            self.try_download_safetensors(&repo, file_map, &downloader, &aux_files)?
+        {
+            return Ok(files);
         }
-
-        // 尝试下载单个 safetensors 文件
-        if let Ok(path) = self.get_file_any(&repo, file_map, "model.safetensors", &downloader) {
-            return Ok(MsModelFiles {
-                repo,
-                weights: vec![path],
-                format: WeightFormat::SafeTensors,
-                aux_files,
-            });
+        if let Some(files) = self.try_download_gguf(&repo, file_map, &downloader, &aux_files)? {
+            return Ok(files);
         }
-
-        for name in [
-            "model.gguf",
-            "ggml-model-q4_0.gguf",
-            "ggml-model-q8_0.gguf",
-            "ggml-model-f16.gguf",
-        ] {
-            if let Ok(path) = self.get_file_any(&repo, file_map, name, &downloader) {
-                return Ok(MsModelFiles {
-                    repo,
-                    weights: vec![path],
-                    format: WeightFormat::Gguf,
-                    aux_files,
-                });
-            }
+        if let Some(files) = self.try_download_onnx(&repo, file_map, &downloader, &aux_files)? {
+            return Ok(files);
         }
 
         Err(LoaderError::MissingWeights)
@@ -115,6 +92,191 @@ impl ModelScopeClient {
             Some("https://www.modelscope.cn".to_string()),
         )?;
         self.get_file_any(repo, file_map, "tokenizer.json", &downloader)
+    }
+
+    fn collect_aux_files(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        downloader: &ModelScopeDownloader,
+    ) -> Vec<PathBuf> {
+        let mut aux_files = Vec::new();
+        for name in [
+            "config.json",
+            "configuration.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+        ] {
+            if let Ok(path) = self.get_file_any(repo, file_map, name, downloader) {
+                aux_files.push(path);
+            }
+        }
+        aux_files
+    }
+
+    fn download_by_format(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        downloader: &ModelScopeDownloader,
+        aux_files: &[PathBuf],
+        format: WeightFormat,
+    ) -> Result<Option<MsModelFiles>> {
+        match format {
+            WeightFormat::SafeTensors => {
+                self.try_download_safetensors(repo, file_map, downloader, aux_files)
+            }
+            WeightFormat::Gguf => self.try_download_gguf(repo, file_map, downloader, aux_files),
+            WeightFormat::Onnx => self.try_download_onnx(repo, file_map, downloader, aux_files),
+        }
+    }
+
+    fn try_download_safetensors(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        downloader: &ModelScopeDownloader,
+        aux_files: &[PathBuf],
+    ) -> Result<Option<MsModelFiles>> {
+        if let Ok(index_path) =
+            self.get_file_any(repo, file_map, "model.safetensors.index.json", downloader)
+        {
+            let shard_index = self.parse_safetensors_index(&index_path)?;
+            let shard_files = shard_index.shard_files();
+            let weights = self.download_shards(repo, &shard_files, downloader)?;
+            let mut aux = aux_files.to_vec();
+            aux.push(index_path);
+            return Ok(Some(MsModelFiles {
+                repo: repo.to_string(),
+                weights,
+                format: WeightFormat::SafeTensors,
+                aux_files: aux,
+            }));
+        }
+
+        if let Ok(path) = self.get_file_any(repo, file_map, "model.safetensors", downloader) {
+            return Ok(Some(MsModelFiles {
+                repo: repo.to_string(),
+                weights: vec![path],
+                format: WeightFormat::SafeTensors,
+                aux_files: aux_files.to_vec(),
+            }));
+        }
+
+        Ok(None)
+    }
+
+    fn try_download_gguf(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        downloader: &ModelScopeDownloader,
+        aux_files: &[PathBuf],
+    ) -> Result<Option<MsModelFiles>> {
+        for candidate in self.gguf_candidate_names(repo) {
+            if let Some(path) = self.try_get_file_any(repo, file_map, &candidate, downloader) {
+                return Ok(Some(MsModelFiles {
+                    repo: repo.to_string(),
+                    weights: vec![path],
+                    format: WeightFormat::Gguf,
+                    aux_files: aux_files.to_vec(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn try_download_onnx(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        downloader: &ModelScopeDownloader,
+        aux_files: &[PathBuf],
+    ) -> Result<Option<MsModelFiles>> {
+        for candidate in self.onnx_candidate_names() {
+            if let Some(path) = self.try_get_file_any(repo, file_map, &candidate, downloader) {
+                return Ok(Some(MsModelFiles {
+                    repo: repo.to_string(),
+                    weights: vec![path],
+                    format: WeightFormat::Onnx,
+                    aux_files: aux_files.to_vec(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn gguf_candidate_names(&self, repo: &str) -> Vec<String> {
+        let mut names = vec![
+            "model.gguf".to_string(),
+            "ggml-model-q4_0.gguf".to_string(),
+            "ggml-model-q8_0.gguf".to_string(),
+            "ggml-model-f16.gguf".to_string(),
+        ];
+
+        if let Some(base) = repo.split('/').last() {
+            for quant in ["Q4_0", "Q8_0", "Q4_K_M", "Q5_K_S", "f16"] {
+                names.push(format!("{base}-{quant}.gguf"));
+                names.push(format!("{base}.{quant}.gguf"));
+            }
+        }
+
+        names.sort_by(|a, b| {
+            let ra = gguf_candidate_rank(a).unwrap_or((0, 0));
+            let rb = gguf_candidate_rank(b).unwrap_or((0, 0));
+            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
+        });
+        names
+    }
+
+    fn onnx_candidate_names(&self) -> Vec<String> {
+        let mut names = vec![
+            "onnx/model.onnx".to_string(),
+            "onnx/model_fp16.onnx".to_string(),
+            "onnx/model_fp32.onnx".to_string(),
+            "onnx/model_int8.onnx".to_string(),
+            "onnx/model_uint8.onnx".to_string(),
+            "onnx/model_q4.onnx".to_string(),
+            "onnx/model_quantized.onnx".to_string(),
+            "model.onnx".to_string(),
+            "model_fp16.onnx".to_string(),
+            "model_fp32.onnx".to_string(),
+            "model_int8.onnx".to_string(),
+            "model_uint8.onnx".to_string(),
+            "model_q4.onnx".to_string(),
+            "model_quantized.onnx".to_string(),
+        ];
+
+        names.retain(|name| onnx_candidate_rank(name).is_some());
+        names.sort_by(|a, b| {
+            let ra = onnx_candidate_rank(a).unwrap_or((0, 0));
+            let rb = onnx_candidate_rank(b).unwrap_or((0, 0));
+            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
+        });
+        names
+    }
+
+    fn try_get_file_any(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        logical: &str,
+        downloader: &ModelScopeDownloader,
+    ) -> Option<PathBuf> {
+        let candidates = if logical.contains('/') {
+            vec![logical.to_string()]
+        } else {
+            self.candidate_names(file_map, logical)
+        };
+
+        for candidate in candidates {
+            if let Ok(path) = self.get_file(repo, &candidate, downloader) {
+                return Some(path);
+            }
+        }
+        None
     }
 
     fn get_file_any(
@@ -154,7 +316,12 @@ impl ModelScopeClient {
             eprintln!("📥 [{}/{}] 下载分片: {}", idx + 1, shards.len(), filename);
 
             let mut progress = ProgressBar::new(filename.clone());
-            let path = downloader.download_file_with_progress(repo, filename, &self.cache_dir, &mut progress)?;
+            let path = downloader.download_file_with_progress(
+                repo,
+                filename,
+                &self.cache_dir,
+                &mut progress,
+            )?;
             result.push(path);
         }
         Ok(result)
@@ -192,11 +359,7 @@ impl ModelScopeClient {
     }
 
     /// 从缓存目录加载已下载的 ModelScope 模型
-    pub fn load_from_cache(
-        &self,
-        repo: &str,
-        _file_map: FileMap,
-    ) -> Result<MsModelFiles> {
+    pub fn load_from_cache(&self, repo: &str, _file_map: FileMap) -> Result<MsModelFiles> {
         // 标准化仓库名: org/name → models--org--name
         let normalized_repo = repo.replace('/', "--");
         let model_dir = self.cache_dir.join("models--").join(&normalized_repo);
@@ -251,19 +414,16 @@ impl ModelScopeClient {
         }
 
         if weights.is_empty() {
-            for name in [
-                "model.gguf",
-                "ggml-model-q4_0.gguf",
-                "ggml-model-q8_0.gguf",
-                "ggml-model-f16.gguf",
-            ] {
-                let candidate = snapshot.join(name);
-                if candidate.exists() {
-                    weights.push(candidate);
-                }
-            }
-            if !weights.is_empty() {
+            if let Some(best) = select_best_cached(&snapshot, "gguf", gguf_candidate_rank) {
+                weights.push(best);
                 format = WeightFormat::Gguf;
+            }
+        }
+
+        if weights.is_empty() {
+            if let Some(best) = select_best_cached(&snapshot, "onnx", onnx_candidate_rank) {
+                weights.push(best);
+                format = WeightFormat::Onnx;
             }
         }
 
@@ -283,9 +443,7 @@ impl ModelScopeClient {
         let mut latest = None;
         let mut latest_mtime: std::time::SystemTime = std::time::SystemTime::UNIX_EPOCH;
 
-        for entry in fs::read_dir(snapshots_dir)
-            .map_err(|e| LoaderError::Io(e))?
-        {
+        for entry in fs::read_dir(snapshots_dir).map_err(|e| LoaderError::Io(e))? {
             let entry = entry?;
             let metadata = entry.metadata()?;
             let mtime = metadata.modified()?;
@@ -313,9 +471,7 @@ impl ModelScopeClient {
             return Ok(models);
         }
 
-        for entry in fs::read_dir(&models_dir)
-            .map_err(|e| LoaderError::Io(e))?
-        {
+        for entry in fs::read_dir(&models_dir).map_err(|e| LoaderError::Io(e))? {
             let name = entry?.file_name();
             // 转换回 org/name 格式
             let normalized = name.to_string_lossy().replace("--", "/");
@@ -325,6 +481,65 @@ impl ModelScopeClient {
         models.sort();
         Ok(models)
     }
+}
+
+fn select_best_cached<F>(snapshot: &Path, ext: &str, ranker: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<(u8, u8)>,
+{
+    let mut candidates = Vec::new();
+
+    if ext.eq_ignore_ascii_case("onnx") {
+        let onnx_dir = snapshot.join("onnx");
+        if onnx_dir.exists() {
+            candidates.extend(find_files_with_extension(&onnx_dir, ext));
+            if let Some(best) = select_best_ranked(candidates.clone(), &ranker) {
+                return Some(best);
+            }
+        }
+    }
+
+    candidates.extend(find_files_with_extension(snapshot, ext));
+    select_best_ranked(candidates, ranker)
+}
+
+fn select_best_ranked<F>(candidates: Vec<PathBuf>, ranker: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<(u8, u8)>,
+{
+    let mut scored: Vec<(u8, u8, PathBuf)> = candidates
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.to_string_lossy();
+            ranker(&name).map(|(primary, secondary)| (primary, secondary, path))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    scored.first().map(|(_, _, path)| path.clone())
+}
+
+fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return files,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let matches = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case(ext))
+            .unwrap_or(false);
+        if matches {
+            files.push(path);
+        }
+    }
+    files
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,10 +561,7 @@ impl SafetensorsIndex {
 }
 
 /// 从 ModelScope 缓存加载模型
-pub fn from_cache(
-    cache_dir: PathBuf,
-    repo: &str,
-) -> Result<MsModelFiles> {
+pub fn from_cache(cache_dir: PathBuf, repo: &str) -> Result<MsModelFiles> {
     let client = ModelScopeClient::new(cache_dir)?;
     client.load_from_cache(repo, &[])
 }
@@ -364,8 +576,12 @@ mod tests {
         let json = r#"{"weight_map":{"model.tok_embeddings.weight":"model-00001-of-00002.safetensors","model.norm.weight":"model-00002-of-00002.safetensors"}}"#;
         let index: SafetensorsIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.shard_files().len(), 2);
-        assert!(index.shard_files().contains(&"model-00001-of-00002.safetensors".to_string()));
-        assert!(index.shard_files().contains(&"model-00002-of-00002.safetensors".to_string()));
+        assert!(index
+            .shard_files()
+            .contains(&"model-00001-of-00002.safetensors".to_string()));
+        assert!(index
+            .shard_files()
+            .contains(&"model-00002-of-00002.safetensors".to_string()));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use gllm::engine::scheduler::{RequestKind, PagedScheduler, SchedulerConfig};
+use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
 
 #[test]
 fn paged_attention_allocates_pages() {

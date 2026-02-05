@@ -13,11 +13,11 @@ use crate::adapter::{AdapterError, AdapterWeights, Message, ModelAdapter};
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::Loader;
 use crate::manifest::ModelManifest;
-use std::sync::Arc;
 use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
+use std::sync::Arc;
 
-use super::scheduler::{RequestId, RequestKind, ScheduledBatch, PagedScheduler};
+use super::scheduler::{PagedScheduler, RequestId, RequestKind, ScheduledBatch};
 use super::vllm2024::Scheduler2024Config;
 
 #[derive(Debug, Error)]

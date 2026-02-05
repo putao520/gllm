@@ -9,12 +9,13 @@ use serde::Deserialize;
 
 use crate::manifest::FileMap;
 
+#[cfg(feature = "candle")]
+use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
 use super::{
+    naming_parser::{gguf_candidate_rank, onnx_candidate_rank},
     parallel::ParallelLoader,
     LoaderError, Result,
 };
-#[cfg(feature = "candle")]
-use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const HF_TOKEN_PATH: &str = ".huggingface/token";
@@ -61,6 +62,7 @@ fn is_auth_error(err: &str) -> bool {
 pub enum WeightFormat {
     SafeTensors,
     Gguf,
+    Onnx,
 }
 
 #[derive(Debug)]
@@ -85,8 +87,7 @@ impl HfHubClient {
         // 从多个来源读取 token
         let token = read_hf_token();
 
-        let mut builder = hf_hub::api::sync::ApiBuilder::new()
-            .with_cache_dir(cache_dir);
+        let mut builder = hf_hub::api::sync::ApiBuilder::new().with_cache_dir(cache_dir);
 
         // 设置 token 用于 gated 模型访问
         if let Some(token) = token {
@@ -97,24 +98,23 @@ impl HfHubClient {
             builder = builder.with_endpoint(endpoint);
         }
 
-        let api = builder
-            .build()
-            .map_err(|err| {
-                // 检查是否为认证错误，提供更好的错误提示
-                let err_msg = err.to_string();
-                if is_auth_error(&err_msg) {
-                    LoaderError::AuthenticationError {
-                        hint: "This model requires authentication. Please:\n\
+        let api = builder.build().map_err(|err| {
+            // 检查是否为认证错误，提供更好的错误提示
+            let err_msg = err.to_string();
+            if is_auth_error(&err_msg) {
+                LoaderError::AuthenticationError {
+                    hint: "This model requires authentication. Please:\n\
                               1. Visit https://huggingface.co/settings/tokens to create a token\n\
                               2. Accept the model's license on the model page\n\
                               3. Set the HF_TOKEN environment variable:\n\
                                  export HF_TOKEN=hf_xxx...\n\
-                              4. Or add the token to ~/.huggingface/token".to_string(),
-                    }
-                } else {
-                    LoaderError::HfHub(err_msg)
+                              4. Or add the token to ~/.huggingface/token"
+                        .to_string(),
                 }
-            })?;
+            } else {
+                LoaderError::HfHub(err_msg)
+            }
+        })?;
         Ok(Self { api })
     }
 
@@ -134,73 +134,32 @@ impl HfHubClient {
         file_map: FileMap,
         parallel: ParallelLoader,
     ) -> Result<HfModelFiles> {
+        self.download_model_files_with_format(repo, file_map, parallel, None)
+    }
+
+    pub fn download_model_files_with_format(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        parallel: ParallelLoader,
+        format_hint: Option<WeightFormat>,
+    ) -> Result<HfModelFiles> {
         let repo = repo.to_string();
-        let mut aux_files = Vec::new();
+        let aux_files = self.collect_aux_files(&repo, file_map);
 
-        for name in [
-            "config.json",
-            "configuration.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "vocab.json",
-        ] {
-            if let Ok(path) = self.get_file_any(&repo, file_map, name) {
-                aux_files.push(path);
-            }
+        if let Some(format) = format_hint {
+            let result = self.download_by_format(&repo, file_map, parallel, &aux_files, format)?;
+            return result.ok_or(LoaderError::MissingWeights);
         }
 
-        if let Ok(index_path) = self.get_file_any(&repo, file_map, "model.safetensors.index.json") {
-            let shard_index = ShardIndex::from_path(&index_path)?;
-            let shard_files = shard_index.shard_files();
-            let weights = self.download_shards(&repo, &shard_files, parallel)?;
-            aux_files.push(index_path);
-            return Ok(HfModelFiles {
-                repo,
-                weights,
-                format: WeightFormat::SafeTensors,
-                aux_files,
-            });
+        if let Some(files) = self.try_download_safetensors(&repo, file_map, parallel, &aux_files)? {
+            return Ok(files);
         }
-
-        if let Ok(path) = self.get_file_any(&repo, file_map, "model.safetensors") {
-            return Ok(HfModelFiles {
-                repo,
-                weights: vec![path],
-                format: WeightFormat::SafeTensors,
-                aux_files,
-            });
+        if let Some(files) = self.try_download_gguf(&repo, &aux_files)? {
+            return Ok(files);
         }
-
-        for name in [
-            "model.gguf",
-            "ggml-model-q4_0.gguf",
-            "ggml-model-q8_0.gguf",
-            "ggml-model-f16.gguf",
-        ] {
-            if let Ok(path) = self.get_file_any(&repo, file_map, name) {
-                return Ok(HfModelFiles {
-                    repo,
-                    weights: vec![path],
-                    format: WeightFormat::Gguf,
-                    aux_files,
-                });
-            }
-        }
-
-        #[cfg(feature = "candle")]
-        if let Some((weights, index_path)) =
-            self.try_download_pytorch_bins(&repo, file_map, parallel)?
-        {
-            if let Some(index_path) = index_path {
-                aux_files.push(index_path);
-            }
-            return Ok(HfModelFiles {
-                repo,
-                weights,
-                format: WeightFormat::SafeTensors,
-                aux_files,
-            });
+        if let Some(files) = self.try_download_onnx(&repo, &aux_files)? {
+            return Ok(files);
         }
 
         Err(LoaderError::MissingWeights)
@@ -214,6 +173,201 @@ impl HfHubClient {
         self.get_file_any(repo, file_map, "tokenizer.json")
     }
 
+    fn collect_aux_files(&self, repo: &str, file_map: FileMap) -> Vec<PathBuf> {
+        let mut aux_files = Vec::new();
+        for name in [
+            "config.json",
+            "configuration.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+        ] {
+            if let Ok(path) = self.get_file_any(repo, file_map, name) {
+                aux_files.push(path);
+            }
+        }
+        aux_files
+    }
+
+    fn download_by_format(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        parallel: ParallelLoader,
+        aux_files: &[PathBuf],
+        format: WeightFormat,
+    ) -> Result<Option<HfModelFiles>> {
+        match format {
+            WeightFormat::SafeTensors => {
+                self.try_download_safetensors(repo, file_map, parallel, aux_files)
+            }
+            WeightFormat::Gguf => self.try_download_gguf(repo, aux_files),
+            WeightFormat::Onnx => self.try_download_onnx(repo, aux_files),
+        }
+    }
+
+    fn try_download_safetensors(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        parallel: ParallelLoader,
+        aux_files: &[PathBuf],
+    ) -> Result<Option<HfModelFiles>> {
+        if let Ok(index_path) = self.get_file_any(repo, file_map, "model.safetensors.index.json") {
+            let shard_index = ShardIndex::from_path(&index_path)?;
+            let shard_files = shard_index.shard_files();
+            let weights = self.download_shards(repo, &shard_files, parallel)?;
+            let mut aux = aux_files.to_vec();
+            aux.push(index_path);
+            return Ok(Some(HfModelFiles {
+                repo: repo.to_string(),
+                weights,
+                format: WeightFormat::SafeTensors,
+                aux_files: aux,
+            }));
+        }
+
+        if let Ok(path) = self.get_file_any(repo, file_map, "model.safetensors") {
+            return Ok(Some(HfModelFiles {
+                repo: repo.to_string(),
+                weights: vec![path],
+                format: WeightFormat::SafeTensors,
+                aux_files: aux_files.to_vec(),
+            }));
+        }
+
+        #[cfg(feature = "candle")]
+        if let Some((weights, index_path)) =
+            self.try_download_pytorch_bins(repo, file_map, parallel)?
+        {
+            let mut aux = aux_files.to_vec();
+            if let Some(index_path) = index_path {
+                aux.push(index_path);
+            }
+            return Ok(Some(HfModelFiles {
+                repo: repo.to_string(),
+                weights,
+                format: WeightFormat::SafeTensors,
+                aux_files: aux,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    fn try_download_gguf(&self, repo: &str, aux_files: &[PathBuf]) -> Result<Option<HfModelFiles>> {
+        for candidate in self.ranked_gguf_candidates(repo) {
+            if let Ok(path) = self.get_file(repo, &candidate) {
+                return Ok(Some(HfModelFiles {
+                    repo: repo.to_string(),
+                    weights: vec![path],
+                    format: WeightFormat::Gguf,
+                    aux_files: aux_files.to_vec(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn try_download_onnx(&self, repo: &str, aux_files: &[PathBuf]) -> Result<Option<HfModelFiles>> {
+        for candidate in self.ranked_onnx_candidates(repo) {
+            if let Ok(path) = self.get_file(repo, &candidate) {
+                return Ok(Some(HfModelFiles {
+                    repo: repo.to_string(),
+                    weights: vec![path],
+                    format: WeightFormat::Onnx,
+                    aux_files: aux_files.to_vec(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn ranked_gguf_candidates(&self, repo: &str) -> Vec<String> {
+        if let Ok(files) = self.list_repo_files(repo) {
+            let mut ranked: Vec<(u8, u8, String)> = files
+                .into_iter()
+                .filter_map(|name| {
+                    gguf_candidate_rank(&name)
+                        .map(|(primary, secondary)| (primary, secondary, name))
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+            if !ranked.is_empty() {
+                return ranked.into_iter().map(|(_, _, name)| name).collect();
+            }
+        }
+
+        let mut candidates = vec![
+            "model.gguf".to_string(),
+            "ggml-model-q4_0.gguf".to_string(),
+            "ggml-model-q8_0.gguf".to_string(),
+            "ggml-model-f16.gguf".to_string(),
+        ];
+
+        candidates.sort_by(|a, b| {
+            let ra = gguf_candidate_rank(a).unwrap_or((0, 0));
+            let rb = gguf_candidate_rank(b).unwrap_or((0, 0));
+            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
+        });
+
+        candidates
+    }
+
+    fn ranked_onnx_candidates(&self, repo: &str) -> Vec<String> {
+        if let Ok(files) = self.list_repo_files(repo) {
+            let mut ranked: Vec<(u8, u8, String)> = files
+                .into_iter()
+                .filter_map(|name| {
+                    onnx_candidate_rank(&name)
+                        .map(|(primary, secondary)| (primary, secondary, name))
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+            if !ranked.is_empty() {
+                return ranked.into_iter().map(|(_, _, name)| name).collect();
+            }
+        }
+
+        let mut candidates = vec![
+            "onnx/model.onnx",
+            "onnx/model_fp16.onnx",
+            "onnx/model_fp32.onnx",
+            "onnx/model_int8.onnx",
+            "onnx/model_uint8.onnx",
+            "onnx/model_q4.onnx",
+            "onnx/model_quantized.onnx",
+            "model.onnx",
+            "model_fp16.onnx",
+            "model_fp32.onnx",
+            "model_int8.onnx",
+            "model_uint8.onnx",
+            "model_q4.onnx",
+            "model_quantized.onnx",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+        candidates.retain(|name| onnx_candidate_rank(name).is_some());
+        candidates.sort_by(|a, b| {
+            let ra = onnx_candidate_rank(a).unwrap_or((0, 0));
+            let rb = onnx_candidate_rank(b).unwrap_or((0, 0));
+            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
+        });
+        candidates
+    }
+
+    fn list_repo_files(&self, repo: &str) -> Result<Vec<String>> {
+        let info = self
+            .api
+            .model(repo.to_string())
+            .info()
+            .map_err(|err| LoaderError::HfHub(err.to_string()))?;
+        Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
+    }
+
     #[cfg(feature = "candle")]
     fn try_download_pytorch_bins(
         &self,
@@ -221,9 +375,7 @@ impl HfHubClient {
         file_map: FileMap,
         parallel: ParallelLoader,
     ) -> Result<Option<(Vec<PathBuf>, Option<PathBuf>)>> {
-        if let Ok(index_path) =
-            self.get_file_any(repo, file_map, "pytorch_model.bin.index.json")
-        {
+        if let Ok(index_path) = self.get_file_any(repo, file_map, "pytorch_model.bin.index.json") {
             let shard_index = ShardIndex::from_path(&index_path)?;
             let shard_files = shard_index.shard_files();
             let bin_paths = self.download_shards(repo, &shard_files, parallel)?;
@@ -245,7 +397,8 @@ impl HfHubClient {
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {
         let repo_api = self.api.model(repo.to_string());
         // get() 会自动检查缓存，不存在则下载（无进度显示）
-        repo_api.get(filename)
+        repo_api
+            .get(filename)
             .map_err(|err| LoaderError::HfHub(err.to_string()))
     }
 
@@ -286,7 +439,8 @@ impl HfHubClient {
                 let filename = shard_path.to_string_lossy().to_string();
                 let repo_api = api.model(repo_id.clone());
 
-                let path = repo_api.get(&filename)
+                let path = repo_api
+                    .get(&filename)
                     .map_err(|err| LoaderError::HfHub(err.to_string()))?;
                 result.push(path);
             }

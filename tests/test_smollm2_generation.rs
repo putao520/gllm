@@ -132,12 +132,10 @@ fn test_smollm2_chat_template() {
 
     use gllm::adapter::{Message, Role};
 
-    let messages = vec![
-        Message {
-            role: Role::User,
-            content: "What is the capital of Germany?".to_string(),
-        },
-    ];
+    let messages = vec![Message {
+        role: Role::User,
+        content: "What is the capital of Germany?".to_string(),
+    }];
 
     let response = client
         .generate_chat(messages)

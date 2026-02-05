@@ -45,20 +45,28 @@ fn test_multiple_architectures_generation() {
                 println!("  Architecture: {:?}", arch);
 
                 print!("  Generating... ");
-                match client.generate(test.prompt).max_tokens(15).temperature(0.0).generate() {
+                match client
+                    .generate(test.prompt)
+                    .max_tokens(15)
+                    .temperature(0.0)
+                    .generate()
+                {
                     Ok(response) => {
                         let text = response.text.trim();
                         println!("✓");
                         println!("  Output: '{}'", text);
 
-                        let contains = text.to_lowercase().contains(&test.expected_contains.to_lowercase())
+                        let contains = text
+                            .to_lowercase()
+                            .contains(&test.expected_contains.to_lowercase())
                             || text.contains(test.expected_contains);
 
                         if contains {
                             println!("  ✅ Contains '{}'", test.expected_contains);
                             passed += 1;
                         } else {
-                            let msg = format!("Output does not contain '{}'", test.expected_contains);
+                            let msg =
+                                format!("Output does not contain '{}'", test.expected_contains);
                             println!("  ⚠️  {}", msg);
                             failed.push((test.alias, test.prompt, msg));
                         }
@@ -170,11 +178,7 @@ fn test_multiple_sequences_same_model() {
         Ok(client) => {
             println!("✅ Model loaded");
 
-            let prompts = vec![
-                "Hello, my name is",
-                "The weather today is",
-                "I like to eat",
-            ];
+            let prompts = vec!["Hello, my name is", "The weather today is", "I like to eat"];
 
             for (i, prompt) in prompts.iter().enumerate() {
                 let response = client
@@ -186,7 +190,10 @@ fn test_multiple_sequences_same_model() {
 
                 println!("  Seq {}: '{}'", i + 1, prompt);
                 println!("    Output: '{}'", response.text.trim());
-                assert!(!response.text.trim().is_empty(), "Output should not be empty");
+                assert!(
+                    !response.text.trim().is_empty(),
+                    "Output should not be empty"
+                );
             }
         }
         Err(e) => {

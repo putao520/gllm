@@ -10,7 +10,7 @@
 //!   cargo run --release --example regression              # Use CPU backend (auto)
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
-use gllm::engine::scheduler::{RequestKind, PagedScheduler, SchedulerConfig};
+use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 #[cfg(feature = "candle")]
 use gllm::loader::convert_bins_to_safetensors;

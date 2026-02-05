@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 
 use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 
-use super::types::{PageMetadata, SequenceGroup};
 #[cfg(test)]
 use super::types::GroupState;
+use super::types::{PageMetadata, SequenceGroup};
 
 const FREQUENCY_WEIGHT: isize = 10;
 const PIN_BONUS: isize = 5_000;
@@ -233,12 +233,7 @@ impl HGALScheduler {
             entry.access_count = entry.access_count.saturating_add(1);
             entry.last_access = now;
             if entry.state == PageState::Warm {
-                if !Self::is_in_warmup_period_meta(
-                    entry,
-                    now,
-                    warmup_duration,
-                    min_warm_access,
-                ) {
+                if !Self::is_in_warmup_period_meta(entry, now, warmup_duration, min_warm_access) {
                     entry.state = PageState::Active;
                     entry.warm_until = None;
                 }
