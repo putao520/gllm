@@ -15,7 +15,6 @@ use super::downloader::Downloader;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
     SafeTensors,
-    Bin,
 }
 
 #[derive(Debug)]
@@ -84,30 +83,6 @@ impl ModelScopeClient {
                 repo,
                 weights: vec![path],
                 format: WeightFormat::SafeTensors,
-                aux_files,
-            });
-        }
-
-        // 尝试下载 pytorch 分片
-        if let Ok(index_path) = self.get_file_any(&repo, file_map, "pytorch_model.bin.index.json", &downloader) {
-            let shard_index = self.parse_safetensors_index(&index_path)?;
-            let shard_files = shard_index.shard_files();
-            let weights = self.download_shards(&repo, &shard_files, &downloader)?;
-            aux_files.push(index_path);
-            return Ok(MsModelFiles {
-                repo,
-                weights,
-                format: WeightFormat::Bin,
-                aux_files,
-            });
-        }
-
-        // 尝试下载单个 pytorch 文件
-        if let Ok(path) = self.get_file_any(&repo, file_map, "pytorch_model.bin", &downloader) {
-            return Ok(MsModelFiles {
-                repo,
-                weights: vec![path],
-                format: WeightFormat::Bin,
                 aux_files,
             });
         }
@@ -248,12 +223,6 @@ impl ModelScopeClient {
             }
         }
 
-        // 查找 .bin 权重
-        let bin_file = snapshot.join("pytorch_model.bin");
-        if bin_file.exists() {
-            weights.push(bin_file);
-        }
-
         // 查找辅助文件
         for name in [
             "config.json",
@@ -273,16 +242,10 @@ impl ModelScopeClient {
             return Err(LoaderError::MissingWeights);
         }
 
-        let format = if weights.iter().any(|w| w.to_string_lossy().ends_with(".safetensors")) {
-            WeightFormat::SafeTensors
-        } else {
-            WeightFormat::Bin
-        };
-
         Ok(MsModelFiles {
             repo: repo.to_string(),
             weights,
-            format,
+            format: WeightFormat::SafeTensors,
             aux_files,
         })
     }

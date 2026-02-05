@@ -23,42 +23,13 @@
 | **REQ-LOADER-002** | 智能缓存系统 | 支持本地缓存管理，避免重复下载 | `~/.gllm/cache` 结构正确，支持校验和验证 | 🟢 已实现 |
 | **REQ-LOADER-003** | 并发加载 | 支持多线程并发下载和张量加载 | 大模型加载速度显著提升 | 🟢 已实现 |
 | **REQ-LOADER-004** | 权重转换 | 支持 safetensors/bin 自动探测与转换 | 兼容主流权重格式 | 🟢 已实现 |
+| **REQ-LOADER-011** | GGUF 格式支持 | 支持加载 GGUF 量化模型 (q4_0, q8_0) | 1. 使用 `gguf-rs` 解析<br>2. 能够加载 GGUF 张量到 Tensor 结构 | 🔴 待实现 |
 | **REQ-LOADER-005** | ModelScope 支持 | 支持从魔搭社区(ModelScope)下载模型 | 1. `source` 配置项支持切换源<br>2. 自动处理 ModelScope 特有的文件结构 | 🟢 已实现 |
 | **REQ-LOADER-006** | 动态模型发现 | 支持任意 HF Model ID，无需预注册 | 1. `Client::new("org/model-name", ModelKind::Chat)` 自动下载<br>2. 从 `config.json` 自动识别架构<br>3. 无需修改代码即可支持新模型 | 🟢 已实现 |
 | **REQ-LOADER-007** | 架构自动识别 | 从模型配置文件自动推断架构类型 | 1. 读取 `config.json` 的 `model_type`/`architectures`<br>2. 匹配到对应的 Adapter<br>3. 支持常见架构的自动探测 | 🟢 已实现 |
-| **REQ-LOADER-008** | Manifest 降级为配置覆盖 | Manifest 仅用于特殊配置覆盖 | 1. 默认流程无需 Manifest<br>2. Manifest 仅用于 `rope_base` 等特殊覆盖<br>3. 新模型无需添加 Manifest 即可用 | 🟢 已实现 |
 | **REQ-LOADER-009** | Registry 清理 | 移除 KnownModel 枚举，实现纯动态加载 | 1. 移除 KnownModel<br>2. 移除硬编码 Repo 信息<br>3. 仅允许动态 Model ID | 🟢 已实现 |
 | **REQ-LOADER-010** | Registry 删除与显式用途 | 彻底移除 Registry，API 显式指定 ModelKind | 1. 删除 Registry 与 ManifestOverride<br>2. `Client::new(model_id, kind)` 强制显式传入用途<br>3. 提供 `new_chat`/`new_embedding` 快捷方法<br>4. `manifest_from_config` 不再接受 overrides | 🟢 已实现 |
 
-### 重构说明 (REQ-LOADER-REFACTOR)
-
-**当前问题**：
-- 每个模型需要在 `KnownModel` 枚举中注册
-- `hf_repo`、`model_scope_repo` 等信息硬编码
-- 添加新模型需要修改代码并重新编译
-
-**目标架构**：
-```
-用户输入: Client::new_chat("Qwen/Qwen3-0.6B")
-  ↓
-1. 构造 HF 下载地址: huggingface.co/Qwen/Qwen3-0.6B
-  ↓
-2. 下载模型文件 (config.json, tokenizer.json, safetensors)
-  ↓
-3. 读取 config.json → 识别架构 (Qwen3)
-  ↓
-4. 匹配 Qwen3Adapter → 加载权重
-  ↓
-5. (可选) 应用 Manifest 中的配置覆盖
-```
-
-**Manifest 重新定位**：
-- **从**：模型注册表（每个模型都必须注册）
-- **到**：配置覆盖层（仅用于特殊配置）
-- **保留字段**：`rope_base_override`、`max_context_override`、`moe_config`
-- **移除字段**：`hf_repo`、`model_scope_repo`、`aliases`（由用户输入直接指定）
-
-## 3. 核心功能 (REQ-CORE)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
@@ -138,3 +109,9 @@
 |----|----------|------|----------|------|
 | **REQ-ARCH-001** | 零拷贝推理 | 推理过程中 GPU 数据不回传 CPU | 符合 ARCH-GPU-001 | 🟢 已实现 |
 | **REQ-ARCH-002** | 单一后端原则 | 全程在单一后端执行 | 符合 ARCH-SINGLE-BACKEND | 🟢 已实现 |
+
+## 6. 架构约束 (REQ-ARCH)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-ARCH-003** | 纯 Rust 依赖原则 | 禁止引入 `candle`、`tch` 等重量级深度学习框架依赖 | 1. Cargo.toml 中无 candle/tch<br>2. 仅使用 safetensors/gguf-rs 等底层解析库<br>3. 计算核心完全自研 (gllm-kernels) | 🔴 待实现 |

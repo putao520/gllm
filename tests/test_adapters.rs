@@ -330,7 +330,8 @@ fn test_model(
         ModelKind::Chat => Client::new_chat(alias),
         ModelKind::Embedding => Client::new_embedding(alias),
         ModelKind::Reranker => Client::new(alias, ModelKind::Reranker),
-    } {
+    };
+    let client = match client {
         Ok(c) => c,
         Err(e) => return TestStatus::Skipped(format!("Client init failed: {}", e)),
     };

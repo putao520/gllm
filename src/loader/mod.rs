@@ -21,6 +21,7 @@ pub mod config;
 pub mod hf_hub;
 pub mod modelscope;
 pub mod parallel;
+#[cfg(feature = "candle")]
 pub mod pytorch;
 pub mod safetensors;
 
@@ -28,6 +29,9 @@ pub use downloader::{Downloader, HfHubDownloader, ModelScopeDownloader, NoProgre
 pub use hf_hub::{HfHubClient, HfModelFiles, WeightFormat};
 pub use modelscope::{ModelScopeClient, MsModelFiles};
 pub use parallel::ParallelLoader;
+#[cfg(feature = "candle")]
+pub use pytorch::convert_bins_to_safetensors;
+#[cfg(feature = "candle")]
 pub use pytorch::{PytorchConversionConfig, PytorchConversionOutput};
 pub use safetensors::{SafeTensorsLoader, TensorSlice};
 
@@ -51,6 +55,7 @@ pub enum LoaderError {
     SafeTensors(#[from] ::safetensors::SafeTensorError),
     #[error("invalid quantization: {0}")]
     InvalidQuantization(String),
+    #[cfg(feature = "candle")]
     #[error("pytorch bin error: {0}")]
     Pytorch(String),
     #[error("hf hub error: {0}")]
@@ -427,11 +432,7 @@ impl Loader {
             HfModelFiles {
                 repo: ms_files.repo,
                 weights: ms_files.weights,
-                format: if matches!(ms_files.format, modelscope::WeightFormat::SafeTensors) {
-                    WeightFormat::SafeTensors
-                } else {
-                    WeightFormat::Bin
-                },
+                format: WeightFormat::SafeTensors,
                 aux_files: ms_files.aux_files,
             }
         } else {
@@ -529,26 +530,7 @@ impl Loader {
             return Ok(());
         }
         if self.files.format != WeightFormat::SafeTensors {
-            if self.files.format == WeightFormat::Bin {
-                if let Some(paths) = find_safetensors_sidecar(&self.files.weights) {
-                    self.files.weights = paths;
-                    self.files.format = WeightFormat::SafeTensors;
-                } else {
-                    let index_path = find_bin_index(&self.files.aux_files);
-                    let output = pytorch::convert_bins_to_safetensors(
-                        &self.files.weights,
-                        index_path,
-                        &PytorchConversionConfig::default(),
-                    )?;
-                    self.files.weights = output.safetensors;
-                    if let Some(index_path) = output.index {
-                        self.files.aux_files.push(index_path);
-                    }
-                    self.files.format = WeightFormat::SafeTensors;
-                }
-            } else {
-                return Err(LoaderError::UnsupportedWeights(self.files.format));
-            }
+            return Err(LoaderError::UnsupportedWeights(self.files.format));
         }
 
         let is_moe = self.manifest.as_ref().map(|m| m.is_moe()).unwrap_or(false);
@@ -622,59 +604,6 @@ fn resolve_repo(repo_or_alias: &str) -> String {
     repo_or_alias.to_string()
 }
 
-#[derive(Debug, Deserialize)]
-struct LocalShardIndex {
-    weight_map: HashMap<String, String>,
-}
-
-impl LocalShardIndex {
-    fn shard_files(&self) -> Vec<String> {
-        let mut shards: Vec<String> = self.weight_map.values().cloned().collect();
-        shards.sort();
-        shards.dedup();
-        shards
-    }
-}
-
-fn find_safetensors_sidecar(weights: &[PathBuf]) -> Option<Vec<PathBuf>> {
-    let first = weights.first()?;
-    let dir = first.parent()?;
-    let index_path = dir.join("model.safetensors.index.json");
-    if index_path.exists() {
-        if let Ok(bytes) = std::fs::read(&index_path) {
-            if let Ok(index) = serde_json::from_slice::<LocalShardIndex>(&bytes) {
-                let mut shards = Vec::new();
-                for shard in index.shard_files() {
-                    let path = dir.join(&shard);
-                    if path.exists() {
-                        shards.push(path);
-                    }
-                }
-                if !shards.is_empty() {
-                    return Some(shards);
-                }
-            }
-        }
-    }
-
-    let single = dir.join("model.safetensors");
-    if single.exists() {
-        return Some(vec![single]);
-    }
-    None
-}
-
-fn find_bin_index(aux_files: &[PathBuf]) -> Option<&Path> {
-    aux_files.iter().find_map(|path| {
-        let name = path.file_name()?.to_string_lossy();
-        if name.ends_with(".bin.index.json") {
-            Some(path.as_path())
-        } else {
-            None
-        }
-    })
-}
-
 fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
     if weights.is_empty() {
         return Err(LoaderError::MissingWeights);
@@ -688,7 +617,6 @@ fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
             .to_ascii_lowercase();
         let detected = match ext.as_str() {
             "safetensors" => WeightFormat::SafeTensors,
-            "bin" => WeightFormat::Bin,
             _ => {
                 return Err(LoaderError::UnsupportedWeightExtension(ext));
             }

@@ -13,6 +13,8 @@ use super::{
     parallel::ParallelLoader,
     LoaderError, Result,
 };
+#[cfg(feature = "candle")]
+use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const HF_TOKEN_PATH: &str = ".huggingface/token";
@@ -58,7 +60,6 @@ fn is_auth_error(err: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
     SafeTensors,
-    Bin,
 }
 
 #[derive(Debug)]
@@ -170,24 +171,17 @@ impl HfHubClient {
             });
         }
 
-        if let Ok(index_path) = self.get_file_any(&repo, file_map, "pytorch_model.bin.index.json") {
-            let shard_index = ShardIndex::from_path(&index_path)?;
-            let shard_files = shard_index.shard_files();
-            let weights = self.download_shards(&repo, &shard_files, parallel)?;
-            aux_files.push(index_path);
+        #[cfg(feature = "candle")]
+        if let Some((weights, index_path)) =
+            self.try_download_pytorch_bins(&repo, file_map, parallel)?
+        {
+            if let Some(index_path) = index_path {
+                aux_files.push(index_path);
+            }
             return Ok(HfModelFiles {
                 repo,
                 weights,
-                format: WeightFormat::Bin,
-                aux_files,
-            });
-        }
-
-        if let Ok(path) = self.get_file_any(&repo, file_map, "pytorch_model.bin") {
-            return Ok(HfModelFiles {
-                repo,
-                weights: vec![path],
-                format: WeightFormat::Bin,
+                format: WeightFormat::SafeTensors,
                 aux_files,
             });
         }
@@ -201,6 +195,34 @@ impl HfHubClient {
 
     pub fn download_tokenizer_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
         self.get_file_any(repo, file_map, "tokenizer.json")
+    }
+
+    #[cfg(feature = "candle")]
+    fn try_download_pytorch_bins(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        parallel: ParallelLoader,
+    ) -> Result<Option<(Vec<PathBuf>, Option<PathBuf>)>> {
+        if let Ok(index_path) =
+            self.get_file_any(repo, file_map, "pytorch_model.bin.index.json")
+        {
+            let shard_index = ShardIndex::from_path(&index_path)?;
+            let shard_files = shard_index.shard_files();
+            let bin_paths = self.download_shards(repo, &shard_files, parallel)?;
+            let config = PytorchConversionConfig::default();
+            let output = convert_bins_to_safetensors(&bin_paths, Some(&index_path), &config)?;
+            return Ok(Some((output.safetensors, output.index)));
+        }
+
+        if let Ok(bin_path) = self.get_file_any(repo, file_map, "pytorch_model.bin") {
+            let config = PytorchConversionConfig::default();
+            let output =
+                convert_bins_to_safetensors(std::slice::from_ref(&bin_path), None, &config)?;
+            return Ok(Some((output.safetensors, output.index)));
+        }
+
+        Ok(None)
     }
 
     fn get_file(&self, repo: &str, filename: &str) -> Result<PathBuf> {

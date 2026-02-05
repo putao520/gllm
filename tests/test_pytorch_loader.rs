@@ -1,3 +1,5 @@
+#![cfg(feature = "candle")]
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -6,8 +8,7 @@ use std::sync::{Mutex, OnceLock};
 
 use candle_core::pickle::{Object, Stack};
 use candle_core::{Layout, Shape};
-use gllm::loader::pytorch::convert_bins_to_safetensors;
-use gllm::loader::{LoaderError, PytorchConversionConfig};
+use gllm::loader::{convert_bins_to_safetensors, LoaderError, PytorchConversionConfig};
 use hf_hub::api::sync::ApiBuilder;
 use safetensors::{Dtype, SafeTensors};
 use zip::ZipArchive;

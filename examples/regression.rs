@@ -12,13 +12,17 @@
 
 use gllm::engine::scheduler::{RequestKind, Scheduler, SchedulerConfig};
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
-use gllm::loader::pytorch::convert_bins_to_safetensors;
+#[cfg(feature = "candle")]
+use gllm::loader::convert_bins_to_safetensors;
+#[cfg(feature = "candle")]
 use gllm::loader::PytorchConversionConfig;
 use gllm::{Client, ModelKind};
 use gllm_kernels::backend_trait::Backend;
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::KvCacheConfig;
+#[cfg(feature = "candle")]
 use hf_hub::api::sync::ApiBuilder;
+#[cfg(feature = "candle")]
 use safetensors::SafeTensors;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -556,6 +560,7 @@ fn kv_cache_check() -> InternalCheck {
     }
 }
 
+#[cfg(feature = "candle")]
 fn pytorch_loader_check() -> InternalCheck {
     let name = "PyTorch bin loader";
     let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -642,6 +647,15 @@ fn pytorch_loader_check() -> InternalCheck {
         name,
         passed: true,
         error: None,
+    }
+}
+
+#[cfg(not(feature = "candle"))]
+fn pytorch_loader_check() -> InternalCheck {
+    InternalCheck {
+        name: "PyTorch bin loader",
+        passed: false,
+        error: Some("candle feature disabled; rebuild with --features candle".to_string()),
     }
 }
 
