@@ -1,5 +1,17 @@
 use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
 
+/// TEST-PAGED-001: PagedAttention 分配页面
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建调度器
+/// 2. 入队两个请求
+/// 3. 构建批次
+/// 4. 验证页面分配
+///
+/// **期望结果**: 页面正确分配
 #[test]
 fn paged_attention_allocates_pages() {
     let config = SchedulerConfig {
@@ -23,6 +35,17 @@ fn paged_attention_allocates_pages() {
     assert_eq!(scheduler.free_pages(), 6);
 }
 
+/// TEST-PAGED-002: PagedAttention 动态批处理尊重限制
+///
+/// **关联需求**: REQ-TEST-005, REQ-SCHED-003
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建调度器 (max_batch=2, max_tokens=6)
+/// 2. 入队 3 个请求 (各 3 tokens)
+/// 3. 验证批次大小和 token 数
+///
+/// **期望结果**: 第一批次 2 个请求，第二批次 1 个请求
 #[test]
 fn paged_attention_dynamic_batching_respects_limits() {
     let config = SchedulerConfig {
@@ -48,6 +71,18 @@ fn paged_attention_dynamic_batching_respects_limits() {
     scheduler.complete_batch(next);
 }
 
+/// TEST-PAGED-003: PagedAttention 双缓冲预取
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建调度器
+/// 2. 调用 prefetch_next()
+/// 3. 调用 next_batch() 两次
+/// 4. 验证 KV cache slot 不同
+///
+/// **期望结果**: 预取和实际批次使用不同 slot
 #[test]
 fn paged_attention_prefetches_with_double_buffer() {
     let config = SchedulerConfig {
@@ -76,6 +111,17 @@ fn paged_attention_prefetches_with_double_buffer() {
     scheduler.complete_batch(second);
 }
 
+/// TEST-PAGED-004: PagedAttention 拒绝超大请求
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 边界测试
+///
+/// **测试步骤**:
+/// 1. 创建调度器 (1 页面)
+/// 2. 入队超大请求 (9 tokens)
+/// 3. 尝试构建批次
+///
+/// **期望结果**: next_batch() 返回 None
 #[test]
 fn paged_attention_rejects_oversized_request() {
     let config = SchedulerConfig {

@@ -16,6 +16,17 @@ use gllm::loader::{
 /// Small GGUF model for testing - Q4_0 quantized
 const GGUF_TEST_MODEL: &str = "mav23/SmolLM-135M-Instruct-GGUF";
 
+/// TEST-INTEL-001: 从扩展名检测格式
+///
+/// **关联需求**: REQ-LOADER-013
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 检测 .safetensors 扩展名
+/// 2. 检测 .gguf 扩展名
+/// 3. 检测 .onnx 扩展名
+///
+/// **期望结果**: 正确检测格式
 #[test]
 fn detect_format_from_extensions() {
     // SafeTensors
@@ -47,6 +58,16 @@ fn detect_format_from_extensions() {
     );
 }
 
+/// TEST-INTEL-002: 解析 GGUF 量化类型
+///
+/// **关联需求**: REQ-LOADER-014
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析各种 GGUF 文件名
+/// 2. 验证量化类型正确
+///
+/// **期望结果**: 正确解析 Q4_0, Q8_0, Q4_K_M, F16 等类型
 #[test]
 fn parse_gguf_quantization_types() {
     // Standard GGUF naming
@@ -77,6 +98,16 @@ fn parse_gguf_quantization_types() {
     );
 }
 
+/// TEST-INTEL-003: 解析 ONNX 精度类型
+///
+/// **关联需求**: REQ-LOADER-015
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析各种 ONNX 文件名
+/// 2. 验证精度类型正确
+///
+/// **期望结果**: 正确解析 FP16, FP32, INT8, Q4 等类型
 #[test]
 fn parse_onnx_precision_types() {
     // ONNX with precision suffix
@@ -107,6 +138,16 @@ fn parse_onnx_precision_types() {
     );
 }
 
+/// TEST-INTEL-004: GGUF 候选排名
+///
+/// **关联需求**: REQ-LOADER-014
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 解析支持的量化类型
+/// 2. 验证排名
+///
+/// **期望结果**: Q4_0 排名高，Q6_K 排名低
 #[test]
 fn gguf_candidate_ranking() {
     // Supported quantization with high priority
@@ -120,6 +161,17 @@ fn gguf_candidate_ranking() {
     assert_eq!(rank2.1, 5); // Q6_K has rank 5
 }
 
+/// TEST-INTEL-005: ONNX 候选排名
+///
+/// **关联需求**: REQ-LOADER-015
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 检查 onnx/ 目录下的文件
+/// 2. 检查根目录下的文件
+/// 3. 验证排名
+///
+/// **期望结果**: onnx/ 目录优先，FP32 优先级最低
 #[test]
 fn onnx_candidate_ranking() {
     // Files in onnx/ directory should be preferred
@@ -138,6 +190,16 @@ fn onnx_candidate_ranking() {
     assert_eq!(rank3.1, 6); // FP32 has rank 6 (lowest)
 }
 
+/// TEST-INTEL-006: 选择优先格式
+///
+/// **关联需求**: REQ-LOADER-013
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 提供多种格式列表
+/// 2. 选择优先格式
+///
+/// **期望结果**: SafeTensors > GGUF > ONNX
 #[test]
 fn select_preferred_format() {
     // SafeTensors should be preferred over GGUF and ONNX
@@ -159,6 +221,15 @@ fn select_preferred_format() {
     );
 }
 
+/// TEST-INTEL-007: 格式检测器拒绝未知扩展名
+///
+/// **关联需求**: REQ-LOADER-013
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 检测 .bin 扩展名
+///
+/// **期望结果**: 返回 UnsupportedWeightExtension 错误
 #[test]
 fn format_detector_rejects_unknown_extensions() {
     let path = PathBuf::from("model.bin");
@@ -166,6 +237,15 @@ fn format_detector_rejects_unknown_extensions() {
     assert!(matches!(result, Err(LoaderError::UnsupportedWeightExtension(_))));
 }
 
+/// TEST-INTEL-008: GGUF 量化优先级顺序
+///
+/// **关联需求**: REQ-LOADER-014
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 比较各量化类型的优先级
+///
+/// **期望结果**: Q4_0 < Q8_0 < F32 (数值越小优先级越高)
 #[test]
 fn gguf_quantization_preference_order() {
     // Q4_0 should be preferred over Q8_0
@@ -177,6 +257,15 @@ fn gguf_quantization_preference_order() {
         < naming_parser::GgufQuantization::F32.preference_rank());
 }
 
+/// TEST-INTEL-009: ONNX 精度优先级顺序
+///
+/// **关联需求**: REQ-LOADER-015
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 比较各精度的优先级
+///
+/// **期望结果**: Q4 < FP32，UINT8 > INT8
 #[test]
 fn onnx_precision_preference_order() {
     // FP32 should be lowest priority (default fallback)
@@ -188,7 +277,20 @@ fn onnx_precision_preference_order() {
         > naming_parser::OnnxPrecision::Uint8.preference_rank());
 }
 
-// E2E: Verify actual GGUF model can be loaded with quantization detection
+/// TEST-INTEL-010: GGUF E2E 量化检测
+///
+/// **关联需求**: REQ-LOADER-013, REQ-LOADER-014
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 单API
+///
+/// **前置条件**: mav23/SmolLM-135M-Instruct-GGUF 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 使用 Loader API 加载 GGUF 模型
+/// 2. 验证格式检测
+/// 3. 验证源检测
+///
+/// **期望结果**: 正确检测 GGUF 格式和 HuggingFace 源
 #[test]
 #[ignore = "Requires actual model download"] // Run with: cargo test --test test_intelligent_loading -- --ignored
 fn gguf_e2e_quantization_detection() {
@@ -206,7 +308,19 @@ fn gguf_e2e_quantization_detection() {
     assert_eq!(loader.repo(), GGUF_TEST_MODEL);
 }
 
-// E2E: Verify smart source fallback works
+/// TEST-INTEL-011: 智能源回退 E2E
+///
+/// **关联需求**: REQ-LOADER-016
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 单API
+///
+/// **前置条件**: 网络可用
+///
+/// **测试步骤**:
+/// 1. 尝试从 HuggingFace 加载公开模型
+/// 2. 验证加载成功
+///
+/// **期望结果**: HuggingFace 下载成功
 #[test]
 #[ignore = "Requires network access"] // Run with: cargo test --test test_intelligent_loading -- --ignored
 fn smart_source_fallback_e2e() {

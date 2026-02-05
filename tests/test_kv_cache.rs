@@ -17,12 +17,34 @@ fn make_state(backend: &CpuBackend, max_seq_len: usize) -> KvCacheState {
     KvCacheState::new(handle, config)
 }
 
+/// TEST-KVCACHE-001: KV Cache Slot 翻转
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 执行 Front.flip()
+/// 2. 执行 Back.flip()
+///
+/// **期望结果**: Front 变 Back，Back 变 Front
 #[test]
 fn kv_cache_slot_flip() {
     assert_eq!(KvCacheSlot::Front.flip(), KvCacheSlot::Back);
     assert_eq!(KvCacheSlot::Back.flip(), KvCacheSlot::Front);
 }
 
+/// TEST-KVCACHE-002: KV Cache 状态推进和边界检查
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试 + 边界测试
+///
+/// **测试步骤**:
+/// 1. 推进状态 (advance)
+/// 2. 验证 used() 和 remaining()
+/// 3. 尝试超额推进 (应返回错误)
+/// 4. 重置状态
+///
+/// **期望结果**: 状态正确推进，超额推进返回 Exhausted 错误
 #[test]
 fn kv_cache_state_advances_and_bounds() {
     let backend = CpuBackend::new();
@@ -53,6 +75,19 @@ fn kv_cache_state_advances_and_bounds() {
     assert_eq!(state.remaining(), 4);
 }
 
+/// TEST-KVCACHE-003: KV Cache 双缓冲交换和重置
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建双缓冲 (front/back)
+/// 2. 验证初始状态
+/// 3. 执行 swap()
+/// 4. 验证交换后状态
+/// 5. 执行 reset_all()
+///
+/// **期望结果**: 交换后 front/back 互换，重置后归零
 #[test]
 fn kv_cache_double_buffer_swap_and_reset() {
     let backend = CpuBackend::new();

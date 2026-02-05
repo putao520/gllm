@@ -27,6 +27,15 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
     loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
 }
 
+/// TEST-ERROR-001: 空输入返回错误
+///
+/// **关联需求**: REQ-TEST-007
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 使用空字符串调用 generate()
+///
+/// **期望结果**: 返回 EmptyPrompt 错误
 #[test]
 fn empty_prompt_returns_error() {
     let files = TestModelFiles::new().expect("test model files");
@@ -35,6 +44,16 @@ fn empty_prompt_returns_error() {
     assert!(matches!(err, ExecutorError::EmptyPrompt));
 }
 
+/// TEST-ERROR-002: 损坏权重上报加载错误
+///
+/// **关联需求**: REQ-TEST-007
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 创建损坏的权重文件
+/// 2. 尝试加载权重
+///
+/// **期望结果**: 返回 SafeTensors/InvalidQuantization/MissingTensor 错误
 #[test]
 fn corrupted_weights_surface_loader_errors() {
     let dir = TempDir::new().expect("temp dir");
@@ -59,6 +78,16 @@ fn corrupted_weights_surface_loader_errors() {
     );
 }
 
+/// TEST-ERROR-003: OOM 错误被检测用于回退
+///
+/// **关联需求**: REQ-TEST-007
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 创建 OOM 错误
+/// 2. 调用 is_oom_context_error()
+///
+/// **期望结果**: 正确识别 OOM 错误
 #[test]
 fn oom_errors_are_detected_for_fallback() {
     let err =

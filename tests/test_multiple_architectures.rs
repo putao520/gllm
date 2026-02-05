@@ -26,6 +26,19 @@ const MODEL_TESTS: &[ModelTest] = &[
     },
 ];
 
+/// TEST-MULTI-ARCH-001: 多架构生成测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: Qwen2.5/SmolLM2 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 测试多个架构的模型
+/// 2. 验证生成输出包含期望内容
+///
+/// **期望结果**: 所有架构模型正确生成
 #[test]
 #[ignore = "Run with: cargo test --test test_multiple_architectures -- --ignored"]
 fn test_multiple_architectures_generation() {
@@ -104,6 +117,19 @@ fn test_multiple_architectures_generation() {
     }
 }
 
+/// TEST-MULTI-ARCH-002: Qwen2.5 GQA 架构专项测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: Qwen/Qwen2.5-0.5B-Instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 Qwen2.5 模型
+/// 2. 执行数学问题生成
+/// 3. 验证输出包含 "5"
+///
+/// **期望结果**: 正确输出 "5"
 #[test]
 #[ignore = "Run with: cargo test --test test_multiple_architectures -- --ignored"]
 fn test_qwen25_gqa_specific() {
@@ -135,6 +161,18 @@ fn test_qwen25_gqa_specific() {
     }
 }
 
+/// TEST-MULTI-ARCH-003: SmolLM2 GQA 架构专项测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: HuggingFaceTB/SmolLM2-135M-Instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 SmolLM2 模型
+/// 2. 执行多个事实问题生成
+///
+/// **期望结果**: 正确生成输出
 #[test]
 #[ignore = "Run with: cargo test --test test_multiple_architectures -- --ignored"]
 fn test_smollm2_gqa_specific() {
@@ -169,6 +207,19 @@ fn test_smollm2_gqa_specific() {
     }
 }
 
+/// TEST-MULTI-ARCH-004: 同一模型多次序列生成
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM2 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载模型
+/// 2. 执行多次连续生成
+/// 3. 验证每次输出非空
+///
+/// **期望结果**: 所有生成输出非空
 #[test]
 #[ignore = "Run with: cargo test --test test_multiple_architectures -- --ignored"]
 fn test_multiple_sequences_same_model() {

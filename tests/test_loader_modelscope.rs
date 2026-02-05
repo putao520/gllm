@@ -16,6 +16,17 @@ fn write_config(path: &Path) {
     std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
+/// TEST-LOADER-002: Loader 接受 configuration.json
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 configuration.json
+/// 2. 使用 from_local_files 加载
+/// 3. 验证 config_path
+///
+/// **期望结果**: config_path 指向 configuration.json
 #[test]
 fn loader_accepts_configuration_json() {
     let dir = TempDir::new().expect("temp dir");

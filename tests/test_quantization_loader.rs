@@ -15,6 +15,17 @@ fn f16_bytes(values: &[f16]) -> Vec<u8> {
     out
 }
 
+/// TEST-QUANT-004: AWQ 量化权重反量化
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 AWQ 格式权重
+/// 2. 加载并反量化
+/// 3. 验证结果
+///
+/// **期望结果**: 正确反量化为 [1.0, 2.0, 4.0, 6.0]
 #[test]
 fn quantized_awq_like_weights_are_dequantized() {
     let dir = TempDir::new().expect("temp dir");

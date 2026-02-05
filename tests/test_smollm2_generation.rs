@@ -4,6 +4,20 @@
 
 use gllm::Client;
 
+/// TEST-SMOLLM2-001: SmolLM2 简单生成测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: HuggingFaceTB/SmolLM2-135M-Instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 SmolLM2 模型
+/// 2. 执行补全生成
+/// 3. 验证输出
+///
+/// **期望结果**: 输出非空且包含 "Paris" 或类似内容
 #[test]
 #[ignore = "Requires model download - run with cargo test --test test_smollm2_generation -- --ignored"]
 fn test_smollm2_generation_simple() {
@@ -50,6 +64,19 @@ fn test_smollm2_generation_simple() {
     println!("  Contains 'Paris': {}", is_reasonable);
 }
 
+/// TEST-SMOLLM2-002: SmolLM2 多 token 生成测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM2 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载模型
+/// 2. 生成长文本
+/// 3. 验证输出
+///
+/// **期望结果**: 输出非空且长度 > 10
 #[test]
 #[ignore = "Requires model download - run with cargo test --test test_smollm2_generation -- --ignored"]
 fn test_smollm2_generation_multiple_tokens() {
@@ -84,6 +111,19 @@ fn test_smollm2_generation_multiple_tokens() {
     assert!(text.len() > 10, "output should be meaningful");
 }
 
+/// TEST-SMOLLM2-003: SmolLM2 QKV 布局修复测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM2 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载模型
+/// 2. 执行数学问题生成
+/// 3. 验证输出
+///
+/// **期望结果**: 输出包含 "2" 或 "two"
 #[test]
 #[ignore = "Requires model download - run with cargo test --test test_smollm2_generation -- --ignored"]
 fn test_smollm2_qkv_layout_fix() {
@@ -117,6 +157,19 @@ fn test_smollm2_qkv_layout_fix() {
     assert!(!text.is_empty(), "output should not be empty");
 }
 
+/// TEST-SMOLLM2-004: SmolLM2 chat 模板测试
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM2 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载模型
+/// 2. 使用 generate_chat()
+/// 3. 验证输出
+///
+/// **期望结果**: 输出非空且提到 Berlin
 #[test]
 #[ignore = "Requires model download - run with cargo test --test test_smollm2_generation -- --ignored"]
 fn test_smollm2_chat_template() {

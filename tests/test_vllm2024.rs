@@ -5,6 +5,17 @@ use gllm_kernels::backend_trait::Backend;
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::KvCacheConfig;
 
+/// TEST-VLLM-001: LMCache 存储和复用 handles
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 LMCache 状态
+/// 2. 存储 KV handle
+/// 3. 获取缓存的 handle
+///
+/// **期望结果**: 缓存命中，返回正确的 handle
 #[test]
 fn lmcache_stores_and_reuses_handles() {
     let mut state = LmcacheState::new(LMCacheConfig {
@@ -35,6 +46,17 @@ fn lmcache_stores_and_reuses_handles() {
     assert_eq!(hit.logits_handle, None);
 }
 
+/// TEST-VLLM-002: SwiftKV SiKV 减少页面
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 SwiftKV 状态
+/// 2. 执行 distill_cpu()
+/// 3. 验证蒸馏后页面数减少
+///
+/// **期望结果**: 页面数减少，无需精度回退
 #[test]
 fn swift_kv_sikv_reduces_pages() {
     let mut swift = SwiftKvState::new(SwiftKVConfig {
@@ -55,6 +77,17 @@ fn swift_kv_sikv_reduces_pages() {
     assert!(!outcome.precision_fallback);
 }
 
+/// TEST-VLLM-003: SwiftKV AKV 共享相似层
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 启用 across_kv 模式
+/// 2. 执行 distill_cpu()
+/// 3. 验证相似层被合并
+///
+/// **期望结果**: 相似层被合并，页面数减少
 #[test]
 fn swift_kv_akv_shares_similar_layers() {
     let mut swift = SwiftKvState::new(SwiftKVConfig {
@@ -69,6 +102,17 @@ fn swift_kv_akv_shares_similar_layers() {
     assert_eq!(outcome.result.distilled_pages, 1);
 }
 
+/// TEST-VLLM-004: SwiftKV 精度保护回退
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 边界测试
+///
+/// **测试步骤**:
+/// 1. 设置严格的精度保护阈值
+/// 2. 执行 distill_cpu()
+/// 3. 验证精度回退
+///
+/// **期望结果**: 精度不足时触发回退
 #[test]
 fn swift_kv_precision_guard_fallbacks() {
     let mut swift = SwiftKvState::new(SwiftKVConfig {

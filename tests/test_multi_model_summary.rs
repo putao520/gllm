@@ -16,6 +16,20 @@ const MODELS_TO_TEST: &[ModelTestCase] = &[ModelTestCase {
     architecture: "Llama4",
 }];
 
+/// TEST-MULTI-001: 多模型 QKV 布局修复验证
+///
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: HuggingFaceTB/SmolLM2-135M-Instruct 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载模型
+/// 2. 执行多次生成
+/// 3. 验证输出包含期望内容
+///
+/// **期望结果**: QKV 布局修复后所有测试通过
 #[test]
 #[ignore = "Run with: cargo test --test test_multi_model_summary -- --ignored"]
 fn test_all_available_models() {

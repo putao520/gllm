@@ -159,21 +159,64 @@ fn run_roundtrip(repo: &str, expected_dtype: PytorchDtype) -> TestResult<()> {
     Ok(())
 }
 
+/// TEST-PYTORCH-001: PyTorch bin F32 往环转换
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 下载 F32 PyTorch 模型
+/// 2. 转换为 SafeTensors
+/// 3. 验证数据一致性
+///
+/// **期望结果**: 转换后数据与原始数据一致
 #[test]
 fn pytorch_bin_roundtrip_f32() {
     run_roundtrip(F32_REPO, PytorchDtype::F32).expect("f32 roundtrip");
 }
 
+/// TEST-PYTORCH-002: PyTorch bin F16 循环转换
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 下载 F16 PyTorch 模型
+/// 2. 转换为 SafeTensors
+/// 3. 验证数据一致性
+///
+/// **期望结果**: 转换后数据与原始数据一致
 #[test]
 fn pytorch_bin_roundtrip_f16() {
     run_roundtrip(F16_REPO, PytorchDtype::F16).expect("f16 roundtrip");
 }
 
+/// TEST-PYTORCH-003: PyTorch bin BF16 循环转换
+///
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 下载 BF16 PyTorch 模型
+/// 2. 转换为 SafeTensors
+/// 3. 验证数据一致性
+///
+/// **期望结果**: 转换后数据与原始数据一致
 #[test]
 fn pytorch_bin_roundtrip_bf16() {
     run_roundtrip(BF16_REPO, PytorchDtype::BF16).expect("bf16 roundtrip");
 }
 
+/// TEST-PYTORCH-004: PyTorch 转换拒绝空输入
+///
+/// **关联需求**: REQ-TEST-007
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 传入空文件列表
+/// 2. 尝试转换
+///
+/// **期望结果**: 返回 MissingWeights 错误
 #[test]
 fn pytorch_conversion_rejects_empty_input() {
     let err = convert_bins_to_safetensors(&[], None, &PytorchConversionConfig::default())
@@ -181,6 +224,16 @@ fn pytorch_conversion_rejects_empty_input() {
     assert!(matches!(err, LoaderError::MissingWeights));
 }
 
+/// TEST-PYTORCH-005: PyTorch 转换拒绝缺失 state dict key
+///
+/// **关联需求**: REQ-TEST-007
+/// **测试类型**: 负向测试
+///
+/// **测试步骤**:
+/// 1. 提供不存在的 state_dict_key
+/// 2. 尝试转换
+///
+/// **期望结果**: 返回包含 "state dict" 的错误
 #[test]
 fn pytorch_conversion_rejects_missing_state_dict_key() {
     let bin_path = download_bin(F32_REPO).expect("download bin");

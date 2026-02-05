@@ -27,6 +27,17 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
     loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
 }
 
+/// TEST-PERF-001: 性能测试报告吞吐量和延迟
+///
+/// **关联需求**: REQ-TEST-008
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 执行多次 embedding
+/// 2. 计算吞吐量
+/// 3. 验证吞吐量为有限正值
+///
+/// **期望结果**: 吞吐量为有限正值，延迟 < 500ms
 #[test]
 fn performance_harness_reports_throughput_and_latency() {
     let files = TestModelFiles::new().expect("test model files");
@@ -45,6 +56,16 @@ fn performance_harness_reports_throughput_and_latency() {
     assert!(elapsed.as_millis() < 500, "benchmark should stay CI-fast");
 }
 
+/// TEST-PERF-002: 性能测试检查内存压力
+///
+/// **关联需求**: REQ-TEST-008
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 获取后端内存压力
+/// 2. 验证压力值在 [0, 1] 范围内
+///
+/// **期望结果**: 内存压力为归一化值 (0.0 ~ 1.0)
 #[test]
 fn performance_harness_checks_memory_pressure() {
     let files = TestModelFiles::new().expect("test model files");

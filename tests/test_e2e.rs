@@ -76,7 +76,20 @@ fn test_e2e_feature(feature: &str, alias: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// E2E 测试 - 验证功能端到端流程
+/// TEST-E2E-001: E2E 测试 - 验证功能端到端流程
+///
+/// **关联需求**: REQ-TEST-001
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: ModelScope 可用，模型已缓存
+///
+/// **测试步骤**:
+/// 1. 创建 Client (显式指定 ModelKind)
+/// 2. 执行 generate/embeddings/rerank
+/// 3. 验证输出结果
+///
+/// **期望结果**: ModelScope 模型 100% 通过
 #[test]
 fn e2e_features() {
     println!("🚀 E2E 测试");

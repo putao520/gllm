@@ -9,6 +9,17 @@ use gllm::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::PageState;
 
+/// TEST-MOE-001: Qwen3 MoE manifest 选择 MoE 适配器
+///
+/// **关联需求**: REQ-TEST-009
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 Qwen3MoE manifest
+/// 2. 验证 is_moe() 返回 true
+/// 3. 验证 adapter_for() 返回 Some
+///
+/// **期望结果**: MoE 模型正确识别并获取适配器
 #[test]
 fn qwen3_moe_manifest_selects_moe_adapter() {
     let manifest = ModelManifest {
@@ -29,6 +40,17 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
     );
 }
 
+/// TEST-MOE-002: MoE 路由器优先驱逐冷专家
+///
+/// **关联需求**: REQ-TEST-009
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建热专家 (高频访问)
+/// 2. 创建冷专家 (低频访问)
+/// 3. 执行 select_victim_groups()
+///
+/// **期望结果**: 冷专家被优先驱逐
 #[test]
 fn moe_router_prefers_colder_experts_for_eviction() {
     let mut scheduler = HGALScheduler::new(HGALConfig::default());
@@ -65,6 +87,17 @@ fn moe_router_prefers_colder_experts_for_eviction() {
     assert_eq!(victims, vec![2]);
 }
 
+/// TEST-MOE-003: MoE 路由器标记访问并平衡最近性
+///
+/// **关联需求**: REQ-TEST-009
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建两个专家
+/// 2. 标记访问
+/// 3. 验证选择逻辑保持平衡
+///
+/// **期望结果**: 两个专家都保持在活跃状态
 #[test]
 fn moe_router_marks_access_and_balances_recency() {
     let mut scheduler = HGALScheduler::new(HGALConfig::default());

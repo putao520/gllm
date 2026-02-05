@@ -16,6 +16,17 @@ fn f16_bytes(values: &[f16]) -> Vec<u8> {
     out
 }
 
+/// TEST-QUANT-001: GPTQ signed int4 反量化
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 packed int4 权重文件
+/// 2. 加载并反量化
+/// 3. 验证反量化结果
+///
+/// **期望结果**: 正确反量化为 [-1.0, 0.5]
 #[test]
 fn gptq_signed_int4_dequantizes_with_metadata_bits() {
     let dir = TempDir::new().expect("temp dir");
@@ -65,6 +76,17 @@ fn gptq_signed_int4_dequantizes_with_metadata_bits() {
     }
 }
 
+/// TEST-QUANT-002: SmoothQuant 块缩放减少激活范围
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 BlockQuantization
+/// 2. 缩放激活值
+/// 3. 验证峰值被裁剪
+///
+/// **期望结果**: 缩放后峰值 <= 4.0
 #[test]
 fn smoothquant_block_scales_reduce_activation_range() {
     let quant = BlockQuantization::new(2, vec![f16::from_f32(0.5), f16::from_f32(0.25)]);
@@ -79,6 +101,17 @@ fn smoothquant_block_scales_reduce_activation_range() {
     assert_eq!(scaled[0], 2.0);
 }
 
+/// TEST-QUANT-003: 动态 INT8 量化往返误差容忍
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 量化浮点数为 INT8
+/// 2. 反量化回浮点数
+/// 3. 验证误差 < 0.05
+///
+/// **期望结果**: 误差在容忍范围内
 #[test]
 fn dynamic_int8_quantization_round_trips_within_tolerance() {
     let source = [0.5f32, -1.5, 3.25, -0.75];

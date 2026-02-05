@@ -36,6 +36,21 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
     }
 }
 
+/// TEST-GGUF-001: GGUF loader SmolLM Q8_0 E2E
+///
+/// **关联需求**: REQ-TEST-002, REQ-TEST-006
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: SmolLM-135M GGUF Q8_0 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 下载 base 配置和 GGUF 权重
+/// 2. 创建执行器
+/// 3. 验证 Q8_0 张量反量化
+/// 4. 执行生成
+///
+/// **期望结果**: 反量化正确，生成非空输出
 #[test]
 fn gguf_loader_smollm_q8_0_e2e() {
     let (config_path, tokenizer_path, manifest) =
@@ -106,7 +121,18 @@ fn download_gguf_file() -> Result<PathBuf, String> {
         .ok_or_else(|| "gguf weights missing".to_string())
 }
 
-// 调试函数：打印 GGUF 张量的量化类型
+/// TEST-GGUF-002: 调试 GGUF 张量类型
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM-135M GGUF Q8_0 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 GGUF 文件
+/// 2. 打印各张量的量化类型
+///
+/// **期望结果**: 显示 Q4_0 和 Q8_0 张量统计
 #[test]
 fn debug_gguf_tensor_types() {
     use gllm::loader::gguf::GgufLoader;
