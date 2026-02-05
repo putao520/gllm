@@ -33,7 +33,7 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
 /// **测试类型**: 正向测试
 ///
 /// **测试步骤**:
-/// 1. 执行多次 embedding
+/// 1. 使用 Embedding 模型执行多次 embedding
 /// 2. 计算吞吐量
 /// 3. 验证吞吐量为有限正值
 ///
@@ -41,7 +41,8 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
 #[test]
 fn performance_harness_reports_throughput_and_latency() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut executor = build_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
+    // 使用 Embedding 模型而不是 Chat 模型
+    let mut executor = build_executor("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &files);
 
     let mut total_dims = 0usize;
     let start = Instant::now();
@@ -62,14 +63,15 @@ fn performance_harness_reports_throughput_and_latency() {
 /// **测试类型**: 正向测试
 ///
 /// **测试步骤**:
-/// 1. 获取后端内存压力
+/// 1. 使用 Embedding 模型获取后端内存压力
 /// 2. 验证压力值在 [0, 1] 范围内
 ///
 /// **期望结果**: 内存压力为归一化值 (0.0 ~ 1.0)
 #[test]
 fn performance_harness_checks_memory_pressure() {
     let files = TestModelFiles::new().expect("test model files");
-    let executor = build_executor("Qwen/Qwen3-0.6B", ModelKind::Chat, &files);
+    // 使用 Embedding 模型而不是 Chat 模型
+    let executor = build_executor("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &files);
     let pressure = executor
         .backend()
         .get_memory_pressure()
