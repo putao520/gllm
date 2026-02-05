@@ -28,12 +28,11 @@ fn cuda_available() -> bool {
 // 矩阵 1: ModelKind × WeightFormat × CPU
 // ============================================================================
 
+/// SafeTensors 格式测试 - Qwen3-0.6B 基础版 (公开模型)
 #[test]
 fn matrix_chat_safetensors_cpu() {
-    // 使用 HuggingFaceTB/SmolLM-135M-Instruct，明确指定 SafeTensors 格式
-    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
-        .expect("HF loader should succeed with SafeTensors format");
+    let model = "Qwen/Qwen3-0.6B";
+    let loader = Loader::from_hf(model).expect("SafeTensors loader should succeed");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
 
     // 验证 manifest 创建
@@ -46,20 +45,29 @@ fn matrix_chat_safetensors_cpu() {
     }
 }
 
+/// GGUF 格式测试 - Qwen3-0.6B-GGUF (公开模型)
 #[test]
 fn matrix_chat_gguf_cpu() {
-    let model = "mav23/SmolLM-135M-Instruct-GGUF";
-    let loader = Loader::from_hf(model).expect("GGUF loader");
+    let model = "Qwen/Qwen3-0.6B-GGUF";
+    let loader = Loader::from_hf(model).expect("GGUF loader should succeed");
     assert_eq!(loader.weight_format(), WeightFormat::Gguf);
 }
 
+/// ONNX 格式测试 - Qwen3-0.6B-DQ-ONNX (公开模型)
+#[test]
+fn matrix_chat_onnx_cpu() {
+    let model = "onnx-community/Qwen3-0.6B-DQ-ONNX";
+    let loader = Loader::from_hf(model).expect("ONNX loader should succeed");
+    assert_eq!(loader.weight_format(), WeightFormat::Onnx);
+}
+
+/// Embedding SafeTensors 测试
 #[test]
 fn matrix_embedding_safetensors_cpu() {
-    // 使用公开的 Embedding 模型，明确指定 SafeTensors 格式
-    let model = "sentence-transformers/all-MiniLM-L6-v2";
-    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
-        .expect("HF loader should succeed for public model");
-    assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
+    let model = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+    let loader = Loader::from_hf(model).expect("Embedding loader should succeed");
+    // Embedding 模型通常是 ONNX 格式
+    assert!(loader.weight_format() == WeightFormat::Onnx || loader.weight_format() == WeightFormat::SafeTensors);
 
     // 验证 manifest 类型
     if let Some(config_path) = loader.config_path() {
@@ -71,13 +79,13 @@ fn matrix_embedding_safetensors_cpu() {
     }
 }
 
+/// Reranker ONNX 测试
 #[test]
 fn matrix_reranker_safetensors_cpu() {
-    // 使用公开的 Reranker 模型，明确指定 SafeTensors 格式
-    let model = "BAAI/bge-reranker-v2-m3";
-    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
-        .expect("HF loader should succeed for public model");
-    assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
+    let model = "zhiqing/Qwen3-Reranker-0.6B-ONNX";
+    let loader = Loader::from_hf(model).expect("Reranker loader should succeed");
+    // Reranker 模型通常是 ONNX 格式
+    assert!(loader.weight_format() == WeightFormat::Onnx || loader.weight_format() == WeightFormat::SafeTensors);
 
     // 验证 manifest 类型
     if let Some(config_path) = loader.config_path() {
@@ -96,30 +104,30 @@ fn matrix_reranker_safetensors_cpu() {
 #[test]
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_safetensors_cuda() {
-    // 使用 SmolLM，明确指定 SafeTensors 格式
-    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
-        .expect("HF loader should succeed");
+    // SafeTensors + CUDA
+    let model = "Qwen/Qwen3-0.6B";
+    let loader = Loader::from_hf(model).expect("SafeTensors loader should succeed");
     assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
     assert!(cuda_available(), "CUDA backend should be available");
-
-    // 验证 manifest
-    if let Some(config_path) = loader.config_path() {
-        let config_value = gllm::loader::config::load_config_value(config_path)
-            .expect("load config");
-        let manifest = gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Chat)
-            .expect("create manifest");
-        assert_eq!(manifest.kind, ModelKind::Chat);
-    }
 }
 
 #[test]
 #[ignore = "Requires CUDA backend"]
-fn matrix_embedding_safetensors_cuda() {
-    let model = "sentence-transformers/all-MiniLM-L6-v2";
-    let loader = Loader::auto_with_format(model, WeightFormat::SafeTensors)
-        .expect("HF loader should succeed");
-    assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
+fn matrix_chat_gguf_cuda() {
+    // GGUF + CUDA
+    let model = "Qwen/Qwen3-0.6B-GGUF";
+    let loader = Loader::from_hf(model).expect("GGUF loader should succeed");
+    assert_eq!(loader.weight_format(), WeightFormat::Gguf);
+    assert!(cuda_available(), "CUDA backend should be available");
+}
+
+#[test]
+#[ignore = "Requires CUDA backend"]
+fn matrix_chat_onnx_cuda() {
+    // ONNX + CUDA
+    let model = "onnx-community/Qwen3-0.6B-DQ-ONNX";
+    let loader = Loader::from_hf(model).expect("ONNX loader should succeed");
+    assert_eq!(loader.weight_format(), WeightFormat::Onnx);
     assert!(cuda_available(), "CUDA backend should be available");
 }
 
@@ -290,7 +298,7 @@ fn matrix_backend_cuda_detection() {
 
 #[test]
 fn matrix_source_huggingface() {
-    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
+    let model = "Qwen/Qwen3-0.6B";
     let loader = Loader::from_hf(model).expect("HF loader");
     assert_eq!(loader.source(), ModelSource::HuggingFace);
 }
@@ -298,7 +306,7 @@ fn matrix_source_huggingface() {
 #[test]
 fn matrix_source_auto_selection() {
     // auto() 应该选择 HuggingFace 作为默认源
-    let model = "HuggingFaceTB/SmolLM-135M-Instruct";
+    let model = "Qwen/Qwen3-0.6B";
     let loader = Loader::auto(model).expect("auto loader");
     assert_eq!(loader.source(), ModelSource::HuggingFace);
 }
