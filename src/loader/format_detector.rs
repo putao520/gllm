@@ -113,7 +113,7 @@ fn select_single_format(formats: Vec<WeightFormat>) -> Result<WeightFormat> {
     }
 }
 
-fn select_preferred_format(formats: &[WeightFormat]) -> WeightFormat {
+pub fn select_preferred_format(formats: &[WeightFormat]) -> WeightFormat {
     if formats.contains(&WeightFormat::SafeTensors) {
         return WeightFormat::SafeTensors;
     }
