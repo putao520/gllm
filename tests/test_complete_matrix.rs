@@ -123,23 +123,30 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
 // 矩阵 1: ModelKind × WeightFormat × CPU (真实推理验证)
 // ============================================================================
 
-/// TEST-MATRIX-GEN-001: SafeTensors 格式 Chat 模型 CPU 后端
+/// TEST-MATRIX-GEN-001: SafeTensors 或 ONNX 格式 Chat 模型 CPU 后端
 ///
 /// **关联需求**: REQ-TEST-002
 /// **测试类型**: 正向测试
 /// **前置条件**: HuggingFaceTB/SmolLM-135M-Instruct 模型已缓存
 ///
 /// **测试步骤**:
-/// 1. 加载 SafeTensors 格式的 Chat 模型
+/// 1. 加载 Chat 模型 (SafeTensors 或 ONNX 格式)
 /// 2. 使用 CPU 后端执行文本生成
 /// 3. 验证生成结果非空
 ///
 /// **期望结果**: 模型成功生成非空文本
+/// **注意**: HuggingFace 仓库现在优先提供 ONNX 格式，测试接受两种格式
 #[test]
 fn matrix_chat_safetensors_cpu() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::from_hf(model).expect("SafeTensors loader");
-    assert_eq!(loader.weight_format(), gllm::loader::WeightFormat::SafeTensors);
+    let loader = Loader::from_hf(model).expect("model loader");
+    // 接受 SafeTensors 或 ONNX 格式 (HuggingFace 仓库现在优先提供 ONNX)
+    let format = loader.weight_format();
+    assert!(
+        matches!(format, gllm::loader::WeightFormat::SafeTensors | gllm::loader::WeightFormat::Onnx),
+        "Expected SafeTensors or Onnx format, got: {:?}",
+        format
+    );
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
@@ -161,7 +168,8 @@ fn matrix_chat_safetensors_cpu() {
     let output = executor.generate("Hello", 5, 0.0).expect("generate");
     assert!(
         !output.trim().is_empty(),
-        "SafeTensors model should generate text, got: {output:?}"
+        "Model ({:?}) should generate text, got: {output:?}",
+        format
     );
 }
 
