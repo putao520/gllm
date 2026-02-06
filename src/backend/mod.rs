@@ -1,5 +1,5 @@
 use gllm_kernels::{CpuBackend, CudaBackend};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
 use crate::adapter::{adapter_for, Message};
@@ -84,7 +84,7 @@ impl BackendExecutor {
 pub struct BackendContext {
     model_ref: String,
     manifest: Arc<ModelManifest>,
-    executor: BackendExecutor,
+    executor: Mutex<BackendExecutor>,
 }
 
 impl BackendContext {
@@ -108,7 +108,7 @@ impl BackendContext {
         Ok(Self {
             model_ref,
             manifest,
-            executor,
+            executor: Mutex::new(executor),
         })
     }
 
@@ -116,20 +116,21 @@ impl BackendContext {
         self.manifest.as_ref()
     }
 
-    pub fn executor(&self) -> &BackendExecutor {
-        &self.executor
+    pub fn executor(&self) -> MutexGuard<'_, BackendExecutor> {
+        self.executor.lock().unwrap_or_else(|err| err.into_inner())
     }
 
-    pub fn executor_mut(&mut self) -> &mut BackendExecutor {
-        &mut self.executor
+    pub fn executor_mut(&self) -> MutexGuard<'_, BackendExecutor> {
+        self.executor()
     }
 
-    pub fn rebuild_cpu(&mut self) -> Result<(), BackendContextError> {
-        if matches!(self.executor, BackendExecutor::Cpu(_)) {
+    pub fn rebuild_cpu(&self) -> Result<(), BackendContextError> {
+        let mut executor = self.executor_mut();
+        if matches!(*executor, BackendExecutor::Cpu(_)) {
             return Ok(());
         }
-        let executor = build_cpu_executor(self.manifest.clone(), &self.model_ref)?;
-        self.executor = executor;
+        let cpu_executor = build_cpu_executor(self.manifest.clone(), &self.model_ref)?;
+        *executor = cpu_executor;
         Ok(())
     }
 }

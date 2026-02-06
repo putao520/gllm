@@ -52,7 +52,7 @@ impl KvCacheState {
     }
 
     pub fn config(&self) -> KvCacheConfig {
-        self.config
+        self.config.clone()
     }
 
     pub fn used(&self) -> usize {

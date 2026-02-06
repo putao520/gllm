@@ -283,6 +283,13 @@ impl PagedScheduler {
         self.pending_swap_ins.remove(&request_id)
     }
 
+    pub fn request_pages(&self, request_id: RequestId) -> Vec<(usize, PageId)> {
+        self.block_tables
+            .get(&request_id)
+            .map(|table| table.blocks.iter().copied().enumerate().collect())
+            .unwrap_or_default()
+    }
+
     pub fn free_sequence(&mut self, request_id: RequestId) {
         if let Some(block_table) = self.block_tables.remove(&request_id) {
             for block in block_table.blocks {
@@ -299,6 +306,13 @@ impl PagedScheduler {
     pub fn on_swap_in(&mut self, _request_id: RequestId, page_indices: &[PageId]) {
         for &page_id in page_indices {
             self.hgal.on_swap_in(page_id);
+        }
+    }
+
+    pub fn on_page_evicted(&mut self, request_id: RequestId, page_indices: &[PageId]) {
+        for &page_id in page_indices {
+            self.hgal
+                .update_page_state(page_id, Some(request_id), PageState::Swapped);
         }
     }
 

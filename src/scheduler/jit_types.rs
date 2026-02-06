@@ -3,8 +3,8 @@
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemState {
     // Resource Metrics
-    pub memory_pressure: f32,       // [0.0, 1.0]
-    pub kv_fragmentation: f32,      // [0.0, 1.0]
+    pub memory_pressure: f32,  // [0.0, 1.0]
+    pub kv_fragmentation: f32, // [0.0, 1.0]
 
     // Load Metrics
     pub waiting_queue_len: usize,
@@ -18,8 +18,8 @@ pub struct SystemState {
 /// Kernel execution strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelStrategy {
-    AccuracyFirst,      // FP32 Accumulation, Deterministic
-    ThroughputFirst,    // BF16/FP16, Aggressive Fused
+    AccuracyFirst,   // FP32 Accumulation, Deterministic
+    ThroughputFirst, // BF16/FP16, Aggressive Fused
 }
 
 /// JIT Decision output.

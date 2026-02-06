@@ -7,28 +7,36 @@ use crate::loader::LoaderError;
 use super::{BackendContext, BackendContextError, BackendExecutor};
 
 pub struct OomFallback<'a> {
-    context: &'a mut BackendContext,
+    context: &'a BackendContext,
 }
 
 impl<'a> OomFallback<'a> {
-    pub fn new(context: &'a mut BackendContext) -> Self {
+    pub fn new(context: &'a BackendContext) -> Self {
         Self { context }
     }
 
-    pub fn run<F, T>(&mut self, mut op: F) -> Result<T, BackendContextError>
+    pub fn run<F, T>(&self, mut op: F) -> Result<T, BackendContextError>
     where
         F: FnMut(&mut BackendExecutor) -> Result<T, ExecutorError>,
     {
-        match op(self.context.executor_mut()) {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                if self.context.executor().is_cuda() && is_oom_error(&err) {
-                    self.context.rebuild_cpu()?;
-                    return Ok(op(self.context.executor_mut())?);
+        let (first_error, should_retry) = {
+            let mut executor = self.context.executor_mut();
+            match op(&mut executor) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    let retry = executor.is_cuda() && is_oom_error(&err);
+                    (err, retry)
                 }
-                Err(err.into())
             }
+        };
+
+        if !should_retry {
+            return Err(first_error.into());
         }
+
+        self.context.rebuild_cpu()?;
+        let mut executor = self.context.executor_mut();
+        Ok(op(&mut executor)?)
     }
 }
 
@@ -37,7 +45,7 @@ pub struct FallbackGenerator<'a> {
 }
 
 impl<'a> FallbackGenerator<'a> {
-    pub fn new(context: &'a mut BackendContext) -> Self {
+    pub fn new(context: &'a BackendContext) -> Self {
         Self {
             fallback: OomFallback::new(context),
         }
@@ -59,7 +67,7 @@ pub struct FallbackEmbedder<'a> {
 }
 
 impl<'a> FallbackEmbedder<'a> {
-    pub fn new(context: &'a mut BackendContext) -> Self {
+    pub fn new(context: &'a BackendContext) -> Self {
         Self {
             fallback: OomFallback::new(context),
         }

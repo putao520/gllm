@@ -144,6 +144,36 @@ Client 端采用以下模式管理模型多样性与调度复杂性：
 
 ---
 
+### 5. 运行时模型管理 (ARCH-LIFECYCLE)
+
+为了支持运行时动态切换模型 (Hot Swap)，Client 不再持有静态的 Executor，而是管理其生命周期。
+
+#### 核心机制 (ARCH-LIFECYCLE-SWAP)
+
+**State Container**:
+`Client` 内部持有 `Arc<RwLock<Option<Executor>>>`。
+- `Arc`: 允许在多线程中克隆 Client。
+- `RwLock`: 允许并发读取（推理），但独占写入（切换模型）。
+- `Option`: 允许卸载模型进入"空闲状态"。
+
+**切换流程 (Stop-the-World)**:
+1. **Acquire Lock**: `client.swap_model()` 请求写锁。这会阻塞所有新的推理请求，并等待当前正在进行的 `generate().next()` 步骤释放读锁。
+2. **Drop Old Executor**: 获得写锁后，将 `Option` 置为 `None`。Rust 的 `Drop` 机制自动触发：
+   - 释放 `Executor`
+   - 释放 `Backend` (CUDA Context / Memory)
+   - 释放 `Scheduler` (KV Cache 显存)
+   - **关键**: 确保 GPU 显存完全释放。
+3. **Load New Model**: 调用 `Loader` 加载新模型权重（此时 GPU 应为空闲）。
+4. **Create New Executor**: 初始化新后端，分配新的 KV Cache（基于新模型的维度配置）。
+5. **Release Lock**: 将新 Executor 放入 `Option`，释放写锁，恢复服务。
+
+**KV Cache 联动**:
+KV Cache 的生命周期严格绑定于 `Executor`。
+- **不可复用**: 不同模型的 `head_dim`, `num_layers`, `num_heads` 不同，KV Cache 物理结构不同。
+- **全量销毁**: 切换模型必须销毁整个 Cache Pool，重新分配。
+
+---
+
 ## 数据流
 
 ### GPU 后端数据流（🚨 核心原则）

@@ -1,6 +1,6 @@
 //! Client API skeleton.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use gllm_kernels::BackendError;
 use thiserror::Error;
@@ -22,8 +22,10 @@ pub enum ClientError {
     UnknownModel(String),
     #[error("unsupported architecture: {0:?}")]
     UnsupportedArchitecture(ModelArchitecture),
-    #[error("executor lock poisoned")]
+    #[error("state lock poisoned")]
     ExecutorPoisoned,
+    #[error("no model loaded")]
+    NoModelLoaded,
     #[error("not implemented: {kind} (queued request {request_id})")]
     NotImplementedQueued { kind: &'static str, request_id: u64 },
     #[error(transparent)]
@@ -36,32 +38,19 @@ pub enum ClientError {
     Executor(#[from] ExecutorError),
 }
 
+pub struct ClientState {
+    pub model_id: String,
+    pub manifest: Arc<ModelManifest>,
+    pub backend: BackendContext,
+}
+
+#[derive(Clone)]
 pub struct Client {
-    model_id: String,
-    manifest: Arc<ModelManifest>,
-    backend: Mutex<Option<BackendContext>>,
+    state: Arc<RwLock<Option<ClientState>>>,
 }
 
 pub struct AsyncClient {
     inner: Client,
-}
-
-struct BackendGuard<'a> {
-    guard: std::sync::MutexGuard<'a, Option<BackendContext>>,
-}
-
-impl<'a> std::ops::Deref for BackendGuard<'a> {
-    type Target = BackendContext;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.as_ref().expect("backend context initialized")
-    }
-}
-
-impl<'a> std::ops::DerefMut for BackendGuard<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.as_mut().expect("backend context initialized")
-    }
 }
 
 impl From<BackendContextError> for ClientError {
@@ -78,41 +67,59 @@ impl From<BackendContextError> for ClientError {
 
 impl Client {
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
-        let raw_model_id = model_id;
-        let model_id = model_id.trim();
-        if model_id.is_empty() {
-            return Err(ClientError::UnknownModel(raw_model_id.to_string()));
-        }
-
-        let loader_config = LoaderConfig::from_env();
-        let config_files =
-            loader_config::download_config_files(model_id, &loader_config, EMPTY_FILE_MAP)?;
-        let config_value = loader_config::load_config_value(&config_files.config_path)?;
-        let manifest = loader_config::manifest_from_config(model_id, &config_value, kind)?;
-
-        Ok(Self {
-            model_id: model_id.to_string(),
-            manifest: Arc::new(manifest),
-            backend: Mutex::new(None),
-        })
+        let client = Self {
+            state: Arc::new(RwLock::new(None)),
+        };
+        client.load_model(model_id, kind)?;
+        Ok(client)
     }
 
     pub fn new_chat(model_id: &str) -> Result<Self, ClientError> {
         Self::new(model_id, ModelKind::Chat)
     }
-
     pub fn new_embedding(model_id: &str) -> Result<Self, ClientError> {
         Self::new(model_id, ModelKind::Embedding)
     }
 
-    pub fn manifest(&self) -> &ModelManifest {
-        self.manifest.as_ref()
+    pub fn manifest(&self) -> Arc<ModelManifest> {
+        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        state
+            .as_ref()
+            .map(|loaded| loaded.manifest.clone())
+            .expect("model loaded")
+    }
+
+    pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
+        let model_id = Self::normalize_model_id(model_id)?;
+        let mut guard = self.write_state()?;
+        let state = Self::build_state(&model_id, kind)?;
+        *guard = Some(state);
+        Ok(())
+    }
+
+    pub fn unload_model(&self) -> Result<(), ClientError> {
+        let mut guard = self.write_state()?;
+        *guard = None;
+        Ok(())
+    }
+
+    pub fn swap_model(&self, model_id: &str) -> Result<(), ClientError> {
+        let model_id = Self::normalize_model_id(model_id)?;
+        let mut guard = self.write_state()?;
+        let kind = guard
+            .as_ref()
+            .map(|loaded| loaded.manifest.kind)
+            .ok_or(ClientError::NoModelLoaded)?;
+
+        *guard = None;
+        let state = Self::build_state(&model_id, kind)?;
+        *guard = Some(state);
+        Ok(())
     }
 
     pub fn generate(&self, prompt: impl Into<String>) -> GenerationBuilder<'_> {
         GenerationBuilder::from_prompt(self, prompt)
     }
-
     pub fn generate_chat(&self, messages: Vec<Message>) -> GenerationBuilder<'_> {
         GenerationBuilder::from_messages(self, messages)
     }
@@ -136,13 +143,23 @@ impl Client {
     }
 
     pub fn thinking_head_available(&self) -> Result<bool, ClientError> {
-        let backend = self.lock_backend()?;
-        Ok(backend.executor().thinking_head_available())
+        let state = self.read_state()?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let available = {
+            let executor = loaded.backend.executor();
+            executor.thinking_head_available()
+        };
+        Ok(available)
     }
 
     pub(crate) fn render_chat_prompt(&self, messages: &[Message]) -> Result<String, ClientError> {
-        let backend = self.lock_backend()?;
-        Ok(backend.executor().apply_chat_template(messages))
+        let state = self.read_state()?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let prompt = {
+            let executor = loaded.backend.executor();
+            executor.apply_chat_template(messages)
+        };
+        Ok(prompt)
     }
 
     pub(crate) fn execute_generation(
@@ -151,8 +168,9 @@ impl Client {
         max_tokens: usize,
         temperature: f32,
     ) -> Result<GenerationResponse, ClientError> {
-        let mut backend = self.lock_backend()?;
-        let mut generator = FallbackGenerator::new(&mut backend);
+        let state = self.read_state()?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let mut generator = FallbackGenerator::new(&loaded.backend);
         let text = generator.generate(&prompt, max_tokens, temperature)?;
         Ok(GenerationResponse {
             text,
@@ -164,8 +182,9 @@ impl Client {
         &self,
         inputs: Vec<String>,
     ) -> Result<EmbeddingsResponse, ClientError> {
-        let mut backend = self.lock_backend()?;
-        let mut embedder = FallbackEmbedder::new(&mut backend);
+        let state = self.read_state()?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let mut embedder = FallbackEmbedder::new(&loaded.backend);
         let embeddings = embedder.embed_batch(&inputs)?;
         let embeddings = embeddings
             .into_iter()
@@ -183,8 +202,9 @@ impl Client {
         documents: Vec<String>,
         top_n: usize,
     ) -> Result<RerankResponse, ClientError> {
-        let mut backend = self.lock_backend()?;
-        let mut embedder = FallbackEmbedder::new(&mut backend);
+        let state = self.read_state()?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let mut embedder = FallbackEmbedder::new(&loaded.backend);
         let scores = embedder.rerank_batch(&query, &documents)?;
         let mut results = scores
             .into_iter()
@@ -207,18 +227,41 @@ impl Client {
         })
     }
 
-    fn lock_backend(&self) -> Result<BackendGuard<'_>, ClientError> {
-        let mut guard = self
-            .backend
-            .lock()
-            .map_err(|_| ClientError::ExecutorPoisoned)?;
-        if guard.is_none() {
-            let backend = detect_backend()?;
-            let context =
-                BackendContext::new(self.model_id.clone(), self.manifest.clone(), backend)?;
-            *guard = Some(context);
+    fn normalize_model_id(model_id: &str) -> Result<String, ClientError> {
+        let trimmed = model_id.trim();
+        if trimmed.is_empty() {
+            return Err(ClientError::UnknownModel(model_id.to_string()));
         }
-        Ok(BackendGuard { guard })
+        Ok(trimmed.to_string())
+    }
+
+    fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
+        let config = LoaderConfig::from_env();
+        let config_files = loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP)?;
+        let config_value = loader_config::load_config_value(&config_files.config_path)?;
+        let manifest = Arc::new(loader_config::manifest_from_config(
+            model_id,
+            &config_value,
+            kind,
+        )?);
+        let detected_backend = detect_backend()?;
+        let backend =
+            BackendContext::new(model_id.to_string(), manifest.clone(), detected_backend)?;
+        Ok(ClientState {
+            model_id: model_id.to_string(),
+            manifest,
+            backend,
+        })
+    }
+
+    fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, ClientError> {
+        self.state.read().map_err(|_| ClientError::ExecutorPoisoned)
+    }
+
+    fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, ClientError> {
+        self.state
+            .write()
+            .map_err(|_| ClientError::ExecutorPoisoned)
     }
 }
 
@@ -232,11 +275,9 @@ impl AsyncClient {
     pub fn inner(&self) -> &Client {
         &self.inner
     }
-
     pub fn generate(&self, prompt: impl Into<String>) -> GenerationBuilder<'_> {
         self.inner.generate(prompt)
     }
-
     pub fn generate_chat(&self, messages: Vec<Message>) -> GenerationBuilder<'_> {
         self.inner.generate_chat(messages)
     }

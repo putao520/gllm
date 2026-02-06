@@ -19,13 +19,13 @@ use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 use std::sync::Arc;
 
-use crate::scheduler::batcher::{BatchResult, ContinuousBatcher};
+use crate::scheduler::batcher::{BatchAction, BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
 use crate::scheduler::types::RequestKind;
 use crate::scheduler::vllm2024::Scheduler2024Config;
 use crate::scheduler::{
-    BasicObserver, PagedScheduler, PolicyVariant, ScheduledBatch, Sequence,
-    SystemState,
+    BasicObserver, GlobalMemoryManager, MemoryManagerError, PagedScheduler, PolicyVariant,
+    ScheduledBatch, Sequence, SystemState, Tier, VirtualPageId,
 };
 use std::collections::HashMap;
 
@@ -52,6 +52,8 @@ pub enum ExecutorError {
     Tokenizer(#[from] TokenizerError),
     #[error(transparent)]
     KvCache(#[from] KvCacheError),
+    #[error(transparent)]
+    MemoryManager(#[from] MemoryManagerError),
     #[error("scheduler error: {0}")]
     Scheduler(String),
     #[error("empty prompt tokens")]
@@ -78,6 +80,7 @@ pub struct Executor<B: Backend + 'static> {
     tokenizer: TokenizerHandle,
     kv_cache: Option<KvCacheDoubleBuffer>,
     kv_cache_slot: KvCacheSlot,
+    memory_manager: GlobalMemoryManager,
 }
 
 impl<B: Backend + 'static> Executor<B> {
@@ -107,7 +110,11 @@ impl<B: Backend + 'static> Executor<B> {
         // For now, assume 1GB KV cache with block_size 16 and head_dim 128, float32.
         // 1 block = 16 * num_heads * head_dim * dtype_size
         // This is backend dependent. We use a safe default of 10240 blocks.
-        let total_blocks = 10240;
+        // Allow override via env for testing resource control.
+        let total_blocks = std::env::var("GLLM_KV_CACHE_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10240);
         let block_size = 16;
         let hgal_config = HGALConfig::default();
 
@@ -138,6 +145,11 @@ impl<B: Backend + 'static> Executor<B> {
         };
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = adapter.load_weights(loader, &backend)?;
+        let l1_capacity = total_blocks;
+        let l2_capacity = total_blocks.saturating_mul(10);
+        let l3_capacity = total_blocks.saturating_mul(100);
+        let memory_manager =
+            GlobalMemoryManager::new_with_capacities(l1_capacity, l2_capacity, l3_capacity);
         Ok(Self {
             backend,
             scheduler,
@@ -150,6 +162,7 @@ impl<B: Backend + 'static> Executor<B> {
             tokenizer,
             kv_cache: None,
             kv_cache_slot: KvCacheSlot::Front,
+            memory_manager,
             batcher: ContinuousBatcher::new(),
             observer: BasicObserver::new(),
             policy: PolicyVariant::default(),
@@ -180,8 +193,8 @@ impl<B: Backend + 'static> Executor<B> {
     pub fn allocate_kv_cache(&mut self, config: &KvCacheConfig) -> ExecutorResult<KvCacheHandle> {
         let front = self.backend.alloc_kv_cache(config)?;
         let back = self.backend.alloc_kv_cache(config)?;
-        let front = KvCacheState::new(front, *config);
-        let back = KvCacheState::new(back, *config);
+        let front = KvCacheState::new(front, config.clone());
+        let back = KvCacheState::new(back, config.clone());
         self.kv_cache = Some(KvCacheDoubleBuffer::new(front, back));
         self.kv_cache_slot = KvCacheSlot::Front;
         Ok(self
@@ -280,7 +293,6 @@ impl<B: Backend + 'static> Executor<B> {
         Ok(self.tokenizer.decode(tokens, true)?)
     }
 
-
     pub fn sample_from_logits(
         &self,
         logits: &LogitsHandle,
@@ -310,15 +322,12 @@ impl<B: Backend + 'static> Executor<B> {
 
         // 0. Observability: Capture System State
         let system_state = SystemState {
-            memory_pressure: self
-                .backend
-                .get_memory_pressure()
-                .unwrap_or(0.0), // Best effort
-            kv_fragmentation: 0.0, // TODO: Get from scheduler
-            waiting_queue_len: 0,  // TODO: Get from batcher.waiting.len()
+            memory_pressure: self.backend.get_memory_pressure().unwrap_or(0.0), // Best effort
+            kv_fragmentation: 0.0,  // TODO: Get from scheduler
+            waiting_queue_len: 0,   // TODO: Get from batcher.waiting.len()
             current_running_len: 0, // TODO: Get from batcher.running.len()
-            mean_context_len: 0,   // TODO
-            logits_entropy: 0.0,   // Phase 2
+            mean_context_len: 0,    // TODO
+            logits_entropy: 0.0,    // Phase 2
         };
         self.observer.update(system_state);
 
@@ -347,7 +356,7 @@ impl<B: Backend + 'static> Executor<B> {
 
         // 3. Prepare Batch
         for req_id in batch.requests {
-            self.process_pending_swap_in(req_id)?;
+            self.ensure_pages_resident(req_id)?;
 
             let (tokens, position) = {
                 let req = self.requests.get(&req_id).expect("request exists");
@@ -380,10 +389,7 @@ impl<B: Backend + 'static> Executor<B> {
                 continue;
             }
 
-            sequences.push(SequenceInput {
-                tokens,
-                position,
-            });
+            sequences.push(SequenceInput { tokens, position });
             request_indices.push(req_id);
         }
 
@@ -394,19 +400,23 @@ impl<B: Backend + 'static> Executor<B> {
         let batch_input = BatchInput { sequences };
 
         // 4. Run Backend Forward
-        let mut kv_cache = self.active_kv_handle()?;
+        let kv_handle = self.active_kv_handle()?;
+        // The backend expects one handle per sequence, even if they all point to the same PagedAttention cache.
+        let count = batch_input.sequences.len();
+        let mut kv_caches = vec![kv_handle; count];
+
         let logits_list = self.backend.batch_forward_gpu_pure(
             &batch_input,
             &AttentionTopology::linear(),
             &self.weights,
-            std::slice::from_mut(&mut kv_cache),
+            &mut kv_caches,
             &self.forward_config,
         )?;
 
         // 5. Process Results
         // Note: batch_forward_gpu_pure must return results in the same order as input sequences
         if logits_list.len() != request_indices.len() {
-             return Err(ExecutorError::Backend(BackendError::Cuda(
+            return Err(ExecutorError::Backend(BackendError::Cuda(
                 "Backend returned mismatched number of logits".to_string(),
             )));
         }
@@ -536,14 +546,23 @@ impl<B: Backend + 'static> Executor<B> {
 
         // Advance KV cache
         {
-             let slot = self.kv_cache_slot;
-             if let Some(kv_cache) = self.kv_cache.as_mut() {
-                 let active = kv_cache.slot_mut(slot);
-                 active.advance(total_tokens)?;
-             }
+            let slot = self.kv_cache_slot;
+            if let Some(kv_cache) = self.kv_cache.as_mut() {
+                let active = kv_cache.slot_mut(slot);
+                active.advance(total_tokens)?;
+            }
         }
 
-        self.batcher.update_batch(&mut self.scheduler, batch_results.as_slice());
+        for request_id in batch_results
+            .iter()
+            .filter(|result| matches!(result.action, BatchAction::Complete | BatchAction::Fail))
+            .map(|result| result.request_id)
+        {
+            self.release_request_pages(request_id);
+        }
+
+        self.batcher
+            .update_batch(&mut self.scheduler, batch_results.as_slice());
         Ok(())
     }
 
@@ -571,11 +590,14 @@ impl<B: Backend + 'static> Executor<B> {
 
         // Maintain legacy KV cache state advancement
         if let Some(kv_cache) = self.kv_cache.as_mut() {
-             let active = kv_cache.slot_mut(self.kv_cache_slot);
-             active.advance(tokens.len())?;
+            let active = kv_cache.slot_mut(self.kv_cache_slot);
+            active.advance(tokens.len())?;
         }
 
-        logits_list.into_iter().next().ok_or(ExecutorError::EmptySample)
+        logits_list
+            .into_iter()
+            .next()
+            .ok_or(ExecutorError::EmptySample)
     }
 
     pub fn generate(
@@ -652,6 +674,21 @@ impl<B: Backend + 'static> Executor<B> {
         Ok(scores)
     }
 
+    pub fn is_finished(&self, request_id: RequestId) -> bool {
+        self.requests
+            .get(&request_id)
+            .map(|r| r.finished)
+            .unwrap_or(false) // If removed, considered finished? Or unknown.
+    }
+
+    pub fn get_output(&self, request_id: RequestId) -> ExecutorResult<String> {
+        let req = self
+            .requests
+            .get(&request_id)
+            .ok_or(ExecutorError::Scheduler("Request not found".into()))?;
+        self.decode_tokens(&req.output_tokens)
+    }
+
     fn ensure_kv_cache(&mut self) -> ExecutorResult<&mut KvCacheDoubleBuffer> {
         let needs_alloc = self.kv_cache.as_ref().map_or(true, |existing| {
             existing.front().config() != self.kv_cache_config
@@ -660,8 +697,8 @@ impl<B: Backend + 'static> Executor<B> {
         if needs_alloc {
             let front = self.backend.alloc_kv_cache(&self.kv_cache_config)?;
             let back = self.backend.alloc_kv_cache(&self.kv_cache_config)?;
-            let front = KvCacheState::new(front, self.kv_cache_config);
-            let back = KvCacheState::new(back, self.kv_cache_config);
+            let front = KvCacheState::new(front, self.kv_cache_config.clone());
+            let back = KvCacheState::new(back, self.kv_cache_config.clone());
             self.kv_cache = Some(KvCacheDoubleBuffer::new(front, back));
             self.kv_cache_slot = KvCacheSlot::Front;
         }
@@ -710,8 +747,211 @@ impl<B: Backend + 'static> Executor<B> {
         Ok(())
     }
 
+    fn storage_key_to_page_id(storage_key: StorageKey) -> ExecutorResult<PageId> {
+        usize::try_from(storage_key).map_err(|_| {
+            ExecutorError::Scheduler("storage key does not fit into page id".to_string())
+        })
+    }
+
+    fn ensure_l1_page_tracked(&mut self, physical_id: PageId) -> ExecutorResult<()> {
+        match self.memory_manager.track_page(Tier::L1, physical_id) {
+            Ok(()) => Ok(()),
+            Err(MemoryManagerError::TierCapacityExceeded { tier: Tier::L1 }) => {
+                self.reclaim_memory(1)?;
+                self.memory_manager.track_page(Tier::L1, physical_id)?;
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn release_request_pages(&mut self, request_id: RequestId) {
+        for (logical_idx, page_id) in self.scheduler.request_pages(request_id) {
+            let virtual_id = VirtualPageId::new(request_id, logical_idx);
+            if let Some(location) = self.memory_manager.unmap_virtual_page(virtual_id) {
+                let _ = self
+                    .memory_manager
+                    .untrack_page(location.tier, location.physical_id);
+            } else {
+                let _ = self.memory_manager.untrack_page(Tier::L1, page_id);
+            }
+        }
+    }
+
+    fn reclaim_memory(&mut self, required_pages: usize) -> ExecutorResult<()> {
+        if required_pages == 0 {
+            return Ok(());
+        }
+
+        let mut kv_handle = self.active_kv_handle()?;
+        loop {
+            let usage = self.memory_manager.tier_usage(Tier::L1);
+            let free_pages = usage.capacity.saturating_sub(usage.used);
+            if free_pages >= required_pages {
+                return Ok(());
+            }
+
+            let need = required_pages.saturating_sub(free_pages).max(1);
+            let victims = self.scheduler.select_victims(need);
+            if victims.is_empty() {
+                return Ok(());
+            }
+
+            let mut victim_ids = Vec::with_capacity(victims.len());
+            let mut swap_out_mappings = Vec::new();
+            let mut planned_remaps = Vec::new();
+
+            for (request_id, pages) in &victims {
+                if pages.is_empty() {
+                    continue;
+                }
+                victim_ids.push(*request_id);
+                for (logical_idx, &l1_page_id) in pages.iter().enumerate() {
+                    let storage_key = PagedScheduler::storage_key(*request_id, logical_idx)
+                        .map_err(ExecutorError::Scheduler)?;
+                    let target_page = Self::storage_key_to_page_id(storage_key)?;
+                    let (target_tier, target_page) =
+                        match self.memory_manager.track_page(Tier::L2, target_page) {
+                            Ok(()) => (Tier::L2, target_page),
+                            Err(MemoryManagerError::TierCapacityExceeded { tier: Tier::L2 }) => {
+                                self.memory_manager.track_page(Tier::L3, target_page)?;
+                                (Tier::L3, target_page)
+                            }
+                            Err(err) => return Err(err.into()),
+                        };
+                    let virtual_id = VirtualPageId::new(*request_id, logical_idx);
+                    swap_out_mappings.push((l1_page_id, storage_key));
+                    planned_remaps.push((virtual_id, l1_page_id, target_tier, target_page));
+                }
+            }
+
+            if swap_out_mappings.is_empty() {
+                return Ok(());
+            }
+
+            self.backend
+                .swap_out_pages(&mut kv_handle, &swap_out_mappings)?;
+
+            for (virtual_id, l1_page_id, target_tier, target_page) in planned_remaps {
+                if let Some(old_location) = self.memory_manager.unmap_virtual_page(virtual_id) {
+                    let _ = self
+                        .memory_manager
+                        .untrack_page(old_location.tier, old_location.physical_id);
+                } else {
+                    let _ = self.memory_manager.untrack_page(Tier::L1, l1_page_id);
+                }
+                self.memory_manager
+                    .bind_virtual_page(virtual_id, target_tier, target_page)?;
+            }
+
+            for (request_id, pages) in &victims {
+                self.scheduler.on_page_evicted(*request_id, pages);
+            }
+            self.scheduler
+                .free_victims(&victim_ids)
+                .map_err(ExecutorError::Scheduler)?;
+        }
+    }
+
+    fn ensure_pages_resident(&mut self, request_id: RequestId) -> ExecutorResult<()> {
+        if let Some(mappings) = self.scheduler.take_pending_swap_in(request_id) {
+            if !mappings.is_empty() {
+                let mut kv_handle = self.active_kv_handle()?;
+                self.backend.swap_in_pages(&mut kv_handle, &mappings)?;
+                let page_indices: Vec<PageId> = mappings
+                    .iter()
+                    .map(|(physical_id, _)| *physical_id)
+                    .collect();
+
+                for (logical_idx, (physical_id, storage_key)) in mappings.into_iter().enumerate() {
+                    let virtual_id = VirtualPageId::new(request_id, logical_idx);
+                    self.ensure_l1_page_tracked(physical_id)?;
+
+                    let old_location = self
+                        .memory_manager
+                        .resolve(virtual_id)
+                        .ok()
+                        .map(|(tier, page)| (tier, page));
+                    if old_location.is_some() {
+                        self.memory_manager.remap_virtual_page(
+                            virtual_id,
+                            Tier::L1,
+                            physical_id,
+                        )?;
+                    } else {
+                        self.memory_manager
+                            .bind_virtual_page(virtual_id, Tier::L1, physical_id)?;
+                    }
+
+                    if let Some((tier, page)) = old_location {
+                        if tier != Tier::L1 {
+                            let _ = self.memory_manager.untrack_page(tier, page);
+                        }
+                    } else {
+                        let offload_page = Self::storage_key_to_page_id(storage_key)?;
+                        let _ = self.memory_manager.untrack_page(Tier::L2, offload_page);
+                        let _ = self.memory_manager.untrack_page(Tier::L3, offload_page);
+                    }
+                }
+
+                self.scheduler.on_swap_in(request_id, &page_indices);
+            }
+        }
+
+        let request_pages = self.scheduler.request_pages(request_id);
+        if request_pages.is_empty() {
+            return Ok(());
+        }
+
+        let mut swap_in_mappings = Vec::new();
+        let mut swapped_pages = Vec::new();
+        let mut remap_plan = Vec::new();
+
+        for (logical_idx, physical_id) in request_pages {
+            let virtual_id = VirtualPageId::new(request_id, logical_idx);
+            match self.memory_manager.resolve(virtual_id) {
+                Ok((Tier::L1, mapped)) if mapped == physical_id => {}
+                Ok((Tier::L1, mapped)) => {
+                    self.ensure_l1_page_tracked(physical_id)?;
+                    self.memory_manager
+                        .remap_virtual_page(virtual_id, Tier::L1, physical_id)?;
+                    let _ = self.memory_manager.untrack_page(Tier::L1, mapped);
+                }
+                Ok((tier @ Tier::L2, offload_id)) | Ok((tier @ Tier::L3, offload_id)) => {
+                    self.reclaim_memory(1)?;
+                    self.ensure_l1_page_tracked(physical_id)?;
+                    let storage_key: StorageKey = offload_id as StorageKey;
+                    swap_in_mappings.push((physical_id, storage_key));
+                    swapped_pages.push(physical_id);
+                    remap_plan.push((virtual_id, tier, offload_id, physical_id));
+                }
+                Err(MemoryManagerError::UnknownVirtualPage { .. }) => {
+                    self.ensure_l1_page_tracked(physical_id)?;
+                    self.memory_manager
+                        .bind_virtual_page(virtual_id, Tier::L1, physical_id)?;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        if !swap_in_mappings.is_empty() {
+            let mut kv_handle = self.active_kv_handle()?;
+            self.backend
+                .swap_in_pages(&mut kv_handle, &swap_in_mappings)?;
+
+            for (virtual_id, old_tier, old_physical_id, new_physical_id) in remap_plan {
+                self.memory_manager
+                    .remap_virtual_page(virtual_id, Tier::L1, new_physical_id)?;
+                let _ = self.memory_manager.untrack_page(old_tier, old_physical_id);
+            }
+            self.scheduler.on_swap_in(request_id, &swapped_pages);
+        }
+
+        Ok(())
+    }
+
     fn check_memory_pressure(&mut self) -> ExecutorResult<()> {
-        let Some(swap_cfg) = self.kv_cache_config.swap_config else {
+        let Some(ref swap_cfg) = self.kv_cache_config.swap_config else {
             return Ok(());
         };
         if !swap_cfg.enable_swap || self.kv_cache.is_none() {
@@ -725,54 +965,15 @@ impl<B: Backend + 'static> Executor<B> {
             return Ok(());
         }
 
-        let mut kv_handle = self.active_kv_handle()?;
         while pressure > threshold {
-            let victims = self.scheduler.select_victims(needed_blocks);
-            if victims.is_empty() {
+            self.reclaim_memory(needed_blocks)?;
+            let next_pressure = self.backend.get_memory_pressure()?;
+            if next_pressure >= pressure {
                 break;
             }
-
-            let mut victim_ids = Vec::with_capacity(victims.len());
-            let mut swap_out_mappings = Vec::new();
-            for (request_id, pages) in victims {
-                victim_ids.push(request_id);
-                for (logical_idx, physical_id) in pages.into_iter().enumerate() {
-                    let storage_key = PagedScheduler::storage_key(request_id, logical_idx)
-                        .map_err(ExecutorError::Scheduler)?;
-                    swap_out_mappings.push((physical_id, storage_key));
-                }
-            }
-
-            if swap_out_mappings.is_empty() {
-                break;
-            }
-
-            self.backend
-                .swap_out_pages(&mut kv_handle, &swap_out_mappings)?;
-            self.scheduler
-                .free_victims(&victim_ids)
-                .map_err(ExecutorError::Scheduler)?;
-            pressure = self.backend.get_memory_pressure()?;
+            pressure = next_pressure;
         }
 
-        Ok(())
-    }
-
-    fn process_pending_swap_in(&mut self, request_id: RequestId) -> ExecutorResult<()> {
-        let Some(mappings) = self.scheduler.take_pending_swap_in(request_id) else {
-            return Ok(());
-        };
-        if mappings.is_empty() {
-            return Ok(());
-        }
-
-        let mut kv_handle = self.active_kv_handle()?;
-        self.backend.swap_in_pages(&mut kv_handle, &mappings)?;
-        let page_indices: Vec<PageId> = mappings
-            .iter()
-            .map(|(physical_id, _)| *physical_id)
-            .collect();
-        self.scheduler.on_swap_in(request_id, &page_indices);
         Ok(())
     }
 }

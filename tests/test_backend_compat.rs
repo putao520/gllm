@@ -98,10 +98,16 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
 #[test]
 fn backend_generation_outputs_are_stable() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut first =
-        build_cpu_executor("HuggingFaceTB/SmolLM-135M-Instruct", ModelKind::Chat, &files);
-    let mut second =
-        build_cpu_executor("HuggingFaceTB/SmolLM-135M-Instruct", ModelKind::Chat, &files);
+    let mut first = build_cpu_executor(
+        "HuggingFaceTB/SmolLM-135M-Instruct",
+        ModelKind::Chat,
+        &files,
+    );
+    let mut second = build_cpu_executor(
+        "HuggingFaceTB/SmolLM-135M-Instruct",
+        ModelKind::Chat,
+        &files,
+    );
 
     let prompt = "tok3 tok4";
     let first_tokens = first.encode_prompt(prompt).expect("encode prompt");

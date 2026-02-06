@@ -24,12 +24,16 @@ fn test_swap_out_and_restore_flow() {
 
     // 1. Add Sequence A (needs 2 blocks)
     let id_a = 1;
-    scheduler.add_sequence(make_group(id_a, 2)).expect("Failed to add seq A");
+    scheduler
+        .add_sequence(make_group(id_a, 2))
+        .expect("Failed to add seq A");
     assert_eq!(scheduler.num_free_blocks(), 2);
 
     // 2. Add Sequence B (needs 2 blocks)
     let id_b = 2;
-    scheduler.add_sequence(make_group(id_b, 2)).expect("Failed to add seq B");
+    scheduler
+        .add_sequence(make_group(id_b, 2))
+        .expect("Failed to add seq B");
     assert_eq!(scheduler.num_free_blocks(), 0);
 
     // 3. Try to allocate for B -> Should fail (OOM)
@@ -48,7 +52,9 @@ fn test_swap_out_and_restore_flow() {
     println!("Victim selected: {}", victim_id);
 
     let victim_ids: Vec<RequestId> = victims.iter().map(|(id, _)| *id).collect();
-    scheduler.free_victims(&victim_ids).expect("free_victims failed");
+    scheduler
+        .free_victims(&victim_ids)
+        .expect("free_victims failed");
 
     // 5. Verify Victim is Swapped
     // If a sequence with 2 blocks was swapped, we should have 2 free blocks.
@@ -56,7 +62,9 @@ fn test_swap_out_and_restore_flow() {
 
     // 6. Now allocate for the survivor
     let survivor_id = if victim_id == id_a { id_b } else { id_a };
-    scheduler.allocate_next_token(survivor_id).expect("Survivor should grow");
+    scheduler
+        .allocate_next_token(survivor_id)
+        .expect("Survivor should grow");
     // Survivor grew by 1 block (total 3 used for survivor). Remaining free: 1.
     assert_eq!(scheduler.num_free_blocks(), 1);
 
@@ -69,16 +77,22 @@ fn test_swap_out_and_restore_flow() {
 
     // 8. Make room for victim
     // Swap out the survivor (who now has 3 blocks)
-    scheduler.free_victims(&[survivor_id]).expect("Swap out survivor");
+    scheduler
+        .free_victims(&[survivor_id])
+        .expect("Swap out survivor");
     // Free blocks: 1 (existing) + 3 (survivor) = 4.
     assert_eq!(scheduler.num_free_blocks(), 4);
 
     // 9. Retry restore victim
-    scheduler.allocate_next_token(victim_id).expect("Restore victim should succeed now");
+    scheduler
+        .allocate_next_token(victim_id)
+        .expect("Restore victim should succeed now");
 
     // 10. Verify Pending Swap-ins
     // The scheduler should have recorded the mapping for the backend to reload data
-    let swap_ins = scheduler.take_pending_swap_in(victim_id).expect("Should have pending swap-ins");
+    let swap_ins = scheduler
+        .take_pending_swap_in(victim_id)
+        .expect("Should have pending swap-ins");
     assert!(!swap_ins.is_empty());
     assert_eq!(swap_ins.len(), 2); // Victim had 2 pages initially.
 

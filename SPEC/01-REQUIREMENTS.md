@@ -35,7 +35,10 @@
 | **REQ-LOADER-015** | ONNX 命名规则解析 | 解析 ONNX 文件名的精度类型 | 1. 识别 `onnx/model_{precision}.onnx` 格式<br>2. 支持 fp32/fp16/int8/uint8/q4 等精度标识<br>3. 自动选择最优加载路径 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-016** | 智能源选择 | HF 不可用时自动切换到 ModelScope | 1. HF 下载失败时自动尝试 ModelScope<br>2. 支持配置优先级 (HF→MS 或 MS→HF)<br>3. 记录源切换日志 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
+| **REQ-LOADER-018** | 运行时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 
+
+## 3. 核心功能 (REQ-CORE)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
@@ -53,7 +56,7 @@
 |----|----------|------|----------|------|
 | **REQ-SCHED-012 | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-SCHED-013 | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. **取代** Chunked Prefill<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🆕 新增 |
+| **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-002 | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
 | **REQ-SCHED-003** | 动态批处理 | 支持 Continuous Batching | 1. 吞吐量优于 Static Batching<br>2. **序列完成自动移除**<br>3. **新序列动态加入**<br>4. **BatchAction 决策** (Continue/Complete/Pause) | 🟢 已实现 (2026-02-02) [commit: 063f150] |
@@ -121,9 +124,4 @@
 |----|----------|------|----------|------|
 | **REQ-ARCH-001** | 零拷贝推理 | 推理过程中 GPU 数据不回传 CPU | 符合 ARCH-GPU-001 | 🟢 已实现 |
 | **REQ-ARCH-002** | 单一后端原则 | 全程在单一后端执行 | 符合 ARCH-SINGLE-BACKEND | 🟢 已实现 |
-
-## 6. 架构约束 (REQ-ARCH)
-
-| ID | 需求标题 | 描述 | 验收标准 | 状态 |
-|----|----------|------|----------|------|
 | **REQ-ARCH-003** | 纯 Rust 依赖原则 | 禁止引入 `candle`、`tch` 等重量级深度学习框架依赖 | 1. Cargo.toml 中无 candle/tch<br>2. 仅使用 safetensors/gguf-rs 等底层解析库<br>3. 计算核心完全自研 (gllm-kernels) | 🟢 已实现 (2026-02-05) [commit: fc36508] |

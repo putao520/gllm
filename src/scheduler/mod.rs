@@ -8,6 +8,7 @@ pub mod allocator;
 pub mod batcher;
 pub mod hgal;
 pub mod jit_types;
+pub mod memory_manager;
 pub mod observer;
 pub mod paged_scheduler;
 pub mod policy;
@@ -19,6 +20,10 @@ pub use allocator::BlockAllocator;
 pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};
 pub use hgal::{HGALConfig, HGALScheduler};
 pub use jit_types::{SchedulerDecision, SystemState};
+pub use memory_manager::{
+    EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PageLocation, PageTable, Tier,
+    TierManager, TierUsage, VirtualPageId,
+};
 pub use observer::{BasicObserver, RuntimeObserver};
 pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerOutput};
 pub use policy::{PolicyVariant, SchedulingPolicy};

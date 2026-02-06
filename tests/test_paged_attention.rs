@@ -1,8 +1,7 @@
 use std::time::Instant;
 
 use gllm::scheduler::{
-    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, Sequence,
-    SequenceGroup,
+    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, Sequence, SequenceGroup,
 };
 use gllm_kernels::kernel_types::RequestId;
 
@@ -75,7 +74,10 @@ fn paged_attention_dynamic_batching_respects_limits() {
     assert_eq!(first.requests, vec![1, 2]);
     batcher.update_batch(
         &mut scheduler,
-        &[BatchResult::complete(1, None), BatchResult::complete(2, None)],
+        &[
+            BatchResult::complete(1, None),
+            BatchResult::complete(2, None),
+        ],
     );
 
     let second = batcher.build_batch(&mut scheduler, 2, true);
@@ -109,7 +111,9 @@ fn paged_attention_prefetches_with_double_buffer() {
     assert!(!victims.is_empty());
     let victim_ids: Vec<RequestId> = victims.iter().map(|(id, _)| *id).collect();
     let victim = victim_ids[0];
-    scheduler.free_victims(&victim_ids).expect("swap-out victim");
+    scheduler
+        .free_victims(&victim_ids)
+        .expect("swap-out victim");
 
     let new_block = scheduler
         .allocate_next_token(victim)
