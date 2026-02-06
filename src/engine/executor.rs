@@ -448,6 +448,9 @@ impl<B: Backend + 'static> Executor<B> {
         max_tokens: usize,
         temperature: f32,
     ) -> ExecutorResult<String> {
+        if prompt.trim().is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
         let sampling_config = SamplingConfig {
             temperature,
             ..SamplingConfig::default()
