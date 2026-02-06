@@ -366,3 +366,50 @@ fn unified_loading_entry_e2e() {
         "auto_with_source should return a Result"
     );
 }
+
+/// TEST-INTEL-007: Loader 接受 configuration.json
+///
+/// **关联需求**: REQ-LOADER-005 (ModelScope 支持)
+/// **测试类型**: 正向测试
+///
+/// **测试步骤**:
+/// 1. 创建 configuration.json
+/// 2. 使用 from_local_files 加载
+/// 3. 验证 config_path
+///
+/// **期望结果**: config_path 指向 configuration.json
+#[test]
+fn loader_accepts_configuration_json() {
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn write_config(path: &Path) {
+        let value = serde_json::json!({
+            "hidden_size": 4,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "num_hidden_layers": 1,
+            "vocab_size": 4,
+            "max_position_embeddings": 8,
+            "torch_dtype": "float32"
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    let dir = TempDir::new().expect("temp dir");
+    let weights = dir.path().join("model.safetensors");
+    let config = dir.path().join("configuration.json");
+
+    std::fs::write(&weights, []).expect("write weights");
+    write_config(&config);
+
+    let loader = gllm::loader::Loader::from_local_files(
+        "Qwen/Qwen3-0.6B",
+        vec![weights],
+        vec![config.clone()]
+    )
+    .expect("loader");
+
+    let path = loader.config_path().expect("config path");
+    assert_eq!(path.file_name().unwrap(), "configuration.json");
+}

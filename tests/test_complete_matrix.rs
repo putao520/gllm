@@ -19,10 +19,10 @@ use gllm::adapter::{AdapterResult, AdapterWeights, ModelAdapter};
 use gllm::engine::executor::Executor;
 use gllm::loader::{
     config as loader_config, CacheLayout, HfHubClient, Loader, LoaderConfig, ParallelLoader,
-    TensorInfo, WeightsHandle,
+    TensorInfo, UploadedTensor, WeightsHandle,
 };
 use gllm::manifest::{FileMap, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
-use gllm_kernels::{backend_trait::Backend, cpu_backend::CpuBackend, CudaBackend};
+use gllm_kernels::{backend_trait::Backend, cpu_backend::CpuBackend, CudaBackend, QuantizedType};
 
 // ============================================================================
 // 辅助函数
@@ -721,4 +721,160 @@ fn matrix_source_auto_selection() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
     let loader = Loader::auto(model).expect("auto loader");
     assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
+}
+
+// ============================================================================
+// 矩阵 9: GGUF 量化加载测试 (来自 test_gguf_loader.rs)
+// ============================================================================
+
+const GGUF_REPO: &str = "mav23/SmolLM-135M-Instruct-GGUF";
+const GGUF_FILE: &str = "smollm-135m-instruct.Q8_0.gguf";
+const GGUF_FILE_MAP: FileMap = &[("model.gguf", GGUF_FILE)];
+
+/// TEST-GGUF-001: GGUF loader SmolLM Q8_0 E2E
+///
+/// **关联需求**: REQ-TEST-002, REQ-TEST-006
+/// **测试类型**: 正向测试
+/// **E2E测试粒度**: 业务流程
+///
+/// **前置条件**: SmolLM-135M GGUF Q8_0 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 下载 base 配置和 GGUF 权重
+/// 2. 创建执行器
+/// 3. 验证 Q8_0 张量反量化
+/// 4. 执行生成
+///
+/// **期望结果**: 反量化正确，生成非空输出
+#[test]
+#[ignore = "Requires GGUF model - run with --ignored"]
+fn matrix_gguf_q8_0_e2e() {
+    let base_repo = "HuggingFaceTB/SmolLM-135M-Instruct";
+
+    // Download base config files
+    let config = LoaderConfig::default();
+    let files = loader_config::download_config_files(base_repo, &config, EMPTY_FILE_MAP)
+        .expect("download config files");
+    let tokenizer_path = files.tokenizer_path.expect("tokenizer.json missing");
+    let config_value = loader_config::load_config_value(&files.config_path)
+        .expect("load config value");
+    let manifest = loader_config::manifest_from_config(base_repo, &config_value, ModelKind::Chat)
+        .expect("manifest from config");
+
+    // Download GGUF weights
+    let cache = CacheLayout::new(None).expect("cache layout");
+    let hf = HfHubClient::new(cache.hf_cache_dir()).expect("HF client");
+    let gguf_files = hf
+        .download_model_files(GGUF_REPO, GGUF_FILE_MAP, ParallelLoader::new(false))
+        .expect("download gguf files");
+    let gguf_path = gguf_files.weights.into_iter().next().expect("gguf weights");
+
+    // Create loader with GGUF weights and base config
+    let mut loader = Loader::from_local_files_with_manifest(
+        base_repo,
+        vec![gguf_path],
+        vec![files.config_path, tokenizer_path],
+        Some(&manifest),
+    )
+    .expect("gguf loader");
+
+    struct GgufRemapAdapter;
+    impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
+        fn supports(&self, manifest: &ModelManifest) -> bool {
+            matches!(manifest.arch, ModelArchitecture::Llama4)
+        }
+
+        fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
+            let handle = loader.upload_weights(backend)?;
+            let handle = remap_gguf_handle(handle)?;
+            Ok(AdapterWeights::new(handle))
+        }
+    }
+
+    static GGUF_ADAPTER: GgufRemapAdapter = GgufRemapAdapter;
+
+    let backend = CpuBackend::new();
+    let mut executor =
+        Executor::from_loader(backend, Arc::new(manifest), &GGUF_ADAPTER, &mut loader)
+            .expect("executor init");
+
+    // Verify Q8_0 tensors
+    let q8_tensors: Vec<_> = executor
+        .weights()
+        .handle
+        .meta
+        .iter()
+        .filter(|(_, info)| info.quantized == Some(QuantizedType::Q8_0))
+        .collect();
+    assert!(!q8_tensors.is_empty(), "expected at least one Q8_0 tensor");
+
+    // Verify dequantized values
+    let q8_name = q8_tensors[0].0.as_str();
+    match executor.weights().handle.get(q8_name) {
+        Some(UploadedTensor::F32(values)) => {
+            let sum: f32 = values.iter().map(|v| v.abs()).sum();
+            assert!(sum > 0.01, "dequantized tensor appears to be all zeros");
+        }
+        _ => panic!("missing dequantized tensor for {q8_name}"),
+    }
+
+    // Test generation
+    let output = executor
+        .generate("The capital of", 8, 0.0)
+        .expect("generate output");
+    assert!(!output.trim().is_empty(), "generation output empty");
+}
+
+/// TEST-GGUF-002: 调试 GGUF 张量类型
+///
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向测试
+///
+/// **前置条件**: SmolLM-135M GGUF Q8_0 模型已缓存
+///
+/// **测试步骤**:
+/// 1. 加载 GGUF 文件
+/// 2. 打印各张量的量化类型
+///
+/// **期望结果**: 显示 Q4_0 和 Q8_0 张量统计
+#[test]
+#[ignore = "Requires GGUF model - run with --ignored"]
+fn matrix_gguf_tensor_types() {
+    use gllm::loader::gguf::GgufLoader;
+
+    let cache = CacheLayout::new(None).expect("cache layout");
+    let hf = HfHubClient::new(cache.hf_cache_dir()).expect("HF client");
+    let gguf_files = hf
+        .download_model_files(GGUF_REPO, GGUF_FILE_MAP, ParallelLoader::new(false))
+        .expect("download gguf files");
+    let gguf_path = gguf_files.weights.into_iter().next().expect("gguf weights");
+
+    let gguf_loader = GgufLoader::from_files(&[gguf_path]).expect("gguf loader");
+
+    println!("=== GGUF Tensor Types ===");
+    let mut q4_count = 0;
+    let mut q8_count = 0;
+
+    for name in gguf_loader.names() {
+        let tensor = gguf_loader.tensor(&name).expect("tensor");
+        let qtype = tensor.quantized_type();
+        match qtype {
+            Some(QuantizedType::Q4_0) => {
+                q4_count += 1;
+                if q4_count <= 5 {
+                    println!("Q4_0: {}", name);
+                }
+            }
+            Some(QuantizedType::Q8_0) => {
+                q8_count += 1;
+                if q8_count <= 5 {
+                    println!("Q8_0: {}", name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    println!("Summary: Q4_0={}, Q8_0={}", q4_count, q8_count);
+    assert!(q4_count > 0 || q8_count > 0, "expected some quantized tensors");
 }
