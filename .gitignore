@@ -1,4 +1,12 @@
 /target
 
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # SPEC documents (managed separately)
 SPEC/
