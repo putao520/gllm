@@ -65,6 +65,7 @@
 | **REQ-SCHED-009** | LMCache 跨请求共享 | vLLM 2024 优化：L1/L2 KV Cache 架构 | 1. **L1 GPU** / **L2 CPU** 两层缓存<br>2. 相同提示命中时跳过 Prefill<br>3. 重复提示吞吐提升 10×+，命中率 > 70%<br>4. **AOT CUBIN 兼容** (使用现有 Memcpy Kernel) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
 | **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 缓存命中时跳过 GPU 前向计算 | 1. 缓存命中时直接复用已有 KV handle<br>2. 跳过 embedding + attention + ffn 计算<br>3. 仅执行 sampling 生成第一个 token<br>4. 保持零拷贝原则 | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
 | **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
+| **REQ-SCHED-014** | 自适应 JIT 调度策略 | 引入底层 JIT 决策层，基于实时观测动态调整策略 | 1. **微秒级决策** (<10μs)<br>2. **策略热切换** (Accuracy/Throughput)<br>3. **参数自整定** (动态 Batch/Swap)<br>4. **零运行时开销** (Enum Dispatch) | ✅ 已实现 (2026-02-06) [commit: a7e761b] |
 
 > **详细设计**: 见 [SPEC/02-ARCHITECTURE.md §2024 vLLM 优化](./02-ARCHITECTURE.md#2024-vllm-优化-arch-sched-2024)
 
