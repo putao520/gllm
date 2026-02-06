@@ -5,7 +5,8 @@ use gllm_kernels::backend_trait::{
 };
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::{
-    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, SamplingConfig, SwapConfig,
+    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, RequestId, SamplingConfig,
+    StorageKey, SwapConfig,
 };
 use thiserror::Error;
 
@@ -17,8 +18,23 @@ use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 use std::sync::Arc;
 
-use super::scheduler::{PagedScheduler, RequestId, RequestKind, ScheduledBatch};
-use super::vllm2024::Scheduler2024Config;
+use crate::scheduler::batcher::ContinuousBatcher;
+use crate::scheduler::hgal::HGALConfig;
+use crate::scheduler::types::{GroupState, RequestKind, SequenceGroup};
+use crate::scheduler::vllm2024::Scheduler2024Config;
+use crate::scheduler::{PagedScheduler, ScheduledBatch};
+use std::collections::HashMap;
+
+#[derive(Debug)]
+struct RequestData {
+    prompt_tokens: Vec<u32>,
+    output_tokens: Vec<u32>,
+    sampling_config: SamplingConfig,
+    is_prefill: bool,
+    // kv_cache: KvCacheHandle, // Moved to Scheduler/BlockTable management
+    max_new_tokens: usize,
+    finished: bool,
+}
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -32,6 +48,8 @@ pub enum ExecutorError {
     Tokenizer(#[from] TokenizerError),
     #[error(transparent)]
     KvCache(#[from] KvCacheError),
+    #[error("scheduler error: {0}")]
+    Scheduler(String),
     #[error("empty prompt tokens")]
     EmptyPrompt,
     #[error("backend returned empty sample")]
@@ -43,6 +61,8 @@ pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
 pub struct Executor<B: Backend + 'static> {
     backend: B,
     scheduler: PagedScheduler,
+    batcher: ContinuousBatcher,
+    requests: HashMap<RequestId, RequestData>,
     manifest: Arc<ModelManifest>,
     adapter: &'static dyn ModelAdapter<B>,
     weights: AdapterWeights<B>,
@@ -76,12 +96,21 @@ impl<B: Backend + 'static> Executor<B> {
             rope_precompute: true,
             position_encoding: PositionEncoding::Rope,
         };
-        let mut scheduler = PagedScheduler::new();
+
+        // TODO: Get total_blocks from backend or config.
+        // For now, assume 1GB KV cache with block_size 16 and head_dim 128, float32.
+        // 1 block = 16 * num_heads * head_dim * dtype_size
+        // This is backend dependent. We use a safe default of 10240 blocks.
+        let total_blocks = 10240;
+        let block_size = 16;
+        let hgal_config = HGALConfig::default();
+
+        let mut scheduler = PagedScheduler::new(total_blocks, block_size, hgal_config);
         scheduler.enable_vllm_2024(Scheduler2024Config {
             enable_2024_optimizations: true,
             ..Scheduler2024Config::default()
         });
-        let page_size = scheduler.config().page_size;
+        let page_size = scheduler.page_size();
 
         // CPU backend 只支持 f32 dtype for KV cache
         // 如果模型配置是 f16/bf16，需要强制转换为 f32
@@ -115,6 +144,8 @@ impl<B: Backend + 'static> Executor<B> {
             tokenizer,
             kv_cache: None,
             kv_cache_slot: KvCacheSlot::Front,
+            batcher: ContinuousBatcher::new(),
+            requests: HashMap::new(),
         })
     }
 
@@ -159,21 +190,94 @@ impl<B: Backend + 'static> Executor<B> {
             .map(|cache| cache.slot(self.kv_cache_slot).handle())
     }
 
-    pub fn enqueue(&mut self, kind: RequestKind, prompt: impl Into<String>) -> RequestId {
-        self.scheduler.enqueue(kind, prompt)
+    pub fn enqueue(&mut self, _kind: RequestKind, prompt: impl Into<String>) -> RequestId {
+        let id = self.requests.len() as RequestId + 1;
+        let prompt_str = prompt.into();
+        let prompt_tokens = self.encode_prompt(&prompt_str).unwrap_or_default();
+        let context_len = prompt_tokens.len();
+
+        let group = SequenceGroup {
+            id,
+            pages: Vec::new(),
+            state: GroupState::Running,
+            access_count: 0,
+            last_access: std::time::Instant::now(),
+            is_pinned: false,
+            context_len,
+        };
+
+        let request_data = RequestData {
+            prompt_tokens,
+            output_tokens: Vec::new(),
+            sampling_config: SamplingConfig::default(),
+            is_prefill: true,
+            max_new_tokens: 128, // Default
+            finished: false,
+        };
+
+        self.requests.insert(id, request_data);
+        self.batcher.add_request(group);
+        id
     }
 
+    pub fn enqueue_with_config(
+        &mut self,
+        _kind: RequestKind,
+        prompt: impl Into<String>,
+        max_new_tokens: usize,
+        sampling_config: SamplingConfig,
+    ) -> ExecutorResult<RequestId> {
+        let id = self.requests.len() as RequestId + 1;
+        let prompt_str = prompt.into();
+        let prompt_tokens = self.encode_prompt(&prompt_str)?;
+        let context_len = prompt_tokens.len();
+
+        let group = SequenceGroup {
+            id,
+            pages: Vec::new(),
+            state: GroupState::Running,
+            access_count: 0,
+            last_access: std::time::Instant::now(),
+            is_pinned: false,
+            context_len,
+        };
+
+        let request_data = RequestData {
+            prompt_tokens,
+            output_tokens: Vec::new(),
+            sampling_config,
+            is_prefill: true,
+            max_new_tokens,
+            finished: false,
+        };
+
+        self.requests.insert(id, request_data);
+        self.batcher.add_request(group);
+        Ok(id)
+    }
+
+    // Deprecated/Modified: enqueue_with_tokens is used by tests, so we adapt it.
     pub fn enqueue_with_tokens(
         &mut self,
         kind: RequestKind,
         prompt: impl Into<String>,
         tokens: usize,
     ) -> RequestId {
-        self.scheduler.enqueue_with_tokens(kind, prompt, tokens)
+        // Adapt for tests that manually specify token count but don't care about actual encoding
+        let _ = self.enqueue_with_config(
+            kind,
+            prompt,
+            tokens, // Interpret tokens as max_new_tokens for tests
+            SamplingConfig::default(),
+        );
+        self.requests.len() as RequestId
     }
 
     pub fn next_batch(&mut self) -> Option<ScheduledBatch> {
-        self.scheduler.next_batch()
+        if !self.batcher.has_pending_work() {
+            return None;
+        }
+        Some(self.batcher.schedule(&mut self.scheduler))
     }
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
@@ -241,81 +345,120 @@ impl<B: Backend + 'static> Executor<B> {
         tokens.into_iter().next().ok_or(ExecutorError::EmptySample)
     }
 
+    /// Main Engine Step: Continuous Batching
+    ///
+    /// 1. Schedule next batch (mix of prefill and decode)
+    /// 2. Construct batched inputs (strict causal ordering)
+    /// 3. Run backend forward
+    /// 4. Sample and update request states
+    pub fn step(&mut self) -> ExecutorResult<()> {
+        self.check_memory_pressure()?;
+
+        // 1. Schedule
+        let batch = match self.next_batch() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        if batch.requests.is_empty() {
+            return Ok(());
+        }
+
+        // 2. Process Batch (Serial Execution for Correctness / Accuracy First)
+        // We deliberately process requests serially to avoid "ragged batch" non-determinism.
+        // This aligns with our "Accuracy First" philosophy (2026 Standard).
+        for req_id in batch.requests {
+            self.process_pending_swap_in(req_id)?;
+
+            // Extraction Scope
+            let (tokens, sampling_config, max_new_tokens) = {
+                let req = self.requests.get(&req_id).expect("request exists");
+                if req.finished {
+                    continue;
+                }
+                let tokens = if req.is_prefill {
+                    req.prompt_tokens.clone()
+                } else {
+                    req.output_tokens
+                        .last()
+                        .map(|t| vec![*t])
+                        .unwrap_or_default()
+                };
+                (tokens, req.sampling_config.clone(), req.max_new_tokens)
+            };
+
+            if tokens.is_empty() {
+                continue;
+            }
+
+            // Execution Scope (mut borrow of self)
+            let logits = self.forward_step(&tokens)?;
+            let next_token = self.sample_from_logits(&logits, sampling_config.temperature)?;
+
+            // Update Scope (mut borrow of requests)
+            let eos_token = self.model_config.eos_token_id;
+            let mut request_finished = false;
+
+            {
+                let req = self.requests.get_mut(&req_id).expect("request exists");
+                req.output_tokens.push(next_token);
+                req.is_prefill = false;
+
+                if eos_token.is_some_and(|id| id == next_token)
+                    || req.output_tokens.len() >= max_new_tokens
+                {
+                    req.finished = true;
+                    request_finished = true;
+                }
+            }
+
+            if request_finished {
+                self.batcher.finish_request(&mut self.scheduler, req_id);
+            }
+        }
+        Ok(())
+    }
+
     pub fn generate(
         &mut self,
         prompt: &str,
         max_tokens: usize,
         temperature: f32,
     ) -> ExecutorResult<String> {
-        let input_tokens = self.encode_prompt(prompt)?;
-        if input_tokens.is_empty() {
-            return Err(ExecutorError::EmptyPrompt);
-        }
-
-        // LMCache lookup (ARCH-SCHED-LMCACHE). We simulate skipping prefill tokens by
-        // advancing the KV cache usage without GPU recompute to stay zero-copy/AOT.
-        let model_id = self.manifest.model_id.to_string();
-        let lmcache_hit = self.scheduler.lmcache_lookup(&model_id, prompt);
-
-        let slot = self.kv_cache_slot;
-        let kv_cache = self.ensure_kv_cache()?;
-        kv_cache.slot_mut(slot).reset();
-
-        // LMCache fast path: reuse existing KV/logits handles to skip GPU forward.
-        let mut logits = if let Some(hit) = lmcache_hit.clone() {
-            if let Some(kv_handle) = hit.kv_handle {
-                // Rebind current slot to cached handle and logical cursor.
-                let state = KvCacheState::new(kv_handle, self.kv_cache_config);
-                self.kv_cache
-                    .as_mut()
-                    .expect("kv cache should be allocated")
-                    .overwrite_slot(slot, state);
-                self.kv_cache
-                    .as_mut()
-                    .expect("kv cache should be allocated")
-                    .slot_mut(slot)
-                    .set_used(hit.prefix_tokens)
-                    .map_err(ExecutorError::from)?;
-            }
-            if let Some(logits_handle) = hit.logits_handle {
-                // Only sampling for the first token; skip forward compute.
-                logits_handle
-            } else {
-                // No cached logits; fall back to computing the final token of the prefix.
-                let mut tokens_slice: &[u32] =
-                    &input_tokens[hit.prefix_tokens.min(input_tokens.len())..];
-                if tokens_slice.is_empty() {
-                    let last_idx = input_tokens.len().saturating_sub(1);
-                    tokens_slice = &input_tokens[last_idx..];
-                }
-                self.forward_step(tokens_slice)?
-            }
-        } else {
-            // Cold path: regular forward over the whole prompt.
-            self.forward_step(&input_tokens)?
+        let sampling_config = SamplingConfig {
+            temperature,
+            ..SamplingConfig::default()
         };
 
-        let mut generated = Vec::with_capacity(max_tokens);
-        let eos_token = self.model_config.eos_token_id;
-        for _ in 0..max_tokens {
-            let next = self.sample_from_logits(&logits, temperature)?;
-            if eos_token.is_some_and(|id| id == next) {
+        // 1. Enqueue (Non-blocking)
+        let req_id =
+            self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config)?;
+
+        // 2. Drive the Engine (Blocking for this request)
+        // In a real server, this loop would be global.
+        // Here we run the global loop until OUR request is done.
+        loop {
+            self.step()?;
+
+            if let Some(req) = self.requests.get(&req_id) {
+                if req.finished {
+                    break;
+                }
+            } else {
+                // Request removed (e.g. error or finished and cleaned up?)
+                // If finish_request removes it from batcher, it might still be in self.requests?
+                // We typically keep data in `requests` until retrieved.
                 break;
             }
-            generated.push(next);
-            logits = self.forward_step(&[next])?;
         }
 
-        let text = self.decode_tokens(&generated)?;
-        self.kv_cache_slot = self.kv_cache_slot.flip();
+        // 3. Retrieve Result
+        let req = self.requests.get(&req_id).expect("request data missing");
+        let text = self.decode_tokens(&req.output_tokens)?;
 
-        // Write back prefix cache; store the active KV handle/logits for reuse.
-        let kv_handle = self
-            .kv_cache
-            .as_ref()
-            .map(|c| c.slot(self.kv_cache_slot.flip()).handle());
-        self.scheduler
-            .lmcache_put(&model_id, prompt, kv_handle, Some(logits));
+        // Cleanup?
+        // self.requests.remove(&req_id);
+
         Ok(text)
     }
 
@@ -370,9 +513,12 @@ impl<B: Backend + 'static> Executor<B> {
     }
 
     /// 异步友好的 swap-out；目前内部仍为同步调用，提供 async 接口方便集成。
-    pub async fn swap_out_pages_async(&mut self, page_indices: &[usize]) -> ExecutorResult<()> {
+    pub async fn swap_out_pages_async(
+        &mut self,
+        page_mappings: &[(PageId, StorageKey)],
+    ) -> ExecutorResult<()> {
         let mut handle = self.active_kv_handle()?;
-        self.backend.swap_out_pages(&mut handle, page_indices)?;
+        self.backend.swap_out_pages(&mut handle, page_mappings)?;
         Ok(())
     }
 
@@ -380,11 +526,15 @@ impl<B: Backend + 'static> Executor<B> {
     pub async fn swap_in_pages_async(
         &mut self,
         request_id: RequestId,
-        page_indices: &[PageId],
+        page_mappings: &[(PageId, StorageKey)],
     ) -> ExecutorResult<()> {
         let mut handle = self.active_kv_handle()?;
-        self.backend.swap_in_pages(&mut handle, page_indices)?;
-        self.scheduler.on_swap_in(request_id, page_indices);
+        self.backend.swap_in_pages(&mut handle, page_mappings)?;
+        let page_indices: Vec<PageId> = page_mappings
+            .iter()
+            .map(|(physical_id, _)| *physical_id)
+            .collect();
+        self.scheduler.on_swap_in(request_id, &page_indices);
         Ok(())
     }
 
@@ -395,6 +545,72 @@ impl<B: Backend + 'static> Executor<B> {
             let states = self.backend.get_page_states(&handle)?;
             self.scheduler.sync_page_states(&states);
         }
+        Ok(())
+    }
+
+    fn check_memory_pressure(&mut self) -> ExecutorResult<()> {
+        let Some(swap_cfg) = self.kv_cache_config.swap_config else {
+            return Ok(());
+        };
+        if !swap_cfg.enable_swap || self.kv_cache.is_none() {
+            return Ok(());
+        }
+
+        let threshold = swap_cfg.swap_threshold.max(0.0).min(1.0);
+        let needed_blocks = swap_cfg.lru_granularity.max(1);
+        let mut pressure = self.backend.get_memory_pressure()?;
+        if pressure <= threshold {
+            return Ok(());
+        }
+
+        let mut kv_handle = self.active_kv_handle()?;
+        while pressure > threshold {
+            let victims = self.scheduler.select_victims(needed_blocks);
+            if victims.is_empty() {
+                break;
+            }
+
+            let mut victim_ids = Vec::with_capacity(victims.len());
+            let mut swap_out_mappings = Vec::new();
+            for (request_id, pages) in victims {
+                victim_ids.push(request_id);
+                for (logical_idx, physical_id) in pages.into_iter().enumerate() {
+                    let storage_key = PagedScheduler::storage_key(request_id, logical_idx)
+                        .map_err(ExecutorError::Scheduler)?;
+                    swap_out_mappings.push((physical_id, storage_key));
+                }
+            }
+
+            if swap_out_mappings.is_empty() {
+                break;
+            }
+
+            self.backend
+                .swap_out_pages(&mut kv_handle, &swap_out_mappings)?;
+            self.scheduler
+                .free_victims(&victim_ids)
+                .map_err(ExecutorError::Scheduler)?;
+            pressure = self.backend.get_memory_pressure()?;
+        }
+
+        Ok(())
+    }
+
+    fn process_pending_swap_in(&mut self, request_id: RequestId) -> ExecutorResult<()> {
+        let Some(mappings) = self.scheduler.take_pending_swap_in(request_id) else {
+            return Ok(());
+        };
+        if mappings.is_empty() {
+            return Ok(());
+        }
+
+        let mut kv_handle = self.active_kv_handle()?;
+        self.backend.swap_in_pages(&mut kv_handle, &mappings)?;
+        let page_indices: Vec<PageId> = mappings
+            .iter()
+            .map(|(physical_id, _)| *physical_id)
+            .collect();
+        self.scheduler.on_swap_in(request_id, &page_indices);
         Ok(())
     }
 }

@@ -330,6 +330,7 @@ mod tests {
             access_count: 0,
             last_access: now,
             is_pinned: false,
+            context_len: 1,
         };
         scheduler.upsert_group(warm_group);
         scheduler.update_page_state(1, Some(1), PageState::Warm);
@@ -342,6 +343,7 @@ mod tests {
             access_count: 0,
             last_access: now - Duration::from_secs(1),
             is_pinned: false,
+            context_len: 1,
         };
         scheduler.upsert_group(cold_group);
         scheduler.update_page_state(2, Some(2), PageState::Standby);

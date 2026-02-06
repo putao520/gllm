@@ -51,9 +51,16 @@ impl ContinuousBatcher {
 
         self.running.sort_unstable();
         for request_id in self.running.iter().copied() {
-            if scheduler.allocate_next_token(request_id).is_ok() {
-                batch_ids.push(request_id);
-                next_running.push(request_id);
+            match scheduler.allocate_next_token(request_id) {
+                Ok(_) => {
+                    batch_ids.push(request_id);
+                    next_running.push(request_id);
+                }
+                Err(err) => {
+                    if err.contains("Out of memory") {
+                        next_running.push(request_id);
+                    }
+                }
             }
         }
 

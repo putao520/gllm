@@ -13,6 +13,8 @@ pub struct SequenceGroup {
     pub last_access: Instant,
     /// Pinned groups are immune to eviction (e.g., during prefill).
     pub is_pinned: bool,
+    /// Total number of tokens in the sequence context.
+    pub context_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,13 @@ pub enum GroupState {
     Running,
     Swapped,
     Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    Chat,
+    Embedding,
+    Rerank,
 }
 
 /// Per-page metadata needed by HGAL (Hybrid Gang-Aware LIRS).
