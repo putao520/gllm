@@ -1,4 +1,26 @@
-use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
+use std::time::Instant;
+
+use gllm::scheduler::{
+    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, Sequence,
+    SequenceGroup,
+};
+use gllm_kernels::kernel_types::RequestId;
+
+fn make_group(id: RequestId, context_len: usize) -> SequenceGroup {
+    SequenceGroup {
+        id,
+        pages: Vec::new(),
+        context_len,
+        state: GroupState::Running,
+        access_count: 0,
+        last_access: Instant::now(),
+        is_pinned: false,
+    }
+}
+
+fn make_sequence(id: RequestId, prompt_len: usize) -> Sequence {
+    Sequence::new(id, vec![1; prompt_len])
+}
 
 /// TEST-PAGED-001: PagedAttention 分配页面
 ///
@@ -7,108 +29,97 @@ use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
 ///
 /// **测试步骤**:
 /// 1. 创建调度器
-/// 2. 入队两个请求
-/// 3. 构建批次
-/// 4. 验证页面分配
+/// 2. 添加两个序列
+/// 3. 验证页面分配后剩余块数
+/// 4. 释放序列并验证块归还
 ///
-/// **期望结果**: 页面正确分配
+/// **期望结果**: 页面正确分配并释放
 #[test]
 fn paged_attention_allocates_pages() {
-    let config = SchedulerConfig {
-        page_size: 4,
-        total_pages: 6,
-        max_batch: 4,
-        max_tokens: 64,
-        ..SchedulerConfig::default()
-    };
-    let mut scheduler = PagedScheduler::with_config(config);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 8);
+    let mut scheduler = PagedScheduler::new(6, 4, HGALConfig::default());
+    scheduler
+        .add_sequence(make_group(1, 5))
+        .expect("add sequence 1");
+    scheduler
+        .add_sequence(make_group(2, 8))
+        .expect("add sequence 2");
 
-    let batch = scheduler.next_batch().expect("batch");
-    assert_eq!(batch.requests.len(), 2);
-    assert_eq!(batch.allocations.len(), 2);
-    assert_eq!(batch.allocations[0].pages.len(), 2);
-    assert_eq!(batch.allocations[1].pages.len(), 2);
+    // 5 tokens -> 2 blocks, 8 tokens -> 2 blocks, total 4 used.
+    assert_eq!(scheduler.num_free_blocks(), 2);
 
-    scheduler.complete_batch(batch);
-    assert_eq!(scheduler.free_pages(), 6);
+    scheduler.free_sequence(1);
+    scheduler.free_sequence(2);
+    assert_eq!(scheduler.num_free_blocks(), 6);
 }
 
-/// TEST-PAGED-002: PagedAttention 动态批处理尊重限制
+/// TEST-PAGED-002: PagedAttention 动态批处理尊重批次大小
 ///
 /// **关联需求**: REQ-TEST-005, REQ-SCHED-003
 /// **测试类型**: 正向测试
 ///
 /// **测试步骤**:
-/// 1. 创建调度器 (max_batch=2, max_tokens=6)
-/// 2. 入队 3 个请求 (各 3 tokens)
-/// 3. 验证批次大小和 token 数
+/// 1. 创建调度器与 batcher
+/// 2. 入队 3 个序列
+/// 3. 限制 max_batch_size=2 构建批次
 ///
-/// **期望结果**: 第一批次 2 个请求，第二批次 1 个请求
+/// **期望结果**: 第一批 2 个，第二批 1 个
 #[test]
 fn paged_attention_dynamic_batching_respects_limits() {
-    let config = SchedulerConfig {
-        page_size: 2,
-        total_pages: 10,
-        max_batch: 2,
-        max_tokens: 6,
-        ..SchedulerConfig::default()
-    };
-    let mut scheduler = PagedScheduler::with_config(config);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 3);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 3);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "c", 3);
+    let mut scheduler = PagedScheduler::new(10, 2, HGALConfig::default());
+    let mut batcher = ContinuousBatcher::new();
+    batcher.enqueue(make_sequence(1, 3));
+    batcher.enqueue(make_sequence(2, 3));
+    batcher.enqueue(make_sequence(3, 3));
 
-    let batch = scheduler.next_batch().expect("batch");
-    assert_eq!(batch.requests.len(), 2);
-    assert_eq!(batch.total_tokens, 6);
-    scheduler.complete_batch(batch);
+    let first = batcher.build_batch(&mut scheduler, 2, true);
+    assert_eq!(first.requests, vec![1, 2]);
+    batcher.update_batch(
+        &mut scheduler,
+        &[BatchResult::complete(1, None), BatchResult::complete(2, None)],
+    );
 
-    let next = scheduler.next_batch().expect("next batch");
-    assert_eq!(next.requests.len(), 1);
-    assert_eq!(next.total_tokens, 3);
-    scheduler.complete_batch(next);
+    let second = batcher.build_batch(&mut scheduler, 2, true);
+    assert_eq!(second.requests, vec![3]);
+    batcher.update_batch(&mut scheduler, &[BatchResult::complete(3, None)]);
+    assert!(!batcher.has_pending_work());
 }
 
-/// TEST-PAGED-003: PagedAttention 双缓冲预取
+/// TEST-PAGED-003: PagedAttention 换出后可恢复并记录 swap-in 映射
 ///
 /// **关联需求**: REQ-TEST-005
 /// **测试类型**: 正向测试
 ///
 /// **测试步骤**:
-/// 1. 创建调度器
-/// 2. 调用 prefetch_next()
-/// 3. 调用 next_batch() 两次
-/// 4. 验证 KV cache slot 不同
+/// 1. 添加两个序列
+/// 2. 选择并换出一个受害者序列
+/// 3. 访问被换出序列触发恢复
 ///
-/// **期望结果**: 预取和实际批次使用不同 slot
+/// **期望结果**: 恢复成功且存在 pending swap-in
 #[test]
 fn paged_attention_prefetches_with_double_buffer() {
-    let config = SchedulerConfig {
-        page_size: 2,
-        total_pages: 4,
-        max_batch: 1,
-        max_tokens: 8,
-        ..SchedulerConfig::default()
-    };
-    let mut scheduler = PagedScheduler::with_config(config);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 2);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 2);
+    let mut scheduler = PagedScheduler::new(4, 2, HGALConfig::default());
+    scheduler
+        .add_sequence(make_group(1, 2))
+        .expect("add sequence 1");
+    scheduler
+        .add_sequence(make_group(2, 2))
+        .expect("add sequence 2");
 
-    let prefetched = scheduler.prefetch_next().expect("prefetch");
-    let prefetched_id = prefetched.id;
-    let prefetched_slot = prefetched.kv_cache_slot;
+    let victims = scheduler.select_victims(1);
+    assert!(!victims.is_empty());
+    let victim_ids: Vec<RequestId> = victims.iter().map(|(id, _)| *id).collect();
+    let victim = victim_ids[0];
+    scheduler.free_victims(&victim_ids).expect("swap-out victim");
 
-    let first = scheduler.next_batch().expect("first batch");
-    assert_eq!(first.id, prefetched_id);
-    assert_eq!(first.kv_cache_slot, prefetched_slot);
+    let new_block = scheduler
+        .allocate_next_token(victim)
+        .expect("restore victim and continue");
+    assert!(new_block.is_some());
 
-    let second = scheduler.next_batch().expect("second batch");
-    assert_ne!(first.kv_cache_slot, second.kv_cache_slot);
-
-    scheduler.complete_batch(first);
-    scheduler.complete_batch(second);
+    let pending = scheduler
+        .take_pending_swap_in(victim)
+        .expect("pending swap-in should exist");
+    assert_eq!(pending.len(), 1);
 }
 
 /// TEST-PAGED-004: PagedAttention 拒绝超大请求
@@ -117,61 +128,39 @@ fn paged_attention_prefetches_with_double_buffer() {
 /// **测试类型**: 边界测试
 ///
 /// **测试步骤**:
-/// 1. 创建调度器 (1 页面)
-/// 2. 入队超大请求 (9 tokens)
-/// 3. 尝试构建批次
+/// 1. 创建仅 1 块容量的调度器
+/// 2. 添加需要 3 块的序列
 ///
-/// **期望结果**: next_batch() 返回 None
+/// **期望结果**: add_sequence 返回 OOM
 #[test]
 fn paged_attention_rejects_oversized_request() {
-    let config = SchedulerConfig {
-        page_size: 4,
-        total_pages: 1,
-        max_batch: 1,
-        max_tokens: 32,
-        ..SchedulerConfig::default()
-    };
-    let mut scheduler = PagedScheduler::with_config(config);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 9);
-
-    assert!(scheduler.next_batch().is_none());
-    assert_eq!(scheduler.free_pages(), 1);
-    assert!(scheduler.prefetch_next().is_none());
-}
-
-fn static_batch_cost(lengths: &[usize], max_batch: usize) -> usize {
-    lengths
-        .chunks(max_batch)
-        .map(|chunk| chunk.len() * chunk.iter().copied().max().unwrap_or(0))
-        .sum()
+    let mut scheduler = PagedScheduler::new(1, 4, HGALConfig::default());
+    let err = scheduler
+        .add_sequence(make_group(1, 9))
+        .expect_err("oversized sequence should be rejected");
+    assert!(err.contains("Out of memory"));
+    assert_eq!(scheduler.num_free_blocks(), 1);
 }
 
 #[test]
 fn continuous_batching_improves_utilization_over_static() {
-    let lengths = vec![8, 2, 6, 1, 7, 3];
-    let max_batch = 3;
-    let max_tokens = 16;
+    let mut scheduler = PagedScheduler::new(64, 2, HGALConfig::default());
+    let mut batcher = ContinuousBatcher::new();
 
-    let static_cost = static_batch_cost(&lengths, max_batch);
-
-    let config = SchedulerConfig {
-        page_size: 2,
-        total_pages: 64,
-        max_batch,
-        max_tokens,
-        ..SchedulerConfig::default()
-    };
-    let mut scheduler = PagedScheduler::with_config(config);
-    for (idx, tokens) in lengths.iter().enumerate() {
-        scheduler.enqueue_with_tokens(RequestKind::Generate, format!("req{idx}"), *tokens);
+    for (idx, prompt_len) in [8, 2, 6, 1, 7, 3].into_iter().enumerate() {
+        batcher.enqueue(make_sequence((idx + 1) as RequestId, prompt_len));
     }
 
-    let mut dynamic_tokens = 0usize;
-    while let Some(batch) = scheduler.next_batch() {
-        dynamic_tokens += batch.total_tokens;
-        scheduler.complete_batch(batch);
-    }
+    let batch = batcher.build_batch(&mut scheduler, usize::MAX, true);
+    assert_eq!(batch.requests, vec![1, 2, 3, 4, 5, 6]);
 
-    assert!(dynamic_tokens > 0);
-    assert!(dynamic_tokens <= static_cost);
+    let results: Vec<BatchResult> = batch
+        .requests
+        .iter()
+        .map(|id| BatchResult::complete(*id, None))
+        .collect();
+    batcher.update_batch(&mut scheduler, &results);
+
+    assert!(!batcher.has_pending_work());
+    assert_eq!(scheduler.num_free_blocks(), 64);
 }

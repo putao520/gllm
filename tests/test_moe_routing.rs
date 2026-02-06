@@ -60,6 +60,7 @@ fn moe_router_prefers_colder_experts_for_eviction() {
     let expert_a = SequenceGroup {
         id: 1,
         pages: vec![1, 2],
+        context_len: 0,
         state: GroupState::Running,
         access_count: 8,
         last_access: now,
@@ -73,6 +74,7 @@ fn moe_router_prefers_colder_experts_for_eviction() {
     let expert_b = SequenceGroup {
         id: 2,
         pages: vec![3, 4],
+        context_len: 0,
         state: GroupState::Running,
         access_count: 1,
         last_access: now - Duration::from_millis(10),
@@ -106,6 +108,7 @@ fn moe_router_marks_access_and_balances_recency() {
     let expert_a = SequenceGroup {
         id: 10,
         pages: vec![10],
+        context_len: 0,
         state: GroupState::Running,
         access_count: 0,
         last_access: now,
@@ -114,6 +117,7 @@ fn moe_router_marks_access_and_balances_recency() {
     let expert_b = SequenceGroup {
         id: 11,
         pages: vec![11],
+        context_len: 0,
         state: GroupState::Running,
         access_count: 0,
         last_access: now,

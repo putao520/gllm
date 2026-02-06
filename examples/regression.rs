@@ -10,7 +10,7 @@
 //!   cargo run --release --example regression              # Use CPU backend (auto)
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
-use gllm::engine::scheduler::{PagedScheduler, RequestKind, SchedulerConfig};
+use gllm::scheduler::{GroupState, HGALConfig, PagedScheduler, SequenceGroup};
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
 #[cfg(feature = "candle")]
 use gllm::loader::convert_bins_to_safetensors;
@@ -24,8 +24,6 @@ use gllm_kernels::kernel_types::KvCacheConfig;
 use hf_hub::api::sync::ApiBuilder;
 #[cfg(feature = "candle")]
 use safetensors::SafeTensors;
-use std::path::PathBuf;
-use std::time::Duration;
 use std::time::Instant;
 
 /// Test configuration for a single model
@@ -424,62 +422,106 @@ fn print_summary(results: &[TestResult]) {
 
 fn scheduler_check() -> InternalCheck {
     let name = "PagedAttention scheduler";
-    let config = SchedulerConfig {
-        page_size: 4,
-        total_pages: 4,
-        max_batch: 2,
-        max_tokens: 16,
-        warmup_duration: Duration::from_millis(100),
-        working_set_window: Duration::from_secs(1),
-        hot_threshold: 3,
-        lir_ratio: 0.3,
-        min_warm_access: 2,
-        enable_clock_pro: true,
+    let mut scheduler = PagedScheduler::new(4, 4, HGALConfig::default());
+    let now = Instant::now();
+    let group_a = SequenceGroup {
+        id: 1,
+        pages: Vec::new(),
+        context_len: 5,
+        state: GroupState::Running,
+        access_count: 0,
+        last_access: now,
+        is_pinned: false,
     };
-    let mut scheduler = PagedScheduler::with_config(config);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "a", 5);
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "b", 3);
-
-    let batch = match scheduler.next_batch() {
-        Some(batch) => batch,
-        None => {
-            return InternalCheck {
-                name,
-                passed: false,
-                error: Some("failed to build batch".to_string()),
-            };
-        }
+    let group_b = SequenceGroup {
+        id: 2,
+        pages: Vec::new(),
+        context_len: 3,
+        state: GroupState::Running,
+        access_count: 0,
+        last_access: now,
+        is_pinned: false,
     };
-
-    if batch.allocations.len() != 2 {
+    if let Err(err) = scheduler.add_sequence(group_a) {
         return InternalCheck {
             name,
             passed: false,
-            error: Some("unexpected allocation count".to_string()),
+            error: Some(format!("add sequence A failed: {err}")),
         };
     }
-    let first_slot = batch.kv_cache_slot;
-    scheduler.complete_batch(batch);
-
-    scheduler.enqueue_with_tokens(RequestKind::Generate, "c", 2);
-    let next = match scheduler.next_batch() {
-        Some(batch) => batch,
-        None => {
-            return InternalCheck {
-                name,
-                passed: false,
-                error: Some("failed to build second batch".to_string()),
-            };
-        }
-    };
-    if next.kv_cache_slot == first_slot {
+    if let Err(err) = scheduler.add_sequence(group_b) {
         return InternalCheck {
             name,
             passed: false,
-            error: Some("kv cache slot did not flip".to_string()),
+            error: Some(format!("add sequence B failed: {err}")),
         };
     }
-    scheduler.complete_batch(next);
+    if scheduler.num_free_blocks() != 1 {
+        return InternalCheck {
+            name,
+            passed: false,
+            error: Some("unexpected free block count after add_sequence".to_string()),
+        };
+    }
+
+    match scheduler.allocate_next_token(2) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return InternalCheck {
+                name,
+                passed: false,
+                error: Some("sequence B should not allocate on first growth".to_string()),
+            };
+        }
+        Err(err) => {
+            return InternalCheck {
+                name,
+                passed: false,
+                error: Some(format!("first growth failed: {err}")),
+            };
+        }
+    }
+    match scheduler.allocate_next_token(2) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return InternalCheck {
+                name,
+                passed: false,
+                error: Some("sequence B should allocate a new block".to_string()),
+            };
+        }
+        Err(err) => {
+            return InternalCheck {
+                name,
+                passed: false,
+                error: Some(format!("second growth failed: {err}")),
+            };
+        }
+    }
+
+    let victims = scheduler.select_victims(1);
+    if victims.is_empty() {
+        return InternalCheck {
+            name,
+            passed: false,
+            error: Some("victim selection returned empty".to_string()),
+        };
+    }
+    let victim_ids: Vec<_> = victims.iter().map(|(id, _)| *id).collect();
+    if let Err(err) = scheduler.free_victims(&victim_ids) {
+        return InternalCheck {
+            name,
+            passed: false,
+            error: Some(format!("free_victims failed: {err}")),
+        };
+    }
+    if scheduler.num_free_blocks() == 0 {
+        return InternalCheck {
+            name,
+            passed: false,
+            error: Some("free_victims did not release blocks".to_string()),
+        };
+    }
 
     InternalCheck {
         name,
@@ -565,7 +607,7 @@ fn kv_cache_check() -> InternalCheck {
 #[cfg(feature = "candle")]
 fn pytorch_loader_check() -> InternalCheck {
     let name = "PyTorch bin loader";
-    let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("regression-cache");
     if let Err(err) = std::fs::create_dir_all(&cache_dir) {
