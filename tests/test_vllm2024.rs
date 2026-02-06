@@ -1,4 +1,4 @@
-use gllm::engine::vllm2024::{
+use gllm::scheduler::vllm2024::{
     CacheLevel, L3Backend, LMCacheConfig, LmcacheState, SwiftKVConfig, SwiftKvState,
 };
 use gllm_kernels::backend_trait::Backend;

@@ -168,7 +168,10 @@ fn debug_gguf_tensor_types() {
         }
     }
 
-    println!("Summary: Q4_0={}, Q8_0={}, Other={}", q4_count, q8_count, other_count);
+    println!(
+        "Summary: Q4_0={}, Q8_0={}, Other={}",
+        q4_count, q8_count, other_count
+    );
 }
 
 fn remap_gguf_handle<B: Backend>(

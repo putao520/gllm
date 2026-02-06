@@ -9,9 +9,7 @@
 
 use std::path::PathBuf;
 
-use gllm::loader::{
-    format_detector, naming_parser, LoaderError, WeightFormat,
-};
+use gllm::loader::{format_detector, naming_parser, LoaderError, WeightFormat};
 
 /// Small GGUF model for testing - Q4_0 quantized
 const GGUF_TEST_MODEL: &str = "mav23/SmolLM-135M-Instruct-GGUF";
@@ -92,10 +90,7 @@ fn parse_gguf_quantization_types() {
     );
 
     // No quantization suffix → None
-    assert_eq!(
-        naming_parser::parse_gguf_quantization("model.gguf"),
-        None
-    );
+    assert_eq!(naming_parser::parse_gguf_quantization("model.gguf"), None);
 }
 
 /// TEST-INTEL-003: 解析 ONNX 精度类型
@@ -132,10 +127,7 @@ fn parse_onnx_precision_types() {
     );
 
     // Not an ONNX file → None
-    assert_eq!(
-        naming_parser::parse_onnx_precision("model.txt"),
-        None
-    );
+    assert_eq!(naming_parser::parse_onnx_precision("model.txt"), None);
 }
 
 /// TEST-INTEL-004: GGUF 候选排名
@@ -234,7 +226,10 @@ fn select_preferred_format() {
 fn format_detector_rejects_unknown_extensions() {
     let path = PathBuf::from("model.bin");
     let result = format_detector::detect_format_from_path(&path);
-    assert!(matches!(result, Err(LoaderError::UnsupportedWeightExtension(_))));
+    assert!(matches!(
+        result,
+        Err(LoaderError::UnsupportedWeightExtension(_))
+    ));
 }
 
 /// TEST-INTEL-008: GGUF 量化优先级顺序
@@ -249,12 +244,16 @@ fn format_detector_rejects_unknown_extensions() {
 #[test]
 fn gguf_quantization_preference_order() {
     // Q4_0 should be preferred over Q8_0
-    assert!(naming_parser::GgufQuantization::Q4_0.preference_rank()
-        < naming_parser::GgufQuantization::Q8_0.preference_rank());
+    assert!(
+        naming_parser::GgufQuantization::Q4_0.preference_rank()
+            < naming_parser::GgufQuantization::Q8_0.preference_rank()
+    );
 
     // F32 should be lowest priority
-    assert!(naming_parser::GgufQuantization::Q8_0.preference_rank()
-        < naming_parser::GgufQuantization::F32.preference_rank());
+    assert!(
+        naming_parser::GgufQuantization::Q8_0.preference_rank()
+            < naming_parser::GgufQuantization::F32.preference_rank()
+    );
 }
 
 /// TEST-INTEL-009: ONNX 精度优先级顺序
@@ -269,12 +268,16 @@ fn gguf_quantization_preference_order() {
 #[test]
 fn onnx_precision_preference_order() {
     // FP32 should be lowest priority (default fallback)
-    assert!(naming_parser::OnnxPrecision::Q4.preference_rank()
-        < naming_parser::OnnxPrecision::Fp32.preference_rank());
+    assert!(
+        naming_parser::OnnxPrecision::Q4.preference_rank()
+            < naming_parser::OnnxPrecision::Fp32.preference_rank()
+    );
 
     // UINT8 (rank 3) should be higher priority than INT8 (rank 4)
-    assert!(naming_parser::OnnxPrecision::Int8.preference_rank()
-        > naming_parser::OnnxPrecision::Uint8.preference_rank());
+    assert!(
+        naming_parser::OnnxPrecision::Int8.preference_rank()
+            > naming_parser::OnnxPrecision::Uint8.preference_rank()
+    );
 }
 
 /// TEST-INTEL-010: GGUF E2E 量化检测
@@ -295,8 +298,8 @@ fn onnx_precision_preference_order() {
 #[ignore = "Requires actual model download"] // Run with: cargo test --test test_intelligent_loading -- --ignored
 fn gguf_e2e_quantization_detection() {
     // Use Loader API to download GGUF model
-    let loader = gllm::loader::Loader::from_hf(GGUF_TEST_MODEL)
-        .expect("GGUF loader should be created");
+    let loader =
+        gllm::loader::Loader::from_hf(GGUF_TEST_MODEL).expect("GGUF loader should be created");
 
     // Verify loader detected the correct format
     assert_eq!(loader.weight_format(), WeightFormat::Gguf);
@@ -327,7 +330,10 @@ fn smart_source_fallback_e2e() {
     // Test that HuggingFace is the default source (should succeed)
     let result = gllm::loader::Loader::from_hf(GGUF_TEST_MODEL);
 
-    assert!(result.is_ok(), "HuggingFace download should succeed for public model");
+    assert!(
+        result.is_ok(),
+        "HuggingFace download should succeed for public model"
+    );
 
     let loader = result.unwrap();
     assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
@@ -345,10 +351,8 @@ fn unified_loading_entry_e2e() {
     assert_eq!(gguf_loader.source(), gllm::loader::ModelSource::HuggingFace);
 
     // Test Loader::auto_with_format() with explicit format
-    let gguf_explicit = gllm::loader::Loader::auto_with_format(
-        GGUF_TEST_MODEL,
-        WeightFormat::Gguf,
-    ).expect("Loader::auto_with_format should work with explicit GGUF");
+    let gguf_explicit = gllm::loader::Loader::auto_with_format(GGUF_TEST_MODEL, WeightFormat::Gguf)
+        .expect("Loader::auto_with_format should work with explicit GGUF");
     assert_eq!(gguf_explicit.weight_format(), WeightFormat::Gguf);
 
     // Test Loader::auto_with_source() with explicit source
@@ -357,5 +361,8 @@ fn unified_loading_entry_e2e() {
         gllm::loader::ModelSource::ModelScope,
     );
     // ModelScope might not have this specific GGUF model, so we just check it doesn't panic
-    assert!(gguf_ms.is_ok() || gguf_ms.is_err(), "auto_with_source should return a Result");
+    assert!(
+        gguf_ms.is_ok() || gguf_ms.is_err(),
+        "auto_with_source should return a Result"
+    );
 }

@@ -18,11 +18,11 @@ use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 use std::sync::Arc;
 
-use crate::scheduler::batcher::ContinuousBatcher;
+use crate::scheduler::batcher::{BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
-use crate::scheduler::types::{GroupState, RequestKind, SequenceGroup};
+use crate::scheduler::types::RequestKind;
 use crate::scheduler::vllm2024::Scheduler2024Config;
-use crate::scheduler::{PagedScheduler, ScheduledBatch};
+use crate::scheduler::{PagedScheduler, ScheduledBatch, Sequence};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -194,17 +194,7 @@ impl<B: Backend + 'static> Executor<B> {
         let id = self.requests.len() as RequestId + 1;
         let prompt_str = prompt.into();
         let prompt_tokens = self.encode_prompt(&prompt_str).unwrap_or_default();
-        let context_len = prompt_tokens.len();
-
-        let group = SequenceGroup {
-            id,
-            pages: Vec::new(),
-            state: GroupState::Running,
-            access_count: 0,
-            last_access: std::time::Instant::now(),
-            is_pinned: false,
-            context_len,
-        };
+        let sequence = Sequence::new(id, prompt_tokens.clone());
 
         let request_data = RequestData {
             prompt_tokens,
@@ -216,7 +206,7 @@ impl<B: Backend + 'static> Executor<B> {
         };
 
         self.requests.insert(id, request_data);
-        self.batcher.add_request(group);
+        self.batcher.enqueue(sequence);
         id
     }
 
@@ -230,17 +220,7 @@ impl<B: Backend + 'static> Executor<B> {
         let id = self.requests.len() as RequestId + 1;
         let prompt_str = prompt.into();
         let prompt_tokens = self.encode_prompt(&prompt_str)?;
-        let context_len = prompt_tokens.len();
-
-        let group = SequenceGroup {
-            id,
-            pages: Vec::new(),
-            state: GroupState::Running,
-            access_count: 0,
-            last_access: std::time::Instant::now(),
-            is_pinned: false,
-            context_len,
-        };
+        let sequence = Sequence::new(id, prompt_tokens.clone());
 
         let request_data = RequestData {
             prompt_tokens,
@@ -252,7 +232,7 @@ impl<B: Backend + 'static> Executor<B> {
         };
 
         self.requests.insert(id, request_data);
-        self.batcher.add_request(group);
+        self.batcher.enqueue(sequence);
         Ok(id)
     }
 
@@ -277,7 +257,7 @@ impl<B: Backend + 'static> Executor<B> {
         if !self.batcher.has_pending_work() {
             return None;
         }
-        Some(self.batcher.schedule(&mut self.scheduler))
+        Some(self.batcher.build_batch(&mut self.scheduler))
     }
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
@@ -364,6 +344,8 @@ impl<B: Backend + 'static> Executor<B> {
             return Ok(());
         }
 
+        let mut batch_results = Vec::with_capacity(batch.requests.len());
+
         // 2. Process Batch (Serial Execution for Correctness / Accuracy First)
         // We deliberately process requests serially to avoid "ragged batch" non-determinism.
         // This aligns with our "Accuracy First" philosophy (2026 Standard).
@@ -388,6 +370,10 @@ impl<B: Backend + 'static> Executor<B> {
             };
 
             if tokens.is_empty() {
+                if let Some(req) = self.requests.get_mut(&req_id) {
+                    req.finished = true;
+                }
+                batch_results.push(BatchResult::fail(req_id));
                 continue;
             }
 
@@ -413,9 +399,13 @@ impl<B: Backend + 'static> Executor<B> {
             }
 
             if request_finished {
-                self.batcher.finish_request(&mut self.scheduler, req_id);
+                batch_results.push(BatchResult::complete(req_id, Some(next_token)));
+            } else {
+                batch_results.push(BatchResult::continue_with_token(req_id, next_token));
             }
         }
+        self.batcher
+            .update_batch(&mut self.scheduler, batch_results.as_slice());
         Ok(())
     }
 

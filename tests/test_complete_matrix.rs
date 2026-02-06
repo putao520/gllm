@@ -18,8 +18,8 @@ use std::sync::Arc;
 use gllm::adapter::{AdapterResult, AdapterWeights, ModelAdapter};
 use gllm::engine::executor::Executor;
 use gllm::loader::{
-    config as loader_config, CacheLayout, HfHubClient, Loader, LoaderConfig,
-    ParallelLoader, TensorInfo, WeightsHandle,
+    config as loader_config, CacheLayout, HfHubClient, Loader, LoaderConfig, ParallelLoader,
+    TensorInfo, WeightsHandle,
 };
 use gllm::manifest::{FileMap, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use gllm_kernels::{backend_trait::Backend, cpu_backend::CpuBackend, CudaBackend};
@@ -108,11 +108,7 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
         matches!(manifest.arch, ModelArchitecture::Llama4)
     }
 
-    fn load_weights(
-        &self,
-        loader: &mut Loader,
-        backend: &B,
-    ) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
         let handle = loader.upload_weights(backend)?;
         let handle = remap_gguf_handle(handle)?;
         Ok(AdapterWeights::new(handle))
@@ -143,26 +139,26 @@ fn matrix_chat_safetensors_cpu() {
     // 接受 SafeTensors 或 ONNX 格式 (HuggingFace 仓库现在优先提供 ONNX)
     let format = loader.weight_format();
     assert!(
-        matches!(format, gllm::loader::WeightFormat::SafeTensors | gllm::loader::WeightFormat::Onnx),
+        matches!(
+            format,
+            gllm::loader::WeightFormat::SafeTensors | gllm::loader::WeightFormat::Onnx
+        ),
         "Expected SafeTensors or Onnx format, got: {:?}",
         format
     );
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
-    let manifest = gllm::loader::config::manifest_from_config(
-        model,
-        &config_value,
-        ModelKind::Chat,
-    )
-    .expect("manifest");
+    let manifest =
+        gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Chat)
+            .expect("manifest");
 
     let mut loader = Loader::from_hf(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
-    let mut executor = Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader)
-        .expect("executor");
+    let mut executor =
+        Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader).expect("executor");
 
     // 真实推理测试
     let output = executor.generate("Hello", 5, 0.0).expect("generate");
@@ -281,20 +277,17 @@ fn matrix_embedding_safetensors_cpu() {
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
-    let manifest = gllm::loader::config::manifest_from_config(
-        model,
-        &config_value,
-        ModelKind::Embedding,
-    )
-    .expect("manifest");
+    let manifest =
+        gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Embedding)
+            .expect("manifest");
 
     let mut loader = Loader::from_hf(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
 
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
-    let mut executor = Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader)
-        .expect("executor");
+    let mut executor =
+        Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader).expect("executor");
 
     // 生成 embedding 并验证
     let text = "test";
@@ -325,20 +318,17 @@ fn matrix_reranker_safetensors_cpu() {
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
-    let manifest = gllm::loader::config::manifest_from_config(
-        model,
-        &config_value,
-        ModelKind::Reranker,
-    )
-    .expect("manifest");
+    let manifest =
+        gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Reranker)
+            .expect("manifest");
 
     let mut loader = Loader::from_hf(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
 
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
-    let mut executor = Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader)
-        .expect("executor");
+    let mut executor =
+        Executor::from_loader(backend, Arc::new(manifest), adapter, &mut loader).expect("executor");
 
     // 生成 rerank 分数
     let query = "test query";
@@ -371,7 +361,10 @@ fn matrix_reranker_safetensors_cpu() {
 fn matrix_chat_safetensors_cuda() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
     let loader = Loader::from_hf(model).expect("SafeTensors loader");
-    assert_eq!(loader.weight_format(), gllm::loader::WeightFormat::SafeTensors);
+    assert_eq!(
+        loader.weight_format(),
+        gllm::loader::WeightFormat::SafeTensors
+    );
     assert!(cuda_available(), "CUDA backend should be available");
 }
 

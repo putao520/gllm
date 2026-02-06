@@ -1,188 +1,276 @@
-use super::paged_scheduler::PagedScheduler;
-use super::types::SequenceGroup;
-use gllm_kernels::kernel_types::RequestId;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-#[derive(Debug)]
+use gllm_kernels::kernel_types::RequestId;
+
+use super::paged_scheduler::PagedScheduler;
+use super::sequence::{Sequence, SequenceState};
+
+#[derive(Debug, Clone)]
 pub struct ScheduledBatch {
     pub requests: Vec<RequestId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchAction {
+    Continue,
+    Complete,
+    Pause,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchResult {
+    pub request_id: RequestId,
+    pub action: BatchAction,
+    pub generated_token: Option<u32>,
+}
+
+impl BatchResult {
+    pub fn continue_with_token(request_id: RequestId, generated_token: u32) -> Self {
+        Self {
+            request_id,
+            action: BatchAction::Continue,
+            generated_token: Some(generated_token),
+        }
+    }
+
+    pub fn complete(request_id: RequestId, generated_token: Option<u32>) -> Self {
+        Self {
+            request_id,
+            action: BatchAction::Complete,
+            generated_token,
+        }
+    }
+
+    pub fn pause(request_id: RequestId) -> Self {
+        Self {
+            request_id,
+            action: BatchAction::Pause,
+            generated_token: None,
+        }
+    }
+
+    pub fn fail(request_id: RequestId) -> Self {
+        Self {
+            request_id,
+            action: BatchAction::Fail,
+            generated_token: None,
+        }
+    }
+}
+
+/// Continuous batching at iteration granularity.
+///
+/// - `PagedScheduler` owns memory/page allocation.
+/// - `ContinuousBatcher` owns runnable sequence state transitions.
 pub struct ContinuousBatcher {
-    waiting: VecDeque<SequenceGroup>,
-    running: Vec<RequestId>,
+    waiting: VecDeque<Sequence>,
+    running: BTreeMap<RequestId, Sequence>,
 }
 
 impl ContinuousBatcher {
     pub fn new() -> Self {
         Self {
             waiting: VecDeque::new(),
-            running: Vec::new(),
+            running: BTreeMap::new(),
         }
     }
 
-    pub fn add_request(&mut self, group: SequenceGroup) {
-        self.waiting.push_back(group);
-    }
-
-    pub fn schedule(&mut self, scheduler: &mut PagedScheduler) -> ScheduledBatch {
-        let (mut batch_ids, mut next_running) = if self.running.is_empty() {
-            self.schedule_prefill_phase(scheduler)
-        } else {
-            self.schedule_decode_phase(scheduler)
-        };
-
-        // Canonical ordering is required for deterministic scheduling.
-        batch_ids.sort_unstable();
-        next_running.sort_unstable();
-        self.running = next_running;
-
-        ScheduledBatch {
-            requests: batch_ids,
+    pub fn enqueue(&mut self, mut sequence: Sequence) {
+        if self.running.contains_key(&sequence.id)
+            || self
+                .waiting
+                .iter()
+                .any(|existing| existing.id == sequence.id)
+        {
+            return;
         }
+        sequence.state = SequenceState::Waiting;
+        self.waiting.push_back(sequence);
     }
 
-    fn schedule_decode_phase(
-        &mut self,
-        scheduler: &mut PagedScheduler,
-    ) -> (Vec<RequestId>, Vec<RequestId>) {
-        let mut batch_ids = Vec::new();
-        let mut next_running = Vec::new();
+    pub fn build_batch(&mut self, scheduler: &mut PagedScheduler) -> ScheduledBatch {
+        self.admit_waiting(scheduler);
 
-        self.running.sort_unstable();
-        for request_id in self.running.iter().copied() {
-            match scheduler.allocate_next_token(request_id) {
-                Ok(_) => {
-                    batch_ids.push(request_id);
-                    next_running.push(request_id);
+        let mut requests = Vec::new();
+        let mut failed = Vec::new();
+
+        for sequence in self.running.values_mut() {
+            if sequence.state == SequenceState::Paused {
+                sequence.state = SequenceState::Running;
+            }
+            if sequence.state != SequenceState::Running {
+                continue;
+            }
+
+            if sequence.needs_prefill() {
+                requests.push(sequence.id);
+                continue;
+            }
+
+            match scheduler.allocate_next_token(sequence.id) {
+                Ok(Some(new_page)) => {
+                    sequence.kv_pages.push(new_page);
+                    requests.push(sequence.id);
                 }
+                Ok(None) => requests.push(sequence.id),
                 Err(err) => {
                     if err.contains("Out of memory") {
-                        next_running.push(request_id);
+                        continue;
                     }
+                    sequence.state = SequenceState::Failed;
+                    failed.push(sequence.id);
                 }
             }
         }
 
-        (batch_ids, next_running)
+        for request_id in failed {
+            self.running.remove(&request_id);
+            scheduler.free_sequence(request_id);
+        }
+
+        ScheduledBatch { requests }
     }
 
-    fn schedule_prefill_phase(
-        &mut self,
-        scheduler: &mut PagedScheduler,
-    ) -> (Vec<RequestId>, Vec<RequestId>) {
-        let mut batch_ids = Vec::new();
-        let mut next_running = Vec::new();
-        let mut remaining = self.waiting.len();
+    pub fn update_batch(&mut self, scheduler: &mut PagedScheduler, results: &[BatchResult]) {
+        let mut finished = Vec::new();
 
-        while remaining > 0 {
-            if let Some(group) = self.waiting.pop_front() {
-                let request_id = group.id;
-                match scheduler.add_sequence(group.clone()) {
-                    Ok(_) => {
-                        batch_ids.push(request_id);
-                        next_running.push(request_id);
+        for result in results {
+            let Some(sequence) = self.running.get_mut(&result.request_id) else {
+                continue;
+            };
+
+            match result.action {
+                BatchAction::Continue => {
+                    if let Some(token) = result.generated_token {
+                        sequence.push_generated_token(token);
                     }
-                    Err(_) => {
-                        self.waiting.push_front(group);
-                        break;
+                    sequence.state = SequenceState::Running;
+                }
+                BatchAction::Pause => {
+                    sequence.state = SequenceState::Paused;
+                }
+                BatchAction::Complete => {
+                    if let Some(token) = result.generated_token {
+                        sequence.push_generated_token(token);
                     }
+                    sequence.state = SequenceState::Completed;
+                    finished.push(result.request_id);
+                }
+                BatchAction::Fail => {
+                    sequence.state = SequenceState::Failed;
+                    finished.push(result.request_id);
                 }
             }
-            remaining -= 1;
         }
 
-        (batch_ids, next_running)
-    }
-
-    /// Mark a request as finished and free resources
-    pub fn finish_request(&mut self, scheduler: &mut PagedScheduler, id: RequestId) {
-        if let Some(pos) = self.running.iter().position(|&r| r == id) {
-            self.running.remove(pos);
+        for request_id in finished {
+            self.running.remove(&request_id);
+            scheduler.free_sequence(request_id);
         }
-        scheduler.free_sequence(id);
     }
 
     pub fn has_pending_work(&self) -> bool {
         !self.waiting.is_empty() || !self.running.is_empty()
     }
+
+    fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
+        while let Some(mut sequence) = self.waiting.pop_front() {
+            let request_id = sequence.id;
+            match scheduler.add_sequence(sequence.to_sequence_group()) {
+                Ok(()) => {
+                    let pages = scheduler
+                        .block_tables
+                        .get(&request_id)
+                        .map(|table| table.blocks.clone())
+                        .unwrap_or_default();
+                    sequence.mark_running(pages);
+                    self.running.insert(request_id, sequence);
+                }
+                Err(_) => {
+                    sequence.state = SequenceState::Waiting;
+                    self.waiting.push_front(sequence);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
-    use crate::scheduler::hgal::HGALConfig;
-    use crate::scheduler::types::GroupState;
-
     use super::*;
+    use crate::scheduler::hgal::HGALConfig;
 
-    fn make_group(id: RequestId, context_len: usize) -> SequenceGroup {
-        SequenceGroup {
-            id,
-            pages: Vec::new(),
-            state: GroupState::Running,
-            access_count: 0,
-            last_access: Instant::now(),
-            is_pinned: false,
-            context_len,
-        }
+    fn make_sequence(id: RequestId, prompt_len: usize) -> Sequence {
+        Sequence::new(id, vec![1; prompt_len])
     }
 
     #[test]
-    fn schedule_is_phase_isolated_and_decode_first() {
-        let mut batcher = ContinuousBatcher::new();
-        let mut scheduler = PagedScheduler::new(16, 4, HGALConfig::default());
-
-        batcher.add_request(make_group(10, 4));
-        let prefill_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(prefill_batch.requests, vec![10]);
-
-        batcher.add_request(make_group(2, 2));
-        let decode_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(decode_batch.requests, vec![10]);
-        assert_eq!(batcher.waiting.len(), 1);
-
-        batcher.finish_request(&mut scheduler, 10);
-        let prefill_after_decode = batcher.schedule(&mut scheduler);
-        assert_eq!(prefill_after_decode.requests, vec![2]);
-    }
-
-    #[test]
-    fn decode_phase_never_falls_back_to_prefill_in_same_schedule_call() {
-        let mut batcher = ContinuousBatcher::new();
-        let mut scheduler = PagedScheduler::new(16, 4, HGALConfig::default());
-
-        batcher.add_request(make_group(10, 4));
-        let prefill_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(prefill_batch.requests, vec![10]);
-
-        batcher.add_request(make_group(2, 2));
-        scheduler.free_sequence(10);
-
-        // Decode queue is non-empty at call start, so this round must stay decode-only.
-        let decode_only_batch = batcher.schedule(&mut scheduler);
-        assert!(decode_only_batch.requests.is_empty());
-        assert_eq!(batcher.waiting.len(), 1);
-
-        // Prefill is allowed only in the next round after running becomes empty.
-        let prefill_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(prefill_batch.requests, vec![2]);
-    }
-
-    #[test]
-    fn schedule_returns_sorted_ids_for_prefill_and_decode() {
+    fn build_batch_allows_iteration_level_join() {
         let mut batcher = ContinuousBatcher::new();
         let mut scheduler = PagedScheduler::new(32, 4, HGALConfig::default());
 
-        batcher.add_request(make_group(7, 1));
-        batcher.add_request(make_group(3, 1));
-        batcher.add_request(make_group(5, 1));
+        batcher.enqueue(make_sequence(10, 4));
+        let first = batcher.build_batch(&mut scheduler);
+        assert_eq!(first.requests, vec![10]);
+        batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(10, 100)]);
 
-        let prefill_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(prefill_batch.requests, vec![3, 5, 7]);
+        batcher.enqueue(make_sequence(2, 2));
+        let second = batcher.build_batch(&mut scheduler);
+        assert_eq!(second.requests, vec![2, 10]);
+    }
 
-        let decode_batch = batcher.schedule(&mut scheduler);
-        assert_eq!(decode_batch.requests, vec![3, 5, 7]);
+    #[test]
+    fn update_batch_complete_releases_scheduler_resources() {
+        let mut batcher = ContinuousBatcher::new();
+        let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
+
+        batcher.enqueue(make_sequence(1, 4));
+        let first = batcher.build_batch(&mut scheduler);
+        assert_eq!(first.requests, vec![1]);
+
+        batcher.update_batch(&mut scheduler, &[BatchResult::complete(1, Some(7))]);
+        assert!(!batcher.has_pending_work());
+        assert_eq!(scheduler.num_free_blocks(), 8);
+    }
+
+    #[test]
+    fn build_batch_keeps_deterministic_order() {
+        let mut batcher = ContinuousBatcher::new();
+        let mut scheduler = PagedScheduler::new(32, 4, HGALConfig::default());
+
+        batcher.enqueue(make_sequence(7, 1));
+        batcher.enqueue(make_sequence(3, 1));
+        batcher.enqueue(make_sequence(5, 1));
+
+        let prefill = batcher.build_batch(&mut scheduler);
+        assert_eq!(prefill.requests, vec![3, 5, 7]);
+        batcher.update_batch(
+            &mut scheduler,
+            &[
+                BatchResult::continue_with_token(3, 1),
+                BatchResult::continue_with_token(5, 1),
+                BatchResult::continue_with_token(7, 1),
+            ],
+        );
+
+        let decode = batcher.build_batch(&mut scheduler);
+        assert_eq!(decode.requests, vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn build_batch_keeps_waiting_when_capacity_is_not_enough() {
+        let mut batcher = ContinuousBatcher::new();
+        let mut scheduler = PagedScheduler::new(1, 4, HGALConfig::default());
+
+        batcher.enqueue(make_sequence(1, 4));
+        batcher.enqueue(make_sequence(2, 4));
+
+        let first = batcher.build_batch(&mut scheduler);
+        assert_eq!(first.requests, vec![1]);
+        assert_eq!(batcher.waiting.len(), 1);
+        assert!(batcher.running.contains_key(&1));
+        assert!(!batcher.running.contains_key(&2));
     }
 }

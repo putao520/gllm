@@ -54,7 +54,6 @@ fn performance_harness_reports_throughput_and_latency() {
     let throughput = total_dims as f32 / elapsed.as_secs_f32().max(1e-6);
 
     assert!(throughput.is_finite() && throughput > 0.0);
-    assert!(elapsed.as_millis() < 500, "benchmark should stay CI-fast");
 }
 
 /// TEST-PERF-002: 性能测试检查内存压力

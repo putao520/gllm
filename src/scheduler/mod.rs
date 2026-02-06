@@ -8,11 +8,13 @@ pub mod allocator;
 pub mod batcher;
 pub mod hgal;
 pub mod paged_scheduler;
+pub mod sequence;
 pub mod types;
 pub mod vllm2024;
 
 pub use allocator::BlockAllocator;
-pub use batcher::{ContinuousBatcher, ScheduledBatch};
+pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};
 pub use hgal::{HGALConfig, HGALScheduler};
 pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerOutput};
+pub use sequence::{Sequence, SequenceState};
 pub use types::{GroupState, PageMetadata, SequenceGroup};

@@ -56,7 +56,8 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
 
     if let Ok(cuda_backend) = CudaBackend::new(0) {
         let mut loader = files.loader("BAAI/bge-small-en-v1.5").expect("loader");
-        let manifest = manifest_from_loader("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &loader);
+        let manifest =
+            manifest_from_loader("BAAI/bge-small-en-v1.5", ModelKind::Embedding, &loader);
         loader.set_manifest_if_missing(&manifest);
         let adapter = adapter_for::<CudaBackend>(&manifest).expect("cuda adapter");
         let mut cuda_exec = Executor::from_loader(
