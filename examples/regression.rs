@@ -562,7 +562,7 @@ fn kv_cache_check() -> InternalCheck {
             };
         }
     };
-    let mut front = KvCacheState::new(handle_front, config);
+    let mut front = KvCacheState::new(handle_front, config.clone());
     let mut back = KvCacheState::new(handle_back, config);
     if front.advance(2).is_err() || back.advance(1).is_err() {
         return InternalCheck {

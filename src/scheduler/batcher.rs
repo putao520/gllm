@@ -127,6 +127,8 @@ impl ContinuousBatcher {
                 Ok(None) => requests.push(sequence.id),
                 Err(err) => {
                     if err.contains("Out of memory") {
+                        // 内存不足：标记为暂停，让其他序列有机会
+                        sequence.state = SequenceState::Paused;
                         continue;
                     }
                     sequence.state = SequenceState::Failed;
@@ -186,8 +188,18 @@ impl ContinuousBatcher {
     }
 
     fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
-        while let Some(mut sequence) = self.waiting.pop_front() {
+        // 企业级策略：
+        // 1. 收集所有等待的序列
+        // 2. 尝试 admit 每个序列
+        // 3. 分配失败的序列不再放回队列，等待下次 build_batch 时重试
+        // 4. 避免无限循环：失败的序列不会在本次调用中重试
+
+        // 收集当前所有等待的序列
+        let waiting_sequences: Vec<_> = self.waiting.drain(..).collect();
+
+        for mut sequence in waiting_sequences {
             let request_id = sequence.id;
+
             match scheduler.add_sequence(sequence.to_sequence_group()) {
                 Ok(()) => {
                     let pages = scheduler
@@ -199,9 +211,11 @@ impl ContinuousBatcher {
                     self.running.insert(request_id, sequence);
                 }
                 Err(_) => {
+                    // 分配失败：放回队列末尾，等待下次 build_batch 时重试
+                    // 关键：不在本次循环中重试，避免无限循环
                     sequence.state = SequenceState::Waiting;
-                    self.waiting.push_front(sequence);
-                    break;
+                    self.waiting.push_back(sequence);
+                    // 继续处理下一个序列，不中断
                 }
             }
         }
