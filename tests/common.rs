@@ -23,7 +23,7 @@ impl TestModelFiles {
     }
 
     /// Get the cache directory (for compatibility).
-    pub fn cache_dir(&self) -> &Path {
+    pub fn _cache_dir(&self) -> &Path {
         std::path::Path::new("~/.gllm/models")
     }
 }

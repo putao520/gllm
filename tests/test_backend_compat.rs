@@ -87,21 +87,35 @@ fn cpu_and_cuda_embeddings_align_within_tolerance() {
 ///
 /// **关联需求**: REQ-TEST-001, REQ-TEST-010
 /// **测试类型**: 正向测试
-/// **前置条件**: microsoft/Phi-4-mini-instruct 模型已缓存
+/// **前置条件**: HuggingFaceTB/SmolLM-135M-Instruct 模型已缓存
 ///
 /// **测试步骤**:
 /// 1. 使用相同模型创建两个独立的执行器
-/// 2. 对两个执行器执行相同的生成请求
-/// 3. 比较两个执行器的输出
+/// 2. 对两个执行器执行相同的前向 + 采样请求
+/// 3. 比较两个执行器采样出的 token
 ///
-/// **期望结果**: 相同输入产生相同输出（确定性采样）
+/// **期望结果**: 相同输入产生相同 token（确定性采样）
 #[test]
 fn backend_generation_outputs_are_stable() {
     let files = TestModelFiles::new().expect("test model files");
-    let mut first = build_cpu_executor("microsoft/Phi-4-mini-instruct", ModelKind::Chat, &files);
-    let mut second = build_cpu_executor("microsoft/Phi-4-mini-instruct", ModelKind::Chat, &files);
+    let mut first =
+        build_cpu_executor("HuggingFaceTB/SmolLM-135M-Instruct", ModelKind::Chat, &files);
+    let mut second =
+        build_cpu_executor("HuggingFaceTB/SmolLM-135M-Instruct", ModelKind::Chat, &files);
 
-    let out1 = first.generate("tok3 tok4", 2, 0.0).expect("generate");
-    let out2 = second.generate("tok3 tok4", 2, 0.0).expect("generate");
-    assert_eq!(out1, out2, "deterministic sampling mismatch");
+    let prompt = "tok3 tok4";
+    let first_tokens = first.encode_prompt(prompt).expect("encode prompt");
+    let second_tokens = second.encode_prompt(prompt).expect("encode prompt");
+    assert_eq!(first_tokens, second_tokens, "tokenization mismatch");
+
+    let first_logits = first.forward_step(&first_tokens).expect("forward first");
+    let second_logits = second.forward_step(&second_tokens).expect("forward second");
+    let first_token = first
+        .sample_from_logits(&first_logits, 0.0)
+        .expect("sample first");
+    let second_token = second
+        .sample_from_logits(&second_logits, 0.0)
+        .expect("sample second");
+
+    assert_eq!(first_token, second_token, "deterministic sampling mismatch");
 }

@@ -6,7 +6,7 @@ use gllm_kernels::backend_trait::{
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::{
     GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, RequestId, SamplingConfig,
-    StorageKey, SwapConfig,
+    StorageKey,
 };
 use thiserror::Error;
 
@@ -133,7 +133,7 @@ impl<B: Backend + 'static> Executor<B> {
             max_seq_len: model_config.max_position_embeddings,
             dtype_size: cpu_dtype_size.unwrap_or(model_config.dtype_size),
             page_size,
-            swap_config: Some(SwapConfig::default()),
+            swap_config: None,
         };
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = adapter.load_weights(loader, &backend)?;

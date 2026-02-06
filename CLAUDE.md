@@ -19,7 +19,17 @@
 
 ## Core Architecture
 
-### 0. Backend Constraints (from gllm-kernels)
+### 0. Core Philosophy: Accuracy First (准确度优先)
+> **🚨 Critical Difference from vLLM**:
+> vLLM and similar frameworks often prioritize throughput by using out-of-order execution in continuous batching, approximate attention masks, or aggressive quantization. This can degrade inference accuracy, especially in long-context or complex instruction-following scenarios.
+>
+> **gllm Principles**:
+> 1.  **Accuracy > Throughput**: Never sacrifice calculation precision for scheduling optimization.
+> 2.  **Strict Causal Ordering**: Intra-batch attention computation must guarantee strict causal masking. No out-of-order execution that risks context drift.
+> 3.  **Reliability First**: Memory management (PagedAttention) must have strict boundary checks and error recovery. Prefer OOM rejection over returning corrupted results.
+> 4.  **Deterministic Scheduling**: To combat floating-point non-associativity, batches must be strictly ordered (e.g., by RequestId). We prefer deterministic serial execution over messy parallel reduction.
+
+### 1. Backend Constraints (from gllm-kernels)
 - **Quantization**: Template-based kernels (1/2/4/8-bit unified)
 - **GPU Execution**: L3 GPU-Pure API (zero-copy generation loop)
 - **AOT Only**: Pre-compiled `.cubin` files, no PTX JIT

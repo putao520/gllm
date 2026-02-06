@@ -218,9 +218,9 @@ fn e2e_rerank_architectures() {
 
 struct TestResult {
     alias: String,
-    function_type: String,
+    _function_type: String,
     architecture: String,
-    backend: String,
+    _backend: String,
     status: TestStatus,
 }
 
@@ -253,9 +253,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                     format!("CPU:{}", alias),
                     TestResult {
                         alias: alias.clone(),
-                        function_type: function_type.to_string(),
+                        _function_type: function_type.to_string(),
                         architecture: arch_str.clone(),
-                        backend: "CPU".to_string(),
+                        _backend: "CPU".to_string(),
                         status: TestStatus::Passed,
                     },
                 );
@@ -265,9 +265,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                     format!("CPU:{}", alias),
                     TestResult {
                         alias: alias.clone(),
-                        function_type: function_type.to_string(),
+                        _function_type: function_type.to_string(),
                         architecture: arch_str.clone(),
-                        backend: "CPU".to_string(),
+                        _backend: "CPU".to_string(),
                         status: TestStatus::Skipped(reason),
                     },
                 );
@@ -277,9 +277,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                     format!("CPU:{}", alias),
                     TestResult {
                         alias: alias.clone(),
-                        function_type: function_type.to_string(),
+                        _function_type: function_type.to_string(),
                         architecture: arch_str.clone(),
-                        backend: "CPU".to_string(),
+                        _backend: "CPU".to_string(),
                         status: TestStatus::Failed(err),
                     },
                 );
@@ -294,9 +294,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                         format!("CUDA:{}", alias),
                         TestResult {
                             alias: alias.clone(),
-                            function_type: function_type.to_string(),
+                            _function_type: function_type.to_string(),
                             architecture: arch_str,
-                            backend: "CUDA".to_string(),
+                            _backend: "CUDA".to_string(),
                             status: TestStatus::Passed,
                         },
                     );
@@ -306,9 +306,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                         format!("CUDA:{}", alias),
                         TestResult {
                             alias,
-                            function_type: function_type.to_string(),
+                            _function_type: function_type.to_string(),
                             architecture: arch_str,
-                            backend: "CUDA".to_string(),
+                            _backend: "CUDA".to_string(),
                             status: TestStatus::Skipped(reason),
                         },
                     );
@@ -318,9 +318,9 @@ fn run_test_matrix(function_type: &str) -> HashMap<String, TestResult> {
                         format!("CUDA:{}", alias),
                         TestResult {
                             alias,
-                            function_type: function_type.to_string(),
+                            _function_type: function_type.to_string(),
                             architecture: arch_str,
-                            backend: "CUDA".to_string(),
+                            _backend: "CUDA".to_string(),
                             status: TestStatus::Failed(err),
                         },
                     );

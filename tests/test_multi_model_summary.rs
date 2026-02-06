@@ -7,13 +7,13 @@ use gllm::Client;
 struct ModelTestCase {
     alias: &'static str,
     description: &'static str,
-    architecture: &'static str,
+    _architecture: &'static str,
 }
 
 const MODELS_TO_TEST: &[ModelTestCase] = &[ModelTestCase {
     alias: "HuggingFaceTB/SmolLM2-135M-Instruct",
     description: "SmolLM2-135M - Llama4 architecture, GQA (9:3)",
-    architecture: "Llama4",
+    _architecture: "Llama4",
 }];
 
 /// TEST-MULTI-001: 多模型 QKV 布局修复验证
