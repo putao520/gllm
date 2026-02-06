@@ -89,13 +89,24 @@ impl ContinuousBatcher {
         self.waiting.push_back(sequence);
     }
 
-    pub fn build_batch(&mut self, scheduler: &mut PagedScheduler) -> ScheduledBatch {
-        self.admit_waiting(scheduler);
+    pub fn build_batch(
+        &mut self,
+        scheduler: &mut PagedScheduler,
+        max_batch_size: usize,
+        admit_new_prefill: bool,
+    ) -> ScheduledBatch {
+        if admit_new_prefill {
+            self.admit_waiting(scheduler);
+        }
 
         let mut requests = Vec::new();
         let mut failed = Vec::new();
 
         for sequence in self.running.values_mut() {
+            if requests.len() >= max_batch_size {
+                break;
+            }
+
             if sequence.state == SequenceState::Paused {
                 sequence.state = SequenceState::Running;
             }
@@ -212,12 +223,12 @@ mod tests {
         let mut scheduler = PagedScheduler::new(32, 4, HGALConfig::default());
 
         batcher.enqueue(make_sequence(10, 4));
-        let first = batcher.build_batch(&mut scheduler);
+        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(first.requests, vec![10]);
         batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(10, 100)]);
 
         batcher.enqueue(make_sequence(2, 2));
-        let second = batcher.build_batch(&mut scheduler);
+        let second = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(second.requests, vec![2, 10]);
     }
 
@@ -227,7 +238,7 @@ mod tests {
         let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
 
         batcher.enqueue(make_sequence(1, 4));
-        let first = batcher.build_batch(&mut scheduler);
+        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(first.requests, vec![1]);
 
         batcher.update_batch(&mut scheduler, &[BatchResult::complete(1, Some(7))]);
@@ -244,7 +255,7 @@ mod tests {
         batcher.enqueue(make_sequence(3, 1));
         batcher.enqueue(make_sequence(5, 1));
 
-        let prefill = batcher.build_batch(&mut scheduler);
+        let prefill = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(prefill.requests, vec![3, 5, 7]);
         batcher.update_batch(
             &mut scheduler,
@@ -255,7 +266,7 @@ mod tests {
             ],
         );
 
-        let decode = batcher.build_batch(&mut scheduler);
+        let decode = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(decode.requests, vec![3, 5, 7]);
     }
 
@@ -267,7 +278,7 @@ mod tests {
         batcher.enqueue(make_sequence(1, 4));
         batcher.enqueue(make_sequence(2, 4));
 
-        let first = batcher.build_batch(&mut scheduler);
+        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
         assert_eq!(first.requests, vec![1]);
         assert_eq!(batcher.waiting.len(), 1);
         assert!(batcher.running.contains_key(&1));

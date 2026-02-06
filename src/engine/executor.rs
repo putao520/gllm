@@ -22,7 +22,10 @@ use crate::scheduler::batcher::{BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
 use crate::scheduler::types::RequestKind;
 use crate::scheduler::vllm2024::Scheduler2024Config;
-use crate::scheduler::{PagedScheduler, ScheduledBatch, Sequence};
+use crate::scheduler::{
+    BasicObserver, PagedScheduler, PolicyVariant, ScheduledBatch, Sequence,
+    SystemState,
+};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -62,6 +65,8 @@ pub struct Executor<B: Backend + 'static> {
     backend: B,
     scheduler: PagedScheduler,
     batcher: ContinuousBatcher,
+    observer: BasicObserver,
+    policy: PolicyVariant,
     requests: HashMap<RequestId, RequestData>,
     manifest: Arc<ModelManifest>,
     adapter: &'static dyn ModelAdapter<B>,
@@ -145,6 +150,8 @@ impl<B: Backend + 'static> Executor<B> {
             kv_cache: None,
             kv_cache_slot: KvCacheSlot::Front,
             batcher: ContinuousBatcher::new(),
+            observer: BasicObserver::new(),
+            policy: PolicyVariant::default(),
             requests: HashMap::new(),
         })
     }
@@ -257,7 +264,10 @@ impl<B: Backend + 'static> Executor<B> {
         if !self.batcher.has_pending_work() {
             return None;
         }
-        Some(self.batcher.build_batch(&mut self.scheduler))
+        Some(
+            self.batcher
+                .build_batch(&mut self.scheduler, usize::MAX, true),
+        )
     }
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
@@ -334,10 +344,33 @@ impl<B: Backend + 'static> Executor<B> {
     pub fn step(&mut self) -> ExecutorResult<()> {
         self.check_memory_pressure()?;
 
-        // 1. Schedule
-        let batch = match self.next_batch() {
-            Some(b) => b,
-            None => return Ok(()),
+        // 0. Observability: Capture System State
+        let system_state = SystemState {
+            memory_pressure: self
+                .backend
+                .get_memory_pressure()
+                .unwrap_or(0.0), // Best effort
+            kv_fragmentation: 0.0, // TODO: Get from scheduler
+            waiting_queue_len: 0,  // TODO: Get from batcher.waiting.len()
+            current_running_len: 0, // TODO: Get from batcher.running.len()
+            mean_context_len: 0,   // TODO
+            logits_entropy: 0.0,   // Phase 2
+        };
+        self.observer.update(system_state);
+
+        // 1. JIT Decision: Decide Scheduling Strategy
+        let decision = self.policy.decide(&system_state);
+
+        // 2. Schedule
+        // Pass dynamic decision parameters to batcher
+        let batch = if !self.batcher.has_pending_work() {
+            return Ok(());
+        } else {
+            self.batcher.build_batch(
+                &mut self.scheduler,
+                decision.max_batch_size,
+                decision.admit_new_prefill,
+            )
         };
 
         if batch.requests.is_empty() {
@@ -346,7 +379,7 @@ impl<B: Backend + 'static> Executor<B> {
 
         let mut batch_results = Vec::with_capacity(batch.requests.len());
 
-        // 2. Process Batch (Serial Execution for Correctness / Accuracy First)
+        // 3. Process Batch (Serial Execution for Correctness / Accuracy First)
         // We deliberately process requests serially to avoid "ragged batch" non-determinism.
         // This aligns with our "Accuracy First" philosophy (2026 Standard).
         for req_id in batch.requests {

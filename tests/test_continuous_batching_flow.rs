@@ -22,7 +22,7 @@ fn test_continuous_batching_prefill_and_decode_mix() {
     batcher.enqueue(make_sequence(req_a, 2));
 
     // 3. T=1: Schedule A (Prefill)
-    let batch_1 = batcher.build_batch(&mut scheduler);
+    let batch_1 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert_eq!(batch_1.requests, vec![req_a], "First batch should contain A");
 
     // Simulate A finishing prefill and generating 1st token
@@ -35,7 +35,7 @@ fn test_continuous_batching_prefill_and_decode_mix() {
     batcher.enqueue(make_sequence(req_b, 2));
 
     // 5. T=2: Schedule (Should mix A-Decode and B-Prefill)
-    let batch_2 = batcher.build_batch(&mut scheduler);
+    let batch_2 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     // Sort to ensure deterministic comparison, though implementation usually sorts by ID
     let mut ids = batch_2.requests.clone();
     ids.sort_unstable();
@@ -48,7 +48,7 @@ fn test_continuous_batching_prefill_and_decode_mix() {
     ]);
 
     // 6. T=3: Both in Decode
-    let batch_3 = batcher.build_batch(&mut scheduler);
+    let batch_3 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     let mut ids_3 = batch_3.requests.clone();
     ids_3.sort_unstable();
     assert_eq!(ids_3, vec![req_a, req_b], "Third batch should have both in decode");
@@ -59,7 +59,7 @@ fn test_continuous_batching_prefill_and_decode_mix() {
     ]);
 
     // 8. T=4: Only B remains
-    let batch_4 = batcher.build_batch(&mut scheduler);
+    let batch_4 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert_eq!(batch_4.requests, vec![req_b], "Fourth batch should only have B");
 
     println!("Continuous Batching Test Passed: Mixed prefill/decode handled correctly.");
@@ -76,13 +76,13 @@ fn test_oom_handling_in_batching() {
     batcher.enqueue(make_sequence(req_a, 2));
 
     // T=1: A Prefill (Uses 2 blocks. Free: 2)
-    let batch_1 = batcher.build_batch(&mut scheduler);
+    let batch_1 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert_eq!(batch_1.requests, vec![req_a]);
     batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(req_a, 100)]);
 
     // T=2: A Decode (Uses 3 blocks. Free: 1)
     // We must trigger a decode step for A to actually consume the 3rd block in the scheduler
-    let batch_1b = batcher.build_batch(&mut scheduler);
+    let batch_1b = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert_eq!(batch_1b.requests, vec![req_a]);
     batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(req_a, 101)]);
 
@@ -92,7 +92,7 @@ fn test_oom_handling_in_batching() {
     batcher.enqueue(make_sequence(req_b, 2));
 
     // T=3: Try to admit B (fail) + A Decode (Uses 4 blocks. Free: 0)
-    let batch_2 = batcher.build_batch(&mut scheduler);
+    let batch_2 = batcher.build_batch(&mut scheduler, usize::MAX, true);
 
     // B should stay in waiting because admit_waiting checks capacity
     // A should continue and take the last block
@@ -104,7 +104,7 @@ fn test_oom_handling_in_batching() {
 
     // T=4: A tries to grow again -> OOM
     // B still waiting (needs 2, free 0).
-    let batch_3 = batcher.build_batch(&mut scheduler);
+    let batch_3 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert!(batch_3.requests.is_empty(), "Should return empty batch if A is OOM and B cannot fit");
 
     // 5. Finish A to free space
@@ -112,6 +112,6 @@ fn test_oom_handling_in_batching() {
     batcher.update_batch(&mut scheduler, &[BatchResult::complete(req_a, None)]);
 
     // 6. Now B should be admitted
-    let batch_4 = batcher.build_batch(&mut scheduler);
+    let batch_4 = batcher.build_batch(&mut scheduler, usize::MAX, true);
     assert_eq!(batch_4.requests, vec![req_b], "B should be admitted after A finishes");
 }
