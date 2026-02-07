@@ -80,7 +80,7 @@ fn align_up(value: usize, alignment: usize) -> usize {
     if alignment == 0 {
         return value;
     }
-    ((value + alignment - 1) / alignment) * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 fn build_gguf(metadata: Vec<MetaEntry>, tensors: Vec<TensorEntry>, alignment: usize) -> Vec<u8> {

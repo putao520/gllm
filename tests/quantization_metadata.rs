@@ -34,7 +34,7 @@ fn test_parse_quantization_metadata() {
     // 验证第一个量化组
     let qweight_meta = metadata.get("qweight").expect("存在 qweight 元数据");
     assert_eq!(qweight_meta.bits, 4);
-    assert_eq!(qweight_meta.signed, false);
+    assert!(!qweight_meta.signed);
     assert_eq!(qweight_meta.block_size, 128);
     assert_eq!(qweight_meta.companions.scales.as_ref().unwrap(), "scales");
     assert_eq!(qweight_meta.companions.zeros.as_ref().unwrap(), "qzeros");
@@ -42,7 +42,7 @@ fn test_parse_quantization_metadata() {
     // 验证第二个量化组
     let qweight_2_meta = metadata.get("qweight_2").expect("存在 qweight_2 元数据");
     assert_eq!(qweight_2_meta.bits, 8);
-    assert_eq!(qweight_2_meta.signed, true);
+    assert!(qweight_2_meta.signed);
     assert_eq!(qweight_2_meta.block_size, 256);
     assert_eq!(
         qweight_2_meta.companions.scales.as_ref().unwrap(),

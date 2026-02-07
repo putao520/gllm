@@ -25,9 +25,9 @@ impl ParallelLoader {
         F: Fn(&PathBuf) -> Result<T> + Sync,
     {
         let results: Vec<Result<T>> = if self.enabled {
-            paths.par_iter().map(|path| f(path)).collect()
+            paths.par_iter().map(&f).collect()
         } else {
-            paths.iter().map(|path| f(path)).collect()
+            paths.iter().map(f).collect()
         };
 
         let mut out = Vec::with_capacity(results.len());

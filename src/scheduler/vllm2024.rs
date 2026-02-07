@@ -80,23 +80,12 @@ impl Default for LMCacheConfig {
 }
 
 /// Unified configuration gate for the three optimizations.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Scheduler2024Config {
     pub enable_2024_optimizations: bool,
     pub chunked: ChunkedConfig,
     pub swift_kv: SwiftKVConfig,
     pub lmcache: LMCacheConfig,
-}
-
-impl Default for Scheduler2024Config {
-    fn default() -> Self {
-        Self {
-            enable_2024_optimizations: false,
-            chunked: ChunkedConfig::default(),
-            swift_kv: SwiftKVConfig::default(),
-            lmcache: LMCacheConfig::default(),
-        }
-    }
 }
 
 // ----------------------------- Chunked Prefill -----------------------------
@@ -127,7 +116,7 @@ impl ChunkTracker {
         let tokens = self.pending_tokens.min(self.chunk_size);
         let chunk_idx = self.completed_chunks;
         self.pending_tokens = self.pending_tokens.saturating_sub(tokens);
-        let total_chunks = (self.total_tokens + self.chunk_size - 1) / self.chunk_size;
+        let total_chunks = self.total_tokens.div_ceil(self.chunk_size);
         Some(PrefillChunk {
             request_id: 0, // patched by caller
             chunk_idx,
@@ -247,10 +236,10 @@ impl SwiftKvState {
             return result;
         }
 
-        let mut distilled = (page_count + self.config.window_size - 1) / self.config.window_size;
+        let mut distilled = page_count.div_ceil(self.config.window_size);
         if self.config.enable_across_kv {
             // AKV: further share across layers; model it as a 50% reduction when enabled.
-            distilled = (distilled + 1) / 2;
+            distilled = distilled.div_ceil(2);
         }
 
         let result = DistillResult {

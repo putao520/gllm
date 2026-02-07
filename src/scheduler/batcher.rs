@@ -68,6 +68,12 @@ pub struct ContinuousBatcher {
     running: BTreeMap<RequestId, Sequence>,
 }
 
+impl Default for ContinuousBatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContinuousBatcher {
     pub fn new() -> Self {
         Self {

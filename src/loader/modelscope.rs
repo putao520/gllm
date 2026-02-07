@@ -215,7 +215,7 @@ impl ModelScopeClient {
             "ggml-model-f16.gguf".to_string(),
         ];
 
-        if let Some(base) = repo.split('/').last() {
+        if let Some(base) = repo.split('/').next_back() {
             for quant in ["Q4_0", "Q8_0", "f16"] {
                 names.push(format!("{base}-{quant}.gguf"));
                 names.push(format!("{base}.{quant}.gguf"));
@@ -424,7 +424,7 @@ impl ModelScopeClient {
         let mut latest = None;
         let mut latest_mtime: std::time::SystemTime = std::time::SystemTime::UNIX_EPOCH;
 
-        for entry in fs::read_dir(snapshots_dir).map_err(|e| LoaderError::Io(e))? {
+        for entry in fs::read_dir(snapshots_dir).map_err(LoaderError::Io)? {
             let entry = entry?;
             let metadata = entry.metadata()?;
             let mtime = metadata.modified()?;
@@ -440,7 +440,7 @@ impl ModelScopeClient {
 
     fn parse_safetensors_index(&self, path: &Path) -> Result<SafetensorsIndex> {
         let content = fs::read(path)?;
-        serde_json::from_slice(&content).map_err(|e| LoaderError::Json(e))
+        serde_json::from_slice(&content).map_err(LoaderError::Json)
     }
 
     /// 列出缓存中可用的模型
@@ -452,7 +452,7 @@ impl ModelScopeClient {
             return Ok(models);
         }
 
-        for entry in fs::read_dir(&models_dir).map_err(|e| LoaderError::Io(e))? {
+        for entry in fs::read_dir(&models_dir).map_err(LoaderError::Io)? {
             let name = entry?.file_name();
             // 转换回 org/name 格式
             let normalized = name.to_string_lossy().replace("--", "/");

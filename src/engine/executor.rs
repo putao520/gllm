@@ -704,7 +704,7 @@ impl<B: Backend + 'static> Executor<B> {
     }
 
     fn ensure_kv_cache(&mut self) -> ExecutorResult<&mut KvCacheDoubleBuffer> {
-        let needs_alloc = self.kv_cache.as_ref().map_or(true, |existing| {
+        let needs_alloc = self.kv_cache.as_ref().is_none_or(|existing| {
             existing.front().config() != self.kv_cache_config
                 || existing.back().config() != self.kv_cache_config
         });
@@ -881,11 +881,7 @@ impl<B: Backend + 'static> Executor<B> {
                     let virtual_id = VirtualPageId::new(request_id, logical_idx);
                     self.ensure_l1_page_tracked(physical_id)?;
 
-                    let old_location = self
-                        .memory_manager
-                        .resolve(virtual_id)
-                        .ok()
-                        .map(|(tier, page)| (tier, page));
+                    let old_location = self.memory_manager.resolve(virtual_id).ok();
                     if old_location.is_some() {
                         self.memory_manager.remap_virtual_page(
                             virtual_id,
@@ -972,7 +968,7 @@ impl<B: Backend + 'static> Executor<B> {
             return Ok(());
         }
 
-        let threshold = swap_cfg.swap_threshold.max(0.0).min(1.0);
+        let threshold = swap_cfg.swap_threshold.clamp(0.0, 1.0);
         let needed_blocks = swap_cfg.lru_granularity.max(1);
         let mut pressure = self.backend.get_memory_pressure()?;
         if pressure <= threshold {

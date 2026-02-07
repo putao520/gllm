@@ -11,8 +11,8 @@ pub enum BackendType {
 
 #[derive(Debug)]
 pub enum DetectedBackend {
-    Cuda(CudaBackend),
-    Cpu(CpuBackend),
+    Cuda(Box<CudaBackend>),
+    Cpu(Box<CpuBackend>),
 }
 
 impl DetectedBackend {
@@ -44,12 +44,12 @@ fn detect_from_system() -> Result<DetectedBackend, BackendError> {
     };
     let selected = select_backend_type(availability);
     match selected {
-        BackendType::Cuda => Ok(DetectedBackend::Cuda(
+        BackendType::Cuda => Ok(DetectedBackend::Cuda(Box::new(
             cuda_probe.expect("cuda availability checked"),
-        )),
+        ))),
         BackendType::Rocm => Err(BackendError::Unimplemented("rocm backend")),
         BackendType::Metal => Err(BackendError::Unimplemented("metal backend")),
-        BackendType::Cpu => Ok(DetectedBackend::Cpu(CpuBackend::new())),
+        BackendType::Cpu => Ok(DetectedBackend::Cpu(Box::new(CpuBackend::new()))),
     }
 }
 

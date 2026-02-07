@@ -181,8 +181,9 @@ pub enum ParallelPolicy {
     Disabled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelSource {
+    #[default]
     HuggingFace,
     ModelScope,
 }
@@ -201,12 +202,6 @@ impl ModelSource {
             ModelSource::HuggingFace => "HuggingFace",
             ModelSource::ModelScope => "ModelScope",
         }
-    }
-}
-
-impl Default for ModelSource {
-    fn default() -> Self {
-        ModelSource::HuggingFace
     }
 }
 
@@ -441,9 +436,11 @@ impl Loader {
     /// ```
     #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替")]
     pub fn from_hf(repo_or_alias: &str) -> Result<Self> {
-        let mut config = LoaderConfig::default();
-        config.source = ModelSource::HuggingFace;
-        config.enable_fallback = false;
+        let config = LoaderConfig {
+            source: ModelSource::HuggingFace,
+            enable_fallback: false,
+            ..Default::default()
+        };
         Self::from_source_with_config(repo_or_alias, config)
     }
 
@@ -462,9 +459,11 @@ impl Loader {
     /// ```
     #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替")]
     pub fn from_ms(repo_or_alias: &str) -> Result<Self> {
-        let mut config = LoaderConfig::default();
-        config.source = ModelSource::ModelScope;
-        config.enable_fallback = false;
+        let config = LoaderConfig {
+            source: ModelSource::ModelScope,
+            enable_fallback: false,
+            ..Default::default()
+        };
         Self::from_source_with_config(repo_or_alias, config)
     }
 
@@ -482,8 +481,10 @@ impl Loader {
     }
 
     pub fn from_source(repo_or_alias: &str, source: ModelSource) -> Result<Self> {
-        let mut config = LoaderConfig::default();
-        config.source = source;
+        let config = LoaderConfig {
+            source,
+            ..Default::default()
+        };
         Self::from_source_with_config(repo_or_alias, config)
     }
 
@@ -862,7 +863,7 @@ impl Loader {
         let path = self
             .files
             .weights
-            .get(0)
+            .first()
             .ok_or(LoaderError::MissingWeights)?;
         let onnx = OnnxLoader::from_path(path)?;
         self.onnx = Some(onnx);
@@ -1087,11 +1088,7 @@ fn resolve_repo(repo_or_alias: &str) -> String {
 }
 
 fn normalize_architecture_token(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace('.', "_")
+    value.trim().to_ascii_lowercase().replace(['-', '.'], "_")
 }
 
 fn map_gguf_architecture(value: &str) -> Option<crate::manifest::ModelArchitecture> {
@@ -1425,7 +1422,7 @@ fn maybe_split_fused(
                 fused
                     .targets
                     .into_iter()
-                    .zip(parts.into_iter())
+                    .zip(parts)
                     .map(|(name, data)| OwnedTensor::F16 {
                         name,
                         shape: out_shape.clone(),
@@ -1441,7 +1438,7 @@ fn maybe_split_fused(
                 fused
                     .targets
                     .into_iter()
-                    .zip(parts.into_iter())
+                    .zip(parts)
                     .map(|(name, data)| OwnedTensor::BF16 {
                         name,
                         shape: out_shape.clone(),
@@ -1457,7 +1454,7 @@ fn maybe_split_fused(
                 fused
                     .targets
                     .into_iter()
-                    .zip(parts.into_iter())
+                    .zip(parts)
                     .map(|(name, data)| OwnedTensor::F32 {
                         name,
                         shape: out_shape.clone(),
@@ -1493,7 +1490,7 @@ fn maybe_split_fused_owned(
     fused
         .targets
         .into_iter()
-        .zip(parts.into_iter())
+        .zip(parts)
         .map(|(name, data)| OwnedTensor::F32 {
             name,
             shape: out_shape.clone(),
@@ -1791,7 +1788,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
     let data = tensor.as_bytes();
     match tensor.dtype() {
         gguf::GgmlDType::F16 => {
-            if data.len() % 2 != 0 {
+            if !data.len().is_multiple_of(2) {
                 return Err(LoaderError::Gguf(
                     "gguf f16 tensor has invalid byte length".to_string(),
                 ));
@@ -1804,7 +1801,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
             Ok(out)
         }
         gguf::GgmlDType::BF16 => {
-            if data.len() % 2 != 0 {
+            if !data.len().is_multiple_of(2) {
                 return Err(LoaderError::Gguf(
                     "gguf bf16 tensor has invalid byte length".to_string(),
                 ));
@@ -1817,7 +1814,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
             Ok(out)
         }
         gguf::GgmlDType::F32 => {
-            if data.len() % 4 != 0 {
+            if !data.len().is_multiple_of(4) {
                 return Err(LoaderError::Gguf(
                     "gguf f32 tensor has invalid byte length".to_string(),
                 ));
@@ -1829,7 +1826,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
             Ok(out)
         }
         gguf::GgmlDType::F64 => {
-            if data.len() % 8 != 0 {
+            if !data.len().is_multiple_of(8) {
                 return Err(LoaderError::Gguf(
                     "gguf f64 tensor has invalid byte length".to_string(),
                 ));
@@ -1845,7 +1842,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
         }
         gguf::GgmlDType::I8 => Ok(data.iter().map(|v| (*v as i8) as f32).collect()),
         gguf::GgmlDType::I16 => {
-            if data.len() % 2 != 0 {
+            if !data.len().is_multiple_of(2) {
                 return Err(LoaderError::Gguf(
                     "gguf i16 tensor has invalid byte length".to_string(),
                 ));
@@ -1857,7 +1854,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
             Ok(out)
         }
         gguf::GgmlDType::I32 => {
-            if data.len() % 4 != 0 {
+            if !data.len().is_multiple_of(4) {
                 return Err(LoaderError::Gguf(
                     "gguf i32 tensor has invalid byte length".to_string(),
                 ));
@@ -1869,7 +1866,7 @@ fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
             Ok(out)
         }
         gguf::GgmlDType::I64 => {
-            if data.len() % 8 != 0 {
+            if !data.len().is_multiple_of(8) {
                 return Err(LoaderError::Gguf(
                     "gguf i64 tensor has invalid byte length".to_string(),
                 ));
@@ -1894,7 +1891,7 @@ fn gguf_matrix_dims(shape: &[usize]) -> Result<(usize, usize)> {
             "gguf quantized tensor has more than 2 dimensions".into(),
         ));
     }
-    let cols = *shape.get(0).unwrap_or(&1);
+    let cols = *shape.first().unwrap_or(&1);
     let rows = *shape.get(1).unwrap_or(&1);
     Ok((rows.max(1), cols.max(1)))
 }
@@ -1906,7 +1903,7 @@ fn parse_q4_0_blocks(
 ) -> Result<Vec<gllm_kernels::Q4_0Block>> {
     use gllm_kernels::{Q4_0Block, Q4_0_BLOCK_BYTES, QK4_0};
 
-    let blocks_per_row = (cols + QK4_0 - 1) / QK4_0;
+    let blocks_per_row = cols.div_ceil(QK4_0);
     let total_blocks = rows
         .checked_mul(blocks_per_row)
         .ok_or_else(|| LoaderError::InvalidQuantization("gguf block count overflow".into()))?;
@@ -1946,7 +1943,7 @@ fn parse_q8_0_blocks(
 ) -> Result<Vec<gllm_kernels::Q8_0Block>> {
     use gllm_kernels::{Q8_0Block, Q8_0_BLOCK_BYTES, QK8_0};
 
-    let blocks_per_row = (cols + QK8_0 - 1) / QK8_0;
+    let blocks_per_row = cols.div_ceil(QK8_0);
     let total_blocks = rows
         .checked_mul(blocks_per_row)
         .ok_or_else(|| LoaderError::InvalidQuantization("gguf block count overflow".into()))?;
@@ -2224,10 +2221,10 @@ fn split_tensor<T: Copy>(data: &[T], shape: &[usize], axis: usize, split: usize)
     let mut parts: Vec<Vec<T>> = (0..split).map(|_| Vec::with_capacity(part_len)).collect();
 
     for outer_idx in 0..outer {
-        for split_idx in 0..split {
+        for (split_idx, part) in parts.iter_mut().enumerate().take(split) {
             let offset = outer_idx * axis_dim * inner + split_idx * chunk * inner;
             let slice = &data[offset..offset + chunk * inner];
-            parts[split_idx].extend_from_slice(slice);
+            part.extend_from_slice(slice);
         }
     }
     parts
@@ -2282,7 +2279,7 @@ fn link_or_copy(src: &Path, dest: &Path) -> Result<()> {
         if let Err(err) = symlink(src, dest) {
             std::fs::copy(src, dest).map_err(|_| err)?;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

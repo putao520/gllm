@@ -13,14 +13,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() < 2 {
         eprintln!("Usage: {} <repo_id>", args[0]);
-        eprintln!("");
+        eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} Qwen/Qwen3-7B", args[0]);
         eprintln!("  {} microsoft/Phi-4-mini-instruct", args[0]);
         eprintln!("  {} Qwen/Qwen3-Embedding", args[0]);
         eprintln!("  {} BAAI/bge-m4", args[0]);
         eprintln!("  {} Qwen/Qwen3-Reranker", args[0]);
-        eprintln!("");
+        eprintln!();
         eprintln!("Test Matrix Models:");
         eprintln!("  Generator: Qwen/Qwen3-7B, meta-llama/Llama-4-8b, microsoft/Phi-4-mini-instruct, Qwen/Qwen3-A22B");
         eprintln!("  Embedding: Qwen/Qwen3-Embedding, BAAI/bge-m4");

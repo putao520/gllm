@@ -223,13 +223,9 @@ fn find_u32(value: &Value, keys: &[&str]) -> Option<u32> {
 
 fn find_f32(value: &Value, keys: &[&str]) -> Option<f32> {
     keys.iter().find_map(|key| {
-        value.get(*key).and_then(|v| {
-            if let Some(num) = v.as_f64() {
-                Some(num as f32)
-            } else {
-                None
-            }
-        })
+        value
+            .get(*key)
+            .and_then(|v| v.as_f64().map(|num| num as f32))
     })
 }
 

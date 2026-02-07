@@ -24,7 +24,7 @@ pub(super) fn match_swiglu(
         if !is_linear_value(graph, index, &up_input) {
             continue;
         }
-        let output = match node.outputs.get(0) {
+        let output = match node.outputs.first() {
             Some(value) => value.clone(),
             None => continue,
         };
@@ -47,7 +47,7 @@ fn find_swiglu_inputs(
     index: &GraphIndex,
     node: &OnnxNode,
 ) -> Option<(usize, String, String)> {
-    let first_input = node.inputs.get(0)?;
+    let first_input = node.inputs.first()?;
     let second_input = node.inputs.get(1)?;
     let first = silu_source(graph, index, first_input, second_input);
     let second = silu_source(graph, index, second_input, first_input);
@@ -65,7 +65,7 @@ fn silu_source(
     if !is_silu_op(silu_node) {
         return None;
     }
-    let gate_input = silu_node.inputs.get(0)?.clone();
+    let gate_input = silu_node.inputs.first()?.clone();
     Some((silu_id, gate_input, other_input.to_string()))
 }
 

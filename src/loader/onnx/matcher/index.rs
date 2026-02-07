@@ -94,7 +94,7 @@ pub(super) fn is_linear_value(graph: &OnnxGraph, index: &GraphIndex, value: &str
     if node.op_type != "Add" {
         return false;
     }
-    let left = node.inputs.get(0).map(String::as_str);
+    let left = node.inputs.first().map(String::as_str);
     let right = node.inputs.get(1).map(String::as_str);
     match (left, right) {
         (Some(a), Some(b)) => {
@@ -121,9 +121,7 @@ pub(super) fn constant_scalar(graph: &OnnxGraph, index: &GraphIndex, value: &str
     if let Some(tensor) = graph.initializers.get(value) {
         return tensor.scalar_f32();
     }
-    let Some(node_id) = index.producer(value) else {
-        return None;
-    };
+    let node_id = index.producer(value)?;
     let node = &graph.nodes[node_id];
     if node.op_type != "Constant" {
         return None;

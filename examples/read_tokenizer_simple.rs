@@ -1,10 +1,9 @@
-use gguf_rs::get_gguf_container_array_size;
+use gllm::loader::gguf::{GgufReader, GgufValue};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "/home/putao/.gllm/models/Mungert--SmolLM2-135M-Instruct-GGUF/SmolLM2-135M-Instruct-bf16.gguf";
 
-    let mut container = get_gguf_container_array_size(path, 100000)?;
-    let model = container.decode()?;
+    let model = GgufReader::open(path)?;
 
     println!("=== GGUF Tokenizer Metadata ===\n");
 
@@ -24,35 +23,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tokenizer.ggml.add_space_prefix",
     ];
 
-    for key in &tokenizer_keys {
+    for key in tokenizer_keys {
         if let Some(value) = model.metadata().get(key) {
             match value {
-                gguf_rs::Value::String(s) => {
+                GgufValue::String(s) => {
                     println!("{}: \"{}\"", key, s);
                 }
-                gguf_rs::Value::Number(n) => {
-                    println!("{}: {}", key, n);
-                }
-                gguf_rs::Value::Bool(b) => {
+                GgufValue::Bool(b) => {
                     println!("{}: {}", key, b);
                 }
-                gguf_rs::Value::Array(arr) => {
-                    println!("{}: Array of {} elements", key, arr.len());
-                    if *key == "tokenizer.ggml.tokens" {
+                GgufValue::Array(arr) => {
+                    println!("{}: Array of {} elements", key, arr.items.len());
+                    if key == "tokenizer.ggml.tokens" {
                         println!("  First 30 tokens:");
-                        for (i, v) in arr.iter().take(30).enumerate() {
+                        for (i, v) in arr.items.iter().take(30).enumerate() {
                             if let Some(s) = v.as_str() {
                                 println!("    [{}]: '{}'", i, s);
                             }
                         }
-                    } else if *key == "tokenizer.ggml.merges" {
+                    } else if key == "tokenizer.ggml.merges" {
                         println!("  First 30 merges:");
-                        for (i, v) in arr.iter().take(30).enumerate() {
+                        for (i, v) in arr.items.iter().take(30).enumerate() {
                             if let Some(s) = v.as_str() {
                                 println!("    [{}]: '{}'", i, s);
                             }
                         }
                     }
+                }
+                value if value.as_u64().is_some() => {
+                    println!("{}: {}", key, value.as_u64().unwrap_or_default());
+                }
+                value if value.as_f32().is_some() => {
+                    println!("{}: {}", key, value.as_f32().unwrap_or_default());
                 }
                 _ => {
                     println!("{}: {:?}", key, value);

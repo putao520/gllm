@@ -49,13 +49,21 @@ pub enum ModelKind {
 }
 
 impl ModelKind {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "chat" | "generation" | "generator" | "text-generation" => Some(Self::Chat),
             "embedding" | "embeddings" | "embed" => Some(Self::Embedding),
             "rerank" | "reranker" | "re-ranker" | "re-rank" => Some(Self::Reranker),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for ModelKind {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
     }
 }
 

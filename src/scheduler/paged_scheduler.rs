@@ -13,6 +13,12 @@ pub struct BlockTable {
     pub blocks: Vec<PageId>,
 }
 
+impl Default for BlockTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockTable {
     pub fn new() -> Self {
         Self { blocks: Vec::new() }
@@ -143,7 +149,7 @@ impl PagedScheduler {
 
     pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {
         // Calculate needed blocks for the context
-        let needed_blocks = (group.context_len + self.block_size - 1) / self.block_size;
+        let needed_blocks = group.context_len.div_ceil(self.block_size);
         let free_blocks = self.allocator.get_num_free_blocks();
 
         // Ensure we have enough blocks

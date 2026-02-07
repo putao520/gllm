@@ -24,8 +24,8 @@ pub enum BackendContextError {
 }
 
 pub enum BackendExecutor {
-    Cuda(Executor<CudaBackend>),
-    Cpu(Executor<CpuBackend>),
+    Cuda(Box<Executor<CudaBackend>>),
+    Cpu(Box<Executor<CpuBackend>>),
 }
 
 impl BackendExecutor {
@@ -145,15 +145,15 @@ fn build_executor(
             let adapter = adapter_for::<CudaBackend>(manifest.as_ref())
                 .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
             let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
-            let executor = Executor::from_loader(backend, manifest, adapter, &mut loader)?;
-            Ok(BackendExecutor::Cuda(executor))
+            let executor = Executor::from_loader(*backend, manifest, adapter, &mut loader)?;
+            Ok(BackendExecutor::Cuda(Box::new(executor)))
         }
         DetectedBackend::Cpu(backend) => {
             let adapter = adapter_for::<CpuBackend>(manifest.as_ref())
                 .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
             let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
-            let executor = Executor::from_loader(backend, manifest, adapter, &mut loader)?;
-            Ok(BackendExecutor::Cpu(executor))
+            let executor = Executor::from_loader(*backend, manifest, adapter, &mut loader)?;
+            Ok(BackendExecutor::Cpu(Box::new(executor)))
         }
     }
 }
@@ -166,5 +166,5 @@ fn build_cpu_executor(
         .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
     let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
     let executor = Executor::from_loader(CpuBackend::new(), manifest, adapter, &mut loader)?;
-    Ok(BackendExecutor::Cpu(executor))
+    Ok(BackendExecutor::Cpu(Box::new(executor)))
 }

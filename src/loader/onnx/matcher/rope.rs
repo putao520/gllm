@@ -15,11 +15,11 @@ pub(super) fn match_rope(
         if consumed.contains(&id) || !is_rope_op(node) {
             continue;
         }
-        let input = match node.inputs.get(0) {
+        let input = match node.inputs.first() {
             Some(value) => value.clone(),
             None => continue,
         };
-        let output = match node.outputs.get(0) {
+        let output = match node.outputs.first() {
             Some(value) => value.clone(),
             None => continue,
         };
@@ -85,7 +85,7 @@ fn linear_qkv_source(graph: &OnnxGraph, index: &GraphIndex, value: &str) -> Opti
     let producer = index.producer(value)?;
     let node = &graph.nodes[producer];
     if node.op_type == "Add" && node.inputs.len() >= 2 {
-        let left = node.inputs.get(0).map(String::as_str)?;
+        let left = node.inputs.first().map(String::as_str)?;
         let right = node.inputs.get(1).map(String::as_str)?;
         if let Some(source) = linear_qkv_source(graph, index, left) {
             if is_constant_value(graph, index, right) {

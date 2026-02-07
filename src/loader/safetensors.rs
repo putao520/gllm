@@ -157,7 +157,7 @@ impl MappedSafetensors {
         let view = self
             .tensors
             .tensor(name)
-            .map_err(|err| LoaderError::SafeTensors(err))?;
+            .map_err(LoaderError::SafeTensors)?;
         let dtype = view.dtype();
         let shape = view.shape().to_vec();
         let data = view.data();
@@ -200,7 +200,7 @@ impl SafeTensorsLoader {
                 let view = file
                     .tensors
                     .tensor(&name)
-                    .map_err(|err| LoaderError::SafeTensors(err))?;
+                    .map_err(LoaderError::SafeTensors)?;
                 index.insert(
                     name,
                     TensorLocation {

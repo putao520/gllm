@@ -3,19 +3,35 @@ use safetensors::Dtype;
 
 use super::{proto, LoaderError, Result};
 
-pub(super) fn build_tensor_bytes(
-    data_type: proto::tensor_proto::DataType,
-    dtype: Dtype,
-    element_count: usize,
-    raw_data: Bytes,
-    float_data: Vec<f32>,
-    int32_data: Vec<i32>,
-    int64_data: Vec<i64>,
-    double_data: Vec<f64>,
-    uint64_data: Vec<u64>,
-    string_data: Vec<Vec<u8>>,
-    name: &str,
-) -> Result<Bytes> {
+pub(super) struct TensorPackInput<'a> {
+    pub data_type: proto::tensor_proto::DataType,
+    pub dtype: Dtype,
+    pub element_count: usize,
+    pub raw_data: Bytes,
+    pub float_data: Vec<f32>,
+    pub int32_data: Vec<i32>,
+    pub int64_data: Vec<i64>,
+    pub double_data: Vec<f64>,
+    pub uint64_data: Vec<u64>,
+    pub string_data: Vec<Vec<u8>>,
+    pub name: &'a str,
+}
+
+pub(super) fn build_tensor_bytes(input: TensorPackInput<'_>) -> Result<Bytes> {
+    let TensorPackInput {
+        data_type,
+        dtype,
+        element_count,
+        raw_data,
+        float_data,
+        int32_data,
+        int64_data,
+        double_data,
+        uint64_data,
+        string_data,
+        name,
+    } = input;
+
     if !raw_data.is_empty() {
         let expected = expected_byte_len(dtype, element_count, name)?;
         if raw_data.len() != expected {

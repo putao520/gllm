@@ -335,13 +335,12 @@ impl ModelScopeDownloader {
     ) -> Result<()> {
         // 创建目录
         if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| crate::loader::LoaderError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(crate::loader::LoaderError::Io)?;
         }
 
         // 检查是否需要续传
         let start_pos = if dest_path.exists() {
-            let metadata =
-                std::fs::metadata(dest_path).map_err(|e| crate::loader::LoaderError::Io(e))?;
+            let metadata = std::fs::metadata(dest_path).map_err(crate::loader::LoaderError::Io)?;
             metadata.len()
         } else {
             0
@@ -353,7 +352,7 @@ impl ModelScopeDownloader {
         progress.init(size as usize, filename);
 
         // 如果已下载完成，直接返回
-        if start_pos >= size as u64 {
+        if start_pos >= size {
             progress.finish();
             return Ok(());
         }
@@ -383,12 +382,12 @@ impl ModelScopeDownloader {
 
             // 追加写入文件
             let mut file = if current == 0 && !dest_path.exists() {
-                std::fs::File::create(dest_path).map_err(|e| crate::loader::LoaderError::Io(e))?
+                std::fs::File::create(dest_path).map_err(crate::loader::LoaderError::Io)?
             } else {
                 std::fs::OpenOptions::new()
                     .append(true)
                     .open(dest_path)
-                    .map_err(|e| crate::loader::LoaderError::Io(e))?
+                    .map_err(crate::loader::LoaderError::Io)?
             };
 
             let mut reader = response.into_reader();
@@ -397,19 +396,19 @@ impl ModelScopeDownloader {
             loop {
                 let n = reader
                     .read(&mut buffer)
-                    .map_err(|e| crate::loader::LoaderError::Io(e))?;
+                    .map_err(crate::loader::LoaderError::Io)?;
                 if n == 0 {
                     break;
                 }
                 file.write_all(&buffer[..n])
-                    .map_err(|e| crate::loader::LoaderError::Io(e))?;
+                    .map_err(crate::loader::LoaderError::Io)?;
                 written += n as u64;
                 progress.update((current + written) as usize);
             }
 
             current += written;
 
-            if current >= size as u64 {
+            if current >= size {
                 break;
             }
         }
@@ -523,9 +522,7 @@ impl ModelScopeDownloader {
         let mut latest = None;
         let mut latest_mtime: std::time::SystemTime = std::time::SystemTime::UNIX_EPOCH;
 
-        for entry in
-            std::fs::read_dir(snapshots_dir).map_err(|e| crate::loader::LoaderError::Io(e))?
-        {
+        for entry in std::fs::read_dir(snapshots_dir).map_err(crate::loader::LoaderError::Io)? {
             let entry = entry?;
             let metadata = entry.metadata()?;
             let mtime = metadata.modified()?;

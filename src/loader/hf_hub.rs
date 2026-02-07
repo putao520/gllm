@@ -552,7 +552,7 @@ impl HfHubClient {
     }
 }
 
-fn map_name<'a>(file_map: FileMap, logical: &'a str) -> &'a str {
+fn map_name(file_map: FileMap, logical: &str) -> &str {
     for (source, target) in file_map {
         if *source == logical {
             return target;
@@ -591,7 +591,7 @@ struct ShardIndex {
 impl ShardIndex {
     fn from_path(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(|err| LoaderError::Json(err))
+        serde_json::from_slice(&bytes).map_err(LoaderError::Json)
     }
 
     fn shard_files(&self) -> Vec<String> {
@@ -736,7 +736,7 @@ mod tests {
         // 注意：如果 ~/.huggingface/token 文件存在，此测试会跳过
         // 这是有意为之 - 在有实际 token 的环境中跳过此测试
         // 检查 token 文件是否存在
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             let token_path = PathBuf::from(home).join(DEFAULT_HF_TOKEN_PATH);
             if token_path.exists() {
                 // token 文件存在，跳过测试

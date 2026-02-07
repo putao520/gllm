@@ -84,11 +84,13 @@ impl HGALScheduler {
         sequence_id: Option<RequestId>,
         state: PageState,
     ) {
-        let entry = self.page_metadata.entry(page_id).or_insert_with(|| {
-            let mut meta = PageMetadata::default();
-            meta.page_id = page_id;
-            meta
-        });
+        let entry = self
+            .page_metadata
+            .entry(page_id)
+            .or_insert_with(|| PageMetadata {
+                page_id,
+                ..Default::default()
+            });
         entry.sequence_id = sequence_id;
         entry.state = state;
         if state == PageState::Swapped {
@@ -222,11 +224,13 @@ impl HGALScheduler {
         let warmup_duration = self.config.warmup_duration;
         let min_warm_access = self.config.min_warm_access;
         let sequence_id = {
-            let entry = self.page_metadata.entry(page_id).or_insert_with(|| {
-                let mut meta = PageMetadata::default();
-                meta.page_id = page_id;
-                meta
-            });
+            let entry = self
+                .page_metadata
+                .entry(page_id)
+                .or_insert_with(|| PageMetadata {
+                    page_id,
+                    ..Default::default()
+                });
             let irr = now
                 .saturating_duration_since(entry.last_access)
                 .as_millis()
@@ -261,11 +265,13 @@ impl HGALScheduler {
     /// Mark a page as swapped into GPU and begin warm-up protection.
     pub fn on_swap_in(&mut self, page_id: PageId) {
         let now = Instant::now();
-        let entry = self.page_metadata.entry(page_id).or_insert_with(|| {
-            let mut meta = PageMetadata::default();
-            meta.page_id = page_id;
-            meta
-        });
+        let entry = self
+            .page_metadata
+            .entry(page_id)
+            .or_insert_with(|| PageMetadata {
+                page_id,
+                ..Default::default()
+            });
         entry.swap_in_time = Some(now);
         entry.warm_until = Some(now + self.config.warmup_duration);
         entry.state = PageState::Warm;
@@ -358,12 +364,14 @@ mod tests {
     #[test]
     fn working_set_detection_promotes_protected() {
         let mut scheduler = HGALScheduler::new(HGALConfig::default());
-        let mut meta = PageMetadata::default();
-        meta.page_id = 3;
-        meta.sequence_id = Some(3);
-        meta.state = PageState::Active;
-        meta.access_count = 5;
-        meta.last_access = Instant::now();
+        let meta = PageMetadata {
+            page_id: 3,
+            sequence_id: Some(3),
+            state: PageState::Active,
+            access_count: 5,
+            last_access: Instant::now(),
+            ..Default::default()
+        };
         scheduler.page_metadata.insert(3, meta);
 
         scheduler.detect_working_set();

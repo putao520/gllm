@@ -162,9 +162,9 @@ fn main() {
                     let elem_size = match elem_type {
                         0 | 1 => 1,
                         2 | 3 => 2,
-                        4 | 5 | 6 => 4,
+                        4..=6 => 4,
                         7 => 1,
-                        10 | 11 | 12 => 8,
+                        10..=12 => 8,
                         _ => 1,
                     };
 
@@ -222,7 +222,7 @@ fn main() {
     // 从当前位置继续扫描
     let mut found_tokenizer_keys = 0;
     let max_search = 20; // 最多搜索 20 个 KV
-    let search_start = pos;
+    let _search_start = pos;
 
     for _ in 0..max_search {
         if pos + 12 > data.len() {
@@ -299,9 +299,9 @@ fn main() {
                 let elem_size = match elem_type {
                     0 | 1 => 1,
                     2 | 3 => 2,
-                    4 | 5 | 6 => 4,
+                    4..=6 => 4,
                     7 => 1,
-                    10 | 11 | 12 => 8,
+                    10..=12 => 8,
                     _ => 1,
                 };
                 pos = pos.saturating_add((arr_len as usize).min(10000) * elem_size);

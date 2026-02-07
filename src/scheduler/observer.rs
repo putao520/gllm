@@ -16,6 +16,12 @@ pub struct BasicObserver {
     pub last_state: SystemState,
 }
 
+impl Default for BasicObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BasicObserver {
     pub fn new() -> Self {
         Self {

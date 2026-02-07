@@ -58,7 +58,7 @@ impl OnnxTensor {
                 .map(|bits| half::bf16::from_bits(bits).to_f32()),
             Dtype::I32 => parse::slice_to_i32(bytes.get(0..4)?).map(|value| value as f32),
             Dtype::I64 => parse::slice_to_i64(bytes.get(0..8)?).map(|value| value as f32),
-            Dtype::U8 => bytes.get(0).map(|b| *b as f32),
+            Dtype::U8 => bytes.first().map(|b| *b as f32),
             Dtype::U16 => parse::slice_to_u16(bytes.get(0..2)?).map(|value| value as f32),
             Dtype::U32 => parse::slice_to_u32(bytes.get(0..4)?).map(|value| value as f32),
             Dtype::U64 => parse::slice_to_u64(bytes.get(0..8)?).map(|value| value as f32),
@@ -108,19 +108,19 @@ impl OnnxTensor {
         let data = if data_location == proto::tensor_proto::DataLocation::External as i32 {
             parse::load_external_data(resolver, &external_data, dtype, element_count, &name)?
         } else {
-            pack::build_tensor_bytes(
+            pack::build_tensor_bytes(pack::TensorPackInput {
                 data_type,
                 dtype,
                 element_count,
-                raw_data.unwrap_or_default(),
+                raw_data: raw_data.unwrap_or_default(),
                 float_data,
                 int32_data,
                 int64_data,
                 double_data,
                 uint64_data,
                 string_data,
-                &name,
-            )?
+                name: &name,
+            })?
         };
 
         Ok(Self {

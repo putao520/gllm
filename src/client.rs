@@ -46,6 +46,7 @@ pub struct ClientState {
 
 #[derive(Clone)]
 pub struct Client {
+    #[allow(clippy::arc_with_non_send_sync)]
     state: Arc<RwLock<Option<ClientState>>>,
 }
 
@@ -66,6 +67,7 @@ impl From<BackendContextError> for ClientError {
 }
 
 impl Client {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         let client = Self {
             state: Arc::new(RwLock::new(None)),

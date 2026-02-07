@@ -41,10 +41,10 @@ pub(super) fn match_attention(
 }
 
 fn flash_from_attention_node(node: &OnnxNode) -> Option<FlashAttentionSpec> {
-    let q = node.inputs.get(0)?.clone();
+    let q = node.inputs.first()?.clone();
     let k = node.inputs.get(1)?.clone();
     let v = node.inputs.get(2)?.clone();
-    let output = node.outputs.get(0)?.clone();
+    let output = node.outputs.first()?.clone();
     let causal = attr_i64(node, "unidirectional").map(|value| value != 0);
     let scale = attr_f32(node, "scale");
     Some(FlashAttentionSpec {
@@ -64,7 +64,7 @@ fn flash_from_softmax(
     consumed: &HashSet<usize>,
 ) -> Option<(FlashAttentionSpec, Vec<usize>)> {
     let softmax = &graph.nodes[softmax_id];
-    let score_input = softmax.inputs.get(0)?.clone();
+    let score_input = softmax.inputs.first()?.clone();
     let (score_value, scale, mut extra_nodes) = unwrap_scale(graph, index, &score_input);
     let score_node_id = index.producer(&score_value)?;
     if consumed.contains(&score_node_id) {
@@ -74,9 +74,9 @@ fn flash_from_softmax(
     if score_node.op_type != "MatMul" {
         return None;
     }
-    let q = score_node.inputs.get(0)?.clone();
+    let q = score_node.inputs.first()?.clone();
     let k = score_node.inputs.get(1)?.clone();
-    let softmax_out = softmax.outputs.get(0)?.clone();
+    let softmax_out = softmax.outputs.first()?.clone();
     let out_node_id = single_consumer(index, &softmax_out)?;
     if consumed.contains(&out_node_id) {
         return None;
@@ -86,7 +86,7 @@ fn flash_from_softmax(
         return None;
     }
     let v = other_input(out_node, &softmax_out)?;
-    let output = out_node.outputs.get(0)?.clone();
+    let output = out_node.outputs.first()?.clone();
     extra_nodes.push(score_node_id);
     extra_nodes.push(softmax_id);
     extra_nodes.push(out_node_id);

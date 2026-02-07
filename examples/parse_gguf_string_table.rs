@@ -46,6 +46,7 @@ impl GGUFValueType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum GGUFValue {
     Uint8(u8),
     Int8(i8),

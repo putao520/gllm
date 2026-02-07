@@ -130,7 +130,7 @@ fn main() {
             }
             let arr_len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            let arr_type = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            let _arr_type = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
             pos += 4;
 
             // 简单跳过 - 每个元素最多 100 字节

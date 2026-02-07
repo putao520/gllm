@@ -268,7 +268,7 @@ fn test_embedding_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
             }
         };
 
-        let has_embedding = embeddings.embeddings.first().is_some()
+        let has_embedding = !embeddings.embeddings.is_empty()
             && embeddings
                 .embeddings
                 .first()

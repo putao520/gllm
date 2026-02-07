@@ -7,6 +7,7 @@ pub trait SchedulingPolicy {
 }
 
 /// 1. Accuracy First Policy (Default/Fallback)
+///
 /// Trigger: High memory pressure OR instability detected.
 #[derive(Default)]
 pub struct AccuracyFirstPolicy;
@@ -37,6 +38,7 @@ impl SchedulingPolicy for AccuracyFirstPolicy {
 }
 
 /// 2. Throughput First Policy
+///
 /// Trigger: Low pressure AND high backlog.
 #[derive(Default)]
 pub struct ThroughputFirstPolicy;
@@ -54,16 +56,11 @@ impl SchedulingPolicy for ThroughputFirstPolicy {
 }
 
 /// Enum Dispatch for Zero-Cost Abstraction
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub enum PolicyVariant {
+    #[default]
     Accuracy,
     Throughput,
-}
-
-impl Default for PolicyVariant {
-    fn default() -> Self {
-        Self::Accuracy
-    }
 }
 
 impl PolicyVariant {
