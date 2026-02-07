@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::manifest::{ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
+use crate::manifest::{ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
 use crate::quantization::dequantize_int8_with_zero;
 
 /// Ω1: 量化元数据 - 完全由模型文件提供，不基于推测
@@ -372,6 +372,7 @@ pub struct Loader {
     safetensors: Option<SafeTensorsLoader>,
     gguf: Option<GgufLoader>,
     onnx: Option<OnnxLoader>,
+    tie_word_embeddings_hint: Option<bool>,
 }
 
 impl Loader {
@@ -584,6 +585,7 @@ impl Loader {
             safetensors: None,
             gguf: None,
             onnx: None,
+            tie_word_embeddings_hint: None,
         })
     }
 
@@ -757,6 +759,7 @@ impl Loader {
             safetensors: None,
             gguf: None,
             onnx: None,
+            tie_word_embeddings_hint: None,
         })
     }
 
@@ -776,6 +779,10 @@ impl Loader {
         if self.manifest.is_none() {
             self.manifest = Some(Arc::new(manifest.clone()));
         }
+    }
+
+    pub fn set_tie_word_embeddings_hint(&mut self, tie_word_embeddings: Option<bool>) {
+        self.tie_word_embeddings_hint = tie_word_embeddings;
     }
 
     pub fn weight_format(&self) -> WeightFormat {
@@ -996,6 +1003,10 @@ impl Loader {
             upload_tensor_slice(backend, &mut handle, &name, tensor)?;
         }
 
+        if self.should_materialize_tied_lm_head() {
+            materialize_tied_lm_head_from_safetensors(backend, &mut handle, loader)?;
+        }
+
         Ok(handle)
     }
 
@@ -1082,11 +1093,24 @@ impl Loader {
             }
         }
 
+        if self.should_materialize_tied_lm_head() {
+            materialize_tied_lm_head_from_gguf(backend, &mut handle, loader)?;
+        }
+
         Ok(handle)
     }
 
     fn rules(&self) -> Option<TensorNamingRule> {
         self.manifest.as_ref().map(|m| m.tensor_rules)
+    }
+
+    fn should_materialize_tied_lm_head(&self) -> bool {
+        self.tie_word_embeddings_hint == Some(true)
+            && self
+                .manifest
+                .as_ref()
+                .map(|m| m.kind == ModelKind::Chat)
+                .unwrap_or(true)
     }
 }
 
@@ -1265,6 +1289,85 @@ enum OwnedTensor {
         shape: Vec<usize>,
         data: Vec<f32>,
     },
+}
+
+const EMBEDDING_WEIGHT_NAMES: &[&str] = &[
+    "model.embed_tokens.weight",
+    "tok_embeddings.weight",
+    "transformer.wte.weight",
+    "model.tok_embeddings.weight",
+    "embeddings.word_embeddings.weight",
+    "model.embeddings.word_embeddings.weight",
+    "roberta.embeddings.word_embeddings.weight",
+    "token_embd.weight",
+];
+
+const LM_HEAD_WEIGHT_NAMES: &[&str] = &[
+    "lm_head.weight",
+    "model.lm_head.weight",
+    "embed_out.weight",
+    "model.embed_out.weight",
+    "transformer.lm_head.weight",
+];
+
+const TIED_LM_HEAD_ALIAS: &str = "lm_head.weight";
+
+fn has_any_tensor<B: Backend>(handle: &WeightsHandle<B>, names: &[&str]) -> bool {
+    names.iter().any(|name| handle.tensors.contains_key(*name))
+}
+
+fn materialize_tied_lm_head_from_safetensors<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    loader: &SafeTensorsLoader,
+) -> Result<()> {
+    if has_any_tensor(handle, LM_HEAD_WEIGHT_NAMES) {
+        return Ok(());
+    }
+
+    for name in EMBEDDING_WEIGHT_NAMES {
+        let Ok(tensor) = loader.tensor(name) else {
+            continue;
+        };
+        upload_tensor_slice(backend, handle, TIED_LM_HEAD_ALIAS, tensor)?;
+        return Ok(());
+    }
+
+    Err(LoaderError::MissingTensor(
+        "tie_word_embeddings=true but no embedding tensor was found to materialize lm_head.weight"
+            .to_string(),
+    ))
+}
+
+fn materialize_tied_lm_head_from_gguf<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    loader: &GgufLoader,
+) -> Result<()> {
+    if has_any_tensor(handle, LM_HEAD_WEIGHT_NAMES) {
+        return Ok(());
+    }
+
+    for name in EMBEDDING_WEIGHT_NAMES {
+        let tensor = match loader.tensor(name) {
+            Ok(tensor) => tensor,
+            Err(_) => continue,
+        };
+        let shape = gguf_shape_to_usize(tensor.shape())?;
+        let data = gguf_tensor_to_f32(&tensor)?;
+        let owned = OwnedTensor::F32 {
+            name: TIED_LM_HEAD_ALIAS.to_string(),
+            shape,
+            data,
+        };
+        upload_owned_tensor(backend, handle, owned, None)?;
+        return Ok(());
+    }
+
+    Err(LoaderError::MissingTensor(
+        "tie_word_embeddings=true but no embedding tensor was found to materialize lm_head.weight"
+            .to_string(),
+    ))
 }
 
 fn upload_f32_data<B: Backend>(

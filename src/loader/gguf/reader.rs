@@ -286,6 +286,22 @@ impl GgufReader {
         self.get_metadata_f32(&key)
     }
 
+    fn get_arch_str(&self, suffix: &str) -> Option<&str> {
+        let arch = self.architecture_name()?;
+        let key = format!("{arch}.{suffix}");
+        self.get_metadata_str(&key)
+    }
+
+    fn get_arch_array(&self, suffix: &str) -> Option<&GgufArray> {
+        let arch = self.architecture_name()?;
+        let key = format!("{arch}.{suffix}");
+        self.get_metadata_array(&key)
+    }
+
+    pub fn file_type(&self) -> Option<u64> {
+        self.get_metadata_u64("general.file_type")
+    }
+
     pub fn embedding_length(&self) -> Option<u64> {
         self.get_arch_u64("embedding_length")
     }
@@ -314,6 +330,60 @@ impl GgufReader {
         self.get_arch_f32("rope.freq_base")
     }
 
+    pub fn rope_scale(&self) -> Option<f32> {
+        self.get_arch_f32("rope.scale")
+    }
+
+    pub fn rope_scaling_type(&self) -> Option<&str> {
+        self.get_arch_str("rope.scaling.type")
+            .or_else(|| self.get_arch_str("rope.scaling"))
+    }
+
+    pub fn rope_scaling_factor(&self) -> Option<f32> {
+        self.get_arch_f32("rope.scaling.factor")
+    }
+
+    pub fn rope_scaling_factors(&self) -> Option<Vec<f32>> {
+        let array = self
+            .get_arch_array("rope.scaling.factors")
+            .or_else(|| self.get_arch_array("rope.scaling.short_factor"))
+            .or_else(|| self.get_arch_array("rope.scaling.long_factor"))?;
+        let mut out = Vec::with_capacity(array.items.len());
+        for item in &array.items {
+            out.push(item.as_f32()?);
+        }
+        Some(out)
+    }
+
+    pub fn rope_ext_factor(&self) -> Option<f32> {
+        self.get_arch_f32("rope.ext_factor")
+    }
+
+    pub fn rope_attn_factor(&self) -> Option<f32> {
+        self.get_arch_f32("rope.attn_factor")
+    }
+
+    pub fn rope_beta_fast(&self) -> Option<f32> {
+        self.get_arch_f32("rope.beta_fast")
+    }
+
+    pub fn rope_beta_slow(&self) -> Option<f32> {
+        self.get_arch_f32("rope.beta_slow")
+    }
+
+    pub fn attention_head_dim(&self) -> Option<u64> {
+        self.get_arch_u64("attention.head_dim")
+    }
+
+    pub fn attention_dropout(&self) -> Option<f32> {
+        self.get_arch_f32("attention.dropout")
+    }
+
+    pub fn feed_forward_activation(&self) -> Option<&str> {
+        self.get_arch_str("feed_forward.activation")
+            .or_else(|| self.get_arch_str("hidden_act"))
+    }
+
     pub fn tokenizer_tokens(&self) -> Result<Vec<&str>, GgufError> {
         let tokens = self
             .get_metadata_array("tokenizer.ggml.tokens")
@@ -332,6 +402,43 @@ impl GgufReader {
                     "tokenizer.ggml.tokens contains non-string item".to_string(),
                 )
             })?);
+        }
+        Ok(out)
+    }
+
+    pub fn tokenizer_scores(&self) -> Result<Vec<f32>, GgufError> {
+        let scores = self
+            .get_metadata_array("tokenizer.ggml.scores")
+            .ok_or_else(|| GgufError::MissingMetadata("tokenizer.ggml.scores".to_string()))?;
+
+        let mut out = Vec::with_capacity(scores.items.len());
+        for item in &scores.items {
+            let value = item.as_f32().ok_or_else(|| {
+                GgufError::InvalidMetadata(
+                    "tokenizer.ggml.scores contains non-float item".to_string(),
+                )
+            })?;
+            out.push(value);
+        }
+        Ok(out)
+    }
+
+    pub fn tokenizer_token_types(&self) -> Result<Vec<u32>, GgufError> {
+        let token_types = self
+            .get_metadata_array("tokenizer.ggml.token_type")
+            .ok_or_else(|| GgufError::MissingMetadata("tokenizer.ggml.token_type".to_string()))?;
+
+        let mut out = Vec::with_capacity(token_types.items.len());
+        for item in &token_types.items {
+            let value = item.as_u64().ok_or_else(|| {
+                GgufError::InvalidMetadata(
+                    "tokenizer.ggml.token_type contains non-integer item".to_string(),
+                )
+            })?;
+            let value = u32::try_from(value).map_err(|_| {
+                GgufError::InvalidMetadata("tokenizer.ggml.token_type overflow".to_string())
+            })?;
+            out.push(value);
         }
         Ok(out)
     }

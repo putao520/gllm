@@ -94,6 +94,13 @@ impl<B: Backend + 'static> Executor<B> {
     ) -> ExecutorResult<Self> {
         loader.set_manifest_if_missing(manifest.as_ref());
         let model_config = ModelConfig::from_loader(manifest.as_ref(), loader)?;
+        loader.set_tie_word_embeddings_hint(model_config.tie_word_embeddings);
+        if manifest.kind == ModelKind::Chat && model_config.use_cache == Some(false) {
+            return Err(ExecutorError::Config(ModelConfigError::InvalidConfig(
+                "config.use_cache=false is not supported for generator models in current gllm executor"
+                    .to_string(),
+            )));
+        }
         let position_encoding = match manifest.kind {
             // Encoder-style embedding/reranker models (e.g. XLM-R/BERT) usually do not expose RoPE.
             // When rope_theta is absent/invalid, skip positional rotation instead of forcing RoPE.

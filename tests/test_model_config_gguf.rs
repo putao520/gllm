@@ -8,7 +8,7 @@ use gllm::loader::Loader;
 use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
-use gllm::model_config::{ModelConfig, ModelConfigError};
+use gllm::model_config::{ModelConfig, ModelConfigError, RopeScalingType};
 use tempfile::TempDir;
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,7 @@ enum MetaValue {
     U64(u64),
     F32(f32),
     Bool(bool),
+    ArrayF32(Vec<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,14 @@ fn write_meta(out: &mut Vec<u8>, entry: &MetaEntry) {
         MetaValue::Bool(v) => {
             write_u32(out, GgufValueType::Bool as u32);
             out.push(u8::from(*v));
+        }
+        MetaValue::ArrayF32(values) => {
+            write_u32(out, GgufValueType::Array as u32);
+            write_u32(out, GgufValueType::Float32 as u32);
+            write_u64(out, values.len() as u64);
+            for value in values {
+                write_u32(out, value.to_bits());
+            }
         }
     }
 }
@@ -199,6 +208,58 @@ fn full_llama_config_metadata() -> Vec<MetaEntry> {
             value: MetaValue::F32(500_000.0),
         },
         MetaEntry {
+            key: "llama.rope.scale".to_string(),
+            value: MetaValue::F32(8.0),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.type".to_string(),
+            value: MetaValue::Str("yarn".to_string()),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.factor".to_string(),
+            value: MetaValue::F32(8.0),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.factors".to_string(),
+            value: MetaValue::ArrayF32(vec![8.0, 4.0]),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.original_max_position_embeddings".to_string(),
+            value: MetaValue::U64(4096),
+        },
+        MetaEntry {
+            key: "llama.rope.ext_factor".to_string(),
+            value: MetaValue::F32(1.25),
+        },
+        MetaEntry {
+            key: "llama.rope.attn_factor".to_string(),
+            value: MetaValue::F32(1.1),
+        },
+        MetaEntry {
+            key: "llama.rope.beta_fast".to_string(),
+            value: MetaValue::F32(32.0),
+        },
+        MetaEntry {
+            key: "llama.rope.beta_slow".to_string(),
+            value: MetaValue::F32(1.0),
+        },
+        MetaEntry {
+            key: "llama.attention.head_dim".to_string(),
+            value: MetaValue::U64(128),
+        },
+        MetaEntry {
+            key: "llama.attention.dropout".to_string(),
+            value: MetaValue::F32(0.1),
+        },
+        MetaEntry {
+            key: "llama.feed_forward.activation".to_string(),
+            value: MetaValue::Str("silu".to_string()),
+        },
+        MetaEntry {
+            key: "llama.layer_norm_epsilon".to_string(),
+            value: MetaValue::F32(1e-5),
+        },
+        MetaEntry {
             key: "tokenizer.ggml.bos_token_id".to_string(),
             value: MetaValue::U32(1),
         },
@@ -242,8 +303,24 @@ fn model_config_reads_from_gguf_metadata_without_config_json() {
     assert_eq!(config.vocab_size, 32_000);
     assert_eq!(config.max_position_embeddings, 8192);
     assert_eq!(config.rope_theta, 500_000.0);
+    assert_eq!(config.rope_scale, 8.0);
+    assert_eq!(config.rope_interleaved, false);
+    let rope_scaling = config.rope_scaling.expect("rope_scaling");
+    assert_eq!(rope_scaling.scaling_type, Some(RopeScalingType::Yarn));
+    assert_eq!(rope_scaling.factor, Some(8.0));
+    assert_eq!(rope_scaling.factors, Some(vec![8.0, 4.0]));
+    assert_eq!(rope_scaling.original_max_position_embeddings, Some(4096));
+    assert_eq!(rope_scaling.ext_factor, Some(1.25));
+    assert_eq!(rope_scaling.attn_factor, Some(1.1));
+    assert_eq!(rope_scaling.beta_fast, Some(32.0));
+    assert_eq!(rope_scaling.beta_slow, Some(1.0));
     assert_eq!(config.head_dim, 128);
     assert_eq!(config.dtype_size, 2);
+    assert_eq!(config.use_cache, None);
+    assert_eq!(config.tie_word_embeddings, None);
+    assert_eq!(config.attention_dropout, Some(0.1));
+    assert_eq!(config.hidden_act.as_deref(), Some("silu"));
+    assert_eq!(config.layer_norm_epsilon, Some(1e-5));
     assert_eq!(config.bos_token_id, Some(1));
     assert_eq!(config.eos_token_id, Some(2));
 }
@@ -354,4 +431,63 @@ fn model_config_returns_error_when_gguf_and_config_json_are_both_missing() {
 
     let err = ModelConfig::from_loader(&manifest, &mut loader).expect_err("missing config");
     assert!(matches!(err, ModelConfigError::MissingConfigAndMetadata(_)));
+}
+
+#[test]
+fn model_config_reads_full_rope_scaling_and_runtime_flags_from_config_json() {
+    let manifest = make_manifest();
+    let value = serde_json::json!({
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "num_hidden_layers": 32,
+        "vocab_size": 32000,
+        "max_position_embeddings": 8192,
+        "rope_theta": 10000.0,
+        "rope_interleaved": true,
+        "attention": {
+            "head_dim": 128,
+            "dropout": 0.2
+        },
+        "use_cache": false,
+        "tie_word_embeddings": true,
+        "hidden_act": "silu",
+        "layer_norm_epsilon": 1e-5,
+        "torch_dtype": "float16",
+        "rope_scaling": {
+            "type": "yarn",
+            "rope_type": "dynamic",
+            "factor": 16.0,
+            "factors": [16.0, 8.0],
+            "base": 500000.0,
+            "original_max_position_embeddings": 4096,
+            "ext_factor": 1.5,
+            "attn_factor": 1.2,
+            "beta_fast": 32.0,
+            "beta_slow": 1.0
+        }
+    });
+
+    let config =
+        ModelConfig::from_value(&manifest, &value, None).expect("model config from json value");
+
+    assert_eq!(config.rope_theta, 500000.0);
+    assert_eq!(config.rope_scale, 16.0);
+    assert_eq!(config.rope_interleaved, true);
+    let rope_scaling = config.rope_scaling.expect("rope scaling");
+    assert_eq!(rope_scaling.scaling_type, Some(RopeScalingType::Yarn));
+    assert_eq!(rope_scaling.rope_type.as_deref(), Some("dynamic"));
+    assert_eq!(rope_scaling.factor, Some(16.0));
+    assert_eq!(rope_scaling.factors, Some(vec![16.0, 8.0]));
+    assert_eq!(rope_scaling.base, Some(500000.0));
+    assert_eq!(rope_scaling.original_max_position_embeddings, Some(4096));
+    assert_eq!(rope_scaling.ext_factor, Some(1.5));
+    assert_eq!(rope_scaling.attn_factor, Some(1.2));
+    assert_eq!(rope_scaling.beta_fast, Some(32.0));
+    assert_eq!(rope_scaling.beta_slow, Some(1.0));
+    assert_eq!(config.use_cache, Some(false));
+    assert_eq!(config.tie_word_embeddings, Some(true));
+    assert_eq!(config.attention_dropout, Some(0.2));
+    assert_eq!(config.hidden_act.as_deref(), Some("silu"));
+    assert_eq!(config.layer_norm_epsilon, Some(1e-5));
 }

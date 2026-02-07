@@ -17,6 +17,8 @@ enum MetaValue {
     F32(f32),
     Bool(bool),
     ArrayString(Vec<String>),
+    ArrayF32(Vec<f32>),
+    ArrayU32(Vec<u32>),
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +78,22 @@ fn write_meta(out: &mut Vec<u8>, entry: &MetaEntry) {
             write_u64(out, values.len() as u64);
             for value in values {
                 write_string(out, value);
+            }
+        }
+        MetaValue::ArrayF32(values) => {
+            write_u32(out, GgufValueType::Array as u32);
+            write_u32(out, GgufValueType::Float32 as u32);
+            write_u64(out, values.len() as u64);
+            for value in values {
+                write_u32(out, value.to_bits());
+            }
+        }
+        MetaValue::ArrayU32(values) => {
+            write_u32(out, GgufValueType::Array as u32);
+            write_u32(out, GgufValueType::Uint32 as u32);
+            write_u64(out, values.len() as u64);
+            for value in values {
+                write_u32(out, *value);
             }
         }
     }
@@ -416,6 +434,54 @@ fn test_gguf_012_metadata_helper_accessors() {
             value: MetaValue::F32(500_000.0),
         },
         MetaEntry {
+            key: "general.file_type".to_string(),
+            value: MetaValue::U32(7),
+        },
+        MetaEntry {
+            key: "llama.rope.scale".to_string(),
+            value: MetaValue::F32(8.0),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.type".to_string(),
+            value: MetaValue::Str("yarn".to_string()),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.factor".to_string(),
+            value: MetaValue::F32(8.0),
+        },
+        MetaEntry {
+            key: "llama.rope.scaling.factors".to_string(),
+            value: MetaValue::ArrayF32(vec![8.0, 4.0]),
+        },
+        MetaEntry {
+            key: "llama.rope.ext_factor".to_string(),
+            value: MetaValue::F32(1.5),
+        },
+        MetaEntry {
+            key: "llama.rope.attn_factor".to_string(),
+            value: MetaValue::F32(1.2),
+        },
+        MetaEntry {
+            key: "llama.rope.beta_fast".to_string(),
+            value: MetaValue::F32(32.0),
+        },
+        MetaEntry {
+            key: "llama.rope.beta_slow".to_string(),
+            value: MetaValue::F32(1.0),
+        },
+        MetaEntry {
+            key: "llama.attention.head_dim".to_string(),
+            value: MetaValue::U64(128),
+        },
+        MetaEntry {
+            key: "llama.attention.dropout".to_string(),
+            value: MetaValue::F32(0.1),
+        },
+        MetaEntry {
+            key: "llama.feed_forward.activation".to_string(),
+            value: MetaValue::Str("silu".to_string()),
+        },
+        MetaEntry {
             key: "tokenizer.ggml.bos_token_id".to_string(),
             value: MetaValue::U32(1),
         },
@@ -430,6 +496,14 @@ fn test_gguf_012_metadata_helper_accessors() {
         MetaEntry {
             key: "tokenizer.ggml.add_eos_token".to_string(),
             value: MetaValue::Bool(false),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.scores".to_string(),
+            value: MetaValue::ArrayF32(vec![0.1, 0.2, 0.3]),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.token_type".to_string(),
+            value: MetaValue::ArrayU32(vec![1, 2, 3]),
         },
     ]);
     let tensors = vec![
@@ -447,10 +521,30 @@ fn test_gguf_012_metadata_helper_accessors() {
     assert_eq!(reader.context_length(), Some(8192));
     assert_eq!(reader.rope_dimension_count(), Some(128));
     assert_eq!(reader.rope_freq_base(), Some(500_000.0));
+    assert_eq!(reader.file_type(), Some(7));
+    assert_eq!(reader.rope_scale(), Some(8.0));
+    assert_eq!(reader.rope_scaling_type(), Some("yarn"));
+    assert_eq!(reader.rope_scaling_factor(), Some(8.0));
+    assert_eq!(reader.rope_scaling_factors(), Some(vec![8.0, 4.0]));
+    assert_eq!(reader.rope_ext_factor(), Some(1.5));
+    assert_eq!(reader.rope_attn_factor(), Some(1.2));
+    assert_eq!(reader.rope_beta_fast(), Some(32.0));
+    assert_eq!(reader.rope_beta_slow(), Some(1.0));
+    assert_eq!(reader.attention_head_dim(), Some(128));
+    assert_eq!(reader.attention_dropout(), Some(0.1));
+    assert_eq!(reader.feed_forward_activation(), Some("silu"));
     assert_eq!(reader.bos_token_id(), Some(1));
     assert_eq!(reader.eos_token_id(), Some(2));
     assert!(reader.add_bos_token());
     assert!(!reader.add_eos_token());
+    assert_eq!(
+        reader.tokenizer_scores().expect("scores"),
+        vec![0.1, 0.2, 0.3]
+    );
+    assert_eq!(
+        reader.tokenizer_token_types().expect("token types"),
+        vec![1, 2, 3]
+    );
 
     assert!(reader.get("general.architecture").is_some());
     assert_eq!(reader.floating_point_dtype_size(), Some(2));
