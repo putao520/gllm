@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::adapter::{AdapterError, AdapterWeights, Message, ModelAdapter};
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::Loader;
-use crate::manifest::ModelManifest;
+use crate::manifest::{ModelKind, ModelManifest};
 use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
 use std::sync::Arc;
@@ -92,6 +92,14 @@ impl<B: Backend + 'static> Executor<B> {
     ) -> ExecutorResult<Self> {
         loader.set_manifest_if_missing(manifest.as_ref());
         let model_config = ModelConfig::from_loader(manifest.as_ref(), loader)?;
+        let position_encoding = match manifest.kind {
+            // Encoder-style embedding/reranker models (e.g. XLM-R/BERT) usually do not expose RoPE.
+            // When rope_theta is absent/invalid, skip positional rotation instead of forcing RoPE.
+            ModelKind::Embedding | ModelKind::Reranker if model_config.rope_theta <= 0.0 => {
+                PositionEncoding::None
+            }
+            _ => PositionEncoding::Rope,
+        };
         let forward_config = GeneratorForwardConfig {
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_attention_heads,
@@ -103,7 +111,7 @@ impl<B: Backend + 'static> Executor<B> {
             rope_scale: 1.0,
             rope_interleaved: false,
             rope_precompute: true,
-            position_encoding: PositionEncoding::Rope,
+            position_encoding,
         };
 
         // Ω1: 从模型配置计算 KV cache 大小，而非硬编码
