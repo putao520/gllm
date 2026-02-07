@@ -182,7 +182,7 @@ let metadata = loader.quantization_metadata()?
 │  组件: ModelAdapter Trait (Qwen3Adapter, Llama4Adapter)                 │
 │  职责:                                                                  │
 │    1. WeightMapper: 将 safetensors 映射到标准计算图输入。               │
-│    2. TokenizerAdapter: 处理 Chat Template (Jinja2/Hardcoded)。         │
+│    2. TokenizerAdapter: 提供 Tokenizer 实例和编码/解码接口。           │
 │  特性: 无状态 (Stateless), 策略模式。                                   │
 └───────────────────────────────────┬─────────────────────────────────────┘
                                     │ 生成
@@ -260,7 +260,6 @@ Client 端采用以下模式管理模型多样性与调度复杂性：
   - **用途匹配**: `manifest.kind == ModelKind::Chat`
   - **Ω1 约束**: 禁止基于 Model ID 推断用途（如 `model_id.contains("embed")`）
 - `load_weights()` - 差异化加载逻辑（如 Qwen3 Thinking Head）
-- **职责边界**: Chat Template/Jinja2 提示词编排由应用层负责，推理引擎 Adapter 不提供模板渲染能力
 - **静态注册表** - 使用常量表存储所有适配器实例
 
 **适配器用途区分 (ModelKind)**：
