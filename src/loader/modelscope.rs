@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::downloader::Downloader;
-use super::{
-    naming_parser::{gguf_candidate_rank, onnx_candidate_rank},
-    LoaderError, ModelScopeDownloader, ParallelLoader, ProgressBar, Result, WeightFormat,
-};
+use super::{LoaderError, ModelScopeDownloader, ParallelLoader, ProgressBar, Result, WeightFormat};
 use crate::manifest::FileMap;
 
 #[derive(Debug)]
@@ -208,6 +205,8 @@ impl ModelScopeClient {
         Ok(None)
     }
 
+    /// Ω1: 候选文件名列表（按优先级排序）
+    /// 不基于文件名推测，仅作为文件存在性检查的顺序
     fn gguf_candidate_names(&self, repo: &str) -> Vec<String> {
         let mut names = vec![
             "model.gguf".to_string(),
@@ -217,45 +216,28 @@ impl ModelScopeClient {
         ];
 
         if let Some(base) = repo.split('/').last() {
-            for quant in ["Q4_0", "Q8_0", "Q4_K_M", "Q5_K_S", "f16"] {
+            for quant in ["Q4_0", "Q8_0", "f16"] {
                 names.push(format!("{base}-{quant}.gguf"));
                 names.push(format!("{base}.{quant}.gguf"));
             }
         }
 
-        names.sort_by(|a, b| {
-            let ra = gguf_candidate_rank(a).unwrap_or((0, 0));
-            let rb = gguf_candidate_rank(b).unwrap_or((0, 0));
-            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
-        });
+        // 简单字母排序，不基于文件名推测
+        names.sort();
         names
     }
 
+    /// Ω1: 候选文件名列表（按优先级排序）
     fn onnx_candidate_names(&self) -> Vec<String> {
-        let mut names = vec![
+        let names = vec![
             "onnx/model.onnx".to_string(),
-            "onnx/model_fp16.onnx".to_string(),
-            "onnx/model_fp32.onnx".to_string(),
-            "onnx/model_int8.onnx".to_string(),
-            "onnx/model_uint8.onnx".to_string(),
-            "onnx/model_q4.onnx".to_string(),
-            "onnx/model_quantized.onnx".to_string(),
             "model.onnx".to_string(),
-            "model_fp16.onnx".to_string(),
-            "model_fp32.onnx".to_string(),
-            "model_int8.onnx".to_string(),
-            "model_uint8.onnx".to_string(),
-            "model_q4.onnx".to_string(),
-            "model_quantized.onnx".to_string(),
         ];
 
-        names.retain(|name| onnx_candidate_rank(name).is_some());
-        names.sort_by(|a, b| {
-            let ra = onnx_candidate_rank(a).unwrap_or((0, 0));
-            let rb = onnx_candidate_rank(b).unwrap_or((0, 0));
-            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
-        });
-        names
+        // 简单字母排序
+        let mut result = names;
+        result.sort();
+        result
     }
 
     fn try_get_file_any(
@@ -414,14 +396,16 @@ impl ModelScopeClient {
         }
 
         if weights.is_empty() {
-            if let Some(best) = select_best_cached(&snapshot, "gguf", gguf_candidate_rank) {
+            // Ω1: 不基于文件名推测，选择第一个找到的文件
+            if let Some(best) = select_first_cached(&snapshot, "gguf") {
                 weights.push(best);
                 format = WeightFormat::Gguf;
             }
         }
 
         if weights.is_empty() {
-            if let Some(best) = select_best_cached(&snapshot, "onnx", onnx_candidate_rank) {
+            // Ω1: 不基于文件名推测，选择第一个找到的文件
+            if let Some(best) = select_first_cached(&snapshot, "onnx") {
                 weights.push(best);
                 format = WeightFormat::Onnx;
             }
@@ -483,40 +467,28 @@ impl ModelScopeClient {
     }
 }
 
-fn select_best_cached<F>(snapshot: &Path, ext: &str, ranker: F) -> Option<PathBuf>
-where
-    F: Fn(&str) -> Option<(u8, u8)>,
-{
+/// Ω1: 选择第一个找到的文件，不基于文件名推测
+fn select_first_cached(snapshot: &Path, ext: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
     if ext.eq_ignore_ascii_case("onnx") {
         let onnx_dir = snapshot.join("onnx");
         if onnx_dir.exists() {
             candidates.extend(find_files_with_extension(&onnx_dir, ext));
-            if let Some(best) = select_best_ranked(candidates.clone(), &ranker) {
-                return Some(best);
+            if !candidates.is_empty() {
+                candidates.sort();
+                return candidates.into_iter().next();
             }
         }
     }
 
     candidates.extend(find_files_with_extension(snapshot, ext));
-    select_best_ranked(candidates, ranker)
-}
-
-fn select_best_ranked<F>(candidates: Vec<PathBuf>, ranker: F) -> Option<PathBuf>
-where
-    F: Fn(&str) -> Option<(u8, u8)>,
-{
-    let mut scored: Vec<(u8, u8, PathBuf)> = candidates
-        .into_iter()
-        .filter_map(|path| {
-            let name = path.to_string_lossy();
-            ranker(&name).map(|(primary, secondary)| (primary, secondary, path))
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    scored.first().map(|(_, _, path)| path.clone())
+    if !candidates.is_empty() {
+        candidates.sort();
+        candidates.into_iter().next()
+    } else {
+        None
+    }
 }
 
 fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {

@@ -11,11 +11,7 @@ use crate::manifest::FileMap;
 
 #[cfg(feature = "candle")]
 use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
-use super::{
-    naming_parser::{gguf_candidate_rank, onnx_candidate_rank},
-    parallel::ParallelLoader,
-    LoaderError, Result,
-};
+use super::{parallel::ParallelLoader, LoaderError, Result};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
 const HF_TOKEN_PATH: &str = ".huggingface/token";
@@ -284,79 +280,78 @@ impl HfHubClient {
         Ok(None)
     }
 
-    fn ranked_gguf_candidates(&self, repo: &str) -> Vec<String> {
-        if let Ok(files) = self.list_repo_files(repo) {
-            let mut ranked: Vec<(u8, u8, String)> = files
-                .into_iter()
-                .filter_map(|name| {
-                    gguf_candidate_rank(&name)
-                        .map(|(primary, secondary)| (primary, secondary, name))
-                })
-                .collect();
-            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-            if !ranked.is_empty() {
-                return ranked.into_iter().map(|(_, _, name)| name).collect();
-            }
-        }
-
-        let mut candidates = vec![
+    /// Ω1: 候选文件名列表（按优先级排序）
+    /// 注意：这不基于元数据，仅作为文件存在性检查的顺序
+    /// 用户如需特定文件，应通过 file_map 显式指定
+    fn gguf_candidate_names(&self) -> Vec<String> {
+        vec![
             "model.gguf".to_string(),
             "ggml-model-q4_0.gguf".to_string(),
             "ggml-model-q8_0.gguf".to_string(),
             "ggml-model-f16.gguf".to_string(),
-        ];
+        ]
+    }
 
-        candidates.sort_by(|a, b| {
-            let ra = gguf_candidate_rank(a).unwrap_or((0, 0));
-            let rb = gguf_candidate_rank(b).unwrap_or((0, 0));
-            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
-        });
+    /// Ω1: 候选文件名列表（按优先级排序）
+    fn onnx_candidate_names(&self) -> Vec<String> {
+        vec![
+            "onnx/model.onnx".to_string(),
+            "model.onnx".to_string(),
+        ]
+    }
 
-        candidates
+    fn ranked_gguf_candidates(&self, repo: &str) -> Vec<String> {
+        if let Ok(files) = self.list_repo_files(repo) {
+            // Ω1: 不基于文件名推测，优先选择简单的名称
+            let mut gguf_files: Vec<_> = files
+                .into_iter()
+                .filter(|name| name.ends_with(".gguf"))
+                .collect();
+            if !gguf_files.is_empty() {
+                // 优先选择 model.gguf，否则按字母顺序
+                gguf_files.sort_by(|a, b| {
+                    match (a.as_str(), b.as_str()) {
+                        ("model.gguf", _) => std::cmp::Ordering::Less,
+                        (_, "model.gguf") => std::cmp::Ordering::Greater,
+                        _ => a.cmp(b),
+                    }
+                });
+                return gguf_files;
+            }
+        }
+
+        // 回退到预设的候选列表
+        self.gguf_candidate_names()
     }
 
     fn ranked_onnx_candidates(&self, repo: &str) -> Vec<String> {
         if let Ok(files) = self.list_repo_files(repo) {
-            let mut ranked: Vec<(u8, u8, String)> = files
-                .into_iter()
-                .filter_map(|name| {
-                    onnx_candidate_rank(&name)
-                        .map(|(primary, secondary)| (primary, secondary, name))
-                })
+            // Ω1: 优先选择 onnx/ 目录下的文件
+            let onnx_dir_files: Vec<_> = files
+                .iter()
+                .filter(|name| name.starts_with("onnx/") && name.ends_with(".onnx"))
+                .cloned()
                 .collect();
-            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-            if !ranked.is_empty() {
-                return ranked.into_iter().map(|(_, _, name)| name).collect();
+            if !onnx_dir_files.is_empty() {
+                let mut result = onnx_dir_files;
+                result.sort();
+                return result;
+            }
+
+            // 其次选择根目录的 onnx 文件
+            let root_onnx: Vec<_> = files
+                .into_iter()
+                .filter(|name| name.ends_with(".onnx"))
+                .collect();
+            if !root_onnx.is_empty() {
+                let mut result = root_onnx;
+                result.sort();
+                return result;
             }
         }
 
-        let mut candidates = vec![
-            "onnx/model.onnx",
-            "onnx/model_fp16.onnx",
-            "onnx/model_fp32.onnx",
-            "onnx/model_int8.onnx",
-            "onnx/model_uint8.onnx",
-            "onnx/model_q4.onnx",
-            "onnx/model_quantized.onnx",
-            "model.onnx",
-            "model_fp16.onnx",
-            "model_fp32.onnx",
-            "model_int8.onnx",
-            "model_uint8.onnx",
-            "model_q4.onnx",
-            "model_quantized.onnx",
-        ]
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-
-        candidates.retain(|name| onnx_candidate_rank(name).is_some());
-        candidates.sort_by(|a, b| {
-            let ra = onnx_candidate_rank(a).unwrap_or((0, 0));
-            let rb = onnx_candidate_rank(b).unwrap_or((0, 0));
-            rb.0.cmp(&ra.0).then_with(|| rb.1.cmp(&ra.1))
-        });
-        candidates
+        // 回退到预设的候选列表
+        self.onnx_candidate_names()
     }
 
     fn list_repo_files(&self, repo: &str) -> Result<Vec<String>> {

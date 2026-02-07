@@ -22,7 +22,6 @@ pub mod format_detector;
 pub mod gguf;
 pub mod hf_hub;
 pub mod modelscope;
-pub mod naming_parser;
 pub mod onnx;
 pub mod parallel;
 #[cfg(feature = "candle")]

@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use super::naming_parser::{gguf_candidate_rank, onnx_candidate_rank};
 use super::{LoaderError, Result, WeightFormat};
 
 #[derive(Debug, Clone)]
@@ -134,10 +133,26 @@ fn collect_weights_in_dir(dir: &Path, format: WeightFormat) -> Result<Vec<PathBu
             Ok(files)
         }
         WeightFormat::Gguf => {
-            select_best_by_rank(collect_gguf_candidates(dir), gguf_candidate_rank)
+            let mut files = collect_gguf_candidates(dir);
+            if files.is_empty() {
+                return Err(LoaderError::MissingWeights);
+            }
+            // Ω1: 不基于文件名推测，选择第一个
+            // 用户如需特定文件，应直接指定文件路径
+            files.sort();
+            Ok(vec![files.into_iter().next().unwrap()])
         }
         WeightFormat::Onnx => {
-            select_best_by_rank(collect_onnx_candidates(dir), onnx_candidate_rank)
+            let mut files = collect_onnx_candidates(dir);
+            if files.is_empty() {
+                return Err(LoaderError::MissingWeights);
+            }
+            // 优先选择 onnx/ 目录下的文件
+            if let Some(first) = files.iter().find(|p| p.to_string_lossy().contains("onnx/")) {
+                return Ok(vec![first.clone()]);
+            }
+            files.sort();
+            Ok(vec![files.into_iter().next().unwrap()])
         }
     }
 }
@@ -230,30 +245,6 @@ fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
         }
     }
     files
-}
-
-fn select_best_by_rank<F>(candidates: Vec<PathBuf>, ranker: F) -> Result<Vec<PathBuf>>
-where
-    F: Fn(&str) -> Option<(u8, u8)>,
-{
-    if candidates.is_empty() {
-        return Err(LoaderError::MissingWeights);
-    }
-
-    let mut scored: Vec<(u8, u8, PathBuf)> = candidates
-        .into_iter()
-        .filter_map(|path| {
-            let name = path.to_string_lossy();
-            ranker(&name).map(|(primary, secondary)| (primary, secondary, path))
-        })
-        .collect();
-
-    if scored.is_empty() {
-        return Err(LoaderError::MissingWeights);
-    }
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    Ok(vec![scored.remove(0).2])
 }
 
 #[cfg(test)]
