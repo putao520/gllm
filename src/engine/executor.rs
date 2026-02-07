@@ -361,7 +361,10 @@ impl<B: Backend + 'static> Executor<B> {
             self.ensure_pages_resident(req_id)?;
 
             let (tokens, position) = {
-                let req = self.requests.get(&req_id).expect("request exists");
+                let Some(req) = self.requests.get(&req_id) else {
+                    // Request was removed, skip it
+                    continue;
+                };
                 if req.finished {
                     continue;
                 }
