@@ -213,6 +213,8 @@ impl Default for ModelSource {
 #[derive(Debug, Clone)]
 pub struct LoaderConfig {
     pub cache_dir: Option<PathBuf>,
+    /// 覆盖 HuggingFace token 文件路径（默认使用 ~/.huggingface/token）
+    pub hf_token_path: Option<PathBuf>,
     pub checksum: ChecksumPolicy,
     pub parallel: ParallelPolicy,
     pub source: ModelSource,
@@ -224,6 +226,7 @@ impl Default for LoaderConfig {
     fn default() -> Self {
         Self {
             cache_dir: None,
+            hf_token_path: None,
             checksum: ChecksumPolicy::VerifyOnLoad,
             parallel: ParallelPolicy::Auto,
             source: ModelSource::HuggingFace,
@@ -558,7 +561,11 @@ impl Loader {
         let config = LoaderConfig::default();
         let cache = CacheLayout::new(config.cache_dir.clone())?;
         cache.ensure()?;
-        let hf = HfHubClient::new(cache.hf_cache_dir())?;
+        let hf = HfHubClient::with_endpoint_and_token_path(
+            cache.hf_cache_dir(),
+            None,
+            config.hf_token_path.clone(),
+        )?;
         let format = detect_weight_format(&weights)?;
         Ok(Self {
             manifest: resolved_manifest,
@@ -711,7 +718,11 @@ impl Loader {
             }
         } else {
             // 使用 HuggingFace 客户端
-            let hf = HfHubClient::new(cache.hf_cache_dir())?;
+            let hf = HfHubClient::with_endpoint_and_token_path(
+                cache.hf_cache_dir(),
+                None,
+                config.hf_token_path.clone(),
+            )?;
             hf.download_model_files_with_format(&repo, file_map, parallel_download, format_hint)?
         };
 
@@ -728,7 +739,11 @@ impl Loader {
         }
 
         // 创建 HfHubClient（用于后续操作）
-        let hf = HfHubClient::new(cache.hf_cache_dir())?;
+        let hf = HfHubClient::with_endpoint_and_token_path(
+            cache.hf_cache_dir(),
+            None,
+            config.hf_token_path.clone(),
+        )?;
 
         Ok(Self {
             manifest,

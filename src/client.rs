@@ -81,12 +81,12 @@ impl Client {
         Self::new(model_id, ModelKind::Embedding)
     }
 
-    pub fn manifest(&self) -> Arc<ModelManifest> {
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+    pub fn manifest(&self) -> Result<Arc<ModelManifest>, ClientError> {
+        let state = self.read_state()?;
         state
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
-            .expect("model loaded")
+            .ok_or(ClientError::NoModelLoaded)
     }
 
     pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {

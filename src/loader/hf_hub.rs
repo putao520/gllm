@@ -14,14 +14,27 @@ use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
 use super::{parallel::ParallelLoader, LoaderError, Result};
 
 /// Token 缓存文件位置 (与 huggingface-cli 一致)
-const HF_TOKEN_PATH: &str = ".huggingface/token";
+const DEFAULT_HF_TOKEN_PATH: &str = ".huggingface/token";
 
 /// 从多个来源读取 HuggingFace Token
 ///
 /// 优先级:
 /// 1. 环境变量 HF_TOKEN
 /// 2. ~/.huggingface/token 文件
-fn read_hf_token() -> Option<String> {
+fn resolve_token_path(token_path_override: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = token_path_override {
+        if path.is_absolute() {
+            return Some(path.to_path_buf());
+        }
+        let home = std::env::var("HOME").ok()?;
+        return Some(PathBuf::from(home).join(path));
+    }
+
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(DEFAULT_HF_TOKEN_PATH))
+}
+
+fn read_hf_token(token_path_override: Option<&Path>) -> Option<String> {
     // 1. 从环境变量读取
     if let Ok(token) = std::env::var("HF_TOKEN") {
         if !token.is_empty() {
@@ -30,13 +43,11 @@ fn read_hf_token() -> Option<String> {
     }
 
     // 2. 从 ~/.huggingface/token 文件读取
-    if let Some(home) = std::env::var("HOME").ok() {
-        let token_path = PathBuf::from(home).join(HF_TOKEN_PATH);
-        if let Ok(token) = fs::read_to_string(&token_path) {
-            let token = token.trim();
-            if !token.is_empty() && token.starts_with("hf_") {
-                return Some(token.to_string());
-            }
+    let token_path = resolve_token_path(token_path_override)?;
+    if let Ok(token) = fs::read_to_string(&token_path) {
+        let token = token.trim();
+        if !token.is_empty() && token.starts_with("hf_") {
+            return Some(token.to_string());
         }
     }
 
@@ -76,12 +87,20 @@ pub struct HfHubClient {
 
 impl HfHubClient {
     pub fn new(cache_dir: PathBuf) -> Result<Self> {
-        Self::with_endpoint(cache_dir, None)
+        Self::with_endpoint_and_token_path(cache_dir, None, None)
     }
 
     pub fn with_endpoint(cache_dir: PathBuf, endpoint: Option<String>) -> Result<Self> {
+        Self::with_endpoint_and_token_path(cache_dir, endpoint, None)
+    }
+
+    pub fn with_endpoint_and_token_path(
+        cache_dir: PathBuf,
+        endpoint: Option<String>,
+        token_path: Option<PathBuf>,
+    ) -> Result<Self> {
         // 从多个来源读取 token
-        let token = read_hf_token();
+        let token = read_hf_token(token_path.as_deref());
 
         let mut builder = hf_hub::api::sync::ApiBuilder::new().with_cache_dir(cache_dir);
 
@@ -703,7 +722,10 @@ mod tests {
         let _guard = EnvVarGuard::set("HF_TOKEN", Some("hf_test_from_hf_token"));
 
         // 优先级 1: HF_TOKEN
-        assert_eq!(read_hf_token(), Some("hf_test_from_hf_token".to_string()));
+        assert_eq!(
+            read_hf_token(None),
+            Some("hf_test_from_hf_token".to_string())
+        );
     }
 
     #[test]
@@ -715,7 +737,7 @@ mod tests {
         // 这是有意为之 - 在有实际 token 的环境中跳过此测试
         // 检查 token 文件是否存在
         if let Some(home) = std::env::var("HOME").ok() {
-            let token_path = PathBuf::from(home).join(HF_TOKEN_PATH);
+            let token_path = PathBuf::from(home).join(DEFAULT_HF_TOKEN_PATH);
             if token_path.exists() {
                 // token 文件存在，跳过测试
                 return;
@@ -723,7 +745,24 @@ mod tests {
         }
 
         // 只有在没有 token 文件时才断言
-        assert!(read_hf_token().is_none());
+        assert!(read_hf_token(None).is_none());
+    }
+
+    #[test]
+    fn test_read_hf_token_from_config_path() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = EnvVarGuard::set("HF_TOKEN", None);
+
+        let temp_dir = std::env::temp_dir().join(format!("gllm-hf-token-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp token dir");
+        let token_path = temp_dir.join("token");
+        std::fs::write(&token_path, "hf_config_path_token\n").expect("write temp token file");
+
+        let token = read_hf_token(Some(&token_path));
+        assert_eq!(token, Some("hf_config_path_token".to_string()));
+
+        let _ = std::fs::remove_file(&token_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

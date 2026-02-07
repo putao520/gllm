@@ -25,7 +25,7 @@ pub use memory_manager::{
     TierManager, TierUsage, VirtualPageId,
 };
 pub use observer::{BasicObserver, RuntimeObserver};
-pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerOutput};
+pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerError, SchedulerOutput};
 pub use policy::{PolicyVariant, SchedulingPolicy};
 pub use sequence::{Sequence, SequenceState};
 pub use types::{GroupState, PageMetadata, SequenceGroup};

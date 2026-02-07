@@ -1,30 +1,72 @@
+use std::env;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
+use std::path::Path;
 
-fn main() {
-    let path = std::path::Path::new("/home/putao/.gllm/models/Mungert--SmolLM2-135M-Instruct-GGUF/SmolLM2-135M-Instruct-bf16.gguf");
+fn take_slice<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> io::Result<&'a [u8]> {
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "position overflow"))?;
+    let slice = data.get(*pos..end).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("unexpected EOF at offset {} (need {len} bytes)", *pos),
+        )
+    })?;
+    *pos = end;
+    Ok(slice)
+}
 
-    let mut f = File::open(path).expect("open file");
+fn read_u64(data: &[u8], pos: &mut usize) -> io::Result<u64> {
+    let bytes = take_slice(data, pos, 8)?;
+    let arr: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid u64 slice"))?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+fn read_u32(data: &[u8], pos: &mut usize) -> io::Result<u32> {
+    let bytes = take_slice(data, pos, 4)?;
+    let arr: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid u32 slice"))?;
+    Ok(u32::from_le_bytes(arr))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = env::args_os();
+    let program = args
+        .next()
+        .map(|p| Path::new(&p).display().to_string())
+        .unwrap_or_else(|| "list_gguf_keys".to_string());
+    let Some(path) = args.next() else {
+        // Example program: return a clear error instead of panicking.
+        eprintln!("Usage: {program} <path-to-model.gguf>");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing GGUF file path").into());
+    };
+
+    let mut file = File::open(&path)?;
     let mut data = Vec::new();
-    f.read_to_end(&mut data).expect("read file");
+    file.read_to_end(&mut data)?;
 
-    let kv_count = u64::from_le_bytes([
-        data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-    ]);
+    if data.len() < 32 {
+        return Err(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "GGUF header is truncated").into(),
+        );
+    }
 
+    let mut header_pos = 24usize;
+    let kv_count = read_u64(&data, &mut header_pos)?;
     println!("KV count: {kv_count}\n");
 
     let mut pos = 32usize;
     for i in 0..kv_count {
-        let key_len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
-        pos += 8;
+        let key_len = usize::try_from(read_u64(&data, &mut pos)?)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "key length overflow"))?;
+        let key_bytes = take_slice(&data, &mut pos, key_len)?;
+        let key = std::str::from_utf8(key_bytes).unwrap_or("invalid");
 
-        let key = std::str::from_utf8(&data[pos..pos + key_len]).unwrap_or("invalid");
-        pos += key_len;
-
-        let vtype = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-
+        let vtype = read_u32(&data, &mut pos)?;
         let type_name = match vtype {
             0 => "UINT8",
             1 => "INT8",
@@ -42,25 +84,25 @@ fn main() {
             _ => "UNKNOWN",
         };
 
-        // 跳过值（简化处理）
         if vtype == 8 {
-            // STRING
-            let str_len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
-            pos += 8 + str_len;
+            let str_len = usize::try_from(read_u64(&data, &mut pos)?).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "string length overflow")
+            })?;
+            let _ = take_slice(&data, &mut pos, str_len)?;
         } else if vtype <= 7 {
-            pos += 8;
+            let _ = take_slice(&data, &mut pos, 8)?;
         } else if vtype == 9 {
-            // ARRAY
-            let arr_len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            let arr_type = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            pos += 4;
-            // 简单跳过
-            pos += (arr_len as usize).min(100) * 4;
+            let arr_len = read_u64(&data, &mut pos)?;
+            let _arr_type = read_u32(&data, &mut pos)?;
+            let arr_len = usize::try_from(arr_len).unwrap_or(usize::MAX / 4);
+            let skip_len = arr_len.saturating_mul(4).min(400);
+            let _ = take_slice(&data, &mut pos, skip_len)?;
         } else {
-            pos += 16;
+            let _ = take_slice(&data, &mut pos, 16)?;
         }
 
         println!("{i:2}. {key:50} {type_name}");
     }
+
+    Ok(())
 }

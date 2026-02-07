@@ -177,7 +177,18 @@ fn test_generator_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
         };
 
         // Check backend info
-        let manifest = client.manifest();
+        let manifest = match client.manifest() {
+            Ok(m) => m,
+            Err(e) => {
+                return TestResult {
+                    alias: alias_clone.clone(),
+                    model_id: model_id_clone.clone(),
+                    passed: false,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("Read manifest failed: {}", e)),
+                };
+            }
+        };
         println!("    Architecture: {:?}", manifest.arch);
 
         // Run generation

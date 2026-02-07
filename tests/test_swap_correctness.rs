@@ -1,5 +1,5 @@
 use gllm::scheduler::hgal::HGALConfig;
-use gllm::scheduler::paged_scheduler::PagedScheduler;
+use gllm::scheduler::paged_scheduler::{PagedScheduler, SchedulerError};
 use gllm::scheduler::types::{GroupState, SequenceGroup};
 use gllm_kernels::kernel_types::RequestId;
 use std::time::Instant;
@@ -40,8 +40,10 @@ fn test_swap_out_and_restore_flow() {
     // allocate_next_token implies growing by 1 token/block (since block size is 1)
     let result = scheduler.allocate_next_token(id_b);
     assert!(result.is_err());
-    let err = result.err().unwrap();
-    assert!(err.contains("Out of memory"));
+    assert!(matches!(
+        result.err(),
+        Some(SchedulerError::OutOfMemory { .. })
+    ));
 
     // 4. Trigger Swap Logic: Select victim
     // We need 1 block for B.
@@ -73,7 +75,10 @@ fn test_swap_out_and_restore_flow() {
     // Should fail with OOM.
     let restore_result = scheduler.allocate_next_token(victim_id);
     assert!(restore_result.is_err());
-    assert!(restore_result.err().unwrap().contains("Out of memory"));
+    assert!(matches!(
+        restore_result.err(),
+        Some(SchedulerError::OutOfMemory { .. })
+    ));
 
     // 8. Make room for victim
     // Swap out the survivor (who now has 3 blocks)

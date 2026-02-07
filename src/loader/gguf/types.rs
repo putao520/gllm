@@ -3,7 +3,11 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const GGUF_MAGIC: u32 = 0x4655_4747;
+/// GGUF v3 is the current production format supported by gllm parser.
+/// Earlier/newer versions must be handled explicitly in `GgufReader`.
 pub const GGUF_SUPPORTED_VERSION: u32 = 3;
+/// GGML K-quantized blocks have fixed width 256 by format definition.
+/// Source: SPEC DATA-GGUF-DTYPE table (Q2_K/Q3_K/... block size = 256).
 const QK_K: usize = 256;
 
 #[repr(u32)]

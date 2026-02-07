@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 use gllm::scheduler::{
-    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, Sequence, SequenceGroup,
+    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, SchedulerError,
+    Sequence, SequenceGroup,
 };
 use gllm_kernels::kernel_types::RequestId;
 
@@ -142,7 +143,7 @@ fn paged_attention_rejects_oversized_request() {
     let err = scheduler
         .add_sequence(make_group(1, 9))
         .expect_err("oversized sequence should be rejected");
-    assert!(err.contains("Out of memory"));
+    assert!(matches!(err, SchedulerError::OutOfMemory { .. }));
     assert_eq!(scheduler.num_free_blocks(), 1);
 }
 

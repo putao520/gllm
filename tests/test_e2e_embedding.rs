@@ -62,7 +62,7 @@ fn e2e_embedding_gguf() {
     const MODEL: &str = "Qwen/Qwen3-Embedding-0.6B-GGUF";
 
     let client = Client::new_embedding(MODEL).expect("Failed to load GGUF model");
-    let manifest = client.manifest();
+    let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Embedding);
 }
 

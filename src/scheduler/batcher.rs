@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use gllm_kernels::kernel_types::RequestId;
 
-use super::paged_scheduler::PagedScheduler;
+use super::paged_scheduler::{PagedScheduler, SchedulerError};
 use super::sequence::{Sequence, SequenceState};
 
 #[derive(Debug, Clone)]
@@ -125,12 +125,12 @@ impl ContinuousBatcher {
                     requests.push(sequence.id);
                 }
                 Ok(None) => requests.push(sequence.id),
-                Err(err) => {
-                    if err.contains("Out of memory") {
-                        // 内存不足：标记为暂停，让其他序列有机会
-                        sequence.state = SequenceState::Paused;
-                        continue;
-                    }
+                Err(SchedulerError::OutOfMemory { .. }) => {
+                    // 内存不足：标记为暂停，让其他序列有机会
+                    sequence.state = SequenceState::Paused;
+                    continue;
+                }
+                Err(_) => {
                     sequence.state = SequenceState::Failed;
                     failed.push(sequence.id);
                 }

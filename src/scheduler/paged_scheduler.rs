@@ -5,6 +5,7 @@ use super::vllm2024::{CacheHit, Scheduler2024Config, Scheduler2024State};
 use gllm_kernels::backend_trait::{KvCacheHandle, LogitsHandle};
 use gllm_kernels::kernel_types::{PageId, PageState, RequestId, StorageKey};
 use std::collections::HashMap;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct BlockTable {
@@ -23,6 +24,27 @@ pub struct SchedulerOutput {
     pub swapped_out: Vec<RequestId>,
     pub blocks_to_swap_out: HashMap<RequestId, Vec<PageId>>,
     pub blocks_to_free: Vec<PageId>, // Blocks that are just freed (e.g. finished seq)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SchedulerError {
+    #[error(
+        "out of memory during {operation}: need {needed_blocks} blocks, only {free_blocks} free"
+    )]
+    OutOfMemory {
+        operation: &'static str,
+        needed_blocks: usize,
+        free_blocks: usize,
+    },
+    #[error("missing sequence group {request_id} in {context}")]
+    MissingGroup {
+        request_id: RequestId,
+        context: &'static str,
+    },
+    #[error("allocator invariant violated during {operation}")]
+    AllocatorInvariant { operation: &'static str },
+    #[error("storage key conversion overflow: {field}")]
+    StorageKeyOverflow { field: &'static str },
 }
 
 pub struct PagedScheduler {
@@ -54,16 +76,23 @@ impl PagedScheduler {
     pub fn storage_key(
         request_id: RequestId,
         logical_block_idx: usize,
-    ) -> Result<StorageKey, String> {
-        let req =
-            u64::try_from(request_id).map_err(|_| "request id conversion overflow".to_string())?;
-        let block = u64::try_from(logical_block_idx)
-            .map_err(|_| "logical block index conversion overflow".to_string())?;
+    ) -> Result<StorageKey, SchedulerError> {
+        let req = u64::try_from(request_id).map_err(|_| SchedulerError::StorageKeyOverflow {
+            field: "request_id",
+        })?;
+        let block =
+            u64::try_from(logical_block_idx).map_err(|_| SchedulerError::StorageKeyOverflow {
+                field: "logical_block_idx",
+            })?;
         if req > u32::MAX as u64 {
-            return Err("request id exceeds storage key capacity".to_string());
+            return Err(SchedulerError::StorageKeyOverflow {
+                field: "request_id",
+            });
         }
         if block > u32::MAX as u64 {
-            return Err("logical block index exceeds storage key capacity".to_string());
+            return Err(SchedulerError::StorageKeyOverflow {
+                field: "logical_block_idx",
+            });
         }
         Ok((req << 32) | block)
     }
@@ -112,19 +141,28 @@ impl PagedScheduler {
         }
     }
 
-    pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), String> {
+    pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {
         // Calculate needed blocks for the context
         let needed_blocks = (group.context_len + self.block_size - 1) / self.block_size;
+        let free_blocks = self.allocator.get_num_free_blocks();
 
         // Ensure we have enough blocks
-        if self.allocator.get_num_free_blocks() < needed_blocks {
-            return Err("Out of memory: Insufficient blocks for new sequence".to_string());
+        if free_blocks < needed_blocks {
+            return Err(SchedulerError::OutOfMemory {
+                operation: "add_sequence",
+                needed_blocks,
+                free_blocks,
+            });
         }
 
         let mut allocated = Vec::new();
         for _ in 0..needed_blocks {
-            // Safe to unwrap because we checked capacity
-            let block = self.allocator.allocate().unwrap();
+            let block = self
+                .allocator
+                .allocate()
+                .ok_or(SchedulerError::AllocatorInvariant {
+                    operation: "add_sequence",
+                })?;
             allocated.push(block);
             self.hgal.mark_accessed(block);
         }
@@ -139,12 +177,18 @@ impl PagedScheduler {
         Ok(())
     }
 
-    pub fn allocate_next_token(&mut self, request_id: RequestId) -> Result<Option<PageId>, String> {
+    pub fn allocate_next_token(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<Option<PageId>, SchedulerError> {
         let is_swapped = self
             .hgal
             .sequence_groups
             .get(&request_id)
-            .ok_or("Group not found in HGAL")?
+            .ok_or(SchedulerError::MissingGroup {
+                request_id,
+                context: "hgal.sequence_groups",
+            })?
             .state
             == GroupState::Swapped;
         if is_swapped {
@@ -152,15 +196,19 @@ impl PagedScheduler {
         }
 
         let needs_alloc = {
-            let block_table = self
-                .block_tables
-                .get(&request_id)
-                .ok_or("Group not found")?;
-            let group = self
-                .hgal
-                .sequence_groups
-                .get_mut(&request_id)
-                .ok_or("Group not found in HGAL")?;
+            let block_table =
+                self.block_tables
+                    .get(&request_id)
+                    .ok_or(SchedulerError::MissingGroup {
+                        request_id,
+                        context: "block_tables",
+                    })?;
+            let group = self.hgal.sequence_groups.get_mut(&request_id).ok_or(
+                SchedulerError::MissingGroup {
+                    request_id,
+                    context: "hgal.sequence_groups",
+                },
+            )?;
 
             // Always increment context length
             group.context_len += 1;
@@ -175,21 +223,37 @@ impl PagedScheduler {
         }
 
         // Need new block
-        if self.allocator.get_num_free_blocks() == 0 {
-            return Err("Out of memory".to_string());
+        let free_blocks = self.allocator.get_num_free_blocks();
+        if free_blocks == 0 {
+            return Err(SchedulerError::OutOfMemory {
+                operation: "allocate_next_token",
+                needed_blocks: 1,
+                free_blocks,
+            });
         }
 
-        let block = self.allocator.allocate().unwrap();
+        let block = self
+            .allocator
+            .allocate()
+            .ok_or(SchedulerError::AllocatorInvariant {
+                operation: "allocate_next_token",
+            })?;
 
         self.block_tables
             .get_mut(&request_id)
-            .expect("Group missing in block_table")
+            .ok_or(SchedulerError::MissingGroup {
+                request_id,
+                context: "block_tables",
+            })?
             .blocks
             .push(block);
         self.hgal
             .sequence_groups
             .get_mut(&request_id)
-            .expect("Group missing in HGAL")
+            .ok_or(SchedulerError::MissingGroup {
+                request_id,
+                context: "hgal.sequence_groups",
+            })?
             .pages
             .push(block);
         self.hgal.mark_accessed(block);
@@ -212,7 +276,7 @@ impl PagedScheduler {
     }
 
     /// Free selected victims after swap-out is complete.
-    pub fn free_victims(&mut self, victims: &[RequestId]) -> Result<(), String> {
+    pub fn free_victims(&mut self, victims: &[RequestId]) -> Result<(), SchedulerError> {
         for &request_id in victims {
             let Some(block_table) = self.block_tables.get_mut(&request_id) else {
                 continue;
@@ -238,22 +302,30 @@ impl PagedScheduler {
         Ok(())
     }
 
-    fn restore_swapped_sequence(&mut self, request_id: RequestId) -> Result<(), String> {
+    fn restore_swapped_sequence(&mut self, request_id: RequestId) -> Result<(), SchedulerError> {
         let Some(storage_keys) = self.swapped_storage_keys.get(&request_id).cloned() else {
             return Ok(());
         };
 
-        if self.allocator.get_num_free_blocks() < storage_keys.len() {
-            return Err("Out of memory: insufficient blocks for swap-in restore".to_string());
+        let free_blocks = self.allocator.get_num_free_blocks();
+        let needed_blocks = storage_keys.len();
+        if free_blocks < needed_blocks {
+            return Err(SchedulerError::OutOfMemory {
+                operation: "restore_swapped_sequence",
+                needed_blocks,
+                free_blocks,
+            });
         }
 
         let mut restored_pages = Vec::with_capacity(storage_keys.len());
         let mut swap_in_mappings = Vec::with_capacity(storage_keys.len());
         for storage_key in storage_keys {
-            let physical_id = self
-                .allocator
-                .allocate()
-                .ok_or_else(|| "allocator out of blocks during swap-in restore".to_string())?;
+            let physical_id =
+                self.allocator
+                    .allocate()
+                    .ok_or(SchedulerError::AllocatorInvariant {
+                        operation: "restore_swapped_sequence",
+                    })?;
             restored_pages.push(physical_id);
             swap_in_mappings.push((physical_id, storage_key));
         }

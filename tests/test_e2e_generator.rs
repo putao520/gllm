@@ -44,7 +44,7 @@ fn e2e_generator_gguf() {
     const MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
 
     let client = Client::new_chat(MODEL).expect("Failed to load GGUF model");
-    let manifest = client.manifest();
+    let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Chat);
 }
 

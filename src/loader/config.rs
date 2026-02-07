@@ -41,13 +41,25 @@ pub fn download_config_files(
     let cache = CacheLayout::new(config.cache_dir.clone())?;
     cache.ensure()?;
 
-    let result = download_from_source(model_id, config.source, &cache, file_map);
+    let result = download_from_source(
+        model_id,
+        config.source,
+        &cache,
+        file_map,
+        config.hf_token_path.as_deref(),
+    );
 
     if config.enable_fallback {
         result.or_else(|err| {
             if should_fallback(&err) {
                 let fallback = super::fallback_source(config.source);
-                download_from_source(model_id, fallback, &cache, file_map)
+                download_from_source(
+                    model_id,
+                    fallback,
+                    &cache,
+                    file_map,
+                    config.hf_token_path.as_deref(),
+                )
             } else {
                 Err(err)
             }
@@ -135,10 +147,15 @@ fn download_from_source(
     source: ModelSource,
     cache: &CacheLayout,
     file_map: FileMap,
+    hf_token_path: Option<&Path>,
 ) -> Result<ConfigFiles, ConfigError> {
     match source {
         ModelSource::HuggingFace => {
-            let hf = HfHubClient::new(cache.hf_cache_dir())?;
+            let hf = HfHubClient::with_endpoint_and_token_path(
+                cache.hf_cache_dir(),
+                None,
+                hf_token_path.map(|p| p.to_path_buf()),
+            )?;
             let config_path = hf
                 .download_config_file(model_id, file_map)
                 .map_err(|err| map_missing_config(model_id, err))?;

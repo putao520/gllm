@@ -808,7 +808,7 @@ impl<B: Backend + 'static> Executor<B> {
                 victim_ids.push(*request_id);
                 for (logical_idx, &l1_page_id) in pages.iter().enumerate() {
                     let storage_key = PagedScheduler::storage_key(*request_id, logical_idx)
-                        .map_err(ExecutorError::Scheduler)?;
+                        .map_err(|err| ExecutorError::Scheduler(err.to_string()))?;
                     let target_page = Self::storage_key_to_page_id(storage_key)?;
                     let (target_tier, target_page) =
                         match self.memory_manager.track_page(Tier::L2, target_page) {
@@ -849,7 +849,7 @@ impl<B: Backend + 'static> Executor<B> {
             }
             self.scheduler
                 .free_victims(&victim_ids)
-                .map_err(ExecutorError::Scheduler)?;
+                .map_err(|err| ExecutorError::Scheduler(err.to_string()))?;
         }
     }
 

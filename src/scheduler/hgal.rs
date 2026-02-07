@@ -7,7 +7,10 @@ use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 use super::types::GroupState;
 use super::types::{PageMetadata, SequenceGroup};
 
+// Priority formula source: SPEC/DOCS/scheduling/hgal-scheduler-algorithm.md §4.1.
+// These defaults are tuned to keep recency dominant while still rewarding locality.
 const FREQUENCY_WEIGHT: isize = 10;
+// Large pin bonus guarantees pinned groups are effectively excluded from victim selection.
 const PIN_BONUS: isize = 5_000;
 
 #[derive(Debug, Clone)]

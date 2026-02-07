@@ -58,7 +58,7 @@ fn e2e_reranker_gguf() {
     const MODEL: &str = "DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF";
 
     let client = Client::new(MODEL, gllm::ModelKind::Reranker).expect("Failed to load GGUF model");
-    let manifest = client.manifest();
+    let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Reranker);
 }
 
