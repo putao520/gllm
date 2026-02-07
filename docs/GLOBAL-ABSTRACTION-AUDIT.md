@@ -32,8 +32,8 @@
 
 ### Adapter (Logic)
 *   **现状**: `ModelAdapter` 处理权重加载。
-*   **缺口**: 缺少 **Tokenizer 适配**。Qwen3 和 Llama4 的 Chat Template 处理逻辑不同，这也属于 Adapter 职责。
-*   **修正**: `ModelAdapter` 需包含 `apply_chat_template` 方法。
+*   **边界**: Prompt 模板渲染属于应用层职责，不在推理引擎 Adapter 内实现。
+*   **修正**: `ModelAdapter` 仅保留推理相关能力（如 `supports` / `load_weights`）。
 
 ---
 
@@ -68,7 +68,6 @@ pub struct ModelManifest {
 ```rust
 pub trait ModelAdapter: Send + Sync {
     fn load_weights(&self, ...) -> Result<Weights>;
-    fn chat_template(&self) -> &str; // 新增
 }
 ```
 
@@ -88,6 +87,6 @@ pub trait Backend {
 ## 5. 结论
 
 **整体架构逻辑自洽，闭环完整。**
-唯一的修补项是在 `ModelManifest` 中增加 MoE 配置，以及在 `ModelAdapter` 中增加 Tokenizer 支持。
+唯一的修补项是在 `ModelManifest` 中增加 MoE 配置。
 
 **状态**: **Audit Passed. Ready for Code.**

@@ -2,7 +2,7 @@ use gllm_kernels::{CpuBackend, CudaBackend};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
-use crate::adapter::{adapter_for, Message};
+use crate::adapter::adapter_for;
 use crate::engine::executor::{Executor, ExecutorError};
 use crate::loader::{Loader, LoaderError};
 use crate::manifest::{ModelArchitecture, ModelManifest};
@@ -38,13 +38,6 @@ impl BackendExecutor {
 
     pub fn is_cuda(&self) -> bool {
         matches!(self, BackendExecutor::Cuda(_))
-    }
-
-    pub fn apply_chat_template(&self, messages: &[Message]) -> String {
-        match self {
-            BackendExecutor::Cuda(exec) => exec.apply_chat_template(messages),
-            BackendExecutor::Cpu(exec) => exec.apply_chat_template(messages),
-        }
     }
 
     pub fn generate(

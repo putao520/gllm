@@ -10,6 +10,7 @@ use ::safetensors::Dtype;
 use gllm_kernels::backend_trait::{Backend, TensorLookup};
 use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -918,6 +919,30 @@ impl Loader {
         self.gguf.as_ref().ok_or(LoaderError::MissingWeights)
     }
 
+    pub fn safetensors_gllm_config(&mut self) -> Result<Option<&Value>> {
+        if self.files.format != WeightFormat::SafeTensors {
+            return Ok(None);
+        }
+        self.ensure_safetensors()?;
+        let loader = self
+            .safetensors
+            .as_ref()
+            .ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.gllm_config())
+    }
+
+    pub fn safetensors_gllm_tokenizer_config(&mut self) -> Result<Option<&Value>> {
+        if self.files.format != WeightFormat::SafeTensors {
+            return Ok(None);
+        }
+        self.ensure_safetensors()?;
+        let loader = self
+            .safetensors
+            .as_ref()
+            .ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.gllm_tokenizer_config())
+    }
+
     pub fn onnx_tensor_dtype(&mut self, name: &str) -> Result<Dtype> {
         self.ensure_onnx()?;
         let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
@@ -945,6 +970,14 @@ impl Loader {
             self.ensure_gguf()?;
             let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
             Ok(loader.floating_point_dtype_size())
+        } else if self.files.format == WeightFormat::Onnx {
+            self.ensure_onnx()?;
+            let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
+            Ok(loader
+                .unique_precisions()
+                .into_iter()
+                .filter_map(onnx_dtype_size)
+                .min())
         } else {
             Ok(None)
         }
@@ -1139,6 +1172,20 @@ fn fallback_source(source: ModelSource) -> ModelSource {
     match source {
         ModelSource::HuggingFace => ModelSource::ModelScope,
         ModelSource::ModelScope => ModelSource::HuggingFace,
+    }
+}
+
+fn onnx_dtype_size(dtype: Dtype) -> Option<usize> {
+    match dtype {
+        Dtype::F32 => Some(4),
+        Dtype::F16 | Dtype::BF16 => Some(2),
+        Dtype::F64 => Some(8),
+        Dtype::I8 | Dtype::U8 => Some(1),
+        Dtype::I16 | Dtype::U16 => Some(2),
+        Dtype::I32 | Dtype::U32 => Some(4),
+        Dtype::I64 | Dtype::U64 => Some(8),
+        Dtype::BOOL => Some(1),
+        _ => None,
     }
 }
 
@@ -1354,13 +1401,44 @@ fn materialize_tied_lm_head_from_gguf<B: Backend>(
             Err(_) => continue,
         };
         let shape = gguf_shape_to_usize(tensor.shape())?;
-        let data = gguf_tensor_to_f32(&tensor)?;
+        let quantized = match tensor.dtype() {
+            gguf::GgmlDType::Q4_0 => Some(gllm_kernels::QuantizedType::Q4_0),
+            gguf::GgmlDType::Q8_0 => Some(gllm_kernels::QuantizedType::Q8_0),
+            _ => None,
+        };
+        let data = match quantized {
+            Some(gllm_kernels::QuantizedType::Q4_0) => {
+                let (rows, cols) = gguf_matrix_dims(&shape)?;
+                let blocks = parse_q4_0_blocks(tensor.as_bytes(), rows, cols)?;
+                let matrix = gllm_kernels::Q4_0Matrix { blocks, rows, cols };
+                let total = rows
+                    .checked_mul(cols)
+                    .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                let mut out = vec![0.0f32; total];
+                gllm_kernels::dequantize_q4_0(&matrix, &mut out)
+                    .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
+                out
+            }
+            Some(gllm_kernels::QuantizedType::Q8_0) => {
+                let (rows, cols) = gguf_matrix_dims(&shape)?;
+                let blocks = parse_q8_0_blocks(tensor.as_bytes(), rows, cols)?;
+                let matrix = gllm_kernels::Q8_0Matrix { blocks, rows, cols };
+                let total = rows
+                    .checked_mul(cols)
+                    .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                let mut out = vec![0.0f32; total];
+                gllm_kernels::dequantize_q8_0(&matrix, &mut out)
+                    .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
+                out
+            }
+            _ => gguf_tensor_to_f32(&tensor)?,
+        };
         let owned = OwnedTensor::F32 {
             name: TIED_LM_HEAD_ALIAS.to_string(),
             shape,
             data,
         };
-        upload_owned_tensor(backend, handle, owned, None)?;
+        upload_owned_tensor(backend, handle, owned, quantized)?;
         return Ok(());
     }
 

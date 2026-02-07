@@ -181,6 +181,8 @@ impl MappedSafetensors {
 pub struct SafeTensorsLoader {
     files: Vec<MappedSafetensors>,
     index: HashMap<String, TensorLocation>,
+    gllm_config: Option<Value>,
+    gllm_tokenizer_config: Option<Value>,
 }
 
 impl SafeTensorsLoader {
@@ -212,7 +214,16 @@ impl SafeTensorsLoader {
             }
         }
 
-        Ok(Self { files, index })
+        let gllm_config = parse_namespace_metadata(&files, &["gllm.config", "_gllm_config"])?;
+        let gllm_tokenizer_config =
+            parse_namespace_metadata(&files, &["gllm.tokenizer", "_gllm_tokenizer"])?;
+
+        Ok(Self {
+            files,
+            index,
+            gllm_config,
+            gllm_tokenizer_config,
+        })
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -307,6 +318,14 @@ impl SafeTensorsLoader {
         }
     }
 
+    pub fn gllm_config(&self) -> Option<&Value> {
+        self.gllm_config.as_ref()
+    }
+
+    pub fn gllm_tokenizer_config(&self) -> Option<&Value> {
+        self.gllm_tokenizer_config.as_ref()
+    }
+
     /// Ω1: 从实际张量中检测 dtype 大小（字节）
     ///
     /// 优先检测权重张量的实际 dtype，而非依赖 config.json
@@ -352,6 +371,39 @@ impl SafeTensorsLoader {
         }
         None
     }
+}
+
+fn parse_namespace_metadata(files: &[MappedSafetensors], keys: &[&str]) -> Result<Option<Value>> {
+    let mut merged: Option<Value> = None;
+    for file in files {
+        let Some(meta) = file.metadata() else {
+            continue;
+        };
+
+        for key in keys {
+            let Some(encoded) = meta.get(*key) else {
+                continue;
+            };
+            let parsed: Value = serde_json::from_str(encoded).map_err(|err| {
+                LoaderError::InvalidQuantization(format!(
+                    "invalid metadata json for {key} in {}: {err}",
+                    file.path().display()
+                ))
+            })?;
+
+            if let Some(existing) = &merged {
+                if existing != &parsed {
+                    return Err(LoaderError::InvalidQuantization(format!(
+                        "conflicting metadata value for {key} across safetensors shards"
+                    )));
+                }
+            } else {
+                merged = Some(parsed);
+            }
+            break;
+        }
+    }
+    Ok(merged)
 }
 
 fn cast_or_copy_f16(data: &[u8]) -> Result<Cow<'_, [f16]>> {

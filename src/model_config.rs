@@ -88,6 +88,8 @@ pub struct ModelConfig {
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
     pub num_hidden_layers: usize,
+    pub num_experts: Option<usize>,
+    pub expert_intermediate_size: Option<usize>,
     pub vocab_size: usize,
     pub max_position_embeddings: usize,
     pub rope_theta: f32,
@@ -110,6 +112,7 @@ pub struct ModelConfig {
 impl ModelConfig {
     pub fn from_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
         let mut gguf_metadata_error: Option<ModelConfigError> = None;
+        let mut safetensors_metadata_error: Option<ModelConfigError> = None;
 
         if loader.weight_format() == WeightFormat::Gguf {
             match Self::from_gguf_loader(manifest, loader) {
@@ -118,11 +121,22 @@ impl ModelConfig {
             }
         }
 
+        if loader.weight_format() == WeightFormat::SafeTensors {
+            match Self::from_safetensors_loader(manifest, loader) {
+                Ok(Some(config)) => return Ok(config),
+                Ok(None) => {}
+                Err(err) => safetensors_metadata_error = Some(err),
+            }
+        }
+
         if let Some(path) = loader.config_path().map(|path| path.to_path_buf()) {
             return Self::from_path_with_loader(manifest, &path, loader);
         }
 
         if let Some(err) = gguf_metadata_error {
+            return Err(ModelConfigError::MissingConfigAndMetadata(err.to_string()));
+        }
+        if let Some(err) = safetensors_metadata_error {
             return Err(ModelConfigError::MissingConfigAndMetadata(err.to_string()));
         }
 
@@ -154,6 +168,31 @@ impl ModelConfig {
         Self::from_value(&manifest_clone, &value, weight_dtype_size)
     }
 
+    fn from_safetensors_loader(
+        manifest: &ModelManifest,
+        loader: &mut Loader,
+    ) -> ModelConfigResult<Option<Self>> {
+        let Some(value) = loader
+            .safetensors_gllm_config()
+            .map_err(|err| {
+                ModelConfigError::InvalidConfig(format!(
+                    "failed to load safetensors gllm.config metadata: {err}"
+                ))
+            })?
+            .cloned()
+        else {
+            return Ok(None);
+        };
+
+        let weight_dtype_size = loader.detect_weight_dtype_size().map_err(|err| {
+            ModelConfigError::InvalidConfig(format!(
+                "failed to detect model dtype from weights: {err}"
+            ))
+        })?;
+
+        Self::from_value(manifest, &value, weight_dtype_size).map(Some)
+    }
+
     fn from_gguf_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
         let (
             vocab_size,
@@ -161,6 +200,8 @@ impl ModelConfig {
             num_hidden_layers,
             num_attention_heads,
             num_key_value_heads,
+            num_experts,
+            expert_intermediate_size,
             max_position_embeddings,
             rope_theta,
             rope_scale,
@@ -192,6 +233,21 @@ impl ModelConfig {
                 require_gguf_usize(reader.head_count(), "attention.head_count")?;
             let num_key_value_heads =
                 require_gguf_usize(reader.head_count_kv(), "attention.head_count_kv")?;
+            let num_experts = optional_gguf_usize(reader.num_experts(), "num_experts")?;
+            if matches!(num_experts, Some(0)) {
+                return Err(ModelConfigError::InvalidConfig(
+                    "GGUF metadata field invalid: num_experts".to_string(),
+                ));
+            }
+            let expert_intermediate_size = optional_gguf_usize(
+                reader.expert_intermediate_size(),
+                "expert_intermediate_size",
+            )?;
+            if matches!(expert_intermediate_size, Some(0)) {
+                return Err(ModelConfigError::InvalidConfig(
+                    "GGUF metadata field invalid: expert_intermediate_size".to_string(),
+                ));
+            }
             let max_position_embeddings =
                 require_gguf_usize(reader.context_length(), "context_length")?;
             let rope_scaling = rope_scaling_from_gguf(reader, arch)?;
@@ -258,6 +314,8 @@ impl ModelConfig {
                 num_hidden_layers,
                 num_attention_heads,
                 num_key_value_heads,
+                num_experts,
+                expert_intermediate_size,
                 max_position_embeddings,
                 rope_theta,
                 rope_scale,
@@ -311,6 +369,8 @@ impl ModelConfig {
             num_attention_heads,
             num_key_value_heads,
             num_hidden_layers,
+            num_experts,
+            expert_intermediate_size,
             vocab_size,
             max_position_embeddings,
             rope_theta,
@@ -351,6 +411,25 @@ impl ModelConfig {
         .unwrap_or(num_attention_heads);
         let num_hidden_layers =
             require_usize(value, &["num_hidden_layers", "n_layer", "num_layers"])?;
+        let num_experts = find_usize(value, &["num_experts", "moe.num_experts"]);
+        let expert_intermediate_size = find_usize(
+            value,
+            &[
+                "expert_intermediate_size",
+                "moe.expert_intermediate_size",
+                "moe_intermediate_size",
+            ],
+        );
+        if matches!(num_experts, Some(0)) {
+            return Err(ModelConfigError::InvalidConfig(
+                "num_experts must be > 0 when provided".to_string(),
+            ));
+        }
+        if matches!(expert_intermediate_size, Some(0)) {
+            return Err(ModelConfigError::InvalidConfig(
+                "expert_intermediate_size must be > 0 when provided".to_string(),
+            ));
+        }
         let vocab_size = require_usize(value, &["vocab_size"])?;
         let rope_scaling = rope_scaling_from_json(value)?;
 
@@ -470,6 +549,8 @@ impl ModelConfig {
             num_attention_heads,
             num_key_value_heads,
             num_hidden_layers,
+            num_experts,
+            expert_intermediate_size,
             vocab_size,
             max_position_embeddings,
             rope_theta,
@@ -502,6 +583,16 @@ fn require_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<usiz
     usize::try_from(value).map_err(|_| {
         ModelConfigError::InvalidConfig(format!("GGUF metadata field overflow: {field}"))
     })
+}
+
+fn optional_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<Option<usize>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let parsed = usize::try_from(value).map_err(|_| {
+        ModelConfigError::InvalidConfig(format!("GGUF metadata field overflow: {field}"))
+    })?;
+    Ok(Some(parsed))
 }
 
 fn require_gguf_f32(value: Option<f32>, field: &str) -> ModelConfigResult<f32> {

@@ -5,7 +5,7 @@ use gllm_kernels::backend_trait::Backend;
 use crate::loader::Loader;
 use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest};
 
-use super::r#trait::{AdapterResult, AdapterWeights, Message, ModelAdapter};
+use super::r#trait::{AdapterResult, AdapterWeights, ModelAdapter};
 
 /// Ω1: Qwen3 架构特有的 thinking head 张量名称模式
 ///
@@ -38,25 +38,6 @@ impl<B: Backend> ModelAdapter<B> for Qwen3Adapter {
             .collect();
 
         Ok(AdapterWeights::with_thinking_head(handle, thinking_tensors))
-    }
-
-    fn apply_chat_template(&self, messages: &[Message]) -> String {
-        const IM_START: &str = "<|im_start|>";
-        const IM_END: &str = "<|im_end|>";
-
-        let mut out = String::new();
-        for message in messages {
-            out.push_str(IM_START);
-            out.push_str(message.role.as_str());
-            out.push('\n');
-            out.push_str(message.content.trim());
-            out.push('\n');
-            out.push_str(IM_END);
-            out.push('\n');
-        }
-        out.push_str(IM_START);
-        out.push_str("assistant\n");
-        out
     }
 
     fn add_special_tokens(&self) -> bool {

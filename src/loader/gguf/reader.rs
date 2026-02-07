@@ -264,6 +264,14 @@ impl GgufReader {
             .and_then(|v| u32::try_from(v).ok())
     }
 
+    pub fn hf_tokenizer_name(&self) -> Option<&str> {
+        self.get_metadata_str("tokenizer.hf.name")
+    }
+
+    pub fn hf_pretrained_name(&self) -> Option<&str> {
+        self.get_metadata_str("tokenizer.hf.pretrained_name")
+    }
+
     pub fn add_bos_token(&self) -> bool {
         self.get_metadata_bool("tokenizer.ggml.add_bos_token")
             .unwrap_or(false)
@@ -382,6 +390,14 @@ impl GgufReader {
     pub fn feed_forward_activation(&self) -> Option<&str> {
         self.get_arch_str("feed_forward.activation")
             .or_else(|| self.get_arch_str("hidden_act"))
+    }
+
+    pub fn num_experts(&self) -> Option<u64> {
+        self.get_arch_u64("num_experts")
+    }
+
+    pub fn expert_intermediate_size(&self) -> Option<u64> {
+        self.get_arch_u64("expert_intermediate_size")
     }
 
     pub fn tokenizer_tokens(&self) -> Result<Vec<&str>, GgufError> {

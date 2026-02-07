@@ -260,7 +260,7 @@ Client 端采用以下模式管理模型多样性与调度复杂性：
   - **用途匹配**: `manifest.kind == ModelKind::Chat`
   - **Ω1 约束**: 禁止基于 Model ID 推断用途（如 `model_id.contains("embed")`）
 - `load_weights()` - 差异化加载逻辑（如 Qwen3 Thinking Head）
-- `apply_chat_template()` - 差异化分词逻辑（处理 Jinja2/Hardcoded 模板）
+- **职责边界**: Chat Template/Jinja2 提示词编排由应用层负责，推理引擎 Adapter 不提供模板渲染能力
 - **静态注册表** - 使用常量表存储所有适配器实例
 
 **适配器用途区分 (ModelKind)**：

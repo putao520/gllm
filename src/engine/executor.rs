@@ -11,7 +11,7 @@ use gllm_kernels::kernel_types::{
 };
 use thiserror::Error;
 
-use crate::adapter::{AdapterError, AdapterWeights, Message, ModelAdapter};
+use crate::adapter::{AdapterError, AdapterWeights, ModelAdapter};
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::Loader;
 use crate::manifest::{ModelKind, ModelManifest};
@@ -193,10 +193,6 @@ impl<B: Backend + 'static> Executor<B> {
 
     pub fn model_config(&self) -> &ModelConfig {
         &self.model_config
-    }
-
-    pub fn apply_chat_template(&self, messages: &[Message]) -> String {
-        self.adapter.apply_chat_template(messages)
     }
 
     pub fn allocate_kv_cache(&mut self, config: &KvCacheConfig) -> ExecutorResult<KvCacheHandle> {

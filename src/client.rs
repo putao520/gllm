@@ -157,12 +157,8 @@ impl Client {
 
     pub(crate) fn render_chat_prompt(&self, messages: &[Message]) -> Result<String, ClientError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        let prompt = {
-            let executor = loaded.backend.executor();
-            executor.apply_chat_template(messages)
-        };
-        Ok(prompt)
+        state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        Ok(serialize_messages_as_prompt(messages))
     }
 
     pub(crate) fn execute_generation(
@@ -291,6 +287,18 @@ impl Client {
             .write()
             .map_err(|_| ClientError::ExecutorPoisoned)
     }
+}
+
+fn serialize_messages_as_prompt(messages: &[Message]) -> String {
+    let mut prompt = String::new();
+    for message in messages {
+        prompt.push_str(message.role.as_str());
+        prompt.push_str(": ");
+        prompt.push_str(message.content.trim());
+        prompt.push('\n');
+    }
+    prompt.push_str("assistant: ");
+    prompt
 }
 
 impl AsyncClient {

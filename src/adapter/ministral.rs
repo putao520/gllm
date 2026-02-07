@@ -5,7 +5,7 @@ use gllm_kernels::backend_trait::Backend;
 use crate::loader::Loader;
 use crate::manifest::{ModelArchitecture, ModelManifest};
 
-use super::r#trait::{AdapterResult, AdapterWeights, Message, ModelAdapter};
+use super::r#trait::{AdapterResult, AdapterWeights, ModelAdapter};
 
 pub struct MinistralAdapter;
 
@@ -19,16 +19,4 @@ impl<B: Backend> ModelAdapter<B> for MinistralAdapter {
         Ok(AdapterWeights::new(handle))
     }
 
-    fn apply_chat_template(&self, messages: &[Message]) -> String {
-        let mut out = String::new();
-        out.push_str("<s>");
-        for message in messages {
-            out.push_str(message.role.as_str());
-            out.push_str(": ");
-            out.push_str(message.content.trim());
-            out.push('\n');
-        }
-        out.push_str("assistant: ");
-        out
-    }
 }

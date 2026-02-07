@@ -196,6 +196,14 @@ fn full_llama_config_metadata() -> Vec<MetaEntry> {
             value: MetaValue::U64(8),
         },
         MetaEntry {
+            key: "llama.num_experts".to_string(),
+            value: MetaValue::U64(64),
+        },
+        MetaEntry {
+            key: "llama.expert_intermediate_size".to_string(),
+            value: MetaValue::U64(14336),
+        },
+        MetaEntry {
             key: "llama.context_length".to_string(),
             value: MetaValue::U64(8192),
         },
@@ -300,6 +308,8 @@ fn model_config_reads_from_gguf_metadata_without_config_json() {
     assert_eq!(config.num_hidden_layers, 32);
     assert_eq!(config.num_attention_heads, 32);
     assert_eq!(config.num_key_value_heads, 8);
+    assert_eq!(config.num_experts, Some(64));
+    assert_eq!(config.expert_intermediate_size, Some(14336));
     assert_eq!(config.vocab_size, 32_000);
     assert_eq!(config.max_position_embeddings, 8192);
     assert_eq!(config.rope_theta, 500_000.0);
@@ -441,6 +451,8 @@ fn model_config_reads_full_rope_scaling_and_runtime_flags_from_config_json() {
         "num_attention_heads": 32,
         "num_key_value_heads": 8,
         "num_hidden_layers": 32,
+        "num_experts": 64,
+        "expert_intermediate_size": 14336,
         "vocab_size": 32000,
         "max_position_embeddings": 8192,
         "rope_theta": 10000.0,
@@ -487,6 +499,8 @@ fn model_config_reads_full_rope_scaling_and_runtime_flags_from_config_json() {
     assert_eq!(rope_scaling.beta_slow, Some(1.0));
     assert_eq!(config.use_cache, Some(false));
     assert_eq!(config.tie_word_embeddings, Some(true));
+    assert_eq!(config.num_experts, Some(64));
+    assert_eq!(config.expert_intermediate_size, Some(14336));
     assert_eq!(config.attention_dropout, Some(0.2));
     assert_eq!(config.hidden_act.as_deref(), Some("silu"));
     assert_eq!(config.layer_norm_epsilon, Some(1e-5));

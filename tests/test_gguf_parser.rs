@@ -490,6 +490,14 @@ fn test_gguf_012_metadata_helper_accessors() {
             value: MetaValue::U32(2),
         },
         MetaEntry {
+            key: "tokenizer.hf.name".to_string(),
+            value: MetaValue::Str("meta-llama/Llama-3.1-8B-Instruct".to_string()),
+        },
+        MetaEntry {
+            key: "tokenizer.hf.pretrained_name".to_string(),
+            value: MetaValue::Str("meta-llama/Llama-3.1-8B".to_string()),
+        },
+        MetaEntry {
             key: "tokenizer.ggml.add_bos_token".to_string(),
             value: MetaValue::Bool(true),
         },
@@ -504,6 +512,14 @@ fn test_gguf_012_metadata_helper_accessors() {
         MetaEntry {
             key: "tokenizer.ggml.token_type".to_string(),
             value: MetaValue::ArrayU32(vec![1, 2, 3]),
+        },
+        MetaEntry {
+            key: "llama.num_experts".to_string(),
+            value: MetaValue::U64(64),
+        },
+        MetaEntry {
+            key: "llama.expert_intermediate_size".to_string(),
+            value: MetaValue::U64(14336),
         },
     ]);
     let tensors = vec![
@@ -535,6 +551,13 @@ fn test_gguf_012_metadata_helper_accessors() {
     assert_eq!(reader.feed_forward_activation(), Some("silu"));
     assert_eq!(reader.bos_token_id(), Some(1));
     assert_eq!(reader.eos_token_id(), Some(2));
+    assert_eq!(
+        reader.hf_tokenizer_name(),
+        Some("meta-llama/Llama-3.1-8B-Instruct")
+    );
+    assert_eq!(reader.hf_pretrained_name(), Some("meta-llama/Llama-3.1-8B"));
+    assert_eq!(reader.num_experts(), Some(64));
+    assert_eq!(reader.expert_intermediate_size(), Some(14336));
     assert!(reader.add_bos_token());
     assert!(!reader.add_eos_token());
     assert_eq!(

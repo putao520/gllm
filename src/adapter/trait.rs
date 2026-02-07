@@ -96,23 +96,7 @@ pub trait ModelAdapter<B: Backend> {
 
     fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>>;
 
-    fn apply_chat_template(&self, messages: &[Message]) -> String {
-        default_chat_template(messages)
-    }
-
     fn add_special_tokens(&self) -> bool {
         true
     }
-}
-
-fn default_chat_template(messages: &[Message]) -> String {
-    let mut out = String::new();
-    for message in messages {
-        out.push_str(message.role.as_str());
-        out.push_str(": ");
-        out.push_str(message.content.trim());
-        out.push('\n');
-    }
-    out.push_str("assistant: ");
-    out
 }
