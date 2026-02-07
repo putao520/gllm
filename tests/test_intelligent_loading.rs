@@ -299,13 +299,10 @@ fn onnx_precision_preference_order() {
 fn gguf_e2e_quantization_detection() {
     // Use Loader API to download GGUF model
     let loader =
-        gllm::loader::Loader::from_hf(GGUF_TEST_MODEL).expect("GGUF loader should be created");
+        gllm::loader::Loader::from(GGUF_TEST_MODEL).expect("GGUF loader should be created");
 
     // Verify loader detected the correct format
     assert_eq!(loader.weight_format(), WeightFormat::Gguf);
-
-    // Verify source is HuggingFace
-    assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
 
     // Verify repo name is preserved
     assert_eq!(loader.repo(), GGUF_TEST_MODEL);
@@ -328,7 +325,7 @@ fn gguf_e2e_quantization_detection() {
 #[ignore = "Requires network access"] // Run with: cargo test --test test_intelligent_loading -- --ignored
 fn smart_source_fallback_e2e() {
     // Test that HuggingFace is the default source (should succeed)
-    let result = gllm::loader::Loader::from_hf(GGUF_TEST_MODEL);
+    let result = gllm::loader::Loader::from(GGUF_TEST_MODEL);
 
     assert!(
         result.is_ok(),
@@ -344,13 +341,13 @@ fn smart_source_fallback_e2e() {
 #[test]
 #[ignore = "Requires model download"] // Run with: cargo test --test test_intelligent_loading -- --ignored
 fn unified_loading_entry_e2e() {
-    // Test Loader::auto() for GGUF model
-    let gguf_loader = gllm::loader::Loader::auto(GGUF_TEST_MODEL)
-        .expect("Loader::auto should work for GGUF model");
+    // Test Loader::from() for GGUF model
+    let gguf_loader = gllm::loader::Loader::from(GGUF_TEST_MODEL)
+        .expect("Loader::from should work for GGUF model");
     assert_eq!(gguf_loader.weight_format(), WeightFormat::Gguf);
     assert_eq!(gguf_loader.source(), gllm::loader::ModelSource::HuggingFace);
 
-    // Test Loader::auto_with_format() with explicit format
+    // Test Loader::from_with_format() with explicit format
     let gguf_explicit = gllm::loader::Loader::auto_with_format(GGUF_TEST_MODEL, WeightFormat::Gguf)
         .expect("Loader::auto_with_format should work with explicit GGUF");
     assert_eq!(gguf_explicit.weight_format(), WeightFormat::Gguf);

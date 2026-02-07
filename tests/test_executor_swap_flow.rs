@@ -21,7 +21,7 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
 
     // 2. Load Model (SmolLM2-135M-Instruct)
     let model_id = "HuggingFaceTB/SmolLM2-135M-Instruct";
-    let mut loader = Loader::from_hf(model_id)?;
+    let mut loader = Loader::from(model_id)?;
 
     // Manually construct manifest as auto-detection might not be exposed in Loader yet
     let manifest = Arc::new(ModelManifest {

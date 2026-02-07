@@ -19,7 +19,7 @@ impl TestModelFiles {
     ///
     /// The alias should be a valid HuggingFace model ID (e.g. "Qwen/Qwen3-0.6B").
     pub fn loader(&self, alias: &str) -> Result<Loader, Box<dyn std::error::Error>> {
-        Ok(Loader::from_hf(alias)?)
+        Ok(Loader::from(alias)?)
     }
 
     /// Get the cache directory (for compatibility).

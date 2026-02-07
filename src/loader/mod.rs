@@ -303,18 +303,89 @@ pub struct Loader {
 }
 
 impl Loader {
+    /// 从远程仓库加载模型（主入口）
+    ///
+    /// # 参数
+    ///
+    /// * `repo_model` - 仓库/模型标识符，格式为 `"org/model"`
+    ///   - 例如: `"HuggingFaceTB/SmolLM2-135M-Instruct"`
+    ///   - 例如: `"intfloat/e5-small"`
+    ///   - 例如: `"BAAI/bge-reranker-v2-m3"`
+    ///
+    /// # 行为
+    ///
+    /// 1. **自动源选择**: 优先 HuggingFace，失败自动回退 ModelScope
+    /// 2. **自动格式探测**: 自动识别 SafeTensors/GGUF/ONNX
+    /// 3. **缓存复用**: 已下载的模型直接使用缓存
+    ///
+    /// # 示例
+    ///
+    /// ```no_run
+    /// use gllm::Loader;
+    ///
+    /// // 直接加载，自动处理一切
+    /// let loader = Loader::from("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+    ///
+    /// // GGUF 格式也支持
+    /// let loader = Loader::from("Mungert/SmolLM2-135M-Instruct-GGUF")?;
+    ///
+    /// // ONNX 格式也支持
+    /// let loader = Loader::from("onnx-community/SmolLM2-135M-ONNX")?;
+    /// ```
+    ///
+    /// # 源回退策略
+    ///
+    /// - 首选: HuggingFace (全球可用)
+    /// - 回退: ModelScope (中国优化，某些模型更完整)
+    ///
+    /// 当 HuggingFace 下载失败时（404、网络问题等），自动尝试 ModelScope。
+    pub fn from(repo_model: &str) -> Result<Self> {
+        let mut config = LoaderConfig::from_env();
+        // 默认启用 HF → ModelScope 回退
+        config.enable_fallback = true;
+        config.source = ModelSource::HuggingFace;
+        Self::from_source_with_config(repo_model, config)
+    }
+
+    /// 从 HuggingFace 加载模型（不自动回退）
+    ///
+    /// # 已弃用
+    ///
+    /// 请使用 `Loader::from()` 代替，它支持自动回退。
+    ///
+    /// 如需强制使用 HuggingFace（不回退），使用：
+    /// ```ignore
+    /// let loader = Loader::from_with_config(
+    ///     "org/model",
+    ///     LoaderConfig { source: ModelSource::HuggingFace, enable_fallback: false, ..Default::default() }
+    /// )?;
+    /// ```
+    #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替")]
     pub fn from_hf(repo_or_alias: &str) -> Result<Self> {
         let mut config = LoaderConfig::default();
         config.source = ModelSource::HuggingFace;
+        config.enable_fallback = false;
         Self::from_source_with_config(repo_or_alias, config)
     }
 
     /// 从 ModelScope（魔搭社区）加载模型
     ///
-    /// 许多中国模型（Qwen、GLM、InternLM 等）在 ModelScope 上公开可用
+    /// # 已弃用
+    ///
+    /// 请使用 `Loader::from()` 代替，它会自动回退到 ModelScope。
+    ///
+    /// 如需强制使用 ModelScope，使用：
+    /// ```ignore
+    /// let loader = Loader::from_with_config(
+    ///     "org/model",
+    ///     LoaderConfig { source: ModelSource::ModelScope, enable_fallback: false, ..Default::default() }
+    /// )?;
+    /// ```
+    #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替")]
     pub fn from_ms(repo_or_alias: &str) -> Result<Self> {
         let mut config = LoaderConfig::default();
         config.source = ModelSource::ModelScope;
+        config.enable_fallback = false;
         Self::from_source_with_config(repo_or_alias, config)
     }
 
@@ -339,14 +410,49 @@ impl Loader {
 
     /// 从 HuggingFace 加载，失败时自动回退到 ModelScope
     ///
-    /// 这对中国用户特别有用，许多模型在 ModelScope 上是公开的
+    /// # 已弃用
+    ///
+    /// 请使用 `Loader::from()` 代替，默认已启用自动回退。
+    #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替，默认已启用自动回退")]
     pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Self> {
-        Self::from_hf(repo_or_alias)
+        Self::from(repo_or_alias)
     }
 
+    /// 从 HuggingFace 加载（带自定义配置）
+    ///
+    /// # 已弃用
+    ///
+    /// 请使用 `Loader::from_with_config()` 代替。
+    #[deprecated(since = "0.11.0", note = "请使用 Loader::from_with_config() 代替")]
     pub fn from_hf_with_config(repo_or_alias: &str, mut config: LoaderConfig) -> Result<Self> {
         config.source = ModelSource::HuggingFace;
+        config.enable_fallback = false;
         Self::from_source_with_config(repo_or_alias, config)
+    }
+
+    /// 加载模型（带自定义配置）
+    ///
+    /// # 参数
+    ///
+    /// * `repo_model` - 仓库/模型标识符，格式为 `"org/model"`
+    /// * `config` - 自定义配置
+    ///
+    /// # 示例
+    ///
+    /// ```no_run
+    /// use gllm::Loader;
+    /// use gllm::loader::LoaderConfig;
+    ///
+    /// // 自定义缓存目录
+    /// let loader = Loader::from_with_config(
+    ///     "HuggingFaceTB/SmolLM2-135M-Instruct",
+    ///     LoaderConfig { cache_dir: Some("/custom/cache".into()), ..Default::default() }
+    /// )?;
+    /// ```
+    pub fn from_with_config(repo_model: &str, mut config: LoaderConfig) -> Result<Self> {
+        config.enable_fallback = true;
+        config.source = ModelSource::HuggingFace;
+        Self::from_source_with_config(repo_model, config)
     }
 
     /// Create a loader from local files without downloading.
@@ -404,9 +510,14 @@ impl Loader {
         Self::from_source_with_config_and_manifest_and_format(repo_or_alias, config, manifest, None)
     }
 
+    /// 自动加载模型（`from()` 的别名）
+    ///
+    /// # 已弃用
+    ///
+    /// 请使用 `Loader::from()` 代替，API 更简洁清晰。
+    #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替")]
     pub fn auto(repo_or_alias: &str) -> Result<Self> {
-        let config = LoaderConfig::from_env();
-        Self::auto_with_config(repo_or_alias, config, None)
+        Self::from(repo_or_alias)
     }
 
     pub fn auto_with_format(repo_or_alias: &str, format: WeightFormat) -> Result<Self> {
@@ -828,21 +939,54 @@ fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
     format_detector::detect_format_from_paths(weights)
 }
 
-/// Convenience: create a loader from a HuggingFace repo or alias.
+/// 从远程仓库加载模型（便捷函数）
+///
+/// 这是 `Loader::from()` 的便捷包装，提供更简洁的调用方式。
+///
+/// # 参数
+///
+/// * `repo_model` - 仓库/模型标识符，格式为 `"org/model"`
+///
+/// # 示例
+///
+/// ```no_run
+/// use gllm::loader;
+///
+/// // 简洁调用
+/// let loader = loader::from("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+/// ```
+pub fn from(repo_model: &str) -> Result<Loader> {
+    Loader::from(repo_model)
+}
+
+/// 从 HuggingFace 加载模型
+///
+/// # 已弃用
+///
+/// 请使用 `from()` 代替。
+#[deprecated(since = "0.11.0", note = "请使用 from() 代替")]
 pub fn from_hf(repo_or_alias: &str) -> Result<Loader> {
-    Loader::from_hf(repo_or_alias)
+    Loader::from(repo_or_alias)
 }
 
 /// Convenience: create a loader from ModelScope (魔搭社区).
 ///
-/// ModelScope 对中国用户更友好，许多模型在那里是公开的。
+/// # 已弃用
+///
+/// 请使用 `gllm::loader::Loader::from()` 代替，自动回退已包含。
+#[deprecated(since = "0.11.0", note = "请使用 gllm::loader::Loader::from() 代替")]
 pub fn from_ms(repo_or_alias: &str) -> Result<Loader> {
-    Loader::from_ms(repo_or_alias)
+    Loader::from(repo_or_alias)
 }
 
 /// Convenience: create a loader with automatic HF->MS fallback.
+///
+/// # 已弃用
+///
+/// 请使用 `gllm::loader::Loader::from()` 代替，默认已启用自动回退。
+#[deprecated(since = "0.11.0", note = "请使用 gllm::loader::Loader::from() 代替")]
 pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Loader> {
-    Loader::from_hf_with_fallback(repo_or_alias)
+    Loader::from(repo_or_alias)
 }
 
 /// Convenience: create a loader using environment-driven source selection.

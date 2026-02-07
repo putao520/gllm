@@ -135,7 +135,7 @@ impl<B: Backend> ModelAdapter<B> for GgufRemapAdapter {
 #[test]
 fn matrix_chat_safetensors_cpu() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::from_hf(model).expect("model loader");
+    let loader = Loader::from(model).expect("model loader");
     // 接受 SafeTensors 或 ONNX 格式 (HuggingFace 仓库现在优先提供 ONNX)
     let format = loader.weight_format();
     assert!(
@@ -153,7 +153,7 @@ fn matrix_chat_safetensors_cpu() {
         gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Chat)
             .expect("manifest");
 
-    let mut loader = Loader::from_hf(model).expect("loader");
+    let mut loader = Loader::from(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
     let backend = CpuBackend::new();
@@ -251,7 +251,7 @@ fn matrix_chat_gguf_cpu() {
 fn matrix_chat_onnx_cpu() {
     // ONNX 模型使用不同的适配器，这里只验证格式检测
     let model = "microsoft/Phi-3-mini-4k-instruct-onnx";
-    let loader = Loader::from_hf(model).expect("ONNX loader");
+    let loader = Loader::from(model).expect("ONNX loader");
     assert!(
         loader.weight_format() == gllm::loader::WeightFormat::Onnx
             || loader.weight_format() == gllm::loader::WeightFormat::SafeTensors
@@ -273,7 +273,7 @@ fn matrix_chat_onnx_cpu() {
 #[test]
 fn matrix_embedding_safetensors_cpu() {
     let model = "BAAI/bge-small-en-v1.5";
-    let loader = Loader::from_hf(model).expect("Embedding loader");
+    let loader = Loader::from(model).expect("Embedding loader");
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
@@ -281,7 +281,7 @@ fn matrix_embedding_safetensors_cpu() {
         gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Embedding)
             .expect("manifest");
 
-    let mut loader = Loader::from_hf(model).expect("loader");
+    let mut loader = Loader::from(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
 
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
@@ -314,7 +314,7 @@ fn matrix_embedding_safetensors_cpu() {
 #[test]
 fn matrix_reranker_safetensors_cpu() {
     let model = "BAAI/bge-reranker-v2-m3";
-    let loader = Loader::from_hf(model).expect("Reranker loader");
+    let loader = Loader::from(model).expect("Reranker loader");
 
     let config_path = loader.config_path().expect("config path");
     let config_value = gllm::loader::config::load_config_value(&config_path).expect("load config");
@@ -322,7 +322,7 @@ fn matrix_reranker_safetensors_cpu() {
         gllm::loader::config::manifest_from_config(model, &config_value, ModelKind::Reranker)
             .expect("manifest");
 
-    let mut loader = Loader::from_hf(model).expect("loader");
+    let mut loader = Loader::from(model).expect("loader");
     loader.set_manifest_if_missing(&manifest);
 
     let adapter = gllm::adapter::adapter_for::<CpuBackend>(&manifest).expect("adapter");
@@ -360,7 +360,7 @@ fn matrix_reranker_safetensors_cpu() {
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_safetensors_cuda() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::from_hf(model).expect("SafeTensors loader");
+    let loader = Loader::from(model).expect("SafeTensors loader");
     assert_eq!(
         loader.weight_format(),
         gllm::loader::WeightFormat::SafeTensors
@@ -383,7 +383,7 @@ fn matrix_chat_safetensors_cuda() {
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_gguf_cuda() {
     let model = "mav23/SmolLM-135M-Instruct-GGUF";
-    let loader = Loader::from_hf(model).expect("GGUF loader");
+    let loader = Loader::from(model).expect("GGUF loader");
     assert_eq!(loader.weight_format(), gllm::loader::WeightFormat::Gguf);
     assert!(cuda_available(), "CUDA backend should be available");
 }
@@ -403,7 +403,7 @@ fn matrix_chat_gguf_cuda() {
 #[ignore = "Requires CUDA backend"]
 fn matrix_chat_onnx_cuda() {
     let model = "microsoft/Phi-3-mini-4k-instruct-onnx";
-    let loader = Loader::from_hf(model).expect("ONNX loader");
+    let loader = Loader::from(model).expect("ONNX loader");
     assert!(
         loader.weight_format() == gllm::loader::WeightFormat::Onnx
             || loader.weight_format() == gllm::loader::WeightFormat::SafeTensors
@@ -428,7 +428,7 @@ fn matrix_chat_onnx_cuda() {
 #[test]
 fn matrix_gguf_format_detection() {
     let gguf_model = "mav23/SmolLM-135M-Instruct-GGUF";
-    let loader = Loader::from_hf(gguf_model).expect("GGUF loader");
+    let loader = Loader::from(gguf_model).expect("GGUF loader");
     assert_eq!(loader.weight_format(), gllm::loader::WeightFormat::Gguf);
 }
 /// TEST-MATRIX-GEN-008: GGUF Q4_0 量化检测
@@ -703,7 +703,7 @@ fn matrix_backend_cuda_detection() {
 #[test]
 fn matrix_source_huggingface() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::from_hf(model).expect("HF loader");
+    let loader = Loader::from(model).expect("HF loader");
     assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
 }
 /// TEST-MATRIX-GEN-015: 自动源选择
@@ -719,7 +719,7 @@ fn matrix_source_huggingface() {
 #[test]
 fn matrix_source_auto_selection() {
     let model = "HuggingFaceTB/SmolLM-135M-Instruct";
-    let loader = Loader::auto(model).expect("auto loader");
+    let loader = Loader::from(model).expect("auto loader");
     assert_eq!(loader.source(), gllm::loader::ModelSource::HuggingFace);
 }
 
