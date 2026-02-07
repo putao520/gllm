@@ -31,12 +31,12 @@
 | **REQ-LOADER-010** | Registry 删除与显式用途 | 彻底移除 Registry，API 显式指定 ModelKind | 1. 删除 Registry 与 ManifestOverride<br>2. `Client::new(model_id, kind)` 强制显式传入用途<br>3. 提供 `new_chat`/`new_embedding` 快捷方法<br>4. `manifest_from_config` 不再接受 overrides | 🟢 已实现 |
 | **REQ-LOADER-012** | ONNX 格式支持 | 原生支持加载 .onnx 模型文件 (纯 Rust 实现) | 1. 集成官方完整 ONNX Proto 定义 (Enterprise Grade)<br>2. **禁止引入第三方推理引擎** (tract/ort)<br>3. 完整解析 Model/Graph/Node/Tensor 结构<br>4. 支持零拷贝/内存映射加载<br>5. **必须实现 Graph Pattern Matching**<br>6. **必须将子图映射为 Fused Kernels** | 🟢 已实现 (2026-02-05) [commit: 088b9a8] |
 | **REQ-LOADER-013** | 自动格式探测 | 自动探测模型文件格式 (safetensors/GGUF/ONNX) | 1. 根据文件扩展名自动识别格式<br>2. 支持从 HF/MS 自动选择对应加载器<br>3. 无需用户手动指定格式 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
-| **REQ-LOADER-014** | GGUF 量化元数据读取 | 从 GGUF 文件读取量化类型信息 | 1. 从 GGUF 元数据读取 `general.quantization_version`<br>2. 从 GGUF tensor 信息读取实际量化类型 (Q4_0, Q8_0, Q5_K, etc.)<br>3. **禁止基于文件名推断** (Ω1: 真实性原则) | 📋 待实现 |
-| **REQ-LOADER-015** | ONNX 精度元数据读取 | 从 ONNX 文件读取精度信息 | 1. 从 ONNX tensor dtype 读取实际精度 (fp32/fp16/int8/uint8)<br>2. **禁止基于文件名推断** (Ω1: 真实性原则) | 📋 待实现 |
+| **REQ-LOADER-014** | GGUF 量化元数据读取 | 从 GGUF 文件读取量化类型信息 | 1. 从 GGUF 元数据读取 `general.quantization_version`<br>2. 从 GGUF tensor 信息读取实际量化类型 (Q4_0, Q8_0, Q5_K, etc.)<br>3. **禁止基于文件名推断** (Ω1: 真实性原则) | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
+| **REQ-LOADER-015** | ONNX 精度元数据读取 | 从 ONNX 文件读取精度信息 | 1. 从 ONNX tensor dtype 读取实际精度 (fp32/fp16/int8/uint8)<br>2. **禁止基于文件名推断** (Ω1: 真实性原则) | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
 | **REQ-LOADER-016** | 智能源选择 | HF 不可用时自动切换到 ModelScope | 1. HF 下载失败时自动尝试 ModelScope<br>2. 支持配置优先级 (HF→MS 或 MS→HF)<br>3. 记录源切换日志 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
-| **REQ-LOADER-019** | GGUF 架构元数据读取 | 从 GGUF 文件读取架构信息 | 1. 读取 GGUF 内置 `general.architecture` 字段 (如 "llama", "qwen2", "deepseek")<br>2. **禁止基于 Model ID 推断架构** (Ω1: 真实性原则)<br>3. 如果 GGUF 缺少架构元数据，返回明确的错误而非推测 | 📋 待实现 |
+| **REQ-LOADER-019** | GGUF 架构元数据读取 | 从 GGUF 文件读取架构信息 | 1. 读取 GGUF 内置 `general.architecture` 字段 (如 "llama", "qwen2", "deepseek")<br>2. **禁止基于 Model ID 推断架构** (Ω1: 真实性原则)<br>3. 如果 GGUF 缺少架构元数据，返回明确的错误而非推测 | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
 | **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
 
 
