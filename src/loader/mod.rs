@@ -321,7 +321,7 @@ impl Loader {
     /// # 示例
     ///
     /// ```no_run
-    /// use gllm::Loader;
+    /// use gllm::loader::Loader;
     ///
     /// // 直接加载，自动处理一切
     /// let loader = Loader::from("HuggingFaceTB/SmolLM2-135M-Instruct")?;
@@ -331,6 +331,8 @@ impl Loader {
     ///
     /// // ONNX 格式也支持
     /// let loader = Loader::from("onnx-community/SmolLM2-135M-ONNX")?;
+    ///
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # 源回退策略
@@ -440,7 +442,7 @@ impl Loader {
     /// # 示例
     ///
     /// ```no_run
-    /// use gllm::Loader;
+    /// use gllm::loader::Loader;
     /// use gllm::loader::LoaderConfig;
     ///
     /// // 自定义缓存目录
@@ -448,6 +450,8 @@ impl Loader {
     ///     "HuggingFaceTB/SmolLM2-135M-Instruct",
     ///     LoaderConfig { cache_dir: Some("/custom/cache".into()), ..Default::default() }
     /// )?;
+    ///
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn from_with_config(repo_model: &str, mut config: LoaderConfig) -> Result<Self> {
         config.enable_fallback = true;
@@ -954,6 +958,8 @@ fn detect_weight_format(weights: &[PathBuf]) -> Result<WeightFormat> {
 ///
 /// // 简洁调用
 /// let loader = loader::from("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+///
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn from(repo_model: &str) -> Result<Loader> {
     Loader::from(repo_model)
