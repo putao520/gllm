@@ -252,6 +252,9 @@ impl SafeTensorsLoader {
         Ok(())
     }
 
+    /// Ω1: 读取量化位宽（保留向后兼容）
+    ///
+    /// 推荐使用 `quantization_metadata()` 获取完整的量化信息
     pub fn packed_bits(&self) -> HashMap<String, u8> {
         let mut out = HashMap::new();
         for file in &self.files {
@@ -274,6 +277,74 @@ impl SafeTensorsLoader {
             }
         }
         out
+    }
+
+    /// Ω1: 读取完整的量化元数据
+    ///
+    /// 从 safetensors 元数据中读取 `gllm.quantization` 字段
+    pub fn quantization_metadata(&self) -> super::Result<Option<HashMap<String, super::QuantizationMetadata>>> {
+        let mut out = HashMap::new();
+        let mut has_metadata = false;
+
+        for file in &self.files {
+            let Some(meta) = file.metadata() else {
+                continue;
+            };
+
+            // 尝试读取新的量化元数据格式
+            if let Some(metadata_map) = super::QuantizationMetadata::from_metadata(meta)? {
+                out.extend(metadata_map);
+                has_metadata = true;
+            }
+        }
+
+        if has_metadata {
+            Ok(Some(out))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Ω1: 从实际张量中检测 dtype 大小（字节）
+    ///
+    /// 优先检测权重张量的实际 dtype，而非依赖 config.json
+    pub fn detect_weight_dtype_size(&self) -> Option<usize> {
+        // 优先查找模型权重张量（排除量化张量）
+        let weight_names = self.names().into_iter().filter(|name| {
+            // 排除量化相关张量
+            !name.contains("qweight")
+                && !name.contains("qzeros")
+                && !name.contains("scales")
+                && !name.contains("g_idx")
+                // 排除量化张量名称模式
+                && !name.contains(".q")
+                && !name.contains("_q4")
+                && !name.contains("_q8")
+                && !name.contains("_q2")
+                && !name.contains("_q3")
+                && !name.contains("_q5")
+                && !name.contains("_q6")
+        }).collect::<Vec<_>>();
+
+        for name in weight_names {
+            if let Some(meta) = self.tensor_meta(&name) {
+                return match meta.dtype {
+                    safetensors::Dtype::F32 => Some(4),
+                    safetensors::Dtype::F16 => Some(2),
+                    safetensors::Dtype::BF16 => Some(2),
+                    safetensors::Dtype::F64 => Some(8),
+                    // 量化类型不应出现在权重中，但返回已知的字节数
+                    safetensors::Dtype::I8 | safetensors::Dtype::U8 => Some(1),
+                    safetensors::Dtype::I16 | safetensors::Dtype::U16 => Some(2),
+                    safetensors::Dtype::I32 | safetensors::Dtype::U32 => Some(4),
+                    safetensors::Dtype::I64 | safetensors::Dtype::U64 => Some(8),
+                    safetensors::Dtype::BOOL => Some(1),
+                    // 处理 future 可能添加的新 dtype
+                    _ => None,
+                };
+            }
+        }
+        None
     }
 }
 

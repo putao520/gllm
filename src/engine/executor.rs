@@ -106,17 +106,32 @@ impl<B: Backend + 'static> Executor<B> {
             position_encoding: PositionEncoding::Rope,
         };
 
-        // TODO: Get total_blocks from backend or config.
-        // For now, assume 1GB KV cache with block_size 16 and head_dim 128, float32.
-        // 1 block = 16 * num_heads * head_dim * dtype_size
-        // This is backend dependent. We use a safe default of 10240 blocks.
-        // Allow override via env for testing resource control.
-        let total_blocks = std::env::var("GLLM_KV_CACHE_BLOCKS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10240);
+        // Ω1: 从模型配置计算 KV cache 大小，而非硬编码
         let block_size = 16;
         let hgal_config = HGALConfig::default();
+
+        // 从后端获取 dtype_size
+        let dtype_size = model_config.dtype_size;
+
+        // 计算单层单头的 KV cache 大小（以元素数为单位）
+        let kv_elements_per_token_per_layer = model_config.num_key_value_heads * model_config.head_dim;
+
+        // 计算 GPU 内存可容纳的块数（这里使用启发式：基于模型大小估算）
+        // 实际应该从后端查询可用内存，但这里先基于模型配置计算
+        let model_kv_size_mb = (model_config.num_hidden_layers
+            * model_config.num_attention_heads
+            * model_config.head_dim
+            * model_config.max_position_embeddings
+            * dtype_size) / 1024 / 1024;
+
+        // 假设使用 20% 的 GPU 内存用于 KV cache（保守估计）
+        // TODO: 从后端查询实际可用内存
+        let estimated_kv_cache_mb = model_kv_size_mb / 5;
+
+        // 计算块数：每块大小 = block_size * num_kv_heads * head_dim * dtype_size (bytes)
+        let bytes_per_block = block_size * kv_elements_per_token_per_layer * dtype_size;
+
+        let total_blocks = (estimated_kv_cache_mb * 1024 * 1024 / bytes_per_block).max(1);
 
         let mut scheduler = PagedScheduler::new(total_blocks, block_size, hgal_config);
         scheduler.enable_vllm_2024(Scheduler2024Config {

@@ -39,20 +39,45 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
-    pub fn from_loader(manifest: &ModelManifest, loader: &Loader) -> ModelConfigResult<Self> {
-        let path = loader
-            .config_path()
-            .ok_or(ModelConfigError::MissingConfig)?;
-        Self::from_path(manifest, path)
+    pub fn from_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
+        // 先提取路径，避免借用冲突
+        let path = loader.config_path()
+            .ok_or(ModelConfigError::MissingConfig)?
+            .to_path_buf();
+        Self::from_path_with_loader(manifest, &path, loader)
     }
 
     pub fn from_path(manifest: &ModelManifest, path: &Path) -> ModelConfigResult<Self> {
         let bytes = std::fs::read(path)?;
         let value: Value = serde_json::from_slice(&bytes)?;
-        Self::from_value(manifest, &value)
+        Self::from_value(manifest, &value, None)
     }
 
-    pub fn from_value(manifest: &ModelManifest, value: &Value) -> ModelConfigResult<Self> {
+    /// Ω1: 从实际权重中检测 dtype 大小
+    ///
+    /// 优先使用权重文件中的实际 dtype，而非 config.json 中的声明
+    pub fn from_path_with_loader(
+        manifest: &ModelManifest,
+        path: &Path,
+        loader: &mut Loader,
+    ) -> ModelConfigResult<Self> {
+        // 先克隆需要的数据，避免借用冲突
+        let manifest_clone = manifest.clone();
+        let bytes = std::fs::read(path)?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+
+        // 检测权重 dtype（需要可变借用）
+        let weight_dtype_size = loader.detect_weight_dtype_size()
+            .unwrap_or(None);
+
+        Self::from_value(&manifest_clone, &value, weight_dtype_size)
+    }
+
+    pub fn from_value(
+        manifest: &ModelManifest,
+        value: &Value,
+        weight_dtype_size: Option<usize>,
+    ) -> ModelConfigResult<Self> {
         let hidden_size = require_usize(value, &["hidden_size", "n_embd", "d_model"])?;
         let num_attention_heads =
             require_usize(value, &["num_attention_heads", "n_head", "num_heads"])?;
@@ -85,9 +110,14 @@ impl ModelConfig {
             ));
         }
 
-        let rope_theta = manifest.rope_base_override.unwrap_or_else(|| {
-            find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]).unwrap_or(10000.0)
-        });
+        // Ω1: rope_theta 必须从模型配置或 manifest 中读取，不再使用硬编码默认值
+        let rope_theta = if let Some(override_value) = manifest.rope_base_override {
+            override_value
+        } else {
+            find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]).ok_or_else(|| {
+                ModelConfigError::InvalidConfig("missing rope_theta (rope_base) in config.json".to_string())
+            })?
+        };
 
         let head_dim = find_usize(value, &["head_dim", "kv_channels"])
             .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
@@ -97,7 +127,14 @@ impl ModelConfig {
             ));
         }
 
-        let dtype_size = dtype_size_from_config(value).unwrap_or(2);
+        // Ω1: dtype 大小优先从实际权重中读取，而非 config.json
+        // 如果权重检测失败，再尝试从配置文件读取
+        let dtype_size = match weight_dtype_size {
+            Some(size) => size,
+            None => dtype_size_from_config(value).ok_or_else(|| {
+                ModelConfigError::InvalidConfig("无法确定模型的 dtype 大小，config.json 中缺少 torch_dtype 字段".to_string())
+            })?,
+        };
 
         Ok(Self {
             hidden_size,

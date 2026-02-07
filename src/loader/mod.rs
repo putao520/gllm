@@ -16,6 +16,75 @@ use thiserror::Error;
 use crate::manifest::{ModelManifest, TensorNamingRule, EMPTY_FILE_MAP};
 use crate::quantization::dequantize_int8_with_zero;
 
+/// Ω1: 量化元数据 - 完全由模型文件提供，不基于推测
+///
+/// 存储在 safetensors 元数据的 `gllm.quantization` 字段中：
+/// ```json
+/// {
+///   "qweight": {
+///     "bits": 4,
+///     "signed": false,
+///     "block_size": 128,
+///     "group_size": 64,
+///     "companions": {
+///       "scales": "scales",
+///       "zeros": "qzeros"
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct QuantizationMetadata {
+    /// 量化位宽 (4, 8)
+    pub bits: u8,
+    /// 是否有符号
+    #[serde(default)]
+    pub signed: bool,
+    /// 量化块大小（用于反量化时的索引计算）
+    /// Ω1: 必须由模型提供，不允许默认值
+    pub block_size: usize,
+    /// 关联张量映射
+    #[serde(default)]
+    pub companions: CompanionTensors,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
+pub struct CompanionTensors {
+    /// scales 张量名称
+    pub scales: Option<String>,
+    /// zeros 张量名称
+    pub zeros: Option<String>,
+    /// 其他关联张量
+    #[serde(flatten)]
+    pub others: HashMap<String, String>,
+}
+
+impl QuantizationMetadata {
+    /// 从 safetensors 元数据解析量化信息
+    pub fn from_metadata(meta: &std::collections::HashMap<String, String>) -> Result<Option<HashMap<String, QuantizationMetadata>>> {
+        let Some(encoded) = meta.get("gllm.quantization") else {
+            return Ok(None);
+        };
+
+        serde_json::from_str(encoded)
+            .map(Some)
+            .map_err(|e| LoaderError::InvalidQuantization(format!("无效的量化元数据: {e}")))
+    }
+
+    /// 验证量化配置的完整性
+    pub fn validate(&self) -> Result<()> {
+        if ![4, 8].contains(&self.bits) {
+            return Err(LoaderError::InvalidQuantization(format!(
+                "不支持的量化位宽: {} (仅支持 4 或 8)", self.bits
+            )));
+        }
+        if self.block_size == 0 {
+            return Err(LoaderError::InvalidQuantization("block_size 不能为 0".to_string()));
+        }
+        Ok(())
+    }
+}
+
 pub mod config;
 pub mod downloader;
 pub mod format_detector;
@@ -819,6 +888,21 @@ impl Loader {
         Ok(loader.unique_precisions())
     }
 
+    /// Ω1: 从实际权重张量中检测 dtype 大小
+    ///
+    /// 对于 SafeTensors 格式，直接读取张量的实际 dtype
+    pub fn detect_weight_dtype_size(&mut self) -> Result<Option<usize>> {
+        if self.files.format == WeightFormat::SafeTensors {
+            self.ensure_safetensors()?;
+            let loader = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
+            Ok(loader.detect_weight_dtype_size())
+        } else {
+            // 对于 GGUF，通常都是量化的，dtype 由量化格式决定
+            // 这里返回 None 表示无法从权重确定
+            Ok(None)
+        }
+    }
+
     pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
         match self.files.format {
             WeightFormat::SafeTensors => self.upload_safetensors(backend),
@@ -833,7 +917,7 @@ impl Loader {
             .safetensors
             .as_ref()
             .ok_or(LoaderError::MissingWeights)?;
-        let quantized = QuantizedIndex::from_loader(loader);
+        let quantized = QuantizedIndex::from_loader(loader)?;
         let mut quantized_seen = HashSet::new();
 
         let is_moe = self.manifest.as_ref().map(|m| m.is_moe()).unwrap_or(false);
@@ -1373,9 +1457,50 @@ struct QuantizedGroup {
     zeros: Option<String>,
     bits: u8,
     signed: bool,
+    /// Ω1: 从元数据读取的块大小（必填，不再使用 Option）
+    block_size: usize,
 }
 
 impl QuantizedGroup {
+    /// Ω1: 从元数据创建量化组
+    fn from_metadata(
+        base_name: String,
+        qweight: String,
+        metadata: &QuantizationMetadata,
+        name_to_tensor: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        metadata.validate()?;
+
+        let scales = metadata.companions.scales.as_ref()
+            .and_then(|pattern| name_to_tensor(pattern))
+            .or_else(|| {
+                // 向后兼容：尝试默认名称
+                name_to_tensor("scales").or_else(|| name_to_tensor("scale"))
+            })
+            .ok_or_else(|| {
+                LoaderError::InvalidQuantization(format!(
+                    "未找到 scales 张量: {base_name}"
+                ))
+            })?;
+
+        let zeros = metadata.companions.zeros.as_ref()
+            .and_then(|pattern| name_to_tensor(pattern))
+            .or_else(|| {
+                // 向后兼容：尝试默认名称
+                name_to_tensor("qzeros").or_else(|| name_to_tensor("zeros"))
+            });
+
+        Ok(Self {
+            base_name,
+            qweight,
+            scales,
+            zeros,
+            bits: metadata.bits,
+            signed: metadata.signed,
+            block_size: metadata.block_size,
+        })
+    }
+
     fn dequantize(&self, loader: &SafeTensorsLoader) -> Result<OwnedTensor> {
         let qweight = loader.tensor(&self.qweight)?;
         let scales = loader.tensor(&self.scales)?;
@@ -1405,7 +1530,8 @@ impl QuantizedGroup {
         };
 
         let total = values.len();
-        let block_size = (total / scales.len().max(1)).max(1);
+        // Ω1: 使用元数据中的 block_size（必填）
+        let block_size = self.block_size;
         let mut out = Vec::with_capacity(total);
         for (idx, value) in values.into_iter().enumerate() {
             let block = idx / block_size;
@@ -1435,107 +1561,78 @@ struct QuantizedIndex {
 }
 
 impl QuantizedIndex {
-    fn from_loader(loader: &SafeTensorsLoader) -> Self {
+    /// Ω1: 完全从模型元数据构建量化索引，禁止任何推测
+    fn from_loader(loader: &SafeTensorsLoader) -> Result<Self> {
         let mut index = QuantizedIndex::default();
-        let packed_bits = loader.packed_bits();
-        let names = loader.names();
-        let name_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
 
-        for name in &names {
-            if !is_qweight_name(name) {
-                continue;
+        // 读取量化元数据
+        let quantization_metadata = loader.quantization_metadata()?
+            .ok_or_else(|| {
+                LoaderError::InvalidQuantization(
+                    "模型缺少量化元数据。请在 safetensors 文件中包含 gllm.quantization 字段".to_string()
+                )
+            })?;
+
+        // 验证所有量化组
+        for (qweight_name, metadata) in &quantization_metadata {
+            metadata.validate()?;
+
+            // 验证 qweight 张量存在
+            if loader.tensor(qweight_name).is_err() {
+                return Err(LoaderError::MissingTensor(format!(
+                    "量化元数据指定的 qweight 张量不存在: {qweight_name}"
+                )));
             }
-            let base = match quantized_base_name(name) {
-                Some(base) => base,
-                None => continue,
+
+            // 构建名称查找函数
+            let name_set: HashSet<_> = loader.names().into_iter().collect();
+            let find_tensor = |name: &str| -> Option<String> {
+                if name_set.contains(name) {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
             };
-            let scales = match find_quantized_companion(&name_set, name, &["scales", "scale"]) {
-                Some(scales) => scales,
-                None => continue,
-            };
-            let zeros = find_quantized_companion(&name_set, name, &["qzeros", "zeros", "zero"]);
-            let bits = infer_bits(name, packed_bits.get(name.as_str()).copied());
-            let signed = infer_signed(name);
-            let group = QuantizedGroup {
-                base_name: base.clone(),
-                qweight: name.to_string(),
-                scales,
-                zeros,
-                bits,
-                signed,
-            };
+
+            // 从元数据创建量化组
+            let group = QuantizedGroup::from_metadata(
+                qweight_name.clone(),
+                qweight_name.clone(),
+                metadata,
+                &find_tensor,
+            )?;
+
+            // 验证关联张量存在
+            if loader.tensor(&group.scales).is_err() {
+                return Err(LoaderError::MissingTensor(format!(
+                    "量化元数据指定的 scales 张量不存在: {}", group.scales
+                )));
+            }
+            if let Some(ref zeros) = group.zeros {
+                if loader.tensor(zeros).is_err() {
+                    return Err(LoaderError::MissingTensor(format!(
+                        "量化元数据指定的 zeros 张量不存在: {zeros}"
+                    )));
+                }
+            }
+
+            // 注册到索引
             for member in [&group.qweight, &group.scales] {
-                index
-                    .member_to_base
-                    .insert(member.to_string(), base.clone());
+                index.member_to_base.insert(member.to_string(), group.base_name.clone());
             }
-            if let Some(zeros) = &group.zeros {
-                index.member_to_base.insert(zeros.to_string(), base.clone());
+            if let Some(ref zeros) = group.zeros {
+                index.member_to_base.insert(zeros.to_string(), group.base_name.clone());
             }
-            index.groups.insert(base, group);
+            index.groups.insert(group.base_name.clone(), group);
         }
 
-        index
+        Ok(index)
     }
 
     fn group_for(&self, name: &str) -> Option<&QuantizedGroup> {
         let base = self.member_to_base.get(name)?;
         self.groups.get(base)
     }
-}
-
-fn is_qweight_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("qweight") || lower.contains("q_weight")
-}
-
-fn quantized_base_name(name: &str) -> Option<String> {
-    if name.contains("qweight") {
-        return replace_last(name, "qweight", "weight");
-    }
-    if name.contains("q_weight") {
-        return replace_last(name, "q_weight", "weight");
-    }
-    None
-}
-
-fn find_quantized_companion(
-    names: &HashSet<&str>,
-    source: &str,
-    candidates: &[&str],
-) -> Option<String> {
-    for candidate in candidates {
-        if let Some(name) = replace_last(source, "qweight", candidate) {
-            if names.contains(name.as_str()) {
-                return Some(name);
-            }
-        }
-        if let Some(name) = replace_last(source, "q_weight", candidate) {
-            if names.contains(name.as_str()) {
-                return Some(name);
-            }
-        }
-    }
-    None
-}
-
-fn infer_bits(name: &str, packed_bits: Option<u8>) -> u8 {
-    if let Some(bits) = packed_bits {
-        return bits;
-    }
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("int4") || lower.contains("q4") {
-        4
-    } else if lower.contains("int8") || lower.contains("q8") {
-        8
-    } else {
-        8
-    }
-}
-
-fn infer_signed(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("signed") || lower.contains("s4") || lower.contains("s8")
 }
 
 fn decode_quantized_values(

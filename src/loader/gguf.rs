@@ -127,11 +127,16 @@ impl MappedGguf {
             .map_err(|err| LoaderError::Gguf(err.to_string()))?;
 
         let header_len = 4 + counter.load(Ordering::Relaxed);
+        // Ω1: 对齐值必须由 GGUF 元数据提供，不使用默认值
         let alignment = model
             .metadata()
             .get("general.alignment")
             .and_then(|value| value.as_u64())
-            .unwrap_or(32) as usize;
+            .ok_or_else(|| {
+                LoaderError::Gguf(
+                    "GGUF 元数据缺少 general.alignment 字段。这是必需的元数据，不能推测默认值".to_string()
+                )
+            })? as usize;
         let alignment = alignment.max(1);
         let data_start = align_up(header_len, alignment);
 
