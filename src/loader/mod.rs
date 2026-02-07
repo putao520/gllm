@@ -61,7 +61,9 @@ pub struct CompanionTensors {
 
 impl QuantizationMetadata {
     /// 从 safetensors 元数据解析量化信息
-    pub fn from_metadata(meta: &std::collections::HashMap<String, String>) -> Result<Option<HashMap<String, QuantizationMetadata>>> {
+    pub fn from_metadata(
+        meta: &std::collections::HashMap<String, String>,
+    ) -> Result<Option<HashMap<String, QuantizationMetadata>>> {
         let Some(encoded) = meta.get("gllm.quantization") else {
             return Ok(None);
         };
@@ -75,16 +77,20 @@ impl QuantizationMetadata {
     pub fn validate(&self) -> Result<()> {
         if ![4, 8].contains(&self.bits) {
             return Err(LoaderError::InvalidQuantization(format!(
-                "不支持的量化位宽: {} (仅支持 4 或 8)", self.bits
+                "不支持的量化位宽: {} (仅支持 4 或 8)",
+                self.bits
             )));
         }
         if self.block_size == 0 {
-            return Err(LoaderError::InvalidQuantization("block_size 不能为 0".to_string()));
+            return Err(LoaderError::InvalidQuantization(
+                "block_size 不能为 0".to_string(),
+            ));
         }
         Ok(())
     }
 }
 
+pub mod adapter;
 pub mod config;
 pub mod downloader;
 pub mod format_detector;
@@ -820,7 +826,8 @@ impl Loader {
         if self.files.format != WeightFormat::Gguf {
             return Err(LoaderError::UnsupportedWeights(self.files.format));
         }
-        let gguf = GgufLoader::from_files(&self.files.weights)?;
+        let gguf = GgufLoader::from_files(&self.files.weights)
+            .map_err(|err| LoaderError::Gguf(err.to_string()))?;
         self.gguf = Some(gguf);
         Ok(())
     }
@@ -861,7 +868,14 @@ impl Loader {
     pub fn gguf_architecture(&mut self) -> Result<crate::manifest::ModelArchitecture> {
         self.ensure_gguf()?;
         let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
-        loader.architecture()
+        let architecture = loader
+            .architecture()
+            .map_err(|err| LoaderError::Gguf(err.to_string()))?;
+        map_gguf_architecture(architecture).ok_or_else(|| {
+            LoaderError::Gguf(format!(
+                "unsupported GGUF architecture metadata: {architecture}"
+            ))
+        })
     }
 
     pub fn gguf_quantization_version(&mut self) -> Result<Option<u64>> {
@@ -894,7 +908,10 @@ impl Loader {
     pub fn detect_weight_dtype_size(&mut self) -> Result<Option<usize>> {
         if self.files.format == WeightFormat::SafeTensors {
             self.ensure_safetensors()?;
-            let loader = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
+            let loader = self
+                .safetensors
+                .as_ref()
+                .ok_or(LoaderError::MissingWeights)?;
             Ok(loader.detect_weight_dtype_size())
         } else {
             // 对于 GGUF，通常都是量化的，dtype 由量化格式决定
@@ -973,17 +990,22 @@ impl Loader {
             if !visited.insert(name.clone()) {
                 continue;
             }
-            let tensor = loader.tensor(&name)?;
-            if let Some(qtype) = tensor.quantized_type() {
+            let tensor = loader
+                .tensor(&name)
+                .map_err(|err| LoaderError::Gguf(err.to_string()))?;
+            let shape = gguf_shape_to_usize(tensor.shape())?;
+            let qtype = match tensor.dtype() {
+                gguf::GgmlDType::Q4_0 => Some(gllm_kernels::QuantizedType::Q4_0),
+                gguf::GgmlDType::Q8_0 => Some(gllm_kernels::QuantizedType::Q8_0),
+                gguf::GgmlDType::Q5_K => Some(gllm_kernels::QuantizedType::Q5_K),
+                _ => None,
+            };
+
+            if let Some(qtype) = qtype {
                 let owned = match qtype {
                     gllm_kernels::QuantizedType::Q4_0 => {
-                        if matches!(tensor.byte_order, gguf_rs::ByteOrder::BE) {
-                            return Err(LoaderError::Gguf(
-                                "big-endian gguf quantized tensors are not supported".into(),
-                            ));
-                        }
-                        let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
-                        let blocks = parse_q4_0_blocks(tensor.data, rows, cols)?;
+                        let (rows, cols) = gguf_matrix_dims(&shape)?;
+                        let blocks = parse_q4_0_blocks(tensor.as_bytes(), rows, cols)?;
                         let matrix = Q4_0Matrix { blocks, rows, cols };
                         let total = rows.checked_mul(cols).ok_or_else(|| {
                             LoaderError::InvalidQuantization("gguf output overflow".into())
@@ -993,18 +1015,13 @@ impl Loader {
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
                         OwnedTensor::F32 {
                             name: name.clone(),
-                            shape: tensor.shape.clone(),
+                            shape: shape.clone(),
                             data: out,
                         }
                     }
                     gllm_kernels::QuantizedType::Q8_0 => {
-                        if matches!(tensor.byte_order, gguf_rs::ByteOrder::BE) {
-                            return Err(LoaderError::Gguf(
-                                "big-endian gguf quantized tensors are not supported".into(),
-                            ));
-                        }
-                        let (rows, cols) = gguf_matrix_dims(&tensor.shape)?;
-                        let blocks = parse_q8_0_blocks(tensor.data, rows, cols)?;
+                        let (rows, cols) = gguf_matrix_dims(&shape)?;
+                        let blocks = parse_q8_0_blocks(tensor.as_bytes(), rows, cols)?;
                         let matrix = Q8_0Matrix { blocks, rows, cols };
                         let total = rows.checked_mul(cols).ok_or_else(|| {
                             LoaderError::InvalidQuantization("gguf output overflow".into())
@@ -1014,7 +1031,7 @@ impl Loader {
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
                         OwnedTensor::F32 {
                             name: name.clone(),
-                            shape: tensor.shape.clone(),
+                            shape: shape.clone(),
                             data: out,
                         }
                     }
@@ -1031,10 +1048,10 @@ impl Loader {
                 continue;
             }
 
-            let data = tensor.to_f32()?;
+            let data = gguf_tensor_to_f32(&tensor)?;
             let owned = OwnedTensor::F32 {
                 name: name.clone(),
-                shape: tensor.shape.clone(),
+                shape,
                 data,
             };
             for output in maybe_split_fused_owned(self.rules(), owned) {
@@ -1052,6 +1069,27 @@ impl Loader {
 
 fn resolve_repo(repo_or_alias: &str) -> String {
     repo_or_alias.to_string()
+}
+
+fn normalize_architecture_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace('.', "_")
+}
+
+fn map_gguf_architecture(value: &str) -> Option<crate::manifest::ModelArchitecture> {
+    match normalize_architecture_token(value).as_str() {
+        "llama" => Some(crate::manifest::ModelArchitecture::Llama4),
+        "qwen2" | "qwen2_5" => Some(crate::manifest::ModelArchitecture::Qwen2_5),
+        "qwen3" => Some(crate::manifest::ModelArchitecture::Qwen3),
+        "deepseek" => Some(crate::manifest::ModelArchitecture::Qwen3MoE),
+        "mistral" => Some(crate::manifest::ModelArchitecture::Mistral3),
+        "ministral" => Some(crate::manifest::ModelArchitecture::Ministral),
+        "gemma" | "gemma2" => Some(crate::manifest::ModelArchitecture::Gemma2),
+        _ => None,
+    }
 }
 
 fn fallback_source(source: ModelSource) -> ModelSource {
@@ -1471,19 +1509,23 @@ impl QuantizedGroup {
     ) -> Result<Self> {
         metadata.validate()?;
 
-        let scales = metadata.companions.scales.as_ref()
+        let scales = metadata
+            .companions
+            .scales
+            .as_ref()
             .and_then(|pattern| name_to_tensor(pattern))
             .or_else(|| {
                 // 向后兼容：尝试默认名称
                 name_to_tensor("scales").or_else(|| name_to_tensor("scale"))
             })
             .ok_or_else(|| {
-                LoaderError::InvalidQuantization(format!(
-                    "未找到 scales 张量: {base_name}"
-                ))
+                LoaderError::InvalidQuantization(format!("未找到 scales 张量: {base_name}"))
             })?;
 
-        let zeros = metadata.companions.zeros.as_ref()
+        let zeros = metadata
+            .companions
+            .zeros
+            .as_ref()
             .and_then(|pattern| name_to_tensor(pattern))
             .or_else(|| {
                 // 向后兼容：尝试默认名称
@@ -1566,12 +1608,12 @@ impl QuantizedIndex {
         let mut index = QuantizedIndex::default();
 
         // 读取量化元数据
-        let quantization_metadata = loader.quantization_metadata()?
-            .ok_or_else(|| {
-                LoaderError::InvalidQuantization(
-                    "模型缺少量化元数据。请在 safetensors 文件中包含 gllm.quantization 字段".to_string()
-                )
-            })?;
+        let quantization_metadata = loader.quantization_metadata()?.ok_or_else(|| {
+            LoaderError::InvalidQuantization(
+                "模型缺少量化元数据。请在 safetensors 文件中包含 gllm.quantization 字段"
+                    .to_string(),
+            )
+        })?;
 
         // 验证所有量化组
         for (qweight_name, metadata) in &quantization_metadata {
@@ -1605,7 +1647,8 @@ impl QuantizedIndex {
             // 验证关联张量存在
             if loader.tensor(&group.scales).is_err() {
                 return Err(LoaderError::MissingTensor(format!(
-                    "量化元数据指定的 scales 张量不存在: {}", group.scales
+                    "量化元数据指定的 scales 张量不存在: {}",
+                    group.scales
                 )));
             }
             if let Some(ref zeros) = group.zeros {
@@ -1618,10 +1661,14 @@ impl QuantizedIndex {
 
             // 注册到索引
             for member in [&group.qweight, &group.scales] {
-                index.member_to_base.insert(member.to_string(), group.base_name.clone());
+                index
+                    .member_to_base
+                    .insert(member.to_string(), group.base_name.clone());
             }
             if let Some(ref zeros) = group.zeros {
-                index.member_to_base.insert(zeros.to_string(), group.base_name.clone());
+                index
+                    .member_to_base
+                    .insert(zeros.to_string(), group.base_name.clone());
             }
             index.groups.insert(group.base_name.clone(), group);
         }
@@ -1711,6 +1758,117 @@ fn tensor_to_f32(tensor: &TensorSlice<'_>) -> Result<Vec<f32>> {
         Dtype::U8 => Ok(tensor.as_u8()?.iter().map(|v| *v as f32).collect()),
         other => Err(LoaderError::InvalidQuantization(format!(
             "unsupported quantization tensor dtype {other:?}"
+        ))),
+    }
+}
+
+fn gguf_shape_to_usize(shape: &[u64]) -> Result<Vec<usize>> {
+    let mut out = Vec::with_capacity(shape.len());
+    for &dim in shape {
+        let dim = usize::try_from(dim)
+            .map_err(|_| LoaderError::Gguf("gguf tensor shape overflow".to_string()))?;
+        out.push(dim);
+    }
+    Ok(out)
+}
+
+fn gguf_tensor_to_f32(tensor: &gguf::TensorSlice<'_>) -> Result<Vec<f32>> {
+    let data = tensor.as_bytes();
+    match tensor.dtype() {
+        gguf::GgmlDType::F16 => {
+            if data.len() % 2 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf f16 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 2);
+            for chunk in data.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.push(f16::from_bits(bits).to_f32());
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::BF16 => {
+            if data.len() % 2 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf bf16 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 2);
+            for chunk in data.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                out.push(bf16::from_bits(bits).to_f32());
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::F32 => {
+            if data.len() % 4 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf f32 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 4);
+            for chunk in data.chunks_exact(4) {
+                out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::F64 => {
+            if data.len() % 8 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf f64 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 8);
+            for chunk in data.chunks_exact(8) {
+                let value = f64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ]);
+                out.push(value as f32);
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::I8 => Ok(data.iter().map(|v| (*v as i8) as f32).collect()),
+        gguf::GgmlDType::I16 => {
+            if data.len() % 2 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf i16 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 2);
+            for chunk in data.chunks_exact(2) {
+                out.push(i16::from_le_bytes([chunk[0], chunk[1]]) as f32);
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::I32 => {
+            if data.len() % 4 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf i32 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 4);
+            for chunk in data.chunks_exact(4) {
+                out.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32);
+            }
+            Ok(out)
+        }
+        gguf::GgmlDType::I64 => {
+            if data.len() % 8 != 0 {
+                return Err(LoaderError::Gguf(
+                    "gguf i64 tensor has invalid byte length".to_string(),
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len() / 8);
+            for chunk in data.chunks_exact(8) {
+                out.push(i64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ]) as f32);
+            }
+            Ok(out)
+        }
+        other => Err(LoaderError::InvalidQuantization(format!(
+            "unsupported gguf tensor dtype for f32 conversion: {other:?}"
         ))),
     }
 }
