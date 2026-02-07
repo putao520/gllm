@@ -48,11 +48,7 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
     // 10 tokens prompt + 20 gen = 30 tokens = 2 blocks per req.
     // 3 requests = 6 blocks total.
     // Capacity 4 blocks => Must swap.
-    let prompts = vec![
-        "Hello",
-        "Paris is",
-        "1, 2, 3,",
-    ];
+    let prompts = vec!["Hello", "Paris is", "1, 2, 3,"];
 
     // 5. Enqueue
     let mut req_ids = Vec::new();
@@ -75,14 +71,21 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
         executor.step()?;
         ticks += 1;
 
-        let finished_count = req_ids.iter().filter(|&&id| executor.is_finished(id)).count();
+        let finished_count = req_ids
+            .iter()
+            .filter(|&&id| executor.is_finished(id))
+            .count();
         if finished_count == req_ids.len() {
             all_finished = true;
             break;
         }
     }
 
-    assert!(all_finished, "Requests did not finish within {} steps", max_ticks);
+    assert!(
+        all_finished,
+        "Requests did not finish within {} steps",
+        max_ticks
+    );
 
     // 7. Verify Output
     // If swapping corrupted data, we expect garbage or truncated text.

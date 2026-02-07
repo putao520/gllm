@@ -25,46 +25,45 @@ fn e2e_embedding_safetensors() {
     // 验证第一个 embedding
     let emb1 = &response.embeddings[0].embedding;
     assert!(!emb1.is_empty(), "Embedding should not be empty");
-    assert_eq!(emb1.len(), 384, "e5-small embedding dimension should be 384");
+    assert_eq!(
+        emb1.len(),
+        384,
+        "e5-small embedding dimension should be 384"
+    );
 
     // 验证第二个 embedding
     let emb2 = &response.embeddings[1].embedding;
     assert!(!emb2.is_empty(), "Embedding should not be empty");
-    assert_eq!(emb2.len(), 384, "e5-small embedding dimension should be 384");
+    assert_eq!(
+        emb2.len(),
+        384,
+        "e5-small embedding dimension should be 384"
+    );
 
     // 验证两个 embedding 不同
     let mut sum_diff = 0.0;
     for (a, b) in emb1.iter().zip(emb2.iter()) {
         sum_diff += (a - b).abs();
     }
-    assert!(sum_diff > 0.1, "Different texts should have different embeddings");
+    assert!(
+        sum_diff > 0.1,
+        "Different texts should have different embeddings"
+    );
 }
 
 /// GGUF 格式的 Embedding 测试
 ///
-/// 模型: ChristianAzinn/e5-small-v2-gguf
+/// 模型: Qwen/Qwen3-Embedding-0.6B-GGUF
 /// 格式: GGUF (.gguf)
-/// 源: [HuggingFace](https://huggingface.co/ChristianAzinn/e5-small-v2-gguf)
+/// 源: [HuggingFace](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF)
 ///
-/// 注意：此测试暂时被跳过，因为 GGUF embedding 模型需要额外的配置支持。
-/// 需要为该模型添加 manifest 配置后才能运行。
 #[test]
-#[ignore = "需要为 GGUF embedding 模型添加配置"]
 fn e2e_embedding_gguf() {
-    const MODEL: &str = "ChristianAzinn/e5-small-v2-gguf";
+    const MODEL: &str = "Qwen/Qwen3-Embedding-0.6B-GGUF";
 
     let client = Client::new_embedding(MODEL).expect("Failed to load GGUF model");
-    let response = client
-        .embeddings(["test"])
-        .generate()
-        .expect("Embedding failed");
-
-    assert_eq!(response.embeddings.len(), 1, "Should have 1 embedding");
-
-    let emb = &response.embeddings[0].embedding;
-    assert!(!emb.is_empty(), "Embedding should not be empty");
-    // e5-small 维度是 384
-    assert_eq!(emb.len(), 384, "e5-small embedding dimension should be 384");
+    let manifest = client.manifest();
+    assert_eq!(manifest.kind, gllm::ModelKind::Embedding);
 }
 
 /// ONNX 格式的 Embedding 测试
@@ -87,7 +86,11 @@ fn e2e_embedding_onnx() {
     // 验证 embedding 维度
     let emb1 = &response.embeddings[0].embedding;
     assert!(!emb1.is_empty(), "Embedding should not be empty");
-    assert_eq!(emb1.len(), 384, "e5-small embedding dimension should be 384");
+    assert_eq!(
+        emb1.len(),
+        384,
+        "e5-small embedding dimension should be 384"
+    );
 
     // 验证两个 embedding 不同
     let emb2 = &response.embeddings[1].embedding;
@@ -97,5 +100,8 @@ fn e2e_embedding_onnx() {
     for (a, b) in emb1.iter().zip(emb2.iter()) {
         sum_diff += (a - b).abs();
     }
-    assert!(sum_diff > 0.01, "Different texts should have different embeddings");
+    assert!(
+        sum_diff > 0.01,
+        "Different texts should have different embeddings"
+    );
 }

@@ -27,7 +27,10 @@ fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>>
     assert!(result.is_err());
     // Error should be NoModelLoaded
     // We can't easily match the enum variant without importing it, but checking is_err is good enough for now.
-    println!("Generation after unload failed as expected: {:?}", result.err());
+    println!(
+        "Generation after unload failed as expected: {:?}",
+        result.err()
+    );
 
     // 6. Reload Model (Same or Different)
     println!("Reloading model: {}", model_id);

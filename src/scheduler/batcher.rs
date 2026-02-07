@@ -187,6 +187,30 @@ impl ContinuousBatcher {
         !self.waiting.is_empty() || !self.running.is_empty()
     }
 
+    pub fn waiting_len(&self) -> usize {
+        self.waiting.len()
+    }
+
+    pub fn running_len(&self) -> usize {
+        self.running.len()
+    }
+
+    pub fn mean_context_len(&self) -> usize {
+        let waiting_count = self.waiting.len();
+        let running_count = self.running.len();
+        let total_count = waiting_count.saturating_add(running_count);
+        if total_count == 0 {
+            return 0;
+        }
+
+        let waiting_total: usize = self.waiting.iter().map(Sequence::context_len).sum();
+        let running_total: usize = self.running.values().map(Sequence::context_len).sum();
+        waiting_total
+            .saturating_add(running_total)
+            .checked_div(total_count)
+            .unwrap_or(0)
+    }
+
     fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
         // 企业级策略：
         // 1. 收集所有等待的序列

@@ -282,7 +282,9 @@ impl SafeTensorsLoader {
     /// Ω1: 读取完整的量化元数据
     ///
     /// 从 safetensors 元数据中读取 `gllm.quantization` 字段
-    pub fn quantization_metadata(&self) -> super::Result<Option<HashMap<String, super::QuantizationMetadata>>> {
+    pub fn quantization_metadata(
+        &self,
+    ) -> super::Result<Option<HashMap<String, super::QuantizationMetadata>>> {
         let mut out = HashMap::new();
         let mut has_metadata = false;
 
@@ -310,9 +312,12 @@ impl SafeTensorsLoader {
     /// 优先检测权重张量的实际 dtype，而非依赖 config.json
     pub fn detect_weight_dtype_size(&self) -> Option<usize> {
         // 优先查找模型权重张量（排除量化张量）
-        let weight_names = self.names().into_iter().filter(|name| {
-            // 排除量化相关张量
-            !name.contains("qweight")
+        let weight_names = self
+            .names()
+            .into_iter()
+            .filter(|name| {
+                // 排除量化相关张量
+                !name.contains("qweight")
                 && !name.contains("qzeros")
                 && !name.contains("scales")
                 && !name.contains("g_idx")
@@ -324,7 +329,8 @@ impl SafeTensorsLoader {
                 && !name.contains("_q3")
                 && !name.contains("_q5")
                 && !name.contains("_q6")
-        }).collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
         for name in weight_names {
             if let Some(meta) = self.tensor_meta(&name) {

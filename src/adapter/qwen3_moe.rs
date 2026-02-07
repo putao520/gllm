@@ -28,7 +28,9 @@ impl<B: Backend> ModelAdapter<B> for Qwen3MoEAdapter {
             .meta
             .keys()
             .filter(|name| {
-                THINKING_HEAD_PATTERNS.iter().any(|pattern| name.contains(pattern))
+                THINKING_HEAD_PATTERNS
+                    .iter()
+                    .any(|pattern| name.contains(pattern))
             })
             .cloned()
             .collect();

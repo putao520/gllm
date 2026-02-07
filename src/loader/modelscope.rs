@@ -229,10 +229,7 @@ impl ModelScopeClient {
 
     /// Ω1: 候选文件名列表（按优先级排序）
     fn onnx_candidate_names(&self) -> Vec<String> {
-        let names = vec![
-            "onnx/model.onnx".to_string(),
-            "model.onnx".to_string(),
-        ];
+        let names = vec!["onnx/model.onnx".to_string(), "model.onnx".to_string()];
 
         // 简单字母排序
         let mut result = names;

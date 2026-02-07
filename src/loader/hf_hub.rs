@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use hf_hub::api::sync::Api;
 use serde::Deserialize;
 
-use crate::manifest::FileMap;
+use crate::manifest::{FileMap, EMPTY_FILE_MAP};
 
 #[cfg(feature = "candle")]
 use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
@@ -162,28 +162,87 @@ impl HfHubClient {
     }
 
     pub fn download_config_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
-        self.get_file_any(repo, file_map, "config.json")
+        self.get_file_any_with_base_fallback(repo, file_map, "config.json")
     }
 
     pub fn download_tokenizer_file(&self, repo: &str, file_map: FileMap) -> Result<PathBuf> {
-        self.get_file_any(repo, file_map, "tokenizer.json")
+        self.get_file_any_with_base_fallback(repo, file_map, "tokenizer.json")
     }
 
     fn collect_aux_files(&self, repo: &str, file_map: FileMap) -> Vec<PathBuf> {
-        let mut aux_files = Vec::new();
-        for name in [
+        const AUX_FILES: [&str; 6] = [
             "config.json",
             "configuration.json",
             "tokenizer.json",
             "tokenizer_config.json",
             "special_tokens_map.json",
             "vocab.json",
-        ] {
-            if let Ok(path) = self.get_file_any(repo, file_map, name) {
-                aux_files.push(path);
+        ];
+
+        fn has_any_named(paths: &[PathBuf], names: &[&str]) -> bool {
+            paths.iter().any(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| names.contains(&name))
+            })
+        }
+
+        fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+            if !paths.iter().any(|existing| existing == &path) {
+                paths.push(path);
             }
         }
+
+        let mut aux_files = Vec::new();
+        for name in AUX_FILES {
+            if let Ok(path) = self.get_file_any(repo, file_map, name) {
+                push_unique(&mut aux_files, path);
+            }
+        }
+
+        let has_config = has_any_named(&aux_files, &["config.json", "configuration.json"]);
+        let has_tokenizer = has_any_named(&aux_files, &["tokenizer.json"]);
+        if has_config && has_tokenizer {
+            return aux_files;
+        }
+
+        let Some(base_repo) = self.resolve_base_model_repo(repo) else {
+            return aux_files;
+        };
+
+        for name in AUX_FILES {
+            let required = match name {
+                "config.json" | "configuration.json" => !has_config,
+                "tokenizer.json" => !has_tokenizer,
+                _ => true,
+            };
+            if !required {
+                continue;
+            }
+            if let Ok(path) = self.get_file_any(&base_repo, EMPTY_FILE_MAP, name) {
+                push_unique(&mut aux_files, path);
+            }
+        }
+
         aux_files
+    }
+
+    fn get_file_any_with_base_fallback(
+        &self,
+        repo: &str,
+        file_map: FileMap,
+        logical: &str,
+    ) -> Result<PathBuf> {
+        match self.get_file_any(repo, file_map, logical) {
+            Ok(path) => Ok(path),
+            Err(LoaderError::MissingWeights) => {
+                let base_repo = self
+                    .resolve_base_model_repo(repo)
+                    .ok_or(LoaderError::MissingWeights)?;
+                self.get_file_any(&base_repo, EMPTY_FILE_MAP, logical)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn download_by_format(
@@ -294,27 +353,40 @@ impl HfHubClient {
 
     /// Ω1: 候选文件名列表（按优先级排序）
     fn onnx_candidate_names(&self) -> Vec<String> {
-        vec![
-            "onnx/model.onnx".to_string(),
-            "model.onnx".to_string(),
-        ]
+        vec!["onnx/model.onnx".to_string(), "model.onnx".to_string()]
     }
 
     fn ranked_gguf_candidates(&self, repo: &str) -> Vec<String> {
+        fn preferred_rank(name: &str) -> usize {
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with("q4_0.gguf") {
+                0
+            } else if lower.ends_with("q8_0.gguf") {
+                1
+            } else if lower.ends_with("f16.gguf") || lower.ends_with("fp16.gguf") {
+                2
+            } else if lower.ends_with("f32.gguf") || lower.ends_with("fp32.gguf") {
+                3
+            } else {
+                4
+            }
+        }
+
         if let Ok(files) = self.list_repo_files(repo) {
-            // Ω1: 不基于文件名推测，优先选择简单的名称
+            // 优先选择常见可用量化类型，其次按文件名稳定排序。
             let mut gguf_files: Vec<_> = files
                 .into_iter()
                 .filter(|name| name.ends_with(".gguf"))
                 .collect();
             if !gguf_files.is_empty() {
-                // 优先选择 model.gguf，否则按字母顺序
                 gguf_files.sort_by(|a, b| {
-                    match (a.as_str(), b.as_str()) {
-                        ("model.gguf", _) => std::cmp::Ordering::Less,
-                        (_, "model.gguf") => std::cmp::Ordering::Greater,
-                        _ => a.cmp(b),
-                    }
+                    let a_model = a == "model.gguf";
+                    let b_model = b == "model.gguf";
+                    a_model
+                        .cmp(&b_model)
+                        .reverse()
+                        .then_with(|| preferred_rank(a).cmp(&preferred_rank(b)))
+                        .then_with(|| a.cmp(b))
                 });
                 return gguf_files;
             }
@@ -361,6 +433,23 @@ impl HfHubClient {
             .info()
             .map_err(|err| LoaderError::HfHub(err.to_string()))?;
         Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
+    }
+
+    fn resolve_base_model_repo(&self, repo: &str) -> Option<String> {
+        let endpoint = std::env::var("HF_ENDPOINT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://huggingface.co".to_string());
+        let url = format!("{}/api/models/{}", endpoint.trim_end_matches('/'), repo);
+        let response = ureq::get(&url).call().ok()?;
+        if response.status() != 200 {
+            return None;
+        }
+        let body = response.into_string().ok()?;
+        let metadata: HfModelMetadata = serde_json::from_str(&body).ok()?;
+        metadata
+            .base_model_repo()
+            .filter(|base_repo| base_repo != repo)
     }
 
     #[cfg(feature = "candle")]
@@ -495,6 +584,63 @@ impl ShardIndex {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BaseModelField {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HfCardData {
+    #[serde(default, alias = "baseModel")]
+    base_model: Option<BaseModelField>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HfModelMetadata {
+    #[serde(default, rename = "cardData")]
+    card_data: HfCardData,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+impl HfModelMetadata {
+    fn base_model_repo(&self) -> Option<String> {
+        if let Some(base_model) = &self.card_data.base_model {
+            match base_model {
+                BaseModelField::Single(repo) if !repo.trim().is_empty() => {
+                    return Some(repo.to_string());
+                }
+                BaseModelField::Multiple(repos) => {
+                    if let Some(repo) = repos.iter().find(|repo| !repo.trim().is_empty()) {
+                        return Some(repo.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.tags
+            .iter()
+            .filter_map(|tag| tag.strip_prefix("base_model:"))
+            .find_map(|value| {
+                if value.starts_with("quantized:") || value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            })
+            .or_else(|| {
+                self.tags
+                    .iter()
+                    .filter_map(|tag| tag.strip_prefix("base_model:quantized:"))
+                    .find(|value| !value.trim().is_empty())
+                    .map(|value| value.to_string())
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +724,39 @@ mod tests {
 
         // 只有在没有 token 文件时才断言
         assert!(read_hf_token().is_none());
+    }
+
+    #[test]
+    fn base_model_repo_prefers_card_data() {
+        let metadata: HfModelMetadata = serde_json::from_str(
+            r#"{
+                "cardData": { "base_model": "intfloat/e5-small-v2" },
+                "tags": ["base_model:quantized:intfloat/e5-small-v2"]
+            }"#,
+        )
+        .expect("metadata");
+
+        assert_eq!(
+            metadata.base_model_repo(),
+            Some("intfloat/e5-small-v2".to_string())
+        );
+    }
+
+    #[test]
+    fn base_model_repo_falls_back_to_tags() {
+        let metadata: HfModelMetadata = serde_json::from_str(
+            r#"{
+                "tags": [
+                    "base_model:quantized:intfloat/e5-small-v2",
+                    "gguf"
+                ]
+            }"#,
+        )
+        .expect("metadata");
+
+        assert_eq!(
+            metadata.base_model_repo(),
+            Some("intfloat/e5-small-v2".to_string())
+        );
     }
 }

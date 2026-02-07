@@ -108,38 +108,15 @@ impl<B: Backend + 'static> Executor<B> {
             max_seq_len: model_config.max_position_embeddings,
             vocab_size: model_config.vocab_size,
             rope_theta: model_config.rope_theta,
-            rope_scale: 1.0,
-            rope_interleaved: false,
+            rope_scale: model_config.rope_scale,
+            rope_interleaved: model_config.rope_interleaved,
             rope_precompute: true,
             position_encoding,
         };
 
-        // Ω1: 从模型配置计算 KV cache 大小，而非硬编码
-        let block_size = 16;
+        let block_size = model_config.kv_cache_block_size;
         let hgal_config = HGALConfig::default();
-
-        // 从后端获取 dtype_size
-        let dtype_size = model_config.dtype_size;
-
-        // 计算单层单头的 KV cache 大小（以元素数为单位）
-        let kv_elements_per_token_per_layer = model_config.num_key_value_heads * model_config.head_dim;
-
-        // 计算 GPU 内存可容纳的块数（这里使用启发式：基于模型大小估算）
-        // 实际应该从后端查询可用内存，但这里先基于模型配置计算
-        let model_kv_size_mb = (model_config.num_hidden_layers
-            * model_config.num_attention_heads
-            * model_config.head_dim
-            * model_config.max_position_embeddings
-            * dtype_size) / 1024 / 1024;
-
-        // 假设使用 20% 的 GPU 内存用于 KV cache（保守估计）
-        // TODO: 从后端查询实际可用内存
-        let estimated_kv_cache_mb = model_kv_size_mb / 5;
-
-        // 计算块数：每块大小 = block_size * num_kv_heads * head_dim * dtype_size (bytes)
-        let bytes_per_block = block_size * kv_elements_per_token_per_layer * dtype_size;
-
-        let total_blocks = (estimated_kv_cache_mb * 1024 * 1024 / bytes_per_block).max(1);
+        let total_blocks = model_config.max_position_embeddings.div_ceil(block_size);
 
         let mut scheduler = PagedScheduler::new(total_blocks, block_size, hgal_config);
         scheduler.enable_vllm_2024(Scheduler2024Config {
@@ -346,11 +323,11 @@ impl<B: Backend + 'static> Executor<B> {
         // 0. Observability: Capture System State
         let system_state = SystemState {
             memory_pressure: self.backend.get_memory_pressure().unwrap_or(0.0), // Best effort
-            kv_fragmentation: 0.0,  // TODO: Get from scheduler
-            waiting_queue_len: 0,   // TODO: Get from batcher.waiting.len()
-            current_running_len: 0, // TODO: Get from batcher.running.len()
-            mean_context_len: 0,    // TODO
-            logits_entropy: 0.0,    // Phase 2
+            kv_fragmentation: self.scheduler.kv_fragmentation_ratio(),
+            waiting_queue_len: self.batcher.waiting_len(),
+            current_running_len: self.batcher.running_len(),
+            mean_context_len: self.batcher.mean_context_len(),
+            logits_entropy: 0.0, // Phase 2
         };
         self.observer.update(system_state);
 

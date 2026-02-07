@@ -96,21 +96,23 @@ impl GgufReader {
             raw_tensors.push((name, dtype, shape, rel_offset));
         }
 
-        let alignment = metadata
+        let data_offset = if let Some(alignment) = metadata
             .get("general.alignment")
             .and_then(GgufValue::as_u64)
-            .ok_or_else(|| GgufError::MissingMetadata("general.alignment".to_string()))?;
-        if alignment == 0 {
-            return Err(GgufError::InvalidMetadata(
-                "general.alignment must be > 0".to_string(),
-            ));
-        }
-
-        let data_offset = align_up(
-            pos,
-            usize::try_from(alignment)
-                .map_err(|_| GgufError::ParseError("alignment overflow".to_string()))?,
-        )?;
+        {
+            if alignment == 0 {
+                return Err(GgufError::InvalidMetadata(
+                    "general.alignment must be > 0".to_string(),
+                ));
+            }
+            align_up(
+                pos,
+                usize::try_from(alignment)
+                    .map_err(|_| GgufError::ParseError("alignment overflow".to_string()))?,
+            )?
+        } else {
+            pos
+        };
         if data_offset > bytes.len() {
             return Err(GgufError::ParseError(
                 "tensor data offset exceeds file size".to_string(),

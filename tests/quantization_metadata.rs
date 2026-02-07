@@ -44,7 +44,10 @@ fn test_parse_quantization_metadata() {
     assert_eq!(qweight_2_meta.bits, 8);
     assert_eq!(qweight_2_meta.signed, true);
     assert_eq!(qweight_2_meta.block_size, 256);
-    assert_eq!(qweight_2_meta.companions.scales.as_ref().unwrap(), "scales_2");
+    assert_eq!(
+        qweight_2_meta.companions.scales.as_ref().unwrap(),
+        "scales_2"
+    );
     assert!(qweight_2_meta.companions.zeros.is_none()); // 无 zeros
 }
 

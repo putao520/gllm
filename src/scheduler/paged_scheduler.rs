@@ -327,6 +327,31 @@ impl PagedScheduler {
         self.hgal.config()
     }
 
+    pub fn kv_fragmentation_ratio(&self) -> f32 {
+        let mut allocated_tokens = 0usize;
+        let mut used_tokens = 0usize;
+
+        for (request_id, table) in &self.block_tables {
+            let capacity = table.blocks.len().saturating_mul(self.block_size);
+            allocated_tokens = allocated_tokens.saturating_add(capacity);
+
+            let used = self
+                .hgal
+                .sequence_groups
+                .get(request_id)
+                .map(|group| group.context_len.min(capacity))
+                .unwrap_or(0);
+            used_tokens = used_tokens.saturating_add(used);
+        }
+
+        if allocated_tokens == 0 {
+            return 0.0;
+        }
+
+        ((allocated_tokens.saturating_sub(used_tokens)) as f32 / allocated_tokens as f32)
+            .clamp(0.0, 1.0)
+    }
+
     pub fn num_free_blocks(&self) -> usize {
         self.allocator.get_num_free_blocks()
     }

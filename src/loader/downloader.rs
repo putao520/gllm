@@ -29,21 +29,46 @@ impl ProgressCallback for NoProgress {
     fn finish(&mut self) {}
 }
 
+#[derive(Debug, Clone)]
+pub struct ProgressPrintConfig {
+    pub min_print_interval_secs: f64,
+    pub significant_progress_ratio: f64,
+    pub significant_progress_interval_secs: f64,
+    pub min_eta_speed_mb_per_sec: f64,
+}
+
+impl Default for ProgressPrintConfig {
+    fn default() -> Self {
+        Self {
+            min_print_interval_secs: 1.0,
+            significant_progress_ratio: 0.05,
+            significant_progress_interval_secs: 0.5,
+            min_eta_speed_mb_per_sec: 0.001,
+        }
+    }
+}
+
 /// 带速度和 ETA 的进度报告器
 pub struct ProgressBar {
     filename: String,
     total: usize,
     start: std::time::Instant,
     last_print: std::time::Instant,
+    print_config: ProgressPrintConfig,
 }
 
 impl ProgressBar {
     pub fn new(filename: String) -> Self {
+        Self::with_config(filename, ProgressPrintConfig::default())
+    }
+
+    pub fn with_config(filename: String, print_config: ProgressPrintConfig) -> Self {
         Self {
             filename,
             total: 0,
             start: std::time::Instant::now(),
             last_print: std::time::Instant::now(),
+            print_config,
         }
     }
 
@@ -53,11 +78,13 @@ impl ProgressBar {
         let total_elapsed = self.start.elapsed().as_secs_f64();
 
         // 每秒至少打印一次进度，或者当有显著进度时（>5%）
-        let should_print = elapsed_since_last_print >= 1.0
+        let should_print = elapsed_since_last_print >= self.print_config.min_print_interval_secs
             || current >= self.total
             || (self.total > 0
-                && (current as f64 / self.total as f64) >= 0.05
-                && elapsed_since_last_print >= 0.5);
+                && (current as f64 / self.total as f64)
+                    >= self.print_config.significant_progress_ratio
+                && elapsed_since_last_print
+                    >= self.print_config.significant_progress_interval_secs);
 
         if should_print {
             let percent = (current as f64 / self.total as f64 * 100.0).min(100.0);
@@ -67,7 +94,7 @@ impl ProgressBar {
                 0.0
             };
 
-            let eta_secs = if speed > 0.001 {
+            let eta_secs = if speed > self.print_config.min_eta_speed_mb_per_sec {
                 // 避免除以极小值
                 ((self.total - current) as f64 / (speed * 1e6)) as u64
             } else {
@@ -238,23 +265,53 @@ mod tests {
 }
 
 /// ModelScope 下载器（使用 ureq 实现分块下载）
+#[derive(Debug, Clone)]
+pub struct DownloadTransferConfig {
+    pub chunk_size_bytes: usize,
+    pub io_buffer_size_bytes: usize,
+}
+
+impl Default for DownloadTransferConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size_bytes: 8 * 1024 * 1024,
+            io_buffer_size_bytes: 64 * 1024,
+        }
+    }
+}
+
 pub struct ModelScopeDownloader {
     agent: Agent,
     endpoint: String,
     _cache_dir: PathBuf,
+    transfer_config: DownloadTransferConfig,
 }
 
 impl ModelScopeDownloader {
     pub fn new(cache_dir: PathBuf, endpoint: Option<String>) -> Result<Self> {
+        Self::with_transfer_config(cache_dir, endpoint, DownloadTransferConfig::default())
+    }
+
+    pub fn with_transfer_config(
+        cache_dir: PathBuf,
+        endpoint: Option<String>,
+        transfer_config: DownloadTransferConfig,
+    ) -> Result<Self> {
         let endpoint = endpoint.unwrap_or_else(|| "https://www.modelscope.cn".to_string());
 
         // 配置 ureq agent
         let agent = ureq::builder().try_proxy_from_env(true).build();
+        if transfer_config.chunk_size_bytes == 0 || transfer_config.io_buffer_size_bytes == 0 {
+            return Err(crate::loader::LoaderError::HfHub(
+                "invalid ModelScope transfer config: chunk/buffer must be > 0".to_string(),
+            ));
+        }
 
         Ok(Self {
             agent,
             endpoint,
             _cache_dir: cache_dir,
+            transfer_config,
         })
     }
 
@@ -302,11 +359,12 @@ impl ModelScopeDownloader {
         }
 
         // 分块下载
-        let chunk_size = 8 * 1024 * 1024; // 8MB per chunk
+        let chunk_size = self.transfer_config.chunk_size_bytes as u64;
+        let mut buffer = vec![0u8; self.transfer_config.io_buffer_size_bytes];
         let mut current = start_pos;
 
         loop {
-            let end = (current + chunk_size as u64).min(size);
+            let end = current.saturating_add(chunk_size).min(size);
 
             let range = format!("bytes={}-{}", current, end - 1);
             let response = self
@@ -337,7 +395,6 @@ impl ModelScopeDownloader {
             let mut written = 0u64;
 
             loop {
-                let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
                 let n = reader
                     .read(&mut buffer)
                     .map_err(|e| crate::loader::LoaderError::Io(e))?;
