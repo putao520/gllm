@@ -60,6 +60,8 @@ pub enum ExecutorError {
     EmptyPrompt,
     #[error("backend returned empty sample")]
     EmptySample,
+    #[error("request not found: {request_id}")]
+    RequestNotFound { request_id: RequestId },
 }
 
 pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
@@ -516,14 +518,20 @@ impl<B: Backend + 'static> Executor<B> {
             let req_id = request_indices[i];
 
             // ... Sample ...
-            let req = self.requests.get(&req_id).unwrap();
+            let req = self
+                .requests
+                .get(&req_id)
+                .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
             let temperature = req.sampling_config.temperature;
 
             // Note: sample_from_logits takes &LogitsHandle.
             let next_token = self.sample_from_logits(logits, temperature)?;
 
             // Update request
-            let req = self.requests.get_mut(&req_id).unwrap();
+            let req = self
+                .requests
+                .get_mut(&req_id)
+                .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
             req.output_tokens.push(next_token);
             req.is_prefill = false;
 
@@ -637,7 +645,10 @@ impl<B: Backend + 'static> Executor<B> {
         }
 
         // 3. Retrieve Result
-        let req = self.requests.get(&req_id).expect("request data missing");
+        let req = self
+            .requests
+            .get(&req_id)
+            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
         let text = self.decode_tokens(&req.output_tokens)?;
 
         // Cleanup?
