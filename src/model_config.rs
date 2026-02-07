@@ -119,8 +119,13 @@ impl ModelConfig {
             })?
         };
 
-        let head_dim = find_usize(value, &["head_dim", "kv_channels"])
-            .unwrap_or_else(|| hidden_size.checked_div(num_attention_heads).unwrap_or(0));
+        // Ω1: head_dim 必须从 config.json 读取，不再使用计算回退
+        // 虽然 head_dim = hidden_size / num_attention_heads 是标准公式，
+        // 但为了完全遵循 Ω1 真实性原则，要求配置文件明确提供此值
+        let head_dim = find_usize(value, &["head_dim", "kv_channels"]).ok_or_else(|| {
+            ModelConfigError::InvalidConfig("missing head_dim (or kv_channels) in config.json".to_string())
+        })?;
+
         if head_dim == 0 {
             return Err(ModelConfigError::InvalidConfig(
                 "invalid head_dim".to_string(),
