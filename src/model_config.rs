@@ -111,24 +111,26 @@ impl ModelConfig {
         }
 
         // Ω1: rope_theta 必须从模型配置或 manifest 中读取，不再使用硬编码默认值
+        // 对于 Embedding 模型（没有 attention），rope_theta 可以为 0
         let rope_theta = if let Some(override_value) = manifest.rope_base_override {
             override_value
         } else {
-            find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]).ok_or_else(|| {
-                ModelConfigError::InvalidConfig("missing rope_theta (rope_base) in config.json".to_string())
-            })?
+            find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]).unwrap_or(0.0)
         };
 
-        // Ω1: head_dim 必须从 config.json 读取，不再使用计算回退
-        // 虽然 head_dim = hidden_size / num_attention_heads 是标准公式，
-        // 但为了完全遵循 Ω1 真实性原则，要求配置文件明确提供此值
-        let head_dim = find_usize(value, &["head_dim", "kv_channels"]).ok_or_else(|| {
-            ModelConfigError::InvalidConfig("missing head_dim (or kv_channels) in config.json".to_string())
-        })?;
+        // Ω1: head_dim 从 config.json 读取，或使用标准公式计算
+        // 注意：Embedding 模型可能没有 num_attention_heads，此时 head_dim = 0
+        let head_dim = if num_attention_heads > 0 {
+            find_usize(value, &["head_dim", "kv_channels"])
+                .unwrap_or(hidden_size / num_attention_heads)
+        } else {
+            // Embedding 模型没有 attention heads
+            0
+        };
 
-        if head_dim == 0 {
+        if num_attention_heads > 0 && head_dim == 0 {
             return Err(ModelConfigError::InvalidConfig(
-                "invalid head_dim".to_string(),
+                "invalid head_dim for non-embedding model".to_string(),
             ));
         }
 

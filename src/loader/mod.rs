@@ -1604,16 +1604,16 @@ struct QuantizedIndex {
 
 impl QuantizedIndex {
     /// Ω1: 完全从模型元数据构建量化索引，禁止任何推测
+    ///
+    /// 对于非量化模型（没有 gllm.quantization 元数据），返回空索引
     fn from_loader(loader: &SafeTensorsLoader) -> Result<Self> {
         let mut index = QuantizedIndex::default();
 
-        // 读取量化元数据
-        let quantization_metadata = loader.quantization_metadata()?.ok_or_else(|| {
-            LoaderError::InvalidQuantization(
-                "模型缺少量化元数据。请在 safetensors 文件中包含 gllm.quantization 字段"
-                    .to_string(),
-            )
-        })?;
+        // 读取量化元数据（非量化模型没有此字段，返回空）
+        let quantization_metadata = match loader.quantization_metadata()? {
+            Some(meta) => meta,
+            None => return Ok(index), // 非量化模型，返回空索引
+        };
 
         // 验证所有量化组
         for (qweight_name, metadata) in &quantization_metadata {
