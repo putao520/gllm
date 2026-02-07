@@ -22,8 +22,7 @@ pub use manifest::{
     FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType, TensorNamingRule,
 };
 
-// Re-export EMPTY_FILE_MAP for convenience
-pub use adapter::{Message, Role};
+// Re-export for convenience
 pub use backend::{detect_backend, BackendType};
 pub use client::{AsyncClient, Client};
 pub use manifest::EMPTY_FILE_MAP;

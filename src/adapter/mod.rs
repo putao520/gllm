@@ -32,7 +32,7 @@ pub use qwen3_embed::Qwen3EmbedAdapter;
 pub use qwen3_moe::Qwen3MoEAdapter;
 pub use qwen3_rerank::Qwen3RerankAdapter;
 pub use r#trait::{
-    AdapterError, AdapterResult, AdapterWeights, Message, ModelAdapter, Role, ThinkingHead,
+    AdapterError, AdapterResult, AdapterWeights, ModelAdapter, ThinkingHead,
 };
 pub use xlm_r::XlmRAdapter;
 

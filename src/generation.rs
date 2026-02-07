@@ -1,17 +1,10 @@
 //! Generation loop skeleton.
 
-use crate::adapter::Message;
 use crate::client::{Client, ClientError};
-
-#[derive(Debug, Clone)]
-pub enum Prompt {
-    Raw(String),
-    Messages(Vec<Message>),
-}
 
 pub struct GenerationBuilder<'a> {
     client: &'a Client,
-    prompt: Prompt,
+    prompt: String,
     max_tokens: usize,
     temperature: f32,
 }
@@ -20,16 +13,7 @@ impl<'a> GenerationBuilder<'a> {
     pub(crate) fn from_prompt(client: &'a Client, prompt: impl Into<String>) -> Self {
         Self {
             client,
-            prompt: Prompt::Raw(prompt.into()),
-            max_tokens: 256,
-            temperature: 0.7,
-        }
-    }
-
-    pub(crate) fn from_messages(client: &'a Client, messages: Vec<Message>) -> Self {
-        Self {
-            client,
-            prompt: Prompt::Messages(messages),
+            prompt: prompt.into(),
             max_tokens: 256,
             temperature: 0.7,
         }
@@ -46,12 +30,8 @@ impl<'a> GenerationBuilder<'a> {
     }
 
     pub fn generate(self) -> Result<GenerationResponse, ClientError> {
-        let prompt = match self.prompt {
-            Prompt::Raw(text) => text,
-            Prompt::Messages(messages) => self.client.render_chat_prompt(&messages)?,
-        };
         self.client
-            .execute_generation(prompt, self.max_tokens, self.temperature)
+            .execute_generation(self.prompt, self.max_tokens, self.temperature)
     }
 }
 

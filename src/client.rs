@@ -6,7 +6,6 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use gllm_kernels::BackendError;
 use thiserror::Error;
 
-use crate::adapter::Message;
 use crate::backend::{
     detect_backend, BackendContext, BackendContextError, FallbackEmbedder, FallbackGenerator,
 };
@@ -123,9 +122,6 @@ impl Client {
     pub fn generate(&self, prompt: impl Into<String>) -> GenerationBuilder<'_> {
         GenerationBuilder::from_prompt(self, prompt)
     }
-    pub fn generate_chat(&self, messages: Vec<Message>) -> GenerationBuilder<'_> {
-        GenerationBuilder::from_messages(self, messages)
-    }
 
     pub fn embeddings<I, S>(&self, inputs: I) -> EmbeddingsBuilder<'_>
     where
@@ -153,12 +149,6 @@ impl Client {
             executor.thinking_head_available()
         };
         Ok(available)
-    }
-
-    pub(crate) fn render_chat_prompt(&self, messages: &[Message]) -> Result<String, ClientError> {
-        let state = self.read_state()?;
-        state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        Ok(serialize_messages_as_prompt(messages))
     }
 
     pub(crate) fn execute_generation(
@@ -289,18 +279,6 @@ impl Client {
     }
 }
 
-fn serialize_messages_as_prompt(messages: &[Message]) -> String {
-    let mut prompt = String::new();
-    for message in messages {
-        prompt.push_str(message.role.as_str());
-        prompt.push_str(": ");
-        prompt.push_str(message.content.trim());
-        prompt.push('\n');
-    }
-    prompt.push_str("assistant: ");
-    prompt
-}
-
 impl AsyncClient {
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         Ok(Self {
@@ -313,9 +291,6 @@ impl AsyncClient {
     }
     pub fn generate(&self, prompt: impl Into<String>) -> GenerationBuilder<'_> {
         self.inner.generate(prompt)
-    }
-    pub fn generate_chat(&self, messages: Vec<Message>) -> GenerationBuilder<'_> {
-        self.inner.generate_chat(messages)
     }
 
     pub fn embeddings<I, S>(&self, inputs: I) -> EmbeddingsBuilder<'_>
