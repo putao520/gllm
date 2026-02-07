@@ -1,5 +1,6 @@
 //! ONNX loader with graph parsing and fused-first pattern matching.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -117,6 +118,19 @@ impl OnnxLoader {
     }
 }
 
+/// Collects external tensor data locations declared by an ONNX model.
+///
+/// Returned paths are model-relative (as stored in ONNX `external_data.location`)
+/// and sorted/deduplicated.
+pub fn external_data_locations(path: &Path) -> Result<Vec<String>> {
+    let model = decode_model(path)?;
+    let mut out = BTreeSet::new();
+    if let Some(graph) = model.graph.as_ref() {
+        collect_graph_external_locations(graph, &mut out);
+    }
+    Ok(out.into_iter().collect())
+}
+
 fn dtype_rank(dtype: &Dtype) -> u8 {
     match dtype {
         Dtype::F64 => 0,
@@ -144,4 +158,73 @@ fn decode_model(path: &Path) -> Result<proto::ModelProto> {
     let bytes = Bytes::from_owner(mmap);
     proto::ModelProto::decode(bytes)
         .map_err(|err| LoaderError::Onnx(format!("onnx decode failed: {err}")))
+}
+
+fn collect_graph_external_locations(graph: &proto::GraphProto, out: &mut BTreeSet<String>) {
+    for tensor in &graph.initializer {
+        collect_tensor_external_location(tensor, out);
+    }
+    for sparse in &graph.sparse_initializer {
+        if let Some(values) = sparse.values.as_ref() {
+            collect_tensor_external_location(values, out);
+        }
+        if let Some(indices) = sparse.indices.as_ref() {
+            collect_tensor_external_location(indices, out);
+        }
+    }
+    for node in &graph.node {
+        for attr in &node.attribute {
+            collect_attribute_external_locations(attr, out);
+        }
+    }
+}
+
+fn collect_attribute_external_locations(attr: &proto::AttributeProto, out: &mut BTreeSet<String>) {
+    if let Some(tensor) = attr.t.as_ref() {
+        collect_tensor_external_location(tensor, out);
+    }
+    for tensor in &attr.tensors {
+        collect_tensor_external_location(tensor, out);
+    }
+    if let Some(sparse) = attr.sparse_tensor.as_ref() {
+        if let Some(values) = sparse.values.as_ref() {
+            collect_tensor_external_location(values, out);
+        }
+        if let Some(indices) = sparse.indices.as_ref() {
+            collect_tensor_external_location(indices, out);
+        }
+    }
+    for sparse in &attr.sparse_tensors {
+        if let Some(values) = sparse.values.as_ref() {
+            collect_tensor_external_location(values, out);
+        }
+        if let Some(indices) = sparse.indices.as_ref() {
+            collect_tensor_external_location(indices, out);
+        }
+    }
+    if let Some(graph) = attr.g.as_ref() {
+        collect_graph_external_locations(graph, out);
+    }
+    for graph in &attr.graphs {
+        collect_graph_external_locations(graph, out);
+    }
+}
+
+fn collect_tensor_external_location(tensor: &proto::TensorProto, out: &mut BTreeSet<String>) {
+    let is_external = tensor
+        .data_location
+        .is_some_and(|value| value == proto::tensor_proto::DataLocation::External as i32);
+    if !is_external {
+        return;
+    }
+    for entry in &tensor.external_data {
+        if entry.key.as_deref() != Some("location") {
+            continue;
+        }
+        if let Some(location) = entry.value.as_ref() {
+            if !location.is_empty() {
+                out.insert(location.clone());
+            }
+        }
+    }
 }

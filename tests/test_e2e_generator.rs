@@ -46,28 +46,48 @@ fn e2e_generator_gguf() {
     let client = Client::new_chat(MODEL).expect("Failed to load GGUF model");
     let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Chat);
+
+    let response = client
+        .generate("The capital of France is")
+        .max_tokens(10)
+        .temperature(0.0)
+        .generate()
+        .expect("Generation failed");
+
+    let text = response.text.trim();
+    assert!(!text.is_empty(), "Output should not be empty");
+    assert!(text.len() > 3, "Output should be at least 4 characters");
+
+    // 验证输出包含合理内容（兼容中英文输出）
+    let lower = text.to_lowercase();
+    let is_reasonable = lower.contains("paris")
+        || lower.contains("parís")
+        || lower.contains("capital")
+        || lower.contains("france")
+        || text.contains("巴黎");
+    assert!(is_reasonable, "Output should contain reasonable answer");
 }
 
-// ONNX 格式的 Generator 测试
-//
-// 模型: onnx-community/SmolLM2-135M-ONNX
-// 格式: ONNX (.onnx)
-// 源: [HuggingFace](https://huggingface.co/onnx-community/SmolLM2-135M-ONNX)
-//
-// ONNX generator 推理引擎尚未接入，先整体注释该测试函数（不使用 ignore 属性跳过）。
-// #[test]
-// fn e2e_generator_onnx() {
-//     const MODEL: &str = "onnx-community/SmolLM2-135M-ONNX";
-//
-//     let client = Client::new_chat(MODEL).expect("Failed to load ONNX model");
-//     let response = client
-//         .generate("Hello, world!")
-//         .max_tokens(10)
-//         .temperature(0.0)
-//         .generate()
-//         .expect("Generation failed");
-//
-//     let text = response.text.trim();
-//     assert!(!text.is_empty(), "Output should not be empty");
-//     assert!(text.len() > 2, "Output should be at least 3 characters");
-// }
+/// ONNX 格式的 Generator 测试
+///
+/// 模型: onnx-community/SmolLM2-135M-ONNX
+/// 格式: ONNX (.onnx)
+/// 源: [HuggingFace](https://huggingface.co/onnx-community/SmolLM2-135M-ONNX)
+#[test]
+fn e2e_generator_onnx() {
+    const MODEL: &str = "onnx-community/SmolLM2-135M-ONNX";
+
+    let client = Client::new_chat(MODEL).expect("Failed to load ONNX model");
+    let response = client
+        .generate("The capital of France is")
+        .max_tokens(10)
+        .temperature(0.7)
+        .top_k(40)
+        .top_p(0.95)
+        .generate()
+        .expect("Generation failed");
+
+    let text = response.text.trim();
+    assert!(!text.is_empty(), "Output should not be empty");
+    assert!(text.len() > 3, "Output should be at least 4 characters");
+}

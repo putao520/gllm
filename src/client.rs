@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::backend::{
     detect_backend, BackendContext, BackendContextError, FallbackEmbedder, FallbackGenerator,
+    FallbackReranker,
 };
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
@@ -156,11 +157,13 @@ impl Client {
         prompt: String,
         max_tokens: usize,
         temperature: f32,
+        top_k: usize,
+        top_p: f32,
     ) -> Result<GenerationResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let mut generator = FallbackGenerator::new(&loaded.backend);
-        let text = generator.generate(&prompt, max_tokens, temperature)?;
+        let text = generator.generate(&prompt, max_tokens, temperature, top_k, top_p)?;
         Ok(GenerationResponse {
             text,
             request_id: None,
@@ -193,8 +196,8 @@ impl Client {
     ) -> Result<RerankResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        let mut embedder = FallbackEmbedder::new(&loaded.backend);
-        let scores = embedder.rerank_batch(&query, &documents)?;
+        let mut reranker = FallbackReranker::new(&loaded.backend);
+        let scores = reranker.rerank_batch(&query, &documents)?;
         let mut results = scores
             .into_iter()
             .enumerate()

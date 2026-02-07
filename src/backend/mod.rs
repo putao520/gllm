@@ -11,7 +11,7 @@ pub mod detection;
 pub mod fallback;
 
 pub use detection::{detect_backend, BackendType, DetectedBackend};
-pub use fallback::{FallbackEmbedder, FallbackGenerator};
+pub use fallback::{FallbackEmbedder, FallbackGenerator, FallbackReranker};
 
 #[derive(Debug, Error)]
 pub enum BackendContextError {
@@ -45,10 +45,16 @@ impl BackendExecutor {
         prompt: &str,
         max_tokens: usize,
         temperature: f32,
+        top_k: usize,
+        top_p: f32,
     ) -> Result<String, ExecutorError> {
         match self {
-            BackendExecutor::Cuda(exec) => exec.generate(prompt, max_tokens, temperature),
-            BackendExecutor::Cpu(exec) => exec.generate(prompt, max_tokens, temperature),
+            BackendExecutor::Cuda(exec) => {
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+            }
+            BackendExecutor::Cpu(exec) => {
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+            }
         }
     }
 

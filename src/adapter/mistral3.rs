@@ -18,5 +18,4 @@ impl<B: Backend> ModelAdapter<B> for Mistral3Adapter {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }
-
 }

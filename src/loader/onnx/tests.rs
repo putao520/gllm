@@ -1,4 +1,4 @@
-use super::{proto, OnnxLoader};
+use super::{external_data_locations, proto, OnnxLoader};
 use prost::bytes::Bytes;
 use prost::Message;
 use safetensors::Dtype;
@@ -165,6 +165,31 @@ fn load_external_tensor() {
     let slice = loader.tensor("w").expect("tensor");
     let values = slice.as_f32().expect("f32");
     assert_eq!(values.as_ref(), &[1.0, 2.0]);
+}
+
+#[test]
+fn collect_external_tensor_locations() {
+    let dir = TempDir::new().expect("tempdir");
+    let model_path = dir.path().join("model.onnx");
+    let tensor = proto::TensorProto {
+        dims: vec![2],
+        data_type: Some(proto::tensor_proto::DataType::Float as i32),
+        name: Some("w".to_string()),
+        data_location: Some(proto::tensor_proto::DataLocation::External as i32),
+        external_data: vec![proto::StringStringEntryProto {
+            key: Some("location".to_string()),
+            value: Some("weights.bin".to_string()),
+        }],
+        ..empty_tensor()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![tensor],
+        ..empty_graph()
+    };
+    write_model(empty_model(graph), &model_path);
+
+    let locations = external_data_locations(&model_path).expect("locations");
+    assert_eq!(locations, vec!["weights.bin".to_string()]);
 }
 
 #[test]

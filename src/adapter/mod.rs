@@ -31,9 +31,7 @@ pub use qwen3::Qwen3Adapter;
 pub use qwen3_embed::Qwen3EmbedAdapter;
 pub use qwen3_moe::Qwen3MoEAdapter;
 pub use qwen3_rerank::Qwen3RerankAdapter;
-pub use r#trait::{
-    AdapterError, AdapterResult, AdapterWeights, ModelAdapter, ThinkingHead,
-};
+pub use r#trait::{AdapterError, AdapterResult, AdapterWeights, ModelAdapter, ThinkingHead};
 pub use xlm_r::XlmRAdapter;
 
 static QWEN2_5: Qwen2_5Adapter = Qwen2_5Adapter;

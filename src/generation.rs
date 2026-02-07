@@ -7,6 +7,8 @@ pub struct GenerationBuilder<'a> {
     prompt: String,
     max_tokens: usize,
     temperature: f32,
+    top_k: usize,
+    top_p: f32,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -16,6 +18,8 @@ impl<'a> GenerationBuilder<'a> {
             prompt: prompt.into(),
             max_tokens: 256,
             temperature: 0.7,
+            top_k: 0,
+            top_p: 1.0,
         }
     }
 
@@ -29,9 +33,24 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
+    pub fn top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+
+    pub fn top_p(mut self, top_p: f32) -> Self {
+        self.top_p = top_p;
+        self
+    }
+
     pub fn generate(self) -> Result<GenerationResponse, ClientError> {
-        self.client
-            .execute_generation(self.prompt, self.max_tokens, self.temperature)
+        self.client.execute_generation(
+            self.prompt,
+            self.max_tokens,
+            self.temperature,
+            self.top_k,
+            self.top_p,
+        )
     }
 }
 

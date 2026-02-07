@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use hf_hub::api::sync::Api;
 use serde::Deserialize;
@@ -347,15 +347,36 @@ impl HfHubClient {
     fn try_download_onnx(&self, repo: &str, aux_files: &[PathBuf]) -> Result<Option<HfModelFiles>> {
         for candidate in self.ranked_onnx_candidates(repo) {
             if let Ok(path) = self.get_file(repo, &candidate) {
+                let external_data = self.download_onnx_external_data(repo, &candidate, &path)?;
+                let mut aux = aux_files.to_vec();
+                for external in external_data {
+                    push_unique_path(&mut aux, external);
+                }
                 return Ok(Some(HfModelFiles {
                     repo: repo.to_string(),
                     weights: vec![path],
                     format: WeightFormat::Onnx,
-                    aux_files: aux_files.to_vec(),
+                    aux_files: aux,
                 }));
             }
         }
         Ok(None)
+    }
+
+    fn download_onnx_external_data(
+        &self,
+        repo: &str,
+        onnx_repo_path: &str,
+        local_onnx_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let locations = super::onnx::external_data_locations(local_onnx_path)?;
+        let mut out = Vec::with_capacity(locations.len());
+        for location in locations {
+            let repo_path = resolve_onnx_external_repo_path(onnx_repo_path, &location)?;
+            let downloaded = self.get_file(repo, &repo_path)?;
+            push_unique_path(&mut out, downloaded);
+        }
+        Ok(out)
     }
 
     /// Ω1: 候选文件名列表（按优先级排序）
@@ -559,6 +580,41 @@ fn map_name(file_map: FileMap, logical: &str) -> &str {
         }
     }
     logical
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn resolve_onnx_external_repo_path(onnx_repo_path: &str, location: &str) -> Result<String> {
+    let base = Path::new(onnx_repo_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    normalize_repo_path(&base.join(location))
+}
+
+fn normalize_repo_path(path: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(LoaderError::Onnx(format!(
+                    "invalid ONNX external data path: {}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(LoaderError::Onnx(
+            "invalid ONNX external data path: empty location".to_string(),
+        ));
+    }
+    Ok(parts.join("/"))
 }
 
 fn candidate_names(file_map: FileMap, logical: &str) -> Vec<String> {

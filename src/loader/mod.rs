@@ -987,7 +987,7 @@ impl Loader {
         match self.files.format {
             WeightFormat::SafeTensors => self.upload_safetensors(backend),
             WeightFormat::Gguf => self.upload_gguf(backend),
-            WeightFormat::Onnx => Err(LoaderError::UnsupportedWeights(self.files.format)),
+            WeightFormat::Onnx => self.upload_onnx(backend),
         }
     }
 
@@ -1128,6 +1128,43 @@ impl Loader {
 
         if self.should_materialize_tied_lm_head() {
             materialize_tied_lm_head_from_gguf(backend, &mut handle, loader)?;
+        }
+
+        Ok(handle)
+    }
+
+    fn upload_onnx<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
+        self.ensure_onnx()?;
+        let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
+
+        let mut handle = WeightsHandle::default();
+        let rules = self.rules();
+        let should_materialize_tied_lm_head = self.should_materialize_tied_lm_head();
+        let tensor_names = loader.names();
+        let alias_by_source = onnx_weight_aliases(loader)
+            .into_iter()
+            .map(|(alias, source)| (source, alias))
+            .collect::<HashMap<_, _>>();
+
+        for name in tensor_names {
+            let tensor = loader.tensor(&name)?;
+            let upload_name = alias_by_source
+                .get(&name)
+                .map(|alias| alias.as_str())
+                .unwrap_or(name.as_str());
+            let upload_name = normalize_onnx_weight_name(upload_name);
+            if let Some(outputs) = maybe_split_fused(rules, upload_name.as_str(), &tensor) {
+                for output in outputs {
+                    upload_owned_tensor(backend, &mut handle, output, None)?;
+                }
+                continue;
+            }
+
+            upload_tensor_slice(backend, &mut handle, upload_name.as_str(), tensor)?;
+        }
+
+        if should_materialize_tied_lm_head {
+            materialize_tied_lm_head_from_onnx(backend, &mut handle, loader)?;
         }
 
         Ok(handle)
@@ -1411,9 +1448,9 @@ fn materialize_tied_lm_head_from_gguf<B: Backend>(
                 let (rows, cols) = gguf_matrix_dims(&shape)?;
                 let blocks = parse_q4_0_blocks(tensor.as_bytes(), rows, cols)?;
                 let matrix = gllm_kernels::Q4_0Matrix { blocks, rows, cols };
-                let total = rows
-                    .checked_mul(cols)
-                    .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                let total = rows.checked_mul(cols).ok_or_else(|| {
+                    LoaderError::InvalidQuantization("gguf output overflow".into())
+                })?;
                 let mut out = vec![0.0f32; total];
                 gllm_kernels::dequantize_q4_0(&matrix, &mut out)
                     .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
@@ -1423,9 +1460,9 @@ fn materialize_tied_lm_head_from_gguf<B: Backend>(
                 let (rows, cols) = gguf_matrix_dims(&shape)?;
                 let blocks = parse_q8_0_blocks(tensor.as_bytes(), rows, cols)?;
                 let matrix = gllm_kernels::Q8_0Matrix { blocks, rows, cols };
-                let total = rows
-                    .checked_mul(cols)
-                    .ok_or_else(|| LoaderError::InvalidQuantization("gguf output overflow".into()))?;
+                let total = rows.checked_mul(cols).ok_or_else(|| {
+                    LoaderError::InvalidQuantization("gguf output overflow".into())
+                })?;
                 let mut out = vec![0.0f32; total];
                 gllm_kernels::dequantize_q8_0(&matrix, &mut out)
                     .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
@@ -1439,6 +1476,29 @@ fn materialize_tied_lm_head_from_gguf<B: Backend>(
             data,
         };
         upload_owned_tensor(backend, handle, owned, quantized)?;
+        return Ok(());
+    }
+
+    Err(LoaderError::MissingTensor(
+        "tie_word_embeddings=true but no embedding tensor was found to materialize lm_head.weight"
+            .to_string(),
+    ))
+}
+
+fn materialize_tied_lm_head_from_onnx<B: Backend>(
+    backend: &B,
+    handle: &mut WeightsHandle<B>,
+    loader: &OnnxLoader,
+) -> Result<()> {
+    if has_any_tensor(handle, LM_HEAD_WEIGHT_NAMES) {
+        return Ok(());
+    }
+
+    for name in EMBEDDING_WEIGHT_NAMES {
+        let Ok(tensor) = loader.tensor(name) else {
+            continue;
+        };
+        upload_tensor_slice(backend, handle, TIED_LM_HEAD_ALIAS, tensor)?;
         return Ok(());
     }
 
@@ -1685,6 +1745,96 @@ fn maybe_split_fused_owned(
             data,
         })
         .collect()
+}
+
+fn normalize_onnx_weight_name(name: &str) -> String {
+    let mut normalized = name.to_string();
+    for marker in [".MatMul", ".Gemm"] {
+        if let Some(index) = normalized.find(marker) {
+            let suffix = &normalized[index + marker.len()..];
+            if suffix == ".weight" || suffix == ".bias" {
+                normalized.replace_range(index..index + marker.len(), "");
+                break;
+            }
+        }
+    }
+    if normalized.starts_with("model.layers.") {
+        normalized = normalized.replace(".attn.", ".attention.");
+    }
+    if normalized.ends_with(".final_norm_layernorm.weight") {
+        normalized = "model.norm.weight".to_string();
+    }
+    normalized
+}
+
+fn onnx_weight_aliases(loader: &OnnxLoader) -> Vec<(String, String)> {
+    let graph = loader.graph();
+    let mut aliases = Vec::new();
+    let mut seen = HashSet::new();
+
+    for node in &graph.nodes {
+        if !matches!(node.op_type.as_str(), "MatMul" | "Gemm") {
+            continue;
+        }
+
+        let Some(source) = node
+            .inputs
+            .iter()
+            .find(|name| graph.initializers.contains_key(*name))
+            .cloned()
+        else {
+            continue;
+        };
+
+        let Some(alias) = infer_onnx_linear_weight_alias(node) else {
+            continue;
+        };
+        if alias == source || graph.initializers.contains_key(&alias) {
+            continue;
+        }
+        if seen.insert(alias.clone()) {
+            aliases.push((alias, source));
+        }
+    }
+
+    aliases
+}
+
+fn infer_onnx_linear_weight_alias(node: &crate::loader::onnx::OnnxNode) -> Option<String> {
+    let anchor = node
+        .outputs
+        .first()
+        .map(|s| s.as_str())
+        .or_else(|| (!node.name.is_empty()).then_some(node.name.as_str()))?;
+    let normalized = normalize_onnx_graph_name(anchor);
+    let base = strip_linear_output_tail(&normalized)?;
+    Some(format!("{base}.weight"))
+}
+
+fn normalize_onnx_graph_name(name: &str) -> String {
+    name.trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn strip_linear_output_tail(name: &str) -> Option<String> {
+    let mut parts: Vec<&str> = name.split('.').filter(|part| !part.is_empty()).collect();
+    let tail = parts.last().copied()?;
+    let linear_tail = tail.starts_with("MatMul_output_")
+        || tail.starts_with("Gemm_output_")
+        || tail == "MatMul"
+        || tail == "Gemm";
+    if !linear_tail {
+        return None;
+    }
+    parts.pop();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("."))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2507,6 +2657,26 @@ mod tests {
         let name = "model.layers.0.self_attn.c_attn.weight";
         let replaced = replace_last(name, "c_attn", "q_proj").unwrap();
         assert_eq!(replaced, "model.layers.0.self_attn.q_proj.weight");
+    }
+
+    #[test]
+    fn normalize_onnx_weight_name_strips_matmul_marker() {
+        assert_eq!(
+            normalize_onnx_weight_name("model.layers.0.mlp.gate_proj.MatMul.weight"),
+            "model.layers.0.mlp.gate_proj.weight"
+        );
+        assert_eq!(
+            normalize_onnx_weight_name("model.layers.1.attn.q_proj.Gemm.weight"),
+            "model.layers.1.attention.q_proj.weight"
+        );
+        assert_eq!(
+            normalize_onnx_weight_name("model.layers.2.input_layernorm.weight"),
+            "model.layers.2.input_layernorm.weight"
+        );
+        assert_eq!(
+            normalize_onnx_weight_name("model.layers.30.final_norm_layernorm.weight"),
+            "model.norm.weight"
+        );
     }
 
     #[test]

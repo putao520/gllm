@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -194,15 +194,38 @@ impl ModelScopeClient {
     ) -> Result<Option<MsModelFiles>> {
         for candidate in self.onnx_candidate_names() {
             if let Some(path) = self.try_get_file_any(repo, file_map, &candidate, downloader) {
+                let external_data =
+                    self.download_onnx_external_data(repo, &candidate, &path, downloader)?;
+                let mut aux = aux_files.to_vec();
+                for external in external_data {
+                    push_unique_path(&mut aux, external);
+                }
                 return Ok(Some(MsModelFiles {
                     repo: repo.to_string(),
                     weights: vec![path],
                     format: WeightFormat::Onnx,
-                    aux_files: aux_files.to_vec(),
+                    aux_files: aux,
                 }));
             }
         }
         Ok(None)
+    }
+
+    fn download_onnx_external_data(
+        &self,
+        repo: &str,
+        onnx_repo_path: &str,
+        local_onnx_path: &Path,
+        downloader: &ModelScopeDownloader,
+    ) -> Result<Vec<PathBuf>> {
+        let locations = super::onnx::external_data_locations(local_onnx_path)?;
+        let mut out = Vec::with_capacity(locations.len());
+        for location in locations {
+            let repo_path = resolve_onnx_external_repo_path(onnx_repo_path, &location)?;
+            let downloaded = self.get_file(repo, &repo_path, downloader)?;
+            push_unique_path(&mut out, downloaded);
+        }
+        Ok(out)
     }
 
     /// Ω1: 候选文件名列表（按优先级排序）
@@ -527,6 +550,41 @@ impl SafetensorsIndex {
         list.sort();
         list
     }
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn resolve_onnx_external_repo_path(onnx_repo_path: &str, location: &str) -> Result<String> {
+    let base = Path::new(onnx_repo_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    normalize_repo_path(&base.join(location))
+}
+
+fn normalize_repo_path(path: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(LoaderError::Onnx(format!(
+                    "invalid ONNX external data path: {}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(LoaderError::Onnx(
+            "invalid ONNX external data path: empty location".to_string(),
+        ));
+    }
+    Ok(parts.join("/"))
 }
 
 /// 从 ModelScope 缓存加载模型

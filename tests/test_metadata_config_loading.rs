@@ -8,6 +8,7 @@ use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 use gllm::model_config::ModelConfig;
+use gllm_kernels::cpu_backend::CpuBackend;
 use prost::bytes::Bytes;
 use prost::Message;
 use safetensors::tensor::{serialize_to_file, TensorView};
@@ -192,4 +193,80 @@ fn onnx_dtype_metadata_is_used_for_model_config_dtype_size() {
 
     let config = ModelConfig::from_loader(&manifest, &mut loader).expect("model config");
     assert_eq!(config.dtype_size, 2);
+}
+
+#[test]
+fn onnx_weights_are_uploadable_for_reranker() {
+    let dir = TempDir::new().expect("temp dir");
+    let onnx_path = dir.path().join("model.onnx");
+
+    let emb_values = [1.0f32, 2.0, 3.0, 4.0];
+    let mut emb_raw = Vec::with_capacity(emb_values.len() * 4);
+    for value in emb_values {
+        emb_raw.extend_from_slice(&value.to_le_bytes());
+    }
+
+    let cls_values = [0.5f32, -0.25f32];
+    let mut cls_raw = Vec::with_capacity(cls_values.len() * 4);
+    for value in cls_values {
+        cls_raw.extend_from_slice(&value.to_le_bytes());
+    }
+
+    let graph = proto::GraphProto {
+        initializer: vec![
+            tensor_raw(
+                "roberta.embeddings.word_embeddings.weight",
+                vec![2, 2],
+                proto::tensor_proto::DataType::Float,
+                &emb_raw,
+            ),
+            tensor_raw(
+                "classifier.weight",
+                vec![1, 2],
+                proto::tensor_proto::DataType::Float,
+                &cls_raw,
+            ),
+        ],
+        ..empty_graph()
+    };
+    write_model(empty_model(graph), &onnx_path);
+
+    let manifest = ModelManifest {
+        model_id: Cow::Borrowed("test/reranker"),
+        file_map: EMPTY_FILE_MAP,
+        arch: ModelArchitecture::XlmR,
+        tensor_rules: TensorNamingRule::XlmR,
+        kind: ModelKind::Reranker,
+        rope_base_override: None,
+        max_context_override: None,
+        moe_config: None,
+    };
+
+    let mut loader = Loader::from_local_files_with_manifest(
+        "test/reranker",
+        vec![onnx_path],
+        vec![],
+        Some(&manifest),
+    )
+    .expect("loader");
+    let backend = CpuBackend::new();
+    let weights = loader
+        .upload_weights(&backend)
+        .expect("upload onnx weights");
+
+    assert!(
+        weights
+            .tensors
+            .contains_key("roberta.embeddings.word_embeddings.weight"),
+        "embedding tensor should be uploaded"
+    );
+    assert!(weights.tensors.contains_key("classifier.weight"));
+    assert_eq!(
+        weights
+            .meta
+            .get("classifier.weight")
+            .expect("classifier meta")
+            .shape,
+        vec![1, 2]
+    );
 }

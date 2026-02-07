@@ -56,9 +56,11 @@ impl<'a> FallbackGenerator<'a> {
         prompt: &str,
         max_tokens: usize,
         temperature: f32,
+        top_k: usize,
+        top_p: f32,
     ) -> Result<String, BackendContextError> {
         self.fallback
-            .run(|executor| executor.generate(prompt, max_tokens, temperature))
+            .run(|executor| executor.generate(prompt, max_tokens, temperature, top_k, top_p))
     }
 }
 
@@ -81,6 +83,18 @@ impl<'a> FallbackEmbedder<'a> {
             }
             Ok(embeddings)
         })
+    }
+}
+
+pub struct FallbackReranker<'a> {
+    fallback: OomFallback<'a>,
+}
+
+impl<'a> FallbackReranker<'a> {
+    pub fn new(context: &'a BackendContext) -> Self {
+        Self {
+            fallback: OomFallback::new(context),
+        }
     }
 
     pub fn rerank_batch(

@@ -18,5 +18,4 @@ impl<B: Backend> ModelAdapter<B> for MinistralAdapter {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }
-
 }

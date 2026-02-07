@@ -13,7 +13,8 @@ use thiserror::Error;
 
 use crate::adapter::{AdapterError, AdapterWeights, ModelAdapter};
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
-use crate::loader::Loader;
+use crate::loader::onnx::FusedKernel;
+use crate::loader::{Loader, LoaderError, WeightFormat};
 use crate::manifest::{ModelKind, ModelManifest};
 use crate::model_config::{ModelConfig, ModelConfigError};
 use crate::tokenizer::{TokenizerError, TokenizerHandle};
@@ -40,6 +41,52 @@ struct RequestData {
     finished: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct OnnxFusedKernelStats {
+    flash_attention: usize,
+    swiglu: usize,
+    rope: usize,
+    fused_qkv_rope: usize,
+    atomic: usize,
+}
+
+impl OnnxFusedKernelStats {
+    fn fused_total(&self) -> usize {
+        self.flash_attention + self.swiglu + self.rope + self.fused_qkv_rope
+    }
+
+    fn from_fused_graph(fused_graph: &crate::loader::onnx::FusedGraph) -> Self {
+        let mut stats = Self::default();
+        for op in &fused_graph.ops {
+            match &op.kind {
+                FusedKernel::FlashAttention(_) => stats.flash_attention += 1,
+                FusedKernel::SwiGlu(_) => stats.swiglu += 1,
+                FusedKernel::Rope(_) => stats.rope += 1,
+                FusedKernel::FusedQkvRope(_) => stats.fused_qkv_rope += 1,
+                FusedKernel::Atomic(_) => stats.atomic += 1,
+            }
+        }
+        stats
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OnnxGeneratorPlan {
+    fused_kernels: OnnxFusedKernelStats,
+    graph_outputs: Vec<String>,
+    kv_outputs: Vec<String>,
+    execution_order: Vec<OnnxKernelExecutionOp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnnxKernelExecutionOp {
+    FlashAttention,
+    SwiGlu,
+    Rope,
+    FusedQkvRope,
+    Atomic,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error(transparent)]
@@ -48,6 +95,8 @@ pub enum ExecutorError {
     Backend(#[from] BackendError),
     #[error(transparent)]
     Config(#[from] ModelConfigError),
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
     #[error(transparent)]
     Tokenizer(#[from] TokenizerError),
     #[error(transparent)]
@@ -62,6 +111,8 @@ pub enum ExecutorError {
     EmptySample,
     #[error("request not found: {request_id}")]
     RequestNotFound { request_id: RequestId },
+    #[error("onnx generator plan error: {0}")]
+    OnnxPlan(String),
 }
 
 pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
@@ -83,6 +134,7 @@ pub struct Executor<B: Backend + 'static> {
     kv_cache: Option<KvCacheDoubleBuffer>,
     kv_cache_slot: KvCacheSlot,
     memory_manager: GlobalMemoryManager,
+    onnx_generator_plan: Option<OnnxGeneratorPlan>,
 }
 
 impl<B: Backend + 'static> Executor<B> {
@@ -152,6 +204,7 @@ impl<B: Backend + 'static> Executor<B> {
             page_size,
             swap_config: None,
         };
+        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader)?;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = adapter.load_weights(loader, &backend)?;
         let l1_capacity = total_blocks;
@@ -172,11 +225,61 @@ impl<B: Backend + 'static> Executor<B> {
             kv_cache: None,
             kv_cache_slot: KvCacheSlot::Front,
             memory_manager,
+            onnx_generator_plan,
             batcher: ContinuousBatcher::new(),
             observer: BasicObserver::new(),
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
         })
+    }
+
+    fn build_onnx_generator_plan(
+        manifest: &ModelManifest,
+        loader: &mut Loader,
+    ) -> ExecutorResult<Option<OnnxGeneratorPlan>> {
+        if manifest.kind != ModelKind::Chat || loader.weight_format() != WeightFormat::Onnx {
+            return Ok(None);
+        }
+
+        let onnx = loader.onnx()?;
+        let fused_graph = onnx.fused_graph();
+        let fused_kernels = OnnxFusedKernelStats::from_fused_graph(fused_graph);
+        let execution_order = fused_graph
+            .ops
+            .iter()
+            .map(|op| match &op.kind {
+                FusedKernel::FlashAttention(_) => OnnxKernelExecutionOp::FlashAttention,
+                FusedKernel::SwiGlu(_) => OnnxKernelExecutionOp::SwiGlu,
+                FusedKernel::Rope(_) => OnnxKernelExecutionOp::Rope,
+                FusedKernel::FusedQkvRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
+                FusedKernel::Atomic(_) => OnnxKernelExecutionOp::Atomic,
+            })
+            .collect::<Vec<_>>();
+        if execution_order.is_empty() {
+            return Err(ExecutorError::OnnxPlan(
+                "fused matcher produced an empty ONNX execution plan".to_string(),
+            ));
+        }
+
+        let graph_outputs = onnx
+            .graph()
+            .outputs
+            .iter()
+            .map(|value| value.name.clone())
+            .collect::<Vec<_>>();
+        let kv_outputs = extract_onnx_kv_outputs(&graph_outputs);
+        if kv_outputs.is_empty() {
+            return Err(ExecutorError::OnnxPlan(
+                "ONNX graph does not expose identifiable KV cache outputs".to_string(),
+            ));
+        }
+
+        Ok(Some(OnnxGeneratorPlan {
+            fused_kernels,
+            graph_outputs,
+            kv_outputs,
+            execution_order,
+        }))
     }
 
     pub fn backend(&self) -> &B {
@@ -301,19 +404,60 @@ impl<B: Backend + 'static> Executor<B> {
     pub fn sample_from_logits(
         &self,
         logits: &LogitsHandle,
-        temperature: f32,
+        sampling: &SamplingConfig,
     ) -> ExecutorResult<u32> {
-        let sampling = SamplingConfig {
-            temperature,
-            ..SamplingConfig::default()
-        };
         let tokens = self.backend.sample_from_tensor(
             logits,
             &AttentionTopology::linear(),
             self.model_config.vocab_size,
-            &sampling,
+            sampling,
         )?;
         tokens.into_iter().next().ok_or(ExecutorError::EmptySample)
+    }
+
+    fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<Vec<LogitsHandle>> {
+        if let Some(plan) = self.onnx_generator_plan.as_ref() {
+            if plan.execution_order.is_empty() {
+                return Err(ExecutorError::OnnxPlan(
+                    "ONNX execution plan is empty".to_string(),
+                ));
+            }
+            let total_kernels = plan.fused_kernels.fused_total() + plan.fused_kernels.atomic;
+            if total_kernels != plan.execution_order.len() {
+                return Err(ExecutorError::OnnxPlan(
+                    "ONNX execution plan kernel accounting mismatch".to_string(),
+                ));
+            }
+            if plan.kv_outputs.is_empty() {
+                return Err(ExecutorError::OnnxPlan(
+                    "ONNX execution plan has no KV cache outputs".to_string(),
+                ));
+            }
+            let has_logits_output = plan
+                .graph_outputs
+                .iter()
+                .any(|name| is_onnx_logits_output(name))
+                || plan
+                    .graph_outputs
+                    .len()
+                    .saturating_sub(plan.kv_outputs.len())
+                    == 1;
+            if !has_logits_output {
+                return Err(ExecutorError::OnnxPlan(
+                    "ONNX execution plan has no logits output".to_string(),
+                ));
+            }
+        }
+
+        let kv_handle = self.active_kv_handle()?;
+        let mut kv_caches = vec![kv_handle; batch_input.sequences.len()];
+        Ok(self.backend.batch_forward_gpu_pure(
+            batch_input,
+            &AttentionTopology::linear(),
+            &self.weights,
+            &mut kv_caches,
+            &self.forward_config,
+        )?)
     }
 
     /// Main Engine Step: Continuous Batching
@@ -408,18 +552,7 @@ impl<B: Backend + 'static> Executor<B> {
         let batch_input = BatchInput { sequences };
 
         // 4. Run Backend Forward
-        let kv_handle = self.active_kv_handle()?;
-        // The backend expects one handle per sequence, even if they all point to the same PagedAttention cache.
-        let count = batch_input.sequences.len();
-        let mut kv_caches = vec![kv_handle; count];
-
-        let logits_list = self.backend.batch_forward_gpu_pure(
-            &batch_input,
-            &AttentionTopology::linear(),
-            &self.weights,
-            &mut kv_caches,
-            &self.forward_config,
-        )?;
+        let logits_list = self.run_batch_forward(&batch_input)?;
 
         // 5. Process Results
         // Note: batch_forward_gpu_pure must return results in the same order as input sequences
@@ -429,91 +562,6 @@ impl<B: Backend + 'static> Executor<B> {
             )));
         }
 
-        // We need to advance cache for each processed sequence
-        // We do this in the loop or in batch if API supports it.
-        // Currently `active.advance` is per slot (which is per request in some models, but here `active_kv_handle` returns a handle to the whole cache).
-        // Wait, `active_kv_handle` returns `KvCacheHandle`.
-        // `self.kv_cache` manages the double buffer state.
-        // We need to update the `KvCacheState` in `self.kv_cache` to reflect advanced positions.
-        // `KvCacheSlot` is just Front/Back. `KvCacheState` tracks usage?
-        // Actually `KvCacheState` implementation in `kv_cache.rs` is likely tracking global state or we assume `scheduler` tracks pages.
-        // But `advance(tokens.len())` was called in `forward_step`.
-        // Let's check `forward_step` again (from memory/previous read):
-        /*
-        let active = kv_cache.slot_mut(slot);
-        active.advance(tokens.len())?;
-        */
-        // This likely updates some metadata in `KvCacheState`.
-        // We need to do this for each request?
-        // Wait, `KvCacheState` represents the *whole* cache buffer (vram pointer + config).
-        // It doesn't seem to track per-request cursors.
-        // Ah, `active.advance(tokens.len())` in `forward_step` logic:
-        /*
-           if tokens.len() > active.remaining() { ... }
-           active.advance(tokens.len())?;
-        */
-        // This suggests `KvCacheState` tracks linear usage if it were a linear buffer.
-        // But we are using `PagedScheduler`.
-        // `PagedScheduler` manages pages.
-        // The `forward_step` logic in `executor.rs` (lines 282-318) seems legacy or for simple linear implementation?
-        // Line 113: `PagedScheduler::new(total_blocks, block_size, hgal_config)`.
-        // If we use PagedAttention, `KvCacheState`'s linear `advance` might not be relevant or might be for a simple linear allocator fallback.
-        // HOWEVER, the previous `forward_step` WAS calling it.
-        // And `ensure_kv_cache` allocates `KvCacheState`.
-        // If `batch_forward_gpu_pure` handles PagedAttention, the `KvCacheHandle` passed to it allows it to read/write KV.
-        // The `advance` call on `active` (KvCacheState) might be updating a simple offset.
-        // If we are doing PagedAttention, usually the `scheduler` manages the block tables, and `backend` uses them.
-        // `KvCacheState` might just be a wrapper around the pointer.
-        // IF `advance` is purely checking capacity in a linear buffer sense, it might be wrong for PagedAttention.
-        // But let's assume we need to preserve behavior or update it.
-        // If `forward_step` was checking `remaining()`, maybe we should too.
-        // But for continuous batching with paged attention, "remaining" is determined by free blocks in scheduler, not linear offset.
-        // The `Executor` has `scheduler`.
-        // I will omit the `active.advance()` call if it looks like legacy linear buffer logic, OR I should check `kv_cache.rs` to understand.
-        // I can't check `kv_cache.rs` easily without reading it.
-        // But `forward_step` was:
-        /*
-            let active = kv_cache.slot(slot);
-            if tokens.len() > active.remaining() { ... }
-            ...
-            active.advance(tokens.len())?;
-        */
-        // If I remove `forward_step`, I should probably replicate this logic IF it matters.
-        // But for PagedAttention, capacity is `scheduler.can_allocate(...)`.
-        // The `KvCacheState` might be a linear slab allocator underlying the pages?
-        // If so, `advance` might mark memory as used.
-        // But `scheduler` manages blocks.
-        // It's possible `KvCacheState` is a naive implementation that `Executor` was using before PagedAttention was fully integrated?
-        // Or `KvCacheState` tracks the *allocation* of the big buffer?
-        // `advance` usually implies moving a cursor.
-        // If we have PagedAttention, we don't move a global cursor per token generated in a batch.
-
-        // I will assume `scheduler` handles memory and `KvCacheState` logic in `forward_step` regarding `advance` was for the single-sequence linear case or simpler tests.
-        // I will NOT call `advance` on `KvCacheState` for every request in the batch loop, as that would likely exhaust the "linear" capacity incorrectly if it's not actually linear.
-        // However, the prompt says "Advance the KV cache for the processed tokens."
-        // This is a specific instruction: "Advance the KV cache for the processed tokens."
-        // I MUST follow it.
-        // But calling `active.advance(len)` for *each* request on the *same* `active` object (which represents the whole cache) would mean we advance the global cursor by `sum(tokens)`.
-        // If `KvCacheState` is indeed the linear memory pool, then yes, we consumed that much memory?
-        // No, with PagedAttention we reuse blocks.
-        // Maybe "Advance the KV cache" means something else?
-        // Or maybe `KvCacheState` has a method to advance *specific* request?
-        // The `forward_step` did `active.advance(tokens.len())`. `active` is `KvCacheSlot`.
-
-        // Let's assume the prompt implies I should replicate the effect of `forward_step`'s advance.
-        // I will do:
-        /*
-        let slot = self.kv_cache_slot;
-        if let Some(kv_cache) = self.kv_cache.as_mut() {
-             let active = kv_cache.slot_mut(slot);
-             // active.advance(total_tokens_processed)?; // If I sum them up?
-        }
-        */
-
-        // Wait, `forward_step` is per request (in the old loop).
-        // If I use `batch_forward_gpu_pure`, I am processing `sum(tokens)` tokens in total.
-        // I should probably sum them up and advance once?
-
         let mut total_tokens = 0;
         for seq in &batch_input.sequences {
             total_tokens += seq.tokens.len();
@@ -522,16 +570,12 @@ impl<B: Backend + 'static> Executor<B> {
         // Processing results loop
         for (i, logits) in logits_list.iter().enumerate() {
             let req_id = request_indices[i];
-
-            // ... Sample ...
-            let req = self
+            let sampling_config = self
                 .requests
                 .get(&req_id)
-                .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
-            let temperature = req.sampling_config.temperature;
-
-            // Note: sample_from_logits takes &LogitsHandle.
-            let next_token = self.sample_from_logits(logits, temperature)?;
+                .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?
+                .sampling_config;
+            let next_token = self.sample_from_logits(logits, &sampling_config)?;
 
             // Update request
             let req = self
@@ -620,21 +664,29 @@ impl<B: Backend + 'static> Executor<B> {
         max_tokens: usize,
         temperature: f32,
     ) -> ExecutorResult<String> {
+        self.generate_with_sampling(prompt, max_tokens, temperature, 0, 1.0)
+    }
+
+    pub fn generate_with_sampling(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+    ) -> ExecutorResult<String> {
         if prompt.trim().is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
         let sampling_config = SamplingConfig {
             temperature,
-            ..SamplingConfig::default()
+            top_k,
+            top_p,
         };
 
-        // 1. Enqueue (Non-blocking)
         let req_id =
             self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config)?;
 
-        // 2. Drive the Engine (Blocking for this request)
-        // In a real server, this loop would be global.
-        // Here we run the global loop until OUR request is done.
         loop {
             self.step()?;
 
@@ -643,23 +695,15 @@ impl<B: Backend + 'static> Executor<B> {
                     break;
                 }
             } else {
-                // Request removed (e.g. error or finished and cleaned up?)
-                // If finish_request removes it from batcher, it might still be in self.requests?
-                // We typically keep data in `requests` until retrieved.
                 break;
             }
         }
 
-        // 3. Retrieve Result
         let req = self
             .requests
             .get(&req_id)
             .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
         let text = self.decode_tokens(&req.output_tokens)?;
-
-        // Cleanup?
-        // self.requests.remove(&req_id);
-
         Ok(text)
     }
 
@@ -988,5 +1032,61 @@ impl<B: Backend + 'static> Executor<B> {
         }
 
         Ok(())
+    }
+}
+
+fn extract_onnx_kv_outputs(graph_outputs: &[String]) -> Vec<String> {
+    graph_outputs
+        .iter()
+        .filter(|name| is_onnx_kv_output(name))
+        .cloned()
+        .collect()
+}
+
+fn is_onnx_kv_output(name: &str) -> bool {
+    let normalized = name
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['/', '.', '-', ' '], "_");
+    let has_cache_hint = normalized.contains("past")
+        || normalized.contains("present")
+        || normalized.contains("cache")
+        || normalized.contains("key_values")
+        || normalized.contains("kv");
+    let has_kv_axis = normalized.contains("key") || normalized.contains("value");
+    has_cache_hint && has_kv_axis
+}
+
+fn is_onnx_logits_output(name: &str) -> bool {
+    let normalized = name
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['/', '.', '-', ' '], "_");
+    normalized.contains("logits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_kv_outputs_from_onnx_names() {
+        let outputs = vec![
+            "logits".to_string(),
+            "present.0.key".to_string(),
+            "present.0.value".to_string(),
+            "present.1.key".to_string(),
+            "present.1.value".to_string(),
+        ];
+        let kv_outputs = extract_onnx_kv_outputs(&outputs);
+        assert_eq!(kv_outputs.len(), 4);
+        assert!(kv_outputs.iter().all(|name| name.contains("present")));
+    }
+
+    #[test]
+    fn detects_logits_output_name() {
+        assert!(is_onnx_logits_output("logits"));
+        assert!(is_onnx_logits_output("model/logits_output"));
+        assert!(!is_onnx_logits_output("present.0.key"));
     }
 }
