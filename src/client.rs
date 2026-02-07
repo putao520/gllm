@@ -1,5 +1,6 @@
 //! Client API skeleton.
 
+use std::borrow::Cow;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use gllm_kernels::BackendError;
@@ -12,7 +13,7 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::loader::{config as loader_config, LoaderConfig, LoaderError};
+use crate::loader::{config as loader_config, Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
@@ -239,13 +240,38 @@ impl Client {
 
     fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
         let config = LoaderConfig::from_env();
-        let config_files = loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP)?;
-        let config_value = loader_config::load_config_value(&config_files.config_path)?;
-        let manifest = Arc::new(loader_config::manifest_from_config(
-            model_id,
-            &config_value,
-            kind,
-        )?);
+        let manifest = match loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP)
+        {
+            Ok(config_files) => {
+                let config_value = loader_config::load_config_value(&config_files.config_path)?;
+                Arc::new(loader_config::manifest_from_config(
+                    model_id,
+                    &config_value,
+                    kind,
+                )?)
+            }
+            Err(loader_config::ConfigError::MissingConfig { .. }) => {
+                let mut loader = Loader::from_source_with_config(model_id, config.clone())?;
+                if loader.weight_format() != WeightFormat::Gguf {
+                    return Err(loader_config::ConfigError::MissingConfig {
+                        model_id: model_id.to_string(),
+                    }
+                    .into());
+                }
+                let arch = loader.gguf_architecture()?;
+                Arc::new(ModelManifest {
+                    model_id: Cow::Owned(model_id.to_string()),
+                    file_map: EMPTY_FILE_MAP,
+                    arch,
+                    tensor_rules: loader_config::tensor_rules_for_arch(arch),
+                    kind,
+                    rope_base_override: None,
+                    max_context_override: None,
+                    moe_config: None,
+                })
+            }
+            Err(err) => return Err(err.into()),
+        };
         let detected_backend = detect_backend()?;
         let backend =
             BackendContext::new(model_id.to_string(), manifest.clone(), detected_backend)?;

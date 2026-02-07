@@ -1,17 +1,19 @@
-//! Model config loader (config.json).
+//! Model config loader (GGUF metadata first, config.json fallback).
 
 use std::path::Path;
 
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::loader::Loader;
+use crate::loader::{Loader, WeightFormat};
 use crate::manifest::ModelManifest;
 
 #[derive(Debug, Error)]
 pub enum ModelConfigError {
     #[error("config.json not found in model files")]
     MissingConfig,
+    #[error("GGUF metadata unavailable and config.json not found: {0}")]
+    MissingConfigAndMetadata(String),
     #[error("invalid or incomplete config.json: {0}")]
     InvalidConfig(String),
     #[error("io error: {0}")]
@@ -43,12 +45,24 @@ pub struct ModelConfig {
 
 impl ModelConfig {
     pub fn from_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
-        // 先提取路径，避免借用冲突
-        let path = loader
-            .config_path()
-            .ok_or(ModelConfigError::MissingConfig)?
-            .to_path_buf();
-        Self::from_path_with_loader(manifest, &path, loader)
+        let mut gguf_metadata_error: Option<ModelConfigError> = None;
+
+        if loader.weight_format() == WeightFormat::Gguf {
+            match Self::from_gguf_loader(manifest, loader) {
+                Ok(config) => return Ok(config),
+                Err(err) => gguf_metadata_error = Some(err),
+            }
+        }
+
+        if let Some(path) = loader.config_path().map(|path| path.to_path_buf()) {
+            return Self::from_path_with_loader(manifest, &path, loader);
+        }
+
+        if let Some(err) = gguf_metadata_error {
+            return Err(ModelConfigError::MissingConfigAndMetadata(err.to_string()));
+        }
+
+        Err(ModelConfigError::MissingConfig)
     }
 
     pub fn from_path(manifest: &ModelManifest, path: &Path) -> ModelConfigResult<Self> {
@@ -74,6 +88,132 @@ impl ModelConfig {
         let weight_dtype_size = loader.detect_weight_dtype_size().unwrap_or(None);
 
         Self::from_value(&manifest_clone, &value, weight_dtype_size)
+    }
+
+    fn from_gguf_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
+        let (
+            vocab_size,
+            hidden_size,
+            num_hidden_layers,
+            num_attention_heads,
+            num_key_value_heads,
+            max_position_embeddings,
+            rope_theta,
+            head_dim,
+            bos_token_id,
+            eos_token_id,
+            pad_token_id,
+        ) = {
+            let reader = loader.gguf_reader().map_err(|err| {
+                ModelConfigError::InvalidConfig(format!("failed to load GGUF metadata: {err}"))
+            })?;
+            let arch = reader.architecture().map_err(|err| {
+                ModelConfigError::InvalidConfig(format!(
+                    "missing GGUF architecture metadata: {err}"
+                ))
+            })?;
+
+            let vocab_size_key = format!("{arch}.vocab_size");
+            let vocab_size =
+                require_gguf_usize(reader.get_metadata_u64(&vocab_size_key), &vocab_size_key)?;
+            let hidden_size = require_gguf_usize(reader.embedding_length(), "embedding_length")?;
+            let num_hidden_layers = require_gguf_usize(reader.block_count(), "block_count")?;
+            let num_attention_heads =
+                require_gguf_usize(reader.head_count(), "attention.head_count")?;
+            let num_key_value_heads =
+                require_gguf_usize(reader.head_count_kv(), "attention.head_count_kv")?;
+            let max_position_embeddings =
+                require_gguf_usize(reader.context_length(), "context_length")?;
+            let rope_theta = require_gguf_f32(reader.rope_freq_base(), "rope.freq_base")?;
+            let head_dim = match reader.rope_dimension_count() {
+                Some(value) => usize::try_from(value).map_err(|_| {
+                    ModelConfigError::InvalidConfig(
+                        "GGUF metadata field overflow: rope.dimension_count".to_string(),
+                    )
+                })?,
+                None => {
+                    if num_attention_heads == 0 || hidden_size % num_attention_heads != 0 {
+                        return Err(ModelConfigError::InvalidConfig(
+                            "cannot derive head_dim from GGUF metadata".to_string(),
+                        ));
+                    }
+                    hidden_size / num_attention_heads
+                }
+            };
+
+            if num_attention_heads > 0 && head_dim == 0 {
+                return Err(ModelConfigError::InvalidConfig(
+                    "invalid head_dim in GGUF metadata".to_string(),
+                ));
+            }
+
+            (
+                vocab_size,
+                hidden_size,
+                num_hidden_layers,
+                num_attention_heads,
+                num_key_value_heads,
+                max_position_embeddings,
+                rope_theta,
+                head_dim,
+                reader.bos_token_id(),
+                reader.eos_token_id(),
+                reader
+                    .get_metadata_u64("tokenizer.ggml.padding_token_id")
+                    .and_then(|v| u32::try_from(v).ok()),
+            )
+        };
+
+        let max_position_embeddings = manifest
+            .max_context_override
+            .unwrap_or(max_position_embeddings);
+        if max_position_embeddings == 0 {
+            return Err(ModelConfigError::InvalidConfig(
+                "missing max_position_embeddings".to_string(),
+            ));
+        }
+
+        let rope_theta = manifest.rope_base_override.unwrap_or(rope_theta);
+        let rope_scale = 1.0;
+        let rope_interleaved = false;
+
+        let kv_cache_block_size = head_dim.max(num_key_value_heads);
+        if kv_cache_block_size == 0 {
+            return Err(ModelConfigError::InvalidConfig(
+                "invalid kv_cache_block_size".to_string(),
+            ));
+        }
+
+        let dtype_size = loader
+            .detect_weight_dtype_size()
+            .map_err(|err| {
+                ModelConfigError::InvalidConfig(format!(
+                    "failed to detect model dtype from weights: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                ModelConfigError::InvalidConfig(
+                    "unable to determine model dtype size from GGUF tensors".to_string(),
+                )
+            })?;
+
+        Ok(Self {
+            hidden_size,
+            num_attention_heads,
+            num_key_value_heads,
+            num_hidden_layers,
+            vocab_size,
+            max_position_embeddings,
+            rope_theta,
+            rope_scale,
+            rope_interleaved,
+            kv_cache_block_size,
+            head_dim,
+            dtype_size,
+            bos_token_id,
+            eos_token_id,
+            pad_token_id,
+        })
     }
 
     pub fn from_value(
@@ -201,6 +341,21 @@ impl ModelConfig {
 
 fn require_usize(value: &Value, keys: &[&str]) -> ModelConfigResult<usize> {
     find_usize(value, keys).ok_or_else(|| ModelConfigError::InvalidConfig(keys[0].to_string()))
+}
+
+fn require_gguf_usize(value: Option<u64>, field: &str) -> ModelConfigResult<usize> {
+    let value = value.ok_or_else(|| {
+        ModelConfigError::InvalidConfig(format!("missing GGUF metadata field: {field}"))
+    })?;
+    usize::try_from(value).map_err(|_| {
+        ModelConfigError::InvalidConfig(format!("GGUF metadata field overflow: {field}"))
+    })
+}
+
+fn require_gguf_f32(value: Option<f32>, field: &str) -> ModelConfigResult<f32> {
+    value.filter(|v| v.is_finite()).ok_or_else(|| {
+        ModelConfigError::InvalidConfig(format!("missing GGUF metadata field: {field}"))
+    })
 }
 
 fn find_usize(value: &Value, keys: &[&str]) -> Option<usize> {

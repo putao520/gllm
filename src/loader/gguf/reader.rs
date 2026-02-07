@@ -230,6 +230,14 @@ impl GgufReader {
         &self.quantization_types
     }
 
+    pub fn get(&self, key: &str) -> Option<&GgufValue> {
+        self.metadata.get(key)
+    }
+
+    fn get_metadata_bool(&self, key: &str) -> Option<bool> {
+        self.metadata.get(key).and_then(GgufValue::as_bool)
+    }
+
     pub fn get_metadata_u64(&self, key: &str) -> Option<u64> {
         self.metadata.get(key).and_then(GgufValue::as_u64)
     }
@@ -244,6 +252,66 @@ impl GgufReader {
 
     pub fn get_metadata_array(&self, key: &str) -> Option<&GgufArray> {
         self.metadata.get(key).and_then(GgufValue::as_array)
+    }
+
+    pub fn bos_token_id(&self) -> Option<u32> {
+        self.get_metadata_u64("tokenizer.ggml.bos_token_id")
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    pub fn eos_token_id(&self) -> Option<u32> {
+        self.get_metadata_u64("tokenizer.ggml.eos_token_id")
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    pub fn add_bos_token(&self) -> bool {
+        self.get_metadata_bool("tokenizer.ggml.add_bos_token")
+            .unwrap_or(false)
+    }
+
+    pub fn add_eos_token(&self) -> bool {
+        self.get_metadata_bool("tokenizer.ggml.add_eos_token")
+            .unwrap_or(false)
+    }
+
+    fn get_arch_u64(&self, suffix: &str) -> Option<u64> {
+        let arch = self.architecture_name()?;
+        let key = format!("{arch}.{suffix}");
+        self.get_metadata_u64(&key)
+    }
+
+    fn get_arch_f32(&self, suffix: &str) -> Option<f32> {
+        let arch = self.architecture_name()?;
+        let key = format!("{arch}.{suffix}");
+        self.get_metadata_f32(&key)
+    }
+
+    pub fn embedding_length(&self) -> Option<u64> {
+        self.get_arch_u64("embedding_length")
+    }
+
+    pub fn block_count(&self) -> Option<u64> {
+        self.get_arch_u64("block_count")
+    }
+
+    pub fn head_count(&self) -> Option<u64> {
+        self.get_arch_u64("attention.head_count")
+    }
+
+    pub fn head_count_kv(&self) -> Option<u64> {
+        self.get_arch_u64("attention.head_count_kv")
+    }
+
+    pub fn context_length(&self) -> Option<u64> {
+        self.get_arch_u64("context_length")
+    }
+
+    pub fn rope_dimension_count(&self) -> Option<u64> {
+        self.get_arch_u64("rope.dimension_count")
+    }
+
+    pub fn rope_freq_base(&self) -> Option<f32> {
+        self.get_arch_f32("rope.freq_base")
     }
 
     pub fn tokenizer_tokens(&self) -> Result<Vec<&str>, GgufError> {
@@ -294,6 +362,23 @@ impl GgufReader {
         }
 
         Ok(&self.mmap[info.offset..end])
+    }
+
+    pub fn floating_point_dtype_size(&self) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for tensor in &self.tensors {
+            let size = match tensor.dtype {
+                GgmlDType::F16 | GgmlDType::BF16 => 2,
+                GgmlDType::F32 => 4,
+                GgmlDType::F64 => 8,
+                _ => continue,
+            };
+            best = Some(best.map_or(size, |current| current.min(size)));
+            if best == Some(2) {
+                break;
+            }
+        }
+        best
     }
 }
 

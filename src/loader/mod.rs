@@ -906,6 +906,11 @@ impl Loader {
         Ok(loader.quantization_types().to_vec())
     }
 
+    pub fn gguf_reader(&mut self) -> Result<&GgufLoader> {
+        self.ensure_gguf()?;
+        self.gguf.as_ref().ok_or(LoaderError::MissingWeights)
+    }
+
     pub fn onnx_tensor_dtype(&mut self, name: &str) -> Result<Dtype> {
         self.ensure_onnx()?;
         let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
@@ -929,9 +934,11 @@ impl Loader {
                 .as_ref()
                 .ok_or(LoaderError::MissingWeights)?;
             Ok(loader.detect_weight_dtype_size())
+        } else if self.files.format == WeightFormat::Gguf {
+            self.ensure_gguf()?;
+            let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+            Ok(loader.floating_point_dtype_size())
         } else {
-            // 对于 GGUF，通常都是量化的，dtype 由量化格式决定
-            // 这里返回 None 表示无法从权重确定
             Ok(None)
         }
     }

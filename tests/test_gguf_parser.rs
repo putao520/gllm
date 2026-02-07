@@ -13,6 +13,9 @@ use tempfile::NamedTempFile;
 enum MetaValue {
     Str(String),
     U32(u32),
+    U64(u64),
+    F32(f32),
+    Bool(bool),
     ArrayString(Vec<String>),
 }
 
@@ -54,6 +57,18 @@ fn write_meta(out: &mut Vec<u8>, entry: &MetaEntry) {
         MetaValue::U32(v) => {
             write_u32(out, GgufValueType::Uint32 as u32);
             write_u32(out, *v);
+        }
+        MetaValue::U64(v) => {
+            write_u32(out, GgufValueType::Uint64 as u32);
+            write_u64(out, *v);
+        }
+        MetaValue::F32(v) => {
+            write_u32(out, GgufValueType::Float32 as u32);
+            write_u32(out, v.to_bits());
+        }
+        MetaValue::Bool(v) => {
+            write_u32(out, GgufValueType::Bool as u32);
+            out.push(u8::from(*v));
         }
         MetaValue::ArrayString(values) => {
             write_u32(out, GgufValueType::Array as u32);
@@ -366,4 +381,77 @@ fn test_gguf_011_generic_constraint_verification() {
 
     assert!(matches!(kernel.dtype, DType::U8));
     assert_eq!(kernel.data.len(), bytes_len);
+}
+
+#[test]
+fn test_gguf_012_metadata_helper_accessors() {
+    let mut metadata = make_metadata(true);
+    metadata.extend([
+        MetaEntry {
+            key: "llama.embedding_length".to_string(),
+            value: MetaValue::U64(4096),
+        },
+        MetaEntry {
+            key: "llama.block_count".to_string(),
+            value: MetaValue::U64(32),
+        },
+        MetaEntry {
+            key: "llama.attention.head_count".to_string(),
+            value: MetaValue::U64(32),
+        },
+        MetaEntry {
+            key: "llama.attention.head_count_kv".to_string(),
+            value: MetaValue::U64(8),
+        },
+        MetaEntry {
+            key: "llama.context_length".to_string(),
+            value: MetaValue::U64(8192),
+        },
+        MetaEntry {
+            key: "llama.rope.dimension_count".to_string(),
+            value: MetaValue::U64(128),
+        },
+        MetaEntry {
+            key: "llama.rope.freq_base".to_string(),
+            value: MetaValue::F32(500_000.0),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.bos_token_id".to_string(),
+            value: MetaValue::U32(1),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.eos_token_id".to_string(),
+            value: MetaValue::U32(2),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.add_bos_token".to_string(),
+            value: MetaValue::Bool(true),
+        },
+        MetaEntry {
+            key: "tokenizer.ggml.add_eos_token".to_string(),
+            value: MetaValue::Bool(false),
+        },
+    ]);
+    let tensors = vec![
+        make_tensor("f16_weight", GgmlDType::F16, vec![8]),
+        make_tensor("f32_weight", GgmlDType::F32, vec![4]),
+    ];
+
+    let file = write_temp_gguf(&build_gguf(metadata, tensors, 32));
+    let reader = GgufReader::open(file.path()).expect("open gguf");
+
+    assert_eq!(reader.embedding_length(), Some(4096));
+    assert_eq!(reader.block_count(), Some(32));
+    assert_eq!(reader.head_count(), Some(32));
+    assert_eq!(reader.head_count_kv(), Some(8));
+    assert_eq!(reader.context_length(), Some(8192));
+    assert_eq!(reader.rope_dimension_count(), Some(128));
+    assert_eq!(reader.rope_freq_base(), Some(500_000.0));
+    assert_eq!(reader.bos_token_id(), Some(1));
+    assert_eq!(reader.eos_token_id(), Some(2));
+    assert!(reader.add_bos_token());
+    assert!(!reader.add_eos_token());
+
+    assert!(reader.get("general.architecture").is_some());
+    assert_eq!(reader.floating_point_dtype_size(), Some(2));
 }
