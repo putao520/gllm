@@ -1,7 +1,7 @@
 //! GGUF loader (memory mapped, header parsed via gguf-rs).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,9 +12,12 @@ use half::{bf16, f16};
 use memmap2::MmapOptions;
 
 use super::{LoaderError, Result};
+use crate::manifest::ModelArchitecture;
 use gllm_kernels::QuantizedType;
 
 const GGUF_MAX_ARRAY: u64 = 3;
+const GGUF_ARCHITECTURE_KEY: &str = "general.architecture";
+const GGUF_QUANTIZATION_VERSION_KEY: &str = "general.quantization_version";
 
 #[derive(Debug)]
 pub struct GgufTensorInfo {
@@ -163,6 +166,9 @@ impl MappedGguf {
 pub struct GgufLoader {
     file: MappedGguf,
     index: HashMap<String, GgufTensorInfo>,
+    architecture: Option<String>,
+    quantization_version: Option<u64>,
+    quantization_types: Vec<String>,
 }
 
 impl GgufLoader {
@@ -186,14 +192,24 @@ impl GgufLoader {
         let model = container
             .decode()
             .map_err(|err| LoaderError::Gguf(err.to_string()))?;
+        let architecture = model
+            .metadata()
+            .get(GGUF_ARCHITECTURE_KEY)
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        let quantization_version = metadata_u64(model.metadata(), GGUF_QUANTIZATION_VERSION_KEY);
+        let mut quantization_types = BTreeSet::new();
 
         for tensor in model.tensors() {
             let name = tensor.name.clone();
             if index.contains_key(&name) {
                 return Err(LoaderError::DuplicateTensor(name));
             }
-            let _ = GGMLType::try_from(tensor.kind)
+            let kind = GGMLType::try_from(tensor.kind)
                 .map_err(|err| LoaderError::Gguf(err.to_string()))?;
+            if is_quantized_ggml_type(&kind) {
+                quantization_types.insert(kind.to_string());
+            }
             let shape = normalize_shape(&tensor.shape)?;
             let offset = usize::try_from(tensor.offset)
                 .map_err(|_| LoaderError::Gguf("tensor offset overflow".into()))?;
@@ -220,7 +236,13 @@ impl GgufLoader {
             );
         }
 
-        Ok(Self { file, index })
+        Ok(Self {
+            file,
+            index,
+            architecture,
+            quantization_version,
+            quantization_types: quantization_types.into_iter().collect(),
+        })
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -253,6 +275,31 @@ impl GgufLoader {
     pub fn tensor_meta(&self, name: &str) -> Option<&GgufTensorInfo> {
         self.index.get(name)
     }
+
+    pub fn architecture_name(&self) -> Option<&str> {
+        self.architecture.as_deref()
+    }
+
+    pub fn architecture(&self) -> Result<ModelArchitecture> {
+        let architecture = self.architecture_name().ok_or_else(|| {
+            LoaderError::Gguf(format!(
+                "missing GGUF metadata key: {GGUF_ARCHITECTURE_KEY}"
+            ))
+        })?;
+        map_gguf_architecture(architecture).ok_or_else(|| {
+            LoaderError::Gguf(format!(
+                "unsupported GGUF architecture metadata: {architecture}"
+            ))
+        })
+    }
+
+    pub fn quantization_version(&self) -> Option<u64> {
+        self.quantization_version
+    }
+
+    pub fn quantization_types(&self) -> &[String] {
+        self.quantization_types.as_slice()
+    }
 }
 
 fn normalize_shape(shape: &[u64]) -> Result<Vec<usize>> {
@@ -273,6 +320,54 @@ fn align_up(value: usize, alignment: usize) -> usize {
         return value;
     }
     (value + alignment - 1) / alignment * alignment
+}
+
+fn metadata_u64(
+    metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<u64> {
+    let value = metadata.get(key)?;
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
+}
+
+fn normalize_architecture_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace('.', "_")
+}
+
+fn map_gguf_architecture(value: &str) -> Option<ModelArchitecture> {
+    match normalize_architecture_token(value).as_str() {
+        "llama" => Some(ModelArchitecture::Llama4),
+        "qwen2" | "qwen2_5" => Some(ModelArchitecture::Qwen2_5),
+        "qwen3" => Some(ModelArchitecture::Qwen3),
+        // DeepSeekAdapter is tracked by REQ-LOADER-020; current closest MoE mapping keeps loader metadata-driven.
+        "deepseek" => Some(ModelArchitecture::Qwen3MoE),
+        "mistral" => Some(ModelArchitecture::Mistral3),
+        "ministral" => Some(ModelArchitecture::Ministral),
+        "gemma" | "gemma2" => Some(ModelArchitecture::Gemma2),
+        _ => None,
+    }
+}
+
+fn is_quantized_ggml_type(kind: &GGMLType) -> bool {
+    !matches!(
+        kind,
+        GGMLType::F32
+            | GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::F64
+            | GGMLType::I8
+            | GGMLType::I16
+            | GGMLType::I32
+            | GGMLType::I64
+            | GGMLType::Count
+    )
 }
 
 struct MmapReader {
@@ -456,4 +551,129 @@ fn cast_or_copy_i64<'a>(data: &'a [u8], bo: &ByteOrder) -> Result<Cow<'a, [i64]>
         out.push(value);
     }
     Ok(Cow::Owned(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn write_u32(buffer: &mut Vec<u8>, value: u32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_i32(buffer: &mut Vec<u8>, value: i32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(buffer: &mut Vec<u8>, value: u64) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_string(buffer: &mut Vec<u8>, value: &str) {
+        let bytes = value.as_bytes();
+        write_u64(buffer, bytes.len() as u64);
+        buffer.extend_from_slice(bytes);
+    }
+
+    fn write_metadata_string(buffer: &mut Vec<u8>, key: &str, value: &str) {
+        // MetadataValueType::String = 8
+        write_string(buffer, key);
+        write_u32(buffer, 8);
+        write_string(buffer, value);
+    }
+
+    fn write_metadata_u32(buffer: &mut Vec<u8>, key: &str, value: u32) {
+        // MetadataValueType::Uint32 = 4
+        write_string(buffer, key);
+        write_u32(buffer, 4);
+        write_u32(buffer, value);
+    }
+
+    fn write_tensor(buffer: &mut Vec<u8>, name: &str, kind: u32, shape: &[u64], offset: u64) {
+        write_string(buffer, name);
+        write_u32(buffer, shape.len() as u32);
+        for &dim in shape {
+            write_u64(buffer, dim);
+        }
+        write_u32(buffer, kind);
+        write_u64(buffer, offset);
+    }
+
+    fn build_minimal_gguf_with_arch(architecture: Option<&str>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_i32(&mut bytes, FILE_MAGIC_GGUF_LE);
+        // GGUF v3
+        write_i32(&mut bytes, 3);
+
+        // One quantized tensor (Q4_0, 32 elements -> 18 bytes payload)
+        write_u64(&mut bytes, 1);
+
+        let kv_count = if architecture.is_some() { 3 } else { 2 };
+        write_u64(&mut bytes, kv_count);
+
+        if let Some(architecture) = architecture {
+            write_metadata_string(&mut bytes, GGUF_ARCHITECTURE_KEY, architecture);
+        }
+        write_metadata_u32(&mut bytes, "general.alignment", 1);
+        write_metadata_u32(&mut bytes, GGUF_QUANTIZATION_VERSION_KEY, 2);
+
+        // kind=2 => GGMLType::Q4_0, size=(32 * (2 + 16)) / 32 = 18 bytes
+        write_tensor(&mut bytes, "blk.0.attn_q.weight", 2, &[32], 0);
+
+        bytes.extend_from_slice(&[0u8; 18]);
+        bytes
+    }
+
+    #[test]
+    fn reads_architecture_and_quantization_from_metadata() {
+        let file = NamedTempFile::new().expect("create temp gguf");
+        std::fs::write(file.path(), build_minimal_gguf_with_arch(Some("llama")))
+            .expect("write gguf file");
+
+        let loader = GgufLoader::from_file(file.path()).expect("load gguf");
+        assert_eq!(loader.architecture_name(), Some("llama"));
+        assert_eq!(
+            loader.architecture().expect("architecture"),
+            ModelArchitecture::Llama4
+        );
+        assert_eq!(loader.quantization_version(), Some(2));
+        assert_eq!(loader.quantization_types(), ["Q4_0"]);
+    }
+
+    #[test]
+    fn missing_architecture_metadata_returns_error() {
+        let file = NamedTempFile::new().expect("create temp gguf");
+        std::fs::write(file.path(), build_minimal_gguf_with_arch(None)).expect("write gguf file");
+
+        let loader = GgufLoader::from_file(file.path()).expect("load gguf");
+        let err = loader
+            .architecture()
+            .expect_err("missing architecture should fail");
+        assert!(err.to_string().contains(GGUF_ARCHITECTURE_KEY));
+    }
+
+    #[test]
+    fn maps_supported_gguf_architectures() {
+        assert_eq!(
+            map_gguf_architecture("llama"),
+            Some(ModelArchitecture::Llama4)
+        );
+        assert_eq!(
+            map_gguf_architecture("qwen2"),
+            Some(ModelArchitecture::Qwen2_5)
+        );
+        assert_eq!(
+            map_gguf_architecture("deepseek"),
+            Some(ModelArchitecture::Qwen3MoE)
+        );
+        assert_eq!(
+            map_gguf_architecture("mistral"),
+            Some(ModelArchitecture::Mistral3)
+        );
+        assert_eq!(
+            map_gguf_architecture("gemma"),
+            Some(ModelArchitecture::Gemma2)
+        );
+    }
 }

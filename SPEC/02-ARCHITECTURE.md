@@ -15,6 +15,39 @@
 - **禁止**：使用 `dlopen`, `libloading` 或任何形式的运行时动态库加载。
 - **目的**：确保部署原子性，避免 CUDA 运行时版本不匹配导致的 "DLL Hell"。
 
+### 2. 真实性原则 (Ω1: TRUTH)
+- **要求**：所有架构/量化/精度信息必须从模型文件自身提供的 **metadata** 读取。
+- **禁止**：
+  - 基于 **Model ID** 推断架构类型
+  - 基于 **文件名** 推测量化类型 (GGUF) 或精度 (ONNX)
+  - 使用 `contains()` 模糊匹配进行架构推测
+- **目的**：避免错误的推测导致模型加载失败，确保系统行为可预测。
+- **关联需求**: REQ-LOADER-014, REQ-LOADER-015, REQ-LOADER-019
+
+**正确做法示例**:
+```rust
+// ✅ 正确: 从 GGUF 元数据读取
+let arch = gguf_metadata.get("general.architecture");
+
+// ✅ 正确: 从 ONNX tensor dtype 读取
+let precision = tensor.data_type;
+
+// ✅ 正确: 从 config.json 读取
+let arch = config.get("model_type");
+```
+
+**错误做法示例**:
+```rust
+// ❌ 错误: 基于 Model ID 推断
+if model_id.contains("llama") { return LlamaArchitecture; }
+
+// ❌ 错误: 基于文件名推测量化类型
+if filename.contains("Q4_0") { return Quantization::Q4_0; }
+
+// ❌ 错误: 模糊匹配架构
+if token.contains("mistral") { return MistralArchitecture; }
+```
+
 ---
 
 ## 核心功能

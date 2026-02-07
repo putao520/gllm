@@ -1,4 +1,12 @@
-//! Naming rules parser for GGUF and ONNX files.
+//! 🚨 DEPRECATED: 违反 Ω1 真实性原则
+//!
+//! 此模块基于文件名推测量化类型和精度，违反真实性原则。
+//!
+//! 正确做法：
+//! - GGUF: 从 GGUF 元数据读取 tensor 的实际类型
+//! - ONNX: 从 ONNX tensor dtype 读取实际精度
+//!
+//! 此文件将在实现 REQ-LOADER-014 和 REQ-LOADER-015 后删除。
 
 use std::path::Path;
 

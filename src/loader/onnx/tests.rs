@@ -1,6 +1,7 @@
 use super::{proto, OnnxLoader};
 use prost::bytes::Bytes;
 use prost::Message;
+use safetensors::Dtype;
 use tempfile::{NamedTempFile, TempDir};
 
 fn empty_model(graph: proto::GraphProto) -> proto::ModelProto {
@@ -86,6 +87,20 @@ fn tensor_f32(name: &str, dims: Vec<i64>, values: &[f32]) -> proto::TensorProto 
     tensor.data_type = Some(proto::tensor_proto::DataType::Float as i32);
     tensor.name = Some(name.to_string());
     tensor.raw_data = Some(Bytes::from(raw));
+    tensor
+}
+
+fn tensor_raw(
+    name: &str,
+    dims: Vec<i64>,
+    data_type: proto::tensor_proto::DataType,
+    raw: &[u8],
+) -> proto::TensorProto {
+    let mut tensor = empty_tensor();
+    tensor.dims = dims;
+    tensor.data_type = Some(data_type as i32);
+    tensor.name = Some(name.to_string());
+    tensor.raw_data = Some(Bytes::copy_from_slice(raw));
     tensor
 }
 
@@ -214,4 +229,42 @@ fn match_attention_swiglu_rope() {
     assert!(has_attention);
     assert!(has_swiglu);
     assert!(has_rope);
+}
+
+#[test]
+fn expose_precision_from_tensor_dtype() {
+    let fp16_tensor = tensor_raw(
+        "linear_fp16.weight",
+        vec![2],
+        proto::tensor_proto::DataType::Float16,
+        &[0, 0, 0, 0],
+    );
+    let int8_tensor = tensor_raw(
+        "linear_int8.weight",
+        vec![2],
+        proto::tensor_proto::DataType::Int8,
+        &[1, 2],
+    );
+    let graph = proto::GraphProto {
+        initializer: vec![fp16_tensor, int8_tensor],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+    assert_eq!(
+        loader
+            .tensor_dtype("linear_fp16.weight")
+            .expect("fp16 dtype"),
+        Dtype::F16
+    );
+    assert_eq!(
+        loader
+            .tensor_dtype("linear_int8.weight")
+            .expect("int8 dtype"),
+        Dtype::I8
+    );
+    assert_eq!(loader.unique_precisions(), vec![Dtype::F16, Dtype::I8]);
 }

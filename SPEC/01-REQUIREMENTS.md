@@ -31,18 +31,13 @@
 | **REQ-LOADER-010** | Registry 删除与显式用途 | 彻底移除 Registry，API 显式指定 ModelKind | 1. 删除 Registry 与 ManifestOverride<br>2. `Client::new(model_id, kind)` 强制显式传入用途<br>3. 提供 `new_chat`/`new_embedding` 快捷方法<br>4. `manifest_from_config` 不再接受 overrides | 🟢 已实现 |
 | **REQ-LOADER-012** | ONNX 格式支持 | 原生支持加载 .onnx 模型文件 (纯 Rust 实现) | 1. 集成官方完整 ONNX Proto 定义 (Enterprise Grade)<br>2. **禁止引入第三方推理引擎** (tract/ort)<br>3. 完整解析 Model/Graph/Node/Tensor 结构<br>4. 支持零拷贝/内存映射加载<br>5. **必须实现 Graph Pattern Matching**<br>6. **必须将子图映射为 Fused Kernels** | 🟢 已实现 (2026-02-05) [commit: 088b9a8] |
 | **REQ-LOADER-013** | 自动格式探测 | 自动探测模型文件格式 (safetensors/GGUF/ONNX) | 1. 根据文件扩展名自动识别格式<br>2. 支持从 HF/MS 自动选择对应加载器<br>3. 无需用户手动指定格式 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
-| **REQ-LOADER-014** | GGUF 命名规则解析 | 解析 GGUF 文件名的量化类型 | 1. 识别 `{model}-{Q4_0/Q8_0/Q4_K_M/etc}.gguf` 格式<br>2. 自动提取量化类型 (Q4_0, Q8_0, Q5_K, etc.)<br>3. 支持常见 GGUF 命名变体 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
-| **REQ-LOADER-015** | ONNX 命名规则解析 | 解析 ONNX 文件名的精度类型 | 1. 识别 `onnx/model_{precision}.onnx` 格式<br>2. 支持 fp32/fp16/int8/uint8/q4 等精度标识<br>3. 自动选择最优加载路径 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
+| **REQ-LOADER-014** | GGUF 量化元数据读取 | 从 GGUF 文件读取量化类型信息 | 1. 从 GGUF 元数据读取 `general.quantization_version`<br>2. 从 GGUF tensor 信息读取实际量化类型 (Q4_0, Q8_0, Q5_K, etc.)<br>3. **禁止基于文件名推断** (Ω1: 真实性原则) | 📋 待实现 |
+| **REQ-LOADER-015** | ONNX 精度元数据读取 | 从 ONNX 文件读取精度信息 | 1. 从 ONNX tensor dtype 读取实际精度 (fp32/fp16/int8/uint8)<br>2. **禁止基于文件名推断** (Ω1: 真实性原则) | 📋 待实现 |
 | **REQ-LOADER-016** | 智能源选择 | HF 不可用时自动切换到 ModelScope | 1. HF 下载失败时自动尝试 ModelScope<br>2. 支持配置优先级 (HF→MS 或 MS→HF)<br>3. 记录源切换日志 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
-| **REQ-LOADER-019** | GGUF 模型 Manifest 推断 | 为缺少 config.json 的 GGUF 模型自动推断架构信息 | 1. 基于 Model ID 命名规则推断架构 (如 `*-gguf` → 对应原始模型架构)<br>2. 从 GGUF 元数据中提取架构信息 (tensor names, architecture type)<br>3. **禁止模型别名系统** - 完全基于下载的模型文件自动识别<br>4. 在 `Loader::from()` 失败时自动尝试 SafeTensors 版本的架构 | 📋 待实现 |
-| **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
-| **REQ-LOADER-021** | Kimi/Moonshot 架构支持 | 支持 Moonshot Kimi K2/K2.5 系列 | 1. 实现 KimiAdapter<br>2. 支持 MoE 架构 (1T 总参数, 32B 激活)<br>3. 从 config.json 识别 `model_type: "kimi"`<br>4. 支持模型: moonshotai/Kimi-K2-Instruct<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
-| **REQ-LOADER-022** | BERT/RoBERTa 架构独立支持 | 为 BERT/RoBERTa 系列提供专用 Adapter | 1. 实现 BERTAdapter (类似 XLMRAdapter)<br>2. 从 config.json 识别 `model_type: "bert"` / `"roberta"`<br>3. 支持 Embedding/Reranker 功能<br>4. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
-| **REQ-LOADER-023** | BGE/Jina/Cohere Embedding 支持 | 支持主流第三方 Embedding 模型 | 1. **BGE 系列**: BAAI/bge-large, bge-m3 (使用 BERTAdapter)<br>2. **Jina 系列**: jinaai/jina-embeddings-v2, jina-reranker-v2 (ColBERT 架构)<br>3. **Cohere 系列**: 闭源 API (无需实现)<br>4. 从 config.json 自动识别架构 | 📋 待实现 |
-| **REQ-LOADER-024** | E5 Embedding 架构独立支持 | 为 intfloat/e5 系列提供专用 Adapter | 1. 实现 E5Adapter (当前复用 Qwen3Embed)<br>2. 支持 multilingual-e5-small/large/instruct<br>3. 优化 E5 特有的推理路径 | 📋 待实现 |
-| **REQ-LOADER-025** | Jina ColBERT 架构支持 | 支持 Jina 系列的 ColBERT 架构 | 1. 实现 ColBERTAdapter (支持双塔编码)<br>2. 支持 jinaai/jina-embeddings-v2, jina-reranker-v2<br>3. 优化 ColBERT 特有的推理路径 (双塔前向传播) | 📋 待实现 |
+| **REQ-LOADER-019** | GGUF 架构元数据读取 | 从 GGUF 文件读取架构信息 | 1. 读取 GGUF 内置 `general.architecture` 字段 (如 "llama", "qwen2", "deepseek")<br>2. **禁止基于 Model ID 推断架构** (Ω1: 真实性原则)<br>3. 如果 GGUF 缺少架构元数据，返回明确的错误而非推测 | 📋 待实现 |
+| **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
 
 
 ## 3. 核心功能 (REQ-CORE)

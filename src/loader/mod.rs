@@ -415,7 +415,10 @@ impl Loader {
     /// # 已弃用
     ///
     /// 请使用 `Loader::from()` 代替，默认已启用自动回退。
-    #[deprecated(since = "0.11.0", note = "请使用 Loader::from() 代替，默认已启用自动回退")]
+    #[deprecated(
+        since = "0.11.0",
+        note = "请使用 Loader::from() 代替，默认已启用自动回退"
+    )]
     pub fn from_hf_with_fallback(repo_or_alias: &str) -> Result<Self> {
         Self::from(repo_or_alias)
     }
@@ -779,6 +782,42 @@ impl Loader {
     pub fn onnx(&mut self) -> Result<&OnnxLoader> {
         self.ensure_onnx()?;
         self.onnx.as_ref().ok_or(LoaderError::MissingWeights)
+    }
+
+    pub fn gguf_architecture_name(&mut self) -> Result<Option<String>> {
+        self.ensure_gguf()?;
+        let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.architecture_name().map(|name| name.to_string()))
+    }
+
+    pub fn gguf_architecture(&mut self) -> Result<crate::manifest::ModelArchitecture> {
+        self.ensure_gguf()?;
+        let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+        loader.architecture()
+    }
+
+    pub fn gguf_quantization_version(&mut self) -> Result<Option<u64>> {
+        self.ensure_gguf()?;
+        let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.quantization_version())
+    }
+
+    pub fn gguf_quantization_types(&mut self) -> Result<Vec<String>> {
+        self.ensure_gguf()?;
+        let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.quantization_types().to_vec())
+    }
+
+    pub fn onnx_tensor_dtype(&mut self, name: &str) -> Result<Dtype> {
+        self.ensure_onnx()?;
+        let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
+        loader.tensor_dtype(name)
+    }
+
+    pub fn onnx_precisions(&mut self) -> Result<Vec<Dtype>> {
+        self.ensure_onnx()?;
+        let loader = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
+        Ok(loader.unique_precisions())
     }
 
     pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {

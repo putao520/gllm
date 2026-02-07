@@ -68,7 +68,7 @@ pub fn manifest_from_config(
     config: &Value,
     kind: ModelKind,
 ) -> Result<ModelManifest, ConfigError> {
-    let arch = resolve_architecture(config, model_id)?;
+    let arch = resolve_architecture(config)?;
     let tensor_rules = tensor_rules_for_arch(arch);
 
     Ok(ModelManifest {
@@ -83,10 +83,7 @@ pub fn manifest_from_config(
     })
 }
 
-pub fn resolve_architecture(
-    config: &Value,
-    model_id: &str,
-) -> Result<ModelArchitecture, ConfigError> {
+pub fn resolve_architecture(config: &Value) -> Result<ModelArchitecture, ConfigError> {
     let mut candidates = Vec::new();
 
     if let Some(architectures) = config.get("architectures") {
@@ -103,9 +100,8 @@ pub fn resolve_architecture(
         }
     }
 
-    if let Some(arch) = map_architecture_token(model_id) {
-        return Ok(arch);
-    }
+    // 🚨 禁止基于 Model ID 推断架构 (Ω1: 真实性原则)
+    // 必须使用模型自身提供的 metadata (config.json 或 GGUF general.architecture)
 
     if candidates.is_empty() {
         return Err(ConfigError::UnsupportedArchitecture(
@@ -207,53 +203,69 @@ fn collect_architectures(value: &Value, out: &mut Vec<String>) {
 }
 
 fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
-    let lower = token.to_ascii_lowercase();
+    match normalize_architecture_token(token).as_str() {
+        "ministral" | "ministralforcausallm" => Some(ModelArchitecture::Ministral),
+        "mistral" | "mistralforcausallm" => Some(ModelArchitecture::Mistral3),
+        "qwen3_moe" | "qwen3moe" | "qwen3moeforcausallm" => Some(ModelArchitecture::Qwen3MoE),
+        "qwen3" | "qwen3forcausallm" => Some(ModelArchitecture::Qwen3),
+        "qwen2_5" | "qwen2_5forcausallm" => Some(ModelArchitecture::Qwen2_5),
+        "qwen2" | "qwen2forcausallm" => Some(ModelArchitecture::Qwen2_5),
+        "llama" | "llamaforcausallm" => Some(ModelArchitecture::Llama4),
+        "phi3" | "phi3forcausallm" | "phi4" | "phi4forcausallm" => Some(ModelArchitecture::Phi4),
+        "gemma" | "gemmaforcausallm" | "gemma2" | "gemma2forcausallm" => {
+            Some(ModelArchitecture::Gemma2)
+        }
+        "glm5" | "glm5forcausallm" => Some(ModelArchitecture::GLM5),
+        "glm4" | "glm4forcausallm" | "chatglm" | "chatglmforcausallm" => {
+            Some(ModelArchitecture::GLM4)
+        }
+        "glm" | "glmforcausallm" => Some(ModelArchitecture::GLM5),
+        "gpt2" | "gpt2lmheadmodel" | "gpt_oss" | "gptoss" => Some(ModelArchitecture::GPT2Next),
+        "xlm_roberta" | "xlm_roberta_model" | "xlmr" | "roberta" | "bert" => {
+            Some(ModelArchitecture::XlmR)
+        }
+        _ => None,
+    }
+}
 
-    if lower.contains("ministral") {
-        return Some(ModelArchitecture::Ministral);
-    }
-    if lower.contains("mistral") {
-        return Some(ModelArchitecture::Mistral3);
-    }
-    if lower.contains("qwen") && lower.contains("moe") {
-        return Some(ModelArchitecture::Qwen3MoE);
-    }
-    if lower.contains("qwen3") {
-        return Some(ModelArchitecture::Qwen3);
-    }
-    if lower.contains("qwen2.5") || lower.contains("qwen2_5") || lower.contains("qwen2-5") {
-        return Some(ModelArchitecture::Qwen2_5);
-    }
-    if lower.contains("qwen2") {
-        return Some(ModelArchitecture::Qwen3);
-    }
-    if lower.contains("llama") {
-        return Some(ModelArchitecture::Llama4);
-    }
-    if lower.contains("phi3") || lower.contains("phi4") {
-        return Some(ModelArchitecture::Phi4);
-    }
-    if lower.contains("gemma2") || lower.contains("gemma-2") {
-        return Some(ModelArchitecture::Gemma2);
-    }
-    if lower.contains("glm5") || lower.contains("glm-5") {
-        return Some(ModelArchitecture::GLM5);
-    }
-    if lower.contains("glm4") || lower.contains("glm-4") || lower.contains("chatglm") {
-        return Some(ModelArchitecture::GLM4);
-    }
-    if lower.contains("glm") {
-        return Some(ModelArchitecture::GLM5);
-    }
-    if lower.contains("gpt2") || lower.contains("gpt-oss") || lower.contains("gptoss") {
-        return Some(ModelArchitecture::GPT2Next);
-    }
-    if lower.contains("xlm-roberta") || lower.contains("xlm_roberta") || lower.contains("xlmr") {
-        return Some(ModelArchitecture::XlmR);
-    }
-    if lower.contains("roberta") || lower.contains("bert") {
-        return Some(ModelArchitecture::XlmR);
-    }
+fn normalize_architecture_token(token: &str) -> String {
+    token
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        .map(|ch| match ch {
+            '-' | '.' => '_',
+            _ => ch.to_ascii_lowercase(),
+        })
+        .collect()
+}
 
-    None
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_architecture_token_uses_exact_normalized_matching() {
+        assert_eq!(
+            map_architecture_token("LlamaForCausalLM"),
+            Some(ModelArchitecture::Llama4)
+        );
+        assert_eq!(
+            map_architecture_token("Qwen2ForCausalLM"),
+            Some(ModelArchitecture::Qwen2_5)
+        );
+        assert_eq!(
+            map_architecture_token("Qwen2.5ForCausalLM"),
+            Some(ModelArchitecture::Qwen2_5)
+        );
+        assert_eq!(
+            map_architecture_token("MistralForCausalLM"),
+            Some(ModelArchitecture::Mistral3)
+        );
+        assert_eq!(
+            map_architecture_token("Gemma2ForCausalLM"),
+            Some(ModelArchitecture::Gemma2)
+        );
+        assert_eq!(map_architecture_token("custom-llama-adapter"), None);
+    }
 }
