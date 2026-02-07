@@ -35,9 +35,9 @@
 | **REQ-LOADER-015** | ONNX 命名规则解析 | 解析 ONNX 文件名的精度类型 | 1. 识别 `onnx/model_{precision}.onnx` 格式<br>2. 支持 fp32/fp16/int8/uint8/q4 等精度标识<br>3. 自动选择最优加载路径 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-016** | 智能源选择 | HF 不可用时自动切换到 ModelScope | 1. HF 下载失败时自动尝试 ModelScope<br>2. 支持配置优先级 (HF→MS 或 MS→HF)<br>3. 记录源切换日志 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
-| **REQ-LOADER-018** | 运行时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
-| **REQ-LOADER-019** | GGUF 模型 Manifest 推断 | 为缺少 config.json 的 GGUF 模型自动推断架构信息 | 1. 基于 Model ID 命名规则推断架构 (如 `*-gguf` → 对应原始模型架构)<br>2. 支持常见 GGUF 模型系列的自动映射 (llama/GGUF → Llama4, qwen/GGUF → Qwen3, etc.)<br>3. 提供手动 manifest 覆盖机制<br>4. 在 `Loader::from()` 失败时自动尝试 SafeTensors 版本的架构 | 📋 待实现 |
-| **REQ-LOADER-020** | 模型别名注册表 | 支持常用模型的短名称/别名映射 | 1. 内置常见模型别名 (如 `bge-reranker` → `BAAI/bge-reranker-v2-m3`)<br>2. 支持用户自定义别名配置<br>3. 别名解析优先于 Model ID 直接加载<br>4. 提供别名列表查询 API | 📋 待实现 |
+| **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
+| **REQ-LOADER-019** | GGUF 模型 Manifest 推断 | 为缺少 config.json 的 GGUF 模型自动推断架构信息 | 1. 基于 Model ID 命名规则推断架构 (如 `*-gguf` → 对应原始模型架构)<br>2. 从 GGUF 元数据中提取架构信息 (tensor names, architecture type)<br>3. **禁止模型别名系统** - 完全基于下载的模型文件自动识别<br>4. 在 `Loader::from()` 失败时自动尝试 SafeTensors 版本的架构 | 📋 待实现 |
+| **REQ-LOADER-020** | BERT/RoBERTa 架构支持 | 支持 BERT/RoBERTa 系列 Embedding 模型 | 1. 实现 BERTAdapter (类似 XLMRAdapter)<br>2. 从 config.json 识别 `model_type: "bert"` / `"roberta"`<br>3. 支持 Embedding/Reranker 功能<br>4. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
 
 
 ## 3. 核心功能 (REQ-CORE)
@@ -59,7 +59,7 @@
 | **REQ-SCHED-012 | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-SCHED-013 | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. **取代** Chunked Prefill<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 📋 待实现 (Generator) |
+| **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 📋 待实现 (Generator) |
 | **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 📋 待实现 |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-002 | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
