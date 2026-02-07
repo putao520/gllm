@@ -37,9 +37,12 @@
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 | **REQ-LOADER-019** | GGUF 模型 Manifest 推断 | 为缺少 config.json 的 GGUF 模型自动推断架构信息 | 1. 基于 Model ID 命名规则推断架构 (如 `*-gguf` → 对应原始模型架构)<br>2. 从 GGUF 元数据中提取架构信息 (tensor names, architecture type)<br>3. **禁止模型别名系统** - 完全基于下载的模型文件自动识别<br>4. 在 `Loader::from()` 失败时自动尝试 SafeTensors 版本的架构 | 📋 待实现 |
-| **REQ-LOADER-020** | BERT/RoBERTa 架构支持 | 支持 BERT/RoBERTa 系列 Embedding 模型 | 1. 实现 BERTAdapter (类似 XLMRAdapter)<br>2. 从 config.json 识别 `model_type: "bert"` / `"roberta"`<br>3. 支持 Embedding/Reranker 功能<br>4. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
-| **REQ-LOADER-021** | BGE/Jina Embedding 架构支持 | 支持主流第三方 Embedding 模型 | 1. 支持 BAAI/bge 系列 (bge-base, bge-large, bge-m3)<br>2. 支持 jinaai/jina 系列 (jina-embeddings, jina-reranker)<br>3. 支持 Cohere/cohere 系列 (embed-v3, rerank-v3)<br>4. 从 config.json 自动识别架构<br>5. 复用现有 BERT/XLMR Adapter 或实现专用 Adapter | 📋 待实现 |
-| **REQ-LOADER-022** | E5 Embedding 架构独立支持 | 为 intfloat/e5 系列提供专用 Adapter | 1. 实现 E5Adapter (当前复用 Qwen3Embed)<br>2. 支持 multilingual-e5-small/large/instruct<br>3. 优化 E5 特有的推理路径 | 📋 待实现 |
+| **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
+| **REQ-LOADER-021** | Kimi/Moonshot 架构支持 | 支持 Moonshot Kimi K2/K2.5 系列 | 1. 实现 KimiAdapter<br>2. 支持 MoE 架构 (1T 总参数, 32B 激活)<br>3. 从 config.json 识别 `model_type: "kimi"`<br>4. 支持模型: moonshotai/Kimi-K2-Instruct<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
+| **REQ-LOADER-022** | BERT/RoBERTa 架构独立支持 | 为 BERT/RoBERTa 系列提供专用 Adapter | 1. 实现 BERTAdapter (类似 XLMRAdapter)<br>2. 从 config.json 识别 `model_type: "bert"` / `"roberta"`<br>3. 支持 Embedding/Reranker 功能<br>4. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
+| **REQ-LOADER-023** | BGE/Jina/Cohere Embedding 支持 | 支持主流第三方 Embedding 模型 | 1. **BGE 系列**: BAAI/bge-large, bge-m3 (使用 BERTAdapter)<br>2. **Jina 系列**: jinaai/jina-embeddings-v2, jina-reranker-v2 (ColBERT 架构)<br>3. **Cohere 系列**: 闭源 API (无需实现)<br>4. 从 config.json 自动识别架构 | 📋 待实现 |
+| **REQ-LOADER-024** | E5 Embedding 架构独立支持 | 为 intfloat/e5 系列提供专用 Adapter | 1. 实现 E5Adapter (当前复用 Qwen3Embed)<br>2. 支持 multilingual-e5-small/large/instruct<br>3. 优化 E5 特有的推理路径 | 📋 待实现 |
+| **REQ-LOADER-025** | Jina ColBERT 架构支持 | 支持 Jina 系列的 ColBERT 架构 | 1. 实现 ColBERTAdapter (支持双塔编码)<br>2. 支持 jinaai/jina-embeddings-v2, jina-reranker-v2<br>3. 优化 ColBERT 特有的推理路径 (双塔前向传播) | 📋 待实现 |
 
 
 ## 3. 核心功能 (REQ-CORE)
