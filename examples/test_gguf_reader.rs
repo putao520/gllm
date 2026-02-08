@@ -1,8 +1,9 @@
 use gllm::loader::gguf::GgufReader;
+use std::env;
 
 fn main() {
-    let path = "/home/putao/.gllm/models/Mungert--SmolLM2-135M-Instruct-GGUF/SmolLM2-135M-Instruct-bf16.gguf";
-    let reader = GgufReader::open(path).expect("open reader");
+    let path = env::args().nth(1).expect("provide GGUF path");
+    let reader = GgufReader::open(&path).expect("open reader");
 
     println!("Version: {}", reader.version());
     println!("Tensor count: {}", reader.tensor_count());
@@ -11,7 +12,7 @@ fn main() {
     println!("\n=== KV Metadata ===");
     for (i, (key, value)) in reader.metadata().iter().enumerate() {
         println!("{}: key='{}', value={:?}", i, key, value);
-        if i >= 20 {
+        if i >= 45 {
             break;
         }
     }

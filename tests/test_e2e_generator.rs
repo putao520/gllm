@@ -47,6 +47,11 @@ fn e2e_generator_gguf() {
     let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Chat);
 
+    // Debug: print config
+    println!("=== Manifest Config ===");
+    println!("kind: {:?}", manifest.kind);
+    println!("tensor_rules: {:?}", manifest.tensor_rules);
+
     let response = client
         .generate("The capital of France is")
         .max_tokens(10)

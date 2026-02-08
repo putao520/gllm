@@ -114,6 +114,7 @@ impl ModelConfig {
         let mut gguf_metadata_error: Option<ModelConfigError> = None;
         let mut safetensors_metadata_error: Option<ModelConfigError> = None;
 
+        // GGUF 格式：优先从张量+元数据推导配置
         if loader.weight_format() == WeightFormat::Gguf {
             match Self::from_gguf_loader(manifest, loader) {
                 Ok(config) => return Ok(config),
@@ -121,14 +122,34 @@ impl ModelConfig {
             }
         }
 
+        // SafeTensors 格式：优先张量驱动推导 (REQ-LOADER-022)，回退 gllm.config
         if loader.weight_format() == WeightFormat::SafeTensors {
-            match Self::from_safetensors_loader(manifest, loader) {
-                Ok(Some(config)) => return Ok(config),
-                Ok(None) => {}
-                Err(err) => safetensors_metadata_error = Some(err),
+            // 优先尝试张量驱动推导
+            match Self::from_safetensors_loader_tensor_driven(manifest, loader) {
+                Ok(config) => return Ok(config),
+                Err(_) => {
+                    // 回退到 gllm.config 元数据
+                    match Self::from_safetensors_loader(manifest, loader) {
+                        Ok(Some(config)) => return Ok(config),
+                        Ok(None) => {}
+                        Err(err) => safetensors_metadata_error = Some(err),
+                    }
+                }
             }
         }
 
+        // ONNX 格式：张量驱动推导 (REQ-LOADER-023)
+        if loader.weight_format() == WeightFormat::Onnx {
+            match Self::from_onnx_loader_tensor_driven(manifest, loader) {
+                Ok(config) => return Ok(config),
+                Err(err) => {
+                    // ONNX 没有 config.json 回退，记录错误继续
+                    safetensors_metadata_error = Some(err);
+                }
+            }
+        }
+
+        // 回退：从 config.json 读取（最低优先级）
         if let Some(path) = loader.config_path().map(|path| path.to_path_buf()) {
             return Self::from_path_with_loader(manifest, &path, loader);
         }
@@ -193,6 +214,368 @@ impl ModelConfig {
         Self::from_value(manifest, &value, weight_dtype_size).map(Some)
     }
 
+    /// REQ-LOADER-022: SafeTensors 张量驱动配置推导
+    ///
+    /// 遵循 ARCH-TENSOR-DRIVEN 原则：
+    /// - 优先级：张量形状 > gllm.config 元数据 > config.json
+    /// - 从 embedding 张量推导 vocab_size（取较大维度）
+    /// - 从 Q 投影张量推导 head_dim（q_out / num_heads）
+    /// - 从权重张量 dtype 推导 dtype_size
+    fn from_safetensors_loader_tensor_driven(
+        manifest: &ModelManifest,
+        loader: &mut Loader,
+    ) -> ModelConfigResult<Self> {
+        let st_loader = loader.safetensors_loader().map_err(|err| {
+            ModelConfigError::InvalidConfig(format!("failed to access SafeTensors loader: {err}"))
+        })?;
+
+        let names = st_loader.names();
+
+        // ARCH-TENSOR-DRIVEN: 从 embedding tensor 推导 vocab_size 和 hidden_size
+        let emb_name = names.iter().find(|name: &&String| {
+            name.contains("embed_tokens.weight")
+                || name.contains("word_embeddings.weight")
+                || name.contains("wte.weight")
+                || name.contains("embeddings.weight")
+        });
+
+        let (vocab_size, hidden_size) = if let Some(name) = emb_name {
+            let meta = st_loader.tensor_meta(name).ok_or_else(|| {
+                ModelConfigError::InvalidConfig(format!("embedding tensor {name} metadata missing"))
+            })?;
+            if meta.shape.len() >= 2 {
+                let dim0 = meta.shape[0];
+                let dim1 = meta.shape[1];
+                // vocab_size 是较大维度，hidden_size 是较小维度
+                if dim0 > dim1 {
+                    (dim0, dim1)
+                } else {
+                    (dim1, dim0)
+                }
+            } else {
+                return Err(ModelConfigError::InvalidConfig(
+                    "embedding tensor shape must have at least 2 dimensions".to_string(),
+                ));
+            }
+        } else {
+            return Err(ModelConfigError::InvalidConfig(
+                "cannot find embedding tensor in SafeTensors for vocab_size derivation".to_string(),
+            ));
+        };
+
+        // ARCH-TENSOR-DRIVEN: 从 Q 投影张量推导 head_dim 和 num_heads
+        let q_proj_name = names.iter().find(|name: &&String| {
+            (name.contains("q_proj.weight") || name.contains("self_attn.q_proj"))
+                && name.contains("layers.0.")
+        });
+
+        let (num_attention_heads, head_dim) = if let Some(name) = q_proj_name {
+            let meta = st_loader.tensor_meta(name).ok_or_else(|| {
+                ModelConfigError::InvalidConfig(format!("Q projection tensor {name} metadata missing"))
+            })?;
+            // Q shape: [hidden_size, num_heads * head_dim] 或 [num_heads * head_dim, hidden_size]
+            let q_out = meta.shape.iter().copied().max().unwrap_or(0);
+            // 使用常见的 head_dim 值尝试推导
+            let possible_head_dims = [64, 128, 96, 80, 112, 256];
+            let mut found_heads = 0usize;
+            let mut found_head_dim = 0usize;
+            for hd in possible_head_dims {
+                if q_out % hd == 0 {
+                    let heads = q_out / hd;
+                    // 验证 heads 合理（通常 8-128）
+                    if heads >= 4 && heads <= 256 {
+                        found_heads = heads;
+                        found_head_dim = hd;
+                        break;
+                    }
+                }
+            }
+            if found_heads == 0 {
+                // 回退：假设 hidden_size / num_heads = head_dim
+                // 尝试常见的 heads 数量
+                for heads in [32, 64, 16, 48, 40, 8, 12, 24, 28, 36] {
+                    if hidden_size % heads == 0 {
+                        found_heads = heads;
+                        found_head_dim = hidden_size / heads;
+                        break;
+                    }
+                }
+            }
+            if found_heads == 0 {
+                return Err(ModelConfigError::InvalidConfig(
+                    "cannot derive num_heads and head_dim from Q projection tensor".to_string(),
+                ));
+            }
+            (found_heads, found_head_dim)
+        } else {
+            // 无 Q 投影（可能是 Embedding 模型），使用默认
+            (0, 0)
+        };
+
+        // 从张量推导层数
+        let num_hidden_layers = names
+            .iter()
+            .filter_map(|name: &String| {
+                // 匹配 layers.N. 或 encoder.layer.N. 模式
+                if let Some(idx) = name.find("layers.") {
+                    let rest = &name[idx + 7..];
+                    rest.split('.').next()?.parse::<usize>().ok()
+                } else if let Some(idx) = name.find("encoder.layer.") {
+                    let rest = &name[idx + 14..];
+                    rest.split('.').next()?.parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .max()
+            .map(|max_idx| max_idx + 1)
+            .unwrap_or(0);
+
+        // 检测 dtype_size
+        let dtype_size = st_loader.detect_weight_dtype_size().ok_or_else(|| {
+            ModelConfigError::InvalidConfig(
+                "cannot detect dtype_size from SafeTensors weights".to_string(),
+            )
+        })?;
+
+        // num_key_value_heads: 尝试从 k_proj 推导
+        let k_proj_name = names.iter().find(|name: &&String| {
+            (name.contains("k_proj.weight") || name.contains("self_attn.k_proj"))
+                && name.contains("layers.0.")
+        });
+        let num_key_value_heads = if let Some(name) = k_proj_name {
+            if let Some(meta) = st_loader.tensor_meta(name) {
+                let k_out = meta.shape.iter().copied().max().unwrap_or(0);
+                if head_dim > 0 && k_out % head_dim == 0 {
+                    k_out / head_dim
+                } else {
+                    num_attention_heads
+                }
+            } else {
+                num_attention_heads
+            }
+        } else {
+            num_attention_heads
+        };
+
+        // 从 gllm.config 或 manifest 获取其他配置
+        let max_position_embeddings = manifest.max_context_override.unwrap_or(4096);
+        let rope_theta = manifest.rope_base_override.unwrap_or(10000.0);
+        let kv_cache_block_size = if head_dim > 0 {
+            head_dim.max(num_key_value_heads)
+        } else {
+            64
+        };
+
+        Ok(Self {
+            hidden_size,
+            num_attention_heads,
+            num_key_value_heads,
+            num_hidden_layers,
+            num_experts: None,
+            expert_intermediate_size: None,
+            vocab_size,
+            max_position_embeddings,
+            rope_theta,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            rope_scaling: None,
+            kv_cache_block_size,
+            head_dim,
+            dtype_size,
+            use_cache: None,
+            tie_word_embeddings: None,
+            attention_dropout: None,
+            hidden_act: None,
+            layer_norm_epsilon: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+        })
+    }
+
+    /// REQ-LOADER-023: ONNX 张量驱动配置推导
+    ///
+    /// 遵循 ARCH-TENSOR-DRIVEN 原则：
+    /// - 优先级：initializer 形状 > ONNX attributes > 外部 config.json
+    /// - 从 embedding initializer 推导 vocab_size（取较大维度）
+    /// - 从 Q 投影 initializer 推导 head_dim（q_out / num_heads）
+    /// - 从 initializer dtype 推导 dtype_size
+    fn from_onnx_loader_tensor_driven(
+        manifest: &ModelManifest,
+        loader: &mut Loader,
+    ) -> ModelConfigResult<Self> {
+        let onnx_loader = loader.onnx_loader().map_err(|err| {
+            ModelConfigError::InvalidConfig(format!("failed to access ONNX loader: {err}"))
+        })?;
+
+        let names = onnx_loader.names();
+
+        // ARCH-TENSOR-DRIVEN: 从 embedding initializer 推导 vocab_size 和 hidden_size
+        let emb_name = names.iter().find(|name: &&String| {
+            name.contains("embed_tokens.weight")
+                || name.contains("word_embeddings")
+                || name.contains("wte.weight")
+                || name.contains("embeddings.weight")
+                || name.ends_with("Embed")
+        });
+
+        let (vocab_size, hidden_size) = if let Some(name) = emb_name {
+            let tensor = onnx_loader.tensor(name).map_err(|err| {
+                ModelConfigError::InvalidConfig(format!("failed to read embedding tensor: {err}"))
+            })?;
+            if tensor.shape.len() >= 2 {
+                let dim0 = tensor.shape[0];
+                let dim1 = tensor.shape[1];
+                if dim0 > dim1 {
+                    (dim0, dim1)
+                } else {
+                    (dim1, dim0)
+                }
+            } else {
+                return Err(ModelConfigError::InvalidConfig(
+                    "embedding tensor shape must have at least 2 dimensions".to_string(),
+                ));
+            }
+        } else {
+            return Err(ModelConfigError::InvalidConfig(
+                "cannot find embedding initializer in ONNX for vocab_size derivation".to_string(),
+            ));
+        };
+
+        // ARCH-TENSOR-DRIVEN: 从 Q 投影 initializer 推导 head_dim 和 num_heads
+        let q_proj_name = names.iter().find(|name: &&String| {
+            name.contains("q_proj.weight")
+                || name.contains("query.weight")
+                || name.contains("self_attn.q_proj")
+        });
+
+        let (num_attention_heads, head_dim) = if let Some(name) = q_proj_name {
+            let tensor = onnx_loader.tensor(name).map_err(|err| {
+                ModelConfigError::InvalidConfig(format!("failed to read Q projection tensor: {err}"))
+            })?;
+            let q_out = tensor.shape.iter().copied().max().unwrap_or(0);
+            let possible_head_dims = [64, 128, 96, 80, 112, 256];
+            let mut found_heads = 0usize;
+            let mut found_head_dim = 0usize;
+            for hd in possible_head_dims {
+                if q_out % hd == 0 {
+                    let heads = q_out / hd;
+                    if heads >= 4 && heads <= 256 {
+                        found_heads = heads;
+                        found_head_dim = hd;
+                        break;
+                    }
+                }
+            }
+            if found_heads == 0 {
+                for heads in [32, 64, 16, 48, 40, 8, 12, 24, 28, 36] {
+                    if hidden_size % heads == 0 {
+                        found_heads = heads;
+                        found_head_dim = hidden_size / heads;
+                        break;
+                    }
+                }
+            }
+            if found_heads == 0 {
+                return Err(ModelConfigError::InvalidConfig(
+                    "cannot derive num_heads and head_dim from ONNX Q projection".to_string(),
+                ));
+            }
+            (found_heads, found_head_dim)
+        } else {
+            (0, 0)
+        };
+
+        // 从 initializer 名称推导层数
+        let num_hidden_layers = names
+            .iter()
+            .filter_map(|name: &String| {
+                if let Some(idx) = name.find("layers.") {
+                    let rest = &name[idx + 7..];
+                    rest.split('.').next()?.parse::<usize>().ok()
+                } else if let Some(idx) = name.find("encoder.layer.") {
+                    let rest = &name[idx + 14..];
+                    rest.split('.').next()?.parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .max()
+            .map(|max_idx| max_idx + 1)
+            .unwrap_or(0);
+
+        // 检测 dtype_size from ONNX tensors
+        let precisions = onnx_loader.unique_precisions();
+        let dtype_size = precisions
+            .first()
+            .map(|dtype| match dtype {
+                safetensors::Dtype::F32 => 4,
+                safetensors::Dtype::F16 | safetensors::Dtype::BF16 => 2,
+                safetensors::Dtype::F64 => 8,
+                safetensors::Dtype::I8 | safetensors::Dtype::U8 => 1,
+                _ => 2,
+            })
+            .ok_or_else(|| {
+                ModelConfigError::InvalidConfig(
+                    "cannot detect dtype_size from ONNX initializers".to_string(),
+                )
+            })?;
+
+        // num_key_value_heads: 尝试从 k_proj 推导
+        let k_proj_name = names.iter().find(|name: &&String| {
+            name.contains("k_proj.weight") || name.contains("key.weight")
+        });
+        let num_key_value_heads = if let Some(name) = k_proj_name {
+            if let Ok(tensor) = onnx_loader.tensor(name) {
+                let k_out = tensor.shape.iter().copied().max().unwrap_or(0);
+                if head_dim > 0 && k_out % head_dim == 0 {
+                    k_out / head_dim
+                } else {
+                    num_attention_heads
+                }
+            } else {
+                num_attention_heads
+            }
+        } else {
+            num_attention_heads
+        };
+
+        let max_position_embeddings = manifest.max_context_override.unwrap_or(4096);
+        let rope_theta = manifest.rope_base_override.unwrap_or(10000.0);
+        let kv_cache_block_size = if head_dim > 0 {
+            head_dim.max(num_key_value_heads)
+        } else {
+            64
+        };
+
+        Ok(Self {
+            hidden_size,
+            num_attention_heads,
+            num_key_value_heads,
+            num_hidden_layers,
+            num_experts: None,
+            expert_intermediate_size: None,
+            vocab_size,
+            max_position_embeddings,
+            rope_theta,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            rope_scaling: None,
+            kv_cache_block_size,
+            head_dim,
+            dtype_size,
+            use_cache: None,
+            tie_word_embeddings: None,
+            attention_dropout: None,
+            hidden_act: None,
+            layer_norm_epsilon: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+        })
+    }
+
     fn from_gguf_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
         let (
             vocab_size,
@@ -224,9 +607,42 @@ impl ModelConfig {
                 ))
             })?;
 
-            let vocab_size_key = format!("{arch}.vocab_size");
-            let vocab_size =
-                require_gguf_usize(reader.get_metadata_u64(&vocab_size_key), &vocab_size_key)?;
+            // ARCH-TENSOR-DRIVEN: vocab_size 优先从 embedding tensor 推导
+            let vocab_size = {
+                // 尝试从 embedding tensor 推导（最可靠）
+                let emb_tensor = reader.tensors().iter().find(|t| {
+                    t.name.contains("token_embd")
+                        || t.name.contains("embed_tokens")
+                        || t.name.contains("wte")
+                        || t.name.contains("word_embeddings")
+                });
+
+                if let Some(t) = emb_tensor {
+                    if t.shape.len() >= 2 {
+                        // embedding shape: [vocab_size, hidden_size] 或 [hidden_size, vocab_size]
+                        let dim0 = t.shape[0] as usize;
+                        let dim1 = t.shape[1] as usize;
+                        // 选择较大的维度作为 vocab_size（通常 vocab >> hidden）
+                        std::cmp::max(dim0, dim1)
+                    } else {
+                        // 回退到元数据
+                        let vocab_size_key = format!("{arch}.vocab_size");
+                        reader.get_metadata_u64(&vocab_size_key)
+                            .and_then(|v| usize::try_from(v).ok())
+                            .ok_or_else(|| ModelConfigError::InvalidConfig(
+                                "cannot determine vocab_size from GGUF tensor or metadata".to_string(),
+                            ))?
+                    }
+                } else {
+                    // 没有找到 embedding tensor，尝试从元数据读取
+                    let vocab_size_key = format!("{arch}.vocab_size");
+                    reader.get_metadata_u64(&vocab_size_key)
+                        .and_then(|v| usize::try_from(v).ok())
+                        .ok_or_else(|| ModelConfigError::InvalidConfig(
+                            "cannot determine vocab_size from GGUF metadata or embedding tensor".to_string(),
+                        ))?
+                }
+            };
             let hidden_size = require_gguf_usize(reader.embedding_length(), "embedding_length")?;
             let num_hidden_layers = require_gguf_usize(reader.block_count(), "block_count")?;
             let num_attention_heads =
@@ -274,22 +690,49 @@ impl ModelConfig {
             let rope_interleaved =
                 gguf_arch_bool(reader, arch, "rope.interleaved").unwrap_or(false);
 
-            let head_dim = if let Some(value) = gguf_arch_usize(reader, arch, "attention.head_dim")
-            {
-                value
-            } else if let Some(value) = reader.rope_dimension_count() {
-                usize::try_from(value).map_err(|_| {
-                    ModelConfigError::InvalidConfig(
-                        "GGUF metadata field overflow: rope.dimension_count".to_string(),
-                    )
-                })?
-            } else {
-                if num_attention_heads == 0 || hidden_size % num_attention_heads != 0 {
-                    return Err(ModelConfigError::InvalidConfig(
-                        "cannot derive head_dim from GGUF metadata".to_string(),
-                    ));
+            // ARCH-TENSOR-DRIVEN: head_dim 优先从 Q 投影张量推导（最可靠）
+            let head_dim = {
+                // 尝试从 Q 投影张量推导 head_dim
+                let q_tensor = reader.tensors().iter().find(|t| {
+                    t.name.contains("attn_q.weight")
+                        || t.name.contains("q_proj.weight")
+                        || t.name.contains("self_attn.q_proj")
+                        || t.name.contains("attention.wq")
+                });
+
+                if let Some(q) = q_tensor {
+                    // Q shape: [hidden_size, num_heads * head_dim] 或类似
+                    // 选择较大维度作为 q_out
+                    let q_out = q.shape.iter().copied().max().unwrap_or(0) as usize;
+                    if num_attention_heads > 0 && q_out > 0 && q_out % num_attention_heads == 0 {
+                        q_out / num_attention_heads
+                    } else if let Some(value) = gguf_arch_usize(reader, arch, "attention.head_dim") {
+                        value
+                    } else if let Some(value) = reader.rope_dimension_count() {
+                        usize::try_from(value).map_err(|_| {
+                            ModelConfigError::InvalidConfig(
+                                "GGUF metadata field overflow: rope.dimension_count".to_string(),
+                            )
+                        })?
+                    } else {
+                        hidden_size / num_attention_heads
+                    }
+                } else if let Some(value) = gguf_arch_usize(reader, arch, "attention.head_dim") {
+                    value
+                } else if let Some(value) = reader.rope_dimension_count() {
+                    usize::try_from(value).map_err(|_| {
+                        ModelConfigError::InvalidConfig(
+                            "GGUF metadata field overflow: rope.dimension_count".to_string(),
+                        )
+                    })?
+                } else {
+                    if num_attention_heads == 0 || hidden_size % num_attention_heads != 0 {
+                        return Err(ModelConfigError::InvalidConfig(
+                            "cannot derive head_dim from GGUF metadata".to_string(),
+                        ));
+                    }
+                    hidden_size / num_attention_heads
                 }
-                hidden_size / num_attention_heads
             };
 
             if num_attention_heads > 0 && head_dim == 0 {

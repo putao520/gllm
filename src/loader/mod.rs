@@ -919,6 +919,22 @@ impl Loader {
         self.gguf.as_ref().ok_or(LoaderError::MissingWeights)
     }
 
+    /// 获取 SafeTensors 加载器引用
+    ///
+    /// 用于张量驱动配置推导 (REQ-LOADER-022)
+    pub fn safetensors_loader(&mut self) -> Result<&SafeTensorsLoader> {
+        self.ensure_safetensors()?;
+        self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)
+    }
+
+    /// 获取 ONNX 加载器引用
+    ///
+    /// 用于张量驱动配置推导 (REQ-LOADER-023)
+    pub fn onnx_loader(&mut self) -> Result<&OnnxLoader> {
+        self.ensure_onnx()?;
+        self.onnx.as_ref().ok_or(LoaderError::MissingWeights)
+    }
+
     pub fn safetensors_gllm_config(&mut self) -> Result<Option<&Value>> {
         if self.files.format != WeightFormat::SafeTensors {
             return Ok(None);
@@ -1049,6 +1065,9 @@ impl Loader {
         self.ensure_gguf()?;
         let loader = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
 
+        // 获取架构类型，用于名称规范化（Ω1: 使用模型元数据驱动）
+        let architecture = loader.architecture().unwrap_or("unknown");
+
         let mut handle = WeightsHandle::default();
         let mut visited = HashSet::new();
         let tensor_names = loader.names();
@@ -1068,6 +1087,14 @@ impl Loader {
                 _ => None,
             };
 
+            // 规范化 GGUF 张量名称为内核期望的格式（Ω1: 元数据驱动）
+            let normalized_name = normalize_gguf_weight_name(&name, architecture);
+
+            // DEBUG: 打印 layer 0 的 MLP 张量名称转换
+            if name.contains("blk.0") && name.contains("ffn") {
+                eprintln!("DEBUG: GGUF '{}' -> '{}'", name, normalized_name);
+            }
+
             if let Some(qtype) = qtype {
                 let owned = match qtype {
                     gllm_kernels::QuantizedType::Q4_0 => {
@@ -1081,7 +1108,7 @@ impl Loader {
                         dequantize_q4_0(&matrix, &mut out)
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
                         OwnedTensor::F32 {
-                            name: name.clone(),
+                            name: normalized_name,
                             shape: shape.clone(),
                             data: out,
                         }
@@ -1097,7 +1124,7 @@ impl Loader {
                         dequantize_q8_0(&matrix, &mut out)
                             .map_err(|err| LoaderError::Backend(format!("{err:?}")))?;
                         OwnedTensor::F32 {
-                            name: name.clone(),
+                            name: normalized_name,
                             shape: shape.clone(),
                             data: out,
                         }
@@ -1117,7 +1144,7 @@ impl Loader {
 
             let data = gguf_tensor_to_f32(&tensor)?;
             let owned = OwnedTensor::F32 {
-                name: name.clone(),
+                name: normalized_name,
                 shape,
                 data,
             };
@@ -1764,6 +1791,91 @@ fn normalize_onnx_weight_name(name: &str) -> String {
     if normalized.ends_with(".final_norm_layernorm.weight") {
         normalized = "model.norm.weight".to_string();
     }
+    normalized
+}
+
+/// 规范化 GGUF 权重名称为内核期望的格式
+///
+/// GGUF 格式使用不同的命名约定，需要转换为内核能识别的格式：
+/// - `blk.{layer}.xxx` -> `model.layers.{layer}.xxx`
+/// - `output.weight` -> `lm_head.weight`
+/// - `token_embd.weight` -> `model.embed_tokens.weight`
+/// - 添加 `.weight` 后缀（如果缺失）
+/// - 名称映射: `attn_{q,k,v,o}` -> `{q,k,v,o}_proj`, `ffn_{gate,up,down}` -> `{gate,up,down}_proj`
+fn normalize_gguf_weight_name(name: &str, _architecture: &str) -> String {
+    let mut normalized = name.to_string();
+
+    // 前缀映射: blk.{layer} -> model.layers.{layer}
+    if normalized.starts_with("blk.") {
+        normalized = normalized.replacen("blk.", "model.layers.", 1);
+    }
+
+    // 特殊层名称映射
+    let replacements = [
+        ("token_embd.weight", "model.embed_tokens.weight"),
+        ("output.weight", "lm_head.weight"),
+        // Qwen2/Qwen3 特定映射
+        ("attn_q.", "attention.q_proj."),
+        ("attn_k.", "attention.k_proj."),
+        ("attn_v.", "attention.v_proj."),
+        ("attn_o.", "attention.o_proj."),
+        ("ffn_up.", "mlp.up_proj."),
+        ("ffn_gate.", "mlp.gate_proj."),
+        ("ffn_down.", "mlp.down_proj."),
+        // feed_forward_w1/w2/w3 映射 (某些 GGUF 格式)
+        (".feed_forward_w1.", ".mlp.gate_proj."),
+        (".feed_forward_w2.", ".mlp.down_proj."),
+        (".feed_forward_w3.", ".mlp.up_proj."),
+        // 通用映射
+        (".attn_q_", ".attention.q_proj."),
+        (".attn_k_", ".attention.k_proj."),
+        (".attn_v_", ".attention.v_proj."),
+        (".attn_o_", ".attention.o_proj."),
+        (".ffn_up_", ".mlp.up_proj."),
+        (".ffn_gate_", ".mlp.gate_proj."),
+        (".ffn_down_", ".mlp.down_proj."),
+    ];
+
+    for (from, to) in replacements {
+        if normalized.contains(from) {
+            normalized = normalized.replace(from, to);
+        }
+    }
+
+    // 确保 MLP 权重有正确的格式
+    // Qwen2/Qwen3 GGUF 可能使用 `blk.{layer}.ffn_gate.weight`
+    // 需要转换为 `model.layers.{layer}.mlp.gate_proj.weight`
+    if let Some(idx) = normalized.find(".ffn_") {
+        let rest = &normalized[idx..];
+        if rest.starts_with(".ffn_gate.") {
+            normalized = normalized.replacen(".ffn_gate.", ".mlp.gate_proj.", 1);
+        } else if rest.starts_with(".ffn_up.") {
+            normalized = normalized.replacen(".ffn_up.", ".mlp.up_proj.", 1);
+        } else if rest.starts_with(".ffn_down.") {
+            normalized = normalized.replacen(".ffn_down.", ".mlp.down_proj.", 1);
+        }
+    }
+
+    // 确保 attention 层名称正确 (attn_ -> attention.)
+    if let Some(idx) = normalized.find(".attn_") {
+        let rest = &normalized[idx..];
+        if rest.starts_with(".attn_q.") {
+            normalized = normalized.replacen(".attn_q.", ".attention.q_proj.", 1);
+        } else if rest.starts_with(".attn_k.") {
+            normalized = normalized.replacen(".attn_k.", ".attention.k_proj.", 1);
+        } else if rest.starts_with(".attn_v.") {
+            normalized = normalized.replacen(".attn_v.", ".attention.v_proj.", 1);
+        } else if rest.starts_with(".attn_o.") {
+            normalized = normalized.replacen(".attn_o.", ".attention.o_proj.", 1);
+        }
+    }
+
+    // 确保以 .weight 或 .bias 结尾
+    if !normalized.ends_with(".weight") && !normalized.ends_with(".bias") {
+        // 某些 GGUF 张量没有 .weight 后缀，添加它
+        normalized.push_str(".weight");
+    }
+
     normalized
 }
 

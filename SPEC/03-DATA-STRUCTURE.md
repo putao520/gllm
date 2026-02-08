@@ -241,35 +241,97 @@ impl ModelConfig {
     }
 }
 ```
-| U8 | `u8` | 1 |
-| U16 | `u16` | 2 |
-| U32 | `u32` | 4 |
-| U64 | `u64` | 8 |
-| BOOL | `u8` (bit-packed) | 1/8 |
 
 ---
 
-## 5. 模型配置数据结构 (DATA-MODEL-CONFIG)
+## 6. 张量驱动配置推导 (DATA-TENSOR-DRIVEN)
 
-> **关联需求**: REQ-LOADER-007, REQ-LOADER-021
+> **核心原则**: ARCH-TENSOR-DRIVEN
+> **关联需求**: REQ-LOADER-022, REQ-LOADER-023
 
-### 5.1 通用配置字段
+### 6.1 配置优先级
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `hidden_size` | u64 | Hidden dimension |
-| `num_hidden_layers` | u64 | 层数 |
-| `num_attention_heads` | u64 | Attention heads |
-| `num_key_value_heads` | u64 | KV heads (GQA) |
-| `vocab_size` | u64 | 词汇表大小 |
-| `max_position_embeddings` | u64 | 最大序列长度 |
-| `rope_theta` | f32 | RoPE base frequency |
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 (最高) | 张量形状 | 从实际权重张量推导配置 |
+| 2 | 模型元数据 | GGUF metadata / ONNX attributes / gllm.config |
+| 3 (最低) | config.json | 仅作为最后回退 |
 
-### 5.2 架构特定配置
+### 6.2 通用推导规则
 
-| 架构 | 特殊字段 |
-|------|----------|
-| Llama | `sliding_window`, `attention_dropout` |
-| Qwen | `use_sliding_window`, `rope_alpha` |
-| Mistral | `sliding_window_pattern`, `attention_bias` |
-| DeepSeek | `moe` 相关配置 |
+| 配置字段 | 推导方法 | 张量来源 |
+|----------|----------|----------|
+| `vocab_size` | 从 embedding tensor shape 取较大维度 | `token_embd`, `embed_tokens`, `wte`, `word_embeddings` |
+| `head_dim` | 从 Q projection tensor: `q_out / num_heads` | `attn_q`, `q_proj`, `self_attn.q_proj`, `attention.wq` |
+| `hidden_size` | 从 embedding tensor 或 attention tensor | 同 `vocab_size` 来源 |
+| `dtype_size` | 从权重张量实际 dtype | 任意浮点张量 |
+
+### 6.3 格式特定推导规则
+
+#### 6.3.1 GGUF 格式 (已实现)
+
+| 字段 | 推导方法 | 回退策略 |
+|------|----------|----------|
+| `vocab_size` | `token_embd.weight` shape 较大维度 | `{arch}.vocab_size` 元数据 |
+| `head_dim` | `attn_q.weight` shape / `num_heads` | `attention.head_dim` 或 `rope.dimension_count` 元数据 |
+| `dtype_size` | 检测第一个浮点张量 dtype | 必须存在，否则报错 |
+
+**实现位置**: `src/model_config.rs::from_gguf_loader()`
+
+#### 6.3.2 SafeTensors 格式 (待实现 - REQ-LOADER-022)
+
+| 字段 | 推导方法 | 回退策略 |
+|------|----------|----------|
+| `vocab_size` | `model.embed_tokens.weight` / `embeddings.word_embeddings.weight` shape 较大维度 | `gllm.config` 元数据 → `config.json` |
+| `head_dim` | `model.layers.0.self_attn.q_proj.weight` shape / `num_heads` | `gllm.config` 元数据 → `config.json` |
+| `dtype_size` | 检测权重张量 dtype (F16/BF16/F32) | 必须存在，否则报错 |
+
+**张量名称模式**:
+- Embedding: `model.embed_tokens.weight`, `embeddings.word_embeddings.weight`, `transformer.wte.weight`
+- Q Projection: `model.layers.{N}.self_attn.q_proj.weight`, `encoder.layer.{N}.attention.self.query.weight`
+
+**实现要求**:
+1. 新增 `from_safetensors_loader_tensor_driven()` 方法
+2. 遍历张量列表查找 embedding/Q projection
+3. 优先使用张量形状，仅在找不到时回退
+
+#### 6.3.3 ONNX 格式 (待实现 - REQ-LOADER-023)
+
+| 字段 | 推导方法 | 回退策略 |
+|------|----------|----------|
+| `vocab_size` | `embed_tokens.weight` / `word_embeddings` initializer shape 较大维度 | ONNX graph attributes → 外部 config.json |
+| `head_dim` | `q_proj.weight` / `query.weight` initializer shape / `num_heads` | ONNX graph attributes → 外部 config.json |
+| `dtype_size` | 检测 initializer dtype (FLOAT/FLOAT16/BFLOAT16) | 必须存在，否则报错 |
+
+**Initializer 名称模式**:
+- Embedding: `embed_tokens.weight`, `embeddings.word_embeddings.weight`, `wte.weight`
+- Q Projection: `layers.{N}.self_attn.q_proj.weight`, `encoder.layer.{N}.attention.self.query.weight`
+
+**实现要求**:
+1. 新增 `from_onnx_loader()` 方法
+2. 遍历 graph.initializer 查找 embedding/Q projection
+3. 优先使用 initializer 形状，仅在找不到时回退
+
+### 6.4 Ω1 合规性
+
+```rust
+// ✅ 正确: 从张量推导
+let vocab_size = embedding_tensor.shape.iter().max();
+let head_dim = q_tensor.shape.max() / num_heads;
+
+// ❌ 错误: 信任可能不准确的元数据
+let vocab_size = metadata.get("vocab_size")?;
+let head_dim = hidden_size / num_heads;  // 假设标准比例
+
+// ❌ 错误: 使用硬编码默认值
+let head_dim = config.head_dim.unwrap_or(128);
+let vocab_size = config.vocab_size.unwrap_or(32000);
+```
+
+### 6.5 实现状态
+
+| 格式 | 状态 | 关联需求 |
+|------|------|----------|
+| GGUF | ✅ 已实现 | - |
+| SafeTensors | 📋 待实现 | REQ-LOADER-022 |
+| ONNX | 📋 待实现 | REQ-LOADER-023 |

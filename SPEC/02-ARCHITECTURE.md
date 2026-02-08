@@ -382,37 +382,6 @@ Client::new_chat("Qwen/Qwen3-0.6B")
 3. ✅ 新模型无需修改代码即可使用
 4. ✅ Manifest 仅用于特殊配置覆盖（如非标准 RoPE base）
 
----
-
-#### 旧版 Manifest 文档 (重构前)
-
-> **注意**: 以下描述的是旧版 Manifest 系统，正在重构中。
-
-为了实现"只改配置支持新模型"，我们将 HF 标准化(Downloading)和推理配置(Inference)融合为一个统一的 **Model Manifest** 系统，并移除 Registry 依赖。
-
-**核心原则**: `KnownModel` 枚举是整个系统的 SSOT。
-
-**数据结构字段**：
-
-| 类别 | 字段 | 说明 |
-|------|------|------|
-| **身份与下载** | `model_id` | 内部唯一标识 |
-| | `aliases` | 用户别名 (如 "qwen3-7b") |
-| | `hf_repo` | HF 仓库 ID (主要源) |
-| | `model_scope_repo` | ModelScope 仓库 ID (镜像源) |
-| | `hf_file_map` | 关键文件重命名映射 |
-| **架构适配** | `arch` | 物理架构 (Llama, Qwen3, Bert...) |
-| | `tensor_rules` | 权重命名规则 (前缀/后缀) |
-| **推理参数覆盖** | `rope_base_override` | RoPE 基础覆盖值 |
-| | `max_context_override` | 最大上下文覆盖值 |
-| **MoE 配置** | `num_experts` | 总专家数 |
-| | `num_experts_per_tok` | 激活专家数 (Top-K) |
-| | `router_type` | 路由算法 |
-
-**约束**：所有逻辑（下载、加载、计算）由静态配置驱动，禁止代码逻辑中散落模型判断。
-
----
-
 #### 权重加载策略 (ARCH-LOADER)
 
 1.  **架构自适应 (ARCH-LOADER-ADAPTIVE)**
@@ -648,96 +617,9 @@ fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
 
 ### 1. Chunked Prefill / SplitFuse (ARCH-SCHED-CHUNKED) [DEPRECATED]
 
-> **🔴 状态**: 已废弃。与 2026 Accuracy First 架构中的 Phase Isolation 冲突。
-
-#### 1.1 问题定义 (旧)
-
-传统 Continuous Batching 将 Prefill（填充）和 Decode（解码）阶段完全隔离：
-
-```
-传统方式（阶段隔离）：
-Batch 1: [Prefill-512, Prefill-256] → 完成后清空
-Batch 2: [Decode-1, Decode-1, Decode-1, ...] → 纯 Decode
-```
-
-**问题**：
-1. Prefill 阶段 Decode 请求必须等待，导致 Tail Latency 恶化
-2. GPU 利用率在纯 Prefill 阶段（Memory Bound）和纯 Decode 阶段（Compute Bound）之间波动
-3. 批次切换开销大
-
-#### 1.2 Chunked Prefill 设计
-
-**核心思想**：将长 Prefill 请求切分为多个 Chunk，与 Decode Token 交织调度。
-
-```
-Chunked 方式（交织调度）：
-Batch 1: [Prefill-64, Decode-1, Decode-1, Decode-1, Prefill-64, ...]
-         ↑ Chunk 1      ↑ Decode 插槽    ↑ Chunk 2
-```
-
-**算法流程**：
-
-```
-1. 请求分类
-   ├─ Prefill 请求: 按 chunk_size 切分 (如 64/128 tokens)
-   └─ Decode 请求: 每次 1 token
-
-2. 批次构建 (每次调度)
-   ├─ 优先: Decode 请求 (保证低延迟)
-   ├─ 剩余插槽: 填入 Prefill Chunk
-   └─ 约束: total_tokens ≤ max_batch_tokens
-
-3. 状态跟踪
-   └─ PrefillRequest.pending_chunks > 0 → 继续调度
-```
-
-#### 1.3 SplitFuse 优化
-
-进一步细分 Prefill 阶段：
-
-```
-SplitFuse = 分离 Q/K/V 计算 + 融合 Attention
-
-阶段 A (分离计算，可并行):
-  ├─ Prefill-Chunks[N].Q_proj
-  ├─ Prefill-Chunks[N].K_proj
-  └─ Prefill-Chunks[N].V_proj
-
-阶段 B (融合 Attention，顺序执行):
-  └─ FlashAttention(所有已完成的 Chunk)
-```
-
-**收益**：阶段 A 可充分利用 GPU Tensor Core 并行，阶段 B 利用 FlashAttention 的内存优化。
-
-#### 1.4 架构约束
-
-| 约束 | 说明 | 违规后果 |
-|------|------|----------|
-| **Chunk Size 必须对齐** | 必须是 page_size 的整数倍 | 导致页面边界错误 |
-| **禁止 Chunk 间数据依赖** | 每个 Chunk 必须独立可计算 | 无法并行 |
-| **KV Cache 原子写入** | 单个 Chunk 的 KV Cache 必须完整写入 | 数据竞争 |
-| **AOT CUBIN 兼容** | 不得使用动态 kernel 编译 | 违反 ARCH-AOT-CUBIN |
-
-#### 1.5 API 接口
-
-**配置结构**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `chunk_size` | 数值 | Chunk 大小 (默认 64 tokens) |
-| `decode_slots` | 数值 | 每个 Batch 保留的 Decode 插槽数 |
-| `enable_splitfuse` | 布尔值 | 是否启用 SplitFuse |
-
-**请求类型**：
-- `Prefill` - 包含 total_tokens, completed_chunks, pending_chunks
-- `Decode` - 单 token 解码
-
-**调度器方法**：
-- `build_chunked_batch()` - 构建交织批次
-  1. 收集所有待处理的 Decode 请求
-  2. 计算剩余 token 预算
-  3. 填入 Prefill Chunk
-- `update_chunk_progress()` - 更新 Chunk 状态
+> **🔴 状态**: 已废弃。与 2026 Accuracy First 架构中的 Phase Isolation (ARCH-ACCURACY-ISOLATION) 冲突。
+>
+> 详见 ARCH-ACCURACY 章节中的 "阶段隔离" 设计。
 
 ---
 

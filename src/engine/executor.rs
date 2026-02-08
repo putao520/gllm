@@ -175,6 +175,16 @@ impl<B: Backend + 'static> Executor<B> {
             position_encoding,
         };
 
+        // DEBUG: 打印配置信息
+        eprintln!("=== GeneratorForwardConfig ===");
+        eprintln!("num_layers: {}", forward_config.num_layers);
+        eprintln!("num_heads: {}", forward_config.num_heads);
+        eprintln!("num_kv_heads: {}", forward_config.num_kv_heads);
+        eprintln!("head_dim: {}", forward_config.head_dim);
+        eprintln!("hidden_size (calc): {} * {} = {}", forward_config.num_heads, forward_config.head_dim, forward_config.num_heads * forward_config.head_dim);
+        eprintln!("max_seq_len: {}", forward_config.max_seq_len);
+        eprintln!("vocab_size: {}", forward_config.vocab_size);
+
         let block_size = model_config.kv_cache_block_size;
         let hgal_config = HGALConfig::default();
         let total_blocks = model_config.max_position_embeddings.div_ceil(block_size);
