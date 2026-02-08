@@ -60,7 +60,7 @@
 | **REQ-SCHED-012 | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-SCHED-013 | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. **取代** Chunked Prefill<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 📋 待实现 (Generator) |
+| **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 🟢 已实现 (2026-02-07) [commit: 3a0957d] |
 | **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 📋 待实现 |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-002 | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
