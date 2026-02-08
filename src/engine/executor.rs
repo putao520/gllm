@@ -162,6 +162,7 @@ impl<B: Backend + 'static> Executor<B> {
             _ => PositionEncoding::Rope,
         };
         let forward_config = GeneratorForwardConfig {
+            hidden_size: model_config.hidden_size,
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_attention_heads,
             num_kv_heads: model_config.num_key_value_heads,
@@ -181,7 +182,12 @@ impl<B: Backend + 'static> Executor<B> {
         eprintln!("num_heads: {}", forward_config.num_heads);
         eprintln!("num_kv_heads: {}", forward_config.num_kv_heads);
         eprintln!("head_dim: {}", forward_config.head_dim);
-        eprintln!("hidden_size (calc): {} * {} = {}", forward_config.num_heads, forward_config.head_dim, forward_config.num_heads * forward_config.head_dim);
+        eprintln!(
+            "hidden_size (calc): {} * {} = {}",
+            forward_config.num_heads,
+            forward_config.head_dim,
+            forward_config.num_heads * forward_config.head_dim
+        );
         eprintln!("max_seq_len: {}", forward_config.max_seq_len);
         eprintln!("vocab_size: {}", forward_config.vocab_size);
 

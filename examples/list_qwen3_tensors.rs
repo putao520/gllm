@@ -2,8 +2,7 @@
 use gllm::loader::Loader;
 
 fn main() {
-    let loader = Loader::from("Qwen/Qwen3-0.6B-GGUF")
-        .expect("Failed to load model");
+    let loader = Loader::from("Qwen/Qwen3-0.6B-GGUF").expect("Failed to load model");
 
     let gguf = loader.gguf.as_ref().expect("No GGUF");
     let names = gguf.names();

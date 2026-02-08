@@ -1,6 +1,23 @@
 //! Layer 1: Manifest types (SSOT).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+
+/// Role of a tensor in the model architecture
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TensorRole {
+    Embedding,
+    AttentionQuery,
+    AttentionKey,
+    AttentionValue,
+    AttentionOutput,
+    FfnGate,
+    FfnUp,
+    FfnDown,
+    OutputHead,
+    LayerNorm,
+    Rope,
+}
 
 /// HuggingFace file rename map.
 ///
@@ -100,6 +117,9 @@ pub struct ModelManifest {
 
     // MoE specific configuration (None means read from config.json)
     pub moe_config: Option<MoEConfig>,
+
+    // Tensor map for dynamic loading
+    pub tensor_map: HashMap<TensorRole, String>,
 }
 
 impl ModelManifest {
@@ -109,5 +129,21 @@ impl ModelManifest {
                 self.arch,
                 ModelArchitecture::Qwen3MoE | ModelArchitecture::Llama4
             )
+    }
+}
+
+impl Default for ModelManifest {
+    fn default() -> Self {
+        Self {
+            model_id: Cow::Borrowed("default"),
+            file_map: EMPTY_FILE_MAP,
+            arch: ModelArchitecture::Llama4,
+            tensor_rules: TensorNamingRule::Llama4,
+            kind: ModelKind::Chat,
+            rope_base_override: None,
+            max_context_override: None,
+            moe_config: None,
+            tensor_map: HashMap::new(),
+        }
     }
 }

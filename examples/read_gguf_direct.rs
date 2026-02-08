@@ -40,11 +40,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if rope_dim.is_some() {
         let head_dim = rope_dim.unwrap();
         println!("  head_dim from rope_dimension_count: {}", head_dim);
-        println!("  calculated hidden_size: {} * {} = {}", num_heads, head_dim, num_heads * head_dim);
+        println!(
+            "  calculated hidden_size: {} * {} = {}",
+            num_heads,
+            head_dim,
+            num_heads * head_dim
+        );
     } else {
-        let head_dim = if num_heads > 0 { hidden_size / num_heads } else { 0 };
-        println!("  head_dim derived (hidden/num_heads): {} / {} = {}", hidden_size, num_heads, head_dim);
-        println!("  calculated hidden_size: {} * {} = {}", num_heads, head_dim, num_heads * head_dim);
+        let head_dim = if num_heads > 0 {
+            hidden_size / num_heads
+        } else {
+            0
+        };
+        println!(
+            "  head_dim derived (hidden/num_heads): {} / {} = {}",
+            hidden_size, num_heads, head_dim
+        );
+        println!(
+            "  calculated hidden_size: {} * {} = {}",
+            num_heads,
+            head_dim,
+            num_heads * head_dim
+        );
     }
 
     // Print tensor info for first layer

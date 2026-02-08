@@ -44,8 +44,9 @@ fn skip_value(data: &[u8], pos: &mut usize, vtype: u32) -> io::Result<()> {
         }
         8 => {
             // STRING
-            let str_len = usize::try_from(read_u64(data, pos)?)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "string length overflow"))?;
+            let str_len = usize::try_from(read_u64(data, pos)?).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "string length overflow")
+            })?;
             let _ = take_slice(data, pos, str_len)?;
         }
         9 => {
@@ -65,7 +66,11 @@ fn skip_value(data: &[u8], pos: &mut usize, vtype: u32) -> io::Result<()> {
             let _ = take_slice(data, pos, 16)?;
         }
         _ => {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown type {vtype}")).into());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown type {vtype}"),
+            )
+            .into());
         }
     }
     Ok(())
@@ -87,7 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     file.read_to_end(&mut data)?;
 
     if data.len() < 32 {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "GGUF header is truncated").into());
+        return Err(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "GGUF header is truncated").into(),
+        );
     }
 
     // Skip magic, version, tensor_count (already at 32 after header)

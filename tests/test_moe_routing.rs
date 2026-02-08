@@ -31,6 +31,7 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: std::collections::HashMap::new(),
     };
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
     let adapter = adapter_for::<CpuBackend>(&manifest);

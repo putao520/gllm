@@ -25,6 +25,7 @@ fn test_manifest() -> ModelManifest {
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: HashMap::new(),
     }
 }
 
@@ -62,9 +63,10 @@ fn safetensors_gllm_config_metadata_is_used() {
     .expect("write safetensors");
 
     let manifest = test_manifest();
-    let mut loader =
-        Loader::from_local_files_with_manifest("test/model", vec![path], vec![], Some(&manifest))
-            .expect("loader");
+    let mut loader = Loader::new(manifest.clone())
+        .with_weights(vec![path])
+        .load()
+        .expect("load");
 
     let config = ModelConfig::from_loader(&manifest, &mut loader).expect("model config");
     assert_eq!(config.hidden_size, 256);
@@ -183,13 +185,13 @@ fn onnx_dtype_metadata_is_used_for_model_config_dtype_size() {
     .expect("write config");
 
     let manifest = test_manifest();
-    let mut loader = Loader::from_local_files_with_manifest(
-        "test/model",
-        vec![onnx_path],
-        vec![config_path],
-        Some(&manifest),
-    )
-    .expect("loader");
+    let mut loader = Loader::new(manifest.clone())
+        .with_weights(vec![onnx_path])
+        .with_config(config_path)
+        .load()
+        .expect("load");
+    // Explicitly detect format since we are manually constructing
+    // The builder `with_weights` calls `detect_format`, so we should be good.
 
     let config = ModelConfig::from_loader(&manifest, &mut loader).expect("model config");
     assert_eq!(config.dtype_size, 2);
@@ -240,15 +242,13 @@ fn onnx_weights_are_uploadable_for_reranker() {
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: HashMap::new(),
     };
 
-    let mut loader = Loader::from_local_files_with_manifest(
-        "test/reranker",
-        vec![onnx_path],
-        vec![],
-        Some(&manifest),
-    )
-    .expect("loader");
+    let mut loader = Loader::new(manifest)
+        .with_weights(vec![onnx_path])
+        .load()
+        .expect("load");
     let backend = CpuBackend::new();
     let weights = loader
         .upload_weights(&backend)
@@ -256,11 +256,11 @@ fn onnx_weights_are_uploadable_for_reranker() {
 
     assert!(
         weights
-            .tensors
-            .contains_key("roberta.embeddings.word_embeddings.weight"),
+            .tensor_f32("roberta.embeddings.word_embeddings.weight")
+            .is_some(),
         "embedding tensor should be uploaded"
     );
-    assert!(weights.tensors.contains_key("classifier.weight"));
+    assert!(weights.tensor_f32("classifier.weight").is_some());
     assert_eq!(
         weights
             .meta

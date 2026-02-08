@@ -203,13 +203,18 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `hidden_size` | u64 | Hidden dimension |
-| `num_hidden_layers` | u64 | 层数 |
-| `num_attention_heads` | u64 | Attention heads |
-| `num_key_value_heads` | u64 | KV heads (GQA) |
-| `vocab_size` | u64 | 词汇表大小 |
-| `max_position_embeddings` | u64 | 最大序列长度 |
-| `rope_theta` | f32 | RoPE base frequency |
+| `hidden_size` | usize | 隐藏层维度 (Embedding size) |
+| `num_hidden_layers` | usize | 模型层数 |
+| `num_attention_heads` | usize | 注意力头数 (Q heads) |
+| `num_key_value_heads` | usize | 键值对头数 (KV heads / GQA) |
+| `intermediate_size` | Option<usize> | FFN 中间层维度 (Expansion size) |
+| `num_experts` | Option<usize> | MoE 专家总数 |
+| `expert_intermediate_size` | Option<usize> | MoE 专家 FFN 中间层维度 |
+| `vocab_size` | usize | 词汇表大小 |
+| `max_position_embeddings` | usize | 最大序列长度 (Context window) |
+| `head_dim` | usize | 单头维度 (通常为 hidden_size / num_heads) |
+| `dtype_size` | usize | 权重数据类型字节数 (F32=4, F16/BF16=2) |
+| `rope_theta` | f32 | RoPE 基频 |
 
 ### 5.2 Ω1 真实性原则配置加载
 
@@ -264,6 +269,7 @@ impl ModelConfig {
 | `vocab_size` | 从 embedding tensor shape 取较大维度 | `token_embd`, `embed_tokens`, `wte`, `word_embeddings` |
 | `head_dim` | 从 Q projection tensor: `q_out / num_heads` | `attn_q`, `q_proj`, `self_attn.q_proj`, `attention.wq` |
 | `hidden_size` | 从 embedding tensor 或 attention tensor | 同 `vocab_size` 来源 |
+| `intermediate_size`| 从 MLP 投影张量输出维度推导 | `mlp.gate_proj.weight`, `mlp.up_proj.weight`, `blk.{N}.ffn_gate.weight` |
 | `dtype_size` | 从权重张量实际 dtype | 任意浮点张量 |
 
 ### 6.3 格式特定推导规则
@@ -278,17 +284,19 @@ impl ModelConfig {
 
 **实现位置**: `src/model_config.rs::from_gguf_loader()`
 
-#### 6.3.2 SafeTensors 格式 (待实现 - REQ-LOADER-022)
+#### 6.3.2 SafeTensors 格式 (已实现 - REQ-LOADER-022)
 
 | 字段 | 推导方法 | 回退策略 |
 |------|----------|----------|
-| `vocab_size` | `model.embed_tokens.weight` / `embeddings.word_embeddings.weight` shape 较大维度 | `gllm.config` 元数据 → `config.json` |
-| `head_dim` | `model.layers.0.self_attn.q_proj.weight` shape / `num_heads` | `gllm.config` 元数据 → `config.json` |
-| `dtype_size` | 检测权重张量 dtype (F16/BF16/F32) | 必须存在，否则报错 |
+| `vocab_size` | `model.embed_tokens.weight` 等 shape 较大维度 | `gllm.config` 元数据 → `config.json` |
+| `head_dim` | `q_proj.weight` shape / `num_heads` | `gllm.config` 元数据 → `config.json` |
+| `intermediate_size`| `mlp.gate_proj.weight` / `mlp.up_proj.weight` 输出维度 | `gllm.config` 元数据 → `config.json` |
+| `dtype_size` | 检测权重张量实际 dtype | 必须存在，否则报错 |
 
 **张量名称模式**:
 - Embedding: `model.embed_tokens.weight`, `embeddings.word_embeddings.weight`, `transformer.wte.weight`
 - Q Projection: `model.layers.{N}.self_attn.q_proj.weight`, `encoder.layer.{N}.attention.self.query.weight`
+- MLP/FFN: `model.layers.{N}.mlp.gate_proj.weight`, `model.layers.{N}.mlp.up_proj.weight`
 
 **实现要求**:
 1. 新增 `from_safetensors_loader_tensor_driven()` 方法
@@ -299,13 +307,15 @@ impl ModelConfig {
 
 | 字段 | 推导方法 | 回退策略 |
 |------|----------|----------|
-| `vocab_size` | `embed_tokens.weight` / `word_embeddings` initializer shape 较大维度 | ONNX graph attributes → 外部 config.json |
+| `vocab_size` | `embed_tokens.weight` 等 initializer shape 较大维度 | ONNX graph attributes → 外部 config.json |
 | `head_dim` | `q_proj.weight` / `query.weight` initializer shape / `num_heads` | ONNX graph attributes → 外部 config.json |
+| `intermediate_size`| `mlp.gate_proj.weight` 等 initializer 输出维度 | ONNX graph attributes → 外部 config.json |
 | `dtype_size` | 检测 initializer dtype (FLOAT/FLOAT16/BFLOAT16) | 必须存在，否则报错 |
 
 **Initializer 名称模式**:
 - Embedding: `embed_tokens.weight`, `embeddings.word_embeddings.weight`, `wte.weight`
 - Q Projection: `layers.{N}.self_attn.q_proj.weight`, `encoder.layer.{N}.attention.self.query.weight`
+- MLP/FFN: `layers.{N}.mlp.gate_proj.weight`, `layers.{N}.mlp.up_proj.weight`
 
 **实现要求**:
 1. 新增 `from_onnx_loader()` 方法
@@ -313,6 +323,9 @@ impl ModelConfig {
 3. 优先使用 initializer 形状，仅在找不到时回退
 
 ### 6.4 Ω1 合规性
+
+- **严禁默认值**: 如果元数据、张量形状和 `config.json` 都无法提供必需字段，必须返回 `InvalidConfig` 错误，禁止使用硬编码猜测值（如假设 `head_dim=128`）。
+- **张量优先**: 即使元数据存在，也应优先尝试从张量形状验证或推导，以确保推理执行时的内存布局绝对正确。
 
 ```rust
 // ✅ 正确: 从张量推导
@@ -335,3 +348,42 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 | GGUF | ✅ 已实现 | - |
 | SafeTensors | 📋 待实现 | REQ-LOADER-022 |
 | ONNX | 📋 待实现 | REQ-LOADER-023 |
+
+## 7. 通用张量拓扑 (DATA-TENSOR-TOPOLOGY)
+
+> **关联需求**: REQ-LOADER-022, REQ-LOADER-023
+> **关联架构**: ARCH-LOADER-UNIVERSAL
+
+### 7.1 张量角色 (TensorRole)
+
+用于标识张量在 Transformer 架构中的语义作用，独立于具体张量名称。
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TensorRole {
+    Embedding,          // token_embd, wte
+    AttentionQuery,     // q_proj, wq
+    AttentionKey,       // k_proj, wk
+    AttentionValue,     // v_proj, wv
+    AttentionOutput,    // o_proj, wo
+    LayerNorm,          // attn_norm, ffn_norm
+    FfnGate,            // gate_proj, w1
+    FfnDown,            // down_proj, w2
+    FfnUp,              // up_proj, w3
+    OutputHead,         // lm_head, output
+    Unknown,
+}
+```
+
+### 7.2 模型拓扑 (ModelTopology)
+
+描述模型权重的逻辑结构，用于指导加载和配置推导。
+
+```rust
+pub struct ModelTopology {
+    /// 张量映射表: Role -> (LayerIdx -> TensorName)
+    pub tensors: HashMap<TensorRole, Vec<String>>,
+    /// 识别出的最大层数
+    pub num_layers: usize,
+}
+```

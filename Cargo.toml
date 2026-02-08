@@ -23,6 +23,7 @@ path = "src/bin/download.rs"
 default = []
 
 # Optional features
+test-utils = []
 tokio = ["dep:tokio"]
 paged-attention = []
 flash-attention = []

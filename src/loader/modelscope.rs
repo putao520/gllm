@@ -127,6 +127,7 @@ impl ModelScopeClient {
             }
             WeightFormat::Gguf => self.try_download_gguf(repo, file_map, downloader, aux_files),
             WeightFormat::Onnx => self.try_download_onnx(repo, file_map, downloader, aux_files),
+            WeightFormat::PyTorch => Ok(None),
         }
     }
 

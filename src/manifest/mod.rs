@@ -4,5 +4,5 @@ pub mod types;
 
 pub use types::{
     FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType, TensorNamingRule,
-    EMPTY_FILE_MAP,
+    TensorRole, EMPTY_FILE_MAP,
 };

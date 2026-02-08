@@ -1,14 +1,17 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use memmap2::{Mmap, MmapOptions};
+use safetensors::Dtype;
 
 use super::{
     tensor_nbytes, GgmlDType, GgufArray, GgufError, GgufValue, GgufValueType, TensorSlice,
     GGUF_MAGIC, GGUF_SUPPORTED_VERSION,
 };
+use crate::loader::{TensorMeta, TensorProvider};
 
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
@@ -400,6 +403,10 @@ impl GgufReader {
         self.get_arch_u64("expert_intermediate_size")
     }
 
+    pub fn feed_forward_length(&self) -> Option<u64> {
+        self.get_arch_u64("feed_forward_length")
+    }
+
     pub fn tokenizer_tokens(&self) -> Result<Vec<&str>, GgufError> {
         let tokens = self
             .get_metadata_array("tokenizer.ggml.tokens")
@@ -502,6 +509,79 @@ impl GgufReader {
             }
         }
         best
+    }
+}
+
+impl TensorProvider for GgufReader {
+    fn tensor_info(&self, name: &str) -> Option<TensorMeta> {
+        let info = self.tensor_info(name).ok()?;
+        let mut shape = Vec::with_capacity(info.shape.len());
+        for &dim in &info.shape {
+            shape.push(usize::try_from(dim).ok()?);
+        }
+        Some(TensorMeta {
+            name: info.name.to_string(),
+            shape,
+            dtype: gguf_dtype_to_safetensors_dtype(info.dtype),
+        })
+    }
+
+    fn iter_tensors(&self) -> impl Iterator<Item = TensorMeta> {
+        self.tensors.iter().map(|info| {
+            let mut shape = Vec::with_capacity(info.shape.len());
+            for &dim in &info.shape {
+                shape.push(usize::try_from(dim).unwrap_or(0));
+            }
+            TensorMeta {
+                name: info.name.to_string(),
+                shape,
+                dtype: gguf_dtype_to_safetensors_dtype(info.dtype),
+            }
+        })
+    }
+
+    fn load_tensor_data(&self, name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
+        let data = self.tensor_bytes(name).map_err(|e| crate::loader::LoaderError::Gguf(format!("GGUF error: {}", e)))?;
+        Ok(Cow::Borrowed(data))
+    }
+}
+
+fn gguf_dtype_to_safetensors_dtype(dtype: GgmlDType) -> Dtype {
+    match dtype {
+        GgmlDType::F64 => Dtype::F64,
+        GgmlDType::F32 => Dtype::F32,
+        GgmlDType::F16 => Dtype::F16,
+        GgmlDType::BF16 => Dtype::BF16,
+        GgmlDType::I64 => Dtype::I64,
+        GgmlDType::I32 => Dtype::I32,
+        GgmlDType::I16 => Dtype::I16,
+        GgmlDType::I8 => Dtype::I8,
+        // GGUF quantized storages are raw packed bytes; expose as U8 meta for tensor-driven
+        // structural derivation.
+        GgmlDType::Q4_0
+        | GgmlDType::Q4_1
+        | GgmlDType::Q5_0
+        | GgmlDType::Q5_1
+        | GgmlDType::Q8_0
+        | GgmlDType::Q8_1
+        | GgmlDType::Q2_K
+        | GgmlDType::Q3_K
+        | GgmlDType::Q4_K
+        | GgmlDType::Q5_K
+        | GgmlDType::Q6_K
+        | GgmlDType::Q8_K
+        | GgmlDType::IQ2_XXS
+        | GgmlDType::IQ2_XS
+        | GgmlDType::IQ3_XXS
+        | GgmlDType::IQ1_S
+        | GgmlDType::IQ4_NL
+        | GgmlDType::IQ3_S
+        | GgmlDType::IQ2_S
+        | GgmlDType::IQ4_XS
+        | GgmlDType::IQ1_M
+        | GgmlDType::TQ1_0
+        | GgmlDType::TQ2_0
+        | GgmlDType::MXFP4 => Dtype::U8,
     }
 }
 

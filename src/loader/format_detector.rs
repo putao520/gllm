@@ -107,7 +107,7 @@ fn detect_formats_in_dir(dir: &Path) -> Result<Vec<WeightFormat>> {
 fn select_single_format(formats: Vec<WeightFormat>) -> Result<WeightFormat> {
     match formats.len() {
         0 => Err(LoaderError::MissingWeights),
-        1 => Ok(formats[0]),
+        1 => Ok(formats[0].clone()),
         _ => Err(LoaderError::MultipleWeightFormats(formats)),
     }
 }
@@ -153,6 +153,19 @@ fn collect_weights_in_dir(dir: &Path, format: WeightFormat) -> Result<Vec<PathBu
             }
             files.sort();
             Ok(vec![files.into_iter().next().unwrap()])
+        }
+        WeightFormat::PyTorch => {
+            let mut files = Vec::new();
+            for candidate_dir in candidate_dirs(dir) {
+                files.extend(find_files_with_extension(&candidate_dir, "bin"));
+                files.extend(find_files_with_extension(&candidate_dir, "pth"));
+                files.extend(find_files_with_extension(&candidate_dir, "pt"));
+            }
+            if files.is_empty() {
+                return Err(LoaderError::MissingWeights);
+            }
+            files.sort();
+            Ok(files)
         }
     }
 }

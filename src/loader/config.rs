@@ -1,6 +1,7 @@
 //! config.json parsing and architecture resolution.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -92,6 +93,7 @@ pub fn manifest_from_config(
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: HashMap::new(),
     })
 }
 
@@ -219,7 +221,7 @@ fn collect_architectures(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
+pub fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
     match normalize_architecture_token(token).as_str() {
         "ministral" | "ministralforcausallm" => Some(ModelArchitecture::Ministral),
         "mistral" | "mistralforcausallm" => Some(ModelArchitecture::Mistral3),

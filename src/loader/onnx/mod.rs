@@ -1,5 +1,6 @@
 //! ONNX loader with graph parsing and fused-first pattern matching.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -115,6 +116,30 @@ impl OnnxLoader {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl super::TensorProvider for OnnxLoader {
+    fn tensor_info(&self, name: &str) -> Option<super::TensorMeta> {
+        let tensor = self.model.graph.initializers.get(name)?;
+        Some(super::TensorMeta {
+            name: name.to_string(),
+            shape: tensor.shape.clone(),
+            dtype: tensor.dtype,
+        })
+    }
+
+    fn iter_tensors(&self) -> impl Iterator<Item = super::TensorMeta> {
+        self.model.graph.initializers.iter().map(|(name, tensor)| super::TensorMeta {
+            name: name.clone(),
+            shape: tensor.shape.clone(),
+            dtype: tensor.dtype,
+        })
+    }
+
+    fn load_tensor_data(&self, name: &str) -> super::Result<Cow<'_, [u8]>> {
+        let tensor = self.tensor(name)?;
+        Ok(Cow::Borrowed(tensor.data))
     }
 }
 

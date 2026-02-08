@@ -373,6 +373,30 @@ impl SafeTensorsLoader {
     }
 }
 
+impl super::TensorProvider for SafeTensorsLoader {
+    fn tensor_info(&self, name: &str) -> Option<super::TensorMeta> {
+        let meta = self.tensor_meta(name)?;
+        Some(super::TensorMeta {
+            name: name.to_string(),
+            shape: meta.shape.clone(),
+            dtype: meta.dtype,
+        })
+    }
+
+    fn iter_tensors(&self) -> impl Iterator<Item = super::TensorMeta> {
+        self.index.iter().map(|(name, meta)| super::TensorMeta {
+            name: name.clone(),
+            shape: meta.shape.clone(),
+            dtype: meta.dtype,
+        })
+    }
+
+    fn load_tensor_data(&self, name: &str) -> super::Result<Cow<'_, [u8]>> {
+        let tensor = self.tensor(name)?;
+        Ok(Cow::Borrowed(tensor.data))
+    }
+}
+
 fn parse_namespace_metadata(files: &[MappedSafetensors], keys: &[&str]) -> Result<Option<Value>> {
     let mut merged: Option<Value> = None;
     for file in files {

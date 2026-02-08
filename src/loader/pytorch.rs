@@ -1,3 +1,4 @@
+#![cfg(feature = "candle")]
 //! PyTorch .bin (zip+pickle) loader and safetensors conversion.
 
 use std::collections::HashMap;

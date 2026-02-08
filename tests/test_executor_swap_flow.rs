@@ -33,6 +33,7 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: std::collections::HashMap::new(),
     });
 
     // Select adapter (CpuBackend)

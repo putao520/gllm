@@ -409,6 +409,16 @@ Client::new_chat("Qwen/Qwen3-0.6B")
     - **核心逻辑**：利用多线程同时触发 Page Fault 和 CPU 处理，每个层独立并行加载。
     - **收益**：多线程同时触发缺页中断（Page Fault），操作系统能更有效地调度磁盘 I/O 队列；同时利用多核 CPU 并行处理 Fused 拆分。
 
+5.  **通用张量抽象 (ARCH-LOADER-003)**
+    - **目的**: 摆脱对特定 Model Adapter 的依赖，实现 "Universal Loader"。
+    - **TensorProvider**: 统一 SafeTensors/ONNX/GGUF 的底层接口，屏蔽文件格式差异。
+    - **TensorRole**: 引入语义化角色（Embedding, AttentionQuery, FfnGate 等），通过 Regex 规则表将物理张量名映射到逻辑角色。
+    - **Shape Heuristics**:
+        - `vocab_size` = `Embedding` 张量的较大维度
+        - `head_dim` = `AttentionQuery` 张量维度 / `num_heads`
+        - `num_layers` = 匹配到的最大 `layer_idx` + 1
+    - **F32 Adapter**: Loader 层负责将 F16/BF16 转换为 F32（如果后端不支持低精度），对上层 Engine 透明。
+
 #### ONNX Adapter Architecture (ARCH-ONNX)
 
 **核心架构: Matcher -> Mapper -> Kernel**
@@ -936,3 +946,64 @@ CacheKey = Hash(
 | LMCache | ❌ | DMA 复制使用现有 Memcpy 内核 |
 
 **结论**: ✅ **完全兼容 AOT CUBIN 策略，无需修改内核编译流程。**
+
+### 7. 张量驱动配置系统 (ARCH-LOADER-TENSOR)
+
+> **关联需求**: REQ-LOADER-022, REQ-LOADER-023
+> **核心原则**: Ω1 真实性原则 - 物理张量形状是唯一的真理 (Ground Truth)。
+
+#### 7.1 TensorProvider 抽象 (ARCH-LOADER-PROVIDER)
+
+为了屏蔽文件格式差异 (SafeTensors vs GGUF vs ONNX) 并彻底消除动态分发开销，系统定义统一的**静态分发**接口。
+
+**接口定义**:
+```rust
+pub trait TensorProvider {
+    fn tensor_info(&self, name: &str) -> Option<TensorMeta>;
+    fn iter_tensors(&self) -> impl Iterator<Item = TensorMeta>; // impl Iterator 确保不可用作 dyn
+    fn load_tensor_data(&self, name: &str) -> Result<Cow<'_, [u8]>>;
+}
+```
+
+**约束**:
+- **禁止动态分发 (NO_DYN)**: `iter_tensors` 返回 `impl Iterator`，这在 Rust 中天然使得 Trait 不具备对象安全性 (Not Object Safe)。这强制所有使用处必须通过泛型 `<P: TensorProvider>` 进行**静态单态化 (Monomorphization)**，确保零运行时开销。
+- **零拷贝数据**: `load_tensor_data` 返回 `Cow<'_, [u8]>`，对于 `mmap` 的 SafeTensors 直接返回引用，对于 GGUF/ONNX 可能需要临时分配（如果不支持 mmap）。
+
+#### 7.2 角色探测 (ARCH-LOADER-ROLE)
+
+不再依赖硬编码的张量名称，而是基于语义模式匹配。
+
+| 逻辑角色 | 匹配模式 (Regex/Contains) | 示例 |
+|---------|-------------------------|------|
+| `Embedding` | `embed` \| `wte` \| `word_embeddings` | `model.embed_tokens`, `transformer.wte` |
+| `AttnQuery` | `q_proj` \| `query` \| `wq` | `layers.0.self_attn.q_proj` |
+| `AttnKey` | `k_proj` \| `key` \| `wk` | `layers.0.self_attn.k_proj` |
+| `AttnValue` | `v_proj` \| `value` \| `wv` | `layers.0.self_attn.v_proj` |
+| `AttnOutput`| `o_proj` \| `output` \| `wo` | `layers.0.self_attn.o_proj` |
+| `FfnGate` | `gate_proj` \| `w1` \| `ffn_gate` | `layers.0.mlp.gate_proj` |
+| `FfnUp` | `up_proj` \| `w3` \| `ffn_up` | `layers.0.mlp.up_proj` |
+| `FfnDown` | `down_proj` \| `w2` \| `ffn_down` | `layers.0.mlp.down_proj` |
+
+#### 7.3 拓扑推导逻辑 (ARCH-LOADER-TOPOLOGY)
+
+推导必须遵循 **Truth > Hint > Fallback** 优先级。
+
+1.  **Vocab Size**: `Embedding.shape[0]` (或较大维度)。
+2.  **Hidden Size**: `Embedding.shape[1]` (或较小维度)。
+3.  **Head Dim**:
+    - 计算 `Q_out = Q_proj.output_dim`
+    - 计算 `K_out = K_proj.output_dim`
+    - 遍历候选 `[32, 64, 80, 96, 128, 256]`，找到能同时整除 `Q_out` 和 `K_out` 的值。
+    - **歧义处理**: 如果有多个候选值（如 64 和 128 均合法），则**报错** (InvalidConfig)，除非有显式 Metadata Hint。禁止猜测。
+4.  **Num Heads**: `Q_out / Head Dim`。
+5.  **Num KV Heads**: `K_out / Head Dim`。
+6.  **Intermediate Size**: `FfnGate.output_dim` 或 `FfnUp.output_dim`。
+7.  **Num Layers**: 解析所有张量名称中的层索引（如 `layers.N`），取最大值 + 1。
+
+#### 7.4 验证 (ARCH-LOADER-VERIFY)
+
+- **物理约束验证**:
+  - `Q_out % Head Dim == 0`
+  - `K_out % Head Dim == 0`
+  - `Num Heads % Num KV Heads == 0` (GQA 约束)
+- **Ω1 违规**: 任何推导出的配置与物理张量形状冲突时，以**物理张量**为准，并可能需要覆盖 Config。

@@ -83,6 +83,9 @@ impl BackendExecutor {
 pub struct BackendContext {
     model_ref: String,
     manifest: Arc<ModelManifest>,
+    weight_paths: Vec<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
+    tokenizer_path: Option<std::path::PathBuf>,
     executor: Mutex<BackendExecutor>,
 }
 
@@ -91,14 +94,30 @@ impl BackendContext {
         model_ref: impl Into<String>,
         manifest: Arc<ModelManifest>,
         backend: DetectedBackend,
+        weight_paths: Vec<std::path::PathBuf>,
+        config_path: Option<std::path::PathBuf>,
+        tokenizer_path: Option<std::path::PathBuf>,
     ) -> Result<Self, BackendContextError> {
         let model_ref = model_ref.into();
         let backend_type = backend.backend_type();
-        let executor = match build_executor(backend, manifest.clone(), &model_ref) {
+        let executor = match build_executor(
+            backend,
+            manifest.clone(),
+            &model_ref,
+            &weight_paths,
+            config_path.as_deref(),
+            tokenizer_path.as_deref(),
+        ) {
             Ok(executor) => executor,
             Err(err) => {
                 if backend_type == BackendType::Cuda && fallback::is_oom_context_error(&err) {
-                    build_cpu_executor(manifest.clone(), &model_ref)?
+                    build_cpu_executor(
+                        manifest.clone(),
+                        &model_ref,
+                        &weight_paths,
+                        config_path.as_deref(),
+                        tokenizer_path.as_deref(),
+                    )?
                 } else {
                     return Err(err);
                 }
@@ -107,6 +126,9 @@ impl BackendContext {
         Ok(Self {
             model_ref,
             manifest,
+            weight_paths,
+            config_path,
+            tokenizer_path,
             executor: Mutex::new(executor),
         })
     }
@@ -128,7 +150,13 @@ impl BackendContext {
         if matches!(*executor, BackendExecutor::Cpu(_)) {
             return Ok(());
         }
-        let cpu_executor = build_cpu_executor(self.manifest.clone(), &self.model_ref)?;
+        let cpu_executor = build_cpu_executor(
+            self.manifest.clone(),
+            &self.model_ref,
+            &self.weight_paths,
+            self.config_path.as_deref(),
+            self.tokenizer_path.as_deref(),
+        )?;
         *executor = cpu_executor;
         Ok(())
     }
@@ -138,19 +166,36 @@ fn build_executor(
     backend: DetectedBackend,
     manifest: Arc<ModelManifest>,
     model_ref: &str,
+    weight_paths: &[std::path::PathBuf],
+    config_path: Option<&std::path::Path>,
+    tokenizer_path: Option<&std::path::Path>,
 ) -> Result<BackendExecutor, BackendContextError> {
     match backend {
         DetectedBackend::Cuda(backend) => {
             let adapter = adapter_for::<CudaBackend>(manifest.as_ref())
                 .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
-            let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
             let executor = Executor::from_loader(*backend, manifest, adapter, &mut loader)?;
             Ok(BackendExecutor::Cuda(Box::new(executor)))
         }
         DetectedBackend::Cpu(backend) => {
             let adapter = adapter_for::<CpuBackend>(manifest.as_ref())
                 .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
-            let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
             let executor = Executor::from_loader(*backend, manifest, adapter, &mut loader)?;
             Ok(BackendExecutor::Cpu(Box::new(executor)))
         }
@@ -159,11 +204,21 @@ fn build_executor(
 
 fn build_cpu_executor(
     manifest: Arc<ModelManifest>,
-    model_ref: &str,
+    _model_ref: &str,
+    weight_paths: &[std::path::PathBuf],
+    config_path: Option<&std::path::Path>,
+    tokenizer_path: Option<&std::path::Path>,
 ) -> Result<BackendExecutor, BackendContextError> {
     let adapter = adapter_for::<CpuBackend>(manifest.as_ref())
         .ok_or(BackendContextError::UnsupportedArchitecture(manifest.arch))?;
-    let mut loader = Loader::from_env_with_manifest(model_ref, Some(manifest.as_ref()))?;
+    let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+        .with_weights(weight_paths.to_vec());
+    if let Some(path) = config_path {
+        loader = loader.with_config(path.to_path_buf());
+    }
+    if let Some(path) = tokenizer_path {
+        loader = loader.with_tokenizer(path.to_path_buf());
+    }
     let executor = Executor::from_loader(CpuBackend::new(), manifest, adapter, &mut loader)?;
     Ok(BackendExecutor::Cpu(Box::new(executor)))
 }

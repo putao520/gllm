@@ -1,6 +1,7 @@
 //! Client API skeleton.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use gllm_kernels::BackendError;
@@ -13,7 +14,7 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::loader::{config as loader_config, Loader, LoaderConfig, LoaderError, WeightFormat};
+use crate::loader::{config as loader_config, Loader, LoaderConfig, LoaderError, TensorProvider, WeightFormat};
 use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
@@ -37,6 +38,8 @@ pub enum ClientError {
     Backend(#[from] BackendError),
     #[error(transparent)]
     Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    ModelConfig(#[from] crate::model_config::ModelConfigError),
 }
 
 pub struct ClientState {
@@ -229,41 +232,96 @@ impl Client {
 
     fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
         let config = LoaderConfig::from_env();
-        let manifest = match loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP)
+
+        let (manifest, weight_paths, config_path, tokenizer_path) = match loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP)
         {
             Ok(config_files) => {
                 let config_value = loader_config::load_config_value(&config_files.config_path)?;
-                Arc::new(loader_config::manifest_from_config(
+                let manifest = loader_config::manifest_from_config(
                     model_id,
                     &config_value,
                     kind,
-                )?)
+                )?;
+
+                // Ensure weights are downloaded
+                let loader = Loader::from_source_with_config(model_id.to_string(), config.clone())?;
+                let config_path = loader.config_path().map(|p| p.to_path_buf());
+                let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
+                (Arc::new(manifest), loader.weight_paths().to_vec(), config_path, tokenizer_path)
             }
             Err(loader_config::ConfigError::MissingConfig { .. }) => {
-                let mut loader = Loader::from_source_with_config(model_id, config.clone())?;
-                if loader.weight_format() != WeightFormat::Gguf {
-                    return Err(loader_config::ConfigError::MissingConfig {
-                        model_id: model_id.to_string(),
+                let mut loader = Loader::from_source_with_config(model_id.to_string(), config.clone())?;
+
+                let manifest = match loader.weight_format() {
+                    WeightFormat::Gguf => {
+                        let arch_str = loader.gguf_architecture()?;
+                        if let Some(arch) = loader_config::map_architecture_token(arch_str) {
+                             ModelManifest {
+                                model_id: Cow::Owned(model_id.to_string()),
+                                file_map: EMPTY_FILE_MAP,
+                                arch,
+                                tensor_rules: loader_config::tensor_rules_for_arch(arch),
+                                kind,
+                                rope_base_override: None,
+                                max_context_override: None,
+                                moe_config: None,
+                                tensor_map: HashMap::new(),
+                            }
+                        } else {
+                             return Err(ClientError::UnknownModel(format!("Unsupported GGUF architecture: {}", arch_str)));
+                        }
                     }
-                    .into());
-                }
-                let arch = loader.gguf_architecture()?;
-                Arc::new(ModelManifest {
-                    model_id: Cow::Owned(model_id.to_string()),
-                    file_map: EMPTY_FILE_MAP,
-                    arch,
-                    tensor_rules: loader_config::tensor_rules_for_arch(arch),
-                    kind,
-                    rope_base_override: None,
-                    max_context_override: None,
-                    moe_config: None,
-                })
+                    WeightFormat::SafeTensors | WeightFormat::Onnx => {
+                        // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
+                        loader = loader.load()?;
+
+                        // 1. Validate Topology via ModelConfig
+                        let dummy_manifest = ModelManifest {
+                            model_id: Cow::Owned(model_id.to_string()),
+                            file_map: EMPTY_FILE_MAP,
+                            arch: ModelArchitecture::Llama4,
+                            tensor_rules: crate::manifest::TensorNamingRule::Llama4,
+                            kind,
+                            rope_base_override: None,
+                            max_context_override: None,
+                            moe_config: None,
+                            tensor_map: HashMap::new(),
+                        };
+
+                        let _derived_config = crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
+
+                        // 2. Guess Architecture from Tensor Names
+                        let arch = detect_architecture(&loader).unwrap_or(ModelArchitecture::Llama4);
+
+                        ModelManifest {
+                            model_id: Cow::Owned(model_id.to_string()),
+                            file_map: EMPTY_FILE_MAP,
+                            arch,
+                            tensor_rules: loader_config::tensor_rules_for_arch(arch),
+                            kind,
+                            rope_base_override: None,
+                            max_context_override: None,
+                            moe_config: None,
+                            tensor_map: HashMap::new(),
+                        }
+                    }
+                    _ => {
+                        return Err(loader_config::ConfigError::MissingConfig {
+                            model_id: model_id.to_string(),
+                        }
+                        .into());
+                    }
+                };
+                let config_path = loader.config_path().map(|p| p.to_path_buf());
+                let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
+                (Arc::new(manifest), loader.weight_paths().to_vec(), config_path, tokenizer_path)
             }
             Err(err) => return Err(err.into()),
         };
+
         let detected_backend = detect_backend()?;
         let backend =
-            BackendContext::new(model_id.to_string(), manifest.clone(), detected_backend)?;
+            BackendContext::new(model_id.to_string(), manifest.clone(), detected_backend, weight_paths, config_path, tokenizer_path)?;
         Ok(ClientState {
             model_id: model_id.to_string(),
             manifest,
@@ -280,6 +338,46 @@ impl Client {
             .write()
             .map_err(|_| ClientError::ExecutorPoisoned)
     }
+}
+
+fn detect_architecture(loader: &Loader) -> Option<ModelArchitecture> {
+    let check_name = |name: &str| -> Option<ModelArchitecture> {
+        let lower = name.to_lowercase();
+        if lower.contains("bert") || lower.contains("roberta") {
+            return Some(ModelArchitecture::XlmR);
+        }
+        if lower.contains("gpt2") {
+            return Some(ModelArchitecture::GPT2Next);
+        }
+        if lower.contains("mistral") {
+            return Some(ModelArchitecture::Mistral3);
+        }
+        None
+    };
+
+    match loader.weight_format() {
+        WeightFormat::SafeTensors => {
+            if let Some(st) = loader.safetensors_ref() {
+                for meta in st.iter_tensors() {
+                    if let Some(arch) = check_name(&meta.name) {
+                        return Some(arch);
+                    }
+                }
+            }
+        }
+        WeightFormat::Onnx => {
+             if let Some(onnx) = loader.onnx_ref() {
+                 for meta in onnx.iter_tensors() {
+                    if let Some(arch) = check_name(&meta.name) {
+                        return Some(arch);
+                    }
+                 }
+             }
+        }
+        _ => {}
+    }
+    // Default to Llama4 for most modern LLMs (Qwen, Llama, etc share similar structure)
+    Some(ModelArchitecture::Llama4)
 }
 
 impl AsyncClient {

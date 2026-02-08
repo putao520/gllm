@@ -156,6 +156,7 @@ fn make_manifest() -> ModelManifest {
         rope_base_override: None,
         max_context_override: None,
         moe_config: None,
+        tensor_map: std::collections::HashMap::new(),
     }
 }
 
