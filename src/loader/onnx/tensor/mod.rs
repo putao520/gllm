@@ -139,7 +139,7 @@ impl OnnxTensor {
 
         let data_location = data_location.unwrap_or_default();
         let data = if data_location == proto::tensor_proto::DataLocation::External as i32 {
-            parse::load_external_data(resolver, &external_data, dtype, element_count, &name)?
+            parse::load_external_data(resolver, &external_data, data_type, dtype, element_count, &name)?
         } else {
             pack::build_tensor_bytes(pack::TensorPackInput {
                 data_type,

@@ -26,6 +26,12 @@ pub(super) fn map_dtype(data_type: proto::tensor_proto::DataType, name: &str) ->
         OnnxType::Int64 => Ok(Dtype::I64),
         OnnxType::Uint64 => Ok(Dtype::U64),
         OnnxType::Bool => Ok(Dtype::U8),
+        // FLOAT8 types (FP8 quantized inference)
+        OnnxType::Float8e4m3fn | OnnxType::Float8e4m3fnuz => Ok(Dtype::F8_E4M3),
+        OnnxType::Float8e5m2 | OnnxType::Float8e5m2fnuz => Ok(Dtype::F8_E5M2),
+        // INT4/UINT4: packed as 2 elements per byte, stored as U8
+        // The actual unpacking happens at kernel execution time
+        OnnxType::Int4 | OnnxType::Uint4 => Ok(Dtype::U8),
         _ => Err(LoaderError::Onnx(format!(
             "unsupported data_type {:?} for tensor {name}",
             data_type
@@ -61,9 +67,25 @@ pub(super) fn element_count(shape: &[usize], name: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// Calculate byte size for a tensor, handling packed types (INT4/UINT4)
+pub(super) fn byte_size_for_elements(
+    data_type: proto::tensor_proto::DataType,
+    dtype: Dtype,
+    element_count: usize,
+) -> usize {
+    use proto::tensor_proto::DataType as OnnxType;
+    match data_type {
+        // INT4/UINT4: 2 elements packed per byte
+        OnnxType::Int4 | OnnxType::Uint4 => (element_count + 1) / 2,
+        // All other types use safetensors Dtype size
+        _ => dtype.size() * element_count,
+    }
+}
+
 pub(super) fn load_external_data(
     resolver: &mut ExternalDataResolver,
     external_data: &[proto::StringStringEntryProto],
+    data_type: proto::tensor_proto::DataType,
     dtype: Dtype,
     element_count: usize,
     name: &str,
@@ -73,12 +95,9 @@ pub(super) fn load_external_data(
         .get("location")
         .ok_or_else(|| LoaderError::Onnx(format!("external tensor {name} missing location")))?;
     let offset = parse_optional_usize(entries.get("offset"), "offset", name)?.unwrap_or(0);
+    let expected = byte_size_for_elements(data_type, dtype, element_count);
     let length = parse_optional_usize(entries.get("length"), "length", name)?
-        .unwrap_or_else(|| dtype.size() * element_count);
-    let expected = dtype
-        .size()
-        .checked_mul(element_count)
-        .ok_or_else(|| LoaderError::Onnx(format!("tensor byte size overflow for {name}")))?;
+        .unwrap_or(expected);
     if length != expected {
         return Err(LoaderError::Onnx(format!(
             "external tensor {name} length {length} does not match expected {expected}"
