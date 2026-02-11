@@ -33,7 +33,7 @@ pub(super) fn build_tensor_bytes(input: TensorPackInput<'_>) -> Result<Bytes> {
     } = input;
 
     if !raw_data.is_empty() {
-        let expected = expected_byte_len(dtype, element_count, name)?;
+        let expected = expected_byte_len(data_type, dtype, element_count, name)?;
         if raw_data.len() != expected {
             return Err(LoaderError::Onnx(format!(
                 "tensor {name} raw_data has {} bytes, expected {expected}",
@@ -67,10 +67,23 @@ pub(super) fn build_tensor_bytes(input: TensorPackInput<'_>) -> Result<Bytes> {
     }
 }
 
-fn expected_byte_len(dtype: Dtype, element_count: usize, name: &str) -> Result<usize> {
-    element_count
-        .checked_mul(dtype.size())
-        .ok_or_else(|| LoaderError::Onnx(format!("tensor byte size overflow for {name}")))
+/// Calculate expected byte length, handling packed types (INT4/UINT4)
+fn expected_byte_len(
+    data_type: proto::tensor_proto::DataType,
+    dtype: Dtype,
+    element_count: usize,
+    name: &str,
+) -> Result<usize> {
+    use proto::tensor_proto::DataType as OnnxType;
+    let size = match data_type {
+        // INT4/UINT4: 2 elements packed per byte
+        OnnxType::Int4 | OnnxType::Uint4 => (element_count + 1) / 2,
+        // All other types use safetensors Dtype size
+        _ => element_count
+            .checked_mul(dtype.size())
+            .ok_or_else(|| LoaderError::Onnx(format!("tensor byte size overflow for {name}")))?,
+    };
+    Ok(size)
 }
 
 fn ensure_len(name: &str, expected: usize, actual: usize, field: &str) -> Result<()> {

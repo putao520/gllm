@@ -96,7 +96,7 @@ impl GraphOptimizer {
                 op: FusedOp::Atomic(AtomicOp::new(&node.op_type)),
                 inputs: node.inputs.clone(),
                 outputs: node.outputs.clone(),
-                attributes: convert_attributes(&node.attributes),
+                attributes: convert_attributes(&node.attributes, self),
             };
             fused.nodes.push(fused_node);
         }
@@ -188,6 +188,7 @@ impl GraphOptimizer {
 
 fn convert_attributes(
     attrs: &std::collections::HashMap<String, crate::loader::onnx::OnnxAttribute>,
+    optimizer: &GraphOptimizer,
 ) -> std::collections::HashMap<String, AttrValue> {
     let mut out = std::collections::HashMap::new();
     for (name, attr) in attrs {
@@ -203,6 +204,19 @@ fn convert_attributes(
                 shape: tensor.shape.clone(),
                 data: tensor.raw_data().to_vec(),
             })),
+            // Subgraph support for If/Loop/Scan control flow operators
+            OnnxAttributeValue::Graph(subgraph) => {
+                optimizer.convert_to_fused(subgraph)
+                    .ok()
+                    .map(|g| AttrValue::Graph(Box::new(g)))
+            }
+            OnnxAttributeValue::Graphs(subgraphs) => {
+                let converted_graphs: Result<Vec<_>, _> = subgraphs
+                    .iter()
+                    .map(|g| optimizer.convert_to_fused(g))
+                    .collect();
+                converted_graphs.ok().map(AttrValue::Graphs)
+            }
             _ => None,
         };
         if let Some(value) = converted {

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::loader::TensorProvider;
 
 /// 融合后的图 - 优化器输出
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FusedGraph {
     /// 融合后的节点列表
     pub nodes: Vec<FusedNode>,
@@ -101,7 +101,7 @@ impl Default for FusedGraph {
 }
 
 /// 融合后的节点
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FusedNode {
     /// 节点名称
     pub name: String,
@@ -320,10 +320,14 @@ pub enum AttrValue {
     Floats(Vec<f32>),
     Strings(Vec<String>),
     Tensor(TensorAttrValue),
+    /// Subgraph (used by If/Loop/Scan control flow operators)
+    Graph(Box<FusedGraph>),
+    /// Multiple subgraphs
+    Graphs(Vec<FusedGraph>),
 }
 
 /// 优化统计信息
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OptimizationStats {
     /// 原始节点数
     pub original_nodes: usize,
