@@ -1,6 +1,9 @@
 //! Layer 3: Engine (skeleton).
 
 pub mod executor;
+pub mod pipeline;
+
+pub use pipeline::{PipelineError, UnifiedPipeline};
 
 // Re-export scheduler types from the main scheduler module
 pub use crate::scheduler::batcher::ContinuousBatcher;

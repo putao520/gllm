@@ -137,6 +137,16 @@ impl OnnxTensor {
         }
         self.shape.iter().product()
     }
+
+    /// Create a new OnnxTensor with provided data
+    pub fn new(name: String, dtype: Dtype, shape: Vec<usize>, data: Bytes) -> Self {
+        Self {
+            name,
+            dtype,
+            shape,
+            data,
+        }
+    }
 }
 
 impl OnnxSparseTensor {

@@ -615,7 +615,10 @@ impl GlobalMemoryManager {
 
     /// 释放指定请求的 Working 管线页面
     pub fn release_working_pipeline(&mut self, request_id: RequestId) {
-        if let Some(pages) = self.pipeline_pages.remove(&(KvPipeline::Working, request_id)) {
+        if let Some(pages) = self
+            .pipeline_pages
+            .remove(&(KvPipeline::Working, request_id))
+        {
             for pid in pages {
                 let _ = self.tier_manager.free(Tier::L1, pid);
             }
@@ -655,9 +658,16 @@ impl GlobalMemoryManager {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryManagerError {
-    TierCapacityExceeded { tier: Tier },
-    UnknownPhysicalPage { tier: Tier, physical_id: PhysicalId },
-    UnknownVirtualPage { virtual_id: VirtualPageId },
+    TierCapacityExceeded {
+        tier: Tier,
+    },
+    UnknownPhysicalPage {
+        tier: Tier,
+        physical_id: PhysicalId,
+    },
+    UnknownVirtualPage {
+        virtual_id: VirtualPageId,
+    },
     UnknownSession {
         session_id: SessionId,
     },

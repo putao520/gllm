@@ -14,10 +14,11 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::loader::{
-    config as loader_config, Loader, LoaderConfig, LoaderError, TensorProvider, WeightFormat,
+use crate::loader::{Loader, LoaderConfig, LoaderError, TensorProvider, WeightFormat};
+use crate::manifest::{
+    map_architecture_token, tensor_rules_for_arch, ModelArchitecture, ModelKind, ModelManifest,
+    EMPTY_FILE_MAP,
 };
-use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP};
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
 #[derive(Debug, Error)]
@@ -34,8 +35,7 @@ pub enum ClientError {
     NotImplementedQueued { kind: &'static str, request_id: u64 },
     #[error(transparent)]
     Loader(#[from] LoaderError),
-    #[error(transparent)]
-    Config(#[from] loader_config::ConfigError),
+
     #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
@@ -236,107 +236,78 @@ impl Client {
     fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
         let config = LoaderConfig::from_env();
 
-        let (manifest, weight_paths, config_path, tokenizer_path) =
-            match loader_config::download_config_files(model_id, &config, EMPTY_FILE_MAP) {
-                Ok(config_files) => {
-                    let config_value = loader_config::load_config_value(&config_files.config_path)?;
-                    let manifest =
-                        loader_config::manifest_from_config(model_id, &config_value, kind)?;
+        // Ω1: Tensor-driven loading - no config.json dependency (REQ-REFACTOR-004)
+        let mut loader = Loader::from_source_with_config(model_id.to_string(), config.clone())?;
 
-                    // Ensure weights are downloaded
-                    let loader =
-                        Loader::from_source_with_config(model_id.to_string(), config.clone())?;
-                    let config_path = loader.config_path().map(|p| p.to_path_buf());
-                    let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
-                    (
-                        Arc::new(manifest),
-                        loader.weight_paths().to_vec(),
-                        config_path,
-                        tokenizer_path,
-                    )
+        let manifest = match loader.weight_format() {
+            WeightFormat::Gguf => {
+                let arch_str = loader.gguf_architecture()?;
+                if let Some(arch) = map_architecture_token(arch_str) {
+                    ModelManifest {
+                        model_id: Cow::Owned(model_id.to_string()),
+                        file_map: EMPTY_FILE_MAP,
+                        arch,
+                        tensor_rules: tensor_rules_for_arch(arch),
+                        kind,
+                        rope_base_override: None,
+                        max_context_override: None,
+                        moe_config: None,
+                        tensor_map: HashMap::new(),
+                    }
+                } else {
+                    return Err(ClientError::UnknownModel(format!(
+                        "Unsupported GGUF architecture: {}",
+                        arch_str
+                    )));
                 }
-                Err(loader_config::ConfigError::MissingConfig { .. }) => {
-                    let mut loader =
-                        Loader::from_source_with_config(model_id.to_string(), config.clone())?;
+            }
+            WeightFormat::SafeTensors | WeightFormat::Onnx => {
+                // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
+                loader = loader.load()?;
 
-                    let manifest = match loader.weight_format() {
-                        WeightFormat::Gguf => {
-                            let arch_str = loader.gguf_architecture()?;
-                            if let Some(arch) = loader_config::map_architecture_token(arch_str) {
-                                ModelManifest {
-                                    model_id: Cow::Owned(model_id.to_string()),
-                                    file_map: EMPTY_FILE_MAP,
-                                    arch,
-                                    tensor_rules: loader_config::tensor_rules_for_arch(arch),
-                                    kind,
-                                    rope_base_override: None,
-                                    max_context_override: None,
-                                    moe_config: None,
-                                    tensor_map: HashMap::new(),
-                                }
-                            } else {
-                                return Err(ClientError::UnknownModel(format!(
-                                    "Unsupported GGUF architecture: {}",
-                                    arch_str
-                                )));
-                            }
-                        }
-                        WeightFormat::SafeTensors | WeightFormat::Onnx => {
-                            // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
-                            loader = loader.load()?;
+                // 1. Validate Topology via ModelConfig
+                let dummy_manifest = ModelManifest {
+                    model_id: Cow::Owned(model_id.to_string()),
+                    file_map: EMPTY_FILE_MAP,
+                    arch: ModelArchitecture::Llama4,
+                    tensor_rules: crate::manifest::TensorNamingRule::Llama4,
+                    kind,
+                    rope_base_override: None,
+                    max_context_override: None,
+                    moe_config: None,
+                    tensor_map: HashMap::new(),
+                };
 
-                            // 1. Validate Topology via ModelConfig
-                            let dummy_manifest = ModelManifest {
-                                model_id: Cow::Owned(model_id.to_string()),
-                                file_map: EMPTY_FILE_MAP,
-                                arch: ModelArchitecture::Llama4,
-                                tensor_rules: crate::manifest::TensorNamingRule::Llama4,
-                                kind,
-                                rope_base_override: None,
-                                max_context_override: None,
-                                moe_config: None,
-                                tensor_map: HashMap::new(),
-                            };
+                let _derived_config =
+                    crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
-                            let _derived_config = crate::model_config::ModelConfig::from_loader(
-                                &dummy_manifest,
-                                &mut loader,
-                            )?;
+                // 2. Detect Architecture from Tensor Names
+                let arch = detect_architecture(&loader).unwrap_or(ModelArchitecture::Llama4);
 
-                            // 2. Guess Architecture from Tensor Names
-                            let arch =
-                                detect_architecture(&loader).unwrap_or(ModelArchitecture::Llama4);
-
-                            ModelManifest {
-                                model_id: Cow::Owned(model_id.to_string()),
-                                file_map: EMPTY_FILE_MAP,
-                                arch,
-                                tensor_rules: loader_config::tensor_rules_for_arch(arch),
-                                kind,
-                                rope_base_override: None,
-                                max_context_override: None,
-                                moe_config: None,
-                                tensor_map: HashMap::new(),
-                            }
-                        }
-                        _ => {
-                            return Err(loader_config::ConfigError::MissingConfig {
-                                model_id: model_id.to_string(),
-                            }
-                            .into());
-                        }
-                    };
-                    let config_path = loader.config_path().map(|p| p.to_path_buf());
-                    let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
-                    (
-                        Arc::new(manifest),
-                        loader.weight_paths().to_vec(),
-                        config_path,
-                        tokenizer_path,
-                    )
+                ModelManifest {
+                    model_id: Cow::Owned(model_id.to_string()),
+                    file_map: EMPTY_FILE_MAP,
+                    arch,
+                    tensor_rules: tensor_rules_for_arch(arch),
+                    kind,
+                    rope_base_override: None,
+                    max_context_override: None,
+                    moe_config: None,
+                    tensor_map: HashMap::new(),
                 }
-                Err(err) => return Err(err.into()),
-            };
+            }
+            WeightFormat::PyTorch => {
+                return Err(ClientError::UnknownModel(
+                    "PyTorch format not supported, use SafeTensors or GGUF".to_string(),
+                ));
+            }
+        };
+
+        let config_path = loader.config_path().map(|p| p.to_path_buf());
+        let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
+        let weight_paths = loader.weight_paths().to_vec();
+
+        let manifest = Arc::new(manifest);
 
         let detected_backend = detect_backend()?;
         let backend = BackendContext::new(

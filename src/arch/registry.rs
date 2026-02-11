@@ -30,8 +30,7 @@ impl ArchRegistry {
 
     /// 注册架构到模板名的映射
     pub fn map_arch(&mut self, arch: ModelArchitecture, template_name: &str) {
-        self.arch_mapping
-            .insert(arch, template_name.to_string());
+        self.arch_mapping.insert(arch, template_name.to_string());
     }
 
     /// 获取模板（按名称）
@@ -70,6 +69,7 @@ pub fn register_builtin_templates() {
         // 注册 Qwen3
         if let Ok(qwen3) = ArchTemplate::from_yaml(QWEN3_TEMPLATE) {
             registry.map_arch(ModelArchitecture::Qwen3, "qwen3");
+            registry.map_arch(ModelArchitecture::Qwen3MoE, "qwen3");
             registry.register(qwen3);
         }
 
@@ -88,74 +88,7 @@ pub fn register_builtin_templates() {
 // ============================================================================
 
 /// Qwen3 架构模板 (REQ-ARCH-004)
-const QWEN3_TEMPLATE: &str = r#"
-name: qwen3
-version: "1.0"
-
-config:
-  num_layers: "${num_hidden_layers}"
-  hidden_size: "${hidden_size}"
-  num_heads: "${num_attention_heads}"
-  num_kv_heads: "${num_key_value_heads}"
-  head_dim: "${head_dim}"
-  intermediate_size: "${intermediate_size}"
-  vocab_size: "${vocab_size}"
-  rope_theta: "${rope_theta}"
-
-tensor_patterns:
-  embedding: "model.embed_tokens.weight"
-  lm_head: "lm_head.weight"
-  layer_prefix: "model.layers.{}"
-  q_proj: "self_attn.q_proj.weight"
-  k_proj: "self_attn.k_proj.weight"
-  v_proj: "self_attn.v_proj.weight"
-  o_proj: "self_attn.o_proj.weight"
-  gate_proj: "mlp.gate_proj.weight"
-  up_proj: "mlp.up_proj.weight"
-  down_proj: "mlp.down_proj.weight"
-  input_layernorm: "input_layernorm.weight"
-  post_attention_layernorm: "post_attention_layernorm.weight"
-  final_norm: "model.norm.weight"
-
-graph:
-  inputs:
-    - name: input_ids
-      dtype: int64
-      shape:
-        - batch
-        - seq_len
-
-  outputs:
-    - name: logits
-      dtype: "${dtype}"
-      shape:
-        - batch
-        - seq_len
-        - "${vocab_size}"
-
-  nodes:
-    - name: embed
-      op_type: Gather
-      inputs:
-        - "model.embed_tokens.weight"
-        - input_ids
-      outputs:
-        - hidden_states
-
-fusion_hints:
-  - pattern:
-      - q_proj
-      - k_proj
-      - v_proj
-      - rope
-    target: FusedQkvRope
-  - pattern:
-      - gate
-      - up
-      - silu
-      - mul
-    target: SwiGLU
-"#;
+const QWEN3_TEMPLATE: &str = include_str!("templates/qwen3.yaml");
 
 /// Llama 架构模板
 const LLAMA_TEMPLATE: &str = r#"

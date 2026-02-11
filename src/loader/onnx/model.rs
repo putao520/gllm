@@ -133,6 +133,83 @@ impl OnnxGraph {
     }
 }
 
+impl OnnxGraph {
+    /// Bind weights from a TensorProvider to the graph's initializers (REQ-ARCH-003)
+    ///
+    /// Zero-copy binding: tensor data is referenced directly from the provider.
+    /// This allows GGUF/SafeTensors weights to be used without intermediate conversion.
+    pub fn bind_weights<P: crate::loader::TensorProvider>(
+        &mut self,
+        provider: &P,
+        name_mapping: &HashMap<String, String>,
+    ) -> Result<usize> {
+        use prost::bytes::Bytes;
+
+        let mut bound_count = 0;
+
+        for (graph_name, tensor_name) in name_mapping {
+            if let Some(meta) = provider.tensor_info(tensor_name) {
+                // Load tensor data (may be zero-copy via mmap)
+                let data = provider.load_tensor_data(tensor_name)?;
+
+                // Create OnnxTensor with the loaded data
+                let tensor = OnnxTensor::new(
+                    graph_name.clone(),
+                    meta.dtype,
+                    meta.shape.clone(),
+                    Bytes::from(data.into_owned()),
+                );
+
+                self.initializers.insert(graph_name.clone(), tensor);
+                bound_count += 1;
+            }
+        }
+
+        Ok(bound_count)
+    }
+
+    /// Bind all tensors from provider using automatic name matching
+    ///
+    /// Attempts to match tensor names from provider to graph node inputs.
+    pub fn bind_weights_auto<P: crate::loader::TensorProvider>(
+        &mut self,
+        provider: &P,
+    ) -> Result<usize> {
+        use prost::bytes::Bytes;
+
+        let mut bound_count = 0;
+
+        // Collect all input names from nodes that might need weights
+        let mut weight_inputs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &self.nodes {
+            for input in &node.inputs {
+                // Skip empty inputs and likely activation inputs
+                if !input.is_empty() && !input.starts_with("hidden") && !input.starts_with("input")
+                {
+                    weight_inputs.insert(input.clone());
+                }
+            }
+        }
+
+        // Bind tensors from provider
+        for meta in provider.iter_tensors() {
+            if weight_inputs.contains(&meta.name) {
+                let data = provider.load_tensor_data(&meta.name)?;
+                let tensor = OnnxTensor::new(
+                    meta.name.clone(),
+                    meta.dtype,
+                    meta.shape.clone(),
+                    Bytes::from(data.into_owned()),
+                );
+                self.initializers.insert(meta.name, tensor);
+                bound_count += 1;
+            }
+        }
+
+        Ok(bound_count)
+    }
+}
+
 fn parse_nodes(
     nodes: Vec<proto::NodeProto>,
     resolver: &mut ExternalDataResolver,

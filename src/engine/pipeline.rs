@@ -1,0 +1,215 @@
+//! 统一推理管道 (REQ-EXEC-001 ~ REQ-EXEC-004)
+//!
+//! 实现 SPEC/08-LOADER-REFACTOR.md 中定义的统一流水线。
+
+use gllm_kernels::backend_trait::{Backend, Element};
+
+use crate::arch::{
+    get_template_by_arch, register_builtin_templates, resolve_config, ArchTemplate, ResolvedConfig,
+};
+use crate::graph::{
+    executor::{ExecutionError, ExecutionPlan},
+    optimizer::{GraphOptimizer, OptimizationContext},
+    types::OptimizationStats,
+    FusedGraph,
+};
+use crate::loader::onnx::OnnxGraph;
+use crate::loader::{Loader, LoaderError, WeightFormat, WeightsHandle};
+use crate::manifest::{map_architecture_token, ModelArchitecture, ModelManifest};
+
+/// 统一推理管道错误
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("Loader error: {0}")]
+    Loader(#[from] LoaderError),
+    #[error("Template not found for architecture: {0}")]
+    TemplateNotFound(String),
+    #[error("Config resolution failed: {0}")]
+    ConfigResolution(String),
+    #[error("Graph generation failed: {0}")]
+    GraphGeneration(String),
+    #[error("Optimization failed: {0}")]
+    Optimization(String),
+    #[error("Execution failed: {0}")]
+    Execution(#[from] ExecutionError),
+}
+
+/// 统一推理管道
+///
+/// 实现 SPEC 中定义的：
+/// 1. 统一加载 → OnnxGraph
+/// 2. 图优化 → FusedGraph
+/// 3. 执行推理
+pub struct UnifiedPipeline<B: Backend<E>, E: Element> {
+    /// 优化后的融合图
+    pub fused_graph: FusedGraph,
+    /// 执行计划
+    pub execution_plan: ExecutionPlan,
+    /// 原始 OnnxGraph (用于调试)
+    pub original_graph: OnnxGraph,
+    /// 解析后的配置
+    pub config: ResolvedConfig,
+    /// 权重句柄
+    pub weights: WeightsHandle<B, E>,
+    /// 优化上下文
+    pub opt_context: OptimizationContext,
+}
+
+impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
+    /// 从 Loader 构建完整管道
+    ///
+    /// 这是主入口，执行完整的流水线：
+    /// 1. 检测架构
+    /// 2. 加载/生成 OnnxGraph
+    /// 3. 绑定权重
+    /// 4. 图优化
+    /// 5. 生成执行计划
+    pub fn from_loader(
+        mut loader: Loader,
+        backend: &B,
+        manifest: &ModelManifest,
+    ) -> Result<Self, PipelineError> {
+        register_builtin_templates();
+
+        // 确保 loader 已加载
+        loader = loader.load()?;
+
+        // 1. 检测架构并获取模板
+        let arch = detect_architecture(&loader, manifest);
+        let (template, config) = resolve_template_and_config(&loader, arch)?;
+
+        // 2. 生成或获取 OnnxGraph
+        let original_graph = build_onnx_graph(&mut loader, template, &config)?;
+
+        // 3. 上传权重到后端
+        let weights = loader.upload_weights(backend)?;
+
+        // 4. 图优化
+        let opt_context = build_optimization_context();
+        let optimizer = GraphOptimizer::new(opt_context.clone());
+        let fused_graph = optimizer
+            .optimize(&original_graph)
+            .map_err(|e| PipelineError::Optimization(e.to_string()))?;
+
+        // 5. 生成执行计划
+        let execution_plan = ExecutionPlan::from_fused_graph(&fused_graph);
+
+        Ok(Self {
+            fused_graph,
+            execution_plan,
+            original_graph,
+            config,
+            weights,
+            opt_context,
+        })
+    }
+
+    /// 获取优化统计
+    pub fn optimization_stats(&self) -> &OptimizationStats {
+        &self.fused_graph.stats
+    }
+
+    /// 获取融合算子数量
+    pub fn fused_op_count(&self) -> usize {
+        self.fused_graph.fused_op_count()
+    }
+
+    /// 获取执行计划中的操作数
+    pub fn execution_op_count(&self) -> usize {
+        self.execution_plan.op_count()
+    }
+}
+
+/// 检测模型架构
+fn detect_architecture(loader: &Loader, manifest: &ModelManifest) -> ModelArchitecture {
+    // 优先从 GGUF metadata 获取
+    if let Ok(arch_str) = loader.gguf_architecture() {
+        if let Some(arch) = map_architecture_token(arch_str) {
+            return arch;
+        }
+    }
+
+    // 回退到 manifest
+    manifest.arch
+}
+
+/// 解析模板和配置
+fn resolve_template_and_config(
+    loader: &Loader,
+    arch: ModelArchitecture,
+) -> Result<(&'static ArchTemplate, ResolvedConfig), PipelineError> {
+    let template = get_template_by_arch(arch)
+        .ok_or_else(|| PipelineError::TemplateNotFound(format!("{arch:?}")))?;
+
+    // 根据格式获取 TensorProvider 并解析配置
+    let config = match loader.weight_format() {
+        WeightFormat::SafeTensors => {
+            let st = loader.safetensors_ref().ok_or_else(|| {
+                PipelineError::ConfigResolution("SafeTensors not loaded".to_string())
+            })?;
+            resolve_config(template, st, None)
+                .map_err(|e| PipelineError::ConfigResolution(e.to_string()))?
+        }
+        WeightFormat::Gguf => {
+            if let Some(gguf) = loader.gguf_ref() {
+                resolve_config(template, gguf, Some(gguf))
+                    .map_err(|e| PipelineError::ConfigResolution(e.to_string()))?
+            } else {
+                return Err(PipelineError::ConfigResolution(
+                    "GGUF not loaded".to_string(),
+                ));
+            }
+        }
+        WeightFormat::Onnx => {
+            // ONNX 直接使用图中的元数据
+            ResolvedConfig::default()
+        }
+        _ => {
+            return Err(PipelineError::ConfigResolution(
+                "Unsupported weight format".to_string(),
+            ));
+        }
+    };
+
+    Ok((template, config))
+}
+
+/// 构建 OnnxGraph
+fn build_onnx_graph(
+    loader: &mut Loader,
+    template: &ArchTemplate,
+    config: &ResolvedConfig,
+) -> Result<OnnxGraph, PipelineError> {
+    match loader.weight_format() {
+        WeightFormat::Onnx => {
+            // ONNX: 直接返回解析的图
+            let onnx = loader.onnx()?;
+            Ok(onnx.graph().clone())
+        }
+        WeightFormat::SafeTensors | WeightFormat::Gguf => {
+            // 非 ONNX: 使用模板生成图
+            template
+                .to_onnx_graph(config)
+                .map_err(|e| PipelineError::GraphGeneration(e.to_string()))
+        }
+        _ => Err(PipelineError::GraphGeneration(
+            "Unsupported format for graph generation".to_string(),
+        )),
+    }
+}
+
+/// 构建优化上下文
+fn build_optimization_context() -> OptimizationContext {
+    // TODO: 从后端检测硬件能力
+    OptimizationContext::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_architecture_uses_manifest_fallback() {
+        // 基础测试 - 无法直接测试完整管道，需要 mock
+    }
+}

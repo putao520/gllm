@@ -3,7 +3,6 @@ use gllm_kernels::{CpuBackend, CudaBackend};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
-
 use crate::engine::executor::{Executor, ExecutorError};
 use crate::loader::{Loader, LoaderError};
 use crate::manifest::{ModelArchitecture, ModelManifest};
@@ -282,6 +281,8 @@ fn build_executor(
             if let Some(path) = tokenizer_path {
                 loader = loader.with_tokenizer(path.to_path_buf());
             }
+            // Load the weights into memory (REQ-LOADER-023: Universal weight loading)
+            let mut loader = loader.load()?;
             let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
             Ok(BackendExecutor::Cuda(Box::new(executor)))
         }
@@ -294,6 +295,8 @@ fn build_executor(
             if let Some(path) = tokenizer_path {
                 loader = loader.with_tokenizer(path.to_path_buf());
             }
+            // Load the weights into memory (REQ-LOADER-023: Universal weight loading)
+            let mut loader = loader.load()?;
             let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
             Ok(BackendExecutor::Cpu(Box::new(executor)))
         }
@@ -315,6 +318,8 @@ fn build_cpu_executor(
     if let Some(path) = tokenizer_path {
         loader = loader.with_tokenizer(path.to_path_buf());
     }
+    // Load the weights into memory (REQ-LOADER-023: Universal weight loading)
+    let mut loader = loader.load()?;
     let executor = Executor::from_loader(CpuBackend::<f32>::new(), manifest, &mut loader)?;
     Ok(BackendExecutor::Cpu(Box::new(executor)))
 }

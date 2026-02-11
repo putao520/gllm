@@ -22,8 +22,8 @@ pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};
 pub use hgal::{HGALConfig, HGALScheduler};
 pub use jit_types::{SchedulerDecision, SystemState};
 pub use memory_manager::{
-    EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PageLocation, PageTable, Tier,
-    TierManager, TierUsage, VirtualPageId, SessionId, SessionKvCache,
+    EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PageLocation, PageTable, SessionId,
+    SessionKvCache, Tier, TierManager, TierUsage, VirtualPageId,
 };
 pub use observer::{BasicObserver, RuntimeObserver};
 pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerError, SchedulerOutput};

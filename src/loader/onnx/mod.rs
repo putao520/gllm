@@ -27,8 +27,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use attributes::{OnnxAttribute, OnnxAttributeValue};
 pub use matcher::{FusedGraph, FusedKernel, FusedOp};
-pub use model::{OnnxGraph, OnnxModel, OnnxNode};
+pub use model::{OnnxGraph, OnnxModel, OnnxNode, OnnxValueInfo};
 pub use tensor::{OnnxSparseTensor, OnnxTensor};
 
 use external::ExternalDataResolver;

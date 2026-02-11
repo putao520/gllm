@@ -242,9 +242,7 @@ fn resolve_from_tensors<P: TensorProvider>(
 /// 验证配置完整性
 fn validate_config(config: &ResolvedConfig) -> Result<(), ResolveError> {
     if config.num_hidden_layers == 0 {
-        return Err(ResolveError::MissingConfig(
-            "num_hidden_layers".to_string(),
-        ));
+        return Err(ResolveError::MissingConfig("num_hidden_layers".to_string()));
     }
     if config.hidden_size == 0 {
         return Err(ResolveError::MissingConfig("hidden_size".to_string()));

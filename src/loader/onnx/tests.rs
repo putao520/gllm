@@ -4,6 +4,12 @@ use prost::Message;
 use safetensors::Dtype;
 use tempfile::{NamedTempFile, TempDir};
 
+fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
+    data.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
 fn empty_model(graph: proto::GraphProto) -> proto::ModelProto {
     proto::ModelProto {
         ir_version: None,
@@ -124,8 +130,8 @@ fn load_graph_and_tensor() {
 
     let loader = OnnxLoader::from_path(file.path()).expect("loader");
     let slice = loader.tensor("linear.weight").expect("tensor");
-    let values = slice.as_f32().expect("f32");
-    assert_eq!(values.as_ref(), &[1.0, 2.0, 3.0, 4.0]);
+    let values = bytes_to_f32(slice.data);
+    assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
     assert_eq!(loader.graph().nodes.len(), 1);
 }
 
@@ -163,8 +169,8 @@ fn load_external_tensor() {
 
     let loader = OnnxLoader::from_path(&model_path).expect("loader");
     let slice = loader.tensor("w").expect("tensor");
-    let values = slice.as_f32().expect("f32");
-    assert_eq!(values.as_ref(), &[1.0, 2.0]);
+    let values = bytes_to_f32(slice.data);
+    assert_eq!(values, vec![1.0, 2.0]);
 }
 
 #[test]

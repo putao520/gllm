@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use ::safetensors::Dtype;
 use gllm_kernels::backend_trait::{Backend, Element};
-use half::{bf16, f16};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -16,7 +15,6 @@ use crate::manifest::{ModelManifest, TensorRole, EMPTY_FILE_MAP};
 
 // Re-export modules
 pub mod adapter; // GGUF tensor adapter (KernelTensorView)
-pub mod config; // Keep for client.rs dependency
 pub mod downloader;
 pub mod format_detector;
 pub mod gguf;
@@ -493,6 +491,10 @@ impl Loader {
         self.gguf.as_mut().ok_or(LoaderError::MissingWeights)
     }
 
+    pub fn gguf_ref(&self) -> Option<&gguf::GgufReader> {
+        self.gguf.as_ref()
+    }
+
     pub fn onnx_loader(&mut self) -> Result<&mut onnx::OnnxLoader> {
         self.onnx.as_mut().ok_or(LoaderError::MissingWeights)
     }
@@ -503,6 +505,81 @@ impl Loader {
 
     pub fn onnx(&mut self) -> Result<&mut onnx::OnnxLoader> {
         self.onnx_loader()
+    }
+
+    /// 获取统一的 OnnxGraph 表示 (REQ-EXEC-001)
+    ///
+    /// 无论原始格式是 ONNX、SafeTensors 还是 GGUF，都转换为统一的 OnnxGraph。
+    /// 对于 ONNX 文件，直接返回解析的图。
+    /// 对于其他格式，使用架构模板生成图。
+    pub fn to_unified_graph(&mut self) -> Result<onnx::OnnxGraph> {
+        match self.format {
+            WeightFormat::Onnx => {
+                let onnx = self.onnx()?;
+                Ok(onnx.graph().clone())
+            }
+            WeightFormat::SafeTensors | WeightFormat::Gguf => {
+                // 使用架构模板系统生成图
+                use crate::arch::{
+                    get_template_by_arch, register_builtin_templates, resolve_config,
+                };
+
+                register_builtin_templates();
+
+                // 1. 检测架构
+                let arch = self.detect_architecture();
+
+                // 2. 获取模板
+                let template = get_template_by_arch(arch).ok_or_else(|| {
+                    LoaderError::Onnx(format!("No template for arch: {:?}", arch))
+                })?;
+
+                // 3. 解析配置 - 需要获取 TensorProvider
+                let config = match self.format {
+                    WeightFormat::SafeTensors => {
+                        let st = self
+                            .safetensors
+                            .as_ref()
+                            .ok_or(LoaderError::MissingWeights)?;
+                        resolve_config(template, st, self.gguf.as_ref()).map_err(|e| {
+                            LoaderError::Onnx(format!("Config resolve failed: {}", e))
+                        })?
+                    }
+                    WeightFormat::Gguf => {
+                        let gguf = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
+                        resolve_config(template, gguf, Some(gguf)).map_err(|e| {
+                            LoaderError::Onnx(format!("Config resolve failed: {}", e))
+                        })?
+                    }
+                    _ => unreachable!(),
+                };
+
+                // 4. 生成图
+                template
+                    .to_onnx_graph(&config)
+                    .map_err(|e| LoaderError::Onnx(format!("Template to graph failed: {}", e)))
+            }
+            WeightFormat::PyTorch => Err(LoaderError::Onnx(
+                "PyTorch format not supported for unified graph".to_string(),
+            )),
+        }
+    }
+
+    /// 检测模型架构
+    fn detect_architecture(&self) -> crate::manifest::ModelArchitecture {
+        use crate::manifest::map_architecture_token;
+
+        // 优先从 GGUF metadata 获取
+        if let Some(gguf) = &self.gguf {
+            if let Ok(arch_str) = gguf.architecture() {
+                if let Some(arch) = map_architecture_token(arch_str) {
+                    return arch;
+                }
+            }
+        }
+
+        // 从 manifest 获取
+        self.manifest.arch
     }
 
     pub fn set_manifest_if_missing(&mut self, manifest: &ModelManifest) {
@@ -596,10 +673,7 @@ impl Loader {
             match meta.dtype {
                 Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
                     let data = provider.load_tensor_data(&meta.name)?;
-                    let converted = convert_to_element::<E>(meta.dtype, &data)?;
-                    let tensor = backend
-                        .upload_weights(&converted)
-                        .map_err(|e| LoaderError::Backend(e.to_string()))?;
+                    let tensor = upload_native_tensor::<B, E>(backend, &meta, data.as_ref())?;
 
                     tensors.insert(meta.name.clone(), tensor);
                     shapes.insert(meta.name.clone(), meta.shape.clone());
@@ -653,177 +727,55 @@ impl<'a> TensorSlice<'a> {
     pub fn new(dtype: Dtype, shape: Vec<usize>, data: &'a [u8]) -> Self {
         Self { dtype, shape, data }
     }
-
-    pub fn as_f32(&self) -> Result<Cow<'a, [f32]>> {
-        convert_to_f32(self.dtype, self.data)
-    }
 }
 
-fn convert_to_f32(dtype: Dtype, data: &[u8]) -> Result<Cow<'_, [f32]>> {
-    match dtype {
-        Dtype::F32 => cast_or_copy_f32(data),
-        Dtype::F16 => {
-            if data.len() % 2 != 0 {
-                return Err(LoaderError::InvalidQuantization(
-                    "F16 data length not multiple of 2".into(),
-                ));
-            }
-            let mut out = Vec::with_capacity(data.len() / 2);
-            for chunk in data.chunks_exact(2) {
-                let value = f16::from_le_bytes([chunk[0], chunk[1]]);
-                out.push(value.to_f32());
-            }
-            Ok(Cow::Owned(out))
-        }
-        Dtype::BF16 => {
-            if data.len() % 2 != 0 {
-                return Err(LoaderError::InvalidQuantization(
-                    "BF16 data length not multiple of 2".into(),
-                ));
-            }
-            let mut out = Vec::with_capacity(data.len() / 2);
-            for chunk in data.chunks_exact(2) {
-                let value = bf16::from_le_bytes([chunk[0], chunk[1]]);
-                out.push(value.to_f32());
-            }
-            Ok(Cow::Owned(out))
-        }
-        Dtype::F64 => {
-            if data.len() % 8 != 0 {
-                return Err(LoaderError::InvalidQuantization(
-                    "F64 data length not multiple of 8".into(),
-                ));
-            }
-            let mut out = Vec::with_capacity(data.len() / 8);
-            for chunk in data.chunks_exact(8) {
-                let value = f64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]);
-                out.push(value as f32);
-            }
-            Ok(Cow::Owned(out))
-        }
-        _ => Err(LoaderError::UnsupportedDtype(dtype)),
-    }
-}
-
-/// Convert raw tensor data to a vector of generic element type E.
-///
-/// This function handles dtype conversion from various floating point formats
-/// (F32, F16, BF16, F64) to the target element type E.
-///
-/// Optimized paths:
-/// - Same type (e.g., F16 → f16): zero-copy transmute when aligned, otherwise byte copy
-/// - Different types: direct conversion without f32 intermediate when possible
-fn convert_to_element<E: Element>(dtype: Dtype, data: &[u8]) -> Result<Vec<E>> {
-    use std::any::TypeId;
-
-    let target_type = TypeId::of::<E>();
-
-    // Fast path: source dtype matches target E type (zero-copy or direct copy)
-    match dtype {
-        Dtype::F32 if target_type == TypeId::of::<f32>() => {
-            // F32 → f32: direct transmute
-            return Ok(cast_or_copy_typed::<f32, E>(data));
-        }
-        Dtype::F16 if target_type == TypeId::of::<half::f16>() => {
-            // F16 → f16: direct transmute
-            return Ok(cast_or_copy_typed::<half::f16, E>(data));
-        }
-        Dtype::BF16 if target_type == TypeId::of::<half::bf16>() => {
-            // BF16 → bf16: direct transmute
-            return Ok(cast_or_copy_typed::<half::bf16, E>(data));
-        }
-        _ => {}
+fn upload_native_tensor<B: Backend<E>, E: Element>(
+    backend: &B,
+    meta: &TensorMeta,
+    data: &[u8],
+) -> Result<B::Tensor> {
+    let elem_size = std::mem::size_of::<E>();
+    if elem_size == 0 || data.len() % elem_size != 0 {
+        return Err(LoaderError::InvalidQuantization(format!(
+            "tensor {} has invalid byte length {} for element size {}",
+            meta.name,
+            data.len(),
+            elem_size
+        )));
     }
 
-    // Cross-type conversion: use the most direct path
-    // For float types, we can convert directly using Float trait
-    match dtype {
-        Dtype::F32 => {
-            let f32_slice = cast_or_copy_f32(data)?;
-            Ok(f32_slice.iter().map(|&v| E::from_f32(v)).collect())
-        }
-        Dtype::F16 => {
-            let count = data.len() / 2;
-            let mut result = Vec::with_capacity(count);
-            for chunk in data.chunks_exact(2) {
-                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let f16_val = half::f16::from_bits(bits);
-                result.push(E::from_f32(f16_val.to_f32()));
-            }
-            Ok(result)
-        }
-        Dtype::BF16 => {
-            let count = data.len() / 2;
-            let mut result = Vec::with_capacity(count);
-            for chunk in data.chunks_exact(2) {
-                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let bf16_val = half::bf16::from_bits(bits);
-                result.push(E::from_f32(bf16_val.to_f32()));
-            }
-            Ok(result)
-        }
-        Dtype::F64 => {
-            let count = data.len() / 8;
-            let mut result = Vec::with_capacity(count);
-            for chunk in data.chunks_exact(8) {
-                let bits = u64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]);
-                let f64_val = f64::from_bits(bits);
-                result.push(E::from_f32(f64_val as f32));
-            }
-            Ok(result)
-        }
-        _ => Err(LoaderError::UnsupportedDtype(dtype)),
+    let dtype_matches = match meta.dtype {
+        Dtype::F32 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>(),
+        Dtype::F16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::f16>(),
+        Dtype::BF16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::bf16>(),
+        Dtype::F64 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f64>(),
+        _ => false,
+    };
+    if !dtype_matches {
+        return Err(LoaderError::Backend(format!(
+            "native-dtype upload required: tensor '{}' is {:?}, backend expects {}",
+            meta.name,
+            meta.dtype,
+            std::any::type_name::<E>()
+        )));
     }
-}
 
-/// Zero-copy or byte-copy transmute for same-type conversions.
-///
-/// Safety: This is safe because we only call this when TypeId confirms
-/// the source and target types are the same.
-#[inline]
-fn cast_or_copy_typed<S: Copy + 'static, E: Element>(data: &[u8]) -> Vec<E> {
-    let elem_size = std::mem::size_of::<S>();
+    let (prefix, body, suffix) = unsafe { data.align_to::<E>() };
+    if prefix.is_empty() && suffix.is_empty() {
+        return backend
+            .upload_weights(body)
+            .map_err(|e| LoaderError::Backend(e.to_string()));
+    }
+
     let count = data.len() / elem_size;
-
-    // Try zero-copy if aligned
-    let (prefix, body, suffix) = unsafe { data.align_to::<S>() };
-    if prefix.is_empty() && suffix.is_empty() {
-        // Safety: S and E have the same TypeId, so they're the same type
-        // We transmute the reference and copy
-        let e_slice: &[E] =
-            unsafe { std::slice::from_raw_parts(body.as_ptr() as *const E, body.len()) };
-        return e_slice.to_vec();
-    }
-
-    // Fallback: byte-by-byte copy
-    let mut result = Vec::with_capacity(count);
+    let mut converted = Vec::with_capacity(count);
     for chunk in data.chunks_exact(elem_size) {
-        // Copy bytes to properly aligned storage
-        let mut bytes = [0u8; 8]; // Max size we handle
-        bytes[..elem_size].copy_from_slice(chunk);
-        let val: S = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const S) };
-        // Safety: S and E are the same type (verified by TypeId)
-        let e_val: E = unsafe { std::mem::transmute_copy(&val) };
-        result.push(e_val);
+        let value: E = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const E) };
+        converted.push(value);
     }
-    result
-}
-
-fn cast_or_copy_f32(data: &[u8]) -> Result<Cow<'_, [f32]>> {
-    let (prefix, body, suffix) = unsafe { data.align_to::<f32>() };
-    if prefix.is_empty() && suffix.is_empty() {
-        return Ok(Cow::Borrowed(body));
-    }
-    let mut out = Vec::with_capacity(data.len() / 4);
-    for chunk in data.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        out.push(value);
-    }
-    Ok(Cow::Owned(out))
+    backend
+        .upload_weights(&converted)
+        .map_err(|e| LoaderError::Backend(e.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,10 +3,15 @@ mod common;
 use common::TestModelFiles;
 use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
-use gllm::loader::{config as loader_config, Loader, LoaderError};
-use gllm::manifest::{ModelKind, ModelManifest};
+use gllm::loader::{Loader, LoaderError};
+use gllm::manifest::{
+    map_architecture_token, tensor_rules_for_arch, ModelArchitecture, ModelKind, ModelManifest,
+    EMPTY_FILE_MAP,
+};
 use gllm_kernels::backend_trait::BackendError;
 use gllm_kernels::cpu_backend::CpuBackend;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -19,14 +24,28 @@ fn build_executor(
     let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
     let backend = CpuBackend::<f32>::new();
-    Executor::from_loader(backend, Arc::new(manifest.clone()), &mut loader)
-        .expect("executor")
+    Executor::from_loader(backend, Arc::new(manifest.clone()), &mut loader).expect("executor")
 }
 
 fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelManifest {
-    let config_path = loader.config_path().expect("config path");
-    let config_value = loader_config::load_config_value(config_path).expect("config");
-    loader_config::manifest_from_config(alias, &config_value, kind).expect("manifest")
+    // Ω1: Tensor-driven architecture detection
+    let arch = loader
+        .gguf_architecture()
+        .ok()
+        .and_then(map_architecture_token)
+        .unwrap_or(ModelArchitecture::Qwen3);
+
+    ModelManifest {
+        model_id: Cow::Owned(alias.to_string()),
+        file_map: EMPTY_FILE_MAP,
+        arch,
+        tensor_rules: tensor_rules_for_arch(arch),
+        kind,
+        rope_base_override: None,
+        max_context_override: None,
+        moe_config: None,
+        tensor_map: HashMap::new(),
+    }
 }
 
 /// TEST-ERROR-001: 空输入返回错误

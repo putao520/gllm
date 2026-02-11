@@ -11,9 +11,9 @@ use gllm_kernels::kernel_types::{
 };
 use thiserror::Error;
 
-use crate::loader::WeightsHandle;
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::onnx::FusedKernel;
+use crate::loader::WeightsHandle;
 use crate::loader::{Loader, LoaderError, WeightFormat};
 use crate::manifest::{ModelKind, ModelManifest};
 use crate::model_config::{ModelConfig, ModelConfigError};
@@ -89,7 +89,7 @@ enum OnnxKernelExecutionOp {
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
-        #[error(transparent)]
+    #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
     Config(#[from] ModelConfigError),

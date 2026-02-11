@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod arch;
 pub mod backend;
 pub mod engine;
+pub mod graph;
 pub mod loader;
 pub mod scheduler;
 

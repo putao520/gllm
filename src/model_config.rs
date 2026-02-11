@@ -1,9 +1,7 @@
-//! Model config loader (GGUF metadata first, config.json fallback).
-
-use std::collections::HashMap;
-use std::path::Path;
+//! Model config loader (metadata/tensor-driven, no config.json fallback).
 
 use serde_json::Value;
+use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::loader::{
@@ -14,11 +12,11 @@ use crate::manifest::{ModelManifest, TensorRole};
 
 #[derive(Debug, Error)]
 pub enum ModelConfigError {
-    #[error("config.json not found in model files")]
+    #[error("metadata-driven config unavailable")]
     MissingConfig,
-    #[error("GGUF metadata unavailable and config.json not found: {0}")]
+    #[error("metadata-driven config unavailable: {0}")]
     MissingConfigAndMetadata(String),
-    #[error("invalid or incomplete config.json: {0}")]
+    #[error("invalid or incomplete metadata config: {0}")]
     InvalidConfig(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -149,15 +147,9 @@ impl ModelConfig {
             match Self::from_onnx_loader_tensor_driven(manifest, loader) {
                 Ok(config) => return Ok(config),
                 Err(err) => {
-                    // ONNX 没有 config.json 回退，记录错误继续
                     safetensors_metadata_error = Some(err);
                 }
             }
-        }
-
-        // 回退：从 config.json 读取（最低优先级）
-        if let Some(path) = loader.config_path().map(|path| path.to_path_buf()) {
-            return Self::from_path_with_loader(manifest, &path, loader);
         }
 
         if let Some(err) = gguf_metadata_error {
@@ -168,31 +160,6 @@ impl ModelConfig {
         }
 
         Err(ModelConfigError::MissingConfig)
-    }
-
-    pub fn from_path(manifest: &ModelManifest, path: &Path) -> ModelConfigResult<Self> {
-        let bytes = std::fs::read(path)?;
-        let value: Value = serde_json::from_slice(&bytes)?;
-        Self::from_value(manifest, &value, None)
-    }
-
-    /// Ω1: 从实际权重中检测 dtype 大小
-    ///
-    /// 优先使用权重文件中的实际 dtype，而非 config.json 中的声明
-    pub fn from_path_with_loader(
-        manifest: &ModelManifest,
-        path: &Path,
-        loader: &mut Loader,
-    ) -> ModelConfigResult<Self> {
-        // 先克隆需要的数据，避免借用冲突
-        let manifest_clone = manifest.clone();
-        let bytes = std::fs::read(path)?;
-        let value: Value = serde_json::from_slice(&bytes)?;
-
-        // 检测权重 dtype（需要可变借用）
-        let weight_dtype_size = loader.detect_weight_dtype_size().unwrap_or(None);
-
-        Self::from_value(&manifest_clone, &value, weight_dtype_size)
     }
 
     fn from_safetensors_loader(
@@ -223,7 +190,7 @@ impl ModelConfig {
     /// REQ-LOADER-022: SafeTensors 张量驱动配置推导
     ///
     /// 遵循 ARCH-TENSOR-DRIVEN 原则：
-    /// - 优先级：张量形状 > gllm.config 元数据 > config.json
+    /// - 优先级：张量形状 > gllm.config 元数据
     /// - 从 embedding 张量推导 vocab_size（取较大维度）
     /// - 从 Q 投影张量推导 head_dim（q_out / num_heads）
     /// - 从权重张量 dtype 推导 dtype_size
@@ -240,7 +207,7 @@ impl ModelConfig {
             derive_config_from_tensors(st_loader)?
         };
 
-        let base_value = if let Some(value) = loader
+        let base_value = loader
             .safetensors_gllm_config()
             .map_err(|err| {
                 ModelConfigError::InvalidConfig(format!(
@@ -248,19 +215,12 @@ impl ModelConfig {
                 ))
             })?
             .cloned()
-        {
-            Some(value)
-        } else if let Some(path) = loader.config_path() {
-            Some(read_json_value(path)?)
-        } else {
-            None
-        }
-        .ok_or_else(|| {
-            ModelConfigError::InvalidConfig(
-                "tensor-driven derivation requires gllm.config metadata or config.json for non-tensor fields"
-                    .to_string(),
-            )
-        })?;
+            .ok_or_else(|| {
+                ModelConfigError::InvalidConfig(
+                    "tensor-driven derivation requires gllm.config metadata for non-tensor fields"
+                        .to_string(),
+                )
+            })?;
 
         let base = Self::from_value(manifest, &base_value, Some(derived.dtype_size))?;
         apply_tensor_derived(base, derived)
@@ -269,7 +229,7 @@ impl ModelConfig {
     /// REQ-LOADER-023: ONNX 张量驱动配置推导
     ///
     /// 遵循 ARCH-TENSOR-DRIVEN 原则：
-    /// - 优先级：initializer 形状 > ONNX attributes > 外部 config.json
+    /// - 优先级：initializer 形状 > ONNX attributes
     /// - 从 embedding initializer 推导 vocab_size（取较大维度）
     /// - 从 Q 投影 initializer 推导 head_dim（q_out / num_heads）
     /// - 从 initializer dtype 推导 dtype_size
@@ -286,16 +246,9 @@ impl ModelConfig {
             (derived, metadata)
         };
 
-        let base_value = if let Some(value) = onnx_metadata {
-            Some(value)
-        } else if let Some(path) = loader.config_path() {
-            Some(read_json_value(path)?)
-        } else {
-            None
-        }
-        .ok_or_else(|| {
+        let base_value = onnx_metadata.ok_or_else(|| {
             ModelConfigError::InvalidConfig(
-                "tensor-driven ONNX derivation requires metadata attributes or config.json for non-tensor fields"
+                "tensor-driven ONNX derivation requires metadata attributes for non-tensor fields"
                     .to_string(),
             )
         })?;
@@ -545,7 +498,7 @@ impl ModelConfig {
             ));
         }
         let vocab_size = require_usize(value, &["vocab_size"])?;
-        let rope_scaling = rope_scaling_from_json(value)?;
+        let rope_scaling = rope_scaling_from_metadata_json(value)?;
 
         let max_position_embeddings = find_usize(
             value,
@@ -607,7 +560,7 @@ impl ModelConfig {
         )
         .unwrap_or(false);
 
-        // Ω1: head_dim 从 config.json 读取，或使用标准公式计算
+        // Ω1: head_dim 从元数据读取，或使用标准公式计算
         // 注意：Embedding 模型可能没有 num_attention_heads，此时 head_dim = 0
         let head_dim = if num_attention_heads > 0 {
             find_usize(value, &["attention.head_dim", "head_dim", "kv_channels"])
@@ -634,16 +587,12 @@ impl ModelConfig {
             ));
         }
 
-        // Ω1: dtype 大小优先从实际权重中读取，而非 config.json
-        // 如果权重检测失败，再尝试从配置文件读取
-        let dtype_size = match weight_dtype_size {
-            Some(size) => size,
-            None => dtype_size_from_config(value).ok_or_else(|| {
-                ModelConfigError::InvalidConfig(
-                    "无法确定模型的 dtype 大小，config.json 中缺少 torch_dtype 字段".to_string(),
-                )
-            })?,
-        };
+        // Ω1: dtype 大小必须从实际权重中读取，不从外部配置推断。
+        let dtype_size = weight_dtype_size.ok_or_else(|| {
+            ModelConfigError::InvalidConfig(
+                "无法确定模型 dtype_size：权重中缺少可识别浮点 dtype".to_string(),
+            )
+        })?;
 
         let attention_dropout = find_f32(value, &["attention_dropout", "attention.dropout"])
             .filter(|v| v.is_finite() && *v >= 0.0);
@@ -793,6 +742,29 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
             }
         }
     };
+
+    // Cross-layer consistency check (Ω1: True Source Principle)
+    // All layers must have consistent Q/K projection dimensions
+    if num_hidden_layers > 1 && q_out > 0 {
+        for layer_idx in 1..num_hidden_layers {
+            if let Some(q) = role_map.get(&(TensorRole::AttentionQuery, Some(layer_idx))) {
+                let layer_q_out = projection_out_dim(q, hidden_size, "Q projection")?;
+                if layer_q_out != q_out {
+                    return Err(ModelConfigError::InvalidConfig(format!(
+                        "cross-layer mismatch: layer 0 Q projection has dim {q_out}, but layer {layer_idx} has dim {layer_q_out}"
+                    )));
+                }
+            }
+            if let Some(k) = role_map.get(&(TensorRole::AttentionKey, Some(layer_idx))) {
+                let layer_k_out = projection_out_dim(k, hidden_size, "K projection")?;
+                if layer_k_out != k_out {
+                    return Err(ModelConfigError::InvalidConfig(format!(
+                        "cross-layer mismatch: layer 0 K projection has dim {k_out}, but layer {layer_idx} has dim {layer_k_out}"
+                    )));
+                }
+            }
+        }
+    }
 
     let mut head_candidates = Vec::new();
     if q_out > 0 && k_out > 0 {
@@ -959,12 +931,6 @@ fn apply_tensor_derived(
     }
 
     Ok(base)
-}
-
-fn read_json_value(path: &Path) -> ModelConfigResult<Value> {
-    let bytes = std::fs::read(path)?;
-    let value: Value = serde_json::from_slice(&bytes)?;
-    Ok(value)
 }
 
 fn onnx_config_from_metadata(
@@ -1281,7 +1247,7 @@ fn find_bool(value: &Value, keys: &[&str]) -> Option<bool> {
     })
 }
 
-fn rope_scaling_from_json(value: &Value) -> ModelConfigResult<Option<RopeScalingConfig>> {
+fn rope_scaling_from_metadata_json(value: &Value) -> ModelConfigResult<Option<RopeScalingConfig>> {
     let mut config = RopeScalingConfig::default();
 
     if let Some(scaling) = value.get("rope_scaling") {
@@ -1485,22 +1451,6 @@ fn gguf_arch_array_f32(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<
         out.push(value);
     }
     Some(out)
-}
-
-fn dtype_size_from_config(value: &Value) -> Option<usize> {
-    let dtype = value.get("torch_dtype").or_else(|| value.get("dtype"))?;
-    let dtype = dtype.as_str()?.to_ascii_lowercase();
-    if dtype.contains("float32") || dtype.contains("fp32") {
-        Some(4)
-    } else if dtype.contains("float16")
-        || dtype.contains("fp16")
-        || dtype.contains("bfloat16")
-        || dtype.contains("bf16")
-    {
-        Some(2)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

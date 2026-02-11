@@ -205,6 +205,155 @@ impl ArchTemplate {
         let content = std::fs::read_to_string(path)?;
         Ok(Self::from_yaml(&content)?)
     }
+
+    /// 将架构模板转换为 OnnxGraph (REQ-EXEC-001)
+    ///
+    /// 使用已解析的配置替换占位符，展开重复块，生成可执行的图。
+    pub fn to_onnx_graph(
+        &self,
+        config: &super::resolve::ResolvedConfig,
+    ) -> Result<crate::loader::onnx::OnnxGraph, TemplateError> {
+        use crate::loader::onnx::{OnnxGraph, OnnxValueInfo};
+        use std::collections::HashMap;
+
+        // 1. 构建输入
+        let inputs: Vec<OnnxValueInfo> = self
+            .graph
+            .inputs
+            .iter()
+            .map(|def| OnnxValueInfo {
+                name: super::resolve::substitute_placeholders(&def.name, config),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            })
+            .collect();
+
+        // 2. 构建输出
+        let outputs: Vec<OnnxValueInfo> = self
+            .graph
+            .outputs
+            .iter()
+            .map(|def| OnnxValueInfo {
+                name: super::resolve::substitute_placeholders(&def.name, config),
+                value_type: None,
+                doc_string: String::new(),
+                metadata_props: HashMap::new(),
+            })
+            .collect();
+
+        // 3. 展开节点（处理重复块）
+        let mut nodes = Vec::new();
+        for graph_node in &self.graph.nodes {
+            match graph_node {
+                GraphNode::Node(node_def) => {
+                    nodes.push(self.node_def_to_onnx(node_def, config, None)?);
+                }
+                GraphNode::Repeat(repeat_block) => {
+                    let repeat_count = self.resolve_repeat_count(&repeat_block.repeat, config)?;
+                    for i in 0..repeat_count {
+                        for node_def in &repeat_block.nodes {
+                            nodes.push(self.node_def_to_onnx(
+                                node_def,
+                                config,
+                                Some((&repeat_block.var, i)),
+                            )?);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(OnnxGraph {
+            name: self.name.clone(),
+            doc_string: format!("Generated from template {} v{}", self.name, self.version),
+            nodes,
+            inputs,
+            outputs,
+            value_info: Vec::new(),
+            initializers: HashMap::new(),
+            sparse_initializers: Vec::new(),
+            quantization_annotation: Vec::new(),
+            metadata_props: HashMap::new(),
+        })
+    }
+
+    /// 将 NodeDef 转换为 OnnxNode
+    fn node_def_to_onnx(
+        &self,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        loop_var: Option<(&str, usize)>,
+    ) -> Result<crate::loader::onnx::OnnxNode, TemplateError> {
+        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
+        use std::collections::HashMap;
+
+        let substitute = |s: &str| -> String {
+            let mut result = super::resolve::substitute_placeholders(s, config);
+            if let Some((var, idx)) = loop_var {
+                result = result.replace(&format!("${{{}}}", var), &idx.to_string());
+                result = result.replace(&format!("${}$", var), &idx.to_string());
+            }
+            result
+        };
+
+        let inputs: Vec<String> = node_def.inputs.iter().map(|s| substitute(s)).collect();
+        let outputs: Vec<String> = node_def.outputs.iter().map(|s| substitute(s)).collect();
+
+        let mut attributes = HashMap::new();
+        for (key, value) in &node_def.attributes {
+            let attr_value = match value {
+                AttributeValue::Int(v) => OnnxAttributeValue::Int(*v),
+                AttributeValue::Float(v) => OnnxAttributeValue::Float(*v as f32),
+                AttributeValue::String(s) => OnnxAttributeValue::String(substitute(s)),
+                AttributeValue::Ints(v) => OnnxAttributeValue::Ints(v.clone()),
+                AttributeValue::Floats(v) => {
+                    OnnxAttributeValue::Floats(v.iter().map(|f| *f as f32).collect())
+                }
+            };
+            let attr = OnnxAttribute {
+                name: key.clone(),
+                value: attr_value,
+                doc_string: String::new(),
+                ref_attr_name: None,
+                attr_type: None,
+            };
+            attributes.insert(key.clone(), attr);
+        }
+
+        Ok(OnnxNode {
+            name: substitute(&node_def.name),
+            op_type: node_def.op_type.clone(),
+            domain: String::new(),
+            inputs,
+            outputs,
+            attributes,
+        })
+    }
+
+    /// 解析重复次数
+    fn resolve_repeat_count(
+        &self,
+        repeat_expr: &str,
+        config: &super::resolve::ResolvedConfig,
+    ) -> Result<usize, TemplateError> {
+        // 如果是占位符，从配置中获取
+        if repeat_expr.starts_with("${") && repeat_expr.ends_with('}') {
+            let key = &repeat_expr[2..repeat_expr.len() - 1];
+            if let Some(value) = config.get_int(key) {
+                return Ok(value as usize);
+            }
+            return Err(TemplateError::Invalid(format!(
+                "Unknown repeat count placeholder: {}",
+                key
+            )));
+        }
+
+        // 尝试直接解析为数字
+        repeat_expr
+            .parse()
+            .map_err(|_| TemplateError::Invalid(format!("Invalid repeat count: {}", repeat_expr)))
+    }
 }
 
 /// 模板错误
@@ -283,5 +432,78 @@ graph:
             }
             _ => panic!("Expected repeat block"),
         }
+    }
+
+    #[test]
+    fn to_onnx_graph_expands_repeat_blocks() {
+        let yaml = r#"
+name: test_model
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+  outputs:
+    - name: logits
+      dtype: f32
+  nodes:
+    - name: embed
+      op_type: Gather
+      inputs: ["weights", "input_ids"]
+      outputs: ["hidden_0"]
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["hidden_${i}"]
+          outputs: ["attn_${i}"]
+        - name: "layer_${i}_ffn"
+          op_type: FFN
+          inputs: ["attn_${i}"]
+          outputs: ["hidden_${ next }"]
+          attributes:
+            layer_idx: ${i}
+"#;
+        // Note: The template uses ${i} which won't parse as attribute, so simplify
+        let yaml_simple = r#"
+name: test_model
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+  outputs:
+    - name: logits
+      dtype: f32
+  nodes:
+    - name: embed
+      op_type: Gather
+      inputs: ["weights", "input_ids"]
+      outputs: ["hidden_0"]
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["hidden_${i}"]
+          outputs: ["hidden_next_${i}"]
+"#;
+        let template = ArchTemplate::from_yaml(yaml_simple).unwrap();
+
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 2;
+        config.hidden_size = 768;
+        config.vocab_size = 50000;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+
+        // embed + 2 layers * 1 node = 3 nodes
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes[0].name, "embed");
+        assert_eq!(graph.nodes[1].name, "layer_0_attn");
+        assert_eq!(graph.nodes[2].name, "layer_1_attn");
+
+        // Check inputs were substituted
+        assert_eq!(graph.nodes[1].inputs, vec!["hidden_0".to_string()]);
+        assert_eq!(graph.nodes[2].inputs, vec!["hidden_1".to_string()]);
     }
 }
