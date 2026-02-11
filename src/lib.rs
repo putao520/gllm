@@ -2,6 +2,7 @@
 
 pub mod manifest;
 
+pub mod arch;
 pub mod backend;
 pub mod engine;
 pub mod loader;
