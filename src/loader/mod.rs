@@ -16,7 +16,7 @@ use crate::manifest::{ModelManifest, TensorRole, EMPTY_FILE_MAP};
 
 // Re-export modules
 pub mod adapter;
-pub mod config;
+pub mod config; // REQ-REFACTOR-002: 过渡期保留，将逐步迁移到 arch 模块
 pub mod downloader;
 pub mod format_detector;
 pub mod gguf;

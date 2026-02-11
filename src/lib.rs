@@ -2,7 +2,7 @@
 
 pub mod manifest;
 
-pub mod adapter;
+pub mod adapter; // REQ-REFACTOR-001: 过渡期桩代码，将被 arch 模块替代
 pub mod backend;
 pub mod engine;
 pub mod loader;

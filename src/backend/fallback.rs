@@ -137,7 +137,8 @@ pub fn is_oom_error(err: &ExecutorError) -> bool {
 fn is_adapter_oom(err: &AdapterError) -> bool {
     match err {
         AdapterError::Loader(loader) => is_loader_oom(loader),
-        AdapterError::UnsupportedArchitecture(_) => false,
+        AdapterError::UnsupportedArchitecture => false,
+        AdapterError::Backend(backend) => is_backend_oom(backend),
     }
 }
 
