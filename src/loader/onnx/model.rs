@@ -10,6 +10,8 @@ use super::{proto, LoaderError, Result};
 pub struct OnnxModel {
     pub metadata: OnnxModelMetadata,
     pub graph: OnnxGraph,
+    /// Model-local functions (custom operators)
+    pub functions: Vec<OnnxFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,38 @@ pub struct OnnxQuantizationAnnotation {
     pub axis: Option<i32>,
 }
 
+/// ONNX Function (custom operator definition)
+///
+/// Functions allow defining custom operators as subgraphs of existing operators.
+/// When a NodeProto references this function, it gets expanded to the function body.
+#[derive(Debug, Clone)]
+pub struct OnnxFunction {
+    /// Function name (like op_type in NodeProto)
+    pub name: String,
+    /// Domain this function belongs to
+    pub domain: String,
+    /// Overload identifier (for function overloading)
+    pub overload: String,
+    /// Input parameter names
+    pub inputs: Vec<String>,
+    /// Output parameter names
+    pub outputs: Vec<String>,
+    /// Attribute parameter names (without defaults)
+    pub attributes: Vec<String>,
+    /// Attribute parameters with default values
+    pub attribute_protos: HashMap<String, OnnxAttribute>,
+    /// Function body nodes
+    pub nodes: Vec<OnnxNode>,
+    /// Operator sets this function relies on
+    pub opset_import: Vec<OnnxOperatorSet>,
+    /// Value info for intermediate values
+    pub value_info: Vec<OnnxValueInfo>,
+    /// Documentation
+    pub doc_string: String,
+    /// Metadata
+    pub metadata_props: HashMap<String, String>,
+}
+
 impl OnnxModel {
     pub(super) fn from_proto(
         proto: proto::ModelProto,
@@ -90,7 +124,8 @@ impl OnnxModel {
             metadata_props: parse_metadata_props(proto.metadata_props),
         };
         let graph = OnnxGraph::from_proto(graph, resolver)?;
-        Ok(Self { metadata, graph })
+        let functions = parse_functions(proto.functions, resolver)?;
+        Ok(Self { metadata, graph, functions })
     }
 }
 
@@ -313,4 +348,35 @@ fn parse_quantization(
         });
     }
     out
+}
+
+fn parse_functions(
+    functions: Vec<proto::FunctionProto>,
+    resolver: &mut ExternalDataResolver,
+) -> Result<Vec<OnnxFunction>> {
+    let mut out = Vec::with_capacity(functions.len());
+    for func in functions {
+        let name = func.name.unwrap_or_default();
+        if name.is_empty() {
+            return Err(LoaderError::Onnx("function missing name".to_string()));
+        }
+        let nodes = parse_nodes(func.node, resolver)?;
+        let attribute_protos = parse_attributes(func.attribute_proto, resolver)?;
+        let value_info = parse_value_info(func.value_info)?;
+        out.push(OnnxFunction {
+            name,
+            domain: func.domain.unwrap_or_default(),
+            overload: func.overload.unwrap_or_default(),
+            inputs: func.input,
+            outputs: func.output,
+            attributes: func.attribute,
+            attribute_protos,
+            nodes,
+            opset_import: parse_opsets(func.opset_import),
+            value_info,
+            doc_string: func.doc_string.unwrap_or_default(),
+            metadata_props: parse_metadata_props(func.metadata_props),
+        });
+    }
+    Ok(out)
 }
