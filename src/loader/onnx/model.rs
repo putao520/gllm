@@ -95,7 +95,8 @@ impl OnnxModel {
 }
 
 impl OnnxGraph {
-    fn from_proto(proto: proto::GraphProto, resolver: &mut ExternalDataResolver) -> Result<Self> {
+    /// Parse a GraphProto into OnnxGraph (recursive for subgraphs)
+    pub(super) fn from_proto(proto: proto::GraphProto, resolver: &mut ExternalDataResolver) -> Result<Self> {
         let mut initializers = HashMap::new();
         for initializer in proto.initializer {
             let tensor = OnnxTensor::from_initializer(initializer, resolver)?;

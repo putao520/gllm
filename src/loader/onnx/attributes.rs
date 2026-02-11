@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::external::ExternalDataResolver;
+use super::model::OnnxGraph;
 use super::tensor::{OnnxSparseTensor, OnnxTensor};
 use super::types::OnnxType;
 use super::{proto, LoaderError, Result};
@@ -14,6 +15,10 @@ pub struct OnnxAttribute {
     pub attr_type: Option<proto::attribute_proto::AttributeType>,
 }
 
+/// ONNX attribute value with recursive subgraph support.
+///
+/// Graph/Graphs variants now contain fully parsed `OnnxGraph` structures,
+/// enabling control flow operators (If, Loop, Scan) to work correctly.
 #[derive(Debug, Clone)]
 pub enum OnnxAttributeValue {
     Float(f32),
@@ -22,14 +27,16 @@ pub enum OnnxAttributeValue {
     Tensor(OnnxTensor),
     SparseTensor(OnnxSparseTensor),
     Type(OnnxType),
-    Graph(Box<proto::GraphProto>),
+    /// Parsed subgraph (used by If/Loop/Scan operators)
+    Graph(Box<OnnxGraph>),
     Floats(Vec<f32>),
     Ints(Vec<i64>),
     Strings(Vec<String>),
     Tensors(Vec<OnnxTensor>),
     SparseTensors(Vec<OnnxSparseTensor>),
     Types(Vec<OnnxType>),
-    Graphs(Vec<proto::GraphProto>),
+    /// Multiple parsed subgraphs
+    Graphs(Vec<OnnxGraph>),
     Ref(String),
 }
 
@@ -143,11 +150,12 @@ fn parse_by_type(
             Ok(OnnxAttributeValue::Type(OnnxType::from_proto(tp)?))
         }
         AttrType::Graph => {
-            let graph = attr
+            let graph_proto = attr
                 .g
                 .clone()
                 .ok_or_else(|| missing_attr_value(name, "graph"))?;
-            Ok(OnnxAttributeValue::Graph(Box::new(graph)))
+            let parsed = OnnxGraph::from_proto(graph_proto, resolver)?;
+            Ok(OnnxAttributeValue::Graph(Box::new(parsed)))
         }
         AttrType::Floats => Ok(OnnxAttributeValue::Floats(attr.floats.clone())),
         AttrType::Ints => Ok(OnnxAttributeValue::Ints(attr.ints.clone())),
@@ -170,7 +178,13 @@ fn parse_by_type(
             }
             Ok(OnnxAttributeValue::SparseTensors(tensors))
         }
-        AttrType::Graphs => Ok(OnnxAttributeValue::Graphs(attr.graphs.clone())),
+        AttrType::Graphs => {
+            let mut graphs = Vec::with_capacity(attr.graphs.len());
+            for graph_proto in attr.graphs.iter().cloned() {
+                graphs.push(OnnxGraph::from_proto(graph_proto, resolver)?);
+            }
+            Ok(OnnxAttributeValue::Graphs(graphs))
+        }
         AttrType::TypeProtos => {
             let mut types = Vec::with_capacity(attr.type_protos.len());
             for tp in attr.type_protos.iter().cloned() {
@@ -203,8 +217,9 @@ fn parse_by_presence(
             value, resolver, name,
         )?));
     }
-    if let Some(value) = attr.g.clone() {
-        return Ok(OnnxAttributeValue::Graph(Box::new(value)));
+    if let Some(graph_proto) = attr.g.clone() {
+        let parsed = OnnxGraph::from_proto(graph_proto, resolver)?;
+        return Ok(OnnxAttributeValue::Graph(Box::new(parsed)));
     }
     if !attr.floats.is_empty() {
         return Ok(OnnxAttributeValue::Floats(attr.floats.clone()));
@@ -227,7 +242,11 @@ fn parse_by_presence(
         return Ok(OnnxAttributeValue::Tensors(tensors));
     }
     if !attr.graphs.is_empty() {
-        return Ok(OnnxAttributeValue::Graphs(attr.graphs.clone()));
+        let mut graphs = Vec::with_capacity(attr.graphs.len());
+        for graph_proto in attr.graphs.iter().cloned() {
+            graphs.push(OnnxGraph::from_proto(graph_proto, resolver)?);
+        }
+        return Ok(OnnxAttributeValue::Graphs(graphs));
     }
     if let Some(value) = attr.tp.clone() {
         return Ok(OnnxAttributeValue::Type(OnnxType::from_proto(value)?));
