@@ -11,6 +11,8 @@ pub struct OnnxTensor {
     pub name: String,
     pub dtype: Dtype,
     pub shape: Vec<usize>,
+    /// True if this tensor contains STRING data (dtype will be U8 as placeholder)
+    pub is_string: bool,
     data: Bytes,
 }
 
@@ -127,6 +129,7 @@ impl OnnxTensor {
                 .ok_or_else(|| LoaderError::Onnx(format!("tensor {name} missing data_type")))?,
             &name,
         )?;
+        let is_string = data_type == proto::tensor_proto::DataType::String;
         let dtype = parse::map_dtype(data_type, &name)?;
         let shape = parse::parse_dims(&dims, &name)?;
         let element_count = parse::element_count(&shape, &name)?;
@@ -160,6 +163,7 @@ impl OnnxTensor {
             name,
             dtype,
             shape,
+            is_string,
             data,
         })
     }
@@ -177,6 +181,18 @@ impl OnnxTensor {
             name,
             dtype,
             shape,
+            is_string: false,
+            data,
+        }
+    }
+
+    /// Create a new STRING OnnxTensor
+    pub fn new_string(name: String, shape: Vec<usize>, data: Bytes) -> Self {
+        Self {
+            name,
+            dtype: Dtype::U8, // placeholder for string type
+            shape,
+            is_string: true,
             data,
         }
     }

@@ -32,6 +32,9 @@ pub(super) fn map_dtype(data_type: proto::tensor_proto::DataType, name: &str) ->
         // INT4/UINT4: packed as 2 elements per byte, stored as U8
         // The actual unpacking happens at kernel execution time
         OnnxType::Int4 | OnnxType::Uint4 => Ok(Dtype::U8),
+        // STRING: variable length, stored with length-prefix encoding
+        // U8 is used as placeholder dtype; actual data is length-prefixed bytes
+        OnnxType::String => Ok(Dtype::U8),
         _ => Err(LoaderError::Onnx(format!(
             "unsupported data_type {:?} for tensor {name}",
             data_type

@@ -43,8 +43,6 @@ pub(super) fn build_tensor_bytes(input: TensorPackInput<'_>) -> Result<Bytes> {
         return Ok(raw_data);
     }
 
-    let _ = string_data;
-
     use proto::tensor_proto::DataType as OnnxType;
     match data_type {
         OnnxType::Float => pack_f32(float_data, element_count, name),
@@ -60,6 +58,8 @@ pub(super) fn build_tensor_bytes(input: TensorPackInput<'_>) -> Result<Bytes> {
         OnnxType::Float16 => pack_f16_bits_from_i32(int32_data, element_count, name),
         OnnxType::Bfloat16 => pack_bf16_bits_from_i32(int32_data, element_count, name),
         OnnxType::Bool => pack_bool_from_i32(int32_data, element_count, name),
+        // STRING: serialize as length-prefixed byte sequences
+        OnnxType::String => pack_strings(string_data, element_count, name),
         _ => Err(LoaderError::Onnx(format!(
             "tensor {name} missing raw_data for unsupported type {:?}",
             data_type
@@ -218,6 +218,26 @@ fn pack_bool_from_i32(data: Vec<i32>, element_count: usize, name: &str) -> Resul
         }
         Ok(())
     })
+}
+
+/// Pack STRING data as length-prefixed byte sequences
+///
+/// Format: for each string, write 4-byte little-endian length followed by UTF-8 bytes
+/// This allows reconstruction of individual strings from the raw data.
+fn pack_strings(data: Vec<Vec<u8>>, element_count: usize, name: &str) -> Result<Bytes> {
+    ensure_len(name, element_count, data.len(), "string_data")?;
+    // Estimate capacity: 4 bytes per length + average string length
+    let estimated_size: usize = data.iter().map(|s| 4 + s.len()).sum();
+    let mut out = Vec::with_capacity(estimated_size);
+    for s in data {
+        // Write length as 4-byte little-endian
+        let len = u32::try_from(s.len())
+            .map_err(|_| LoaderError::Onnx(format!("string too long in tensor {name}")))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        // Write UTF-8 bytes
+        out.extend_from_slice(&s);
+    }
+    Ok(Bytes::from(out))
 }
 
 fn pack_i32_with<F>(
