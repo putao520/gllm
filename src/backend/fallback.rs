@@ -1,6 +1,4 @@
 use gllm_kernels::backend_trait::BackendError;
-
-use crate::adapter::AdapterError;
 use crate::engine::executor::ExecutorError;
 use crate::loader::LoaderError;
 
@@ -129,16 +127,8 @@ pub fn is_oom_context_error(err: &BackendContextError) -> bool {
 pub fn is_oom_error(err: &ExecutorError) -> bool {
     match err {
         ExecutorError::Backend(backend) => is_backend_oom(backend),
-        ExecutorError::Adapter(adapter) => is_adapter_oom(adapter),
+        ExecutorError::Loader(loader) => is_loader_oom(loader),
         _ => false,
-    }
-}
-
-fn is_adapter_oom(err: &AdapterError) -> bool {
-    match err {
-        AdapterError::Loader(loader) => is_loader_oom(loader),
-        AdapterError::UnsupportedArchitecture => false,
-        AdapterError::Backend(backend) => is_backend_oom(backend),
     }
 }
 
@@ -186,8 +176,7 @@ mod tests {
     #[test]
     fn detects_loader_backend_oom_messages() {
         let loader_err = LoaderError::Backend("out of memory".to_string());
-        let adapter_err = AdapterError::Loader(loader_err);
-        let err = ExecutorError::Adapter(adapter_err);
+        let err = ExecutorError::Loader(loader_err);
         assert!(is_oom_error(&err));
     }
 }

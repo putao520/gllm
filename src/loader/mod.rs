@@ -15,8 +15,8 @@ use thiserror::Error;
 use crate::manifest::{ModelManifest, TensorRole, EMPTY_FILE_MAP};
 
 // Re-export modules
-pub mod adapter;
-pub mod config; // REQ-REFACTOR-002: 过渡期保留，将逐步迁移到 arch 模块
+pub mod adapter; // GGUF tensor adapter (KernelTensorView)
+pub mod config; // Keep for client.rs dependency
 pub mod downloader;
 pub mod format_detector;
 pub mod gguf;
@@ -851,11 +851,18 @@ impl QuantizationMetadata {
 
 // --- Legacy Types for Compatibility ---
 
+/// Thinking head tensor names (for models like Qwen3 with thinking capability)
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingHead {
+    pub tensors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WeightsHandle<B: Backend<E>, E: Element = f32> {
     tensors: HashMap<String, B::Tensor>,
     shapes: HashMap<String, Vec<usize>>,
     pub meta: HashMap<String, TensorMeta>,
+    pub thinking_head: Option<ThinkingHead>,
 }
 
 impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
@@ -868,6 +875,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             tensors,
             shapes,
             meta,
+            thinking_head: None,
         }
     }
 
@@ -882,6 +890,19 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
 
 /// Backward-compatible type alias for f32 weights.
 pub type WeightsHandleF32<B> = WeightsHandle<B, f32>;
+
+/// 实现 gllm_kernels::TensorLookup trait
+impl<B: Backend<E>, E: Element> gllm_kernels::backend_trait::TensorLookup<E, B>
+    for WeightsHandle<B, E>
+{
+    fn get_tensor(&self, name: &str) -> Option<&B::Tensor> {
+        self.tensor(name)
+    }
+
+    fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
+        WeightsHandle::tensor_shape(self, name)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ParallelPolicy {

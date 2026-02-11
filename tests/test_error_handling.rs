@@ -1,7 +1,6 @@
 mod common;
 
 use common::TestModelFiles;
-use gllm::adapter::adapter_for;
 use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
 use gllm::loader::{config as loader_config, Loader, LoaderError};
@@ -19,9 +18,8 @@ fn build_executor(
     let mut loader = files.loader(alias).expect("loader");
     let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
-    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest).expect("adapter");
     let backend = CpuBackend::<f32>::new();
-    Executor::from_loader(backend, Arc::new(manifest.clone()), adapter, &mut loader)
+    Executor::from_loader(backend, Arc::new(manifest.clone()), &mut loader)
         .expect("executor")
 }
 

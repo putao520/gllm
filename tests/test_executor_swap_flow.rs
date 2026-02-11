@@ -1,4 +1,3 @@
-use gllm::adapter::adapter_for;
 use gllm::engine::executor::Executor;
 use gllm::loader::Loader;
 use gllm::manifest::{
@@ -37,13 +36,11 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
         tensor_map: std::collections::HashMap::new(),
     });
 
-    // Select adapter (CpuBackend)
+    // Select backend (CpuBackend)
     let backend = CpuBackend::<f32>::new();
-    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest)
-        .ok_or_else(|| Box::<dyn std::error::Error>::from("Adapter not found"))?;
 
     // 3. Initialize Executor
-    let mut executor = Executor::from_loader(backend, manifest, adapter, &mut loader)?;
+    let mut executor = Executor::from_loader(backend, manifest, &mut loader)?;
 
     // 4. Define Requests
     // Short prompts that trigger generation.

@@ -11,7 +11,7 @@ use gllm_kernels::kernel_types::{
 };
 use thiserror::Error;
 
-use crate::adapter::{AdapterError, AdapterWeights, ModelAdapter};
+use crate::loader::WeightsHandle;
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::onnx::FusedKernel;
 use crate::loader::{Loader, LoaderError, WeightFormat};
@@ -89,9 +89,7 @@ enum OnnxKernelExecutionOp {
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
-    #[error(transparent)]
-    Adapter(#[from] AdapterError),
-    #[error(transparent)]
+        #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
     Config(#[from] ModelConfigError),
@@ -125,8 +123,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     policy: PolicyVariant,
     requests: HashMap<RequestId, RequestData>,
     manifest: Arc<ModelManifest>,
-    adapter: &'static dyn ModelAdapter<B, E>,
-    weights: AdapterWeights<B, E>,
+    weights: WeightsHandle<B, E>,
+    add_special_tokens: bool,
     model_config: ModelConfig,
     forward_config: GeneratorForwardConfig,
     kv_cache_config: KvCacheConfig,
@@ -144,7 +142,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn from_loader(
         backend: B,
         manifest: Arc<ModelManifest>,
-        adapter: &'static dyn ModelAdapter<B, E>,
         loader: &mut Loader,
     ) -> ExecutorResult<Self> {
         loader.set_manifest_if_missing(manifest.as_ref());
@@ -225,7 +222,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader)?;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
-        let weights = adapter.load_weights(loader, &backend)?;
+        let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
         let l2_capacity = total_blocks.saturating_mul(10);
         let l3_capacity = total_blocks.saturating_mul(100);
@@ -235,8 +232,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             backend,
             scheduler,
             manifest,
-            adapter,
             weights,
+            add_special_tokens: true,
             model_config,
             forward_config,
             kv_cache_config,
@@ -309,7 +306,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.manifest.as_ref()
     }
 
-    pub fn weights(&self) -> &AdapterWeights<B, E> {
+    pub fn weights(&self) -> &WeightsHandle<B, E> {
         &self.weights
     }
 
@@ -414,7 +411,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
-        let add_special_tokens = self.adapter.add_special_tokens();
+        let add_special_tokens = self.add_special_tokens;
         Ok(self.tokenizer.encode(prompt, add_special_tokens)?)
     }
 

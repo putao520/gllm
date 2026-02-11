@@ -1,7 +1,7 @@
+use gllm::loader::adapter::GgufAdapter;
 use std::collections::BTreeSet;
 use std::fs;
 
-use gllm::loader::adapter::GgufAdapter;
 use gllm::loader::gguf::{
     tensor_nbytes, GgmlDType, GgufError, GgufReader, GgufValueType, GGUF_MAGIC,
     GGUF_SUPPORTED_VERSION,

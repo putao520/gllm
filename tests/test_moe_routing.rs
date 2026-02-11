@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
-use gllm::adapter::adapter_for;
 use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
@@ -17,9 +16,9 @@ use gllm_kernels::kernel_types::PageState;
 /// **测试步骤**:
 /// 1. 创建 Qwen3MoE manifest
 /// 2. 验证 is_moe() 返回 true
-/// 3. 验证 adapter_for() 返回 Some
+/// 3. 验证架构正确识别为 MoE
 ///
-/// **期望结果**: MoE 模型正确识别并获取适配器
+/// **期望结果**: MoE 模型正确识别
 #[test]
 fn qwen3_moe_manifest_selects_moe_adapter() {
     let manifest = ModelManifest {
@@ -34,11 +33,8 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
         tensor_map: std::collections::HashMap::new(),
     };
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
-    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest);
-    assert!(
-        adapter.is_some(),
-        "MoE adapter should be available for qwen3-moe"
-    );
+    // Post-REQ-REFACTOR-001: adapter removed, architecture-based routing now handled by loader
+    assert_eq!(manifest.arch, ModelArchitecture::Qwen3MoE);
 }
 
 /// TEST-MOE-002: MoE 路由器优先驱逐冷专家
