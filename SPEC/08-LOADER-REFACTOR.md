@@ -165,21 +165,21 @@ src/
 | REQ-EXEC-006 | 中间张量内存管理 | 分配/释放中间计算结果 | 📋 依赖 REQ-EXEC-005 |
 | REQ-EXEC-007 | 并行执行 | 无依赖节点并行执行 | 📋 依赖 REQ-EXEC-005 |
 
-### 3.6 Phase 6: OnnxGraph 完整性补齐
+### 3.6 Phase 6: OnnxGraph 完整性补齐 ✅
 
 | REQ ID | 需求 | 验收标准 | 状态 |
 |--------|------|----------|------|
-| REQ-ONNX-001 | 稀疏张量支持 | `SparseTensor` 加载并转换为 FusedGraph | 📋 待实现 |
-| REQ-ONNX-002 | 量化标注支持 | `QuantizationAnnotation` 传递到优化器 | 📋 待实现 |
-| REQ-ONNX-003 | 节点属性传递 | `OnnxNode.attributes` 完整传递到 `FusedNode` | 📋 待实现 |
+| REQ-ONNX-001 | 稀疏张量支持 | `SparseTensor` 加载并转换为 FusedGraph | ✅ [62268a3] |
+| REQ-ONNX-002 | 量化标注支持 | `QuantizationAnnotation` 传递到优化器 | ✅ [62268a3] |
+| REQ-ONNX-003 | 节点属性传递 | `OnnxNode.attributes` 完整传递到 `FusedNode` | ✅ [62268a3] |
 
-### 3.7 Phase 7: 更多融合模式
+### 3.7 Phase 7: 更多融合模式 ✅
 
 | REQ ID | 需求 | 验收标准 | 状态 |
 |--------|------|----------|------|
-| REQ-OPT-006 | GQA 融合 | Grouped Query Attention 模式识别和融合 | 📋 待实现 |
-| REQ-OPT-007 | MoE routing 融合 | TopK + Softmax + Dispatch 模式融合 | 📋 待实现 |
-| REQ-OPT-008 | 常量折叠 Pass | 编译期常量表达式求值 | 📋 待实现 |
+| REQ-OPT-006 | GQA 融合 | Grouped Query Attention 模式识别和融合 | ✅ [62268a3] |
+| REQ-OPT-007 | MoE routing 融合 | TopK + Softmax + Dispatch 模式融合 | ✅ [62268a3] |
+| REQ-OPT-008 | 常量折叠 Pass | 编译期常量表达式求值 | ✅ [62268a3] |
 
 ---
 
