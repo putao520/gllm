@@ -76,10 +76,10 @@
 | **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 旧版 LMCache 命中跳过前向路径 | **(已废弃)** 由 `GlobalMemoryManager` 统一复用入口替代 | 🔴 已废弃 (Refactor 2026) |
 | **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
 | **REQ-SCHED-014** | 自适应 JIT 调度策略 | 引入底层 JIT 决策层，基于实时观测动态调整策略 | 1. **微秒级决策** (<10μs)<br>2. **策略热切换** (Accuracy/Throughput)<br>3. **参数自整定** (动态 Batch/Swap)<br>4. **零运行时开销** (Enum Dispatch) | ✅ 已实现 (2026-02-06) [commit: a7e761b] |
-| **REQ-SCHED-015** | 调度器重构基线 | 调度器重构以 `GlobalMemoryManager` 为唯一 KV 管理核心，移除 `vllm2024.rs` 冗余 LMCache 结构 | 1. 删除 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel` 作为核心路径<br>2. `GlobalMemoryManager` 承担跨请求复用入口<br>3. 架构与 `ARCH-SCHED-REFACTOR-2026` 一致 | 📋 待实现 |
-| **REQ-SCHED-016** | ChunkedConfig 融合页面调度 | 保留 ChunkedConfig，用于 Prefill 分块时间片规划 | 1. 支持 `plan_prefill(prompt_tokens, chunk_size)`<br>2. 仅允许 Prefill 阶段分块，禁止与 Decode 混批<br>3. 与 PagedAttention 页面状态机一致更新 | 📋 待实现 |
-| **REQ-SCHED-017** | 确定性批顺序策略 | 引入 BatchOrderPolicy，默认严格 RequestId 排序 | 1. 默认 `StrictRequestIdOrder`<br>2. 批内请求按 RequestId 严格升序<br>3. 禁止吞吐优先乱序策略作为默认执行路径 | 📋 待实现 |
-| **REQ-SCHED-018** | 双管线会话调度 | 支持 Working/Conversation 双管线隔离调度 | 1. Working 管线可在轮次结束回收<br>2. Conversation 管线可跨轮保留<br>3. 页表、预取、换出策略按管线隔离 | 📋 待实现 |
+| **REQ-SCHED-015** | 调度器重构基线 | 调度器重构以 `GlobalMemoryManager` 为唯一 KV 管理核心，移除 `vllm2024.rs` 冗余 LMCache 结构 | 1. 删除 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel` 作为核心路径<br>2. `GlobalMemoryManager` 承担跨请求复用入口<br>3. 架构与 `ARCH-SCHED-REFACTOR-2026` 一致 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-SCHED-016** | ChunkedConfig 融合页面调度 | 保留 ChunkedConfig，用于 Prefill 分块时间片规划 | 1. 支持 `plan_prefill(prompt_tokens, chunk_size)`<br>2. 仅允许 Prefill 阶段分块，禁止与 Decode 混批<br>3. 与 PagedAttention 页面状态机一致更新 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-SCHED-017** | 确定性批顺序策略 | 引入 BatchOrderPolicy，默认严格 RequestId 排序 | 1. 默认 `StrictRequestIdOrder`<br>2. 批内请求按 RequestId 严格升序<br>3. 禁止吞吐优先乱序策略作为默认执行路径 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-SCHED-018** | 双管线会话调度 | 支持 Working/Conversation 双管线隔离调度 | 1. Working 管线可在轮次结束回收<br>2. Conversation 管线可跨轮保留<br>3. 页表、预取、换出策略按管线隔离 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 
 > **详细设计**: 见 [SPEC/02-ARCHITECTURE.md §调度器重构架构](./02-ARCHITECTURE.md#调度器重构架构-arch-sched-refactor-2026)
 
@@ -87,10 +87,10 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-KV-001** | KvPrefixIndex 前缀复用 | 无 Session 场景下按最长前缀复用 KV 页面 | 1. `find_longest_prefix(tokens)` 支持 O(n) 前缀匹配<br>2. 支持 append 场景复用（非 hash 全等）<br>3. 命中页面必须校验有效性后复用 | 📋 待实现 |
-| **REQ-KV-002** | SessionKvCache 确定性复用 | 会话内基于 finalized position 做确定性 prefix claim | 1. `register_session`/`claim_session_prefix`/`finalize_session_tokens` API 完整<br>2. `finalized_position` 单调递增<br>3. 禁止 claim 超过已确认边界 | 📋 待实现 |
-| **REQ-KV-003** | KvPipeline 双管线隔离 | Thinking/Reasoning 不污染会话主缓存 | 1. `KvPipeline::{Conversation,Working}` 定义完整<br>2. `prepare_next_turn` 释放 Working，保留 Conversation<br>3. 管线维度参与虚拟页标识 | 📋 待实现 |
-| **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | 1. `distill_cpu<E: Element>` 泛型接口<br>2. 相关相似度/评估接口同步泛型化<br>3. 禁止出现 `Vec<f32>` 固定签名作为核心实现 | 📋 待实现 |
+| **REQ-KV-001** | KvPrefixIndex 前缀复用 | 无 Session 场景下按最长前缀复用 KV 页面 | 1. `find_longest_prefix(tokens)` 支持 O(n) 前缀匹配<br>2. 支持 append 场景复用（非 hash 全等）<br>3. 命中页面必须校验有效性后复用 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-KV-002** | SessionKvCache 确定性复用 | 会话内基于 finalized position 做确定性 prefix claim | 1. `register_session`/`claim_session_prefix`/`finalize_session_tokens` API 完整<br>2. `finalized_position` 单调递增<br>3. 禁止 claim 超过已确认边界 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-KV-003** | KvPipeline 双管线隔离 | Thinking/Reasoning 不污染会话主缓存 | 1. `KvPipeline::{Conversation,Working}` 定义完整<br>2. `prepare_next_turn` 释放 Working，保留 Conversation<br>3. 管线维度参与虚拟页标识 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | 1. `distill_cpu<E: Element>` 泛型接口<br>2. 相关相似度/评估接口同步泛型化<br>3. 禁止出现 `Vec<f32>` 固定签名作为核心实现 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
