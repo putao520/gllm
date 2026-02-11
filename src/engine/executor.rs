@@ -11,8 +11,9 @@ use gllm_kernels::kernel_types::{
 };
 use thiserror::Error;
 
+use crate::graph::optimizer::{GraphOptimizer, OptimizationContext};
+use crate::graph::types::FusedOp;
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
-use crate::loader::onnx::FusedKernel;
 use crate::loader::WeightsHandle;
 use crate::loader::{Loader, LoaderError, WeightFormat};
 use crate::manifest::{ModelKind, ModelManifest};
@@ -47,23 +48,35 @@ struct OnnxFusedKernelStats {
     swiglu: usize,
     rope: usize,
     fused_qkv_rope: usize,
+    gqa: usize,
+    moe_routing: usize,
+    fused_rms_linear: usize,
     atomic: usize,
 }
 
 impl OnnxFusedKernelStats {
     fn fused_total(&self) -> usize {
-        self.flash_attention + self.swiglu + self.rope + self.fused_qkv_rope
+        self.flash_attention
+            + self.swiglu
+            + self.rope
+            + self.fused_qkv_rope
+            + self.gqa
+            + self.moe_routing
+            + self.fused_rms_linear
     }
 
-    fn from_fused_graph(fused_graph: &crate::loader::onnx::FusedGraph) -> Self {
+    fn from_fused_graph(fused_graph: &crate::graph::FusedGraph) -> Self {
         let mut stats = Self::default();
-        for op in &fused_graph.ops {
-            match &op.kind {
-                FusedKernel::FlashAttention(_) => stats.flash_attention += 1,
-                FusedKernel::SwiGlu(_) => stats.swiglu += 1,
-                FusedKernel::Rope(_) => stats.rope += 1,
-                FusedKernel::FusedQkvRope(_) => stats.fused_qkv_rope += 1,
-                FusedKernel::Atomic(_) => stats.atomic += 1,
+        for node in &fused_graph.nodes {
+            match &node.op {
+                FusedOp::FlashAttention(_) => stats.flash_attention += 1,
+                FusedOp::SwiGLU(_) => stats.swiglu += 1,
+                FusedOp::RoPE(_) => stats.rope += 1,
+                FusedOp::FusedQkvRope(_) => stats.fused_qkv_rope += 1,
+                FusedOp::GQA(_) => stats.gqa += 1,
+                FusedOp::MoERouting(_) => stats.moe_routing += 1,
+                FusedOp::FusedRMSLinear(_) => stats.fused_rms_linear += 1,
+                FusedOp::Atomic(_) => stats.atomic += 1,
             }
         }
         stats
@@ -84,6 +97,9 @@ enum OnnxKernelExecutionOp {
     SwiGlu,
     Rope,
     FusedQkvRope,
+    GQA,
+    MoERouting,
+    FusedRMSLinear,
     Atomic,
 }
 
@@ -258,27 +274,37 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         let onnx = loader.onnx()?;
-        let fused_graph = onnx.fused_graph();
-        let fused_kernels = OnnxFusedKernelStats::from_fused_graph(fused_graph);
+        let onnx_graph = onnx.graph();
+
+        // Use the new GraphOptimizer to generate FusedGraph
+        let ctx = OptimizationContext::default();
+        let optimizer = GraphOptimizer::new(ctx);
+        let fused_graph = optimizer
+            .optimize(onnx_graph)
+            .map_err(|e| ExecutorError::OnnxPlan(format!("graph optimization failed: {e}")))?;
+
+        let fused_kernels = OnnxFusedKernelStats::from_fused_graph(&fused_graph);
         let execution_order = fused_graph
-            .ops
+            .nodes
             .iter()
-            .map(|op| match &op.kind {
-                FusedKernel::FlashAttention(_) => OnnxKernelExecutionOp::FlashAttention,
-                FusedKernel::SwiGlu(_) => OnnxKernelExecutionOp::SwiGlu,
-                FusedKernel::Rope(_) => OnnxKernelExecutionOp::Rope,
-                FusedKernel::FusedQkvRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
-                FusedKernel::Atomic(_) => OnnxKernelExecutionOp::Atomic,
+            .map(|node| match &node.op {
+                FusedOp::FlashAttention(_) => OnnxKernelExecutionOp::FlashAttention,
+                FusedOp::SwiGLU(_) => OnnxKernelExecutionOp::SwiGlu,
+                FusedOp::RoPE(_) => OnnxKernelExecutionOp::Rope,
+                FusedOp::FusedQkvRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
+                FusedOp::GQA(_) => OnnxKernelExecutionOp::GQA,
+                FusedOp::MoERouting(_) => OnnxKernelExecutionOp::MoERouting,
+                FusedOp::FusedRMSLinear(_) => OnnxKernelExecutionOp::FusedRMSLinear,
+                FusedOp::Atomic(_) => OnnxKernelExecutionOp::Atomic,
             })
             .collect::<Vec<_>>();
         if execution_order.is_empty() {
             return Err(ExecutorError::OnnxPlan(
-                "fused matcher produced an empty ONNX execution plan".to_string(),
+                "graph optimizer produced an empty execution plan".to_string(),
             ));
         }
 
-        let graph_outputs = onnx
-            .graph()
+        let graph_outputs = onnx_graph
             .outputs
             .iter()
             .map(|value| value.name.clone())

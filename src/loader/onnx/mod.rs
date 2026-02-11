@@ -18,7 +18,6 @@ pub mod proto {
 
 mod attributes;
 mod external;
-mod matcher;
 mod model;
 mod pack;
 mod tensor;
@@ -28,7 +27,6 @@ mod types;
 mod tests;
 
 pub use attributes::{OnnxAttribute, OnnxAttributeValue};
-pub use matcher::{FusedGraph, FusedKernel, FusedOp};
 pub use model::{
     OnnxGraph, OnnxModel, OnnxNode, OnnxQuantizationAnnotation, OnnxValueInfo,
 };
@@ -40,7 +38,6 @@ use external::ExternalDataResolver;
 pub struct OnnxLoader {
     path: PathBuf,
     model: OnnxModel,
-    fused: FusedGraph,
 }
 
 impl OnnxLoader {
@@ -48,11 +45,9 @@ impl OnnxLoader {
         let model_proto = decode_model(path)?;
         let mut resolver = ExternalDataResolver::new(path);
         let model = OnnxModel::from_proto(model_proto, &mut resolver)?;
-        let fused = matcher::build_fused_graph(&model.graph)?;
         Ok(Self {
             path: path.to_path_buf(),
             model,
-            fused,
         })
     }
 
@@ -111,10 +106,6 @@ impl OnnxLoader {
 
     pub fn model(&self) -> &OnnxModel {
         &self.model
-    }
-
-    pub fn fused_graph(&self) -> &FusedGraph {
-        &self.fused
     }
 
     pub fn path(&self) -> &Path {
