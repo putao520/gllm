@@ -11,12 +11,16 @@ use gllm_kernels::cpu_backend::CpuBackend;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn build_executor(alias: &str, kind: ModelKind, files: &TestModelFiles) -> Executor<CpuBackend> {
+fn build_executor(
+    alias: &str,
+    kind: ModelKind,
+    files: &TestModelFiles,
+) -> Executor<CpuBackend<f32>, f32> {
     let mut loader = files.loader(alias).expect("loader");
     let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
-    let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
-    let backend = CpuBackend::new();
+    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest).expect("adapter");
+    let backend = CpuBackend::<f32>::new();
     Executor::from_loader(backend, Arc::new(manifest.clone()), adapter, &mut loader)
         .expect("executor")
 }
@@ -61,8 +65,9 @@ fn corrupted_weights_surface_loader_errors() {
     std::fs::write(&bad_weights, b"not a tensor").expect("write broken weights");
 
     let mut loader =
-        Loader::from_local_files("Qwen/Qwen3-0.6B", vec![bad_weights], vec![]).expect("loader");
-    let backend = CpuBackend::new();
+        Loader::from_local_files_with_manifest("Qwen/Qwen3-0.6B", vec![bad_weights], vec![], None)
+            .expect("loader");
+    let backend = CpuBackend::<f32>::new();
     let err = match loader.upload_weights(&backend) {
         Ok(_) => panic!("expected loader error"),
         Err(err) => err,

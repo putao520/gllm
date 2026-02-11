@@ -1,6 +1,6 @@
 //! Common utilities for E2E tests.
 
-use gllm::loader::Loader;
+use gllm::loader::{Loader, LoaderConfig};
 use std::path::Path;
 
 /// Simple helper for test loaders.
@@ -19,7 +19,8 @@ impl TestModelFiles {
     ///
     /// The alias should be a valid HuggingFace model ID (e.g. "Qwen/Qwen3-0.6B").
     pub fn loader(&self, alias: &str) -> Result<Loader, Box<dyn std::error::Error>> {
-        Ok(Loader::from(alias)?)
+        let config = LoaderConfig::from_env();
+        Ok(Loader::from_source_with_config(alias.to_string(), config)?)
     }
 
     /// Get the cache directory (for compatibility).

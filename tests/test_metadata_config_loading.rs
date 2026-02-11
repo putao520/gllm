@@ -249,18 +249,18 @@ fn onnx_weights_are_uploadable_for_reranker() {
         .with_weights(vec![onnx_path])
         .load()
         .expect("load");
-    let backend = CpuBackend::new();
+    let backend = CpuBackend::<f32>::new();
     let weights = loader
         .upload_weights(&backend)
         .expect("upload onnx weights");
 
     assert!(
         weights
-            .tensor_f32("roberta.embeddings.word_embeddings.weight")
+            .tensor("roberta.embeddings.word_embeddings.weight")
             .is_some(),
         "embedding tensor should be uploaded"
     );
-    assert!(weights.tensor_f32("classifier.weight").is_some());
+    assert!(weights.tensor("classifier.weight").is_some());
     assert_eq!(
         weights
             .meta

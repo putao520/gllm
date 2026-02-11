@@ -1,9 +1,8 @@
-
 #[cfg(test)]
 mod tests {
     use gllm::loader::hf_hub::HfHubClient;
-    use gllm::manifest::EMPTY_FILE_MAP;
     use gllm::loader::parallel::ParallelLoader;
+    use gllm::manifest::EMPTY_FILE_MAP;
     use std::path::PathBuf;
 
     #[test]
@@ -29,13 +28,16 @@ mod tests {
                     println!("   - {:?}", path.file_name().unwrap());
                 }
 
-                let has_tokenizer = files.aux_files.iter().any(|p| p.file_name().unwrap() == "tokenizer.json");
+                let has_tokenizer = files
+                    .aux_files
+                    .iter()
+                    .any(|p| p.file_name().unwrap() == "tokenizer.json");
                 if has_tokenizer {
                     println!("✅ tokenizer.json is present in aux_files");
                 } else {
                     println!("❌ tokenizer.json is MISSING from aux_files");
                 }
-            },
+            }
             Err(e) => println!("❌ Full download failed: {}", e),
         }
     }
@@ -60,7 +62,10 @@ mod tests {
         println!("Attempting to resolve from base model...");
         // 这里我们重新尝试，逻辑内部应该会自动 fallback
         match client.download_tokenizer_file(repo, EMPTY_FILE_MAP) {
-            Ok(path) => println!("✅ Successfully resolved tokenizer from base model: {:?}", path),
+            Ok(path) => println!(
+                "✅ Successfully resolved tokenizer from base model: {:?}",
+                path
+            ),
             Err(e) => println!("❌ Failed to resolve from base model: {}", e),
         }
     }

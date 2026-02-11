@@ -541,7 +541,9 @@ impl TensorProvider for GgufReader {
     }
 
     fn load_tensor_data(&self, name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
-        let data = self.tensor_bytes(name).map_err(|e| crate::loader::LoaderError::Gguf(format!("GGUF error: {}", e)))?;
+        let data = self
+            .tensor_bytes(name)
+            .map_err(|e| crate::loader::LoaderError::Gguf(format!("GGUF error: {}", e)))?;
         Ok(Cow::Borrowed(data))
     }
 }

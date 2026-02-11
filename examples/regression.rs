@@ -543,7 +543,7 @@ fn scheduler_check() -> InternalCheck {
 
 fn kv_cache_check() -> InternalCheck {
     let name = "KV cache double buffer";
-    let backend = CpuBackend::new();
+    let backend = CpuBackend::<f32>::new();
     let config = KvCacheConfig {
         num_layers: 1,
         num_heads: 1,

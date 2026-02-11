@@ -4,6 +4,7 @@ use gllm_kernels::kernel_types::RequestId;
 
 use super::paged_scheduler::{PagedScheduler, SchedulerError};
 use super::sequence::{Sequence, SequenceState};
+use super::types::BatchOrderPolicy;
 
 #[derive(Debug, Clone)]
 pub struct ScheduledBatch {
@@ -66,6 +67,7 @@ impl BatchResult {
 pub struct ContinuousBatcher {
     waiting: VecDeque<Sequence>,
     running: BTreeMap<RequestId, Sequence>,
+    next_enqueue_order: u64,
 }
 
 impl Default for ContinuousBatcher {
@@ -79,6 +81,7 @@ impl ContinuousBatcher {
         Self {
             waiting: VecDeque::new(),
             running: BTreeMap::new(),
+            next_enqueue_order: 0,
         }
     }
 
@@ -91,6 +94,8 @@ impl ContinuousBatcher {
         {
             return;
         }
+        sequence.enqueue_order = self.next_enqueue_order;
+        self.next_enqueue_order = self.next_enqueue_order.saturating_add(1);
         sequence.state = SequenceState::Waiting;
         self.waiting.push_back(sequence);
     }
@@ -100,6 +105,7 @@ impl ContinuousBatcher {
         scheduler: &mut PagedScheduler,
         max_batch_size: usize,
         admit_new_prefill: bool,
+        policy: BatchOrderPolicy,
     ) -> ScheduledBatch {
         if admit_new_prefill {
             self.admit_waiting(scheduler);
@@ -107,11 +113,15 @@ impl ContinuousBatcher {
 
         let mut requests = Vec::new();
         let mut failed = Vec::new();
+        let ordered_ids = self.ordered_running_ids(policy);
 
-        for sequence in self.running.values_mut() {
+        for request_id in ordered_ids {
             if requests.len() >= max_batch_size {
                 break;
             }
+            let Some(sequence) = self.running.get_mut(&request_id) else {
+                continue;
+            };
 
             if sequence.state == SequenceState::Paused {
                 sequence.state = SequenceState::Running;
@@ -250,6 +260,34 @@ impl ContinuousBatcher {
             }
         }
     }
+
+    #[allow(deprecated)]
+    fn ordered_running_ids(&self, policy: BatchOrderPolicy) -> Vec<RequestId> {
+        let mut ordered_ids: Vec<RequestId> = self.running.keys().copied().collect();
+        match policy {
+            BatchOrderPolicy::StrictRequestIdOrder => {
+                ordered_ids.sort_unstable();
+            }
+            BatchOrderPolicy::FifoOrder => {
+                ordered_ids.sort_by_key(|request_id| {
+                    self.running
+                        .get(request_id)
+                        .map(|sequence| (sequence.enqueue_order, *request_id))
+                        .unwrap_or((u64::MAX, *request_id))
+                });
+            }
+            BatchOrderPolicy::ThroughputFirst => {
+                // Prefer longer contexts first to approximate throughput-oriented batching.
+                ordered_ids.sort_by_key(|request_id| {
+                    self.running
+                        .get(request_id)
+                        .map(|sequence| (usize::MAX - sequence.context_len(), *request_id))
+                        .unwrap_or((usize::MAX, *request_id))
+                });
+            }
+        }
+        ordered_ids
+    }
 }
 
 #[cfg(test)]
@@ -267,12 +305,22 @@ mod tests {
         let mut scheduler = PagedScheduler::new(32, 4, HGALConfig::default());
 
         batcher.enqueue(make_sequence(10, 4));
-        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let first = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(first.requests, vec![10]);
         batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(10, 100)]);
 
         batcher.enqueue(make_sequence(2, 2));
-        let second = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let second = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(second.requests, vec![2, 10]);
     }
 
@@ -282,7 +330,12 @@ mod tests {
         let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
 
         batcher.enqueue(make_sequence(1, 4));
-        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let first = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(first.requests, vec![1]);
 
         batcher.update_batch(&mut scheduler, &[BatchResult::complete(1, Some(7))]);
@@ -299,7 +352,12 @@ mod tests {
         batcher.enqueue(make_sequence(3, 1));
         batcher.enqueue(make_sequence(5, 1));
 
-        let prefill = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let prefill = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(prefill.requests, vec![3, 5, 7]);
         batcher.update_batch(
             &mut scheduler,
@@ -310,7 +368,12 @@ mod tests {
             ],
         );
 
-        let decode = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let decode = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(decode.requests, vec![3, 5, 7]);
     }
 
@@ -322,7 +385,12 @@ mod tests {
         batcher.enqueue(make_sequence(1, 4));
         batcher.enqueue(make_sequence(2, 4));
 
-        let first = batcher.build_batch(&mut scheduler, usize::MAX, true);
+        let first = batcher.build_batch(
+            &mut scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        );
         assert_eq!(first.requests, vec![1]);
         assert_eq!(batcher.waiting.len(), 1);
         assert!(batcher.running.contains_key(&1));

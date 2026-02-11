@@ -34,7 +34,7 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
         tensor_map: std::collections::HashMap::new(),
     };
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
-    let adapter = adapter_for::<CpuBackend>(&manifest);
+    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest);
     assert!(
         adapter.is_some(),
         "MoE adapter should be available for qwen3-moe"

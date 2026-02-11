@@ -122,6 +122,7 @@ pub fn is_oom_context_error(err: &BackendContextError) -> bool {
         BackendContextError::Executor(err) => is_oom_error(err),
         BackendContextError::Loader(err) => is_loader_oom(err),
         BackendContextError::UnsupportedArchitecture(_) => false,
+        BackendContextError::Backend(err) => is_backend_oom(err),
     }
 }
 

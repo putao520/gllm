@@ -1,8 +1,7 @@
 use super::allocator::BlockAllocator;
 use super::hgal::{HGALConfig, HGALScheduler};
 use super::types::{GroupState, SequenceGroup};
-use super::vllm2024::{CacheHit, Scheduler2024Config, Scheduler2024State};
-use gllm_kernels::backend_trait::{KvCacheHandle, LogitsHandle};
+use super::vllm2024::{Scheduler2024Config, Scheduler2024State};
 use gllm_kernels::kernel_types::{PageId, PageState, RequestId, StorageKey};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -109,42 +108,6 @@ impl PagedScheduler {
 
     pub fn page_size(&self) -> usize {
         self.block_size
-    }
-
-    pub fn lmcache_lookup(&mut self, model_id: &str, prompt: &str) -> Option<CacheHit> {
-        if let Some(state) = &mut self.vllm_state {
-            if state.config.enable_2024_optimizations {
-                let key = super::vllm2024::LmcacheState::cache_key(
-                    model_id,
-                    prompt,
-                    state.config.lmcache.cache_prefix_len,
-                );
-                return state.lmcache.get(&key);
-            }
-        }
-        None
-    }
-
-    pub fn lmcache_put(
-        &mut self,
-        model_id: &str,
-        prompt: &str,
-        kv_handle: Option<KvCacheHandle>,
-        logits: Option<LogitsHandle>,
-    ) {
-        if let Some(state) = &mut self.vllm_state {
-            if state.config.enable_2024_optimizations {
-                let key = super::vllm2024::LmcacheState::cache_key(
-                    model_id,
-                    prompt,
-                    state.config.lmcache.cache_prefix_len,
-                );
-                // We assume prefix tokens based on prompt length or config?
-                // Using config.cache_prefix_len as the cached amount for now
-                let prefix_len = state.config.lmcache.cache_prefix_len;
-                state.lmcache.put(key, prefix_len, kv_handle, logits);
-            }
-        }
     }
 
     pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {

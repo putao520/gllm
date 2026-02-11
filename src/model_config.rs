@@ -7,9 +7,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::loader::{
-    match_tensor_role,
-    gguf::GgufReader as GgufLoader,
-    Loader, TensorMeta, TensorProvider, WeightFormat,
+    gguf::GgufReader as GgufLoader, match_tensor_role, Loader, TensorMeta, TensorProvider,
+    WeightFormat,
 };
 use crate::manifest::{ModelManifest, TensorRole};
 
@@ -808,8 +807,12 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
             let n_kv = k_out / head_dim;
 
             // Basic sanity checks
-            if n_head == 0 || n_kv == 0 { continue; }
-            if n_head % n_kv != 0 { continue; } // Grouped Query Attention constraint
+            if n_head == 0 || n_kv == 0 {
+                continue;
+            }
+            if n_head % n_kv != 0 {
+                continue;
+            } // Grouped Query Attention constraint
 
             head_candidates.push((n_head, n_kv, head_dim));
         }
@@ -889,7 +892,10 @@ fn anonymize_layer_index(name: &str, layer_idx: usize) -> String {
             // Check context like match_tensor_role
             if i > 0 {
                 let prefix = parts[i - 1];
-                if matches!(prefix, "layers" | "blk" | "blocks" | "h" | "layer" | "block") {
+                if matches!(
+                    prefix,
+                    "layers" | "blk" | "blocks" | "h" | "layer" | "block"
+                ) {
                     new_parts.push("{}");
                     replaced = true;
                     continue;
@@ -908,16 +914,16 @@ fn anonymize_layer_index(name: &str, layer_idx: usize) -> String {
     // Let's assume the original name preserves case but structure is standard.
 
     if !replaced {
-         // Second pass: just find the number segment if it wasn't replaced
-         new_parts.clear();
-         for part in parts.iter() {
-             if !replaced && *part == idx_str {
-                 new_parts.push("{}");
-                 replaced = true;
-             } else {
-                 new_parts.push(part);
-             }
-         }
+        // Second pass: just find the number segment if it wasn't replaced
+        new_parts.clear();
+        for part in parts.iter() {
+            if !replaced && *part == idx_str {
+                new_parts.push("{}");
+                replaced = true;
+            } else {
+                new_parts.push(part);
+            }
+        }
     }
 
     new_parts.join(".")
@@ -1499,8 +1505,8 @@ fn dtype_size_from_config(value: &Value) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use super::*;
+    use std::borrow::Cow;
 
     #[derive(Debug)]
     struct MockTensorProvider {
@@ -1519,7 +1525,7 @@ mod tests {
             self.tensors.clone().into_iter()
         }
 
-        fn load_tensor_data(&self, _name: &str) -> crate::loader::Result<Cow<[u8]>> {
+        fn load_tensor_data(&self, _name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
             unimplemented!("MockTensorProvider::load_tensor_data")
         }
     }

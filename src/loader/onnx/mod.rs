@@ -130,11 +130,15 @@ impl super::TensorProvider for OnnxLoader {
     }
 
     fn iter_tensors(&self) -> impl Iterator<Item = super::TensorMeta> {
-        self.model.graph.initializers.iter().map(|(name, tensor)| super::TensorMeta {
-            name: name.clone(),
-            shape: tensor.shape.clone(),
-            dtype: tensor.dtype,
-        })
+        self.model
+            .graph
+            .initializers
+            .iter()
+            .map(|(name, tensor)| super::TensorMeta {
+                name: name.clone(),
+                shape: tensor.shape.clone(),
+                dtype: tensor.dtype,
+            })
     }
 
     fn load_tensor_data(&self, name: &str) -> super::Result<Cow<'_, [u8]>> {

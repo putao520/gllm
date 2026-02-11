@@ -387,3 +387,119 @@ pub struct ModelTopology {
     pub num_layers: usize,
 }
 ```
+
+## 8. 调度器重构数据结构 (DATA-SCHED-REFACTOR)
+
+> **关联需求**: REQ-SCHED-015, REQ-SCHED-016, REQ-SCHED-017, REQ-SCHED-018, REQ-KV-001, REQ-KV-002, REQ-KV-003, REQ-KV-004
+> **关联架构**: ARCH-SCHED-REFACTOR-2026
+
+### 8.1 KvPrefixIndex 前缀树 (DATA-KV-PREFIX-INDEX)
+
+用于在无 Session ID 场景下查找最长可复用 token 前缀。
+
+```rust
+pub struct KvPrefixIndex {
+    pub root: TrieNode,
+}
+
+pub struct TrieNode {
+    pub children: HashMap<TokenId, TrieNode>,
+    pub page_ref: Option<PageRef>,
+}
+
+pub struct PageRef {
+    pub virtual_page_id: VirtualPageId,
+    pub offset_in_page: usize,
+}
+
+pub struct PrefixMatch {
+    pub matched_tokens: usize,
+    pub matched_pages: Vec<VirtualPageId>,
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `children` | `HashMap<TokenId, TrieNode>` | 按 token 扩展的前缀边 |
+| `page_ref.virtual_page_id` | `VirtualPageId` | 命中 token 对应的 KV 页面 |
+| `page_ref.offset_in_page` | `usize` | token 在页面中的偏移 |
+| `matched_tokens` | `usize` | 可复用前缀长度 |
+
+### 8.2 SessionKvCache 会话缓存 (DATA-KV-SESSION-CACHE)
+
+用于会话级确定性 append 复用。
+
+```rust
+pub struct SessionKvCache {
+    pub session_id: SessionId,
+    pub pages: Vec<VirtualPageId>,
+    pub finalized_position: usize,
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `session_id` | `SessionId` | 会话唯一标识 |
+| `pages` | `Vec<VirtualPageId>` | 已确认前缀对应的页面序列 |
+| `finalized_position` | `usize` | 已确认 token 边界（单调递增） |
+
+### 8.3 KvPipeline 双管线标识 (DATA-KV-PIPELINE)
+
+用于分离可复用会话内容与可丢弃工作内容。
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KvPipeline {
+    Conversation,
+    Working,
+}
+
+pub struct PipelinedVirtualPageId {
+    pub pipeline: KvPipeline,
+    pub sequence_id: RequestId,
+    pub logical_index: usize,
+}
+```
+
+| 枚举值 | 语义 | 生命周期 |
+|--------|------|----------|
+| `Conversation` | System/User/Assistant 主对话上下文 | 跨轮保留 |
+| `Working` | Thinking/Reasoning 临时上下文 | 轮次结束可回收 |
+
+### 8.4 批顺序策略 (DATA-BATCH-ORDER-POLICY)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOrderPolicy {
+    StrictRequestIdOrder,
+    FifoOrder,
+    #[deprecated = "Breaks determinism"]
+    ThroughputFirst,
+}
+```
+
+| 策略 | 排序键 | 约束 |
+|------|--------|------|
+| `StrictRequestIdOrder` | `RequestId` | 默认策略，确定性优先 |
+| `FifoOrder` | `enqueue_time` | 确定性 FIFO |
+| `ThroughputFirst` | 实现定义 | 非默认，不可推荐 |
+
+### 8.5 Prefill/Decode 页面规划 (DATA-PREFILL-PLAN)
+
+```rust
+pub enum PrefillPlan {
+    FullyResident {
+        pages: usize,
+    },
+    Pipelined {
+        l1_pages: usize,
+        l2_prefetch: usize,
+        chunk_schedule: Vec<usize>,
+    },
+}
+```
+
+用于表达 `ChunkedConfig` 融合后的预分配与预取策略，约束如下：
+1. `FullyResident` 表示 prefill 页面可全部驻留 L1。
+2. `Pipelined` 表示需要分批装载/预取，不改变 Phase Isolation。
+3. `chunk_schedule` 仅在 Prefill 阶段生效，不参与 Decode 混批。

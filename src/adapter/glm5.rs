@@ -1,6 +1,6 @@
 //! GLM-4/5 adapter.
 
-use gllm_kernels::backend_trait::Backend;
+use gllm_kernels::backend_trait::{Backend, Element};
 
 use crate::loader::Loader;
 use crate::manifest::{ModelArchitecture, ModelManifest};
@@ -9,7 +9,7 @@ use super::r#trait::{AdapterResult, AdapterWeights, ModelAdapter};
 
 pub struct Glm5Adapter;
 
-impl<B: Backend> ModelAdapter<B> for Glm5Adapter {
+impl<B: Backend<E>, E: Element> ModelAdapter<B, E> for Glm5Adapter {
     fn supports(&self, manifest: &ModelManifest) -> bool {
         matches!(
             manifest.arch,
@@ -17,7 +17,11 @@ impl<B: Backend> ModelAdapter<B> for Glm5Adapter {
         )
     }
 
-    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(
+        &self,
+        loader: &mut Loader,
+        backend: &B,
+    ) -> AdapterResult<AdapterWeights<B, E>> {
         let handle = loader.upload_weights(backend)?;
         Ok(AdapterWeights::new(handle))
     }

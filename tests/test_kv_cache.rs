@@ -3,7 +3,7 @@ use gllm_kernels::backend_trait::Backend;
 use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::kernel_types::KvCacheConfig;
 
-fn make_state(backend: &CpuBackend, max_seq_len: usize) -> KvCacheState {
+fn make_state(backend: &CpuBackend<f32>, max_seq_len: usize) -> KvCacheState {
     let config = KvCacheConfig {
         num_layers: 1,
         num_heads: 1,

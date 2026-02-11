@@ -31,6 +31,40 @@ pub enum RequestKind {
     Rerank,
 }
 
+/// 批处理顺序策略 (ARCH-SCHED-BATCH-ORDER)
+///
+/// 准确度 > 吞吐量原则：默认使用 StrictRequestIdOrder
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BatchOrderPolicy {
+    /// 严格按 RequestId 排序（确定性，精度优先）- 默认
+    #[default]
+    StrictRequestIdOrder,
+    /// 按入队时间排序（确定性，FIFO）
+    FifoOrder,
+    /// 允许 vLLM 风格重排（性能优先，不推荐）
+    #[deprecated = "Breaks determinism, use StrictRequestIdOrder instead"]
+    ThroughputFirst,
+}
+
+/// KV Cache 管线类型 (ARCH-SCHED-PIPELINE)
+///
+/// 用于分离可复用会话内容与可丢弃工作内容
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KvPipeline {
+    /// 主对话上下文（System/User/Assistant）- 跨轮保留
+    Conversation,
+    /// 临时上下文（Thinking/Reasoning）- 轮次结束可回收
+    Working,
+}
+
+/// 带管线标识的虚拟页面 ID
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PipelinedVirtualPageId {
+    pub pipeline: KvPipeline,
+    pub sequence_id: RequestId,
+    pub logical_index: usize,
+}
+
 /// Per-page metadata needed by HGAL (Hybrid Gang-Aware LIRS).
 #[derive(Debug, Clone)]
 pub struct PageMetadata {

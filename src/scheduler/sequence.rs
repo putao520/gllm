@@ -16,6 +16,7 @@ pub enum SequenceState {
 #[derive(Debug, Clone)]
 pub struct Sequence {
     pub id: RequestId,
+    pub enqueue_order: u64,
     pub prompt_tokens: Vec<u32>,
     pub generated_tokens: Vec<u32>,
     pub state: SequenceState,
@@ -28,6 +29,7 @@ impl Sequence {
         let position = prompt_tokens.len();
         Self {
             id,
+            enqueue_order: 0,
             prompt_tokens,
             generated_tokens: Vec::new(),
             state: SequenceState::Waiting,

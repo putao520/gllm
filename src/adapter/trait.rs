@@ -1,6 +1,6 @@
 //! Layer 2: Adapter trait (stateless).
 
-use gllm_kernels::backend_trait::{Backend, TensorLookup};
+use gllm_kernels::backend_trait::{Backend, Element, TensorLookup};
 use thiserror::Error;
 
 use crate::loader::{Loader, LoaderError, WeightsHandle};
@@ -21,20 +21,20 @@ pub struct ThinkingHead {
     pub tensors: Vec<String>,
 }
 
-pub struct AdapterWeights<B: Backend> {
-    pub handle: WeightsHandle<B>,
+pub struct AdapterWeights<B: Backend<E>, E: Element = f32> {
+    pub handle: WeightsHandle<B, E>,
     pub thinking_head: Option<ThinkingHead>,
 }
 
-impl<B: Backend> AdapterWeights<B> {
-    pub fn new(handle: WeightsHandle<B>) -> Self {
+impl<B: Backend<E>, E: Element> AdapterWeights<B, E> {
+    pub fn new(handle: WeightsHandle<B, E>) -> Self {
         Self {
             handle,
             thinking_head: None,
         }
     }
 
-    pub fn with_thinking_head(handle: WeightsHandle<B>, tensors: Vec<String>) -> Self {
+    pub fn with_thinking_head(handle: WeightsHandle<B, E>, tensors: Vec<String>) -> Self {
         let thinking_head = if tensors.is_empty() {
             None
         } else {
@@ -47,9 +47,9 @@ impl<B: Backend> AdapterWeights<B> {
     }
 }
 
-impl<B: Backend> TensorLookup<B> for AdapterWeights<B> {
-    fn tensor_f32(&self, name: &str) -> Option<&B::Tensor<f32>> {
-        self.handle.tensor_f32(name)
+impl<B: Backend<E>, E: Element> TensorLookup<E, B> for AdapterWeights<B, E> {
+    fn get_tensor(&self, name: &str) -> Option<&B::Tensor> {
+        self.handle.tensor(name)
     }
 
     fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
@@ -57,12 +57,20 @@ impl<B: Backend> TensorLookup<B> for AdapterWeights<B> {
     }
 }
 
-pub trait ModelAdapter<B: Backend> {
+pub trait ModelAdapter<B: Backend<E>, E: Element = f32>: Sync {
     fn supports(&self, manifest: &ModelManifest) -> bool;
 
-    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>>;
+    fn load_weights(&self, loader: &mut Loader, backend: &B)
+        -> AdapterResult<AdapterWeights<B, E>>;
 
     fn add_special_tokens(&self) -> bool {
         true
     }
 }
+
+/// Backward-compatible type alias for f32 adapter weights.
+pub type AdapterWeightsF32<B> = AdapterWeights<B, f32>;
+
+/// Backward-compatible type alias for f32 model adapter.
+pub trait ModelAdapterF32<B: Backend<f32>>: ModelAdapter<B, f32> {}
+impl<B: Backend<f32>, T: ModelAdapter<B, f32>> ModelAdapterF32<B> for T {}

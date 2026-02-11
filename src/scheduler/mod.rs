@@ -12,6 +12,7 @@ pub mod memory_manager;
 pub mod observer;
 pub mod paged_scheduler;
 pub mod policy;
+pub mod prefix_index;
 pub mod sequence;
 pub mod types;
 pub mod vllm2024;
@@ -22,10 +23,14 @@ pub use hgal::{HGALConfig, HGALScheduler};
 pub use jit_types::{SchedulerDecision, SystemState};
 pub use memory_manager::{
     EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PageLocation, PageTable, Tier,
-    TierManager, TierUsage, VirtualPageId,
+    TierManager, TierUsage, VirtualPageId, SessionId, SessionKvCache,
 };
 pub use observer::{BasicObserver, RuntimeObserver};
 pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerError, SchedulerOutput};
 pub use policy::{PolicyVariant, SchedulingPolicy};
+pub use prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 pub use sequence::{Sequence, SequenceState};
-pub use types::{GroupState, PageMetadata, SequenceGroup};
+pub use types::{
+    BatchOrderPolicy, GroupState, KvPipeline, PageMetadata, PipelinedVirtualPageId, RequestKind,
+    SequenceGroup,
+};

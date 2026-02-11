@@ -1,11 +1,13 @@
 // Debug Qwen3 GGUF tensor names and shapes
-use gllm::loader::Loader;
+use gllm::loader::{Loader, LoaderConfig};
 
 fn main() {
-    let mut loader = Loader::from("Qwen/Qwen3-0.6B-GGUF").expect("Failed to load model");
+    let config = LoaderConfig::from_env();
+    let loader = Loader::from_source_with_config("Qwen/Qwen3-0.6B-GGUF".to_string(), config)
+        .expect("Failed to load model");
 
     // Get architecture name
-    if let Ok(Some(arch)) = loader.gguf_architecture_name() {
+    if let Ok(arch) = loader.gguf_architecture() {
         println!("Architecture: {}", arch);
     }
 

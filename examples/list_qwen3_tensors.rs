@@ -1,10 +1,12 @@
 // List Qwen3 GGUF MLP tensor names
-use gllm::loader::Loader;
+use gllm::loader::{Loader, LoaderConfig};
 
 fn main() {
-    let loader = Loader::from("Qwen/Qwen3-0.6B-GGUF").expect("Failed to load model");
+    let config = LoaderConfig::from_env();
+    let mut loader = Loader::from_source_with_config("Qwen/Qwen3-0.6B-GGUF".to_string(), config)
+        .expect("Failed to load model");
 
-    let gguf = loader.gguf.as_ref().expect("No GGUF");
+    let gguf = loader.gguf_reader().expect("No GGUF");
     let names = gguf.names();
 
     // Print MLP-related tensors for layers 0-2

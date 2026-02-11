@@ -1,19 +1,18 @@
 //! Layer 2/3: Loader (HF + SafeTensors + fused splits).
 
-    // unused imports removed
+// unused imports removed
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ::safetensors::Dtype;
+use gllm_kernels::backend_trait::{Backend, Element};
 use half::{bf16, f16};
-use gllm_kernels::backend_trait::Backend;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::manifest::{ModelManifest, EMPTY_FILE_MAP, TensorRole};
-
+use crate::manifest::{ModelManifest, TensorRole, EMPTY_FILE_MAP};
 
 // Re-export modules
 pub mod adapter;
@@ -28,14 +27,13 @@ pub mod parallel;
 pub mod pytorch;
 pub mod safetensors;
 
+pub use downloader::{ModelScopeDownloader, ProgressBar};
+pub use gguf::GgufReader as GgufLoader;
 pub use hf_hub::HfHubClient;
 pub use modelscope::ModelScopeClient;
 pub use onnx::OnnxLoader;
-pub use safetensors::SafeTensorsLoader;
-pub use gguf::GgufReader as GgufLoader;
-pub use downloader::{ProgressBar, ModelScopeDownloader};
 pub use parallel::ParallelLoader;
-
+pub use safetensors::SafeTensorsLoader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
@@ -133,8 +131,11 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     for (i, part) in parts.iter().enumerate() {
         if let Ok(idx) = part.parse::<usize>() {
             if i > 0 {
-                let prefix = parts[i-1];
-                if matches!(prefix, "layers" | "blk" | "blocks" | "h" | "layer" | "block") {
+                let prefix = parts[i - 1];
+                if matches!(
+                    prefix,
+                    "layers" | "blk" | "blocks" | "h" | "layer" | "block"
+                ) {
                     layer_idx = Some(idx);
                     break;
                 }
@@ -156,7 +157,10 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     }
 
     // Output Head
-    if (lower.contains("lm_head") || lower.contains("output")) && !lower.contains("layer") && !lower.contains("attention") {
+    if (lower.contains("lm_head") || lower.contains("output"))
+        && !lower.contains("layer")
+        && !lower.contains("attention")
+    {
         return Some((TensorRole::OutputHead, None));
     }
 
@@ -329,7 +333,8 @@ impl Loader {
     }
 
     pub fn from_source_with_config(model_id: String, config: LoaderConfig) -> Result<Self> {
-        let cache = CacheLayout::new(config.cache_dir.clone()).map_err(|e| LoaderError::Cache(e.to_string()))?;
+        let cache = CacheLayout::new(config.cache_dir.clone())
+            .map_err(|e| LoaderError::Cache(e.to_string()))?;
         cache.ensure()?;
 
         let (weights, format, aux_files) = match config.source {
@@ -354,9 +359,16 @@ impl Loader {
                     Err(err) => {
                         // Fallback to ModelScope if enabled and error is recoverable
                         if config.enable_fallback && is_recoverable_error(&err) {
-                            eprintln!("⚠️ HuggingFace download failed, falling back to ModelScope: {}", err);
+                            eprintln!(
+                                "⚠️ HuggingFace download failed, falling back to ModelScope: {}",
+                                err
+                            );
                             let ms_api = ModelScopeClient::new(cache.modelscope_cache_dir())?;
-                            let ms_files = ms_api.download_model_files(&model_id, EMPTY_FILE_MAP, ParallelLoader::new(true))?;
+                            let ms_files = ms_api.download_model_files(
+                                &model_id,
+                                EMPTY_FILE_MAP,
+                                ParallelLoader::new(true),
+                            )?;
                             (ms_files.weights, ms_files.format, ms_files.aux_files)
                         } else {
                             return Err(err);
@@ -366,7 +378,8 @@ impl Loader {
             }
             ModelSource::ModelScope => {
                 let api = ModelScopeClient::new(cache.modelscope_cache_dir())?;
-                let files = api.download_model_files(&model_id, EMPTY_FILE_MAP, ParallelLoader::new(true))?;
+                let files =
+                    api.download_model_files(&model_id, EMPTY_FILE_MAP, ParallelLoader::new(true))?;
                 (files.weights, files.format, files.aux_files)
             }
         };
@@ -432,7 +445,10 @@ impl Loader {
     pub fn load(mut self) -> Result<Self> {
         match self.format {
             WeightFormat::SafeTensors => {
-                let loader = safetensors::SafeTensorsLoader::from_files(&self.weight_paths, parallel::ParallelLoader::new(true))?;
+                let loader = safetensors::SafeTensorsLoader::from_files(
+                    &self.weight_paths,
+                    parallel::ParallelLoader::new(true),
+                )?;
                 self.safetensors = Some(loader);
             }
             WeightFormat::Gguf => {
@@ -501,7 +517,9 @@ impl Loader {
 
     pub fn gguf_architecture(&self) -> Result<&str> {
         if let Some(reader) = &self.gguf {
-            reader.architecture().map_err(|e| LoaderError::Gguf(e.to_string()))
+            reader
+                .architecture()
+                .map_err(|e| LoaderError::Gguf(e.to_string()))
         } else {
             Err(LoaderError::MissingWeights)
         }
@@ -522,24 +540,27 @@ impl Loader {
         } else if let Some(reader) = &self.gguf {
             Ok(reader.floating_point_dtype_size())
         } else if let Some(loader) = &self.onnx {
-             // ONNX might have mixed precision, but we can try to find the dominant floating point type
-             // For now, let's look at the first few tensors
-             let precisions = loader.unique_precisions();
-             for dtype in precisions {
-                 match dtype {
-                     Dtype::F32 => return Ok(Some(4)),
-                     Dtype::F16 | Dtype::BF16 => return Ok(Some(2)),
-                     Dtype::F64 => return Ok(Some(8)),
-                     _ => continue,
-                 }
-             }
-             Ok(None)
+            // ONNX might have mixed precision, but we can try to find the dominant floating point type
+            // For now, let's look at the first few tensors
+            let precisions = loader.unique_precisions();
+            for dtype in precisions {
+                match dtype {
+                    Dtype::F32 => return Ok(Some(4)),
+                    Dtype::F16 | Dtype::BF16 => return Ok(Some(2)),
+                    Dtype::F64 => return Ok(Some(8)),
+                    _ => continue,
+                }
+            }
+            Ok(None)
         } else {
             Ok(None)
         }
     }
 
-    pub fn upload_weights<B: Backend>(&mut self, backend: &B) -> Result<WeightsHandle<B>> {
+    pub fn upload_weights<B: Backend<E>, E: Element>(
+        &mut self,
+        backend: &B,
+    ) -> Result<WeightsHandle<B, E>> {
         match self.format {
             WeightFormat::SafeTensors => {
                 let provider = self
@@ -562,11 +583,11 @@ impl Loader {
         }
     }
 
-    fn upload_provider<P: TensorProvider, B: Backend>(
+    fn upload_provider<P: TensorProvider, B: Backend<E>, E: Element>(
         &self,
         provider: &P,
         backend: &B,
-    ) -> Result<WeightsHandle<B>> {
+    ) -> Result<WeightsHandle<B, E>> {
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
         let mut meta_map = HashMap::new();
@@ -575,9 +596,9 @@ impl Loader {
             match meta.dtype {
                 Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
                     let data = provider.load_tensor_data(&meta.name)?;
-                    let f32_data = convert_to_f32(meta.dtype, &data)?;
+                    let converted = convert_to_element::<E>(meta.dtype, &data)?;
                     let tensor = backend
-                        .upload_weights(&f32_data)
+                        .upload_weights(&converted)
                         .map_err(|e| LoaderError::Backend(e.to_string()))?;
 
                     tensors.insert(meta.name.clone(), tensor);
@@ -594,7 +615,6 @@ impl Loader {
         Ok(WeightsHandle::new(tensors, shapes, meta_map))
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn from_local_files_with_manifest(
         _model_id: &str,
         weight_paths: Vec<PathBuf>,
@@ -644,7 +664,9 @@ fn convert_to_f32(dtype: Dtype, data: &[u8]) -> Result<Cow<'_, [f32]>> {
         Dtype::F32 => cast_or_copy_f32(data),
         Dtype::F16 => {
             if data.len() % 2 != 0 {
-                return Err(LoaderError::InvalidQuantization("F16 data length not multiple of 2".into()));
+                return Err(LoaderError::InvalidQuantization(
+                    "F16 data length not multiple of 2".into(),
+                ));
             }
             let mut out = Vec::with_capacity(data.len() / 2);
             for chunk in data.chunks_exact(2) {
@@ -655,7 +677,9 @@ fn convert_to_f32(dtype: Dtype, data: &[u8]) -> Result<Cow<'_, [f32]>> {
         }
         Dtype::BF16 => {
             if data.len() % 2 != 0 {
-                return Err(LoaderError::InvalidQuantization("BF16 data length not multiple of 2".into()));
+                return Err(LoaderError::InvalidQuantization(
+                    "BF16 data length not multiple of 2".into(),
+                ));
             }
             let mut out = Vec::with_capacity(data.len() / 2);
             for chunk in data.chunks_exact(2) {
@@ -666,13 +690,14 @@ fn convert_to_f32(dtype: Dtype, data: &[u8]) -> Result<Cow<'_, [f32]>> {
         }
         Dtype::F64 => {
             if data.len() % 8 != 0 {
-                return Err(LoaderError::InvalidQuantization("F64 data length not multiple of 8".into()));
+                return Err(LoaderError::InvalidQuantization(
+                    "F64 data length not multiple of 8".into(),
+                ));
             }
             let mut out = Vec::with_capacity(data.len() / 8);
             for chunk in data.chunks_exact(8) {
                 let value = f64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                    chunk[4], chunk[5], chunk[6], chunk[7]
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                 ]);
                 out.push(value as f32);
             }
@@ -680,6 +705,112 @@ fn convert_to_f32(dtype: Dtype, data: &[u8]) -> Result<Cow<'_, [f32]>> {
         }
         _ => Err(LoaderError::UnsupportedDtype(dtype)),
     }
+}
+
+/// Convert raw tensor data to a vector of generic element type E.
+///
+/// This function handles dtype conversion from various floating point formats
+/// (F32, F16, BF16, F64) to the target element type E.
+///
+/// Optimized paths:
+/// - Same type (e.g., F16 → f16): zero-copy transmute when aligned, otherwise byte copy
+/// - Different types: direct conversion without f32 intermediate when possible
+fn convert_to_element<E: Element>(dtype: Dtype, data: &[u8]) -> Result<Vec<E>> {
+    use std::any::TypeId;
+
+    let target_type = TypeId::of::<E>();
+
+    // Fast path: source dtype matches target E type (zero-copy or direct copy)
+    match dtype {
+        Dtype::F32 if target_type == TypeId::of::<f32>() => {
+            // F32 → f32: direct transmute
+            return Ok(cast_or_copy_typed::<f32, E>(data));
+        }
+        Dtype::F16 if target_type == TypeId::of::<half::f16>() => {
+            // F16 → f16: direct transmute
+            return Ok(cast_or_copy_typed::<half::f16, E>(data));
+        }
+        Dtype::BF16 if target_type == TypeId::of::<half::bf16>() => {
+            // BF16 → bf16: direct transmute
+            return Ok(cast_or_copy_typed::<half::bf16, E>(data));
+        }
+        _ => {}
+    }
+
+    // Cross-type conversion: use the most direct path
+    // For float types, we can convert directly using Float trait
+    match dtype {
+        Dtype::F32 => {
+            let f32_slice = cast_or_copy_f32(data)?;
+            Ok(f32_slice.iter().map(|&v| E::from_f32(v)).collect())
+        }
+        Dtype::F16 => {
+            let count = data.len() / 2;
+            let mut result = Vec::with_capacity(count);
+            for chunk in data.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let f16_val = half::f16::from_bits(bits);
+                result.push(E::from_f32(f16_val.to_f32()));
+            }
+            Ok(result)
+        }
+        Dtype::BF16 => {
+            let count = data.len() / 2;
+            let mut result = Vec::with_capacity(count);
+            for chunk in data.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let bf16_val = half::bf16::from_bits(bits);
+                result.push(E::from_f32(bf16_val.to_f32()));
+            }
+            Ok(result)
+        }
+        Dtype::F64 => {
+            let count = data.len() / 8;
+            let mut result = Vec::with_capacity(count);
+            for chunk in data.chunks_exact(8) {
+                let bits = u64::from_le_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ]);
+                let f64_val = f64::from_bits(bits);
+                result.push(E::from_f32(f64_val as f32));
+            }
+            Ok(result)
+        }
+        _ => Err(LoaderError::UnsupportedDtype(dtype)),
+    }
+}
+
+/// Zero-copy or byte-copy transmute for same-type conversions.
+///
+/// Safety: This is safe because we only call this when TypeId confirms
+/// the source and target types are the same.
+#[inline]
+fn cast_or_copy_typed<S: Copy + 'static, E: Element>(data: &[u8]) -> Vec<E> {
+    let elem_size = std::mem::size_of::<S>();
+    let count = data.len() / elem_size;
+
+    // Try zero-copy if aligned
+    let (prefix, body, suffix) = unsafe { data.align_to::<S>() };
+    if prefix.is_empty() && suffix.is_empty() {
+        // Safety: S and E have the same TypeId, so they're the same type
+        // We transmute the reference and copy
+        let e_slice: &[E] =
+            unsafe { std::slice::from_raw_parts(body.as_ptr() as *const E, body.len()) };
+        return e_slice.to_vec();
+    }
+
+    // Fallback: byte-by-byte copy
+    let mut result = Vec::with_capacity(count);
+    for chunk in data.chunks_exact(elem_size) {
+        // Copy bytes to properly aligned storage
+        let mut bytes = [0u8; 8]; // Max size we handle
+        bytes[..elem_size].copy_from_slice(chunk);
+        let val: S = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const S) };
+        // Safety: S and E are the same type (verified by TypeId)
+        let e_val: E = unsafe { std::mem::transmute_copy(&val) };
+        result.push(e_val);
+    }
+    result
 }
 
 fn cast_or_copy_f32(data: &[u8]) -> Result<Cow<'_, [f32]>> {
@@ -706,7 +837,9 @@ pub struct QuantizationMetadata {
 }
 
 impl QuantizationMetadata {
-    pub fn from_metadata(metadata: &HashMap<String, String>) -> Result<Option<HashMap<String, Self>>> {
+    pub fn from_metadata(
+        metadata: &HashMap<String, String>,
+    ) -> Result<Option<HashMap<String, Self>>> {
         if let Some(json) = metadata.get("gllm.quantization") {
             let map: HashMap<String, Self> = serde_json::from_str(json)?;
             Ok(Some(map))
@@ -719,15 +852,15 @@ impl QuantizationMetadata {
 // --- Legacy Types for Compatibility ---
 
 #[derive(Debug, Clone)]
-pub struct WeightsHandle<B: Backend> {
-    tensors: HashMap<String, B::Tensor<f32>>,
+pub struct WeightsHandle<B: Backend<E>, E: Element = f32> {
+    tensors: HashMap<String, B::Tensor>,
     shapes: HashMap<String, Vec<usize>>,
     pub meta: HashMap<String, TensorMeta>,
 }
 
-impl<B: Backend> WeightsHandle<B> {
+impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
     pub fn new(
-        tensors: HashMap<String, B::Tensor<f32>>,
+        tensors: HashMap<String, B::Tensor>,
         shapes: HashMap<String, Vec<usize>>,
         meta: HashMap<String, TensorMeta>,
     ) -> Self {
@@ -738,7 +871,7 @@ impl<B: Backend> WeightsHandle<B> {
         }
     }
 
-    pub fn tensor_f32(&self, name: &str) -> Option<&B::Tensor<f32>> {
+    pub fn tensor(&self, name: &str) -> Option<&B::Tensor> {
         self.tensors.get(name)
     }
 
@@ -746,6 +879,9 @@ impl<B: Backend> WeightsHandle<B> {
         self.shapes.get(name).map(|v| v.as_slice())
     }
 }
+
+/// Backward-compatible type alias for f32 weights.
+pub type WeightsHandleF32<B> = WeightsHandle<B, f32>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ParallelPolicy {
@@ -764,4 +900,3 @@ pub struct UploadedTensor {
     pub shape: Vec<usize>,
     // backend-specific handle
 }
-

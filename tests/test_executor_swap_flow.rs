@@ -21,7 +21,8 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
 
     // 2. Load Model (SmolLM2-135M-Instruct)
     let model_id = "HuggingFaceTB/SmolLM2-135M-Instruct";
-    let mut loader = Loader::from(model_id)?;
+    let config = gllm::loader::LoaderConfig::from_env();
+    let mut loader = Loader::from_source_with_config(model_id.to_string(), config)?;
 
     // Manually construct manifest as auto-detection might not be exposed in Loader yet
     let manifest = Arc::new(ModelManifest {
@@ -37,8 +38,8 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
     });
 
     // Select adapter (CpuBackend)
-    let backend = CpuBackend::new();
-    let adapter = adapter_for(&manifest)
+    let backend = CpuBackend::<f32>::new();
+    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest)
         .ok_or_else(|| Box::<dyn std::error::Error>::from("Adapter not found"))?;
 
     // 3. Initialize Executor

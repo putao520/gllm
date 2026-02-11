@@ -11,12 +11,16 @@ use gllm_kernels::cpu_backend::CpuBackend;
 use gllm_kernels::Backend;
 use std::sync::Arc;
 
-fn build_executor(alias: &str, kind: ModelKind, files: &TestModelFiles) -> Executor<CpuBackend> {
+fn build_executor(
+    alias: &str,
+    kind: ModelKind,
+    files: &TestModelFiles,
+) -> Executor<CpuBackend<f32>, f32> {
     let mut loader = files.loader(alias).expect("loader");
     let manifest = manifest_from_loader(alias, kind, &loader);
     loader.set_manifest_if_missing(&manifest);
-    let adapter = adapter_for::<CpuBackend>(&manifest).expect("adapter");
-    let backend = CpuBackend::new();
+    let adapter = adapter_for::<CpuBackend<f32>, f32>(&manifest).expect("adapter");
+    let backend = CpuBackend::<f32>::new();
     Executor::from_loader(backend, Arc::new(manifest.clone()), adapter, &mut loader)
         .expect("executor")
 }

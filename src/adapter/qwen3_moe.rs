@@ -1,6 +1,6 @@
 //! Qwen3 MoE adapter.
 
-use gllm_kernels::backend_trait::Backend;
+use gllm_kernels::backend_trait::{Backend, Element};
 
 use crate::loader::Loader;
 use crate::manifest::{ModelArchitecture, ModelManifest};
@@ -15,12 +15,16 @@ const THINKING_HEAD_PATTERNS: &[&str] = &["thinking_head"];
 
 pub struct Qwen3MoEAdapter;
 
-impl<B: Backend> ModelAdapter<B> for Qwen3MoEAdapter {
+impl<B: Backend<E>, E: Element> ModelAdapter<B, E> for Qwen3MoEAdapter {
     fn supports(&self, manifest: &ModelManifest) -> bool {
         matches!(manifest.arch, ModelArchitecture::Qwen3MoE)
     }
 
-    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(
+        &self,
+        loader: &mut Loader,
+        backend: &B,
+    ) -> AdapterResult<AdapterWeights<B, E>> {
         let handle = loader.upload_weights(backend)?;
 
         // Ω1: 使用架构定义的张量名称模式检测 thinking head

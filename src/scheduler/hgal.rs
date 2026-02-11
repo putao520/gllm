@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
 
-#[cfg(test)]
+use super::memory_manager::VirtualPageId;
 use super::types::GroupState;
 use super::types::{PageMetadata, SequenceGroup};
 
@@ -279,6 +279,84 @@ impl HGALScheduler {
         entry.last_access = now;
     }
 
+    /// Prefill chunk 完成回调
+    pub fn on_prefill_chunk_complete(
+        &mut self,
+        chunk_idx: usize,
+        total_chunks: usize,
+        pages: &[VirtualPageId],
+    ) {
+        if pages.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let is_last_chunk = chunk_idx.saturating_add(1) >= total_chunks;
+        let mut grouped_pages: HashMap<RequestId, Vec<PageId>> = HashMap::new();
+
+        for vpid in pages {
+            let page_id = virtual_page_to_page_id(*vpid);
+            let entry = self
+                .page_metadata
+                .entry(page_id)
+                .or_insert_with(|| PageMetadata {
+                    page_id,
+                    ..Default::default()
+                });
+            entry.sequence_id = Some(vpid.sequence_id);
+            entry.last_access = now;
+            entry.access_count = entry.access_count.saturating_add(1);
+            entry.recency = 0;
+            entry.state = if is_last_chunk {
+                PageState::Active
+            } else {
+                PageState::Standby
+            };
+            grouped_pages
+                .entry(vpid.sequence_id)
+                .or_default()
+                .push(page_id);
+        }
+
+        for (request_id, mut page_ids) in grouped_pages {
+            let group = self
+                .sequence_groups
+                .entry(request_id)
+                .or_insert_with(|| SequenceGroup {
+                    id: request_id,
+                    pages: Vec::new(),
+                    state: GroupState::Running,
+                    access_count: 0,
+                    last_access: now,
+                    is_pinned: false,
+                    context_len: 0,
+                });
+            group.access_count = group.access_count.saturating_add(1);
+            group.last_access = now;
+            group.state = GroupState::Running;
+            group.pages.append(&mut page_ids);
+            group.pages.sort_unstable();
+            group.pages.dedup();
+            group.context_len = group.context_len.max(group.pages.len());
+        }
+    }
+
+    /// Prefill 完成回调
+    pub fn on_prefill_complete(&mut self, request_id: RequestId) {
+        if let Some(group) = self.sequence_groups.get_mut(&request_id) {
+            group.last_access = Instant::now();
+            group.state = GroupState::Running;
+            for page_id in group.pages.iter().copied() {
+                if let Some(meta) = self.page_metadata.get_mut(&page_id) {
+                    if meta.state != PageState::Swapped {
+                        meta.state = PageState::Active;
+                    }
+                    meta.warm_until = None;
+                }
+            }
+        }
+    }
+
     fn group_has_protection(&self, group: &SequenceGroup) -> bool {
         group.pages.iter().any(|pid| {
             if let Some(meta) = self.page_metadata.get(pid) {
@@ -321,6 +399,14 @@ impl HGALScheduler {
             .max_by_key(|meta| meta.recency)
             .map(|meta| meta.page_id)
     }
+}
+
+fn virtual_page_to_page_id(vpid: VirtualPageId) -> PageId {
+    let sid = vpid.sequence_id as u128;
+    let lid = vpid.logical_index as u128;
+    let paired = (sid + lid) * (sid + lid + 1) / 2 + lid;
+    let limit = usize::MAX as u128;
+    (paired % limit) as usize
 }
 
 #[cfg(test)]
@@ -378,6 +464,31 @@ mod tests {
         assert_eq!(
             scheduler.page_metadata.get(&3).map(|m| m.state).unwrap(),
             PageState::Protected
+        );
+    }
+
+    #[test]
+    fn prefill_callbacks_update_state() {
+        let mut scheduler = HGALScheduler::new(HGALConfig::default());
+        let pages = vec![
+            VirtualPageId::new(9, 0),
+            VirtualPageId::new(9, 1),
+            VirtualPageId::new(9, 2),
+        ];
+
+        scheduler.on_prefill_chunk_complete(0, 2, &pages[..2]);
+        let first = virtual_page_to_page_id(pages[0]);
+        assert_eq!(
+            scheduler.page_metadata.get(&first).map(|m| m.state),
+            Some(PageState::Standby)
+        );
+
+        scheduler.on_prefill_chunk_complete(1, 2, &pages[2..]);
+        scheduler.on_prefill_complete(9);
+        let last = virtual_page_to_page_id(pages[2]);
+        assert_eq!(
+            scheduler.page_metadata.get(&last).map(|m| m.state),
+            Some(PageState::Active)
         );
     }
 }

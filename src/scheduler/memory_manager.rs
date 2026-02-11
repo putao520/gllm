@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use gllm_kernels::kernel_types::{PageId, PageState, PhysicalId, RequestId};
 
-use super::types::PageMetadata;
+use super::types::{KvPipeline, PageMetadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tier {
@@ -28,10 +28,33 @@ impl VirtualPageId {
     }
 }
 
+pub type SessionId = u64;
+
+/// 会话级 KV Cache (ARCH-SCHED-SESSION-KV)
+#[derive(Debug, Clone)]
+pub struct SessionKvCache {
+    pub session_id: SessionId,
+    pub pages: Vec<VirtualPageId>,
+    pub finalized_position: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageLocation {
     pub physical_id: PhysicalId,
     pub tier: Tier,
+}
+
+/// Prefill 规划结果 (DATA-PREFILL-PLAN)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefillPlan {
+    /// 全部驻留 L1
+    FullyResident { pages: usize },
+    /// 分批装载/预取
+    Pipelined {
+        l1_pages: usize,
+        l2_prefetch: usize,
+        chunk_schedule: Vec<usize>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -304,6 +327,8 @@ pub struct GlobalMemoryManager {
     tier_manager: TierManager,
     eviction_policy: EvictionPolicy,
     physical_to_virtual: HashMap<(Tier, PhysicalId), HashSet<VirtualPageId>>,
+    sessions: HashMap<SessionId, SessionKvCache>,
+    pipeline_pages: HashMap<(KvPipeline, RequestId), Vec<PhysicalId>>,
 }
 
 impl GlobalMemoryManager {
@@ -313,6 +338,8 @@ impl GlobalMemoryManager {
             tier_manager,
             eviction_policy,
             physical_to_virtual: HashMap::new(),
+            sessions: HashMap::new(),
+            pipeline_pages: HashMap::new(),
         }
     }
 
@@ -466,6 +493,153 @@ impl GlobalMemoryManager {
         self.tier_manager.usage(tier)
     }
 
+    /// 规划 Prefill 的页面分配策略
+    pub fn plan_prefill(
+        &mut self,
+        prompt_tokens: usize,
+        chunk_size: usize,
+        page_size: usize,
+    ) -> PrefillPlan {
+        if prompt_tokens == 0 {
+            return PrefillPlan::FullyResident { pages: 0 };
+        }
+
+        let safe_page_size = page_size.max(1);
+        let safe_chunk_size = chunk_size.max(1);
+        let total_pages = prompt_tokens.div_ceil(safe_page_size);
+        let l1 = self.tier_usage(Tier::L1);
+        let l2 = self.tier_usage(Tier::L2);
+        let l1_available = l1.capacity.saturating_sub(l1.used);
+
+        if total_pages <= l1_available {
+            return PrefillPlan::FullyResident { pages: total_pages };
+        }
+
+        let l1_pages = l1_available.min(total_pages);
+        let l2_prefetch = l2
+            .capacity
+            .saturating_sub(l2.used)
+            .min(total_pages.saturating_sub(l1_pages));
+
+        let mut remaining_tokens = prompt_tokens;
+        let mut chunk_schedule = Vec::new();
+        while remaining_tokens > 0 {
+            let tokens_this_chunk = remaining_tokens.min(safe_chunk_size);
+            let pages_this_chunk = tokens_this_chunk.div_ceil(safe_page_size);
+            chunk_schedule.push(pages_this_chunk.max(1));
+            remaining_tokens = remaining_tokens.saturating_sub(tokens_this_chunk);
+        }
+
+        PrefillPlan::Pipelined {
+            l1_pages,
+            l2_prefetch,
+            chunk_schedule,
+        }
+    }
+
+    /// 注册新会话
+    pub fn register_session(&mut self, session_id: SessionId) -> SessionKvCache {
+        let cache = SessionKvCache {
+            session_id,
+            pages: Vec::new(),
+            finalized_position: 0,
+        };
+        self.sessions.insert(session_id, cache.clone());
+        cache
+    }
+
+    /// 声明会话前缀（只能 claim finalized_position 范围内的页面）
+    pub fn claim_session_prefix(
+        &mut self,
+        session_id: SessionId,
+        request_id: RequestId,
+        prefix_tokens: usize,
+    ) -> Result<Vec<VirtualPageId>, MemoryManagerError> {
+        let cache = self
+            .sessions
+            .get(&session_id)
+            .ok_or(MemoryManagerError::UnknownSession { session_id })?;
+
+        if prefix_tokens > cache.finalized_position {
+            return Err(MemoryManagerError::SessionPrefixOutOfBounds {
+                session_id,
+                prefix_tokens,
+                finalized_position: cache.finalized_position,
+            });
+        }
+        if prefix_tokens > cache.pages.len() {
+            return Err(MemoryManagerError::SessionPagesInsufficient {
+                session_id,
+                prefix_tokens,
+                available_pages: cache.pages.len(),
+            });
+        }
+
+        Ok(cache
+            .pages
+            .iter()
+            .take(prefix_tokens)
+            .enumerate()
+            .map(|(logical_index, _)| VirtualPageId::new(request_id, logical_index))
+            .collect())
+    }
+
+    /// 确认会话 token 边界（只能单调递增）
+    pub fn finalize_session_tokens(
+        &mut self,
+        session_id: SessionId,
+        new_finalized_position: usize,
+    ) {
+        if let Some(cache) = self.sessions.get_mut(&session_id) {
+            cache.finalized_position = cache.finalized_position.max(new_finalized_position);
+        }
+    }
+
+    /// 在指定管线分配页面
+    pub fn allocate_page_in_pipeline(
+        &mut self,
+        pipeline: KvPipeline,
+        request_id: RequestId,
+        tier: Tier,
+    ) -> Result<PhysicalId, MemoryManagerError> {
+        let pid = self
+            .tier_manager
+            .allocate(tier)
+            .ok_or(MemoryManagerError::TierCapacityExceeded { tier })?;
+        self.pipeline_pages
+            .entry((pipeline, request_id))
+            .or_default()
+            .push(pid);
+        Ok(pid)
+    }
+
+    /// 释放指定请求的 Working 管线页面
+    pub fn release_working_pipeline(&mut self, request_id: RequestId) {
+        if let Some(pages) = self.pipeline_pages.remove(&(KvPipeline::Working, request_id)) {
+            for pid in pages {
+                let _ = self.tier_manager.free(Tier::L1, pid);
+            }
+        }
+    }
+
+    /// 准备下一轮（释放 Working，保留 Conversation）
+    pub fn prepare_next_turn(&mut self, session_id: SessionId) {
+        let _ = session_id;
+        let working_keys: Vec<_> = self
+            .pipeline_pages
+            .keys()
+            .filter(|(pipeline, _)| *pipeline == KvPipeline::Working)
+            .copied()
+            .collect();
+        for key in working_keys {
+            if let Some(pages) = self.pipeline_pages.remove(&key) {
+                for pid in pages {
+                    let _ = self.tier_manager.free(Tier::L1, pid);
+                }
+            }
+        }
+    }
+
     fn remove_reverse_index(&mut self, location: PageLocation, virtual_id: VirtualPageId) {
         let key = (location.tier, location.physical_id);
         let mut should_remove = false;
@@ -484,6 +658,19 @@ pub enum MemoryManagerError {
     TierCapacityExceeded { tier: Tier },
     UnknownPhysicalPage { tier: Tier, physical_id: PhysicalId },
     UnknownVirtualPage { virtual_id: VirtualPageId },
+    UnknownSession {
+        session_id: SessionId,
+    },
+    SessionPrefixOutOfBounds {
+        session_id: SessionId,
+        prefix_tokens: usize,
+        finalized_position: usize,
+    },
+    SessionPagesInsufficient {
+        session_id: SessionId,
+        prefix_tokens: usize,
+        available_pages: usize,
+    },
 }
 
 impl Display for MemoryManagerError {
@@ -504,6 +691,31 @@ impl Display for MemoryManagerError {
                     f,
                     "virtual page ({}, {}) not found",
                     virtual_id.sequence_id, virtual_id.logical_index
+                )
+            }
+            MemoryManagerError::UnknownSession { session_id } => {
+                write!(f, "session {} not found", session_id)
+            }
+            MemoryManagerError::SessionPrefixOutOfBounds {
+                session_id,
+                prefix_tokens,
+                finalized_position,
+            } => {
+                write!(
+                    f,
+                    "session {} prefix {} exceeds finalized position {}",
+                    session_id, prefix_tokens, finalized_position
+                )
+            }
+            MemoryManagerError::SessionPagesInsufficient {
+                session_id,
+                prefix_tokens,
+                available_pages,
+            } => {
+                write!(
+                    f,
+                    "session {} prefix {} exceeds available pages {}",
+                    session_id, prefix_tokens, available_pages
                 )
             }
         }
@@ -657,5 +869,89 @@ mod tests {
         assert_eq!(victims[0], 1);
         assert!(!victims.contains(&2));
         assert!(!victims.contains(&4));
+    }
+
+    #[test]
+    fn plan_prefill_returns_fully_resident_when_l1_has_capacity() {
+        let mut manager = GlobalMemoryManager::new_with_capacities(8, 0, 0);
+        let plan = manager.plan_prefill(512, 128, 128);
+        assert_eq!(plan, PrefillPlan::FullyResident { pages: 4 });
+    }
+
+    #[test]
+    fn plan_prefill_returns_pipelined_when_l1_is_insufficient() {
+        let mut manager = GlobalMemoryManager::new_with_capacities(2, 4, 0);
+        let plan = manager.plan_prefill(1024, 256, 128);
+        assert_eq!(
+            plan,
+            PrefillPlan::Pipelined {
+                l1_pages: 2,
+                l2_prefetch: 4,
+                chunk_schedule: vec![2, 2, 2, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn session_claim_rejects_out_of_bounds_and_respects_monotonic_finalize() {
+        let mut manager = GlobalMemoryManager::new_with_capacities(2, 0, 0);
+        manager.register_session(42);
+        {
+            let session = manager.sessions.get_mut(&42).unwrap();
+            session.pages = vec![
+                VirtualPageId::new(1, 0),
+                VirtualPageId::new(1, 1),
+                VirtualPageId::new(1, 2),
+            ];
+        }
+
+        manager.finalize_session_tokens(42, 2);
+        manager.finalize_session_tokens(42, 1);
+
+        let claimed = manager.claim_session_prefix(42, 99, 2).unwrap();
+        assert_eq!(
+            claimed,
+            vec![VirtualPageId::new(99, 0), VirtualPageId::new(99, 1)]
+        );
+
+        let err = manager.claim_session_prefix(42, 99, 3).unwrap_err();
+        assert_eq!(
+            err,
+            MemoryManagerError::SessionPrefixOutOfBounds {
+                session_id: 42,
+                prefix_tokens: 3,
+                finalized_position: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_next_turn_releases_only_working_pages() {
+        let mut manager = GlobalMemoryManager::new_with_capacities(4, 0, 0);
+        let _ = manager
+            .allocate_page_in_pipeline(KvPipeline::Working, 1, Tier::L1)
+            .unwrap();
+        let _ = manager
+            .allocate_page_in_pipeline(KvPipeline::Working, 2, Tier::L1)
+            .unwrap();
+        let _ = manager
+            .allocate_page_in_pipeline(KvPipeline::Conversation, 1, Tier::L1)
+            .unwrap();
+        assert_eq!(manager.tier_usage(Tier::L1).used, 3);
+
+        manager.release_working_pipeline(1);
+        assert_eq!(manager.tier_usage(Tier::L1).used, 2);
+        assert!(manager
+            .pipeline_pages
+            .contains_key(&(KvPipeline::Conversation, 1)));
+
+        manager.prepare_next_turn(42);
+        assert_eq!(manager.tier_usage(Tier::L1).used, 1);
+        assert!(manager
+            .pipeline_pages
+            .contains_key(&(KvPipeline::Conversation, 1)));
+        assert!(!manager
+            .pipeline_pages
+            .contains_key(&(KvPipeline::Working, 2)));
     }
 }

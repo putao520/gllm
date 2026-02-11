@@ -1,6 +1,6 @@
 //! Layer 2: Model adapters (skeleton).
 
-use gllm_kernels::backend_trait::Backend;
+use gllm_kernels::backend_trait::{Backend, Element};
 
 use crate::manifest::ModelManifest;
 
@@ -31,7 +31,10 @@ pub use qwen3::Qwen3Adapter;
 pub use qwen3_embed::Qwen3EmbedAdapter;
 pub use qwen3_moe::Qwen3MoEAdapter;
 pub use qwen3_rerank::Qwen3RerankAdapter;
-pub use r#trait::{AdapterError, AdapterResult, AdapterWeights, ModelAdapter, ThinkingHead};
+pub use r#trait::{
+    AdapterError, AdapterResult, AdapterWeights, AdapterWeightsF32, ModelAdapter, ModelAdapterF32,
+    ThinkingHead,
+};
 pub use xlm_r::XlmRAdapter;
 
 static QWEN2_5: Qwen2_5Adapter = Qwen2_5Adapter;
@@ -48,44 +51,46 @@ static XLMR: XlmRAdapter = XlmRAdapter;
 static GPT_OSS: GptOssAdapter = GptOssAdapter;
 static GLM5: Glm5Adapter = Glm5Adapter;
 
-pub fn adapter_for<B: Backend>(manifest: &ModelManifest) -> Option<&'static dyn ModelAdapter<B>> {
-    if <Qwen3EmbedAdapter as ModelAdapter<B>>::supports(&QWEN3_EMBED, manifest) {
+pub fn adapter_for<B: Backend<E>, E: Element>(
+    manifest: &ModelManifest,
+) -> Option<&'static dyn ModelAdapter<B, E>> {
+    if <Qwen3EmbedAdapter as ModelAdapter<B, E>>::supports(&QWEN3_EMBED, manifest) {
         return Some(&QWEN3_EMBED);
     }
-    if <Qwen3RerankAdapter as ModelAdapter<B>>::supports(&QWEN3_RERANK, manifest) {
+    if <Qwen3RerankAdapter as ModelAdapter<B, E>>::supports(&QWEN3_RERANK, manifest) {
         return Some(&QWEN3_RERANK);
     }
-    if <XlmRAdapter as ModelAdapter<B>>::supports(&XLMR, manifest) {
+    if <XlmRAdapter as ModelAdapter<B, E>>::supports(&XLMR, manifest) {
         return Some(&XLMR);
     }
-    if <Qwen3MoEAdapter as ModelAdapter<B>>::supports(&QWEN3_MOE, manifest) {
+    if <Qwen3MoEAdapter as ModelAdapter<B, E>>::supports(&QWEN3_MOE, manifest) {
         return Some(&QWEN3_MOE);
     }
-    if <Qwen3Adapter as ModelAdapter<B>>::supports(&QWEN3, manifest) {
+    if <Qwen3Adapter as ModelAdapter<B, E>>::supports(&QWEN3, manifest) {
         return Some(&QWEN3);
     }
-    if <Qwen2_5Adapter as ModelAdapter<B>>::supports(&QWEN2_5, manifest) {
+    if <Qwen2_5Adapter as ModelAdapter<B, E>>::supports(&QWEN2_5, manifest) {
         return Some(&QWEN2_5);
     }
-    if <Llama4Adapter as ModelAdapter<B>>::supports(&LLAMA4, manifest) {
+    if <Llama4Adapter as ModelAdapter<B, E>>::supports(&LLAMA4, manifest) {
         return Some(&LLAMA4);
     }
-    if <Gemma2Adapter as ModelAdapter<B>>::supports(&GEMMA2, manifest) {
+    if <Gemma2Adapter as ModelAdapter<B, E>>::supports(&GEMMA2, manifest) {
         return Some(&GEMMA2);
     }
-    if <Phi4Adapter as ModelAdapter<B>>::supports(&PHI4, manifest) {
+    if <Phi4Adapter as ModelAdapter<B, E>>::supports(&PHI4, manifest) {
         return Some(&PHI4);
     }
-    if <MinistralAdapter as ModelAdapter<B>>::supports(&MINISTRAL, manifest) {
+    if <MinistralAdapter as ModelAdapter<B, E>>::supports(&MINISTRAL, manifest) {
         return Some(&MINISTRAL);
     }
-    if <Mistral3Adapter as ModelAdapter<B>>::supports(&MISTRAL3, manifest) {
+    if <Mistral3Adapter as ModelAdapter<B, E>>::supports(&MISTRAL3, manifest) {
         return Some(&MISTRAL3);
     }
-    if <Glm5Adapter as ModelAdapter<B>>::supports(&GLM5, manifest) {
+    if <Glm5Adapter as ModelAdapter<B, E>>::supports(&GLM5, manifest) {
         return Some(&GLM5);
     }
-    if <GptOssAdapter as ModelAdapter<B>>::supports(&GPT_OSS, manifest) {
+    if <GptOssAdapter as ModelAdapter<B, E>>::supports(&GPT_OSS, manifest) {
         return Some(&GPT_OSS);
     }
     None

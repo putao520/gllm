@@ -59,25 +59,38 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-SCHED-012 | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-SCHED-013 | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. **取代** Chunked Prefill<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
+| **REQ-SCHED-012** | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
+| **REQ-SCHED-013** | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. 允许 Prefill 内 ChunkedConfig 分块，不允许 Prefill/Decode 混批<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 🟢 已实现 (2026-02-07) [commit: 3a0957d] |
 | **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 📋 待实现 |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
-| **REQ-SCHED-002 | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
+| **REQ-SCHED-002** | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
 | **REQ-SCHED-003** | 动态批处理 | 支持 Continuous Batching | 1. 吞吐量优于 Static Batching<br>2. **序列完成自动移除**<br>3. **新序列动态加入**<br>4. **BatchAction 决策** (Continue/Complete/Pause)<br>5. **企业级死锁防护** (admit_waiting 无限循环修复) | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 | **REQ-SCHED-004** | Gang-Aware 调度 | 序列组整体调度，禁止序列内页面分散 | 1. **SequenceGroup 作为换出单位**<br>2. **All-or-nothing within one sequence**<br>3. 优先级调度 (FCFS/Priority) | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-005** | Cache Thrashing 防护 | 防止刚换入的页面立即被换出 | 1. **Warm-up 保护期** (默认 100ms)<br>2. **Thrash 率 < 1%**<br>3. 新换入页面不被选中为受害者 | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-006** | Working Set 检测 | 自动识别高频访问页面并锁定保护 | 1. **自动热页检测** (默认阈值 3 次访问)<br>2. **Protected 状态**<br>3. **保护解除机制** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
-| **REQ-SCHED-007** | Chunked Prefill / SplitFuse | vLLM 2024 优化：消除 Prefill-Decode 阶段隔离 | **(已废弃)** 违反 Phase Isolation 原则 | 🔴 已废弃 (Accuracy Policy) |
+| **REQ-SCHED-007** | Chunked Prefill / SplitFuse | vLLM 2024 交织式混批优化 | **(已废弃)** 仅废弃 SplitFuse 混批路径；ChunkedConfig 以页面调度能力保留 | 🔴 已废弃 (由 REQ-SCHED-016 替代) |
 | **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | 1. **SingleInputKV**: 连续 N 个 KV 蒸馏为 1 个 (减少 50-75%)<br>2. **AcrossKV**: 跨层 KV 共享 (进一步减少 50%)<br>3. 精度损失 < 0.1% PPL<br>4. **AOT CUBIN 兼容** (蒸馏在 CPU/Swap 时执行) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
-| **REQ-SCHED-009** | LMCache 跨请求共享 | vLLM 2024 优化：L1/L2 KV Cache 架构 | 1. **L1 GPU** / **L2 CPU** 两层缓存<br>2. 相同提示命中时跳过 Prefill<br>3. 重复提示吞吐提升 10×+，命中率 > 70%<br>4. **AOT CUBIN 兼容** (使用现有 Memcpy Kernel) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
-| **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 缓存命中时跳过 GPU 前向计算 | 1. 缓存命中时直接复用已有 KV handle<br>2. 跳过 embedding + attention + ffn 计算<br>3. 仅执行 sampling 生成第一个 token<br>4. 保持零拷贝原则 | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
+| **REQ-SCHED-009** | LMCache 跨请求共享 | 旧版 vLLM2024 LMCache 能力 | **(已废弃)** 由 `REQ-KV-001/002` 的 PrefixIndex + SessionKvCache 重构路径替代 | 🔴 已废弃 (Refactor 2026) |
+| **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 旧版 LMCache 命中跳过前向路径 | **(已废弃)** 由 `GlobalMemoryManager` 统一复用入口替代 | 🔴 已废弃 (Refactor 2026) |
 | **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
 | **REQ-SCHED-014** | 自适应 JIT 调度策略 | 引入底层 JIT 决策层，基于实时观测动态调整策略 | 1. **微秒级决策** (<10μs)<br>2. **策略热切换** (Accuracy/Throughput)<br>3. **参数自整定** (动态 Batch/Swap)<br>4. **零运行时开销** (Enum Dispatch) | ✅ 已实现 (2026-02-06) [commit: a7e761b] |
+| **REQ-SCHED-015** | 调度器重构基线 | 调度器重构以 `GlobalMemoryManager` 为唯一 KV 管理核心，移除 `vllm2024.rs` 冗余 LMCache 结构 | 1. 删除 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel` 作为核心路径<br>2. `GlobalMemoryManager` 承担跨请求复用入口<br>3. 架构与 `ARCH-SCHED-REFACTOR-2026` 一致 | 📋 待实现 |
+| **REQ-SCHED-016** | ChunkedConfig 融合页面调度 | 保留 ChunkedConfig，用于 Prefill 分块时间片规划 | 1. 支持 `plan_prefill(prompt_tokens, chunk_size)`<br>2. 仅允许 Prefill 阶段分块，禁止与 Decode 混批<br>3. 与 PagedAttention 页面状态机一致更新 | 📋 待实现 |
+| **REQ-SCHED-017** | 确定性批顺序策略 | 引入 BatchOrderPolicy，默认严格 RequestId 排序 | 1. 默认 `StrictRequestIdOrder`<br>2. 批内请求按 RequestId 严格升序<br>3. 禁止吞吐优先乱序策略作为默认执行路径 | 📋 待实现 |
+| **REQ-SCHED-018** | 双管线会话调度 | 支持 Working/Conversation 双管线隔离调度 | 1. Working 管线可在轮次结束回收<br>2. Conversation 管线可跨轮保留<br>3. 页表、预取、换出策略按管线隔离 | 📋 待实现 |
 
-> **详细设计**: 见 [SPEC/02-ARCHITECTURE.md §2024 vLLM 优化](./02-ARCHITECTURE.md#2024-vllm-优化-arch-sched-2024)
+> **详细设计**: 见 [SPEC/02-ARCHITECTURE.md §调度器重构架构](./02-ARCHITECTURE.md#调度器重构架构-arch-sched-refactor-2026)
+
+## 4.1 KV Cache 管理重构需求 (REQ-KV)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-KV-001** | KvPrefixIndex 前缀复用 | 无 Session 场景下按最长前缀复用 KV 页面 | 1. `find_longest_prefix(tokens)` 支持 O(n) 前缀匹配<br>2. 支持 append 场景复用（非 hash 全等）<br>3. 命中页面必须校验有效性后复用 | 📋 待实现 |
+| **REQ-KV-002** | SessionKvCache 确定性复用 | 会话内基于 finalized position 做确定性 prefix claim | 1. `register_session`/`claim_session_prefix`/`finalize_session_tokens` API 完整<br>2. `finalized_position` 单调递增<br>3. 禁止 claim 超过已确认边界 | 📋 待实现 |
+| **REQ-KV-003** | KvPipeline 双管线隔离 | Thinking/Reasoning 不污染会话主缓存 | 1. `KvPipeline::{Conversation,Working}` 定义完整<br>2. `prepare_next_turn` 释放 Working，保留 Conversation<br>3. 管线维度参与虚拟页标识 | 📋 待实现 |
+| **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | 1. `distill_cpu<E: Element>` 泛型接口<br>2. 相关相似度/评估接口同步泛型化<br>3. 禁止出现 `Vec<f32>` 固定签名作为核心实现 | 📋 待实现 |
 
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
@@ -97,7 +110,7 @@
 | **后端** | `cpu`, `cuda` | ROCm/Metal 未来支持 |
 | **模型类型** | `generator`, `embedding`, `rerank` | 三种核心功能 |
 | **模型大小** | `mini` (最小) | 快速回归，CI 友好 |
-| **功能模块** | `loader`, `inference`, `scheduler`, `quantization`, `vllm2024` | 分层验证 |
+| **功能模块** | `loader`, `inference`, `scheduler`, `quantization`, `scheduler_refactor` | 分层验证 |
 
 ### 测试矩阵需求
 
@@ -107,7 +120,7 @@
 | **REQ-TEST-002** | Generator 模型矩阵 | 覆盖所有 Generator 模型类型 | 1. qwen3-7b (基准)<br>2. llama-4-8b (多模态)<br>3. phi-4-mini (轻量)<br>4. qwen3-moe (MoE)<br>5. smollm2-135m (超轻量)<br>6. smollm3-3b (轻量多用途)<br>7. internlm3-8b (高效推理) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-003** | Embedding 模型矩阵 | 覆盖所有 Embedding 模型 | 1. qwen3-embed<br>2. bge-m3 (中文)<br>3. bge-m4 (升级版)<br>4. e5-small (轻量)<br>5. e5-base (标准)<br>6. e5-large (高精度)<br>7. m3e-base (中文)<br>8. jina-embeddings-v2-small (轻量英文)<br>9. jina-embeddings-v2-base (标准英文)<br>10. jina-embeddings-v4 (最新) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-004** | Reranker 模型矩阵 | 覆盖所有 Reranker 模型 | 1. qwen3-rerank<br>2. bge-reranker-v2-m3 (轻量中文)<br>3. bge-rerank-v3 (升级版) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
-| **REQ-TEST-005** | 功能模块覆盖 | 分层功能测试 | 1. Loader: 权重加载、格式转换<br>2. Inference: 生成、嵌入、重排序<br>3. Scheduler: PagedAttention、CB、Swap<br>4. Quantization: AWQ/GPTQ<br>5. vllm2024: Chunked、SwiftKV、LMCache | 🟢 已实现 (2026-02-02) [commit: fc36508] |
+| **REQ-TEST-005** | 功能模块覆盖 | 分层功能测试 | 1. Loader: 权重加载、格式转换<br>2. Inference: 生成、嵌入、重排序<br>3. Scheduler: PagedAttention、CB、Swap<br>4. Quantization: AWQ/GPTQ<br>5. Scheduler Refactor: PrefixIndex、SessionKvCache、KvPipeline、BatchOrderPolicy | 📋 待实现（随 REQ-SCHED-015~018 / REQ-KV-001~004 落地） |
 | **REQ-TEST-006** | 量化格式测试 | 多种量化格式验证 | 1. AWQ (已实现)<br>2. GPTQ<br>3. SmoothQuant<br>4. 动态量化 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-007** | 错误处理测试 | 边界条件和错误场景 | 1. OOM 处理<br>2. 无效输入<br>3. 权重损坏<br>4. 不支持的架构 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-008** | 性能基准测试 | 吞吐量和延迟验证 | 1. Tokens/sec 吞吐量<br>2. 首token 延迟 (TTFT)<br>3. 内存占用<br>4. 性能回归检测 | 🟢 已实现 (2026-02-02) [commit: fc36508] |

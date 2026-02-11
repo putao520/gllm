@@ -512,7 +512,7 @@ src/
 
 **解决方案**: **Strict Phase Isolation**
 - **规则**: 一个 Batch 必须是 **纯 Prefill** 或者 **纯 Decode**。
-- **废弃**: `Chunked Prefill` (ARCH-SCHED-CHUNKED) 已被永久废弃。
+- **补充**: 允许在 Prefill 阶段使用 `ChunkedConfig` 时间片切分，但不允许与 Decode 混批。
 - **优先级**: 调度器优先处理 Decode 队列。仅当 Decode 队列为空时，才处理 Prefill 队列。
 
 ---
@@ -609,343 +609,129 @@ fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
 
 ---
 
-## 2024 vLLM 优化 (ARCH-SCHED-2024)
+## 调度器重构架构 (ARCH-SCHED-REFACTOR-2026)
 
-> **兼容性声明**: 所有以下优化均为**调度/算法级别**改进，与 **AOT CUBIN 策略**完全兼容。无需修改内核编译流程。
+> **设计来源**: `.serena/memories/scheduler_refactor_design.md`
+> **目标**: 删除 `vllm2024.rs` 中冗余 LMCache，实现准确度优先、确定性优先的 KV 复用架构。
 
-### 概述 (ARCH-SCHED-2024-OVERVIEW)
+### 重构总览 (ARCH-SCHED-REFACTOR-OVERVIEW)
 
-基于 vLLM 2024 Q2 Roadmap 和最新论文，引入三项 PagedAttention 性能优化：
-
-| 优化 | 核心收益 | 论文/来源 | AOT 兼容性 |
-|------|----------|-----------|------------|
-| **Chunked Prefill / SplitFuse** | 消除 Prefill-Decode 阶段隔离，提升吞吐 30-50% | vLLM #3861 | ✅ 纯调度优化 |
-| **SwiftKV** | Prefill 计算减少 50%，KV Cache 减少 62.5% | arXiv:2410.03960 | ✅ 算法级优化 |
-| **LMCache** | 跨请求 KV Cache 共享，重复提示吞吐提升 15× | LMCache GitHub | ✅ 缓存层优化 |
-
----
-
-### 1. Chunked Prefill / SplitFuse (ARCH-SCHED-CHUNKED) [DEPRECATED]
-
-> **🔴 状态**: 已废弃。与 2026 Accuracy First 架构中的 Phase Isolation (ARCH-ACCURACY-ISOLATION) 冲突。
->
-> 详见 ARCH-ACCURACY 章节中的 "阶段隔离" 设计。
-
----
-
-### 2. SwiftKV 算法 (ARCH-SCHED-SWIFTKV)
-
-> **论文**: SwiftKV: Efficient KV Cache Compression for LLM (arXiv:2410.03960)
-
-#### 2.1 问题定义
-
-传统 PagedAttention 将所有 KV Cache 全量保存：
-
-```
-传统方式 (Full KV):
-Layer 0: [K0, V0, K1, V1, K2, V2, ..., K511, V511]  # 1024 向量
-Layer 1: [K0, V0, K1, V1, K2, V2, ..., K511, V511]  # 1024 向量
-...
-```
-
-**问题**：
-1. 内存占用随序列长度线性增长
-2. 后续 Token 的 KV 贡献度递减（Attention 权重衰减）
-3. 大量 KV Cache 用于低 Attention Score 的 Token
-
-#### 2.2 SwiftKV 核心技术
-
-**SingleInputKV (SIKV)**: 单输入 KV 蒸馏
-
-```
-核心思想: 将连续的 N 个 KV 向量蒸馏为 1 个
-
-算法:
-  1. 将序列按窗口大小 W 分组 (如 W=4)
-  2. 每组内: [K0, K1, K2, K3] → Attention 加权 → [K_merged]
-  3. 只保留 merged KV
-
-效果:
-  - KV Cache 数量: N → N/W (减少 75% 当 W=4)
-  - 计算复杂度: O(N²) → O(N²/W)
-```
-
-**AcrossKV (AKV)**: 跨层 KV 共享
-
-```
-核心思想: 相邻层的 KV Cache 高度相关，可以共享
-
-算法:
-  1. 计算 Layer[i] 和 Layer[i-1] 的 KV 相似度
-  2. 高相似度 (>0.9) → 共享前一层的 KV
-  3. 低相似度 → 保留当前层 KV
-
-效果:
-  - KV Cache 数量: 进一步减少 50%
-  - 精度损失: <0.1% (Perplexity)
-```
-
-#### 2.3 架构约束
-
-| 约束 | 说明 | 违规后果 |
+| 组件 | 目标 | 关键约束 |
 |------|------|----------|
-| **蒸馏只在 CPU 端** | KV 蒸馏在 Swap-out 时执行 | 避免额外 GPU 计算 |
-| **可配置蒸馏率** | 用户可选择 W=2/4/8 | 兼顾精度与性能 |
-| **AOT CUBIN 兼容** | Attention 内核无需修改 | 算法层透明优化 |
-| **精度回退** | 检测到精度损失时自动禁用 | 保证正确性 |
+| `KvPrefixIndex` | 无 Session 场景下的跨请求前缀复用 | O(n) 最长前缀匹配，禁止 hash-only 全量相等匹配 |
+| `SessionKvCache` | AI 编程场景的会话级确定性复用 | 仅允许 append 前缀 claim，禁止越界复用 |
+| `KvPipeline` | Thinking 模型双管线隔离 | `Working` 可丢弃，`Conversation` 可跨轮保留 |
+| `BatchOrderPolicy` | 批处理确定性顺序 | 默认 `StrictRequestIdOrder`，准确度 > 吞吐量 |
 
-#### 2.4 API 接口
+### 1. KvPrefixIndex 前缀树索引 (ARCH-SCHED-PREFIX-INDEX)
 
-**SwiftKV 配置**：
+**问题**: Hash 缓存只能命中完全相同 token 序列，无法识别 append 关系。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `enabled` | 布尔值 | 是否启用 SwiftKV |
-| `window_size` | 数值 | SIKV 窗口大小 (2/4/8) |
-| `enable_across_kv` | 布尔值 | 是否启用 AKV |
-| `similarity_threshold` | 浮点数 | AKV 相似度阈值 |
-| `precision_guard` | 浮点数 | 精度损失阈值 (PPL 差值) |
+**方案**: 引入 token 前缀树索引，查找最长可复用前缀。
 
-**SwapManager 扩展方法**：
-- `swap_out_with_distillation()` - Swap-out 时执行蒸馏
-  1. 检查是否启用 SwiftKV
-  2. 执行 SIKV 蒸馏（合并连续页面）
-  3. 执行 AKV 跨层共享（可选）
-  4. Swap-out 压缩后的页面
-- `distill_kv_pages()` - KV 蒸馏 (SIKV)
-- `share_across_layers()` - 跨层共享 (AKV)
+```rust
+pub struct KvPrefixIndex {
+    root: TrieNode,
+}
 
----
-
-### 3. LMCache 跨请求 KV Cache (ARCH-SCHED-LMCACHE)
-
-> **项目**: LMCache - A Distributed KV Cache for LLM Serving (GitHub: LMCache/LMCache)
-
-#### 3.1 问题定义
-
-多用户场景下，大量请求包含相同的系统提示或上下文：
-
-```
-请求 1: [SystemPrompt (512 tokens) + UserQuery (10 tokens)]
-请求 2: [SystemPrompt (512 tokens) + UserQuery (15 tokens)]
-请求 3: [SystemPrompt (512 tokens) + UserQuery (8 tokens)]
+struct TrieNode {
+    children: HashMap<TokenId, TrieNode>,
+    page_ref: Option<(VirtualPageId, usize)>,
+}
 ```
 
-**问题**：相同的 SystemPrompt KV Cache 被重复计算 3 次。
+**集成约束**:
+1. `GlobalMemoryManager` 负责维护索引生命周期，与页表一致更新。
+2. `prepare_prefill_with_auto_reuse(request_id, tokens)` 必须先做最长前缀匹配，再决定是否分配新页面。
+3. 前缀命中后采用虚拟页映射复用语义，禁止直接共享可写物理页（避免污染）。
 
-#### 3.2 LMCache 核心设计
+### 2. SessionKvCache 会话级复用 (ARCH-SCHED-SESSION-KV)
 
-**三层缓存架构**：
+**问题**: AI 编程会话是确定性 append 流，跨请求前缀可预测。
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  L1: GPU In-Memory Cache (最快，最小)                          │
-│  ─────────────────────────────────────────                     │
-│  存储: 当前活跃请求的 KV Cache                                  │
-│  命中率: ~5% (仅当前 Batch 重复)                                │
-│  容量: ~100MB (显存限制)                                        │
-├─────────────────────────────────────────────────────────────────┤
-│  L2: CPU Offload Cache (中等，中量)                            │
-│  ─────────────────────────────────────────                     │
-│  存储: 最近使用的 KV Cache (LRU 淘汰)                           │
-│  命中率: ~30% (跨 Batch 重复)                                   │
-│  容量: ~10GB (系统内存)                                         │
-├─────────────────────────────────────────────────────────────────┤
-│  L3: Distributed Cache (慢，无限)                               │
-│  ─────────────────────────────────────────                     │
-│  存储: Redis/S3/本地磁盘                                        │
-│  命中率: ~65% (跨会话/跨实例重复)                               │
-│  容量: 无限                                                     │
-└─────────────────────────────────────────────────────────────────┘
+**方案**: 引入显式 Session KV 结构，保存会话已确认前缀边界。
+
+```rust
+pub struct SessionKvCache {
+    session_id: SessionId,
+    pages: Vec<VirtualPageId>,
+    finalized_position: usize,
+}
 ```
 
-**Cache Key 设计**：
+**集成约束**:
+1. `register_session(session_id)` 创建会话状态。
+2. `claim_session_prefix(session_id, request_id, prefix_tokens)` 只能 claim `finalized_position` 范围内页面。
+3. `finalize_session_tokens(session_id, new_finalized_position)` 只能单调递增。
 
-```
-CacheKey = Hash(
-    model_id +
-    prompt_prefix_tokens +  // 只缓存前 N tokens (如前 512)
-    layer_indices           // 哪些层的 KV Cache
-)
+### 3. KvPipeline 多管线分离 (ARCH-SCHED-PIPELINE)
 
-示例:
-  SystemPrompt = "You are a helpful assistant..."
-  → Tokenized: [101, 102, ..., 612] (512 tokens)
-  → Hash: SHA256(model_id + tokens) → "abc123..."
-```
+**问题**: Thinking/Reasoning 过程不应污染跨轮会话缓存。
 
-#### 3.3 跨请求命中流程
+**方案**: 将虚拟页命名空间扩展为双管线。
 
-```
-新请求: [SystemPrompt(512) + UserQuery(10)]
+```rust
+pub enum KvPipeline {
+    Conversation,
+    Working,
+}
 
-1. 计算 CacheKey
-   key = hash(model_id + SystemPrompt_tokens)
-
-2. L1 查询 (GPU)
-   └─ Miss → 继续 L2
-
-3. L2 查询 (CPU)
-   ├─ Hit → DMA 复制到 GPU → 跳过前 512 tokens 的 Prefill
-   └─ Miss → 继续 L3
-
-4. L3 查询 (分布式)
-   ├─ Hit → 加载到 L2 → DMA 复制到 GPU
-   └─ Miss → 正常 Prefill，结果写入 L1/L2/L3
-
-收益:
-  └─ 512 tokens Prefill → 0 (命中时)
-  └─ 只需 Prefill 新增的 10 tokens
+pub struct PipelinedVirtualPageId {
+    pub pipeline: KvPipeline,
+    pub sequence_id: RequestId,
+    pub logical_index: usize,
+}
 ```
 
-#### 3.4 架构约束
+**集成约束**:
+1. `Working` 管线仅用于本轮中间推理，可在 `prepare_next_turn` 全量释放。
+2. `Conversation` 管线用于跨轮上下文保留，不受 `Working` 释放影响。
+3. 页表、换出策略、预取逻辑均必须按 `pipeline` 维度隔离。
 
-| 约束 | 说明 | 违规后果 |
-|------|------|----------|
-| **Cache Key 唯一性** | 相同输入必须产生相同 Key | 缓存污染 |
-| **版本一致性** | 模型权重更新时 Cache 失效 | 返回错误结果 |
-| **AOT CUBIN 兼容** | DMA 复制使用现有 Memcpy 内核 | 违反 ARCH-AOT-CUBIN |
-| **禁止生成循环中 L3 访问** | L3 访问必须在批次间执行 | 违反零拷贝原则 |
-| **原子写入** | Cache Entry 必须完整写入后可见 | 部分数据导致错误 |
+### 4. BatchOrderPolicy 确定性批处理 (ARCH-SCHED-BATCH-ORDER)
 
-#### 3.5 API 接口
+**问题**: 吞吐优先重排会改变浮点规约顺序，破坏可复现性。
 
-**LMCache 配置**：
+**方案**: 批构建阶段引入顺序策略并默认严格 RequestId 排序。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `l1_capacity_mb` | 数值 | GPU L1 容量 |
-| `l2_capacity_mb` | 数值 | CPU L2 容量 |
-| `l3_backend` | 枚举 | Redis/LocalDisk/Disabled |
-| `cache_prefix_len` | 数值 | 只缓存前 N tokens |
-
-**LMCache 管理方法**：
-- `get(key, backend)` - 查询缓存（三层查找：L1→L2→L3）
-  - L1 命中：直接返回 GPU KV
-  - L2 命中：DMA 复制到 GPU，回填 L1
-  - L3 命中：加载到 L2，DMA 复制到 GPU，回填 L1/L2
-- `put(key, kv_cache, backend)` - 写入缓存（Prefill 完成后）
-  - 写入 L1
-  - 异步写入 L2 和 L3
-- `invalidate_model(model_id)` - 失效缓存（模型更新时）
-
-**调度器集成**：
-- `schedule_with_cache(request, lmcache)` - 缓存感知调度
-  1. 计算缓存键
-  2. 查询缓存
-  3. 命中时跳过 Prefill，未命中时正常执行并写入缓存
-
-#### 3.6 全局内存管理器 (ARCH-SCHED-GLOBAL-MEM)
-
-**核心抽象**：虚拟内存 → 物理内存映射
-
-| 数据结构 | 说明 |
-|---------|------|
-| `VirtualPageId` | 虚拟页标识 `(sequence_id, logical_index)` |
-| `PageLocation` | 物理页位置 `(physical_id, tier)` |
-| `PageTable` | 虚拟 → 物理映射表 `HashMap<VirtualPageId, PageLocation>` |
-| `Tier` | 存储层级 `L1(GPU) / L2(CPU) / L3(Disk)` |
-
-**核心操作**：
-- `allocate_virtual(sequence, num_pages)` → 返回虚拟页范围
-- `map_to_physical(virtual_page, tier)` → 建立映射
-- `evict(tier, policy)` → 按策略驱逐页
-- `swap_tier(virtual_page, from_tier, to_tier)` → 跨层迁移
-
-**驱逐策略 (EvictionPolicy)**：
-
-| 因子 | 计算方式 | 权重 |
-|------|----------|------|
-| Recency | `current_time - last_access` | 高 |
-| Frequency | `access_count / age` | 中 |
-| Semantic | 基于 HGAL 的注意力分数 | 低 (Phase 2) |
-
-**多层级管理**：
-
-| Tier | 介质 | 容量 | 访问延迟 | 用途 |
-|------|------|------|----------|------|
-| L1 | GPU HBM | 有限 | 极低 | 活跃计算 |
-| L2 | CPU RAM (Pinned) | 大 | 中等 (PCIe) | 交换缓冲 |
-| L3 | NVMe SSD | 巨大 | 高 | 冷数据 |
-
-**企业级约束**：
-- **OOM 保护**: L1 满时主动 Swap-out，而非崩溃
-- **原子操作**: 跨 Tier 迁移必须是原子的
-- **一致性**: 页表更新必须与物理迁移同步
-- **可恢复性**: L3 数据支持进程重启后恢复
-
----
-
-### 4. 三项优化集成架构 (ARCH-SCHED-INTEGRATION)
-
-#### 4.1 数据流
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  新请求到达                                                         │
-└─────────────────────────────┬───────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────────┐
-                    │  LMCache 查询       │
-                    │  (L1 → L2 → L3)     │
-                    └─────────┬───────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              │ 命中                         │ 未命中
-              ▼                               ▼
-        ┌───────────┐                 ┌──────────────┐
-        │ Cache Hit │                 │ Chunked      │
-        │ (跳过     │                 │ Prefill      │
-        │  Prefix)  │                 │ (交织调度)   │
-        └─────┬─────┘                 └──────┬───────┘
-              │                               │
-              ▼                               ▼
-        ┌─────────────┐              ┌────────────────┐
-        │ Decode      │              │ SwiftKV 蒸馏   │
-        │ Loop        │              │ (Swap-out 时)  │
-        └─────────────┘              └────────┬───────┘
-                                             │
-                                             ▼
-                                    ┌────────────────┐
-                                    │ KV Cache 写入  │
-                                    │ (L1/L2/L3)     │
-                                    └────────────────┘
+```rust
+pub enum BatchOrderPolicy {
+    StrictRequestIdOrder,
+    FifoOrder,
+    #[deprecated = "Breaks determinism"]
+    ThroughputFirst,
+}
 ```
 
-#### 4.2 配置统一
+**集成约束**:
+1. 默认策略必须为 `StrictRequestIdOrder`。
+2. `Executor::run_batch_forward` 需校验输入序列严格单调递增。
+3. 禁止将 `ThroughputFirst` 作为默认路径或推荐配置。
 
-**Scheduler2024 配置结构**：
+### 5. GlobalMemoryManager 融合策略 (ARCH-SCHED-GLOBAL-MEM-REFACTOR)
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `chunked` | ChunkedConfig | Chunked Prefill / SplitFuse 配置 |
-| `swift_kv` | SwiftKVConfig | SwiftKV 算法配置 |
-| `lmcache` | LMCacheConfig | LMCache 缓存配置 |
-| `enable_2024_optimizations` | 布尔值 | 全局开关 |
+**核心决策**:
+1. 删除 `vllm2024.rs` 中冗余 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel`。
+2. 保留 `ChunkedConfig`，并融合为 Prefill 阶段的页面规划能力（非 Prefill/Decode 混批）。
+3. SwiftKV 蒸馏接口保持泛型化方向：`distill_cpu<E: Element>(...)`，禁止硬编码 `f32`。
 
-#### 4.3 验收标准
+**统一能力入口**:
+- `plan_prefill(prompt_tokens, chunk_size) -> PrefillPlan`
+- `prepare_prefill_with_auto_reuse(request_id, tokens) -> PrefillPlan`
+- `allocate_page_in_pipeline(pipeline, tier) -> Result<PhysicalId, Error>`
+- `prepare_next_turn(session_id)`（释放 `Working`，保留 `Conversation`）
 
-| 优化 | 验收指标 | 测试场景 |
-|------|----------|----------|
-| **Chunked Prefill** | Tail Latency (P99) < 50ms vs 纯 Decode Batch | 混合 Prefill/Decode 负载 |
-| **SwiftKV** | KV Cache 减少 50%+, 精度损失 < 0.1% PPL | 长序列推理 (32k+) |
-| **LMCache** | 重复提示吞吐提升 10×+, Cache 命中率 > 70% | 相同 SystemPrompt 多请求 |
-
----
-
-### 5. AOT CUBIN 兼容性声明 (ARCH-SCHED-AOT-COMPAT)
-
-> **重要**: 以上三项优化均为 **调度/算法/缓存级别** 改进，不涉及内核编译变更。
+### 6. AOT CUBIN 兼容性声明 (ARCH-SCHED-REFACTOR-AOT)
 
 | 组件 | 是否需要新 Kernel | 理由 |
 |------|-------------------|------|
-| Chunked Prefill | ❌ | 仅改变调度逻辑，内核调用不变 |
-| SplitFuse | ❌ | Q/K/V 分离计算使用现有 Linear 内核 |
-| SwiftKV | ❌ | 蒸馏在 CPU 端或 Swap 时执行 |
-| LMCache | ❌ | DMA 复制使用现有 Memcpy 内核 |
+| `KvPrefixIndex` | ❌ | 纯索引结构，属于调度层 |
+| `SessionKvCache` | ❌ | 会话元数据管理 |
+| `KvPipeline` | ❌ | 页表命名空间扩展 |
+| `BatchOrderPolicy` | ❌ | 批构建顺序策略 |
+| `ChunkedConfig` 融合 | ❌ | 页面规划逻辑，不改变算子实现 |
 
-**结论**: ✅ **完全兼容 AOT CUBIN 策略，无需修改内核编译流程。**
+**结论**: 调度器重构全部位于调度/内存管理层，兼容 AOT CUBIN 策略。
 
 ### 7. 张量驱动配置系统 (ARCH-LOADER-TENSOR)
 

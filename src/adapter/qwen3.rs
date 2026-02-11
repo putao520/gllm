@@ -1,6 +1,6 @@
 //! Qwen3 adapter (skeleton).
 
-use gllm_kernels::backend_trait::Backend;
+use gllm_kernels::backend_trait::{Backend, Element};
 
 use crate::loader::Loader;
 use crate::manifest::{ModelArchitecture, ModelKind, ModelManifest};
@@ -15,14 +15,18 @@ const THINKING_HEAD_PATTERNS: &[&str] = &["thinking_head"];
 
 pub struct Qwen3Adapter;
 
-impl<B: Backend> ModelAdapter<B> for Qwen3Adapter {
+impl<B: Backend<E>, E: Element> ModelAdapter<B, E> for Qwen3Adapter {
     fn supports(&self, manifest: &ModelManifest) -> bool {
         // Ω1: 使用 ModelKind 而非 Model ID 来区分用途
         matches!(manifest.arch, ModelArchitecture::Qwen3)
             && matches!(manifest.kind, ModelKind::Chat)
     }
 
-    fn load_weights(&self, loader: &mut Loader, backend: &B) -> AdapterResult<AdapterWeights<B>> {
+    fn load_weights(
+        &self,
+        loader: &mut Loader,
+        backend: &B,
+    ) -> AdapterResult<AdapterWeights<B, E>> {
         let handle = loader.upload_weights(backend)?;
 
         // Ω1: 使用架构定义的张量名称模式检测 thinking head

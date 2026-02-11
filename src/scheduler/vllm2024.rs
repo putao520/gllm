@@ -1,4 +1,4 @@
-//! 2024 vLLM optimizations (Chunked Prefill / SwiftKV / LMCache).
+//! 2024 vLLM optimizations (Chunked Prefill / SwiftKV).
 //!
 //! This module keeps the orchestration logic fully on the host side so it
 //! remains compatible with the AOT CUBIN strategy (no runtime kernel
@@ -6,10 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use sha2::{Digest, Sha256};
-
-use gllm_kernels::backend_trait::{KvCacheHandle, LogitsHandle};
-use gllm_kernels::kernel_types::RequestId;
+use gllm_kernels::{backend_trait::Element, cpu_kernels::Float, kernel_types::RequestId};
 
 /// Chunked Prefill configuration (ARCH-SCHED-CHUNKED).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,41 +48,12 @@ impl Default for SwiftKVConfig {
     }
 }
 
-/// LMCache L3 backend selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum L3Backend {
-    Redis,
-    LocalDisk,
-    Disabled,
-}
-
-/// LMCache configuration (ARCH-SCHED-LMCACHE).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LMCacheConfig {
-    pub l1_capacity_mb: usize,
-    pub l2_capacity_mb: usize,
-    pub l3_backend: L3Backend,
-    pub cache_prefix_len: usize,
-}
-
-impl Default for LMCacheConfig {
-    fn default() -> Self {
-        Self {
-            l1_capacity_mb: 128,
-            l2_capacity_mb: 8_192,
-            l3_backend: L3Backend::LocalDisk,
-            cache_prefix_len: 512,
-        }
-    }
-}
-
 /// Unified configuration gate for the three optimizations.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Scheduler2024Config {
     pub enable_2024_optimizations: bool,
     pub chunked: ChunkedConfig,
     pub swift_kv: SwiftKVConfig,
-    pub lmcache: LMCacheConfig,
 }
 
 // ----------------------------- Chunked Prefill -----------------------------
@@ -195,17 +163,22 @@ impl ChunkedState {
 // ------------------------------- SwiftKV ----------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DistillResult {
+pub struct DistillPagesSummary {
     pub original_pages: usize,
     pub distilled_pages: usize,
 }
 
-/// Detailed CPU distillation outcome with optional precision signal.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DistillOutcome {
-    pub result: DistillResult,
-    /// Approximated perplexity delta between original and distilled KV.
-    pub ppl_diff: f32,
+/// 蒸馏结果（泛型）
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistillResult<E: Element> {
+    pub original_pages: Vec<Vec<E>>,
+    pub distilled_pages: Vec<Vec<E>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistillOutcome<E: Element> {
+    pub result: DistillResult<E>,
+    pub ppl_diff: E,
     /// Whether precision guard forced a fallback to original KV.
     pub precision_fallback: bool,
 }
@@ -214,7 +187,7 @@ pub struct DistillOutcome {
 pub struct SwiftKvState {
     pub config: SwiftKVConfig,
     /// Last distillation result (for metrics/tests).
-    pub last_result: Option<DistillResult>,
+    pub last_result: Option<DistillPagesSummary>,
 }
 
 impl SwiftKvState {
@@ -226,9 +199,9 @@ impl SwiftKvState {
     }
 
     /// Distill a page set (CPU-side) to model SwiftKV SIKV + AKV effects.
-    pub fn distill_pages(&mut self, page_count: usize) -> DistillResult {
+    pub fn distill_pages(&mut self, page_count: usize) -> DistillPagesSummary {
         if !self.config.enabled || page_count == 0 {
-            let result = DistillResult {
+            let result = DistillPagesSummary {
                 original_pages: page_count,
                 distilled_pages: page_count,
             };
@@ -242,7 +215,7 @@ impl SwiftKvState {
             distilled = distilled.div_ceil(2);
         }
 
-        let result = DistillResult {
+        let result = DistillPagesSummary {
             original_pages: page_count,
             distilled_pages: distilled.max(1),
         };
@@ -252,47 +225,48 @@ impl SwiftKvState {
 
     /// CPU-side SIKV + AKV distillation over concrete KV page vectors.
     /// This keeps zero-copy on GPU: only CPU buffers are manipulated.
-    pub fn distill_cpu(&mut self, pages: &[Vec<f32>]) -> DistillOutcome {
+    pub fn distill_cpu<E: Element + Float>(&mut self, pages: &[Vec<E>]) -> DistillOutcome<E> {
         if !self.config.enabled || pages.is_empty() {
+            let cloned = pages.to_vec();
             let res = DistillResult {
-                original_pages: pages.len(),
-                distilled_pages: pages.len(),
+                original_pages: cloned.clone(),
+                distilled_pages: cloned,
             };
             return DistillOutcome {
                 result: res,
-                ppl_diff: 0.0,
+                ppl_diff: E::ZERO,
                 precision_fallback: false,
             };
         }
 
         // 1) SIKV: sliding-window merge.
-        let mut merged: Vec<Vec<f32>> = Vec::new();
+        let mut merged: Vec<Vec<E>> = Vec::new();
         let w = self.config.window_size.max(1);
         for chunk in pages.chunks(w) {
-            let mut acc = vec![0f32; chunk[0].len()];
-            let mut weight_sum = 0f32;
+            let mut acc = vec![E::ZERO; chunk[0].len()];
+            let mut weight_sum = E::ZERO;
             for page in chunk {
-                let w = 1.0; // simple average; attention weights unknown on CPU-only path.
+                let w = E::ONE; // simple average; attention weights unknown on CPU-only path.
                 weight_sum += w;
                 for (dst, src) in acc.iter_mut().zip(page.iter()) {
                     *dst += w * *src;
                 }
             }
-            if weight_sum > 0.0 {
+            if weight_sum > E::ZERO {
                 for v in acc.iter_mut() {
-                    *v /= weight_sum;
+                    *v = *v / weight_sum;
                 }
             }
             merged.push(acc);
         }
 
         // 2) AKV: cosine similarity across adjacent layers.
-        let mut akv_shared: Vec<Vec<f32>> = Vec::new();
+        let mut akv_shared: Vec<Vec<E>> = Vec::new();
         let mut precision_fallback = false;
         for i in 0..merged.len() {
             if i > 0 && self.config.enable_across_kv {
                 let sim = cosine_similarity(&merged[i - 1], &merged[i]);
-                if sim >= self.config.similarity_threshold {
+                if sim >= E::from_f32(self.config.similarity_threshold) {
                     // Share previous layer; no extra storage needed.
                     continue;
                 }
@@ -302,14 +276,18 @@ impl SwiftKvState {
 
         // 3) Precision guard: compare reconstruction error as proxy for PPL diff.
         let ppl_diff = approx_ppl_delta(pages, &akv_shared);
-        if ppl_diff > self.config.precision_guard {
+        if ppl_diff > E::from_f32(self.config.precision_guard) {
             // Fallback to original pages for correctness.
             precision_fallback = true;
+            let cloned = pages.to_vec();
             let res = DistillResult {
+                original_pages: cloned.clone(),
+                distilled_pages: cloned,
+            };
+            self.last_result = Some(DistillPagesSummary {
                 original_pages: pages.len(),
                 distilled_pages: pages.len(),
-            };
-            self.last_result = Some(res);
+            });
             return DistillOutcome {
                 result: res,
                 ppl_diff,
@@ -318,10 +296,17 @@ impl SwiftKvState {
         }
 
         let res = DistillResult {
-            original_pages: pages.len(),
-            distilled_pages: akv_shared.len().max(1),
+            original_pages: pages.to_vec(),
+            distilled_pages: if akv_shared.is_empty() {
+                pages.to_vec()
+            } else {
+                akv_shared.clone()
+            },
         };
-        self.last_result = Some(res);
+        self.last_result = Some(DistillPagesSummary {
+            original_pages: pages.len(),
+            distilled_pages: res.distilled_pages.len(),
+        });
         DistillOutcome {
             result: res,
             ppl_diff,
@@ -330,240 +315,48 @@ impl SwiftKvState {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0f32;
-    let mut na = 0f32;
-    let mut nb = 0f32;
+pub fn cosine_similarity<E: Element>(a: &[E], b: &[E]) -> E {
+    let mut dot = E::ZERO;
+    let mut na = E::ZERO;
+    let mut nb = E::ZERO;
     for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+        dot = dot + (*x) * (*y);
+        na = na + (*x) * (*x);
+        nb = nb + (*y) * (*y);
     }
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
+    if na == E::ZERO || nb == E::ZERO {
+        return E::ZERO;
     }
     dot / (na.sqrt() * nb.sqrt())
 }
 
-fn approx_ppl_delta(original: &[Vec<f32>], distilled: &[Vec<f32>]) -> f32 {
+pub fn approx_ppl_delta<E: Element>(original: &[Vec<E>], distilled: &[Vec<E>]) -> E {
     // Use normalized L2 reconstruction error as a proxy; small -> low PPL shift.
-    let mut total = 0f32;
+    let mut total = E::ZERO;
     let mut count = 0usize;
+    if distilled.is_empty() {
+        return E::ZERO;
+    }
     for (i, page) in original.iter().enumerate() {
         let distilled_page = distilled.get(i.min(distilled.len().saturating_sub(1)));
         if let Some(dp) = distilled_page {
-            let mut l2 = 0f32;
+            let mut l2 = E::ZERO;
             for (x, y) in page.iter().zip(dp.iter()) {
-                let d = x - y;
-                l2 += d * d;
+                let d = *x - *y;
+                l2 = l2 + d * d;
             }
-            let norm = page.iter().map(|v| v * v).sum::<f32>().max(1e-6);
-            total += (l2 / norm).sqrt();
+            let norm = page
+                .iter()
+                .fold(E::ZERO, |acc, v| acc + (*v) * (*v))
+                .max(E::from_f32(1e-6));
+            total = total + (l2 / norm).sqrt();
             count += 1;
         }
     }
     if count == 0 {
-        0.0
+        E::ZERO
     } else {
-        total / count as f32
-    }
-}
-
-// -------------------------------- LMCache ---------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheLevel {
-    L1,
-    L2,
-    L3,
-}
-
-#[derive(Debug, Clone)]
-pub struct CacheHit {
-    pub level: CacheLevel,
-    pub prefix_tokens: usize,
-    pub kv_handle: Option<KvCacheHandle>,
-    pub logits_handle: Option<LogitsHandle>,
-}
-
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    key: String,
-    prefix_tokens: usize,
-    bytes: usize,
-    kv_handle: Option<KvCacheHandle>,
-    logits_handle: Option<LogitsHandle>,
-}
-
-#[derive(Debug)]
-pub struct LmcacheState {
-    config: LMCacheConfig,
-    l1: HashMap<String, CacheEntry>,
-    l1_order: VecDeque<String>,
-    l1_bytes: usize,
-    l2: HashMap<String, CacheEntry>,
-    l2_order: VecDeque<String>,
-    l2_bytes: usize,
-    l3: HashMap<String, CacheEntry>,
-}
-
-impl LmcacheState {
-    pub fn new(config: LMCacheConfig) -> Self {
-        Self {
-            config,
-            l1: HashMap::new(),
-            l1_order: VecDeque::new(),
-            l1_bytes: 0,
-            l2: HashMap::new(),
-            l2_order: VecDeque::new(),
-            l2_bytes: 0,
-            l3: HashMap::new(),
-        }
-    }
-
-    pub fn cache_key(model_id: &str, prompt: &str, prefix_len: usize) -> String {
-        let truncated: String = prompt.chars().take(prefix_len).collect();
-        let mut hasher = Sha256::new();
-        hasher.update(model_id.as_bytes());
-        hasher.update(truncated.as_bytes());
-        let digest = hasher.finalize();
-        digest.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    pub fn get(&mut self, key: &str) -> Option<CacheHit> {
-        if let Some(entry) = self.l1.get(key).cloned() {
-            self.touch_l1(key);
-            return Some(CacheHit {
-                level: CacheLevel::L1,
-                prefix_tokens: entry.prefix_tokens,
-                kv_handle: entry.kv_handle,
-                logits_handle: entry.logits_handle,
-            });
-        }
-        if let Some(entry) = self.l2.get(key).cloned() {
-            self.promote_l2_to_l1(key.to_owned());
-            return Some(CacheHit {
-                level: CacheLevel::L2,
-                prefix_tokens: entry.prefix_tokens,
-                kv_handle: entry.kv_handle,
-                logits_handle: entry.logits_handle,
-            });
-        }
-        if self.config.l3_backend != L3Backend::Disabled {
-            if let Some(entry) = self.l3.get(key).cloned() {
-                // L3 → L2 (asynchronous in real system; synchronous here for simplicity)
-                self.insert_l2(entry.clone());
-                return Some(CacheHit {
-                    level: CacheLevel::L3,
-                    prefix_tokens: entry.prefix_tokens,
-                    kv_handle: entry.kv_handle,
-                    logits_handle: entry.logits_handle,
-                });
-            }
-        }
-        None
-    }
-
-    pub fn put(
-        &mut self,
-        key: String,
-        prefix_tokens: usize,
-        kv_handle: Option<KvCacheHandle>,
-        logits_handle: Option<LogitsHandle>,
-    ) {
-        let bytes = self.approx_bytes(prefix_tokens);
-        let entry = CacheEntry {
-            key: key.clone(),
-            prefix_tokens,
-            bytes,
-            kv_handle,
-            logits_handle,
-        };
-        self.insert_l1(entry.clone());
-        self.insert_l2(entry.clone());
-        if self.config.l3_backend != L3Backend::Disabled {
-            self.l3.insert(key, entry);
-        }
-    }
-
-    fn approx_bytes(&self, tokens: usize) -> usize {
-        // Rough estimate: assume fp16 KV of 2 bytes * (K+V). Use 4 bytes per token per head slice.
-        tokens * 4
-    }
-
-    fn touch_l1(&mut self, key: &str) {
-        if let Some(pos) = self.l1_order.iter().position(|k| k == key) {
-            self.l1_order.remove(pos);
-        }
-        self.l1_order.push_back(key.to_owned());
-    }
-
-    fn insert_l1(&mut self, entry: CacheEntry) {
-        if let Some(existing) = self.l1.remove(&entry.key) {
-            self.l1_bytes = self.l1_bytes.saturating_sub(existing.bytes);
-            if let Some(pos) = self.l1_order.iter().position(|k| k == &entry.key) {
-                self.l1_order.remove(pos);
-            }
-        }
-        self.evict_until_fit(entry.bytes, true);
-        self.l1_bytes += entry.bytes;
-        self.l1_order.push_back(entry.key.clone());
-        self.l1.insert(entry.key.clone(), entry);
-    }
-
-    fn insert_l2(&mut self, entry: CacheEntry) {
-        if let Some(existing) = self.l2.remove(&entry.key) {
-            self.l2_bytes = self.l2_bytes.saturating_sub(existing.bytes);
-            if let Some(pos) = self.l2_order.iter().position(|k| k == &entry.key) {
-                self.l2_order.remove(pos);
-            }
-        }
-        self.evict_until_fit(entry.bytes, false);
-        self.l2_bytes += entry.bytes;
-        self.l2_order.push_back(entry.key.clone());
-        self.l2.insert(entry.key.clone(), entry);
-    }
-
-    fn promote_l2_to_l1(&mut self, key: String) {
-        if let Some(entry) = self.l2.get(&key).cloned() {
-            self.touch_l2(&key);
-            self.insert_l1(entry);
-        }
-    }
-
-    fn touch_l2(&mut self, key: &str) {
-        if let Some(pos) = self.l2_order.iter().position(|k| k == key) {
-            self.l2_order.remove(pos);
-        }
-        self.l2_order.push_back(key.to_owned());
-    }
-
-    fn evict_until_fit(&mut self, incoming: usize, l1: bool) {
-        let (cap_bytes, order, map, used) = if l1 {
-            (
-                self.config.l1_capacity_mb * 1024 * 1024,
-                &mut self.l1_order,
-                &mut self.l1,
-                &mut self.l1_bytes,
-            )
-        } else {
-            (
-                self.config.l2_capacity_mb * 1024 * 1024,
-                &mut self.l2_order,
-                &mut self.l2,
-                &mut self.l2_bytes,
-            )
-        };
-
-        while *used + incoming > cap_bytes {
-            if let Some(oldest_key) = order.pop_front() {
-                if let Some(entry) = map.remove(&oldest_key) {
-                    *used = used.saturating_sub(entry.bytes);
-                }
-            } else {
-                break;
-            }
-        }
+        total / E::from_f32(count as f32)
     }
 }
 
@@ -574,7 +367,6 @@ pub struct Scheduler2024State {
     pub config: Scheduler2024Config,
     pub chunked: ChunkedState,
     pub swift_kv: SwiftKvState,
-    pub lmcache: LmcacheState,
 }
 
 impl Scheduler2024State {
@@ -582,7 +374,6 @@ impl Scheduler2024State {
         Self {
             chunked: ChunkedState::new(config.chunked),
             swift_kv: SwiftKvState::new(config.swift_kv),
-            lmcache: LmcacheState::new(config.lmcache),
             config,
         }
     }

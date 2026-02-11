@@ -1,7 +1,7 @@
 //! Executor skeleton.
 
 use gllm_kernels::backend_trait::{
-    AttentionTopology, Backend, BackendError, BatchInput, KvCacheHandle, LogitsHandle,
+    AttentionTopology, Backend, BackendError, BatchInput, Element, KvCacheHandle, LogitsHandle,
     SequenceInput,
 };
 use gllm_kernels::cpu_backend::CpuBackend;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::scheduler::batcher::{BatchAction, BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
-use crate::scheduler::types::RequestKind;
+use crate::scheduler::types::{BatchOrderPolicy, RequestKind};
 use crate::scheduler::vllm2024::Scheduler2024Config;
 use crate::scheduler::{
     BasicObserver, GlobalMemoryManager, MemoryManagerError, PagedScheduler, PolicyVariant,
@@ -117,7 +117,7 @@ pub enum ExecutorError {
 
 pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
 
-pub struct Executor<B: Backend + 'static> {
+pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     backend: B,
     scheduler: PagedScheduler,
     batcher: ContinuousBatcher,
@@ -125,8 +125,8 @@ pub struct Executor<B: Backend + 'static> {
     policy: PolicyVariant,
     requests: HashMap<RequestId, RequestData>,
     manifest: Arc<ModelManifest>,
-    adapter: &'static dyn ModelAdapter<B>,
-    weights: AdapterWeights<B>,
+    adapter: &'static dyn ModelAdapter<B, E>,
+    weights: AdapterWeights<B, E>,
     model_config: ModelConfig,
     forward_config: GeneratorForwardConfig,
     kv_cache_config: KvCacheConfig,
@@ -137,11 +137,14 @@ pub struct Executor<B: Backend + 'static> {
     onnx_generator_plan: Option<OnnxGeneratorPlan>,
 }
 
-impl<B: Backend + 'static> Executor<B> {
+/// Backward-compatible type alias for f32 executor.
+pub type ExecutorF32<B> = Executor<B, f32>;
+
+impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn from_loader(
         backend: B,
         manifest: Arc<ModelManifest>,
-        adapter: &'static dyn ModelAdapter<B>,
+        adapter: &'static dyn ModelAdapter<B, E>,
         loader: &mut Loader,
     ) -> ExecutorResult<Self> {
         loader.set_manifest_if_missing(manifest.as_ref());
@@ -204,12 +207,12 @@ impl<B: Backend + 'static> Executor<B> {
 
         // CPU backend 只支持 f32 dtype for KV cache
         // 如果模型配置是 f16/bf16，需要强制转换为 f32
-        let cpu_dtype_size = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
-        {
-            Some(4) // f32
-        } else {
-            None
-        };
+        let cpu_dtype_size =
+            if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend<E>>() {
+                Some(4) // f32
+            } else {
+                None
+            };
 
         let kv_cache_config = KvCacheConfig {
             num_layers: model_config.num_hidden_layers,
@@ -306,7 +309,7 @@ impl<B: Backend + 'static> Executor<B> {
         self.manifest.as_ref()
     }
 
-    pub fn weights(&self) -> &AdapterWeights<B> {
+    pub fn weights(&self) -> &AdapterWeights<B, E> {
         &self.weights
     }
 
@@ -402,10 +405,12 @@ impl<B: Backend + 'static> Executor<B> {
         if !self.batcher.has_pending_work() {
             return None;
         }
-        Some(
-            self.batcher
-                .build_batch(&mut self.scheduler, usize::MAX, true),
-        )
+        Some(self.batcher.build_batch(
+            &mut self.scheduler,
+            usize::MAX,
+            true,
+            BatchOrderPolicy::StrictRequestIdOrder,
+        ))
     }
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
@@ -508,6 +513,7 @@ impl<B: Backend + 'static> Executor<B> {
                 &mut self.scheduler,
                 decision.max_batch_size,
                 decision.admit_new_prefill,
+                BatchOrderPolicy::StrictRequestIdOrder,
             )
         };
 

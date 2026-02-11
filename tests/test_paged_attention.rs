@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use gllm::scheduler::{
-    BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler, SchedulerError,
-    Sequence, SequenceGroup,
+    BatchOrderPolicy, BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler,
+    SchedulerError, Sequence, SequenceGroup,
 };
 use gllm_kernels::kernel_types::RequestId;
 
@@ -71,7 +71,12 @@ fn paged_attention_dynamic_batching_respects_limits() {
     batcher.enqueue(make_sequence(2, 3));
     batcher.enqueue(make_sequence(3, 3));
 
-    let first = batcher.build_batch(&mut scheduler, 2, true);
+    let first = batcher.build_batch(
+        &mut scheduler,
+        2,
+        true,
+        BatchOrderPolicy::StrictRequestIdOrder,
+    );
     assert_eq!(first.requests, vec![1, 2]);
     batcher.update_batch(
         &mut scheduler,
@@ -81,7 +86,12 @@ fn paged_attention_dynamic_batching_respects_limits() {
         ],
     );
 
-    let second = batcher.build_batch(&mut scheduler, 2, true);
+    let second = batcher.build_batch(
+        &mut scheduler,
+        2,
+        true,
+        BatchOrderPolicy::StrictRequestIdOrder,
+    );
     assert_eq!(second.requests, vec![3]);
     batcher.update_batch(&mut scheduler, &[BatchResult::complete(3, None)]);
     assert!(!batcher.has_pending_work());
@@ -156,7 +166,12 @@ fn continuous_batching_improves_utilization_over_static() {
         batcher.enqueue(make_sequence((idx + 1) as RequestId, prompt_len));
     }
 
-    let batch = batcher.build_batch(&mut scheduler, usize::MAX, true);
+    let batch = batcher.build_batch(
+        &mut scheduler,
+        usize::MAX,
+        true,
+        BatchOrderPolicy::StrictRequestIdOrder,
+    );
     assert_eq!(batch.requests, vec![1, 2, 3, 4, 5, 6]);
 
     let results: Vec<BatchResult> = batch
