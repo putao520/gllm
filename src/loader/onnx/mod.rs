@@ -29,8 +29,10 @@ mod tests;
 
 pub use attributes::{OnnxAttribute, OnnxAttributeValue};
 pub use matcher::{FusedGraph, FusedKernel, FusedOp};
-pub use model::{OnnxGraph, OnnxModel, OnnxNode, OnnxValueInfo};
-pub use tensor::{OnnxSparseTensor, OnnxTensor};
+pub use model::{
+    OnnxGraph, OnnxModel, OnnxNode, OnnxQuantizationAnnotation, OnnxValueInfo,
+};
+pub use tensor::{OnnxSparseFormat, OnnxSparseTensor, OnnxTensor};
 
 use external::ExternalDataResolver;
 

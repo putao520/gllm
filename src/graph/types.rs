@@ -16,6 +16,10 @@ pub struct FusedGraph {
     pub outputs: Vec<String>,
     /// 零拷贝权重绑定（仅保存名称/元信息，数据由 provider 按需提供）
     pub weight_bindings: HashMap<String, WeightBinding>,
+    /// 量化标注信息
+    pub quantization_info: HashMap<String, QuantizationInfo>,
+    /// 稀疏张量绑定信息
+    pub sparse_tensors: HashMap<String, SparseTensorBinding>,
     /// 优化统计信息
     pub stats: OptimizationStats,
 }
@@ -27,6 +31,8 @@ impl FusedGraph {
             inputs: Vec::new(),
             outputs: Vec::new(),
             weight_bindings: HashMap::new(),
+            quantization_info: HashMap::new(),
+            sparse_tensors: HashMap::new(),
             stats: OptimizationStats::default(),
         }
     }
@@ -76,6 +82,7 @@ impl FusedGraph {
                             source_name: meta.name,
                             shape: meta.shape,
                             dtype: meta.dtype,
+                            data: None,
                         },
                     );
                     bound += 1;
@@ -143,6 +150,10 @@ pub enum FusedOp {
     FusedQkvRope(FusedQkvRopeConfig),
     /// RMSNorm + Linear 融合
     FusedRMSLinear(FusedRMSLinearConfig),
+    /// GQA 融合
+    GQA(GQAConfig),
+    /// MoE routing 融合
+    MoERouting(MoERoutingConfig),
     /// 原子操作（未融合）
     Atomic(AtomicOp),
 }
@@ -161,6 +172,8 @@ impl FusedOp {
             FusedOp::RoPE(_) => "RoPE",
             FusedOp::FusedQkvRope(_) => "FusedQkvRope",
             FusedOp::FusedRMSLinear(_) => "FusedRMSLinear",
+            FusedOp::GQA(_) => "GQA",
+            FusedOp::MoERouting(_) => "MoERouting",
             FusedOp::Atomic(op) => &op.op_type,
         }
     }
@@ -219,6 +232,33 @@ pub struct FusedRMSLinearConfig {
     pub eps: f32,
 }
 
+/// GQA 融合配置
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GQAConfig {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub num_groups: usize,
+    pub head_dim: usize,
+}
+
+/// MoE 路由融合配置
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoERoutingConfig {
+    pub num_experts: usize,
+    pub top_k: usize,
+    pub capacity_factor: f32,
+}
+
+impl Default for MoERoutingConfig {
+    fn default() -> Self {
+        Self {
+            num_experts: 0,
+            top_k: 2,
+            capacity_factor: 1.0,
+        }
+    }
+}
+
 /// 原子操作（未融合的 ONNX 算子）
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomicOp {
@@ -230,6 +270,36 @@ pub struct WeightBinding {
     pub source_name: String,
     pub shape: Vec<usize>,
     pub dtype: safetensors::Dtype,
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantizationInfo {
+    pub scale: f32,
+    pub zero_point: i64,
+    pub axis: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparseFormat {
+    Coo,
+    Csr,
+    Csc,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparseTensorBinding {
+    pub format: SparseFormat,
+    pub indices: String,
+    pub values: String,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TensorAttrValue {
+    pub dtype: safetensors::Dtype,
+    pub shape: Vec<usize>,
+    pub data: Vec<u8>,
 }
 
 impl AtomicOp {
@@ -248,6 +318,8 @@ pub enum AttrValue {
     String(String),
     Ints(Vec<i64>),
     Floats(Vec<f32>),
+    Strings(Vec<String>),
+    Tensor(TensorAttrValue),
 }
 
 /// 优化统计信息
@@ -267,6 +339,12 @@ pub struct OptimizationStats {
     pub qkv_rope_fusions: usize,
     /// RMSNorm+Linear 融合数
     pub rms_linear_fusions: usize,
+    /// GQA 融合数
+    pub gqa_fusions: usize,
+    /// MoE routing 融合数
+    pub moe_routing_fusions: usize,
+    /// 常量折叠节点数
+    pub constant_folded_nodes: usize,
     /// 消除的死代码节点数
     pub dead_code_eliminated: usize,
 }
@@ -279,6 +357,8 @@ impl OptimizationStats {
             + self.rope_fusions
             + self.qkv_rope_fusions
             + self.rms_linear_fusions
+            + self.gqa_fusions
+            + self.moe_routing_fusions
     }
 
     /// 节点减少率
@@ -309,6 +389,7 @@ mod tests {
             "FlashAttention"
         );
         assert_eq!(FusedOp::SwiGLU(Default::default()).name(), "SwiGLU");
+        assert_eq!(FusedOp::GQA(Default::default()).name(), "GQA");
         assert_eq!(FusedOp::Atomic(AtomicOp::new("MatMul")).name(), "MatMul");
     }
 

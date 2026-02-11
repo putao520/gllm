@@ -66,6 +66,9 @@ pub struct OnnxValueInfo {
 pub struct OnnxQuantizationAnnotation {
     pub tensor_name: String,
     pub quant_param_tensor_names: HashMap<String, String>,
+    pub scale: Option<f32>,
+    pub zero_point: Option<i64>,
+    pub axis: Option<i32>,
 }
 
 impl OnnxModel {
@@ -116,7 +119,7 @@ impl OnnxGraph {
         let inputs = parse_value_info(proto.input)?;
         let outputs = parse_value_info(proto.output)?;
         let value_info = parse_value_info(proto.value_info)?;
-        let quantization_annotation = parse_quantization(proto.quantization_annotation);
+        let quantization_annotation = parse_quantization(proto.quantization_annotation, &initializers);
 
         Ok(Self {
             name: proto.name.unwrap_or_default(),
@@ -282,12 +285,30 @@ fn parse_metadata_props(entries: Vec<proto::StringStringEntryProto>) -> HashMap<
     out
 }
 
-fn parse_quantization(entries: Vec<proto::TensorAnnotation>) -> Vec<OnnxQuantizationAnnotation> {
+fn parse_quantization(
+    entries: Vec<proto::TensorAnnotation>,
+    initializers: &HashMap<String, OnnxTensor>,
+) -> Vec<OnnxQuantizationAnnotation> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
+        let quant_param_tensor_names = parse_metadata_props(entry.quant_parameter_tensor_names);
+        let scale = quant_param_tensor_names
+            .get("SCALE_TENSOR")
+            .and_then(|name| initializers.get(name))
+            .and_then(OnnxTensor::scalar_f32);
+        let zero_point = quant_param_tensor_names
+            .get("ZERO_POINT_TENSOR")
+            .and_then(|name| initializers.get(name))
+            .and_then(OnnxTensor::scalar_i64);
+        let axis = quant_param_tensor_names
+            .get("AXIS")
+            .and_then(|value| value.parse::<i32>().ok());
         out.push(OnnxQuantizationAnnotation {
             tensor_name: entry.tensor_name.unwrap_or_default(),
-            quant_param_tensor_names: parse_metadata_props(entry.quant_parameter_tensor_names),
+            quant_param_tensor_names,
+            scale,
+            zero_point,
+            axis,
         });
     }
     out

@@ -80,6 +80,16 @@ pub enum ExecutionOp {
         inputs: Vec<String>,
         outputs: Vec<String>,
     },
+    GQA {
+        name: String,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+    },
+    MoERouting {
+        name: String,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+    },
     Atomic {
         name: String,
         op_type: String,
@@ -119,6 +129,16 @@ impl ExecutionPlan {
                     outputs: node.outputs.clone(),
                 },
                 FusedOp::FusedRMSLinear(_config) => ExecutionOp::FusedRMSLinear {
+                    name: node.name.clone(),
+                    inputs: node.inputs.clone(),
+                    outputs: node.outputs.clone(),
+                },
+                FusedOp::GQA(_config) => ExecutionOp::GQA {
+                    name: node.name.clone(),
+                    inputs: node.inputs.clone(),
+                    outputs: node.outputs.clone(),
+                },
+                FusedOp::MoERouting(_config) => ExecutionOp::MoERouting {
                     name: node.name.clone(),
                     inputs: node.inputs.clone(),
                     outputs: node.outputs.clone(),
@@ -195,6 +215,8 @@ impl FusedGraphExecutor {
                 | FusedOp::RoPE(_)
                 | FusedOp::FusedQkvRope(_)
                 | FusedOp::FusedRMSLinear(_)
+                | FusedOp::GQA(_)
+                | FusedOp::MoERouting(_)
                 | FusedOp::Atomic(_) => {}
             }
 
@@ -236,6 +258,8 @@ mod tests {
             inputs: vec!["input".to_string()],
             outputs: vec!["output".to_string()],
             weight_bindings: HashMap::new(),
+            quantization_info: HashMap::new(),
+            sparse_tensors: HashMap::new(),
             stats: OptimizationStats::default(),
         };
         let plan = ExecutionPlan::from_fused_graph(&graph);
@@ -261,8 +285,11 @@ mod tests {
                     source_name: "w".to_string(),
                     shape: vec![1],
                     dtype: safetensors::Dtype::F32,
+                    data: None,
                 },
             )]),
+            quantization_info: HashMap::new(),
+            sparse_tensors: HashMap::new(),
             stats: OptimizationStats::default(),
         };
 
