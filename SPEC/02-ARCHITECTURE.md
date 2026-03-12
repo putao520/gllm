@@ -11,9 +11,10 @@
 ## 硬性约束 (Hard Constraints)
 
 ### 1. 静态编译 (NO_DYNAMIC_LOADING)
-- **要求**：所有 Backend (CUDA/ROCm/Metal/CPU) 实现必须**静态编译**并链接到主程序。
-- **禁止**：使用 `dlopen`, `libloading` 或任何形式的运行时动态库加载。
-- **目的**：确保部署原子性，避免 CUDA 运行时版本不匹配导致的 "DLL Hell"。
+- **要求**：gllm 自身的所有模块必须**静态编译**并链接到主程序。
+- **禁止**：gllm 层使用 `dlopen`, `libloading` 或任何形式的运行时动态库加载。
+- **例外**：gllm-kernels GPU 后端通过 `dlopen` 加载 GPU driver API（`libcuda.so` / `libamdhip64.so` / `Metal.framework`），这是 gllm-kernels 的内部实现细节，不违反本约束。gllm 不直接调用 `dlopen`。
+- **目的**：确保 gllm 部署原子性。GPU driver 由操作系统/驱动安装提供，不属于应用依赖。
 
 ### 2. 真实性原则 (Ω1: TRUTH)
 - **要求**：所有架构/量化/精度信息必须从模型文件自身提供的 **metadata** 读取。
@@ -149,9 +150,9 @@ let metadata = loader.quantization_metadata()?
 
 | 任务 | 描述 | 模型示例 |
 |------|------|----------|
-| **Embedding** | 文本向量化 | BGE-M3, CodeXEmbed |
-| **Rerank** | 文本重排序 | BGE-Reranker |
-| **Generator** | 文本生成 | Qwen2, Mistral, MoE |
+| **Embedding** | 文本向量化 | BGE-M3/M4, Qwen3-Embed, E5, Jina v4 |
+| **Rerank** | 文本重排序 | BGE-Reranker-v3, Qwen3-Rerank |
+| **Generator** | 文本生成 | Qwen3, Llama 4, GLM-5, Mistral 3, Phi-4 |
 
 ### 公共 API
 
@@ -202,9 +203,12 @@ let metadata = loader.quantization_metadata()?
 │  Layer 4: Driver (硬件执行层) - "Just Do It."                           │
 │  组件: gllm-kernels (Backend Trait)                                     │
 │  职责:                                                                  │
-│    1. CudaBackend (cudarc + AOT CUBIN).                                 │
-│    2. CpuBackend (faer + SIMD).                                         │
+│    1. CpuBackend (JIT 编译器: 标量→符号执行→融合→SIMD 代码生成).        │
+│    2. GpuBackend (JIT 编译器: 同一管线, Phase 3 生成 PTX/AMDGPU/AIR).   │
 │  特性: 零拷贝 (Zero-Copy), 物理阻断数据回流, Driver API Only。          │
+│  桥接: `src/compat.rs` 提供类型兼容层，统一 gllm-kernels 导出路径。     │
+│  量化: Backend trait 提供 quantized_matmul/dequantize 默认方法，          │
+│        CpuBackend 实现分发到 gllm-kernels K-Quant/Classic/IQ 三族。      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -217,14 +221,14 @@ let metadata = loader.quantization_metadata()?
 **源头隔离结构** (ARCH-MODEL-CACHE-001):
 ```
 ~/.gllm/models/
-├── hf/    # HuggingFace 下载的模型
-└── ms/    # ModelScope 下载的模型
+├── huggingface/    # HuggingFace 下载的模型
+└── modelscope/     # ModelScope 下载的模型
 ```
 
 | 源 | 缓存子目录 | 说明 |
 |---|-----------|------|
-| HuggingFace | `hf/` | HF 专用缓存，使用 hf-hub crate 管理 |
-| ModelScope | `ms/` | MS 专用缓存，使用 git-like 结构 |
+| HuggingFace | `huggingface/` | HF 专用缓存，使用 hf-hub crate 管理 |
+| ModelScope | `modelscope/` | MS 专用缓存，使用 git-like 结构 |
 
 **隔离原则**:
 - 不同下载源的模型文件**互不干扰**
@@ -234,7 +238,7 @@ let metadata = loader.quantization_metadata()?
 **环境变量**:
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `GLLM_CACHE_DIR` | `~/.gllm/models` | 覆盖缓存根目录 |
+| `GLLM_CACHE_DIR` | `~/.gllm/models` | 覆盖缓存根目录（📋 计划中，尚未实现） |
 | `HF_TOKEN` | (空) | HuggingFace 认证 token |
 
 > **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定模型来源。
@@ -419,6 +423,15 @@ Client::new_chat("Qwen/Qwen3-0.6B")
         - `num_layers` = 匹配到的最大 `layer_idx` + 1
     - **F32 Adapter**: Loader 层负责将 F16/BF16 转换为 F32（如果后端不支持低精度），对上层 Engine 透明。
 
+6.  **量化 Per-Tensor 混合精度加载 (ARCH-LOADER-QUANT)**
+    - **目的**: GGUF 量化模型的 tensor 按原始精度分流加载，量化 tensor 不经 GPU upload。
+    - **QuantizedTensor**: 量化 tensor 以原始 block bytes + QuantType 元数据存储在 `WeightsHandle.quantized` HashMap。
+    - **Native Float 转换**: F16/BF16 tensor 在 CPU 侧自动转换为 f32（当 Backend Element 为 f32 时）。
+    - **TensorProvider::ggml_dtype()**: 新增 default method，GGUF 实现返回原始 GgmlDType。
+    - **adapter::ggml_dtype_to_quant_type()**: 桥接 GgmlDType → QuantType，覆盖 21 种量化类型。
+    - **Backend::quantized_matmul()**: 按 QuantType 分发到 kquant_matmul/classic_matmul/iq_matmul。
+    - **Backend::dequantize()**: 24 种量化类型反量化到 f32，用于 embedding lookup 等场景。
+
 #### ONNX Adapter Architecture (ARCH-ONNX)
 
 **核心架构: Matcher -> Mapper -> Kernel**
@@ -456,15 +469,29 @@ client.embeddings(["text"]).generate()
 
 ```
 src/
-├── lib.rs           # 公共 API 导出
-├── client.rs        # Client / AsyncClient
-├── embeddings.rs    # Embeddings API
-├── rerank.rs        # Rerank API
-├── engine.rs        # 推理引擎
-├── generation.rs    # 生成循环
-├── kv_cache.rs      # KV Cache
-├── weight_loader.rs # 权重加载
-└── model_config.rs  # 模型配置
+├── lib.rs              # 公共 API 导出
+├── compat.rs           # 兼容层: 桥接 gllm-kernels 类型 (Backend, CpuBackend, Element 等)
+├── client.rs           # Client / AsyncClient
+├── embeddings.rs       # Embeddings API
+├── rerank.rs           # Rerank API
+├── generation.rs       # 生成循环
+├── tokenizer.rs        # Tokenizer 集成
+├── model_config.rs     # 张量驱动模型配置 (Ω1)
+├── weight_loader.rs    # 权重加载工具
+├── kv_cache.rs         # KV Cache 结构
+├── quantization.rs     # 量化支持
+├── loader/             # 模型加载 (HF/MS/GGUF/ONNX/SafeTensors)
+│   ├── mod.rs          # 统一加载入口
+│   ├── gguf/           # GGUF 解析器 (零拷贝)
+│   ├── onnx/           # ONNX protobuf 解析器
+│   └── ...             # downloader, format_detector, adapter 等
+├── arch/               # 架构 YAML 模板 → OnnxGraph
+├── graph/              # DAG 优化器 (统一表示)
+│   └── optimizer/      # 优化 Pass (模式融合/硬件融合/DCE)
+├── engine/             # 推理引擎 (executor, pipeline)
+├── scheduler/          # 调度器 (HGAL, PagedAttention, Continuous Batching)
+├── backend/            # 后端检测与降级 (CUDA→CPU)
+└── manifest/           # 模型 Manifest 类型
 ```
 
 ---
@@ -536,9 +563,9 @@ src/
 | **禁止序列内页面分散** | 必须以序列组 (SequenceGroup) 为单位换出 | 序列错乱、内存碎片 | - |
 | **禁止新换入页立即换出** | Warm-up 保护期内禁止换出 | Cache Thrashing | - |
 | **禁止纯 LRU** | 必须使用 LIRS 或 CLOCK-Pro 算法 | 无法区分访问模式 | - |
-| **零拷贝原则** | Swap 操作不介入生成循环数据流 | 违反 L3 GPU-Pure | gllm-kernels §L3 GPU-Pure |
-| **AOT CUBIN** | 禁止动态 kernel 编译 | 违反 AOT 策略 | gllm-kernels §AOT Only |
-| **Driver API Only** | 仅依赖 libcuda.so | 运行时依赖问题 | gllm-kernels §Driver API Only |
+| **零拷贝原则** | Swap 操作不介入生成循环数据流 | 数据回流到 CPU | gllm-kernels SPEC/02 ARCH-SCOPE |
+| **JIT 统一路径** | GPU kernel 由 JIT 编译器生成（PTX/AMDGPU/AIR） | 违反 ARCH-JIT-FIRST | gllm-kernels SPEC/04 §1 |
+| **Driver API Only** | 仅依赖 libcuda.so / libamdhip64.so / Metal.framework | 运行时依赖问题 | gllm-kernels SPEC/04 §5 |
 
 ### 数据结构约束 (ARCH-SCHED-DATA)
 
@@ -721,7 +748,7 @@ pub enum BatchOrderPolicy {
 - `allocate_page_in_pipeline(pipeline, tier) -> Result<PhysicalId, Error>`
 - `prepare_next_turn(session_id)`（释放 `Working`，保留 `Conversation`）
 
-### 6. AOT CUBIN 兼容性声明 (ARCH-SCHED-REFACTOR-AOT)
+### 6. JIT 兼容性声明 (ARCH-SCHED-REFACTOR-JIT)
 
 | 组件 | 是否需要新 Kernel | 理由 |
 |------|-------------------|------|
@@ -731,7 +758,7 @@ pub enum BatchOrderPolicy {
 | `BatchOrderPolicy` | ❌ | 批构建顺序策略 |
 | `ChunkedConfig` 融合 | ❌ | 页面规划逻辑，不改变算子实现 |
 
-**结论**: 调度器重构全部位于调度/内存管理层，兼容 AOT CUBIN 策略。
+**结论**: 调度器重构全部位于调度/内存管理层，不涉及 JIT 编译器管线。
 
 ### 7. 张量驱动配置系统 (ARCH-LOADER-TENSOR)
 

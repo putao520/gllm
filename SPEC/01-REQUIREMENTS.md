@@ -40,8 +40,19 @@
 | **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
 | **REQ-LOADER-021** | 融合权重元数据驱动分割 | 融合权重 (如 QKV) 分割完全基于 config.json，禁止硬编码 | 1. `split_phi4_qkv` 等函数接收 `ModelConfig` 参数<br>2. Q 维度 = `config.hidden_size`<br>3. KV 维度 = `config.num_key_value_heads * config.head_dim`<br>4. **禁止**硬编码任何维度值 (如 3072, 1024)<br>5. 支持同一架构的不同变体 (不同 hidden_size / num_kv_heads)<br>6. **关联**: ARCH-QUANT-METADATA-001, ARCH-LOADER-FUSED-METADATA | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 | **REQ-LOADER-022** | 张量驱动配置推导 (Tensor-Driven) | 基于 Tensor Role Matching (Regex) 和张量形状推导配置，优先于硬编码逻辑 | 1. **核心**: 定义 `TensorRole` (Embedding/Attention/FFN)<br>2. **推导**: 纯张量形状推导 `hidden_size`, `num_heads`, `head_dim`<br>3. **禁止**: `if model == "llama"` 硬编码逻辑<br>4. **优先级**: 张量形状 > config.json | 🟢 已实现 (2026-02-08) |
-| **REQ-LOADER-023** | 通用权重加载适配器 (Universal) | Loader 作为通用适配器，透明处理格式差异与精度转换 | 1. **F16->F32**: 后端需要时自动转换<br>2. **Universal**: 统一处理 SafeTensors/ONNX/GGUF<br>3. **Zero-Copy**: 仅在必要时转换，否则保持零拷贝<br>4. **关联**: ARCH-LOADER-003 | 🟢 已实现 (2026-02-08) |
+| **REQ-LOADER-023** | 通用权重加载适配器 (Universal) | Loader 作为通用适配器，透明处理格式差异与精度转换 | 1. **F16->F32**: 后端需要时自动转换<br>2. **Universal**: 统一处理 SafeTensors/ONNX/GGUF<br>3. **Zero-Copy**: 仅在必要时转换，否则保持零拷贝<br>4. **关联**: ARCH-LOADER-003<br>5. **GGUF 量化分流**: 量化 tensor 存入 QuantizedTensor，native float 走 upload_native_tensor_with_convert | 🟢 已实现 (2026-02-08) |
 
+### 2.1 GGUF 量化加载 (REQ-QUANT)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-QUANT-001** | GgmlDType→QuantType 桥接 | 映射 GGUF 量化类型到 gllm-kernels QuantType | `ggml_dtype_to_quant_type()` 覆盖 K-Quant/Classic/IQ 共 21 种类型 | 🟢 已实现 |
+| **REQ-QUANT-002** | TensorProvider 量化元数据 | TensorProvider 暴露原始 GGML dtype | `ggml_dtype()` default method，GgufReader 实现返回实际 dtype | 🟢 已实现 |
+| **REQ-QUANT-003** | QuantizedTensor 双存储 | WeightsHandle 支持量化/native 双存储 | `quantized` HashMap + `new_with_quantized()`/`quantized_tensor()`/`is_quantized()` | 🟢 已实现 |
+| **REQ-QUANT-004** | upload_provider 量化分流 | 量化 tensor 跳过 GPU upload | 量化→QuantizedTensor，native float→upload_native_tensor_with_convert (F16/BF16→f32) | 🟢 已实现 |
+| **REQ-QUANT-005** | TensorLookup 量化访问 | TensorLookup trait 支持量化 tensor 查询 | `get_quantized()` default method，WeightsHandle 实现 | 🟢 已实现 |
+| **REQ-QUANT-006** | Backend quantized_matmul | Backend trait 量化矩阵乘法 | 按 QuantType 分发 kquant_matmul/classic_matmul/iq_matmul，CpuBackend 实现 | 🟢 已实现 |
+| **REQ-QUANT-007** | Backend dequantize | Backend trait 反量化 | 24 种量化类型→f32，CpuBackend 实现 | 🟢 已实现 |
 
 ## 3. 核心功能 (REQ-CORE)
 
@@ -49,7 +60,7 @@
 |----|----------|------|----------|------|
 | **REQ-CORE-001** | 自动后端检测 | 自动选择 CUDA/CPU (ROCm/Metal 计划中) | 1. `detect_backend()` 检测逻辑完整<br>2. 优先级: CUDA > ROCm > Metal > CPU<br>3. 未实现后端返回 `Unimplemented` | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 | **REQ-CORE-002** | 自动降级 | GPU OOM 时自动降级到 CPU | `FallbackEmbedder` 正常工作 | 🟢 已实现 |
-| **REQ-CORE-003** | 量化支持 | 支持 Int4/Int8/AWQ/GPTQ/GGUF 加载 | 能够加载并推理量化模型 | 🟢 已实现 |
+| **REQ-CORE-003** | 量化支持 | 支持 Int4/Int8/AWQ/GPTQ/GGUF 加载 | 1. 能够加载并推理量化模型<br>2. GGUF Per-Tensor 混合精度加载 (QuantizedTensor)<br>3. Backend quantized_matmul/dequantize 分发 | 🟢 已实现 |
 | **REQ-CORE-004** | 精度优先架构 | 系统强制运行在"精度优先"模式 | 1. 强制启用 Deterministic Scheduling<br>2. 强制启用 Phase Isolation<br>3. **移除** 任何吞吐量优先的妥协配置 | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 
 ## 4. 高级调度与内存管理 (REQ-SCHED)
@@ -71,10 +82,10 @@
 | **REQ-SCHED-005** | Cache Thrashing 防护 | 防止刚换入的页面立即被换出 | 1. **Warm-up 保护期** (默认 100ms)<br>2. **Thrash 率 < 1%**<br>3. 新换入页面不被选中为受害者 | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-006** | Working Set 检测 | 自动识别高频访问页面并锁定保护 | 1. **自动热页检测** (默认阈值 3 次访问)<br>2. **Protected 状态**<br>3. **保护解除机制** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-007** | Chunked Prefill / SplitFuse | vLLM 2024 交织式混批优化 | **(已废弃)** 仅废弃 SplitFuse 混批路径；ChunkedConfig 以页面调度能力保留 | 🔴 已废弃 (由 REQ-SCHED-016 替代) |
-| **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | 1. **SingleInputKV**: 连续 N 个 KV 蒸馏为 1 个 (减少 50-75%)<br>2. **AcrossKV**: 跨层 KV 共享 (进一步减少 50%)<br>3. 精度损失 < 0.1% PPL<br>4. **AOT CUBIN 兼容** (蒸馏在 CPU/Swap 时执行) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
+| **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | 1. **SingleInputKV**: 连续 N 个 KV 蒸馏为 1 个 (减少 50-75%)<br>2. **AcrossKV**: 跨层 KV 共享 (进一步减少 50%)<br>3. 精度损失 < 0.1% PPL<br>4. **JIT 兼容** (蒸馏在 CPU/Swap 时执行) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
 | **REQ-SCHED-009** | LMCache 跨请求共享 | 旧版 vLLM2024 LMCache 能力 | **(已废弃)** 由 `REQ-KV-001/002` 的 PrefixIndex + SessionKvCache 重构路径替代 | 🔴 已废弃 (Refactor 2026) |
 | **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 旧版 LMCache 命中跳过前向路径 | **(已废弃)** 由 `GlobalMemoryManager` 统一复用入口替代 | 🔴 已废弃 (Refactor 2026) |
-| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 AOT CUBIN | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
+| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 JIT 统一路径 | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
 | **REQ-SCHED-014** | 自适应 JIT 调度策略 | 引入底层 JIT 决策层，基于实时观测动态调整策略 | 1. **微秒级决策** (<10μs)<br>2. **策略热切换** (Accuracy/Throughput)<br>3. **参数自整定** (动态 Batch/Swap)<br>4. **零运行时开销** (Enum Dispatch) | ✅ 已实现 (2026-02-06) [commit: a7e761b] |
 | **REQ-SCHED-015** | 调度器重构基线 | 调度器重构以 `GlobalMemoryManager` 为唯一 KV 管理核心，移除 `vllm2024.rs` 冗余 LMCache 结构 | 1. 删除 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel` 作为核心路径<br>2. `GlobalMemoryManager` 承担跨请求复用入口<br>3. 架构与 `ARCH-SCHED-REFACTOR-2026` 一致 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 | **REQ-SCHED-016** | ChunkedConfig 融合页面调度 | 保留 ChunkedConfig，用于 Prefill 分块时间片规划 | 1. 支持 `plan_prefill(prompt_tokens, chunk_size)`<br>2. 仅允许 Prefill 阶段分块，禁止与 Decode 混批<br>3. 与 PagedAttention 页面状态机一致更新 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
@@ -107,7 +118,7 @@
 
 | 维度 | 选项 | 说明 |
 |------|------|------|
-| **后端** | `cpu`, `cuda` | ROCm/Metal 未来支持 |
+| **后端** | `cpu`, `jit-cuda` | `jit-hip`/`jit-metal` 未来支持 |
 | **模型类型** | `generator`, `embedding`, `rerank` | 三种核心功能 |
 | **模型大小** | `mini` (最小) | 快速回归，CI 友好 |
 | **功能模块** | `loader`, `inference`, `scheduler`, `quantization`, `scheduler_refactor` | 分层验证 |
@@ -131,12 +142,14 @@
 
 | 测试文件 | 覆盖维度 | 状态 |
 |----------|---------|------|
-| `tests/test_model_matrix.rs` | 模型矩阵 (REQ-TEST-002/003/004) | 🟢 已实现 (2026-02-05) |
-| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 🟢 已实现 (2026-02-05) |
-| `tests/test_quantization.rs` | 量化格式 (REQ-TEST-006) | 🟢 已实现 (2026-02-05) |
-| `tests/test_error_handling.rs` | 错误处理 (REQ-TEST-007) | 🟢 已实现 (2026-02-05) |
-| `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🟢 已实现 (2026-02-05) |
-| `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🟢 已实现 (2026-02-05) |
+| `tests/test_e2e_embedding.rs` | Embedding E2E (REQ-TEST-003) | 🟢 已实现 |
+| `tests/test_e2e_generator.rs` | Generator E2E (REQ-TEST-002) | 🟢 已实现 |
+| `tests/test_e2e_reranker.rs` | Reranker E2E (REQ-TEST-004) | 🟢 已实现 |
+| `tests/test_error_handling.rs` | 错误处理 (REQ-TEST-007) | 🟢 已实现 |
+| `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🟢 已实现 |
+| `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🟢 已实现 |
+| `tests/quantization_metadata.rs` | 量化格式 (REQ-TEST-006) | 🟢 已实现 |
+| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 📋 待实现 |
 
 ## 6. 架构约束 (REQ-ARCH)
 
