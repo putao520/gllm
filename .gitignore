@@ -10,3 +10,11 @@ __pycache__/
 
 # SPEC documents (managed separately)
 SPEC/
+
+# Model files
+~/.gllm/
+test_models/
+
+# IDE / tooling
+.gsc/
+PLAN.md
