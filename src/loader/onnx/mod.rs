@@ -1,7 +1,7 @@
 //! ONNX loader with graph parsing and fused-first pattern matching.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,107 @@ use external::ExternalDataResolver;
 pub struct OnnxLoader {
     path: PathBuf,
     model: OnnxModel,
+    alias_map: HashMap<String, String>,     // semantic_name → onnx_name
+    reverse_alias: HashMap<String, String>,  // onnx_name → semantic_name
+}
+
+
+/// Build alias mapping from ONNX graph nodes.
+///
+/// Scans graph nodes for anonymous initializer names (starting with "onnx::")
+/// and derives semantic names from the node's name path.
+///
+/// Rules:
+/// - MatMul: input[1] → ".weight"
+/// - Gemm: input[1] → ".weight"
+/// - Gather: input[0] → ".weight"
+/// - Mul: whichever input is an onnx:: initializer → ".weight"
+fn build_alias_map(graph: &OnnxGraph) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut alias_map = HashMap::new(); // semantic → onnx
+    let mut reverse_alias = HashMap::new(); // onnx → semantic
+
+    for node in &graph.nodes {
+        // Determine which input index holds the weight and what suffix to use
+        let candidates: Vec<(usize, &str)> = match node.op_type.as_str() {
+            "MatMul" => vec![(1, ".weight")],
+            "Gemm" => vec![(1, ".weight")],
+            "Gather" => vec![(0, ".weight")],
+            "Mul" => {
+                // For Mul, find whichever input is an onnx:: initializer
+                let mut v = Vec::new();
+                for (i, input) in node.inputs.iter().enumerate() {
+                    if input.starts_with("onnx::") && graph.initializers.contains_key(input) {
+                        v.push((i, ".weight"));
+                    }
+                }
+                v
+            }
+            _ => continue,
+        };
+
+        for (input_idx, suffix) in candidates {
+            let Some(onnx_name) = node.inputs.get(input_idx) else {
+                continue;
+            };
+
+            // Only alias anonymous onnx:: names
+            if !onnx_name.starts_with("onnx::") {
+                continue;
+            }
+
+            // Must be an actual initializer
+            if !graph.initializers.contains_key(onnx_name) {
+                continue;
+            }
+
+            // Derive semantic name from node.name:
+            //   "/encoder/layer.0/attention/self/query/MatMul"
+            //   → "encoder.layer.0.attention.self.query" + ".weight"
+            let semantic = derive_semantic_name(&node.name, &node.op_type, suffix);
+            if semantic.is_empty() {
+                continue;
+            }
+
+            // Don't overwrite if this semantic name already exists as a real initializer
+            if graph.initializers.contains_key(&semantic) {
+                continue;
+            }
+
+            // Don't overwrite existing aliases (first match wins)
+            if alias_map.contains_key(&semantic) {
+                continue;
+            }
+
+            alias_map.insert(semantic.clone(), onnx_name.clone());
+            reverse_alias.insert(onnx_name.clone(), semantic);
+        }
+    }
+
+    (alias_map, reverse_alias)
+}
+
+/// Derive a semantic tensor name from an ONNX node name.
+///
+/// Example: "/encoder/layer.0/attention/self/query/MatMul" with op_type "MatMul" and suffix ".weight"
+/// → "encoder.layer.0.attention.self.query.weight"
+fn derive_semantic_name(node_name: &str, op_type: &str, suffix: &str) -> String {
+    // Replace "/" with "."
+    let mut name = node_name.replace('/', ".");
+
+    // Remove leading dots
+    while name.starts_with('.') {
+        name = name[1..].to_string();
+    }
+
+    // Remove trailing ".{op_type}" if present
+    let op_suffix = format!(".{op_type}");
+    if name.ends_with(&op_suffix) {
+        name.truncate(name.len() - op_suffix.len());
+    }
+
+    // Append the tensor suffix (e.g. ".weight")
+    name.push_str(suffix);
+    name
 }
 
 impl OnnxLoader {
@@ -45,34 +146,59 @@ impl OnnxLoader {
         let model_proto = decode_model(path)?;
         let mut resolver = ExternalDataResolver::new(path);
         let model = OnnxModel::from_proto(model_proto, &mut resolver)?;
+        let (alias_map, reverse_alias) = build_alias_map(&model.graph);
         Ok(Self {
             path: path.to_path_buf(),
             model,
+            alias_map,
+            reverse_alias,
         })
     }
 
+    /// Resolve a tensor name: direct lookup first, then alias fallback.
+    fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        if self.model.graph.initializers.contains_key(name) {
+            Some(name)
+        } else {
+            self.alias_map.get(name).map(|s| s.as_str())
+        }
+    }
+
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.model.graph.initializers.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .model
+            .graph
+            .initializers
+            .keys()
+            .map(|k| {
+                self.reverse_alias
+                    .get(k)
+                    .cloned()
+                    .unwrap_or_else(|| k.clone())
+            })
+            .collect();
         names.sort();
         names
     }
 
     pub fn tensor(&self, name: &str) -> Result<TensorSlice<'_>> {
+        let resolved = self.resolve(name).unwrap_or(name);
         let tensor = self
             .model
             .graph
             .initializers
-            .get(name)
+            .get(resolved)
             .ok_or_else(|| LoaderError::MissingTensor(name.to_string()))?;
         Ok(tensor.slice())
     }
 
     pub fn tensor_dtype(&self, name: &str) -> Result<Dtype> {
+        let resolved = self.resolve(name).unwrap_or(name);
         let tensor = self
             .model
             .graph
             .initializers
-            .get(name)
+            .get(resolved)
             .ok_or_else(|| LoaderError::MissingTensor(name.to_string()))?;
         Ok(tensor.dtype)
     }
@@ -83,7 +209,14 @@ impl OnnxLoader {
             .graph
             .initializers
             .iter()
-            .map(|(name, tensor)| (name.clone(), tensor.dtype))
+            .map(|(name, tensor)| {
+                let display_name = self
+                    .reverse_alias
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                (display_name, tensor.dtype)
+            })
             .collect::<Vec<_>>();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
@@ -115,7 +248,8 @@ impl OnnxLoader {
 
 impl super::TensorProvider for OnnxLoader {
     fn tensor_info(&self, name: &str) -> Option<super::TensorMeta> {
-        let tensor = self.model.graph.initializers.get(name)?;
+        let resolved = self.resolve(name)?;
+        let tensor = self.model.graph.initializers.get(resolved)?;
         Some(super::TensorMeta {
             name: name.to_string(),
             shape: tensor.shape.clone(),
@@ -128,10 +262,17 @@ impl super::TensorProvider for OnnxLoader {
             .graph
             .initializers
             .iter()
-            .map(|(name, tensor)| super::TensorMeta {
-                name: name.clone(),
-                shape: tensor.shape.clone(),
-                dtype: tensor.dtype,
+            .map(|(name, tensor)| {
+                let display_name = self
+                    .reverse_alias
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                super::TensorMeta {
+                    name: display_name,
+                    shape: tensor.shape.clone(),
+                    dtype: tensor.dtype,
+                }
             })
     }
 

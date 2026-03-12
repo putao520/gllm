@@ -30,10 +30,10 @@ flash-attention = []
 candle = ["dep:candle-core", "dep:zip"]
 
 # 开发/调试 features
-nccl = ["gllm-kernels/nccl"]
+nccl = []
 
 [dependencies]
-gllm-kernels = { path = "../gllm-kernels", default-features = false }
+gllm-kernels = { path = "../gllm-kernels" }
 hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }

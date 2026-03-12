@@ -152,6 +152,19 @@ impl ModelConfig {
             }
         }
 
+        // Fallback: load from config.json file (HuggingFace standard format)
+        if let Some(config_path) = loader.config_path() {
+            if config_path.exists() {
+                let content = std::fs::read_to_string(config_path)?;
+                let value: Value = serde_json::from_str(&content)?;
+                let weight_dtype_size = loader
+                    .detect_weight_dtype_size()
+                    .ok()
+                    .flatten();
+                return Self::from_value(manifest, &value, weight_dtype_size);
+            }
+        }
+
         if let Some(err) = gguf_metadata_error {
             return Err(ModelConfigError::MissingConfigAndMetadata(err.to_string()));
         }

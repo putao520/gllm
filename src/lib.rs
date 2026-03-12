@@ -1,5 +1,7 @@
 //! gllm - inference client library (skeleton).
 
+pub mod compat;
+
 pub mod manifest;
 
 pub mod arch;

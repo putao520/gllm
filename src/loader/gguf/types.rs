@@ -413,30 +413,32 @@ pub enum GgufError {
 }
 
 pub fn tensor_nbytes(dtype: GgmlDType, shape: &[u64]) -> Result<usize, GgufError> {
-    let mut elements = 1usize;
-    for &dim in shape {
-        let dim = usize::try_from(dim)
-            .map_err(|_| GgufError::ParseError("tensor dimension overflows usize".to_string()))?;
-        elements = elements
-            .checked_mul(dim)
-            .ok_or_else(|| GgufError::ParseError("tensor element count overflow".to_string()))?;
+    if shape.is_empty() {
+        return Ok(0);
     }
 
-    let block = dtype.block_size();
+    let block_size = dtype.block_size();
     let bytes_per_block = dtype.block_bytes();
-    let blocks = if elements == 0 {
-        0
-    } else {
-        let addend = block
-            .checked_sub(1)
-            .ok_or_else(|| GgufError::ParseError("invalid block size".to_string()))?;
-        let rounded = elements
-            .checked_add(addend)
-            .ok_or_else(|| GgufError::ParseError("tensor block rounding overflow".to_string()))?;
-        rounded / block
-    };
 
-    blocks
+    // GGUF pads the innermost dimension (ne[0] = shape[0]) to the block boundary,
+    // matching llama.cpp's ggml_row_size(type, ne[0]) * ne[1] * ne[2] * ...
+    let ne0 = usize::try_from(shape[0])
+        .map_err(|_| GgufError::ParseError("tensor dimension overflows usize".to_string()))?;
+
+    let blocks_per_row = (ne0 + block_size - 1) / block_size;
+    let row_bytes = blocks_per_row
         .checked_mul(bytes_per_block)
-        .ok_or_else(|| GgufError::ParseError("tensor byte size overflow".to_string()))
+        .ok_or_else(|| GgufError::ParseError("row byte size overflow".to_string()))?;
+
+    // Multiply by all outer dimensions (shape[1], shape[2], ...)
+    let mut total = row_bytes;
+    for &dim in &shape[1..] {
+        let dim = usize::try_from(dim)
+            .map_err(|_| GgufError::ParseError("tensor dimension overflows usize".to_string()))?;
+        total = total
+            .checked_mul(dim)
+            .ok_or_else(|| GgufError::ParseError("tensor byte size overflow".to_string()))?;
+    }
+
+    Ok(total)
 }

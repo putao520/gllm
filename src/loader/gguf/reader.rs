@@ -99,22 +99,21 @@ impl GgufReader {
             raw_tensors.push((name, dtype, shape, rel_offset));
         }
 
-        let data_offset = if let Some(alignment) = metadata
+        let alignment_val = metadata
             .get("general.alignment")
-            .and_then(GgufValue::as_u64)
-        {
-            if alignment == 0 {
-                return Err(GgufError::InvalidMetadata(
-                    "general.alignment must be > 0".to_string(),
-                ));
-            }
+            .and_then(GgufValue::as_u64);
+        // GGUF spec: default alignment is 32 bytes when general.alignment is not set.
+        let alignment = alignment_val.unwrap_or(32);
+        let data_offset = if alignment == 0 {
+            return Err(GgufError::InvalidMetadata(
+                "general.alignment must be > 0".to_string(),
+            ));
+        } else {
             align_up(
                 pos,
                 usize::try_from(alignment)
                     .map_err(|_| GgufError::ParseError("alignment overflow".to_string()))?,
             )?
-        } else {
-            pos
         };
         if data_offset > bytes.len() {
             return Err(GgufError::ParseError(
@@ -545,6 +544,11 @@ impl TensorProvider for GgufReader {
             .tensor_bytes(name)
             .map_err(|e| crate::loader::LoaderError::Gguf(format!("GGUF error: {}", e)))?;
         Ok(Cow::Borrowed(data))
+    }
+
+    fn ggml_dtype(&self, name: &str) -> Option<GgmlDType> {
+        let idx = self.tensor_index.get(name)?;
+        Some(self.tensors[*idx].dtype)
     }
 }
 

@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ::safetensors::Dtype;
-use gllm_kernels::backend_trait::{Backend, Element};
+use crate::compat::backend_trait::{Backend, Element};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::manifest::{ModelManifest, TensorRole, EMPTY_FILE_MAP};
+use crate::loader::gguf::GgmlDType;
 
 // Re-export modules
 pub mod adapter; // GGUF tensor adapter (KernelTensorView)
@@ -32,6 +33,20 @@ pub use modelscope::ModelScopeClient;
 pub use onnx::OnnxLoader;
 pub use parallel::ParallelLoader;
 pub use safetensors::SafeTensorsLoader;
+
+use gllm_kernels::quant::QuantType;
+pub use adapter::ggml_dtype_to_quant_type;
+
+/// A quantized tensor stored as raw block bytes with its QuantType metadata.
+/// These are not uploaded via `Backend::upload_weights()` — they stay as raw bytes
+/// and are dispatched to quantized matmul kernels at inference time.
+#[derive(Debug, Clone)]
+pub struct QuantizedTensor {
+    pub data: Vec<u8>,
+    pub quant_type: QuantType,
+    pub shape: Vec<usize>,
+    pub ggml_dtype: GgmlDType,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
@@ -120,6 +135,11 @@ pub fn fallback_source(source: ModelSource) -> ModelSource {
 pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     let lower = name.to_ascii_lowercase();
 
+    // Skip bias tensors — they are 1D and should not be matched as projection weights
+    if lower.ends_with(".bias") || lower.ends_with("_bias") {
+        return None;
+    }
+
     // 1. Extract layer index if present
     // Common patterns: layers.N, blk.N, blocks.N, .h.N
     let mut layer_idx = None;
@@ -142,9 +162,15 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     }
 
     // 2. Match Role
+    // Layer-specific roles — check FIRST to avoid false matches
+    // (e.g. "embeddings.LayerNorm.bias" contains "embed" but is a norm tensor)
+    if lower.contains("norm") || lower.contains("ln_") {
+        return Some((TensorRole::LayerNorm, layer_idx));
+    }
+
     // Embedding
-    if (lower.contains("embed") || lower.contains("wte")) && layer_idx.is_none() {
-        // Exclude position embeddings if necessary, but usually main embedding is largest
+    if (lower.contains("embed") || lower.contains("embd") || lower.contains("wte")) && layer_idx.is_none() {
+        // Exclude position embeddings and type embeddings
         if !lower.contains("pos") && !lower.contains("type") {
             return Some((TensorRole::Embedding, None));
         }
@@ -158,26 +184,22 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     if (lower.contains("lm_head") || lower.contains("output"))
         && !lower.contains("layer")
         && !lower.contains("attention")
+        && !lower.contains("attn")
     {
         return Some((TensorRole::OutputHead, None));
     }
 
-    // Layer-specific roles
-    if lower.contains("norm") || lower.contains("ln_") {
-        return Some((TensorRole::LayerNorm, layer_idx));
-    }
-
     // Attention
-    if lower.contains("q_proj") || lower.contains("query") || lower.contains("wq") {
+    if lower.contains("q_proj") || lower.contains("query") || lower.contains("wq") || lower.contains("attn_q") {
         return Some((TensorRole::AttentionQuery, layer_idx));
     }
-    if lower.contains("k_proj") || lower.contains("key") || lower.contains("wk") {
+    if lower.contains("k_proj") || lower.contains("key") || lower.contains("wk") || lower.contains("attn_k") {
         return Some((TensorRole::AttentionKey, layer_idx));
     }
-    if lower.contains("v_proj") || lower.contains("value") || lower.contains("wv") {
+    if lower.contains("v_proj") || lower.contains("value") || lower.contains("wv") || lower.contains("attn_v.") {
         return Some((TensorRole::AttentionValue, layer_idx));
     }
-    if lower.contains("o_proj") || lower.contains("wo") {
+    if lower.contains("o_proj") || lower.contains("wo") || lower.contains("attn_output") {
         return Some((TensorRole::AttentionOutput, layer_idx));
     }
     // BERT Attention Output: "attention.output.dense"
@@ -210,6 +232,55 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     }
 
     None
+}
+
+/// Build a reverse index from (TensorRole, Option<layer_idx>) to tensor name.
+/// Also indexes bias tensors: for each weight tensor "foo.weight", checks if "foo.bias" exists.
+pub fn build_tensor_role_index<'a>(
+    tensor_names: impl Iterator<Item = &'a str>,
+) -> (
+    HashMap<(TensorRole, Option<usize>), String>,
+    HashMap<String, String>,
+) {
+    let names: Vec<&str> = tensor_names.collect();
+    let name_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+
+    let mut role_index: HashMap<(TensorRole, Option<usize>), String> = HashMap::new();
+    let mut bias_index: HashMap<String, String> = HashMap::new();
+
+    for &name in &names {
+        if let Some((role, layer_idx)) = match_tensor_role(name) {
+            role_index.insert((role, layer_idx), name.to_string());
+        }
+
+        // Index bias tensors: if name ends with .weight, check for .bias
+        if name.ends_with(".weight") {
+            let bias_name = format!("{}bias", &name[..name.len() - 6]);
+            if name_set.contains(bias_name.as_str()) {
+                bias_index.insert(name.to_string(), bias_name);
+            }
+        }
+    }
+
+    // Also check for standalone bias tensors (e.g. BERT's "embeddings.LayerNorm.bias")
+    for &name in &names {
+        let lower = name.to_ascii_lowercase();
+        if (lower.ends_with(".bias") || lower.ends_with("_bias")) && !bias_index.values().any(|v| v == name) {
+            // Try to find the corresponding weight
+            let weight_name = if name.ends_with(".bias") {
+                format!("{}weight", &name[..name.len() - 4])
+            } else if name.ends_with("_bias") {
+                format!("{}_weight", &name[..name.len() - 5])
+            } else {
+                continue;
+            };
+            if name_set.contains(weight_name.as_str()) {
+                bias_index.insert(weight_name, name.to_string());
+            }
+        }
+    }
+
+    (role_index, bias_index)
 }
 
 #[derive(Debug, Error)]
@@ -290,6 +361,11 @@ pub trait TensorProvider {
     /// Loads tensor data.
     /// Returns Cow to support both zero-copy (SafeTensors mmap) and allocated (GGUF conversion) data.
     fn load_tensor_data(&self, name: &str) -> Result<Cow<'_, [u8]>>;
+
+    /// Returns the original GGML dtype for a tensor (GGUF only).
+    fn ggml_dtype(&self, _name: &str) -> Option<GgmlDType> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -331,6 +407,12 @@ impl Loader {
     }
 
     pub fn from_source_with_config(model_id: String, config: LoaderConfig) -> Result<Self> {
+        // 本地目录检测：如果 model_id 是一个存在的目录，直接扫描文件
+        let local_path = Path::new(&model_id);
+        if local_path.is_dir() {
+            return Self::from_local_dir(local_path);
+        }
+
         let cache = CacheLayout::new(config.cache_dir.clone())
             .map_err(|e| LoaderError::Cache(e.to_string()))?;
         cache.ensure()?;
@@ -393,6 +475,45 @@ impl Loader {
                     loader.config_path = Some(path.clone());
                 } else if name == "tokenizer.json" {
                     loader.tokenizer_path = Some(path.clone());
+                }
+            }
+        }
+
+        Ok(loader)
+    }
+
+    /// 从本地目录加载模型文件
+    fn from_local_dir(dir: &Path) -> Result<Self> {
+        let mut weight_paths = Vec::new();
+        let mut aux_files = Vec::new();
+
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("safetensors" | "gguf" | "onnx") => weight_paths.push(path),
+                Some("json") => aux_files.push(path),
+                _ => {}
+            }
+        }
+
+        if weight_paths.is_empty() {
+            return Err(LoaderError::MissingWeights);
+        }
+
+        let mut loader = Self::new(ModelManifest::default());
+        loader.weight_paths = weight_paths;
+        loader.detect_format();
+
+        for path in aux_files {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name == "config.json" {
+                    loader.config_path = Some(path);
+                } else if name == "tokenizer.json" {
+                    loader.tokenizer_path = Some(path);
                 }
             }
         }
@@ -668,12 +789,35 @@ impl Loader {
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
         let mut meta_map = HashMap::new();
+        let mut quantized = HashMap::new();
 
         for meta in provider.iter_tensors() {
+            // Check if this tensor has a quantized GGML dtype
+            if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {
+                if let Some(qt) = adapter::ggml_dtype_to_quant_type(ggml_dt) {
+                    // Quantized tensor — store raw bytes with QuantType metadata
+                    let data = provider.load_tensor_data(&meta.name)?;
+                    quantized.insert(
+                        meta.name.clone(),
+                        QuantizedTensor {
+                            data: data.into_owned(),
+                            quant_type: qt,
+                            shape: meta.shape.clone(),
+                            ggml_dtype: ggml_dt,
+                        },
+                    );
+                    shapes.insert(meta.name.clone(), meta.shape.clone());
+                    meta_map.insert(meta.name.clone(), meta);
+                    continue;
+                }
+            }
+
+            // Native float tensor — upload with dtype conversion if needed
             match meta.dtype {
                 Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
                     let data = provider.load_tensor_data(&meta.name)?;
-                    let tensor = upload_native_tensor::<B, E>(backend, &meta, data.as_ref())?;
+                    let tensor =
+                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref())?;
 
                     tensors.insert(meta.name.clone(), tensor);
                     shapes.insert(meta.name.clone(), meta.shape.clone());
@@ -681,12 +825,13 @@ impl Loader {
                 }
                 _ => {
                     // Skip unsupported types (e.g. integer indices, boolean masks)
-                    // These are not model weights usually.
                 }
             }
         }
 
-        Ok(WeightsHandle::new(tensors, shapes, meta_map))
+        Ok(WeightsHandle::new_with_quantized(
+            tensors, shapes, meta_map, quantized,
+        ))
     }
 
     pub fn from_local_files_with_manifest(
@@ -778,6 +923,88 @@ fn upload_native_tensor<B: Backend<E>, E: Element>(
         .map_err(|e| LoaderError::Backend(e.to_string()))
 }
 
+fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
+    backend: &B,
+    meta: &TensorMeta,
+    data: &[u8],
+) -> Result<B::Tensor> {
+    let _elem_size = std::mem::size_of::<E>();
+
+    // Check if dtype matches directly
+    let dtype_matches = match meta.dtype {
+        Dtype::F32 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>(),
+        Dtype::F16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::f16>(),
+        Dtype::BF16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::bf16>(),
+        Dtype::F64 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f64>(),
+        _ => false,
+    };
+
+    if dtype_matches {
+        return upload_native_tensor::<B, E>(backend, meta, data);
+    }
+
+    // Dtype mismatch — convert on CPU
+    // Currently supports: F16→f32, BF16→f32
+    let is_f32_backend = std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>();
+
+    if is_f32_backend {
+        let converted_f32: Vec<f32> = match meta.dtype {
+            Dtype::F16 => {
+                let src_size = std::mem::size_of::<half::f16>();
+                data.chunks_exact(src_size)
+                    .map(|chunk| {
+                        let val: half::f16 =
+                            unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const half::f16) };
+                        val.to_f32()
+                    })
+                    .collect()
+            }
+            Dtype::BF16 => {
+                let src_size = std::mem::size_of::<half::bf16>();
+                data.chunks_exact(src_size)
+                    .map(|chunk| {
+                        let val: half::bf16 = unsafe {
+                            std::ptr::read_unaligned(chunk.as_ptr() as *const half::bf16)
+                        };
+                        val.to_f32()
+                    })
+                    .collect()
+            }
+            Dtype::F64 => {
+                let src_size = std::mem::size_of::<f64>();
+                data.chunks_exact(src_size)
+                    .map(|chunk| {
+                        let val: f64 =
+                            unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const f64) };
+                        val as f32
+                    })
+                    .collect()
+            }
+            _ => {
+                return Err(LoaderError::Backend(format!(
+                    "cannot convert {:?} to {}",
+                    meta.dtype,
+                    std::any::type_name::<E>()
+                )));
+            }
+        };
+
+        // Safety: we know E is f32 here
+        let as_e: &[E] =
+            unsafe { std::slice::from_raw_parts(converted_f32.as_ptr() as *const E, converted_f32.len()) };
+        return backend
+            .upload_weights(as_e)
+            .map_err(|e| LoaderError::Backend(e.to_string()));
+    }
+
+    Err(LoaderError::Backend(format!(
+        "dtype conversion not supported: tensor \'{}\' is {:?}, backend expects {}",
+        meta.name,
+        meta.dtype,
+        std::any::type_name::<E>()
+    )))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationMetadata {
     pub group_size: usize,
@@ -815,6 +1042,7 @@ pub struct WeightsHandle<B: Backend<E>, E: Element = f32> {
     shapes: HashMap<String, Vec<usize>>,
     pub meta: HashMap<String, TensorMeta>,
     pub thinking_head: Option<ThinkingHead>,
+    quantized: HashMap<String, QuantizedTensor>,
 }
 
 impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
@@ -828,7 +1056,31 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             shapes,
             meta,
             thinking_head: None,
+            quantized: HashMap::new(),
         }
+    }
+
+    pub fn new_with_quantized(
+        tensors: HashMap<String, B::Tensor>,
+        shapes: HashMap<String, Vec<usize>>,
+        meta: HashMap<String, TensorMeta>,
+        quantized: HashMap<String, QuantizedTensor>,
+    ) -> Self {
+        Self {
+            tensors,
+            shapes,
+            meta,
+            thinking_head: None,
+            quantized,
+        }
+    }
+
+    pub fn quantized_tensor(&self, name: &str) -> Option<&QuantizedTensor> {
+        self.quantized.get(name)
+    }
+
+    pub fn is_quantized(&self, name: &str) -> bool {
+        self.quantized.contains_key(name)
     }
 
     pub fn tensor(&self, name: &str) -> Option<&B::Tensor> {
@@ -844,7 +1096,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
 pub type WeightsHandleF32<B> = WeightsHandle<B, f32>;
 
 /// 实现 gllm_kernels::TensorLookup trait
-impl<B: Backend<E>, E: Element> gllm_kernels::backend_trait::TensorLookup<E, B>
+impl<B: Backend<E>, E: Element> crate::compat::backend_trait::TensorLookup<E, B>
     for WeightsHandle<B, E>
 {
     fn get_tensor(&self, name: &str) -> Option<&B::Tensor> {
@@ -853,6 +1105,10 @@ impl<B: Backend<E>, E: Element> gllm_kernels::backend_trait::TensorLookup<E, B>
 
     fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
         WeightsHandle::tensor_shape(self, name)
+    }
+
+    fn get_quantized(&self, name: &str) -> Option<&crate::loader::QuantizedTensor> {
+        self.quantized.get(name)
     }
 }
 

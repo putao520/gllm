@@ -235,3 +235,175 @@ fn expose_precision_from_tensor_dtype() {
     );
     assert_eq!(loader.unique_precisions(), vec![Dtype::F16, Dtype::I8]);
 }
+
+#[test]
+fn alias_map_matmul() {
+    // Simulate: node "/encoder/layer.0/attention/self/query/MatMul" with input[1] = "onnx::MatMul_977"
+    let weight = tensor_f32("onnx::MatMul_977", vec![3, 3], &[1.0; 9]);
+    let bias = tensor_f32(
+        "encoder.layer.0.attention.self.query.bias",
+        vec![3],
+        &[0.1, 0.2, 0.3],
+    );
+    let node = proto::NodeProto {
+        name: Some("/encoder/layer.0/attention/self/query/MatMul".to_string()),
+        op_type: Some("MatMul".to_string()),
+        input: vec![
+            "input".to_string(),
+            "onnx::MatMul_977".to_string(),
+        ],
+        output: vec!["matmul_out".to_string()],
+        ..empty_node()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![weight, bias],
+        node: vec![node],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+
+    // Should be able to access by semantic name
+    let slice = loader
+        .tensor("encoder.layer.0.attention.self.query.weight")
+        .expect("alias lookup");
+    let values = bytes_to_f32(slice.data);
+    assert_eq!(values.len(), 9);
+
+    // Bias should still work directly
+    let _bias = loader
+        .tensor("encoder.layer.0.attention.self.query.bias")
+        .expect("direct bias lookup");
+
+    // names() should expose semantic names
+    let names = loader.names();
+    assert!(names.contains(&"encoder.layer.0.attention.self.query.weight".to_string()));
+    assert!(names.contains(&"encoder.layer.0.attention.self.query.bias".to_string()));
+    assert!(!names.iter().any(|n| n.starts_with("onnx::")));
+}
+
+#[test]
+fn alias_map_gemm() {
+    let weight = tensor_f32("onnx::Gemm_42", vec![4, 4], &[1.0; 16]);
+    let node = proto::NodeProto {
+        name: Some("/classifier/dense/Gemm".to_string()),
+        op_type: Some("Gemm".to_string()),
+        input: vec![
+            "input".to_string(),
+            "onnx::Gemm_42".to_string(),
+            "classifier.dense.bias".to_string(),
+        ],
+        output: vec!["gemm_out".to_string()],
+        ..empty_node()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![weight],
+        node: vec![node],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+    loader
+        .tensor("classifier.dense.weight")
+        .expect("Gemm alias");
+}
+
+#[test]
+fn alias_map_gather() {
+    let weight = tensor_f32("onnx::Gather_10", vec![100, 8], &[0.5; 800]);
+    let node = proto::NodeProto {
+        name: Some("/embeddings/word_embeddings/Gather".to_string()),
+        op_type: Some("Gather".to_string()),
+        input: vec![
+            "onnx::Gather_10".to_string(),
+            "input_ids".to_string(),
+        ],
+        output: vec!["gather_out".to_string()],
+        ..empty_node()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![weight],
+        node: vec![node],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+    loader
+        .tensor("embeddings.word_embeddings.weight")
+        .expect("Gather alias");
+}
+
+#[test]
+fn alias_map_no_overwrite_existing() {
+    // If a semantic name already exists as a real initializer, don't overwrite it
+    let real_weight = tensor_f32("encoder.layer.0.weight", vec![2, 2], &[1.0; 4]);
+    let anon_weight = tensor_f32("onnx::MatMul_99", vec![2, 2], &[2.0; 4]);
+    let node = proto::NodeProto {
+        name: Some("/encoder/layer.0/MatMul".to_string()),
+        op_type: Some("MatMul".to_string()),
+        input: vec!["input".to_string(), "onnx::MatMul_99".to_string()],
+        output: vec!["out".to_string()],
+        ..empty_node()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![real_weight, anon_weight],
+        node: vec![node],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+    // The real weight should be returned, not the anonymous one
+    let slice = loader.tensor("encoder.layer.0.weight").expect("real weight");
+    let values = bytes_to_f32(slice.data);
+    assert_eq!(values, vec![1.0; 4]);
+}
+
+#[test]
+fn alias_tensor_provider_iter() {
+    use crate::loader::TensorProvider;
+
+    let weight = tensor_f32("onnx::MatMul_1", vec![2, 2], &[1.0; 4]);
+    let node = proto::NodeProto {
+        name: Some("/layer/MatMul".to_string()),
+        op_type: Some("MatMul".to_string()),
+        input: vec!["x".to_string(), "onnx::MatMul_1".to_string()],
+        output: vec!["y".to_string()],
+        ..empty_node()
+    };
+    let graph = proto::GraphProto {
+        initializer: vec![weight],
+        node: vec![node],
+        ..empty_graph()
+    };
+    let model = empty_model(graph);
+    let file = NamedTempFile::new().expect("tempfile");
+    write_model(model, file.path());
+
+    let loader = OnnxLoader::from_path(file.path()).expect("loader");
+
+    // iter_tensors should expose semantic name
+    let tensors: Vec<_> = loader.iter_tensors().collect();
+    assert_eq!(tensors.len(), 1);
+    assert_eq!(tensors[0].name, "layer.weight");
+
+    // tensor_info should work with semantic name
+    let info = loader.tensor_info("layer.weight").expect("tensor_info");
+    assert_eq!(info.name, "layer.weight");
+    assert_eq!(info.shape, vec![2, 2]);
+
+    // load_tensor_data should work with semantic name
+    let data = loader.load_tensor_data("layer.weight").expect("load data");
+    assert_eq!(data.len(), 16); // 4 floats * 4 bytes
+}
