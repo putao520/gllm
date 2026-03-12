@@ -4,7 +4,7 @@ use gllm::scheduler::{
     BatchOrderPolicy, BatchResult, ContinuousBatcher, GroupState, HGALConfig, PagedScheduler,
     SchedulerError, Sequence, SequenceGroup,
 };
-use gllm_kernels::kernel_types::RequestId;
+use gllm::scheduler::RequestId;
 
 fn make_group(id: RequestId, context_len: usize) -> SequenceGroup {
     SequenceGroup {

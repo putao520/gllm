@@ -8,7 +8,7 @@ use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 use gllm::model_config::ModelConfig;
-use gllm_kernels::cpu_backend::CpuBackend;
+use gllm::compat::CpuBackend;
 use prost::bytes::Bytes;
 use prost::Message;
 use safetensors::tensor::{serialize_to_file, TensorView};

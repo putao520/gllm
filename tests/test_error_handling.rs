@@ -8,8 +8,8 @@ use gllm::manifest::{
     map_architecture_token, tensor_rules_for_arch, ModelArchitecture, ModelKind, ModelManifest,
     EMPTY_FILE_MAP,
 };
-use gllm_kernels::backend_trait::BackendError;
-use gllm_kernels::cpu_backend::CpuBackend;
+use gllm::engine::BackendError;
+use gllm::compat::CpuBackend;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;

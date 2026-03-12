@@ -3,7 +3,7 @@ use gllm::scheduler::hgal::HGALConfig;
 use gllm::scheduler::paged_scheduler::PagedScheduler;
 use gllm::scheduler::sequence::Sequence;
 use gllm::scheduler::BatchOrderPolicy;
-use gllm_kernels::kernel_types::RequestId;
+use gllm::scheduler::RequestId;
 
 fn make_sequence(id: RequestId, prompt_len: usize) -> Sequence {
     // Dummy prompt tokens

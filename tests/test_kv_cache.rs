@@ -1,7 +1,7 @@
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
-use gllm_kernels::backend_trait::Backend;
-use gllm_kernels::cpu_backend::CpuBackend;
-use gllm_kernels::kernel_types::KvCacheConfig;
+use gllm::compat::backend_trait::Backend;
+use gllm::compat::CpuBackend;
+use gllm::engine::KvCacheConfig;
 
 fn make_state(backend: &CpuBackend<f32>, max_seq_len: usize) -> KvCacheState {
     let config = KvCacheConfig {

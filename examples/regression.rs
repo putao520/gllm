@@ -17,9 +17,9 @@ use gllm::loader::convert_bins_to_safetensors;
 use gllm::loader::PytorchConversionConfig;
 use gllm::scheduler::{GroupState, HGALConfig, PagedScheduler, SequenceGroup};
 use gllm::{Client, ModelKind};
-use gllm_kernels::backend_trait::Backend;
-use gllm_kernels::cpu_backend::CpuBackend;
-use gllm_kernels::kernel_types::KvCacheConfig;
+use gllm::compat::backend_trait::Backend;
+use gllm::compat::CpuBackend;
+use gllm::engine::KvCacheConfig;
 #[cfg(feature = "candle")]
 use hf_hub::api::sync::ApiBuilder;
 #[cfg(feature = "candle")]

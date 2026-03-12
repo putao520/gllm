@@ -1,7 +1,7 @@
 use gllm::scheduler::hgal::HGALConfig;
 use gllm::scheduler::paged_scheduler::{PagedScheduler, SchedulerError};
 use gllm::scheduler::types::{GroupState, SequenceGroup};
-use gllm_kernels::kernel_types::RequestId;
+use gllm::scheduler::RequestId;
 use std::time::Instant;
 
 fn make_group(id: RequestId, context_len: usize) -> SequenceGroup {

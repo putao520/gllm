@@ -3,7 +3,7 @@ use gllm::loader::Loader;
 use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
-use gllm_kernels::cpu_backend::CpuBackend;
+use gllm::compat::CpuBackend;
 use std::borrow::Cow;
 use std::env;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
     for p in &prompts {
         use gllm::scheduler::types::RequestKind;
         // Max 20 new tokens
-        let config = gllm_kernels::kernel_types::SamplingConfig::default();
+        let config = gllm::engine::SamplingConfig::default();
         let id = executor.enqueue_with_config(RequestKind::Chat, *p, 20, config)?;
         req_ids.push(id);
     }

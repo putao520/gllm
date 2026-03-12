@@ -53,7 +53,7 @@ graph:
     - name: rope
       op_type: RotaryEmbedding
       inputs: [q, k]
-      outputs: [qk]
+      outputs: [logits]
 "#;
     let template = ArchTemplate::from_yaml(yaml).unwrap();
     let mut cfg = ResolvedConfig::default();

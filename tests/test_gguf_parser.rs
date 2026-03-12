@@ -6,7 +6,7 @@ use gllm::loader::gguf::{
     tensor_nbytes, GgmlDType, GgufError, GgufReader, GgufValueType, GGUF_MAGIC,
     GGUF_SUPPORTED_VERSION,
 };
-use gllm_kernels::{DType, PackedBits};
+use gllm::loader::adapter::{DType, PackedBits};
 use tempfile::NamedTempFile;
 
 #[derive(Debug, Clone)]

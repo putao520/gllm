@@ -5,8 +5,8 @@ use gllm::manifest::{
     ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
 };
 use gllm::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
-use gllm_kernels::cpu_backend::CpuBackend;
-use gllm_kernels::kernel_types::PageState;
+use gllm::compat::CpuBackend;
+use gllm::scheduler::PageState;
 
 /// TEST-MOE-001: Qwen3 MoE manifest 选择 MoE 适配器
 ///
