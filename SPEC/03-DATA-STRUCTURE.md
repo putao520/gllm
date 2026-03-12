@@ -144,6 +144,38 @@
 | `dtype` | u32 | 数据类型 (GgmlDType) |
 | `offset` | u64 | 在文件中的偏移量 |
 
+### 2.7 QuantizedTensor 量化张量存储 (DATA-QUANT-TENSOR)
+
+> **关联需求**: REQ-QUANT-001 ~ REQ-QUANT-007
+> **实现位置**: `src/loader/mod.rs::QuantizedTensor`
+
+量化 tensor 不经过 `Backend::upload_weights()` 上传，而是以原始 block bytes 存储在 `WeightsHandle.quantized` HashMap 中，在推理时直接传递给量化 matmul/dequantize kernel。
+
+```rust
+pub struct QuantizedTensor {
+    pub data: Vec<u8>,           // 原始 GGUF block bytes
+    pub quant_type: QuantType,   // gllm-kernels QuantType 枚举
+    pub shape: Vec<usize>,       // 逻辑形状 (行×列)
+    pub ggml_dtype: GgmlDType,   // 原始 GGUF 量化类型
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `data` | `Vec<u8>` | 量化 block 原始字节，零转换保留 |
+| `quant_type` | `QuantType` | gllm-kernels 量化类型，用于 kernel 分发 |
+| `shape` | `Vec<usize>` | 张量逻辑形状 |
+| `ggml_dtype` | `GgmlDType` | GGUF 文件中的原始量化类型标识 |
+
+**类型映射 (GgmlDType → QuantType)**:
+
+| 族 | GgmlDType | QuantType | 分发目标 |
+|----|-----------|-----------|----------|
+| K-Quant | Q2_K ~ Q8_K | Q2K ~ Q8K | `kquant_matmul` |
+| Classic | Q4_0 ~ Q8_1 | Q4_0 ~ Q8_1 | `classic_matmul` |
+| IQ | IQ1_S ~ IQ4_XS | IQ1S ~ IQ4XS | `iq_matmul` |
+| Native | F32/F16/BF16/F64/I* | (None) | `upload_weights` 常规路径 |
+
 ---
 
 | 架构 | `general.architecture` 值 | 特殊 Keys |
@@ -303,7 +335,7 @@ impl ModelConfig {
 2. 遍历张量列表查找 embedding/Q projection
 3. 优先使用张量形状，仅在找不到时回退
 
-#### 6.3.3 ONNX 格式 (待实现 - REQ-LOADER-023)
+#### 6.3.3 ONNX 格式 (已实现 - REQ-LOADER-023)
 
 | 字段 | 推导方法 | 回退策略 |
 |------|----------|----------|
@@ -346,8 +378,8 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 | 格式 | 状态 | 关联需求 |
 |------|------|----------|
 | GGUF | ✅ 已实现 | - |
-| SafeTensors | 📋 待实现 | REQ-LOADER-022 |
-| ONNX | 📋 待实现 | REQ-LOADER-023 |
+| SafeTensors | ✅ 已实现 | REQ-LOADER-022 |
+| ONNX | ✅ 已实现 | REQ-LOADER-023 |
 
 ## 7. 通用张量拓扑 (DATA-TENSOR-TOPOLOGY)
 

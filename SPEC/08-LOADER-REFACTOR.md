@@ -87,29 +87,38 @@ src/
 │   ├── gguf/               # GGUF 解析（零转换）
 │   ├── safetensors.rs      # SafeTensors 解析（零转换）
 │   ├── onnx/               # ONNX 解析
-│   └── arch_template.rs    # YAML 模板 → OnnxGraph
+│   ├── adapter.rs          # GGUF→kernels 类型适配
+│   ├── downloader.rs       # 下载编排 (HF→MS fallback)
+│   ├── format_detector.rs  # 自动格式探测
+│   ├── hf_hub.rs           # HuggingFace Hub
+│   ├── modelscope.rs       # ModelScope
+│   ├── parallel.rs         # 并行层加载
+│   └── pytorch.rs          # PyTorch 格式
 │
-├── arch/                   # 架构 YAML 模板
+├── arch/                   # 架构模板系统
 │   ├── mod.rs              # 模板注册表
-│   ├── qwen3.yaml
-│   ├── qwen3_moe.yaml
-│   ├── llama.yaml
-│   ├── mistral.yaml
-│   └── ...
+│   ├── registry.rs         # 架构注册
+│   ├── resolve.rs          # 从元数据解析架构配置
+│   ├── template.rs         # YAML → OnnxGraph 解析器
+│   └── templates/          # YAML 模板文件
+│       └── qwen3.yaml
 │
 ├── graph/                  # DAG 处理
 │   ├── mod.rs
 │   ├── types.rs            # OnnxGraph 扩展类型
-│   ├── optimizer/          # 优化器
-│   │   ├── mod.rs
-│   │   ├── pass.rs         # Pass trait
-│   │   ├── pattern_fusion.rs
-│   │   ├── hardware_fusion.rs
-│   │   └── dead_code.rs
-│   └── executor.rs         # FusedGraph 执行
+│   ├── executor.rs         # FusedGraph 执行
+│   └── optimizer/          # 优化器
+│       ├── mod.rs
+│       ├── pass.rs         # Pass trait
+│       ├── pattern_fusion.rs
+│       ├── hardware_fusion.rs
+│       ├── constant_folding.rs
+│       └── dead_code.rs
 │
 ├── engine/
-│   └── executor.rs         # 重写：使用 graph 模块
+│   ├── mod.rs
+│   ├── executor.rs         # 重写：使用 graph 模块
+│   └── pipeline.rs         # Pipeline 管理
 │
 └── backend/                # 保留不变
 ```
@@ -180,6 +189,18 @@ src/
 | REQ-OPT-006 | GQA 融合 | Grouped Query Attention 模式识别和融合 | ✅ [62268a3] |
 | REQ-OPT-007 | MoE routing 融合 | TopK + Softmax + Dispatch 模式融合 | ✅ [62268a3] |
 | REQ-OPT-008 | 常量折叠 Pass | 编译期常量表达式求值 | ✅ [62268a3] |
+
+### 3.8 Phase 8: GGUF 量化 Per-Tensor 混合精度加载 ✅
+
+| REQ ID | 需求 | 验收标准 | 状态 |
+|--------|------|----------|------|
+| REQ-QUANT-001 | GgmlDType→QuantType 桥接 | `adapter::ggml_dtype_to_quant_type()` 覆盖 21 种量化类型 | ✅ |
+| REQ-QUANT-002 | TensorProvider 量化元数据 | `TensorProvider::ggml_dtype()` 返回原始 GGML dtype | ✅ |
+| REQ-QUANT-003 | QuantizedTensor 存储 | `WeightsHandle.quantized` HashMap 存储量化 tensor 原始 block bytes | ✅ |
+| REQ-QUANT-004 | upload_provider 量化分支 | 量化 tensor 跳过 GPU upload，native float 支持 F16/BF16→f32 自动转换 | ✅ |
+| REQ-QUANT-005 | TensorLookup 量化访问 | `TensorLookup::get_quantized()` 提供量化 tensor 查询 | ✅ |
+| REQ-QUANT-006 | Backend 量化 matmul | `Backend::quantized_matmul()` 分发 K-Quant/Classic/IQ 三族 kernel | ✅ |
+| REQ-QUANT-007 | Backend dequantize | `Backend::dequantize()` 支持 24 种量化类型反量化到 f32 | ✅ |
 
 ---
 

@@ -303,7 +303,7 @@ Swapped --(swap-in)--> Warm --(时间到期 OR 访问2次)--> Active
 ## 8. 2024 vLLM 优化扩展 (v2.0)
 
 > **关联需求**: REQ-SCHED-007, REQ-SCHED-008, REQ-SCHED-009
-> **AOT CUBIN 兼容性**: ✅ 所有优化均为调度/算法级别，无需修改内核编译流程
+> **JIT 兼容性**: ✅ 所有优化均为调度/算法级别，不涉及 JIT 编译器管线
 
 ### 8.1 Chunked Prefill / SplitFuse 调度
 

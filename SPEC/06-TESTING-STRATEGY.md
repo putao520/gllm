@@ -102,16 +102,16 @@ fn test_name() {
 
 | REQ-TEST | 描述 | TEST-XXX | 测试文件 |
 |----------|------|----------|----------|
-| REQ-TEST-001 | 后端覆盖测试 | TEST-BACKEND-001 ~ -003 | `test_backend_compat.rs` |
-| REQ-TEST-002 | Generator 模型矩阵 | TEST-MATRIX-GEN-001 ~ -007 | `test_complete_matrix.rs` |
-| REQ-TEST-003 | Embedding 模型矩阵 | TEST-MATRIX-EMB-001 ~ -010 | `test_complete_matrix.rs` |
-| REQ-TEST-004 | Reranker 模型矩阵 | TEST-MATRIX-RERANK-001 ~ -003 | `test_complete_matrix.rs` |
-| REQ-TEST-005 | 功能模块覆盖 | TEST-LOADER-*, TEST-INFERENCE-*, TEST-SCHED-* | 各功能测试文件 |
-| REQ-TEST-006 | 量化格式测试 | TEST-QUANT-001 ~ -004 | `test_quantization.rs` |
+| REQ-TEST-001 | 后端覆盖测试 | TEST-BACKEND-001 ~ -003 | `test_e2e_embedding.rs`, `test_e2e_generator.rs`, `test_e2e_reranker.rs` |
+| REQ-TEST-002 | Generator 模型矩阵 | TEST-MATRIX-GEN-001 ~ -007 | `test_e2e_generator.rs` |
+| REQ-TEST-003 | Embedding 模型矩阵 | TEST-MATRIX-EMB-001 ~ -010 | `test_e2e_embedding.rs` |
+| REQ-TEST-004 | Reranker 模型矩阵 | TEST-MATRIX-RERANK-001 ~ -003 | `test_e2e_reranker.rs` |
+| REQ-TEST-005 | 功能模块覆盖 | TEST-LOADER-*, TEST-INFERENCE-*, TEST-SCHED-* | `test_gguf_parser.rs`, `test_kv_cache.rs`, `test_paged_attention.rs`, `test_vllm2024.rs` 等 |
+| REQ-TEST-006 | 量化格式测试 | TEST-QUANT-001 ~ -004 | `quantization_metadata.rs` |
 | REQ-TEST-007 | 错误处理测试 | TEST-ERROR-001 ~ -004 | `test_error_handling.rs` |
 | REQ-TEST-008 | 性能基准测试 | TEST-PERF-001 ~ -004 | `test_performance.rs` |
 | REQ-TEST-009 | MoE 专项测试 | TEST-MOE-001 ~ -003 | `test_moe_routing.rs` |
-| REQ-TEST-010 | 后端一致性测试 | TEST-BACKEND-001 | `test_backend_compat.rs` |
+| REQ-TEST-010 | 后端一致性测试 | TEST-BACKEND-001 | 📋 待实现 (`test_backend_compat.rs`) |
 
 ---
 
@@ -158,7 +158,7 @@ fn test_name() {
 
 ```rust
 #[test]
-#[cfg_attr(not(feature = "cuda"), ignore = "Requires CUDA backend")]
+#[cfg_attr(not(feature = "jit-cuda"), ignore = "Requires CUDA backend")]
 fn cuda_test() {
     // ...
 }
@@ -190,26 +190,27 @@ cargo test --test test_complete_matrix -- --test-threads=1
 
 | 测试文件 | 关联 REQ | 测试类型 | 状态 |
 |----------|----------|----------|------|
-| `test_backend_compat.rs` | REQ-TEST-001, REQ-TEST-010 | 单元测试 | 🟢 已实现 |
-| `test_e2e.rs` | REQ-TEST-001 | E2E 测试 | 🟡 需优化 |
-| `test_model_matrix.rs` | REQ-TEST-002/003/004 | 单元测试 (Mock) | ⚠️ 需改为真实测试 |
-| `test_complete_matrix.rs` | REQ-TEST-002/003/004 | 真实推理测试 | 🟢 已实现 |
-| `test_quantization.rs` | REQ-TEST-006 | 单元测试 | 🟢 已实现 |
-| `test_error_handling.rs` | REQ-TEST-007 | 负向/边界测试 | 🟢 已实现 |
+| `test_e2e_embedding.rs` | REQ-TEST-001, REQ-TEST-003 | E2E 测试 | 🟢 已实现 |
+| `test_e2e_generator.rs` | REQ-TEST-001, REQ-TEST-002 | E2E 测试 | 🟢 已实现 |
+| `test_e2e_reranker.rs` | REQ-TEST-001, REQ-TEST-004 | E2E 测试 | 🟢 已实现 |
+| `test_gguf_parser.rs` | REQ-TEST-005 (Loader) | 单元测试 | 🟢 已实现 |
+| `test_model_config_gguf.rs` | REQ-TEST-005 (Loader) | 单元测试 | 🟢 已实现 |
+| `test_metadata_config_loading.rs` | REQ-TEST-005 (Loader) | 单元测试 | 🟢 已实现 |
+| `test_kv_cache.rs` | REQ-TEST-005 (Scheduler) | 单元测试 | 🟢 已实现 |
+| `test_paged_attention.rs` | REQ-TEST-005 (Scheduler) | 单元测试 | 🟢 已实现 |
+| `test_vllm2024.rs` | REQ-TEST-005 (Scheduler) | 单元测试 | 🟢 已实现 |
+| `test_continuous_batching_flow.rs` | REQ-TEST-005 (Scheduler) | 单元测试 | 🟢 已实现 |
+| `test_swap_correctness.rs` | REQ-TEST-005 (Scheduler) | 单元测试 | 🟢 已实现 |
 | `test_moe_routing.rs` | REQ-TEST-009 | 单元测试 | 🟢 已实现 |
+| `test_error_handling.rs` | REQ-TEST-007 | 负向/边界测试 | 🟢 已实现 |
 | `test_performance.rs` | REQ-TEST-008 | 性能测试 | 🟢 已实现 |
-| `test_kv_cache.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_vllm2024.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_paged_attention.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_gguf_loader.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_intelligent_loading.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_loader_modelscope.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_pytorch_loader.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_adapters.rs` | REQ-TEST-005 | 单元测试 | 🟢 已实现 |
-| `test_multiple_architectures.rs` | REQ-TEST-002 | 单元测试 | 🟢 已实现 |
-| `test_multi_model_summary.rs` | REQ-TEST-002 | 单元测试 | 🟢 已实现 |
-| `test_smollm2_generation.rs` | REQ-TEST-002 | 单元测试 | 🟢 已实现 |
-| `test_quantization_loader.rs` | REQ-TEST-006 | 单元测试 | 🟢 已实现 |
+| `test_dag_refactor.rs` | REQ-REFACTOR (08-LOADER-REFACTOR) | 单元测试 | 🟢 已实现 |
+| `test_client_lifecycle.rs` | REQ-LOADER-018 | 单元测试 | 🟢 已实现 |
+| `test_executor_swap_flow.rs` | REQ-LOADER-018 | 单元测试 | 🟢 已实现 |
+| `quantization_metadata.rs` | REQ-TEST-006 | 单元测试 | 🟢 已实现 |
+| `common.rs` | - | 测试工具模块 | 🟢 已实现 |
+| `debug_download.rs` | - | 调试工具 | 🟢 已实现 |
+| `test_aux_files_debug.rs` | - | 调试工具 | 🟢 已实现 |
 
 ---
 
@@ -328,14 +329,14 @@ fn test_empty_input() {
 
 | 文件 | 问题 | 优先级 |
 |------|------|--------|
-| `test_model_matrix.rs` | 使用 Mock 权重 | P0 - 改为真实测试 |
-| `test_e2e.rs` | 依赖外网下载 | P1 - 使用本地缓存 |
 | 所有测试文件 | 缺少 TEST-XXX 注释 | P1 - 补充文档 |
 | 所有测试文件 | 缺少负向/边界测试 | P2 - 补充覆盖 |
+| REQ-TEST-010 (后端一致性) | 缺少独立测试文件 | P2 - 新增 `test_backend_compat.rs` |
+| REQ-TEST-006 (量化格式) | 缺少独立测试文件 | P2 - 新增 `test_quantization.rs` |
 
 ## 10. 跨语言对齐测试策略 (REQ-TEST-011)
 
-> **目标**: 消除 Rust (faer/ndarray) 与 Python (numpy/torch) 矩阵布局(Row/Col-Major)差异导致的隐蔽数值错误。
+> **目标**: 消除 Rust 与 Python (numpy/torch) 矩阵布局(Row/Col-Major)差异导致的隐蔽数值错误。
 
 ### 10.1 测试流程
 1. **生成基准 (Python)**: 使用 `tests/e2e_alignment/generate_golden.py` 运行 HF Transformers 模型，保存中间层(Embedding/Attention)和最终输出到 `.safetensors`。
@@ -439,7 +440,7 @@ assert!(result.is_none());
 
 ```
 tests/
-└── test_gguf_loader.rs         # GGUF loader 单元测试
+└── test_gguf_parser.rs         # GGUF loader 单元测试
 ```
 
 ### 11.6 TEST-GGUF-010: 量化类型映射测试

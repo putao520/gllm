@@ -12,10 +12,12 @@
 
 | Component | Technology | Role |
 |-----------|------------|------|
-| **Loader** | `hf-hub`, `safetensors` | Model fetching and zero-copy loading |
+| **Loader** | `hf-hub`, `safetensors`, `prost`, `memmap2` | Model fetching, zero-copy loading, ONNX/GGUF parsing |
 | **Tokenizer** | `tokenizers` | Text <-> ID conversion |
-| **Scheduler** | Custom | PagedAttention & Continuous Batching |
-| **Engine** | `gllm-kernels` | Hardware abstraction layer |
+| **Scheduler** | Custom (HGAL) | PagedAttention & Continuous Batching |
+| **Engine** | `gllm-kernels` + `compat` shim | Hardware abstraction layer (compat bridges types) |
+| **Graph** | Custom DAG + `serde_yaml` | Unified OnnxGraph representation & optimization |
+| **Backend** | `gllm-kernels` | Auto-detect CUDA/ROCm/Metal/CPU |
 
 ## Core Architecture
 
@@ -34,16 +36,16 @@
 - **GPU Execution**: L3 GPU-Pure API (zero-copy generation loop)
 - **AOT Only**: Pre-compiled `.cubin` files, no PTX JIT
 
-### 1. Data Flow (Zero-Copy)
+### 2. Data Flow (Zero-Copy)
 - **Loader**: Maps `safetensors` directly to memory.
 - **Upload**: Pushes raw bytes to `gllm-kernels` (GPU) or maps them for CPU.
 - **Inference**: Orchestrates the `gllm-kernels` L3 API.
 
-### 2. Smart Scheduling
+### 3. Smart Scheduling
 - **Double Buffering**: Pre-allocate next batch while current batch computes.
 - **PagedAttention**: Manage KV cache as virtual memory pages.
 
-### 3. Fused-First Architecture / 融合优先原则
+### 4. Fused-First Architecture / 融合优先原则
 - **Constraint**: 调度/执行层必须优先选择融合算子 (Fused Kernels)。仅在无法匹配融合模式时，才降级使用原子算子 (Atomic Kernels)。
 - **Constraint**: ONNX Loader 必须实现 Graph Pattern Matching，将子图映射为 Fused Kernels，严禁 naive 的 1:1 翻译。
 
@@ -51,13 +53,64 @@
 
 ```
 src/
-├── lib.rs          # Library entry
-├── loader/         # Model fetching & parsing (HF/SafeTensors)
-│   └── mod.rs
-├── scheduler/      # Batching & KV Cache management
-│   └── mod.rs
-└── engine/         # Execution engine (wraps gllm-kernels)
-    └── mod.rs
+├── lib.rs              # Library entry & public API re-exports
+├── compat.rs           # Compatibility shim: re-exports gllm-kernels types (Backend, CpuBackend, Element, etc.)
+├── client.rs           # Client / AsyncClient (sync/async inference API)
+├── embeddings.rs       # Embeddings API
+├── rerank.rs           # Rerank API
+├── generation.rs       # Generation loop
+├── tokenizer.rs        # Tokenizer integration
+├── model_config.rs     # Tensor-driven model config (Ω1)
+├── weight_loader.rs    # Weight loading utilities
+├── kv_cache.rs         # KV Cache structures
+├── quantization.rs     # Quantization support
+├── loader/             # Model fetching & parsing
+│   ├── mod.rs          # Unified loading entry (auto format detection)
+│   ├── hf_hub.rs       # HuggingFace Hub downloader
+│   ├── modelscope.rs   # ModelScope downloader
+│   ├── downloader.rs   # Download orchestration (HF→MS fallback)
+│   ├── format_detector.rs # Auto format detection
+│   ├── safetensors.rs  # SafeTensors parser (zero-copy)
+│   ├── adapter.rs      # GGUF→kernels type adapter
+│   ├── parallel.rs     # Parallel layer loading
+│   ├── pytorch.rs      # PyTorch format support
+│   ├── gguf/           # GGUF parser (zero-copy, Ω1 compliant)
+│   └── onnx/           # ONNX protobuf parser (prost, graph pattern matching)
+├── arch/               # Architecture YAML templates → OnnxGraph
+│   ├── mod.rs          # Template registry
+│   ├── registry.rs     # Architecture registry
+│   ├── resolve.rs      # Architecture resolution from metadata
+│   └── template.rs     # YAML → OnnxGraph parser
+├── graph/              # DAG optimizer (unified representation)
+│   ├── mod.rs
+│   ├── types.rs        # OnnxGraph extended types
+│   ├── executor.rs     # FusedGraph executor
+│   └── optimizer/      # Optimization passes (pattern/hardware fusion, DCE)
+├── engine/             # Execution engine (wraps gllm-kernels)
+│   ├── mod.rs
+│   ├── executor.rs     # Executor (batch orchestration)
+│   └── pipeline.rs     # Pipeline management
+├── scheduler/          # Batching & KV Cache management (HGAL)
+│   ├── mod.rs
+│   ├── paged_scheduler.rs  # PagedAttention core
+│   ├── batcher.rs      # Continuous Batching
+│   ├── hgal.rs         # HGAL scheduler algorithm
+│   ├── allocator.rs    # Page allocator
+│   ├── memory_manager.rs   # GlobalMemoryManager
+│   ├── prefix_index.rs # KvPrefixIndex (trie-based)
+│   ├── sequence.rs     # SequenceGroup
+│   ├── types.rs        # Scheduler types
+│   ├── observer.rs     # RuntimeObserver
+│   ├── policy.rs       # JIT scheduling policies
+│   ├── jit_types.rs    # JIT type definitions
+│   └── vllm2024.rs     # SwiftKV / legacy structures
+├── backend/            # Backend detection & fallback
+│   ├── mod.rs
+│   ├── detection.rs    # Auto-detect CUDA→ROCm→Metal→CPU
+│   └── fallback.rs     # OOM fallback (GPU→CPU)
+└── manifest/           # Model manifest types
+    ├── mod.rs
+    └── types.rs
 ```
 
 ## Cache Directory
@@ -67,7 +120,7 @@ src/
 下载的模型文件存储在此目录。内部子目录结构由下载库（hf-hub/ModelScope）管理。
 
 **Environment Variables**:
-- `GLLM_CACHE_DIR`: 自定义缓存路径（默认：`~/.gllm/models`）
+- `GLLM_CACHE_DIR`: 自定义缓存路径（默认：`~/.gllm/models`）— 📋 计划中，尚未实现
 - `HF_TOKEN`: HuggingFace 认证 token
 
 > **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定来源。
@@ -104,9 +157,71 @@ cargo test
 **运行命令**：
 ```bash
 # 正确：E2E 测试单线程运行
-cargo test --test test_e2e -- --test-threads=1
-cargo test --test test_real_models -- --test-threads=1
+cargo test --test test_e2e_embedding -- --test-threads=1
+cargo test --test test_e2e_generator -- --test-threads=1
+cargo test --test test_e2e_reranker -- --test-threads=1
 
 # 单元测试可以并行（不涉及真实 I/O）
 cargo test --lib
 ```
+
+## 🧪 测试哲学
+
+**Pipeline 测试原则**：直接用现有 API 跑本地模型，哪里断了就是真实 bug，不做任何 workaround。
+
+## 🚨 禁止 Fallback 绕过
+
+**铁律：功能缺失必须补全实现，禁止用 fallback 绕过**：
+- ❌ JIT 编译失败时禁止 fallback 到手写 Rust 实现
+- ❌ 融合算子失败时禁止降级到原子算子拼接
+- ❌ 禁止用 stub/dummy 返回值（如 `Ok(vec![0.0])`）绕过未实现的功能
+- ✅ 测试失败说明功能缺失，必须补全真正的实现
+- ✅ JIT/融合/算子有 bug 就修 bug，不做 workaround
+
+**理由**：测试的目的是验证真实实现的正确性。Fallback 会掩盖真实问题，导致功能永远无法完成。
+
+## 🚨 禁止 JIT Codegen 静默降级 (NO_SILENT_FALLBACK)
+
+**铁律：JIT codegen 遇到无法生成代码的 OpKind 必须返回 `Err`，禁止静默 NOP**：
+
+- ❌ `emit_nop_raw()` / `emit_nop_placeholder()` 作为未实现 op 的 catch-all
+- ❌ `match _ => Ok(())` 吞掉未知 OpKind
+- ❌ `eprintln!("[WARN]...")` + scalar 计算替代 JIT 编译失败
+- ❌ `#[cfg(not(target_arch))]` 提供静默标量路径绕过 JIT
+- ✅ 未实现的 op 必须 `Err(format!("codegen not implemented for {:?}", op_kind))`
+- ✅ 仅 `Reshape` / `Transpose`（纯元数据 op，不需要计算）允许 NOP 处理
+
+**理由**：NOP placeholder 让编译成功、测试通过，但输出是全零或内存垃圾。这是最危险的 bug 类型 — 静默产生错误结果，无法通过常规测试发现。审查发现 aarch64 codegen 中有 8 处 `emit_nop_raw()` catch-all，导致所有非 GEMM op（LayerNorm、Softmax、Residual、MHA、MeanPool 等）在 aarch64 上被静默跳过。详见 `SPEC/09-MEANPOOL-JIT-GAPS.md`。
+
+## 🚨 JIT 编译管线（铁律）
+
+**所有算子必须走完整的 JIT 编译管线，无例外**：
+
+```
+算法 (Scalar Rust) → Lifting (SymExec trace) → IR (TraceOp SSA) → ISA Lowering (DeviceProfile) → 机器码
+```
+
+### 管线各阶段
+
+| 阶段 | 输入 | 输出 | 职责 |
+|------|------|------|------|
+| **算法** | 数学定义 | `extern "C" fn` scalar 参考实现 | 定义算子语义，与硬件无关 |
+| **Lifting** | scalar fn + `ScalarOpRegistry` | `OpTrace` + `ComputePattern` | SymExec 追踪标量执行，提取 SSA trace |
+| **IR** | `TraceOp` SSA | `FusionPlan` + grouped ops | 硬件无关的算子融合、调度决策 |
+| **ISA Lowering** | IR + `DeviceProfile` | x86_64 / AArch64 机器码 | 根据 `simd_width`、ISA 特性生成向量化代码 |
+
+### 禁止事项
+
+- ❌ 禁止跳过 Lifting 阶段直接手写 ISA 汇编（如直接写 AVX2 指令实现 Softmax）
+- ❌ 禁止在 JIT 代码中通过 `call` 指令调用预编译的 Rust/C 函数
+- ❌ 禁止把 JIT 当成"调度器"——只负责串联预编译函数
+- ❌ 禁止写死特定 ISA（如只支持 AVX2），必须通过 `DeviceProfile` 参数化
+- ✅ 新算子必须：注册 scalar 参考实现 → SymExec 提取 trace → codegen 根据硬件 lower
+- ✅ codegen 层通过 `self.simd_width` / `self.use_avx512` 适配不同硬件
+- ✅ 每个算子的 scalar 参考实现是 ground truth，JIT 生成的代码必须与之数值一致
+
+### 推论
+
+- 宁可暂时不实现某个算子（让测试失败），也不要绕过管线
+- 如果现有 IR 不支持某种计算模式（如 reduction），必须先扩展 IR，再实现算子
+- `ScalarOpRegistry` 是算子注册的唯一入口，不存在"特殊算子"可以绕过
