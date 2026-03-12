@@ -1,15 +1,136 @@
 //! Executor skeleton.
 
-use gllm_kernels::backend_trait::{
-    AttentionTopology, Backend, BackendError, BatchInput, Element, KvCacheHandle, LogitsHandle,
-    SequenceInput,
-};
-use gllm_kernels::cpu_backend::CpuBackend;
-use gllm_kernels::kernel_types::{
-    GeneratorForwardConfig, KvCacheConfig, PageId, PositionEncoding, RequestId, SamplingConfig,
-    StorageKey,
-};
+use std::fmt;
+
+use crate::compat::backend_trait::{Backend, Element};
+use crate::compat::CpuBackend;
+use crate::scheduler::types::{PageId, RequestId, StorageKey};
 use thiserror::Error;
+
+// ---- Engine types (moved from compat) ----
+
+/// Positional encoding variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionEncoding {
+    None,
+    Rope,
+}
+
+/// Sampling hyper-parameters for a single request.
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingConfig {
+    pub temperature: f32,
+    pub top_k: usize,
+    pub top_p: f32,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+        }
+    }
+}
+
+/// Static configuration for the generator forward pass.
+#[derive(Debug, Clone)]
+pub struct GeneratorForwardConfig {
+    pub hidden_size: usize,
+    pub num_layers: usize,
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub max_seq_len: usize,
+    pub vocab_size: usize,
+    pub rope_theta: f64,
+    pub rope_scale: f64,
+    pub rope_interleaved: bool,
+    pub rope_precompute: bool,
+    pub position_encoding: PositionEncoding,
+    /// FFN intermediate dimension.
+    pub intermediate_size: usize,
+    /// LayerNorm epsilon.
+    pub norm_eps: f32,
+}
+
+/// KV-cache swap configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapConfig {
+    pub enable_swap: bool,
+    pub swap_threshold: f32,
+    pub lru_granularity: usize,
+}
+
+/// KV-cache geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvCacheConfig {
+    pub num_layers: usize,
+    pub num_heads: usize,
+    pub head_dim: usize,
+    pub max_seq_len: usize,
+    pub dtype_size: usize,
+    pub page_size: usize,
+    pub swap_config: Option<SwapConfig>,
+}
+
+/// Errors originating from a compute backend.
+#[derive(Debug, Clone)]
+pub enum BackendError {
+    Cuda(String),
+    Cpu(String),
+    Unimplemented(&'static str),
+    Other(String),
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::Cuda(msg) => write!(f, "CUDA error: {msg}"),
+            BackendError::Cpu(msg) => write!(f, "CPU error: {msg}"),
+            BackendError::Unimplemented(what) => write!(f, "unimplemented: {what}"),
+            BackendError::Other(msg) => write!(f, "backend error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for BackendError {}
+
+/// Opaque handle to an allocated KV-cache buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KvCacheHandle(pub u64);
+
+/// Opaque handle to a logits tensor returned by forward.
+#[derive(Debug, Clone)]
+pub struct LogitsHandle {
+    pub data: Vec<f32>,
+}
+
+/// Attention topology descriptor (placeholder).
+#[derive(Debug, Clone)]
+pub struct AttentionTopology {
+    _private: (),
+}
+
+impl AttentionTopology {
+    pub fn linear() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// A single sequence in a batch.
+#[derive(Debug, Clone)]
+pub struct SequenceInput {
+    pub tokens: Vec<u32>,
+    pub position: usize,
+}
+
+/// Batched input for the forward pass.
+#[derive(Debug, Clone)]
+pub struct BatchInput {
+    pub sequences: Vec<SequenceInput>,
+}
 
 use crate::graph::optimizer::{GraphOptimizer, OptimizationContext};
 use crate::graph::types::FusedOp;
@@ -185,11 +306,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             head_dim: model_config.head_dim,
             max_seq_len: model_config.max_position_embeddings,
             vocab_size: model_config.vocab_size,
-            rope_theta: model_config.rope_theta,
-            rope_scale: model_config.rope_scale,
+            rope_theta: model_config.rope_theta as f64,
+            rope_scale: model_config.rope_scale as f64,
             rope_interleaved: model_config.rope_interleaved,
             rope_precompute: true,
             position_encoding,
+            intermediate_size: model_config.intermediate_size.unwrap_or(0),
+            norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12),
         };
 
         // DEBUG: 打印配置信息

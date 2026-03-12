@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use gllm_kernels::BackendError;
+use crate::engine::executor::BackendError;
 use thiserror::Error;
 
 use crate::backend::{
@@ -241,6 +241,7 @@ impl Client {
 
         let manifest = match loader.weight_format() {
             WeightFormat::Gguf => {
+                loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
                 if let Some(arch) = map_architecture_token(arch_str) {
                     ModelManifest {

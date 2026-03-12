@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
+use super::types::{PageId, PageState, RequestId};
 
 use super::memory_manager::VirtualPageId;
 use super::types::GroupState;

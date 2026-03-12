@@ -5,8 +5,14 @@ pub mod pipeline;
 
 pub use pipeline::{PipelineError, UnifiedPipeline};
 
-// Re-export scheduler types from the main scheduler module
+// Re-export scheduler types
 pub use crate::scheduler::batcher::ContinuousBatcher;
 pub use crate::scheduler::types::{GroupState, RequestKind, SequenceGroup};
 pub use crate::scheduler::{PagedScheduler, ScheduledBatch};
-pub use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
+pub use crate::scheduler::types::{PageId, PageState, RequestId};
+
+// Re-export engine types
+pub use executor::{
+    AttentionTopology, BackendError, BatchInput, GeneratorForwardConfig, KvCacheConfig,
+    KvCacheHandle, LogitsHandle, PositionEncoding, SamplingConfig, SequenceInput, SwapConfig,
+};

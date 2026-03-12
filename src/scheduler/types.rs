@@ -1,6 +1,25 @@
 use std::time::Instant;
 
-use gllm_kernels::kernel_types::{PageId, PageState, RequestId};
+/// Physical page identifier.
+pub type PageId = usize;
+/// Physical page identifier (alias used by memory_manager).
+pub type PhysicalId = usize;
+/// Unique request identifier.
+pub type RequestId = u64;
+/// Opaque storage key for swap-out / swap-in.
+pub type StorageKey = u64;
+
+/// Page lifecycle state visible to the scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PageState {
+    Free,
+    Active,
+    Standby,
+    SwappedOut,
+    Warm,
+    Protected,
+    Swapped,
+}
 
 /// A group of pages that belong to the same request/sequence.
 /// Gang scheduling evicts whole groups to avoid intra-sequence fragmentation.

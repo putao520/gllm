@@ -31,6 +31,6 @@ pub use policy::{PolicyVariant, SchedulingPolicy};
 pub use prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 pub use sequence::{Sequence, SequenceState};
 pub use types::{
-    BatchOrderPolicy, GroupState, KvPipeline, PageMetadata, PipelinedVirtualPageId, RequestKind,
-    SequenceGroup,
+    BatchOrderPolicy, GroupState, KvPipeline, PageId, PageMetadata, PageState, PhysicalId,
+    PipelinedVirtualPageId, RequestId, RequestKind, SequenceGroup, StorageKey,
 };

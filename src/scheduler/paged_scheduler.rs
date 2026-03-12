@@ -2,7 +2,7 @@ use super::allocator::BlockAllocator;
 use super::hgal::{HGALConfig, HGALScheduler};
 use super::types::{GroupState, SequenceGroup};
 use super::vllm2024::{Scheduler2024Config, Scheduler2024State};
-use gllm_kernels::kernel_types::{PageId, PageState, RequestId, StorageKey};
+use super::types::{PageId, PageState, RequestId, StorageKey};
 use std::collections::HashMap;
 use thiserror::Error;
 

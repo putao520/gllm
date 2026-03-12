@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use gllm_kernels::kernel_types::{PageId, RequestId};
+use super::types::{PageId, RequestId};
 
 use super::types::{GroupState, SequenceGroup};
 

@@ -1,5 +1,6 @@
-use gllm_kernels::backend_trait::{BackendError, Element};
-use gllm_kernels::{CpuBackend, CudaBackend};
+use crate::compat::backend_trait::Element;
+use crate::engine::executor::BackendError;
+use crate::compat::{CpuBackend, CudaBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType {
@@ -45,7 +46,7 @@ pub fn detect_backend() -> Result<DetectedBackend<f32>, BackendError> {
 
 /// Detect backend for f32 element type.
 fn detect_f32() -> Result<DetectedBackend<f32>, BackendError> {
-    let cuda_probe = CudaBackend::<f32>::new(0).ok();
+    let cuda_probe = CudaBackend::<f32>::new(0);
     let availability = BackendAvailability {
         cuda: cuda_probe.is_some(),
         rocm: rocm_available(),
@@ -68,7 +69,7 @@ fn detect_f32() -> Result<DetectedBackend<f32>, BackendError> {
 /// CPU backend uses pseudo-SIMD (f32 promotion) for f16/bf16 types.
 pub fn detect_backend_generic<E: Element>() -> Result<DetectedBackend<E>, BackendError> {
     // Try CUDA first (preferred for performance)
-    let cuda_probe = CudaBackend::<E>::new(0).ok();
+    let cuda_probe = CudaBackend::<E>::new(0);
     if let Some(backend) = cuda_probe {
         return Ok(DetectedBackend::Cuda(Box::new(backend)));
     }

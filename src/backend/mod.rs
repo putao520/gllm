@@ -1,5 +1,5 @@
-use gllm_kernels::backend_trait::Element;
-use gllm_kernels::{CpuBackend, CudaBackend};
+use crate::compat::backend_trait::Element;
+use crate::compat::{CpuBackend, CudaBackend};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
@@ -25,7 +25,7 @@ pub enum BackendContextError {
     #[error(transparent)]
     Executor(#[from] ExecutorError),
     #[error(transparent)]
-    Backend(#[from] gllm_kernels::backend_trait::BackendError),
+    Backend(#[from] crate::engine::executor::BackendError),
 }
 
 /// Generic backend executor supporting any element type.

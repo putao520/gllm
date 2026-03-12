@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use gllm_kernels::{backend_trait::Element, cpu_kernels::Float, kernel_types::RequestId};
+use crate::compat::backend_trait::Element;
+use crate::compat::cpu_kernels::Float;
+use super::types::RequestId;
 
 /// Chunked Prefill configuration (ARCH-SCHED-CHUNKED).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

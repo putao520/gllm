@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::time::Instant;
 
-use gllm_kernels::kernel_types::{PageId, PageState, PhysicalId, RequestId};
+use super::types::{PageId, PageState, PhysicalId, RequestId};
 
 use super::types::{KvPipeline, PageMetadata};
 
@@ -311,6 +311,7 @@ impl EvictionPolicy {
             PageState::Standby => self.standby_bonus,
             PageState::Active => -self.active_penalty,
             PageState::Warm | PageState::Protected | PageState::Swapped => i64::MIN / 2,
+            PageState::Free | PageState::SwappedOut => i64::MIN,
         };
 
         idle_ms

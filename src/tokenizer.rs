@@ -31,8 +31,13 @@ impl TokenizerHandle {
     }
 
     pub fn from_path(path: &Path) -> TokenizerResult<Self> {
-        let tokenizer = Tokenizer::from_file(path)
+        let mut tokenizer = Tokenizer::from_file(path)
             .map_err(|err| TokenizerError::Tokenizers(format!("{err}")))?;
+        // Disable padding: tokenizer.json may ship with padding enabled (e.g.
+        // sentence-transformers models pad to a fixed length).  We run
+        // single-sequence inference, so padding is unnecessary and harmful —
+        // it inflates seq_len and corrupts mean-pooling / attention.
+        tokenizer.with_padding(None);
         Ok(Self { tokenizer })
     }
 

@@ -2,7 +2,7 @@
 //!
 //! 实现 SPEC/08-LOADER-REFACTOR.md 中定义的统一流水线。
 
-use gllm_kernels::backend_trait::{Backend, Element};
+use crate::compat::backend_trait::{Backend, Element};
 
 use crate::arch::{
     get_template_by_arch, register_builtin_templates, resolve_config, ArchTemplate, ResolvedConfig,

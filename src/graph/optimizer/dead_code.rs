@@ -58,7 +58,7 @@ impl OptimizationPass for DeadCodeEliminationPass {
     }
 
     fn priority(&self) -> i32 {
-        -100 // 最后执行
+        100 // 最后执行
     }
 }
 

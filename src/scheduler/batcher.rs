@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use gllm_kernels::kernel_types::RequestId;
+use super::types::RequestId;
 
 use super::paged_scheduler::{PagedScheduler, SchedulerError};
 use super::sequence::{Sequence, SequenceState};

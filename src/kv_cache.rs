@@ -1,7 +1,6 @@
 //! KV cache tracking for executor.
 
-use gllm_kernels::backend_trait::KvCacheHandle;
-use gllm_kernels::kernel_types::KvCacheConfig;
+use crate::engine::executor::{KvCacheHandle, KvCacheConfig};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
