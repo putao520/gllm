@@ -512,9 +512,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .collect::<Vec<_>>();
         let kv_outputs = extract_onnx_kv_outputs(&graph_outputs);
         if kv_outputs.is_empty() {
-            return Err(ExecutorError::OnnxPlan(
-                "ONNX graph does not expose identifiable KV cache outputs".to_string(),
-            ));
+            log::warn!(
+                "ONNX graph does not expose identifiable KV cache outputs; \
+                 falling back to no-KV-cache mode (O(n²) per step)"
+            );
         }
 
         Ok(Some(OnnxGeneratorPlan {
@@ -709,11 +710,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             if total_kernels != plan.execution_order.len() {
                 return Err(ExecutorError::OnnxPlan(
                     "ONNX execution plan kernel accounting mismatch".to_string(),
-                ));
-            }
-            if plan.kv_outputs.is_empty() {
-                return Err(ExecutorError::OnnxPlan(
-                    "ONNX execution plan has no KV cache outputs".to_string(),
                 ));
             }
             let has_logits_output = plan

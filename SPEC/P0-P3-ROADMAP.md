@@ -23,25 +23,9 @@
 
 ## P0 — 性能关键路径（KV Cache 增量化 + 错误处理）
 
-### P0-1: KV Cache 增量持久化 (REQ-KV-005, ARCH-KV-PERSIST)
+### P0-1: KV Cache 增量持久化 (REQ-KV-005, ARCH-KV-PERSIST) ✅ 已完成
 
-**问题**: `update_kv_cache()` 只更新 `seq_len` 计数器，JIT MHA op 计算的 K/V 未写入 cache buffer。每次 decode step 重算全部 K/V，O(n²) 复杂度。
-
-**修改范围**:
-- `src/compat/decoder_forward.rs` — `build_decoder_layer_graph()` 添加 kv_cache 输出张量
-- `src/compat/decoder_forward.rs` — `execute_jit_decoder_layer()` 传入 cache buffer 指针
-- `src/compat/decoder_forward.rs` — `update_kv_cache()` 写入实际 K/V 数据
-- `src/compat/gpu_compile.rs` — GPU 路径同步修改
-
-**设计要点**:
-1. `build_decoder_layer_graph()` 新增 `k_cache`/`v_cache` 输出 tensor
-2. MHA op 计算 K/V 后写入 cache buffer（gllm-kernels MHA 已支持 K/V 输出）
-3. 增量 decode 时传入已缓存的 K/V 前缀，仅计算新 token 的 K/V
-
-**验收标准**:
-- 多步 decode 中 KV cache buffer 包含正确的 K/V 数据
-- 第 N 步 decode 不重算前 N-1 步的 K/V
-- E2E generator 测试通过且输出不变
+**完成状态**: CPU 路径 — `build_kv_projection_graph` / `execute_kv_projection` / `write_kv_to_cache` 实现 JIT KV projection。GPU 路径 — CUDA/HIP/Metal 三后端均支持 `is_incremental` 分支（GPU proj → dtoh → KV write → CPU attn → GPU post-attn）。`gpu_write_kv_cache()` 共享函数消除三后端重复代码。
 
 ### P0-2: 消除静默失败 (REQ-ERR-001) ✅ 已完成
 
@@ -94,15 +78,9 @@
 
 **完成状态**: `Executor::set_policy(PolicyVariant)` 已实现，下一个 `step()` 立即生效，无需重启。
 
-### P1-5: 量化推理加速路径
+### P1-5: 量化推理加速路径 ✅ 已完成
 
-**问题**: 量化模型能加载但全部反量化为 f32 推理，无量化加速。
-
-**修改范围**:
-- `src/compat/decoder_forward.rs` — 检测量化权重时调用 `Backend::quantized_matmul()` 而非先 dequant
-- `src/compat/cpu_backend.rs` — `quantized_matmul()` 已有 trait 方法，需要在 forward 路径中调用
-
-**约束**: Backend trait 的 `quantized_matmul()`/`dequantize()` 已实现（REQ-QUANT-006/007），只需在 forward 路径中接入。
+**完成状态**: `quantized_linear()` 已在 forward 路径中调用，检测量化权重时直接走 `Backend::quantized_matmul()` 而非先 dequant。
 
 ---
 
@@ -136,28 +114,17 @@
 
 ## P3 — 未来增强
 
-### P3-1: MoE 路由执行 (REQ-MODEL-004)
+### P3-1: MoE 路由执行 (REQ-MODEL-004) ✅ 已完成
 
-**问题**: `MoEConfig` 存在于 manifest 但 executor 未实现专家路由。
+**完成状态**: Scalar MoE 路由已在 executor forward 路径中实现（专家选择 + top-k gating）。
 
-**修改范围**:
-- `src/engine/executor.rs` — MoE forward 路径
-- `src/compat/decoder_forward.rs` — 专家选择 + top-k gating
-- 需要 gllm-kernels 侧 MoE kernel 支持
+### P3-2: Thinking Head 提取 ✅ 已完成
 
-### P3-2: Thinking Head 提取
+**完成状态**: `split_thinking_content()` 已实现，支持 thinking token 识别与分离。
 
-**问题**: `thinking_head_available()` 检查 manifest 但无实际 token 提取。
+### P3-3: PyTorch 格式支持 ✅ 已完成
 
-**修改范围**:
-- `src/engine/executor.rs` — thinking token 识别与分离
-- `src/generation.rs` — 暴露 thinking content API
-
-### P3-3: PyTorch 格式支持
-
-**问题**: `src/loader/pytorch.rs` 是 stub。
-
-**修改范围**: 实现 `.pt`/`.pth` 反序列化。
+**完成状态**: `pytorch.rs` 实现完整的 pickle 反序列化 + safetensors 转换（595 行）。`Loader::load()` 的 `WeightFormat::PyTorch` 分支调用 `convert_bins_to_safetensors()` 转换后走标准 safetensors 加载路径。需 `candle` feature 启用。
 
 ### P3-4: GPU TileLevelFusion / ComputeRoot
 
@@ -165,11 +132,9 @@
 
 **修改范围**: gllm-kernels GPU codegen 扩展。
 
-### P3-5: GLLM_CACHE_DIR 环境变量 (ARCH-MODEL-CACHE)
+### P3-5: GLLM_CACHE_DIR 环境变量 (ARCH-MODEL-CACHE) ✅ 已完成
 
-**问题**: SPEC 中标注"计划中，尚未实现"。
-
-**修改范围**: `src/loader/` — 读取 `GLLM_CACHE_DIR` 覆盖默认缓存路径。
+**完成状态**: `loader/mod.rs:92` 已实现 `GLLM_CACHE_DIR` 环境变量读取，覆盖默认缓存路径。
 
 ### P3-6: 分布式 KV Cache (L3)
 
@@ -184,11 +149,11 @@
 ```
 P0 (性能关键 + 正确性)     P1 (功能完善)           P2 (质量)              P3 (未来)
 ─────────────────────     ──────────────────     ──────────────────     ──────────────
-P0-1 KV Cache 增量化       P1-1 架构模板 ×11 ✅   P2-1 后端一致性测试 ✅  P3-1 MoE 路由
-P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅ P2-2 调度器重构测试 ✅  P3-2 Thinking Head
-P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅  P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式
+P0-1 KV Cache 增量化 ✅    P1-1 架构模板 ×11 ✅   P2-1 后端一致性测试 ✅  P3-1 MoE 路由 ✅
+P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅ P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
+P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅  P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
 P0-4 Backend Detection ✅  P1-4 策略热切换 ✅      P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合扩展
-                           P1-5 量化推理加速       P2-5 IQ Codebook       P3-5 GLLM_CACHE_DIR
+                           P1-5 量化推理加速 ✅    P2-5 IQ Codebook       P3-5 GLLM_CACHE_DIR ✅
                                                                          P3-6 分布式 KV Cache
 ```
 

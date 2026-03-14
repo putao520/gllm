@@ -591,7 +591,26 @@ impl Loader {
                 }
             }
             WeightFormat::PyTorch => {
-                // Not implemented yet
+                #[cfg(feature = "candle")]
+                {
+                    let config = pytorch::PytorchConversionConfig::default();
+                    let output = pytorch::convert_bins_to_safetensors(
+                        &self.weight_paths,
+                        None,
+                        &config,
+                    )?;
+                    let loader = safetensors::SafeTensorsLoader::from_files(
+                        &output.safetensors,
+                        parallel::ParallelLoader::new(true),
+                    )?;
+                    self.safetensors = Some(loader);
+                }
+                #[cfg(not(feature = "candle"))]
+                {
+                    return Err(LoaderError::Pytorch(
+                        "PyTorch format requires 'candle' feature".to_string(),
+                    ));
+                }
             }
         }
         Ok(self)
