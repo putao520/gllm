@@ -178,6 +178,12 @@ pub(crate) fn launch_config_for_op(
         OpKind::MeanPool { hidden, .. } => {
             profile.launch_config_1d(*hidden)
         }
+        OpKind::L2Normalize { hidden } => {
+            profile.launch_config_1d(*hidden)
+        }
+        OpKind::Reshape { .. } | OpKind::Transpose { .. } => {
+            profile.launch_config_1d(1) // metadata NOP
+        }
         _ => profile.launch_config_1d(1024),
     }
 }
@@ -198,77 +204,72 @@ pub(crate) fn build_kernel_params(
     op_kind: &gllm_kernels::compiler::OpKind,
     input_ptrs: &[u64],
     output_ptr: u64,
-) -> Vec<u64> {
+) -> Result<Vec<u64>, BE> {
     use gllm_kernels::compiler::OpKind;
 
     match op_kind {
         OpKind::GemmBias { m, n, k } => {
-            // Kernel: (A, B, C, M, N, K, bias)
-            vec![
-                input_ptrs[0], // A
-                input_ptrs[1], // B
-                output_ptr,    // C
+            Ok(vec![
+                input_ptrs[0], input_ptrs[1], output_ptr,
                 *m as u64, *n as u64, *k as u64,
                 input_ptrs[2], // bias
-            ]
+            ])
         }
         OpKind::Gemm { m, n, k } => {
-            // Kernel: (A, B, C, M, N, K)
-            vec![
-                input_ptrs[0], // A
-                input_ptrs[1], // B
-                output_ptr,    // C
+            Ok(vec![
+                input_ptrs[0], input_ptrs[1], output_ptr,
                 *m as u64, *n as u64, *k as u64,
-            ]
+            ])
         }
         OpKind::MultiHeadAttention { seq_len, num_heads, head_dim } => {
-            // Kernel: (Q, K, V, output, seq_len, num_heads, head_dim)
-            vec![
-                input_ptrs[0], // Q
-                input_ptrs[1], // K
-                input_ptrs[2], // V
-                output_ptr,
+            Ok(vec![
+                input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
                 *seq_len as u64, *num_heads as u64, *head_dim as u64,
-            ]
+            ])
         }
         OpKind::LayerNorm { .. } => {
-            // Kernel: (input, output, N, weight, bias)
             let mut params = vec![input_ptrs[0], output_ptr];
-            // N will be added by caller based on tensor shape
             params.push(0); // placeholder for N
-            if input_ptrs.len() > 1 { params.push(input_ptrs[1]); } // weight
-            if input_ptrs.len() > 2 { params.push(input_ptrs[2]); } // bias
-            params
+            if input_ptrs.len() > 1 { params.push(input_ptrs[1]); }
+            if input_ptrs.len() > 2 { params.push(input_ptrs[2]); }
+            Ok(params)
         }
         OpKind::RmsNorm { .. } => {
-            // Kernel: (input, output, N, weight)
             let mut params = vec![input_ptrs[0], output_ptr];
             params.push(0); // placeholder for N
-            if input_ptrs.len() > 1 { params.push(input_ptrs[1]); } // weight
-            params
+            if input_ptrs.len() > 1 { params.push(input_ptrs[1]); }
+            Ok(params)
         }
         OpKind::Residual | OpKind::Add | OpKind::Mul => {
-            // Kernel: (A, B, output, N)
-            vec![input_ptrs[0], input_ptrs[1], output_ptr, 0] // N placeholder
+            Ok(vec![input_ptrs[0], input_ptrs[1], output_ptr, 0])
         }
         OpKind::Silu | OpKind::Gelu => {
-            // Kernel: (input, output, N)
-            vec![input_ptrs[0], output_ptr, 0] // N placeholder
+            Ok(vec![input_ptrs[0], output_ptr, 0])
         }
         OpKind::SwiGlu | OpKind::GeGlu => {
-            // Kernel: (gate, up, output, N)
-            vec![input_ptrs[0], input_ptrs[1], output_ptr, 0] // N placeholder
+            Ok(vec![input_ptrs[0], input_ptrs[1], output_ptr, 0])
         }
         OpKind::RoPE { head_dim, .. } => {
-            // Kernel: (input, output, head_dim, seq_len)
-            // head_dim is baked in; seq_len will be filled by caller
-            vec![input_ptrs[0], output_ptr, *head_dim as u64, 0] // seq_len placeholder
+            Ok(vec![input_ptrs[0], output_ptr, *head_dim as u64, 0])
         }
         OpKind::MeanPool { .. } => {
-            // Kernel: (input, output) — dims baked in
-            vec![input_ptrs[0], output_ptr]
+            Ok(vec![input_ptrs[0], output_ptr])
         }
-        _ => vec![],
+        OpKind::Softmax => {
+            // Kernel: (input, output, N) — N placeholder filled by caller
+            Ok(vec![input_ptrs[0], output_ptr, 0])
+        }
+        OpKind::L2Normalize { hidden } => {
+            // Kernel: (input, output, hidden)
+            Ok(vec![input_ptrs[0], output_ptr, *hidden as u64])
+        }
+        OpKind::Reshape { .. } | OpKind::Transpose { .. } => {
+            // Metadata-only ops (NOP) — CLAUDE.md allows
+            Ok(vec![])
+        }
+        _ => Err(BE::Other(format!(
+            "build_kernel_params: unhandled OpKind {:?}", op_kind
+        ))),
     }
 }
 
@@ -366,19 +367,17 @@ pub(crate) fn cuda_launch_graph(
         let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().unwrap_or(0);
 
         // Build typed params based on op kind
-        let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr);
+        let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr)?;
 
         // Fill in N placeholder for ops that need it
         match &entry.op_kind {
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
-                // N = last dimension of input tensor (hidden size)
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .expect("tensor meta for LayerNorm/RmsNorm input");
                 let n = *input_meta.shape.last().unwrap_or(&1);
-                raw_params[2] = n as u64; // N is at index 2
+                raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
-                // N = total f32 elements
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .expect("tensor meta for binary op input");
                 let n: usize = input_meta.shape.iter().product();
@@ -400,12 +399,18 @@ pub(crate) fn cuda_launch_graph(
                 raw_params[last] = n as u64;
             }
             OpKind::RoPE { .. } => {
-                // seq_len placeholder at last position
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .expect("tensor meta for RoPE input");
                 let seq_len = input_meta.shape[0];
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
+            }
+            OpKind::Softmax => {
+                let input_meta = graph.tensor(entry.input_tids[0])
+                    .expect("tensor meta for Softmax input");
+                let n: usize = input_meta.shape.iter().product();
+                let last = raw_params.len() - 1;
+                raw_params[last] = n as u64;
             }
             _ => {}
         }
@@ -731,7 +736,21 @@ fn get_f32_data_cuda<E: Element>(
                     gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    _ => {}
+                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
+                    _ => {
+                        return Err(BE::Other(format!(
+                            "Unsupported quantization type {:?} for weight {:?}",
+                            qt.quant_type, name.as_ref()
+                        )));
+                    }
                 }
             }
             return Ok(out);
@@ -1173,7 +1192,7 @@ pub(crate) fn hip_launch_graph(
             .collect();
         let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().unwrap_or(0);
 
-        let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr);
+        let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr)?;
 
         match &entry.op_kind {
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
@@ -1209,6 +1228,13 @@ pub(crate) fn hip_launch_graph(
                 let seq_len = input_meta.shape[0];
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
+            }
+            OpKind::Softmax => {
+                let input_meta = graph.tensor(entry.input_tids[0])
+                    .expect("tensor meta for Softmax input");
+                let n: usize = input_meta.shape.iter().product();
+                let last = raw_params.len() - 1;
+                raw_params[last] = n as u64;
             }
             _ => {}
         }
@@ -1508,7 +1534,21 @@ fn get_f32_data_hip<E: Element>(
                     gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    _ => {}
+                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
+                    _ => {
+                        return Err(BE::Other(format!(
+                            "Unsupported quantization type {:?} for weight {:?}",
+                            qt.quant_type, name.as_ref()
+                        )));
+                    }
                 }
             }
             return Ok(out);
@@ -1965,7 +2005,21 @@ fn get_f32_data_metal<E: Element>(
                     gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
                     gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    _ => {}
+                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
+                    _ => {
+                        return Err(BE::Other(format!(
+                            "Unsupported quantization type {:?} for weight {:?}",
+                            qt.quant_type, name.as_ref()
+                        )));
+                    }
                 }
             }
             return Ok(out);

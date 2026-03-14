@@ -67,3 +67,15 @@ impl TokenizerHandle {
             .map_err(|err| TokenizerError::Tokenizers(format!("{err}")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn from_path_missing_file_returns_error() {
+        let result = TokenizerHandle::from_path(Path::new("/nonexistent/tokenizer.json"));
+        assert!(result.is_err());
+    }
+}

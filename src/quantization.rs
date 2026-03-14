@@ -113,4 +113,29 @@ mod tests {
         let out = dequantize_int4_with_zero(&data, 2.0, 1.0, false);
         assert_eq!(out, vec![0.0, 2.0]);
     }
+
+    #[test]
+    fn dequantize_int8_with_zero_offset() {
+        let data = vec![2i8, 4, -1];
+        let out = dequantize_int8_with_zero(&data, 0.5, 1.0);
+        // (2 - 1) * 0.5 = 0.5, (4 - 1) * 0.5 = 1.5, (-1 - 1) * 0.5 = -1.0
+        assert_eq!(out, vec![0.5, 1.5, -1.0]);
+    }
+
+    #[test]
+    fn dequantize_int4_unsigned() {
+        let data = vec![0b1010_0101]; // lo=5, hi=10
+        let out = dequantize_int4(&data, 2.0, false);
+        assert_eq!(out, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn block_quantization_scale_for_block() {
+        let scales = vec![f16::from_f32(0.5), f16::from_f32(2.0)];
+        let bq = BlockQuantization::new(32, scales);
+        assert!((bq.scale_for_block(0) - 0.5).abs() < 1e-3);
+        assert!((bq.scale_for_block(1) - 2.0).abs() < 1e-3);
+        // Out of bounds returns default 1.0
+        assert!((bq.scale_for_block(99) - 1.0).abs() < 1e-3);
+    }
 }
