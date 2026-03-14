@@ -79,9 +79,54 @@ pub fn register_builtin_templates() {
             registry.register(llama);
         }
 
-            // SmolLM2 and InternLM3 share the Llama template
-            registry.map_arch(ModelArchitecture::SmolLM2, "llama");
-            registry.map_arch(ModelArchitecture::InternLM3, "llama");
+        // SmolLM2 and InternLM3 share the Llama template
+        registry.map_arch(ModelArchitecture::SmolLM2, "llama");
+        registry.map_arch(ModelArchitecture::InternLM3, "llama");
+
+        // 注册 Mistral3 / Ministral
+        if let Ok(mistral3) = ArchTemplate::from_yaml(MISTRAL3_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::Mistral3, "mistral3");
+            registry.map_arch(ModelArchitecture::Ministral, "mistral3");
+            registry.register(mistral3);
+        }
+
+        // 注册 GLM4 / GLM5
+        if let Ok(glm4) = ArchTemplate::from_yaml(GLM4_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::GLM4, "glm4");
+            registry.map_arch(ModelArchitecture::GLM5, "glm4");
+            registry.register(glm4);
+        }
+
+        // 注册 Phi4
+        if let Ok(phi4) = ArchTemplate::from_yaml(PHI4_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::Phi4, "phi4");
+            registry.register(phi4);
+        }
+
+        // 注册 Gemma2
+        if let Ok(gemma2) = ArchTemplate::from_yaml(GEMMA2_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::Gemma2, "gemma2");
+            registry.register(gemma2);
+        }
+
+        // 注册 GPT2Next
+        if let Ok(gpt2next) = ArchTemplate::from_yaml(GPT2NEXT_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::GPT2Next, "gpt2next");
+            registry.register(gpt2next);
+        }
+
+        // 注册 XLM-R / XLM-R Next
+        if let Ok(xlmr) = ArchTemplate::from_yaml(XLMR_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::XlmR, "xlmr");
+            registry.map_arch(ModelArchitecture::XlmRNext, "xlmr");
+            registry.register(xlmr);
+        }
+
+        // 注册 DeepSeek
+        if let Ok(deepseek) = ArchTemplate::from_yaml(DEEPSEEK_TEMPLATE) {
+            registry.map_arch(ModelArchitecture::DeepSeek, "deepseek");
+            registry.register(deepseek);
+        }
 
         registry
     });
@@ -93,6 +138,27 @@ pub fn register_builtin_templates() {
 
 /// Qwen3 架构模板 (REQ-ARCH-004)
 const QWEN3_TEMPLATE: &str = include_str!("templates/qwen3.yaml");
+
+/// Mistral3 架构模板
+const MISTRAL3_TEMPLATE: &str = include_str!("templates/mistral3.yaml");
+
+/// GLM4 架构模板
+const GLM4_TEMPLATE: &str = include_str!("templates/glm4.yaml");
+
+/// Phi4 架构模板
+const PHI4_TEMPLATE: &str = include_str!("templates/phi4.yaml");
+
+/// Gemma2 架构模板
+const GEMMA2_TEMPLATE: &str = include_str!("templates/gemma2.yaml");
+
+/// GPT2Next 架构模板
+const GPT2NEXT_TEMPLATE: &str = include_str!("templates/gpt2next.yaml");
+
+/// XLM-R 架构模板
+const XLMR_TEMPLATE: &str = include_str!("templates/xlmr.yaml");
+
+/// DeepSeek 架构模板
+const DEEPSEEK_TEMPLATE: &str = include_str!("templates/deepseek.yaml");
 
 /// Llama 架构模板
 const LLAMA_TEMPLATE: &str = r#"
@@ -163,10 +229,88 @@ mod tests {
     }
 
     #[test]
+    fn builtin_mistral3_parses() {
+        let template = ArchTemplate::from_yaml(MISTRAL3_TEMPLATE).unwrap();
+        assert_eq!(template.name, "mistral3");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_glm4_parses() {
+        let template = ArchTemplate::from_yaml(GLM4_TEMPLATE).unwrap();
+        assert_eq!(template.name, "glm4");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_phi4_parses() {
+        let template = ArchTemplate::from_yaml(PHI4_TEMPLATE).unwrap();
+        assert_eq!(template.name, "phi4");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_gemma2_parses() {
+        let template = ArchTemplate::from_yaml(GEMMA2_TEMPLATE).unwrap();
+        assert_eq!(template.name, "gemma2");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_gpt2next_parses() {
+        let template = ArchTemplate::from_yaml(GPT2NEXT_TEMPLATE).unwrap();
+        assert_eq!(template.name, "gpt2next");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_xlmr_parses() {
+        let template = ArchTemplate::from_yaml(XLMR_TEMPLATE).unwrap();
+        assert_eq!(template.name, "xlmr");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
+    fn builtin_deepseek_parses() {
+        let template = ArchTemplate::from_yaml(DEEPSEEK_TEMPLATE).unwrap();
+        assert_eq!(template.name, "deepseek");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.embedding.is_some());
+    }
+
+    #[test]
     fn registry_lookup_works() {
         register_builtin_templates();
         assert!(get_template("qwen3").is_some());
         assert!(get_template("llama").is_some());
+        assert!(get_template("mistral3").is_some());
+        assert!(get_template("glm4").is_some());
+        assert!(get_template("phi4").is_some());
+        assert!(get_template("gemma2").is_some());
+        assert!(get_template("gpt2next").is_some());
+        assert!(get_template("xlmr").is_some());
+        assert!(get_template("deepseek").is_some());
         assert!(get_template("nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_arch_mapping_works() {
+        register_builtin_templates();
+        assert!(get_template_by_arch(ModelArchitecture::Mistral3).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::Ministral).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::GLM4).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::GLM5).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::Phi4).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::Gemma2).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::GPT2Next).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::XlmR).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::XlmRNext).is_some());
+        assert!(get_template_by_arch(ModelArchitecture::DeepSeek).is_some());
     }
 }

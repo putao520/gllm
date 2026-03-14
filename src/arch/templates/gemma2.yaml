@@ -1,0 +1,160 @@
+name: gemma2
+version: "1.0"
+
+config:
+  num_layers: "${num_hidden_layers}"
+  hidden_size: "${hidden_size}"
+  num_heads: "${num_attention_heads}"
+  num_kv_heads: "${num_key_value_heads}"
+  head_dim: "${head_dim}"
+  intermediate_size: "${intermediate_size}"
+  vocab_size: "${vocab_size}"
+  rope_theta: "${rope_theta}"
+  dtype: "${dtype}"
+
+tensor_patterns:
+  embedding: "model.embed_tokens.weight"
+  lm_head: "model.embed_tokens.weight"
+  layer_prefix: "model.layers.{}"
+  q_proj: "self_attn.q_proj.weight"
+  k_proj: "self_attn.k_proj.weight"
+  v_proj: "self_attn.v_proj.weight"
+  o_proj: "self_attn.o_proj.weight"
+  gate_proj: "mlp.gate_proj.weight"
+  up_proj: "mlp.up_proj.weight"
+  down_proj: "mlp.down_proj.weight"
+  input_layernorm: "input_layernorm.weight"
+  post_attention_layernorm: "post_attention_layernorm.weight"
+  final_norm: "model.norm.weight"
+
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+      shape: [batch, seq_len]
+
+  outputs:
+    - name: logits
+      dtype: "${dtype}"
+      shape: [batch, seq_len, "${vocab_size}"]
+
+  nodes:
+    - name: embed
+      op_type: Gather
+      inputs: [model.embed_tokens.weight, input_ids]
+      outputs: [hidden_0]
+
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_input_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["hidden_${i}", "model.layers.${i}.input_layernorm.weight"]
+          outputs: ["layer_${i}_normed"]
+
+        - name: "layer_${i}_q_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.q_proj.weight"]
+          outputs: ["layer_${i}_q"]
+
+        - name: "layer_${i}_k_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.k_proj.weight"]
+          outputs: ["layer_${i}_k"]
+
+        - name: "layer_${i}_v_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.v_proj.weight"]
+          outputs: ["layer_${i}_v"]
+
+        - name: "layer_${i}_rope"
+          op_type: RotaryEmbedding
+          inputs: ["layer_${i}_q", "layer_${i}_k"]
+          outputs: ["layer_${i}_q_rope", "layer_${i}_k_rope"]
+          attributes:
+            theta: "${rope_theta}"
+
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["layer_${i}_q_rope", "layer_${i}_k_rope", "layer_${i}_v"]
+          outputs: ["layer_${i}_attn_out"]
+          attributes:
+            softcap: 1
+
+        - name: "layer_${i}_o_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_attn_out", "model.layers.${i}.self_attn.o_proj.weight"]
+          outputs: ["layer_${i}_attn_proj"]
+
+        - name: "layer_${i}_post_attn_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["layer_${i}_attn_proj", "model.layers.${i}.post_attention_layernorm.weight"]
+          outputs: ["layer_${i}_attn_normed"]
+
+        - name: "layer_${i}_residual_add"
+          op_type: Add
+          inputs: ["hidden_${i}", "layer_${i}_attn_normed"]
+          outputs: ["layer_${i}_residual"]
+
+        - name: "layer_${i}_pre_ffn_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["layer_${i}_residual", "model.layers.${i}.pre_feedforward_layernorm.weight"]
+          outputs: ["layer_${i}_ffn_normed"]
+
+        - name: "layer_${i}_gate_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_ffn_normed", "model.layers.${i}.mlp.gate_proj.weight"]
+          outputs: ["layer_${i}_gate"]
+
+        - name: "layer_${i}_up_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_ffn_normed", "model.layers.${i}.mlp.up_proj.weight"]
+          outputs: ["layer_${i}_up"]
+
+        - name: "layer_${i}_gelu"
+          op_type: GELU
+          inputs: ["layer_${i}_gate"]
+          outputs: ["layer_${i}_gate_act"]
+
+        - name: "layer_${i}_geglu_mul"
+          op_type: Mul
+          inputs: ["layer_${i}_gate_act", "layer_${i}_up"]
+          outputs: ["layer_${i}_geglu"]
+
+        - name: "layer_${i}_down_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_geglu", "model.layers.${i}.mlp.down_proj.weight"]
+          outputs: ["layer_${i}_mlp_out"]
+
+        - name: "layer_${i}_post_ffn_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["layer_${i}_mlp_out", "model.layers.${i}.post_feedforward_layernorm.weight"]
+          outputs: ["layer_${i}_mlp_normed"]
+
+        - name: "layer_${i}_output_add"
+          op_type: Add
+          inputs: ["layer_${i}_residual", "layer_${i}_mlp_normed"]
+          outputs: ["hidden_${i}"]
+
+    - name: final_norm
+      op_type: SimplifiedLayerNormalization
+      inputs: ["hidden_0", "model.norm.weight"]
+      outputs: [hidden_final]
+
+    - name: lm_head
+      op_type: MatMul
+      inputs: [hidden_final, model.embed_tokens.weight]
+      outputs: [logits_raw]
+
+    - name: logit_softcap
+      op_type: LogitSoftCap
+      inputs: [logits_raw]
+      outputs: [logits]
+
+fusion_hints:
+  - pattern: [q_proj, k_proj, v_proj, rope]
+    target: FusedQkvRope
+  - pattern: [gate_proj, gelu, up_proj, geglu_mul]
+    target: GeGLU
+  - pattern: [matmul, scale, softmax, matmul]
+    target: FlashAttention

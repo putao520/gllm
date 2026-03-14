@@ -1,10 +1,724 @@
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
-use super::weight_helpers::{get_f32_data, needs_weight_transpose, transpose_f32};
+use super::weight_helpers::{
+    get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear,
+    transpose_f32, try_get_f32_data, weight_data_to_f32, WeightData,
+};
 use super::Element;
 use crate::engine::executor::{
     BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheHandle, LogitsHandle,
 };
+
+// ---------------------------------------------------------------------------
+// Scalar math helpers for KV cache computation (outside JIT)
+// ---------------------------------------------------------------------------
+
+/// Scalar RMSNorm: out[i] = (x[i] / rms) * w[i]
+/// where rms = sqrt(mean(x^2) + eps)
+fn scalar_rms_norm(x: &[f32], w: &[f32], out: &mut [f32], hidden: usize, eps: f32) {
+    let n = x.len() / hidden;
+    for row in 0..n {
+        let start = row * hidden;
+        let end = start + hidden;
+        let slice = &x[start..end];
+        let ss: f32 = slice.iter().map(|v| v * v).sum::<f32>() / hidden as f32;
+        let rms = (ss + eps).sqrt();
+        let inv_rms = 1.0 / rms;
+        for d in 0..hidden {
+            out[start + d] = slice[d] * inv_rms * w[d];
+        }
+    }
+}
+
+/// Scalar GEMM: C = A * B, A is [m, k], B is [k, n], C is [m, n] (row-major)
+pub(super) fn scalar_gemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                sum += a[i * k + p] * b[p * n + j];
+            }
+            c[i * n + j] = sum;
+        }
+    }
+}
+
+/// Scalar RoPE: apply rotary position embedding to x[seq_len, dim]
+/// dim = num_heads * head_dim, positions[seq_len]
+fn scalar_rope(x: &mut [f32], positions: &[u32], head_dim: usize, theta: f64) {
+    let seq_len = positions.len();
+    let dim = x.len() / seq_len;
+    let n_heads = dim / head_dim;
+    let half = head_dim / 2;
+    for s in 0..seq_len {
+        let pos = positions[s] as f64;
+        for h in 0..n_heads {
+            let base = s * dim + h * head_dim;
+            for i in 0..half {
+                let freq = 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64);
+                let angle = pos * freq;
+                let cos_val = angle.cos() as f32;
+                let sin_val = angle.sin() as f32;
+                let x0 = x[base + i];
+                let x1 = x[base + i + half];
+                x[base + i] = x0 * cos_val - x1 * sin_val;
+                x[base + i + half] = x0 * sin_val + x1 * cos_val;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar MoE (Mixture of Experts) helpers
+// ---------------------------------------------------------------------------
+
+/// Scalar MoE gate: hidden [seq_len, hidden_size] × gate_w [hidden_size, num_experts] → logits [seq_len, num_experts]
+/// Then softmax per row.
+fn scalar_moe_gate(
+    hidden: &[f32],
+    gate_w: &[f32],
+    seq_len: usize,
+    num_experts: usize,
+    hidden_size: usize,
+) -> Vec<f32> {
+    let mut logits = vec![0.0f32; seq_len * num_experts];
+    scalar_gemm(hidden, gate_w, &mut logits, seq_len, num_experts, hidden_size);
+    // Softmax per row
+    for s in 0..seq_len {
+        let row = &mut logits[s * num_experts..(s + 1) * num_experts];
+        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_sum: f32 = row.iter().map(|x| (x - max).exp()).sum();
+        for x in row.iter_mut() {
+            *x = (*x - max).exp() / exp_sum;
+        }
+    }
+    logits
+}
+
+/// Scalar top-k expert selection with renormalization.
+/// Returns (expert_index, renormalized_weight) pairs for each token position.
+fn scalar_top_k_experts(
+    gate_probs: &[f32],
+    num_experts: usize,
+    top_k: usize,
+    seq_len: usize,
+) -> Vec<Vec<(usize, f32)>> {
+    let mut result = Vec::with_capacity(seq_len);
+    for s in 0..seq_len {
+        let row = &gate_probs[s * num_experts..(s + 1) * num_experts];
+        let mut indexed: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.truncate(top_k);
+        // Renormalize weights
+        let sum: f32 = indexed.iter().map(|(_, w)| w).sum();
+        if sum > 0.0 {
+            for (_, w) in indexed.iter_mut() {
+                *w /= sum;
+            }
+        }
+        result.push(indexed);
+    }
+    result
+}
+
+/// Scalar SwiGLU FFN for a single expert.
+/// input: [seq_len, hidden_size]
+/// gate_w: [hidden_size, inter], up_w: [hidden_size, inter], down_w: [inter, hidden_size]
+/// output: [seq_len, hidden_size]
+fn scalar_expert_ffn(
+    input: &[f32],
+    gate_w: &[f32],
+    up_w: &[f32],
+    down_w: &[f32],
+    seq_len: usize,
+    hidden: usize,
+    inter: usize,
+) -> Vec<f32> {
+    let mut gate_out = vec![0.0f32; seq_len * inter];
+    scalar_gemm(input, gate_w, &mut gate_out, seq_len, inter, hidden);
+
+    let mut up_out = vec![0.0f32; seq_len * inter];
+    scalar_gemm(input, up_w, &mut up_out, seq_len, inter, hidden);
+
+    // SwiGLU: silu(gate) * up
+    let mut swiglu = vec![0.0f32; seq_len * inter];
+    for i in 0..seq_len * inter {
+        let g = gate_out[i];
+        let silu_g = g / (1.0 + (-g).exp());
+        swiglu[i] = silu_g * up_out[i];
+    }
+
+    let mut down_out = vec![0.0f32; seq_len * hidden];
+    scalar_gemm(&swiglu, down_w, &mut down_out, seq_len, hidden, inter);
+    down_out
+}
+
+/// Scalar MoE forward: gate routing + expert FFN + weighted combine.
+///
+/// For each token position:
+///   1. Compute gate logits → softmax probabilities
+///   2. Select top_k experts
+///   3. Run each selected expert's SwiGLU FFN
+///   4. Weighted sum of expert outputs (by renormalized gate probabilities)
+///
+/// If shared experts exist, their output is added to the routed output.
+fn scalar_moe_ffn(
+    input: &[f32],
+    router_w: &[f32],
+    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)], // [(gate, up, down) per expert]
+    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
+    seq_len: usize,
+    hidden: usize,
+    inter: usize,
+    num_experts: usize,
+    top_k: usize,
+) -> Vec<f32> {
+    // Step 1: Gate routing
+    let gate_probs = scalar_moe_gate(input, router_w, seq_len, num_experts, hidden);
+
+    // Step 2: Top-K selection
+    let selections = scalar_top_k_experts(&gate_probs, num_experts, top_k, seq_len);
+
+    // Step 3+4: Per-token expert execution and weighted combine
+    let mut output = vec![0.0f32; seq_len * hidden];
+
+    for s in 0..seq_len {
+        let token_input = &input[s * hidden..(s + 1) * hidden];
+        for &(expert_idx, weight) in &selections[s] {
+            if expert_idx >= expert_weights.len() {
+                continue;
+            }
+            let (ref gw, ref uw, ref dw) = expert_weights[expert_idx];
+            let expert_out = scalar_expert_ffn(token_input, gw, uw, dw, 1, hidden, inter);
+            for d in 0..hidden {
+                output[s * hidden + d] += weight * expert_out[d];
+            }
+        }
+    }
+
+    // Step 5: Add shared expert output if present
+    if let Some((ref sg, ref su, ref sd)) = shared_expert {
+        let shared_out = scalar_expert_ffn(input, sg, su, sd, seq_len, hidden, inter);
+        for i in 0..seq_len * hidden {
+            output[i] += shared_out[i];
+        }
+    }
+
+    output
+}
+
+// ---------------------------------------------------------------------------
+// Scalar MoE-aware prefill layer
+// ---------------------------------------------------------------------------
+
+/// Scalar MoE-aware decoder layer (full prefill, no KV cache).
+///
+/// Same structure as the JIT decoder layer but replaces the dense SwiGLU FFN
+/// with MoE routing (gate -> top-k -> expert dispatch -> combine).
+fn scalar_moe_prefill_layer(
+    hidden_state: &[f32],
+    q_w: &[f32],
+    k_w: &[f32],
+    v_w: &[f32],
+    o_w: &[f32],
+    rn1_w: &[f32],
+    rn2_w: &[f32],
+    router_w: &[f32],
+    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)],
+    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
+    positions: &[u32],
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    num_experts: usize,
+    top_k: usize,
+    eps: f32,
+    rope_theta: f64,
+    output: &mut [f32],
+) {
+    let q_dim = num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+    let heads_per_group = num_heads / num_kv_heads;
+
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    let mut q_proj = vec![0.0f32; seq_len * q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
+    let mut k_proj = vec![0.0f32; seq_len * kv_dim];
+    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, kv_dim, hidden);
+    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
+    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
+
+    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
+    scalar_rope(&mut k_proj, positions, head_dim, rope_theta);
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_group;
+        for s in 0..seq_len {
+            let q_off = s * q_dim + h * head_dim;
+            let mut scores = vec![f32::NEG_INFINITY; seq_len];
+            for t in 0..=s {
+                let k_off = t * kv_dim + kv_h * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim { dot += q_proj[q_off + d] * k_proj[k_off + d]; }
+                scores[t] = dot * scale;
+            }
+            let max_s = scores[..=s].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for t in 0..=s { scores[t] = (scores[t] - max_s).exp(); sum += scores[t]; }
+            if sum > 0.0 { for t in 0..=s { scores[t] /= sum; } }
+            let o_off = s * q_dim + h * head_dim;
+            for d in 0..head_dim {
+                let mut val = 0.0f32;
+                for t in 0..=s { val += scores[t] * v_proj[t * kv_dim + kv_h * head_dim + d]; }
+                attn_out[o_off + d] = val;
+            }
+        }
+    }
+
+    let mut o_out = vec![0.0f32; seq_len * hidden];
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
+    let mut resid1 = vec![0.0f32; seq_len * hidden];
+    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
+
+    let mut normed2 = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+
+    let moe_out = scalar_moe_ffn(
+        &normed2, router_w, expert_weights, shared_expert,
+        seq_len, hidden, inter, num_experts, top_k,
+    );
+
+    for i in 0..seq_len * hidden { output[i] = resid1[i] + moe_out[i]; }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar incremental decode layer (uses cached K/V, O(n) per step)
+// ---------------------------------------------------------------------------
+
+/// Execute a single decoder layer using cached K/V for attention.
+///
+/// For incremental decode (position > 0), this avoids recomputing all K/V
+/// from scratch. Instead, it:
+/// 1. Computes Q for the new token(s) only
+/// 2. Computes new K/V and appends to cache (done by update_kv_cache)
+/// 3. Runs attention using full cached K/V sequence
+/// 4. Runs FFN (SwiGLU) on the attention output
+///
+/// This is O(total_seq * head_dim) per step instead of O(total_seq^2).
+fn scalar_incremental_decode_layer(
+    hidden_state: &[f32],
+    q_w: &[f32],
+    o_w: &[f32],
+    rn1_w: &[f32],
+    gate_w: &[f32],
+    up_w: &[f32],
+    down_w: &[f32],
+    rn2_w: &[f32],
+    positions: &[u32],
+    kv_cache_k: &[f32],
+    kv_cache_v: &[f32],
+    layer: usize,
+    total_seq: usize,
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    eps: f32,
+    rope_theta: f64,
+    max_seq_len: usize,
+    output: &mut [f32],
+) {
+    let q_dim = num_heads * head_dim;
+    let heads_per_group = num_heads / num_kv_heads;
+
+    // Step 1: Pre-attention RMSNorm
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    // Step 2: Q projection for new tokens only
+    let mut q_proj = vec![0.0f32; seq_len * q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
+
+    // Step 3: Apply RoPE to Q
+    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
+
+    // Step 4: Attention using cached K/V
+    // K/V cache layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
+    // We read total_seq tokens from the cache for this layer.
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_group;
+        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
+
+        for s in 0..seq_len {
+            // Q vector for this head and position
+            let q_offset = s * q_dim + h * head_dim;
+
+            // Compute attention scores: dot(Q, K[t]) for t in 0..total_seq
+            let mut scores = vec![0.0f32; total_seq];
+            for t in 0..total_seq {
+                let k_offset = cache_base + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
+                }
+                scores[t] = dot * scale;
+            }
+
+            // Causal mask: only attend to positions <= current position
+            let cur_pos = positions[s] as usize;
+            for t in 0..total_seq {
+                if t > cur_pos {
+                    scores[t] = f32::NEG_INFINITY;
+                }
+            }
+
+            // Softmax
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for t in 0..total_seq {
+                scores[t] = (scores[t] - max_score).exp();
+                sum += scores[t];
+            }
+            if sum > 0.0 {
+                for t in 0..total_seq {
+                    scores[t] /= sum;
+                }
+            }
+
+            // Weighted sum of V
+            let out_offset = s * q_dim + h * head_dim;
+            for d in 0..head_dim {
+                let mut val = 0.0f32;
+                for t in 0..total_seq {
+                    let v_offset = cache_base + t * head_dim;
+                    val += scores[t] * kv_cache_v[v_offset + d];
+                }
+                attn_out[out_offset + d] = val;
+            }
+        }
+    }
+
+    // Step 5: Output projection
+    let mut o_out = vec![0.0f32; seq_len * hidden];
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
+
+    // Step 6: Residual connection 1
+    let mut resid1 = vec![0.0f32; seq_len * hidden];
+    for i in 0..seq_len * hidden {
+        resid1[i] = hidden_state[i] + o_out[i];
+    }
+
+    // Step 7: Pre-FFN RMSNorm
+    let mut normed2 = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+
+    // Step 8: SwiGLU FFN
+    let mut gate_out = vec![0.0f32; seq_len * inter];
+    scalar_gemm(&normed2, gate_w, &mut gate_out, seq_len, inter, hidden);
+
+    let mut up_out = vec![0.0f32; seq_len * inter];
+    scalar_gemm(&normed2, up_w, &mut up_out, seq_len, inter, hidden);
+
+    // SwiGLU: silu(gate) * up
+    let mut swiglu = vec![0.0f32; seq_len * inter];
+    for i in 0..seq_len * inter {
+        let g = gate_out[i];
+        let silu_g = g / (1.0 + (-g).exp());
+        swiglu[i] = silu_g * up_out[i];
+    }
+
+    let mut down_out = vec![0.0f32; seq_len * hidden];
+    scalar_gemm(&swiglu, down_w, &mut down_out, seq_len, hidden, inter);
+
+    // Step 9: Residual connection 2
+    for i in 0..seq_len * hidden {
+        output[i] = resid1[i] + down_out[i];
+    }
+}
+
+/// Execute a single decoder layer using cached K/V, with quantized matmul acceleration.
+///
+/// Same logic as `scalar_incremental_decode_layer` but dispatches GEMM operations
+/// through `quantized_linear` which uses `quantized_matmul` for quantized weights,
+/// avoiding the expensive dequantize + transpose + scalar_gemm path.
+fn quantized_incremental_decode_layer<E: Element>(
+    backend: &CpuBackend<E>,
+    hidden_state: &[f32],
+    q_w: &WeightData,
+    o_w: &WeightData,
+    rn1_w: &[f32],
+    gate_w: &WeightData,
+    up_w: &WeightData,
+    down_w: &WeightData,
+    rn2_w: &[f32],
+    positions: &[u32],
+    kv_cache_k: &[f32],
+    kv_cache_v: &[f32],
+    layer: usize,
+    total_seq: usize,
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    eps: f32,
+    rope_theta: f64,
+    max_seq_len: usize,
+    transpose_weights: bool,
+    output: &mut [f32],
+) -> Result<(), BE> {
+    let q_dim = num_heads * head_dim;
+    let heads_per_group = num_heads / num_kv_heads;
+
+    // Step 1: Pre-attention RMSNorm
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    // Step 2: Q projection (quantized acceleration)
+    let mut q_proj = vec![0.0f32; seq_len * q_dim];
+    quantized_linear(
+        backend, &normed, q_w, &mut q_proj,
+        seq_len, q_dim, hidden, transpose_weights,
+    )?;
+
+    // Step 3: Apply RoPE to Q
+    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
+
+    // Step 4: Attention using cached K/V
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_group;
+        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
+
+        for s in 0..seq_len {
+            let q_offset = s * q_dim + h * head_dim;
+            let mut scores = vec![0.0f32; total_seq];
+            for t in 0..total_seq {
+                let k_offset = cache_base + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
+                }
+                scores[t] = dot * scale;
+            }
+
+            let cur_pos = positions[s] as usize;
+            for t in 0..total_seq {
+                if t > cur_pos {
+                    scores[t] = f32::NEG_INFINITY;
+                }
+            }
+
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for t in 0..total_seq {
+                scores[t] = (scores[t] - max_score).exp();
+                sum += scores[t];
+            }
+            if sum > 0.0 {
+                for t in 0..total_seq {
+                    scores[t] /= sum;
+                }
+            }
+
+            let out_offset = s * q_dim + h * head_dim;
+            for d in 0..head_dim {
+                let mut val = 0.0f32;
+                for t in 0..total_seq {
+                    let v_offset = cache_base + t * head_dim;
+                    val += scores[t] * kv_cache_v[v_offset + d];
+                }
+                attn_out[out_offset + d] = val;
+            }
+        }
+    }
+
+    // Step 5: Output projection (quantized acceleration)
+    let mut o_out = vec![0.0f32; seq_len * hidden];
+    quantized_linear(
+        backend, &attn_out, o_w, &mut o_out,
+        seq_len, hidden, q_dim, transpose_weights,
+    )?;
+
+    // Step 6: Residual connection 1
+    let mut resid1 = vec![0.0f32; seq_len * hidden];
+    for i in 0..seq_len * hidden {
+        resid1[i] = hidden_state[i] + o_out[i];
+    }
+
+    // Step 7: Pre-FFN RMSNorm
+    let mut normed2 = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+
+    // Step 8: SwiGLU FFN (quantized acceleration)
+    let mut gate_out = vec![0.0f32; seq_len * inter];
+    quantized_linear(
+        backend, &normed2, gate_w, &mut gate_out,
+        seq_len, inter, hidden, transpose_weights,
+    )?;
+
+    let mut up_out = vec![0.0f32; seq_len * inter];
+    quantized_linear(
+        backend, &normed2, up_w, &mut up_out,
+        seq_len, inter, hidden, transpose_weights,
+    )?;
+
+    let mut swiglu = vec![0.0f32; seq_len * inter];
+    for i in 0..seq_len * inter {
+        let g = gate_out[i];
+        let silu_g = g / (1.0 + (-g).exp());
+        swiglu[i] = silu_g * up_out[i];
+    }
+
+    let mut down_out = vec![0.0f32; seq_len * hidden];
+    quantized_linear(
+        backend, &swiglu, down_w, &mut down_out,
+        seq_len, hidden, inter, transpose_weights,
+    )?;
+
+    // Step 9: Residual connection 2
+    for i in 0..seq_len * hidden {
+        output[i] = resid1[i] + down_out[i];
+    }
+    Ok(())
+}
+
+/// Execute a single MoE decoder layer using cached K/V for attention.
+///
+/// Same as `scalar_incremental_decode_layer` but replaces the SwiGLU FFN
+/// with MoE routing: gate → top-k selection → expert FFN → weighted combine.
+fn scalar_incremental_moe_decode_layer(
+    hidden_state: &[f32],
+    q_w: &[f32],
+    o_w: &[f32],
+    rn1_w: &[f32],
+    rn2_w: &[f32],
+    router_w: &[f32],
+    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)],
+    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
+    positions: &[u32],
+    kv_cache_k: &[f32],
+    kv_cache_v: &[f32],
+    layer: usize,
+    total_seq: usize,
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    eps: f32,
+    rope_theta: f64,
+    max_seq_len: usize,
+    num_experts: usize,
+    top_k: usize,
+    output: &mut [f32],
+) {
+    let q_dim = num_heads * head_dim;
+    let heads_per_group = num_heads / num_kv_heads;
+
+    // Step 1: Pre-attention RMSNorm
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    // Step 2: Q projection
+    let mut q_proj = vec![0.0f32; seq_len * q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
+
+    // Step 3: RoPE on Q
+    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
+
+    // Step 4: Attention using cached K/V
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_group;
+        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
+
+        for s in 0..seq_len {
+            let q_offset = s * q_dim + h * head_dim;
+            let mut scores = vec![0.0f32; total_seq];
+            for t in 0..total_seq {
+                let k_offset = cache_base + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
+                }
+                scores[t] = dot * scale;
+            }
+
+            let cur_pos = positions[s] as usize;
+            for t in 0..total_seq {
+                if t > cur_pos {
+                    scores[t] = f32::NEG_INFINITY;
+                }
+            }
+
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for t in 0..total_seq {
+                scores[t] = (scores[t] - max_score).exp();
+                sum += scores[t];
+            }
+            if sum > 0.0 {
+                for t in 0..total_seq {
+                    scores[t] /= sum;
+                }
+            }
+
+            let out_offset = s * q_dim + h * head_dim;
+            for d in 0..head_dim {
+                let mut val = 0.0f32;
+                for t in 0..total_seq {
+                    let v_offset = cache_base + t * head_dim;
+                    val += scores[t] * kv_cache_v[v_offset + d];
+                }
+                attn_out[out_offset + d] = val;
+            }
+        }
+    }
+
+    // Step 5: Output projection
+    let mut o_out = vec![0.0f32; seq_len * hidden];
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
+
+    // Step 6: Residual connection 1
+    let mut resid1 = vec![0.0f32; seq_len * hidden];
+    for i in 0..seq_len * hidden {
+        resid1[i] = hidden_state[i] + o_out[i];
+    }
+
+    // Step 7: Pre-FFN RMSNorm
+    let mut normed2 = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+
+    // Step 8: MoE FFN (replaces standard SwiGLU)
+    let moe_out = scalar_moe_ffn(
+        &normed2, router_w, expert_weights, shared_expert,
+        seq_len, hidden, inter, num_experts, top_k,
+    );
+
+    // Step 9: Residual connection 2
+    for i in 0..seq_len * hidden {
+        output[i] = resid1[i] + moe_out[i];
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JIT compilation for decoder (LLaMA/Qwen-style) layers
@@ -343,6 +1057,94 @@ pub(crate) fn execute_jit_lm_head(
 }
 
 // ---------------------------------------------------------------------------
+// MoE weight loading helpers
+// ---------------------------------------------------------------------------
+
+/// Load all routed expert weights for a given layer.
+/// Returns a Vec of (gate_proj, up_proj, down_proj) tuples, one per expert.
+/// If the router gate weight is not found, returns None (dense layer).
+fn load_moe_weights<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    backend: &CpuBackend<E>,
+    layer: usize,
+    num_experts: usize,
+    hidden: usize,
+    inter: usize,
+    transpose: bool,
+) -> Result<
+    Option<(
+        Vec<f32>,                              // router gate weight
+        Vec<(Vec<f32>, Vec<f32>, Vec<f32>)>,   // expert (gate, up, down)
+        Option<(Vec<f32>, Vec<f32>, Vec<f32>)>, // shared expert (gate, up, down)
+    )>,
+    BE,
+> {
+    // Try to load router gate weight; if absent, this is a dense layer
+    let router_w = match try_get_f32_data(
+        weights, backend,
+        &crate::weight_names::moe_gate_aliases(layer),
+    ) {
+        Some(w) => w,
+        None => return Ok(None),
+    };
+
+    let router_w = if transpose {
+        transpose_f32(&router_w, num_experts, hidden)
+    } else {
+        router_w
+    };
+
+    // Load each routed expert's FFN weights
+    let mut experts = Vec::with_capacity(num_experts);
+    for e in 0..num_experts {
+        let gw = get_f32_data(weights, backend,
+            &crate::weight_names::moe_expert_aliases(layer, e, "gate_proj.weight"))?;
+        let uw = get_f32_data(weights, backend,
+            &crate::weight_names::moe_expert_aliases(layer, e, "up_proj.weight"))?;
+        let dw = get_f32_data(weights, backend,
+            &crate::weight_names::moe_expert_aliases(layer, e, "down_proj.weight"))?;
+
+        let (gw, uw, dw) = if transpose {
+            (
+                transpose_f32(&gw, inter, hidden),
+                transpose_f32(&uw, inter, hidden),
+                transpose_f32(&dw, hidden, inter),
+            )
+        } else {
+            (gw, uw, dw)
+        };
+        experts.push((gw, uw, dw));
+    }
+
+    // Try to load shared expert weights (DeepSeek-style); optional
+    let shared = {
+        let sg = try_get_f32_data(weights, backend,
+            &crate::weight_names::moe_shared_expert_aliases(layer, "gate_proj.weight"));
+        let su = try_get_f32_data(weights, backend,
+            &crate::weight_names::moe_shared_expert_aliases(layer, "up_proj.weight"));
+        let sd = try_get_f32_data(weights, backend,
+            &crate::weight_names::moe_shared_expert_aliases(layer, "down_proj.weight"));
+        match (sg, su, sd) {
+            (Some(g), Some(u), Some(d)) => {
+                let (g, u, d) = if transpose {
+                    (
+                        transpose_f32(&g, inter, hidden),
+                        transpose_f32(&u, inter, hidden),
+                        transpose_f32(&d, hidden, inter),
+                    )
+                } else {
+                    (g, u, d)
+                };
+                Some((g, u, d))
+            }
+            _ => None,
+        }
+    };
+
+    Ok(Some((router_w, experts, shared)))
+}
+
+// ---------------------------------------------------------------------------
 // Full decoder forward pass
 // ---------------------------------------------------------------------------
 
@@ -375,6 +1177,11 @@ pub(crate) fn decoder_forward<E: Element>(
     let vocab_size = config.vocab_size;
     let rope_theta = config.rope_theta;
     let transpose_weights = needs_weight_transpose(weights);
+
+    // MoE configuration
+    let moe_cfg = config.moe_config.as_ref();
+    let moe_num_experts = moe_cfg.map(|c| c.num_experts).unwrap_or(0);
+    let moe_top_k = moe_cfg.map(|c| c.num_experts_per_tok).unwrap_or(0);
 
     let mut results = Vec::with_capacity(input.sequences.len());
 
@@ -409,84 +1216,281 @@ pub(crate) fn decoder_forward<E: Element>(
         // (b) Build position array
         let positions: Vec<u32> = (0..seq_len).map(|i| (position + i) as u32).collect();
 
-        // (c) JIT compile decoder layer graph (once, reused across layers)
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        let jit_layer: gllm_kernels::compiler::CompiledLayer = {
-            let graph = build_decoder_layer_graph(
-                seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta,
-            );
-            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-            compiler.compile_graph(&graph).map_err(|e| {
-                BE::Other(format!("Decoder layer JIT compilation failed: {e}"))
-            })?
+        // (c) Determine if this is an incremental decode step (position > 0 with KV cache)
+        let has_kv_cache = seq_idx < kv_caches.len();
+        let cached_seq_len = if has_kv_cache {
+            let store = backend.kv_store().lock().map_err(|e| {
+                BE::Cpu(format!("KV store lock poisoned: {e}"))
+            })?;
+            store.get(&kv_caches[seq_idx].0).map(|b| b.seq_len).unwrap_or(0)
+        } else {
+            0
         };
-
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        return Err(BE::Other("Decoder forward requires JIT compilation (x86_64 or aarch64)".into()));
+        let is_incremental = has_kv_cache && cached_seq_len > 0 && position > 0;
 
         let kv_dim = num_kv_heads * head_dim;
 
-        // (d) Run through decoder layers
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        for layer in 0..num_layers {
-            // Load weights for this layer
-            let q_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")))?;
-            let k_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")))?;
-            let v_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")))?;
-            let o_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")))?;
-            let rn1_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")))?;
-            let gate_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")))?;
-            let up_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")))?;
-            let down_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
-            let rn2_w = get_f32_data(weights, backend,
-                &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
-
-            // Transpose weights if needed (SafeTensors/GGUF store [out, in])
-            let (q_w, k_w, v_w, o_w, gate_w, up_w, down_w) = if transpose_weights {
-                (
-                    transpose_f32(&q_w, num_heads * head_dim, hidden),
-                    transpose_f32(&k_w, kv_dim, hidden),
-                    transpose_f32(&v_w, kv_dim, hidden),
-                    transpose_f32(&o_w, hidden, num_heads * head_dim),
-                    transpose_f32(&gate_w, inter, hidden),
-                    transpose_f32(&up_w, inter, hidden),
-                    transpose_f32(&down_w, hidden, inter),
-                )
-            } else {
-                (q_w, k_w, v_w, o_w, gate_w, up_w, down_w)
-            };
-
-            // Execute JIT-compiled layer
-            let mut layer_out = vec![0.0f32; seq_len * hidden];
-            execute_jit_decoder_layer(
-                &jit_layer,
-                &hidden_state,
-                &q_w, &k_w, &v_w, &o_w, &rn1_w,
-                &gate_w, &up_w, &down_w, &rn2_w,
-                &positions,
-                seq_len,
-                &mut layer_out,
+        if is_incremental {
+            // ── Incremental decode path: use cached K/V, O(n) per step ──
+            log::debug!(
+                "decoder_forward: incremental decode, position={position}, seq_len={seq_len}, cached_seq={cached_seq_len}"
             );
 
-            // Update KV cache for this layer
-            if seq_idx < kv_caches.len() {
+            let max_seq_len = {
+                let store = backend.kv_store().lock().map_err(|e| {
+                    BE::Cpu(format!("KV store lock poisoned: {e}"))
+                })?;
+                store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(0)
+            };
+
+            for layer in 0..num_layers {
+                // Load weights: prefer quantized raw blocks for direct quantized_matmul
+                let q_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")))?;
+                let k_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")))?;
+                let v_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")))?;
+                let o_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")))?;
+                let rn1_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")))?;
+                let gate_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")))?;
+                let up_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")))?;
+                let down_w = get_weight_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
+                let rn2_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
+
+                // K/V weights need f32 for update_kv_cache (writes into cache buffer)
+                let k_w_f32 = weight_data_to_f32(&k_w, backend, transpose_weights, kv_dim, hidden)?;
+                let v_w_f32 = weight_data_to_f32(&v_w, backend, transpose_weights, kv_dim, hidden)?;
+
+                // Write new K/V into cache BEFORE attention (so attention sees them)
                 update_kv_cache(
                     backend, kv_caches[seq_idx],
-                    layer, &hidden_state, &q_w, &k_w, &v_w,
+                    layer, &hidden_state, &k_w_f32, &v_w_f32,
                     &rn1_w, &positions,
                     seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
                 )?;
-            }
 
-            hidden_state.copy_from_slice(&layer_out);
+                // Read cached K/V for attention (includes the just-written new tokens)
+                let total_seq = cached_seq_len + seq_len;
+                let (kv_cache_k, kv_cache_v) = {
+                    let store = backend.kv_store().lock().map_err(|e| {
+                        BE::Cpu(format!("KV store lock poisoned: {e}"))
+                    })?;
+                    let buffer = store.get(&kv_caches[seq_idx].0).ok_or_else(|| {
+                        BE::Cpu(format!("KV cache handle {} not found", kv_caches[seq_idx].0))
+                    })?;
+                    (buffer.k.clone(), buffer.v.clone())
+                };
+
+                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                quantized_incremental_decode_layer(
+                    backend,
+                    &hidden_state,
+                    &q_w, &o_w, &rn1_w,
+                    &gate_w, &up_w, &down_w, &rn2_w,
+                    &positions,
+                    &kv_cache_k, &kv_cache_v,
+                    layer, total_seq, seq_len,
+                    hidden, num_heads, num_kv_heads, head_dim, inter,
+                    eps, rope_theta, max_seq_len,
+                    transpose_weights,
+                    &mut layer_out,
+                )?;
+
+                hidden_state.copy_from_slice(&layer_out);
+            }
+        } else if moe_num_experts > 0 {
+            // ── MoE Prefill path: scalar execution with expert routing ──
+
+            for layer in 0..num_layers {
+                let q_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")))?;
+                let k_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")))?;
+                let v_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")))?;
+                let o_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")))?;
+                let rn1_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")))?;
+                let rn2_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
+
+                let (q_w, k_w, v_w, o_w) = if transpose_weights {
+                    (
+                        transpose_f32(&q_w, num_heads * head_dim, hidden),
+                        transpose_f32(&k_w, kv_dim, hidden),
+                        transpose_f32(&v_w, kv_dim, hidden),
+                        transpose_f32(&o_w, hidden, num_heads * head_dim),
+                    )
+                } else {
+                    (q_w, k_w, v_w, o_w)
+                };
+
+                // Load MoE router weight
+                let router_w = get_f32_data(weights, backend,
+                    &crate::weight_names::moe_gate_aliases(layer))?;
+                let router_w = if transpose_weights {
+                    transpose_f32(&router_w, moe_num_experts, hidden)
+                } else {
+                    router_w
+                };
+
+                // Load per-expert weights
+                let mut expert_weights = Vec::with_capacity(moe_num_experts);
+                for e in 0..moe_num_experts {
+                    let ew_gate = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_expert_aliases(layer, e, "gate_proj.weight"))?;
+                    let ew_up = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_expert_aliases(layer, e, "up_proj.weight"))?;
+                    let ew_down = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_expert_aliases(layer, e, "down_proj.weight"))?;
+                    let (ew_gate, ew_up, ew_down) = if transpose_weights {
+                        (
+                            transpose_f32(&ew_gate, inter, hidden),
+                            transpose_f32(&ew_up, inter, hidden),
+                            transpose_f32(&ew_down, hidden, inter),
+                        )
+                    } else {
+                        (ew_gate, ew_up, ew_down)
+                    };
+                    expert_weights.push((ew_gate, ew_up, ew_down));
+                }
+
+                // Load shared expert weights (optional, e.g. DeepSeek)
+                let shared_expert = {
+                    let sg = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_shared_expert_aliases(layer, "gate_proj.weight"));
+                    let su = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_shared_expert_aliases(layer, "up_proj.weight"));
+                    let sd = get_f32_data(weights, backend,
+                        &crate::weight_names::moe_shared_expert_aliases(layer, "down_proj.weight"));
+                    match (sg, su, sd) {
+                        (Ok(sg), Ok(su), Ok(sd)) if !sg.is_empty() && !su.is_empty() && !sd.is_empty() => {
+                            let (sg, su, sd) = if transpose_weights {
+                                (
+                                    transpose_f32(&sg, inter, hidden),
+                                    transpose_f32(&su, inter, hidden),
+                                    transpose_f32(&sd, hidden, inter),
+                                )
+                            } else {
+                                (sg, su, sd)
+                            };
+                            Some((sg, su, sd))
+                        }
+                        _ => None,
+                    }
+                };
+
+                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                scalar_moe_prefill_layer(
+                    &hidden_state,
+                    &q_w, &k_w, &v_w, &o_w,
+                    &rn1_w, &rn2_w,
+                    &router_w, &expert_weights,
+                    shared_expert.as_ref(),
+                    &positions,
+                    seq_len, hidden, num_heads, num_kv_heads, head_dim,
+                    inter, moe_num_experts, moe_top_k, eps, rope_theta,
+                    &mut layer_out,
+                );
+
+                // Update KV cache for this layer
+                if has_kv_cache {
+                    update_kv_cache(
+                        backend, kv_caches[seq_idx],
+                        layer, &hidden_state, &k_w, &v_w,
+                        &rn1_w, &positions,
+                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    )?;
+                }
+
+                hidden_state.copy_from_slice(&layer_out);
+            }
+        } else {
+            // ── Dense Prefill path: JIT-compiled full sequence ──
+
+            // (c) JIT compile decoder layer graph (once, reused across layers)
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let jit_layer: gllm_kernels::compiler::CompiledLayer = {
+                let graph = build_decoder_layer_graph(
+                    seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta,
+                );
+                let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                compiler.compile_graph(&graph).map_err(|e| {
+                    BE::Other(format!("Decoder layer JIT compilation failed: {e}"))
+                })?
+            };
+
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            return Err(BE::Other("Decoder forward requires JIT compilation (x86_64 or aarch64)".into()));
+
+            // (d) Run through decoder layers
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            for layer in 0..num_layers {
+                let q_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")))?;
+                let k_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")))?;
+                let v_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")))?;
+                let o_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")))?;
+                let rn1_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")))?;
+                let gate_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")))?;
+                let up_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")))?;
+                let down_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
+                let rn2_w = get_f32_data(weights, backend,
+                    &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
+
+                let (q_w, k_w, v_w, o_w, gate_w, up_w, down_w) = if transpose_weights {
+                    (
+                        transpose_f32(&q_w, num_heads * head_dim, hidden),
+                        transpose_f32(&k_w, kv_dim, hidden),
+                        transpose_f32(&v_w, kv_dim, hidden),
+                        transpose_f32(&o_w, hidden, num_heads * head_dim),
+                        transpose_f32(&gate_w, inter, hidden),
+                        transpose_f32(&up_w, inter, hidden),
+                        transpose_f32(&down_w, hidden, inter),
+                    )
+                } else {
+                    (q_w, k_w, v_w, o_w, gate_w, up_w, down_w)
+                };
+
+                // Execute JIT-compiled layer
+                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                execute_jit_decoder_layer(
+                    &jit_layer,
+                    &hidden_state,
+                    &q_w, &k_w, &v_w, &o_w, &rn1_w,
+                    &gate_w, &up_w, &down_w, &rn2_w,
+                    &positions,
+                    seq_len,
+                    &mut layer_out,
+                );
+
+                // Update KV cache for this layer
+                if has_kv_cache {
+                    update_kv_cache(
+                        backend, kv_caches[seq_idx],
+                        layer, &hidden_state, &k_w, &v_w,
+                        &rn1_w, &positions,
+                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    )?;
+                }
+
+                hidden_state.copy_from_slice(&layer_out);
+            }
         }
 
         // (e) Final RMSNorm + lm_head
@@ -1009,68 +2013,93 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     }
 }
 
-/// Update the KV cache metadata after a decoder layer execution.
+/// Compute K/V post-RoPE for new tokens and write them into the KV cache buffer.
 ///
-/// REQ-KV-005: KV cache incremental persistence is NOT yet implemented.
+/// REQ-KV-005: KV Cache Incremental Persistence.
 ///
-/// The current gllm-kernels MHA op (`OpKind::MultiHeadAttention`) takes Q, K, V
-/// as graph inputs and produces only `attn_out` as output. K/V values after RoPE
-/// are computed and consumed entirely within the JIT scratchpad -- they are never
-/// exported to an external buffer. The `kv_cache` pointer in `CompiledLayerFn` is
-/// accepted by the ABI but unused by the MHA codegen (both x86_64 and aarch64).
+/// This function computes K and V projections (RMSNorm → GEMM → RoPE for K)
+/// using scalar Rust, then writes the results into the KvCacheBuffer at the
+/// correct position offset. This avoids recomputing all K/V from scratch on
+/// each decode step.
 ///
-/// Consequence: every decode step recomputes all K/V from scratch (full
-/// recomputation). This is correct but O(n^2) in total compute across n steps.
-///
-/// To fix this, gllm-kernels must be extended so the MHA op either:
-///   (a) accepts external K/V buffer pointers and appends new K/V into them, or
-///   (b) exports post-RoPE K/V as additional graph outputs.
-/// Until then, only `seq_len` bookkeeping is performed here.
+/// KvCacheBuffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
 fn update_kv_cache<E: Element>(
     backend: &CpuBackend<E>,
     handle: KvCacheHandle,
     layer: usize,
-    _hidden_state: &[f32],
-    _q_w: &[f32],
-    _k_w: &[f32],
-    _v_w: &[f32],
-    _rn1_w: &[f32],
-    _positions: &[u32],
+    hidden_state: &[f32],
+    k_w: &[f32],
+    v_w: &[f32],
+    rn1_w: &[f32],
+    positions: &[u32],
     seq_len: usize,
-    _hidden: usize,
-    _num_kv_heads: usize,
-    _head_dim: usize,
-    _eps: f32,
-    _rope_theta: f64,
+    hidden: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+    rope_theta: f64,
 ) -> Result<(), BE> {
-    // REQ-KV-005: KV Cache Incremental Persistence
-    //
-    // CURRENT LIMITATION: The JIT-compiled MHA op computes K/V internally
-    // during attention but does not export them to an external buffer.
-    // This means every decode step recomputes all K/V from scratch.
-    //
-    // To implement true incremental KV caching, the MHA op in gllm-kernels
-    // needs to support external K/V buffer output pointers. This requires:
-    // 1. gllm-kernels MHA op to accept kv_cache_ptr as additional output
-    // 2. build_decoder_layer_graph() to wire the buffer into the graph
-    // 3. This function to manage buffer lifecycle and seq_len tracking
-    //
-    // Until then, seq_len tracking is maintained for correctness of
-    // position encoding and attention mask computation.
-    log::debug!("update_kv_cache: layer={layer}, seq_len={seq_len} (metadata-only, full K/V recomputation per step)");
+    let kv_dim = num_kv_heads * head_dim;
 
+    // Step 1: RMSNorm on hidden_state (same norm as pre-attention)
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    // Step 2: K = normed * W_k  [seq_len, hidden] × [hidden, kv_dim] → [seq_len, kv_dim]
+    let mut k_proj = vec![0.0f32; seq_len * kv_dim];
+    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, kv_dim, hidden);
+
+    // Step 3: V = normed * W_v  [seq_len, hidden] × [hidden, kv_dim] → [seq_len, kv_dim]
+    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
+    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
+
+    // Step 4: Apply RoPE to K (V does not get RoPE)
+    scalar_rope(&mut k_proj, positions, head_dim, rope_theta);
+
+    // Step 5: Write K/V into cache buffer
     let mut store = backend.kv_store().lock().map_err(|e| {
         BE::Cpu(format!("KV store lock poisoned: {e}"))
     })?;
 
-    if let Some(buffer) = store.get_mut(&handle.0) {
-        if layer == 0 {
-            buffer.seq_len = buffer.seq_len.saturating_add(seq_len);
-            if buffer.seq_len > buffer.max_seq_len {
-                buffer.seq_len = buffer.max_seq_len;
-            }
+    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
+        BE::Cpu(format!("KV cache handle {} not found", handle.0))
+    })?;
+
+    // Determine write position: current seq_len in buffer is the start offset
+    // (only read from layer 0 to avoid double-counting)
+    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
+    let max_seq = buffer.max_seq_len;
+
+    if write_start + seq_len > max_seq {
+        return Err(BE::Cpu(format!(
+            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
+        )));
+    }
+
+    // Buffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
+    // For a given (layer, head, pos), the flat index is:
+    //   (layer * num_kv_heads + head) * max_seq_len * head_dim + pos * head_dim
+    for h in 0..num_kv_heads {
+        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
+        for s in 0..seq_len {
+            let cache_offset = layer_head_base + (write_start + s) * head_dim;
+            let proj_offset = s * kv_dim + h * head_dim;
+            buffer.k[cache_offset..cache_offset + head_dim]
+                .copy_from_slice(&k_proj[proj_offset..proj_offset + head_dim]);
+            buffer.v[cache_offset..cache_offset + head_dim]
+                .copy_from_slice(&v_proj[proj_offset..proj_offset + head_dim]);
         }
     }
+
+    // Update seq_len counter (only on layer 0 to avoid double-counting)
+    if layer == 0 {
+        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
+    }
+
+    log::debug!(
+        "update_kv_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
+        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
+    );
 
     Ok(())
 }

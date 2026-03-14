@@ -265,11 +265,17 @@ fn tensor_info_from_object(
 ) -> Result<Option<PytorchTensorInfo>> {
     let name = match name.unicode() {
         Ok(name) => name,
-        Err(_) => return Ok(None),
+        Err(e) => {
+            log::debug!("skipping tensor with non-unicode name: {e:?}");
+            return Ok(None);
+        }
     };
     let (callable, args) = match value.reduce() {
         Ok(callable_args) => callable_args,
-        _ => return Ok(None),
+        Err(e) => {
+            log::debug!("skipping tensor '{}': reduce failed: {e:?}", name);
+            return Ok(None);
+        }
     };
     let (callable, args) = match callable {
         Object::Class {

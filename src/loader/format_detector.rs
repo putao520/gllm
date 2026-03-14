@@ -241,7 +241,10 @@ fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return files,
+        Err(e) => {
+            log::debug!("cannot read directory {}: {e}", dir.display());
+            return files;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();

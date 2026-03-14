@@ -63,6 +63,8 @@ pub struct GeneratorForwardConfig {
     pub rerank_no_token_id: Option<u32>,
     /// Active kernel execution strategy from JIT scheduler.
     pub kernel_strategy: crate::scheduler::jit_types::KernelStrategy,
+    /// MoE configuration (None for dense models).
+    pub moe_config: Option<crate::manifest::MoEConfig>,
 }
 
 /// KV-cache swap configuration.
@@ -388,6 +390,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             kernel_strategy: crate::scheduler::jit_types::KernelStrategy::AccuracyFirst,
+            moe_config: manifest.moe_config,
         };
 
         let block_size = model_config.kv_cache_block_size;

@@ -122,18 +122,25 @@ impl<E: Element> CudaBackend<E> {
         // Step 1: Try to load the CUDA driver library
         let driver = match gllm_kernels::gpu::cuda::CudaDriver::load() {
             Ok(d) => d,
-            Err(_) => return None,
+            Err(e) => {
+                log::debug!("CUDA driver not available: {e}");
+                return None;
+            }
         };
 
         // Step 2: Initialize the driver
-        if driver.init().is_err() {
+        if let Err(e) = driver.init() {
+            log::debug!("CUDA driver init failed: {e}");
             return None;
         }
 
         // Step 3: Check device count
         let count = match driver.device_count() {
             Ok(c) => c,
-            Err(_) => return None,
+            Err(e) => {
+                log::debug!("CUDA device_count failed: {e}");
+                return None;
+            }
         };
         if count <= 0 || device >= count as usize {
             return None;

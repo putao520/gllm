@@ -30,7 +30,10 @@ pub(super) fn get_system_memory_pressure() -> Result<f32, BE> {
 fn get_memory_pressure_linux() -> Result<f32, BE> {
     let content = match std::fs::read_to_string("/proc/meminfo") {
         Ok(c) => c,
-        Err(_) => return Ok(0.0),
+        Err(e) => {
+            log::debug!("cannot read /proc/meminfo: {e}");
+            return Ok(0.0);
+        }
     };
 
     let mut mem_total_kb: Option<u64> = None;

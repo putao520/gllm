@@ -1,0 +1,169 @@
+name: xlmr
+version: "1.0"
+
+config:
+  num_layers: "${num_hidden_layers}"
+  hidden_size: "${hidden_size}"
+  num_heads: "${num_attention_heads}"
+  num_kv_heads: "${num_attention_heads}"
+  head_dim: "${head_dim}"
+  intermediate_size: "${intermediate_size}"
+  vocab_size: "${vocab_size}"
+  dtype: "${dtype}"
+
+tensor_patterns:
+  embedding: "roberta.embeddings.word_embeddings.weight"
+  layer_prefix: "roberta.encoder.layer.{}"
+  q_proj: "attention.self.query.weight"
+  k_proj: "attention.self.key.weight"
+  v_proj: "attention.self.value.weight"
+  o_proj: "attention.output.dense.weight"
+  gate_proj: "intermediate.dense.weight"
+  down_proj: "output.dense.weight"
+  input_layernorm: "attention.output.LayerNorm.weight"
+  post_attention_layernorm: "output.LayerNorm.weight"
+
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+      shape: [batch, seq_len]
+
+  outputs:
+    - name: hidden_out
+      dtype: "${dtype}"
+      shape: [batch, seq_len, "${hidden_size}"]
+
+  nodes:
+    - name: embed_tokens
+      op_type: Gather
+      inputs: [roberta.embeddings.word_embeddings.weight, input_ids]
+      outputs: [embed_tok]
+
+    - name: embed_pos
+      op_type: Gather
+      inputs: [roberta.embeddings.position_embeddings.weight, position_ids]
+      outputs: [embed_pos_out]
+
+    - name: embed_type
+      op_type: Gather
+      inputs: [roberta.embeddings.token_type_embeddings.weight, token_type_ids]
+      outputs: [embed_type_out]
+
+    - name: embed_add_pos
+      op_type: Add
+      inputs: [embed_tok, embed_pos_out]
+      outputs: [embed_sum_1]
+
+    - name: embed_add_type
+      op_type: Add
+      inputs: [embed_sum_1, embed_type_out]
+      outputs: [embed_sum]
+
+    - name: embed_norm
+      op_type: LayerNormalization
+      inputs: [embed_sum, roberta.embeddings.LayerNorm.weight, roberta.embeddings.LayerNorm.bias]
+      outputs: [hidden_0]
+
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_q_proj"
+          op_type: MatMul
+          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.query.weight"]
+          outputs: ["layer_${i}_q"]
+
+        - name: "layer_${i}_q_bias"
+          op_type: Add
+          inputs: ["layer_${i}_q", "roberta.encoder.layer.${i}.attention.self.query.bias"]
+          outputs: ["layer_${i}_q_biased"]
+
+        - name: "layer_${i}_k_proj"
+          op_type: MatMul
+          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.key.weight"]
+          outputs: ["layer_${i}_k"]
+
+        - name: "layer_${i}_k_bias"
+          op_type: Add
+          inputs: ["layer_${i}_k", "roberta.encoder.layer.${i}.attention.self.key.bias"]
+          outputs: ["layer_${i}_k_biased"]
+
+        - name: "layer_${i}_v_proj"
+          op_type: MatMul
+          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.value.weight"]
+          outputs: ["layer_${i}_v"]
+
+        - name: "layer_${i}_v_bias"
+          op_type: Add
+          inputs: ["layer_${i}_v", "roberta.encoder.layer.${i}.attention.self.value.bias"]
+          outputs: ["layer_${i}_v_biased"]
+
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["layer_${i}_q_biased", "layer_${i}_k_biased", "layer_${i}_v_biased"]
+          outputs: ["layer_${i}_attn_out"]
+          attributes:
+            bidirectional: 1
+
+        - name: "layer_${i}_o_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_attn_out", "roberta.encoder.layer.${i}.attention.output.dense.weight"]
+          outputs: ["layer_${i}_attn_proj"]
+
+        - name: "layer_${i}_o_bias"
+          op_type: Add
+          inputs: ["layer_${i}_attn_proj", "roberta.encoder.layer.${i}.attention.output.dense.bias"]
+          outputs: ["layer_${i}_attn_biased"]
+
+        - name: "layer_${i}_residual_add"
+          op_type: Add
+          inputs: ["hidden_${i}", "layer_${i}_attn_biased"]
+          outputs: ["layer_${i}_attn_residual"]
+
+        - name: "layer_${i}_attn_norm"
+          op_type: LayerNormalization
+          inputs: ["layer_${i}_attn_residual", "roberta.encoder.layer.${i}.attention.output.LayerNorm.weight", "roberta.encoder.layer.${i}.attention.output.LayerNorm.bias"]
+          outputs: ["layer_${i}_attn_normed"]
+
+        - name: "layer_${i}_intermediate"
+          op_type: MatMul
+          inputs: ["layer_${i}_attn_normed", "roberta.encoder.layer.${i}.intermediate.dense.weight"]
+          outputs: ["layer_${i}_inter"]
+
+        - name: "layer_${i}_intermediate_bias"
+          op_type: Add
+          inputs: ["layer_${i}_inter", "roberta.encoder.layer.${i}.intermediate.dense.bias"]
+          outputs: ["layer_${i}_inter_biased"]
+
+        - name: "layer_${i}_gelu"
+          op_type: GELU
+          inputs: ["layer_${i}_inter_biased"]
+          outputs: ["layer_${i}_act"]
+
+        - name: "layer_${i}_output"
+          op_type: MatMul
+          inputs: ["layer_${i}_act", "roberta.encoder.layer.${i}.output.dense.weight"]
+          outputs: ["layer_${i}_out_proj"]
+
+        - name: "layer_${i}_output_bias"
+          op_type: Add
+          inputs: ["layer_${i}_out_proj", "roberta.encoder.layer.${i}.output.dense.bias"]
+          outputs: ["layer_${i}_out_biased"]
+
+        - name: "layer_${i}_ffn_residual"
+          op_type: Add
+          inputs: ["layer_${i}_attn_normed", "layer_${i}_out_biased"]
+          outputs: ["layer_${i}_ffn_residual_out"]
+
+        - name: "layer_${i}_output_norm"
+          op_type: LayerNormalization
+          inputs: ["layer_${i}_ffn_residual_out", "roberta.encoder.layer.${i}.output.LayerNorm.weight", "roberta.encoder.layer.${i}.output.LayerNorm.bias"]
+          outputs: ["hidden_${i}"]
+
+fusion_hints:
+  - pattern: [q_proj, q_bias, k_proj, k_bias, v_proj, v_bias]
+    target: FusedQkvBias
+  - pattern: [intermediate, intermediate_bias, gelu]
+    target: FusedLinearGELU
+  - pattern: [matmul, scale, softmax, matmul]
+    target: FlashAttention

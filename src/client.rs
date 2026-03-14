@@ -169,13 +169,15 @@ impl Client {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let mut generator = FallbackGenerator::new(&loaded.backend);
-        let text = if let Some(sid) = session_id {
+        let result = if let Some(sid) = session_id {
             generator.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
         } else {
             generator.generate(&prompt, max_tokens, temperature, top_k, top_p)?
         };
+        let (text, thinking_content) = crate::generation::split_thinking_content(&result.value);
         Ok(GenerationResponse {
             text,
+            thinking_content,
             request_id: None,
         })
     }
@@ -187,8 +189,8 @@ impl Client {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let mut embedder = FallbackEmbedder::new(&loaded.backend);
-        let embeddings = embedder.embed_batch(&inputs)?;
-        let embeddings = embeddings
+        let result = embedder.embed_batch(&inputs)?;
+        let embeddings = result.value
             .into_iter()
             .map(|embedding| Embedding { embedding })
             .collect();
@@ -207,8 +209,8 @@ impl Client {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let mut reranker = FallbackReranker::new(&loaded.backend);
-        let scores = reranker.rerank_batch(&query, &documents)?;
-        let mut results = scores
+        let result = reranker.rerank_batch(&query, &documents)?;
+        let mut results = result.value
             .into_iter()
             .enumerate()
             .map(|(index, score)| RerankResult { index, score })

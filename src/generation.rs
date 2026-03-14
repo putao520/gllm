@@ -66,5 +66,54 @@ impl<'a> GenerationBuilder<'a> {
 #[derive(Debug, Clone)]
 pub struct GenerationResponse {
     pub text: String,
+    pub thinking_content: Option<String>,
     pub request_id: Option<u64>,
+}
+
+/// Split thinking content from generated text.
+/// Looks for `<think>...</think>` markers and separates them.
+pub fn split_thinking_content(text: &str) -> (String, Option<String>) {
+    if let Some(start) = text.find("<think>") {
+        if let Some(end) = text.find("</think>") {
+            if end > start {
+                let think_start = start + "<think>".len();
+                let thinking = text[think_start..end].trim().to_string();
+                let mut answer = String::new();
+                answer.push_str(&text[..start]);
+                answer.push_str(&text[end + "</think>".len()..]);
+                let answer = answer.trim().to_string();
+                let thinking = if thinking.is_empty() { None } else { Some(thinking) };
+                return (answer, thinking);
+            }
+        }
+    }
+    (text.to_string(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_no_thinking() {
+        let (text, think) = split_thinking_content("Hello world");
+        assert_eq!(text, "Hello world");
+        assert!(think.is_none());
+    }
+
+    #[test]
+    fn split_with_thinking() {
+        let input = "<think>reasoning here</think>The answer is 42.";
+        let (text, think) = split_thinking_content(input);
+        assert_eq!(text, "The answer is 42.");
+        assert_eq!(think.unwrap(), "reasoning here");
+    }
+
+    #[test]
+    fn split_empty_thinking() {
+        let input = "<think></think>Just the answer.";
+        let (text, think) = split_thinking_content(input);
+        assert_eq!(text, "Just the answer.");
+        assert!(think.is_none());
+    }
 }

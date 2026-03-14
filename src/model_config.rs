@@ -131,7 +131,8 @@ impl ModelConfig {
             // 优先尝试张量驱动推导
             match Self::from_safetensors_loader_tensor_driven(manifest, loader) {
                 Ok(config) => return Ok(config),
-                Err(_) => {
+                Err(e) => {
+                    log::debug!("tensor-driven config failed, falling back to gllm.config: {e}");
                     // 回退到 gllm.config 元数据
                     match Self::from_safetensors_loader(manifest, loader) {
                         Ok(Some(config)) => return Ok(config),

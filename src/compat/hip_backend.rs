@@ -62,9 +62,13 @@ impl<E: Element> HipBackend<E> {
 
         let driver = match gllm_kernels::gpu::hip::HipDriver::load() {
             Ok(d) => std::sync::Arc::new(d),
-            Err(_) => return None,
+            Err(e) => {
+                log::debug!("HIP driver not available: {e}");
+                return None;
+            }
         };
-        if driver.init().is_err() {
+        if let Err(e) = driver.init() {
+            log::debug!("HIP driver init failed: {e}");
             return None;
         }
         let hip_device = gllm_kernels::gpu::hip::HipDevice::new(

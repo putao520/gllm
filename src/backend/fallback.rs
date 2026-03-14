@@ -19,7 +19,7 @@ impl<'a> OomFallback<'a> {
         Self { context }
     }
 
-    pub fn run<F, T>(&self, mut op: F) -> Result<FallbackResult<T>, BackendContextError>
+    pub fn run<F, T>(&self, operation: &str, mut op: F) -> Result<FallbackResult<T>, BackendContextError>
     where
         F: FnMut(&mut BackendExecutor) -> Result<T, ExecutorError>,
     {
@@ -38,7 +38,7 @@ impl<'a> OomFallback<'a> {
             return Err(first_error.into());
         }
 
-        log::warn!("OOM fallback triggered: GPU→CPU rebuild");
+        log::warn!("OOM fallback triggered: GPU→CPU for {operation}");
         self.context.rebuild_cpu()?;
         let mut executor = self.context.executor_mut();
         let value = op(&mut executor)?;
@@ -64,10 +64,9 @@ impl<'a> FallbackGenerator<'a> {
         temperature: f32,
         top_k: usize,
         top_p: f32,
-    ) -> Result<String, BackendContextError> {
+    ) -> Result<FallbackResult<String>, BackendContextError> {
         self.fallback
-            .run(|executor| executor.generate(prompt, max_tokens, temperature, top_k, top_p))
-            .map(|r| r.value)
+            .run("generate", |executor| executor.generate(prompt, max_tokens, temperature, top_k, top_p))
     }
 
     pub fn generate_with_session(
@@ -78,13 +77,12 @@ impl<'a> FallbackGenerator<'a> {
         top_k: usize,
         top_p: f32,
         session_id: u64,
-    ) -> Result<String, BackendContextError> {
-        self.fallback.run(|executor| {
+    ) -> Result<FallbackResult<String>, BackendContextError> {
+        self.fallback.run("generate_with_session", |executor| {
             executor.generate_with_session(
                 prompt, max_tokens, temperature, top_k, top_p, session_id,
             )
         })
-        .map(|r| r.value)
     }
 }
 
@@ -99,15 +97,14 @@ impl<'a> FallbackEmbedder<'a> {
         }
     }
 
-    pub fn embed_batch(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>, BackendContextError> {
-        self.fallback.run(|executor| {
+    pub fn embed_batch(&mut self, inputs: &[String]) -> Result<FallbackResult<Vec<Vec<f32>>>, BackendContextError> {
+        self.fallback.run("embed_batch", |executor| {
             let mut embeddings = Vec::with_capacity(inputs.len());
             for input in inputs {
                 embeddings.push(executor.embed(input)?);
             }
             Ok(embeddings)
         })
-        .map(|r| r.value)
     }
 }
 
@@ -126,8 +123,8 @@ impl<'a> FallbackReranker<'a> {
         &mut self,
         query: &str,
         documents: &[String],
-    ) -> Result<Vec<f32>, BackendContextError> {
-        self.fallback.run(|executor| {
+    ) -> Result<FallbackResult<Vec<f32>>, BackendContextError> {
+        self.fallback.run("rerank_batch", |executor| {
             let mut scores = Vec::with_capacity(documents.len());
             for doc in documents.iter() {
                 let score = executor.rerank_pair(query, doc)?.first().copied().unwrap_or(0.0);
@@ -135,7 +132,6 @@ impl<'a> FallbackReranker<'a> {
             }
             Ok(scores)
         })
-        .map(|r| r.value)
     }
 }
 

@@ -114,6 +114,15 @@ pub(crate) fn needs_weight_transpose<E: Element>(
     })
 }
 
+/// Try to get tensor data as Vec<f32>. Returns None if not found (instead of Err).
+pub(crate) fn try_get_f32_data<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    backend: &CpuBackend<E>,
+    names: &[impl AsRef<str>],
+) -> Option<Vec<f32>> {
+    get_f32_data(weights, backend, names).ok()
+}
+
 /// Transpose a row-major matrix [rows, cols] → [cols, rows].
 pub(crate) fn transpose_f32(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     assert_eq!(data.len(), rows * cols);
@@ -124,4 +133,185 @@ pub(crate) fn transpose_f32(data: &[f32], rows: usize, cols: usize) -> Vec<f32> 
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Quantized linear acceleration
+// ---------------------------------------------------------------------------
+
+/// Result of looking up a weight: either quantized raw blocks or dequantized f32.
+pub(crate) enum WeightData {
+    /// Quantized weight: raw block bytes, quant type, and shape [out_dim, in_dim].
+    Quantized {
+        data: Vec<u8>,
+        quant_type: backend_trait::QuantType,
+        out_dim: usize,
+        in_dim: usize,
+    },
+    /// Dequantized f32 weight (native f32 tensor or already dequantized).
+    F32(Vec<f32>),
+}
+
+/// Look up a weight tensor, returning quantized data when available.
+///
+/// For quantized (GGUF) weights with 2D shape, returns `WeightData::Quantized`
+/// so the caller can dispatch to `quantized_matmul` directly, skipping the
+/// expensive dequantize + transpose + scalar_gemm path.
+///
+/// For native f32 tensors or 1D quantized tensors (e.g. norm weights),
+/// returns `WeightData::F32`.
+pub(crate) fn get_weight_data<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    backend: &CpuBackend<E>,
+    names: &[impl AsRef<str>],
+) -> Result<WeightData, BE> {
+    for name in names {
+        let name = name.as_ref();
+        if let Some(t) = weights.get_tensor(name) {
+            let data = as_f32_slice(t.as_slice()).to_vec();
+            return Ok(WeightData::F32(data));
+        }
+        if let Some(qt) = weights.get_quantized(name) {
+            if qt.shape.len() >= 2 {
+                // GGUF shape: [ne0=in_dim, ne1=out_dim]
+                // Memory layout: out_dim rows of in_dim elements (quantized blocks)
+                let in_dim = qt.shape[0];
+                let out_dim = qt.shape[1];
+                return Ok(WeightData::Quantized {
+                    data: qt.data.clone(),
+                    quant_type: qt.quant_type,
+                    out_dim,
+                    in_dim,
+                });
+            }
+            // 1D quantized tensor (norm weights etc.): dequantize to f32
+            return Ok(WeightData::F32(get_f32_data(weights, backend, &[name])?));
+        }
+    }
+    let name_strs: Vec<&str> = names.iter().map(|s| s.as_ref()).collect();
+    Err(BE::Other(format!("tensor not found: {:?}", name_strs)))
+}
+
+/// Perform a linear projection: output = input @ W^T, where W may be quantized.
+///
+/// - `input`: `[seq_len, in_dim]` row-major f32
+/// - `output`: `[seq_len, out_dim]` row-major f32
+///
+/// When `weight` is `WeightData::Quantized`, calls `backend.quantized_matmul()`
+/// directly on the raw block data, skipping dequantization and transpose.
+///
+/// When `weight` is `WeightData::F32`, falls back to the existing
+/// transpose + scalar_gemm path.
+pub(crate) fn quantized_linear<E: Element>(
+    backend: &CpuBackend<E>,
+    input: &[f32],
+    weight: &WeightData,
+    output: &mut [f32],
+    seq_len: usize,
+    out_dim: usize,
+    in_dim: usize,
+    transpose_weights: bool,
+) -> Result<(), BE> {
+    match weight {
+        WeightData::Quantized { data, quant_type, out_dim: w_out, in_dim: w_in } => {
+            if *w_out != out_dim || *w_in != in_dim {
+                return Err(BE::Other(format!(
+                    "quantized weight shape mismatch: expected [{}, {}], got [{}, {}]",
+                    out_dim, in_dim, w_out, w_in
+                )));
+            }
+
+            // quantized_matmul convention (gllm-kernels):
+            //   weight_blocks: m rows of k quantized elements
+            //   input: [n, k] row-major
+            //   output: [m, n] row-major
+            //   output[j, i] = dot(weight_row_j[k], input_row_i[k])
+            //
+            // m=out_dim, k=in_dim, n=seq_len
+            // Result is [out_dim, seq_len], we need [seq_len, out_dim] → transpose
+            let input_e: &[E] = unsafe {
+                std::slice::from_raw_parts(input.as_ptr() as *const E, input.len())
+            };
+            let mut qmm_out = vec![E::from_f32(0.0); out_dim * seq_len];
+            backend.quantized_matmul(
+                data,
+                input_e,
+                &mut qmm_out,
+                *quant_type,
+                out_dim,
+                seq_len,
+                in_dim,
+            )?;
+
+            // Transpose [out_dim, seq_len] → [seq_len, out_dim]
+            for s in 0..seq_len {
+                for d in 0..out_dim {
+                    output[s * out_dim + d] = qmm_out[d * seq_len + s].to_f32();
+                }
+            }
+            Ok(())
+        }
+        WeightData::F32(w_data) => {
+            let w = if transpose_weights {
+                transpose_f32(w_data, out_dim, in_dim)
+            } else {
+                w_data.clone()
+            };
+            super::decoder_forward::scalar_gemm(input, &w, output, seq_len, out_dim, in_dim);
+            Ok(())
+        }
+    }
+}
+
+/// Extract the f32 data from a WeightData, dequantizing if necessary.
+/// Used for weights that cannot go through quantized_matmul (e.g. norm weights,
+/// or weights needed for non-GEMM operations like KV cache update).
+pub(crate) fn weight_data_to_f32<E: Element>(
+    weight: &WeightData,
+    backend: &CpuBackend<E>,
+    transpose_weights: bool,
+    out_dim: usize,
+    in_dim: usize,
+) -> Result<Vec<f32>, BE> {
+    match weight {
+        WeightData::F32(data) => {
+            if transpose_weights && data.len() == out_dim * in_dim {
+                Ok(transpose_f32(data, out_dim, in_dim))
+            } else {
+                Ok(data.clone())
+            }
+        }
+        WeightData::Quantized { data, quant_type, out_dim: w_out, in_dim: w_in } => {
+            // Dequantize then transpose
+            let total = w_out * w_in;
+            let mut f32_data = vec![0.0f32; total];
+            let blk_bytes = quant_type.block_bytes();
+            let blk_elems = quant_type.block_size();
+            let blocks_per_row = (w_in + blk_elems - 1) / blk_elems;
+            let row_data_bytes = blocks_per_row * blk_bytes;
+            let needs_row_dequant = w_in % blk_elems != 0;
+
+            if needs_row_dequant {
+                let row_elems_padded = blocks_per_row * blk_elems;
+                let mut row_buf = vec![0.0f32; row_elems_padded];
+                let mut out_off = 0;
+                let mut data_off = 0;
+                for _row in 0..*w_out {
+                    let row_data = &data[data_off..data_off + row_data_bytes];
+                    backend.dequantize(row_data, &mut row_buf, *quant_type)?;
+                    f32_data[out_off..out_off + *w_in].copy_from_slice(&row_buf[..*w_in]);
+                    out_off += w_in;
+                    data_off += row_data_bytes;
+                }
+            } else {
+                backend.dequantize(data, &mut f32_data, *quant_type)?;
+            }
+
+            if transpose_weights {
+                Ok(transpose_f32(&f32_data, *w_out, *w_in))
+            } else {
+                Ok(f32_data)
+            }
+        }
+    }
 }

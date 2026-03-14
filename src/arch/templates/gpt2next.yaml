@@ -1,0 +1,137 @@
+name: gpt2next
+version: "1.0"
+
+config:
+  num_layers: "${num_hidden_layers}"
+  hidden_size: "${hidden_size}"
+  num_heads: "${num_attention_heads}"
+  num_kv_heads: "${num_key_value_heads}"
+  head_dim: "${head_dim}"
+  intermediate_size: "${intermediate_size}"
+  vocab_size: "${vocab_size}"
+  dtype: "${dtype}"
+
+tensor_patterns:
+  embedding: "transformer.wte.weight"
+  lm_head: "lm_head.weight"
+  layer_prefix: "transformer.h.{}"
+  q_proj: "attn.c_attn.weight"
+  o_proj: "attn.c_proj.weight"
+  gate_proj: "mlp.c_fc.weight"
+  down_proj: "mlp.c_proj.weight"
+  input_layernorm: "ln_1.weight"
+  post_attention_layernorm: "ln_2.weight"
+  final_norm: "transformer.ln_f.weight"
+
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+      shape: [batch, seq_len]
+
+  outputs:
+    - name: logits
+      dtype: "${dtype}"
+      shape: [batch, seq_len, "${vocab_size}"]
+
+  nodes:
+    - name: embed_tokens
+      op_type: Gather
+      inputs: [transformer.wte.weight, input_ids]
+      outputs: [hidden_0]
+
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_ln1"
+          op_type: LayerNormalization
+          inputs: ["hidden_${i}", "transformer.h.${i}.ln_1.weight", "transformer.h.${i}.ln_1.bias"]
+          outputs: ["layer_${i}_normed"]
+
+        - name: "layer_${i}_c_attn"
+          op_type: MatMul
+          inputs: ["layer_${i}_normed", "transformer.h.${i}.attn.c_attn.weight"]
+          outputs: ["layer_${i}_qkv"]
+
+        - name: "layer_${i}_c_attn_bias"
+          op_type: Add
+          inputs: ["layer_${i}_qkv", "transformer.h.${i}.attn.c_attn.bias"]
+          outputs: ["layer_${i}_qkv_biased"]
+
+        - name: "layer_${i}_qkv_split"
+          op_type: Split
+          inputs: ["layer_${i}_qkv_biased"]
+          outputs: ["layer_${i}_q", "layer_${i}_k", "layer_${i}_v"]
+
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["layer_${i}_q", "layer_${i}_k", "layer_${i}_v"]
+          outputs: ["layer_${i}_attn_out"]
+
+        - name: "layer_${i}_c_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_attn_out", "transformer.h.${i}.attn.c_proj.weight"]
+          outputs: ["layer_${i}_attn_proj"]
+
+        - name: "layer_${i}_c_proj_bias"
+          op_type: Add
+          inputs: ["layer_${i}_attn_proj", "transformer.h.${i}.attn.c_proj.bias"]
+          outputs: ["layer_${i}_attn_biased"]
+
+        - name: "layer_${i}_residual_add"
+          op_type: Add
+          inputs: ["hidden_${i}", "layer_${i}_attn_biased"]
+          outputs: ["layer_${i}_residual"]
+
+        - name: "layer_${i}_ln2"
+          op_type: LayerNormalization
+          inputs: ["layer_${i}_residual", "transformer.h.${i}.ln_2.weight", "transformer.h.${i}.ln_2.bias"]
+          outputs: ["layer_${i}_post_normed"]
+
+        - name: "layer_${i}_c_fc"
+          op_type: MatMul
+          inputs: ["layer_${i}_post_normed", "transformer.h.${i}.mlp.c_fc.weight"]
+          outputs: ["layer_${i}_fc"]
+
+        - name: "layer_${i}_c_fc_bias"
+          op_type: Add
+          inputs: ["layer_${i}_fc", "transformer.h.${i}.mlp.c_fc.bias"]
+          outputs: ["layer_${i}_fc_biased"]
+
+        - name: "layer_${i}_gelu"
+          op_type: GELU
+          inputs: ["layer_${i}_fc_biased"]
+          outputs: ["layer_${i}_act"]
+
+        - name: "layer_${i}_c_proj_mlp"
+          op_type: MatMul
+          inputs: ["layer_${i}_act", "transformer.h.${i}.mlp.c_proj.weight"]
+          outputs: ["layer_${i}_mlp_proj"]
+
+        - name: "layer_${i}_c_proj_mlp_bias"
+          op_type: Add
+          inputs: ["layer_${i}_mlp_proj", "transformer.h.${i}.mlp.c_proj.bias"]
+          outputs: ["layer_${i}_mlp_out"]
+
+        - name: "layer_${i}_output_add"
+          op_type: Add
+          inputs: ["layer_${i}_residual", "layer_${i}_mlp_out"]
+          outputs: ["hidden_${i}"]
+
+    - name: final_norm
+      op_type: LayerNormalization
+      inputs: ["hidden_0", "transformer.ln_f.weight", "transformer.ln_f.bias"]
+      outputs: [hidden_final]
+
+    - name: lm_head
+      op_type: MatMul
+      inputs: [hidden_final, lm_head.weight]
+      outputs: [logits]
+
+fusion_hints:
+  - pattern: [c_attn, c_attn_bias, qkv_split]
+    target: FusedQkvBias
+  - pattern: [c_fc, c_fc_bias, gelu]
+    target: FusedLinearGELU
+  - pattern: [matmul, scale, softmax, matmul]
+    target: FlashAttention

@@ -73,8 +73,11 @@ pub struct LoaderConfig {
 
 impl Default for LoaderConfig {
     fn default() -> Self {
+        let cache_dir = dirs::home_dir()
+            .map(|h| h.join(".gllm").join("models"))
+            .unwrap_or_else(|| PathBuf::from(".gllm/models"));
         Self {
-            cache_dir: PathBuf::from("~/.gllm/models"),
+            cache_dir,
             source: ModelSource::HuggingFace,
             hf_token_path: None,
             enable_fallback: true,
@@ -85,7 +88,13 @@ impl Default for LoaderConfig {
 
 impl LoaderConfig {
     pub fn from_env() -> Self {
-        Self::default()
+        let mut config = Self::default();
+        if let Ok(dir) = std::env::var("GLLM_CACHE_DIR") {
+            if !dir.is_empty() {
+                config.cache_dir = PathBuf::from(dir);
+            }
+        }
+        config
     }
 }
 

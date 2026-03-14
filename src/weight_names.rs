@@ -181,3 +181,54 @@ pub fn decoder_score_aliases() -> Vec<String> {
         "cls.weight".to_string(),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// MoE (Mixture of Experts) weight name aliases
+// ---------------------------------------------------------------------------
+
+/// Generate alias names for the MoE router/gate weight in a decoder layer.
+pub fn moe_gate_aliases(layer: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for &prefix in DECODER_PREFIXES {
+        if prefix.is_empty() {
+            out.push(format!("layers.{layer}.mlp.gate.weight"));
+        } else {
+            out.push(format!("{prefix}.layers.{layer}.mlp.gate.weight"));
+        }
+    }
+    out.push(format!("blk.{layer}.ffn_gate_inp.weight"));
+    out
+}
+
+/// Generate alias names for a MoE shared expert weight.
+///
+/// `suffix`: e.g. `"gate_proj.weight"`, `"up_proj.weight"`, `"down_proj.weight"`
+pub fn moe_shared_expert_aliases(layer: usize, suffix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for &prefix in DECODER_PREFIXES {
+        if prefix.is_empty() {
+            out.push(format!("layers.{layer}.mlp.shared_experts.{suffix}"));
+        } else {
+            out.push(format!("{prefix}.layers.{layer}.mlp.shared_experts.{suffix}"));
+        }
+    }
+    out.push(format!("blk.{layer}.ffn_shared_expert.{suffix}"));
+    out
+}
+
+/// Generate alias names for a MoE routed expert weight.
+///
+/// `expert`: expert index (0-based)
+/// `suffix`: e.g. `"gate_proj.weight"`, `"up_proj.weight"`, `"down_proj.weight"`
+pub fn moe_expert_aliases(layer: usize, expert: usize, suffix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for &prefix in DECODER_PREFIXES {
+        if prefix.is_empty() {
+            out.push(format!("layers.{layer}.mlp.experts.{expert}.{suffix}"));
+        } else {
+            out.push(format!("{prefix}.layers.{layer}.mlp.experts.{expert}.{suffix}"));
+        }
+    }
+    out.push(format!("blk.{layer}.ffn_gate_exps.{expert}.{suffix}"));
+    out
+}

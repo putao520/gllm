@@ -510,7 +510,10 @@ impl Downloader for ModelScopeDownloader {
         let snapshots_dir = model_dir.join("snapshots");
         let snapshot = match self.find_latest_snapshot(&snapshots_dir) {
             Ok(s) => s,
-            Err(_) => return false,
+            Err(e) => {
+                log::debug!("no snapshot found in {}: {e}", snapshots_dir.display());
+                return false;
+            }
         };
 
         snapshot.join(filename).exists()
