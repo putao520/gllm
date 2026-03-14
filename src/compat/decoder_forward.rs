@@ -922,6 +922,192 @@ pub(crate) fn build_decoder_layer_graph(
     g
 }
 
+/// Build a CompilerGraph for KV projection only: RmsNorm → K Gemm → K RoPE.
+///
+/// This graph computes the K projection with RoPE applied, which is the most
+/// compute-intensive part of KV cache update. V projection (RmsNorm → V Gemm)
+/// is computed separately via scalar GEMM since there is no Concat OpKind.
+///
+/// Inputs: [input, rn1_w, w_k]
+/// Output: k_rope [seq_len, kv_dim]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn build_kv_projection_graph(
+    seq_len: usize,
+    hidden: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+    rope_theta: f64,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+    let s = seq_len;
+    let h = hidden;
+    let kv_dim = num_kv_heads * head_dim;
+
+    // Graph inputs
+    let input = g.add_tensor("input", vec![s, h], dt);
+    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
+    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
+
+    g.inputs = vec![input, rn1_w, w_k];
+
+    // RmsNorm
+    let normed = g.add_tensor("normed", vec![s, h], dt);
+    g.add_op(
+        OpKind::RmsNorm { eps },
+        vec![input, rn1_w],
+        vec![normed],
+        "rms_norm_kv",
+    );
+
+    // K = normed * W_k  [s, h] × [h, kv_dim] → [s, kv_dim]
+    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: kv_dim, k: h },
+        vec![normed, w_k],
+        vec![k_out],
+        "gemm_k",
+    );
+
+    // RoPE on K
+    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim, theta: rope_theta },
+        vec![k_out],
+        vec![k_rope],
+        "rope_k",
+    );
+
+    g.outputs = vec![k_rope];
+    g
+}
+
+/// Execute a JIT-compiled KV projection graph.
+///
+/// Computes K projection with RoPE via JIT, and V projection via scalar GEMM.
+/// The RmsNorm is computed once inside the JIT graph (for K) and reused for V
+/// via scalar computation.
+///
+/// Returns (k_rope, v_proj) both as [seq_len, kv_dim].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn execute_kv_projection(
+    compiled: &gllm_kernels::compiler::CompiledLayer,
+    hidden_state: &[f32],
+    rn1_w: &[f32],
+    k_w: &[f32],
+    v_w: &[f32],
+    positions: &[u32],
+    seq_len: usize,
+    hidden: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let kv_dim = num_kv_heads * head_dim;
+
+    // Execute JIT graph for K projection (RmsNorm → Gemm → RoPE)
+    let weight_slices: &[&[f32]] = &[rn1_w, k_w];
+    let total_weight_bytes: usize = weight_slices.iter().map(|s| s.len() * 4).sum();
+    let mut weights_buf = vec![0u8; total_weight_bytes];
+    let mut offset = 0;
+    for slice in weight_slices.iter() {
+        let bytes = slice.len() * 4;
+        weights_buf[offset..offset + bytes].copy_from_slice(
+            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes) }
+        );
+        offset += bytes;
+    }
+
+    let mut k_rope = vec![0.0f32; seq_len * kv_dim];
+    let scratchpad_bytes = compiled.scratchpad_bytes;
+    let mut scratchpad = vec![0u8; scratchpad_bytes];
+
+    unsafe {
+        compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            weights_buf.as_ptr() as *const u8,
+            std::ptr::null_mut(),
+            positions.as_ptr(),
+            std::ptr::null(),
+            1,
+            seq_len,
+            k_rope.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+
+    // Compute V projection via scalar: RmsNorm → V Gemm (no RoPE on V)
+    let mut normed = vec![0.0f32; seq_len * hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+
+    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
+    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
+
+    (k_rope, v_proj)
+}
+
+/// Write pre-computed K/V data into the KV cache buffer.
+///
+/// Pure write operation — no computation. Takes k_data (post-RoPE) and v_data,
+/// copies them into the correct positions in the KvCacheBuffer.
+///
+/// KvCacheBuffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
+fn write_kv_to_cache<E: Element>(
+    backend: &CpuBackend<E>,
+    handle: KvCacheHandle,
+    layer: usize,
+    k_data: &[f32],
+    v_data: &[f32],
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<(), BE> {
+    let kv_dim = num_kv_heads * head_dim;
+    let mut store = backend.kv_store().lock().map_err(|e| {
+        BE::Cpu(format!("KV store lock poisoned: {e}"))
+    })?;
+
+    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
+        BE::Cpu(format!("KV cache handle {} not found", handle.0))
+    })?;
+
+    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
+    let max_seq = buffer.max_seq_len;
+
+    if write_start + seq_len > max_seq {
+        return Err(BE::Cpu(format!(
+            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
+        )));
+    }
+
+    for h in 0..num_kv_heads {
+        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
+        for s in 0..seq_len {
+            let cache_offset = layer_head_base + (write_start + s) * head_dim;
+            let proj_offset = s * kv_dim + h * head_dim;
+            buffer.k[cache_offset..cache_offset + head_dim]
+                .copy_from_slice(&k_data[proj_offset..proj_offset + head_dim]);
+            buffer.v[cache_offset..cache_offset + head_dim]
+                .copy_from_slice(&v_data[proj_offset..proj_offset + head_dim]);
+        }
+    }
+
+    if layer == 0 {
+        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
+    }
+
+    log::debug!(
+        "write_kv_to_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
+        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
+    );
+
+    Ok(())
+}
+
 /// Execute a JIT-compiled decoder layer.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_jit_decoder_layer(
@@ -1244,6 +1430,18 @@ pub(crate) fn decoder_forward<E: Element>(
                 store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(0)
             };
 
+            // Compile KV projection graph for incremental decode (seq_len tokens)
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let kv_proj_decode: gllm_kernels::compiler::CompiledLayer = {
+                let kv_graph = build_kv_projection_graph(
+                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                );
+                let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                kv_compiler.compile_graph(&kv_graph).map_err(|e| {
+                    BE::Other(format!("KV projection (decode) JIT compilation failed: {e}"))
+                })?
+            };
+
             for layer in 0..num_layers {
                 // Load attention + norm weights
                 let q_w = get_weight_data(weights, backend,
@@ -1259,17 +1457,44 @@ pub(crate) fn decoder_forward<E: Element>(
                 let rn2_w = get_f32_data(weights, backend,
                     &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
 
-                // K/V weights need f32 for update_kv_cache
+                // K/V weights as f32 for KV projection
                 let k_w_f32 = weight_data_to_f32(&k_w, backend, transpose_weights, kv_dim, hidden)?;
                 let v_w_f32 = weight_data_to_f32(&v_w, backend, transpose_weights, kv_dim, hidden)?;
 
-                // Write new K/V into cache BEFORE attention
-                update_kv_cache(
-                    backend, kv_caches[seq_idx],
-                    layer, &hidden_state, &k_w_f32, &v_w_f32,
-                    &rn1_w, &positions,
-                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
-                )?;
+                // Check if this layer uses MoE
+                let moe_weights = if moe_num_experts > 0 {
+                    load_moe_weights(
+                        weights, backend, layer,
+                        moe_num_experts, hidden, inter, transpose_weights,
+                    )?
+                } else {
+                    None
+                };
+
+                if moe_weights.is_some() {
+                    // MoE layers: use scalar update_kv_cache (no JIT optimization)
+                    update_kv_cache(
+                        backend, kv_caches[seq_idx],
+                        layer, &hidden_state, &k_w_f32, &v_w_f32,
+                        &rn1_w, &positions,
+                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    )?;
+                } else {
+                    // Dense layers: JIT KV projection
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    {
+                        let (k_rope, v_proj) = execute_kv_projection(
+                            &kv_proj_decode,
+                            &hidden_state, &rn1_w, &k_w_f32, &v_w_f32,
+                            &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                        );
+                        write_kv_to_cache(
+                            backend, kv_caches[seq_idx],
+                            layer, &k_rope, &v_proj,
+                            seq_len, num_kv_heads, head_dim,
+                        )?;
+                    }
+                }
 
                 // Read cached K/V for attention
                 let total_seq = cached_seq_len + seq_len;
@@ -1284,16 +1509,6 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
-
-                // Check if this layer uses MoE
-                let moe_weights = if moe_num_experts > 0 {
-                    load_moe_weights(
-                        weights, backend, layer,
-                        moe_num_experts, hidden, inter, transpose_weights,
-                    )?
-                } else {
-                    None
-                };
 
                 if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
                     // MoE incremental: dequantize attention weights to f32
@@ -1464,6 +1679,20 @@ pub(crate) fn decoder_forward<E: Element>(
                 })?
             };
 
+            // Compile KV projection graph for prefill (reused across layers)
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let kv_proj_compiled: Option<gllm_kernels::compiler::CompiledLayer> = if has_kv_cache {
+                let kv_graph = build_kv_projection_graph(
+                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                );
+                let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                Some(kv_compiler.compile_graph(&kv_graph).map_err(|e| {
+                    BE::Other(format!("KV projection JIT compilation failed: {e}"))
+                })?)
+            } else {
+                None
+            };
+
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             return Err(BE::Other("Decoder forward requires JIT compilation (x86_64 or aarch64)".into()));
 
@@ -1503,6 +1732,20 @@ pub(crate) fn decoder_forward<E: Element>(
                     (q_w, k_w, v_w, o_w, gate_w, up_w, down_w)
                 };
 
+                // KV projection: JIT K (RmsNorm→Gemm→RoPE) + scalar V, then write to cache
+                if let Some(ref kv_compiled) = kv_proj_compiled {
+                    let (k_rope, v_proj) = execute_kv_projection(
+                        kv_compiled,
+                        &hidden_state, &rn1_w, &k_w, &v_w,
+                        &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                    );
+                    write_kv_to_cache(
+                        backend, kv_caches[seq_idx],
+                        layer, &k_rope, &v_proj,
+                        seq_len, num_kv_heads, head_dim,
+                    )?;
+                }
+
                 // Execute JIT-compiled layer
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
                 execute_jit_decoder_layer(
@@ -1514,16 +1757,6 @@ pub(crate) fn decoder_forward<E: Element>(
                     seq_len,
                     &mut layer_out,
                 );
-
-                // Update KV cache for this layer
-                if has_kv_cache {
-                    update_kv_cache(
-                        backend, kv_caches[seq_idx],
-                        layer, &hidden_state, &k_w, &v_w,
-                        &rn1_w, &positions,
-                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
-                    )?;
-                }
 
                 hidden_state.copy_from_slice(&layer_out);
             }
