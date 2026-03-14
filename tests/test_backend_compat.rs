@@ -5,6 +5,10 @@ use gllm::engine::BackendError;
 use gllm::engine::KvCacheHandle;
 
 /// Test that BackendError Display includes the inner message for each variant.
+/// TEST-BACKEND-001: 后端错误显示格式
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: BackendError 的 Display 实现返回可读的错误信息
 #[test]
 fn backend_error_display() {
     let err = BackendError::Cpu("test error".to_string());
@@ -33,6 +37,10 @@ fn backend_error_display() {
 }
 
 /// Test that KvCacheHandle equality and hashing work correctly.
+/// TEST-BACKEND-002: KV Cache 句柄相等性
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: 相同参数的 KvCacheHandle 判定为相等
 #[test]
 fn kv_cache_handle_equality() {
     let h1 = KvCacheHandle(42);
@@ -43,6 +51,10 @@ fn kv_cache_handle_equality() {
 }
 
 /// Test that KvCacheHandle can be used as a HashMap key (Hash + Eq).
+/// TEST-BACKEND-003: KV Cache 句柄可哈希
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: KvCacheHandle 可以作为 HashMap 的键使用
 #[test]
 fn kv_cache_handle_hashable() {
     use std::collections::HashMap;
@@ -55,6 +67,10 @@ fn kv_cache_handle_hashable() {
 }
 
 /// Test that BackendError implements std::error::Error.
+/// TEST-BACKEND-004: 后端错误实现 std::error::Error
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: BackendError 实现标准 Error trait
 #[test]
 fn backend_error_is_std_error() {
     let err = BackendError::Cpu("oops".to_string());
@@ -63,6 +79,10 @@ fn backend_error_is_std_error() {
 
 /// Placeholder: CPU deterministic embedding.
 /// Full test requires model loading; validates the type surface compiles.
+/// TEST-BACKEND-005: CPU 后端确定性 embedding
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: 相同输入在 CPU 后端产生完全相同的 embedding 输出
 #[test]
 fn cpu_deterministic_embedding() {
     // This test validates that running the same embedding twice produces identical results.
@@ -77,6 +97,10 @@ fn cpu_deterministic_embedding() {
 
 /// Placeholder: CPU deterministic generation.
 /// Verifies that greedy generation (temperature=0) type surface is accessible.
+/// TEST-BACKEND-006: CPU 后端确定性生成
+/// **关联需求**: REQ-TEST-010
+/// **测试类型**: 正向
+/// **期望结果**: 相同输入在 CPU 后端产生完全相同的生成结果
 #[test]
 fn cpu_deterministic_generation() {
     // Verify that greedy generation (temperature=0) produces identical output across runs.

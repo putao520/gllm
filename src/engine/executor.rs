@@ -908,6 +908,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             total_tokens += seq.tokens.len();
         }
 
+        // Observer Phase 2: compute batch-average logits entropy (SPEC 07-OBSERVABILITY §2.1)
+        let batch_entropy = {
+            let mut total = 0.0f32;
+            for logits in &logits_list {
+                total += shannon_entropy(&logits.data);
+            }
+            if !logits_list.is_empty() {
+                total / logits_list.len() as f32
+            } else {
+                0.0
+            }
+        };
+        self.observer.update_logits_entropy(batch_entropy);
+        // attention_sparsity: MHA op currently only outputs attn_out, not attention weights.
+        // Requires MHA op extension to return weights for actual sparsity measurement.
+        // Setting to 0.0 per SPEC "Phase 2 — reserved" positioning.
+        self.observer.update_attention_sparsity(0.0);
+
         // Processing results loop
         for (i, logits) in logits_list.iter().enumerate() {
             let req_id = request_indices[i];
@@ -1521,6 +1539,24 @@ fn is_onnx_logits_output(name: &str) -> bool {
     normalized.contains("logits")
 }
 
+fn shannon_entropy(logits: &[f32]) -> f32 {
+    if logits.is_empty() {
+        return 0.0;
+    }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = logits.iter().map(|x| (x - max).exp()).sum();
+    let log_sum = exp_sum.ln();
+    let mut entropy = 0.0f32;
+    for &x in logits {
+        let log_p = (x - max) - log_sum;
+        let p = log_p.exp();
+        if p > 0.0 {
+            entropy -= p * log_p;
+        }
+    }
+    entropy
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1544,5 +1580,27 @@ mod tests {
         assert!(is_onnx_logits_output("logits"));
         assert!(is_onnx_logits_output("model/logits_output"));
         assert!(!is_onnx_logits_output("present.0.key"));
+    }
+
+    #[test]
+    fn shannon_entropy_uniform_distribution() {
+        // Uniform distribution over 4 classes: entropy = ln(4) ≈ 1.386
+        let logits = vec![0.0, 0.0, 0.0, 0.0];
+        let h = super::shannon_entropy(&logits);
+        assert!((h - (4.0f32).ln()).abs() < 1e-5, "uniform entropy mismatch: {h}");
+    }
+
+    #[test]
+    fn shannon_entropy_peaked_distribution() {
+        // Peaked distribution: one very high logit
+        let logits = vec![100.0, 0.0, 0.0, 0.0];
+        let h = super::shannon_entropy(&logits);
+        assert!(h < 0.01, "peaked entropy should be near zero: {h}");
+    }
+
+    #[test]
+    fn shannon_entropy_empty() {
+        let h = super::shannon_entropy(&[]);
+        assert_eq!(h, 0.0);
     }
 }

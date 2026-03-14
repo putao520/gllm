@@ -4,6 +4,10 @@
 
 use gllm::loader::QuantizationMetadata;
 
+/// TEST-QUANT-001: 量化元数据解析
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向
+/// **期望结果**: 正确解析量化配置中的位宽、分组大小等参数
 #[test]
 fn test_parse_quantization_metadata() {
     let json = r#"
@@ -41,6 +45,10 @@ fn test_parse_quantization_metadata() {
     assert!(qweight_2_meta.desc_act);
 }
 
+/// TEST-QUANT-002: 量化元数据默认值
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 边界
+/// **期望结果**: 未指定量化参数时使用合理的默认值
 #[test]
 fn test_quantization_metadata_defaults() {
     // 有效配置，使用默认值
@@ -54,6 +62,10 @@ fn test_quantization_metadata_defaults() {
     assert_eq!(valid.group_size, 128);
 }
 
+/// TEST-QUANT-003: 量化元数据序列化往返
+/// **关联需求**: REQ-TEST-006
+/// **测试类型**: 正向
+/// **期望结果**: 序列化后反序列化得到相同的量化配置
 #[test]
 fn test_serialization_roundtrip() {
     let original = r#"

@@ -181,6 +181,10 @@ fn make_tensor(name: &str, dtype: GgmlDType, shape: Vec<u64>) -> TensorEntry {
     }
 }
 
+/// TEST-GGUF-001: GGUF 头部解析
+/// **关联需求**: REQ-LOADER-011
+/// **测试类型**: 正向
+/// **期望结果**: 正确解析 GGUF 文件头部的版本号、元数据数量和张量数量
 #[test]
 fn test_gguf_001_header_parse() {
     let metadata = make_metadata(true);
@@ -194,6 +198,10 @@ fn test_gguf_001_header_parse() {
     assert_eq!(reader.kv_count(), 2);
 }
 
+/// TEST-GGUF-002: GGUF 大规模字符串数组解析 (49152 tokens)
+/// **关联需求**: REQ-LOADER-011
+/// **测试类型**: 边界
+/// **期望结果**: 正确解析包含 49152 个 token 的字符串数组元数据
 #[test]
 fn test_gguf_002_array_string_parse_49152_tokens() {
     let mut metadata = make_metadata(true);
@@ -217,6 +225,10 @@ fn test_gguf_002_array_string_parse_49152_tokens() {
     assert_eq!(parsed[1], "<s>");
 }
 
+/// TEST-GGUF-003: GGUF 张量信息解析
+/// **关联需求**: REQ-LOADER-011
+/// **测试类型**: 正向
+/// **期望结果**: 正确解析张量名称、维度、数据类型和偏移量
 #[test]
 fn test_gguf_003_tensor_info_parse() {
     let metadata = make_metadata(true);
@@ -241,6 +253,10 @@ fn test_gguf_003_tensor_info_parse() {
     assert_eq!(info1.size, 18);
 }
 
+/// TEST-GGUF-004: Ω1 架构从 GGUF 元数据推断
+/// **关联需求**: REQ-LOADER-011
+/// **测试类型**: 正向
+/// **期望结果**: 从 general.architecture 元数据正确推断模型架构
 #[test]
 fn test_gguf_004_omega1_architecture_from_metadata() {
     let metadata = make_metadata(true);
@@ -262,6 +278,10 @@ fn test_gguf_004_omega1_architecture_from_metadata() {
     }
 }
 
+/// TEST-GGUF-005: 量化类型识别
+/// **关联需求**: REQ-LOADER-011
+/// **测试类型**: 正向
+/// **期望结果**: 正确识别 Q4_0、Q8_0 等量化数据类型
 #[test]
 fn test_gguf_005_quantized_type_recognition() {
     let metadata = make_metadata(true);

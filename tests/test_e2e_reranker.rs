@@ -10,6 +10,10 @@ use gllm::Client;
 /// 模型: BAAI/bge-reranker-v2-m3
 /// 格式: SafeTensors (.safetensors)
 /// 源: [HuggingFace](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+/// TEST-E2E-RERANK-001: SafeTensors 格式 reranker 端到端推理
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 SafeTensors 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_safetensors() {
     const MODEL: &str = "BAAI/bge-reranker-v2-m3";
@@ -53,6 +57,10 @@ fn e2e_reranker_safetensors() {
 /// 格式: GGUF (.gguf)
 /// 源: [HuggingFace](https://huggingface.co/DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF)
 ///
+/// TEST-E2E-RERANK-002: GGUF 格式 reranker 端到端推理
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 GGUF 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_gguf() {
     const MODEL: &str = "DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF";
@@ -100,6 +108,10 @@ fn e2e_reranker_gguf() {
 /// 模型: onnx-community/bge-reranker-v2-m3-ONNX
 /// 格式: ONNX (.onnx)
 /// 源: [HuggingFace](https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX)
+/// TEST-E2E-RERANK-003: ONNX 格式 reranker 端到端推理
+/// **关联需求**: REQ-TEST-004
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 ONNX 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_onnx() {
     const MODEL: &str = "onnx-community/bge-reranker-v2-m3-ONNX";

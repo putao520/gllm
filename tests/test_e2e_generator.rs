@@ -10,6 +10,10 @@ use gllm::Client;
 /// 模型: HuggingFaceTB/SmolLM2-135M-Instruct
 /// 格式: SafeTensors (.safetensors)
 /// 源: [HuggingFace](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct)
+/// TEST-E2E-GEN-001: SafeTensors 格式生成端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 SafeTensors 模型并生成 token 序列
 #[test]
 fn e2e_generator_safetensors() {
     const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
@@ -39,6 +43,10 @@ fn e2e_generator_safetensors() {
 /// 格式: GGUF (.gguf)
 /// 源: [HuggingFace](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
 ///
+/// TEST-E2E-GEN-002: GGUF 格式生成端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 GGUF 模型并生成 token 序列
 #[test]
 fn e2e_generator_gguf() {
     const MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
@@ -78,6 +86,10 @@ fn e2e_generator_gguf() {
 /// 模型: onnx-community/SmolLM2-135M-ONNX
 /// 格式: ONNX (.onnx)
 /// 源: [HuggingFace](https://huggingface.co/onnx-community/SmolLM2-135M-ONNX)
+/// TEST-E2E-GEN-003: ONNX 格式生成端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 ONNX 模型并生成 token 序列
 #[test]
 fn e2e_generator_onnx() {
     const MODEL: &str = "onnx-community/SmolLM2-135M-ONNX";

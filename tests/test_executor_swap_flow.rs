@@ -8,6 +8,10 @@ use std::borrow::Cow;
 use std::env;
 use std::sync::Arc;
 
+/// TEST-SCHED-004: 执行器内存压力下的换入换出流程
+/// **关联需求**: REQ-SCHED-002
+/// **测试类型**: 正向
+/// **期望结果**: 内存压力下正确执行 KV Cache 换出和换入操作
 #[test]
 fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup Environment

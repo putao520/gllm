@@ -9,6 +9,10 @@ use gllm::scheduler::{Sequence, SequenceState};
 
 // ---- PrefixIndex tests ----
 
+/// TEST-SCHED-005: 前缀索引插入和查找
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 插入前缀后可以正确查找匹配的页面
 #[test]
 fn prefix_index_insert_and_lookup() {
     let mut index = KvPrefixIndex::new();
@@ -26,6 +30,10 @@ fn prefix_index_insert_and_lookup() {
     assert_eq!(result.matched_pages, pages);
 }
 
+/// TEST-SCHED-006: 前缀索引部分匹配
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 查询前缀的子串时返回最长匹配
 #[test]
 fn prefix_index_partial_match() {
     let mut index = KvPrefixIndex::new();
@@ -44,6 +52,10 @@ fn prefix_index_partial_match() {
     assert_eq!(result.matched_tokens, 3);
 }
 
+/// TEST-SCHED-007: 前缀索引追加复用
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 追加新 token 后复用已有前缀的页面
 #[test]
 fn prefix_index_append_reuse() {
     let mut index = KvPrefixIndex::new();
@@ -77,6 +89,10 @@ fn prefix_index_append_reuse() {
     assert_eq!(result.matched_tokens, 3);
 }
 
+/// TEST-SCHED-008: 前缀索引无匹配返回 None
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 负向
+/// **期望结果**: 查询不存在的前缀时返回 None
 #[test]
 fn prefix_index_no_match_returns_none() {
     let mut index = KvPrefixIndex::new();
@@ -84,6 +100,10 @@ fn prefix_index_no_match_returns_none() {
     assert!(index.find_longest_prefix(&[9, 8, 7]).is_none());
 }
 
+/// TEST-SCHED-009: 前缀索引空查询返回 None
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 边界
+/// **期望结果**: 空 token 序列查询返回 None
 #[test]
 fn prefix_index_empty_query_returns_none() {
     let mut index = KvPrefixIndex::new();
@@ -93,12 +113,20 @@ fn prefix_index_empty_query_returns_none() {
 
 // ---- BatchOrderPolicy tests ----
 
+/// TEST-SCHED-010: 严格请求 ID 排序为默认策略
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 默认批次排序策略为 StrictRequestIdOrder
 #[test]
 fn strict_request_id_order_is_default() {
     let policy = BatchOrderPolicy::default();
     assert_eq!(policy, BatchOrderPolicy::StrictRequestIdOrder);
 }
 
+/// TEST-SCHED-011: 严格请求 ID 排序正确性
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 请求按 ID 严格升序排列
 #[test]
 fn strict_request_id_order_sorts_correctly() {
     // Verify StrictRequestIdOrder produces monotonic ordering by sorting request IDs
@@ -108,6 +136,10 @@ fn strict_request_id_order_sorts_correctly() {
     assert_eq!(request_ids, vec![1, 2, 3, 4, 5]);
 }
 
+/// TEST-SCHED-012: 批次排序策略变体互不相同
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: 不同的 BatchOrderPolicy 变体判定为不相等
 #[test]
 fn batch_order_policy_variants_are_distinct() {
     let strict = BatchOrderPolicy::StrictRequestIdOrder;
@@ -117,6 +149,10 @@ fn batch_order_policy_variants_are_distinct() {
 
 // ---- KvPipeline tests ----
 
+/// TEST-SCHED-013: KV 管线变体
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: KV 管线各变体正确构造和区分
 #[test]
 fn kv_pipeline_variants() {
     let conv = KvPipeline::Conversation;
@@ -128,6 +164,10 @@ fn kv_pipeline_variants() {
 
 // ---- SequenceGroup tests ----
 
+/// TEST-SCHED-014: 序列组基本操作
+/// **关联需求**: REQ-TEST-005
+/// **测试类型**: 正向
+/// **期望结果**: SequenceGroup 的创建、添加和查询操作正确
 #[test]
 fn sequence_group_basic_operations() {
     use std::time::Instant;

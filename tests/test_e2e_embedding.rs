@@ -10,6 +10,10 @@ use gllm::Client;
 /// 模型: intfloat/e5-small-v2
 /// 格式: SafeTensors (.safetensors)
 /// 源: [HuggingFace](https://huggingface.co/intfloat/e5-small-v2)
+/// TEST-E2E-EMB-001: SafeTensors 格式 embedding 端到端推理
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 SafeTensors 模型并生成有效 embedding 向量
 #[test]
 fn e2e_embedding_safetensors() {
     const MODEL: &str = "intfloat/e5-small-v2";
@@ -57,6 +61,10 @@ fn e2e_embedding_safetensors() {
 /// 格式: GGUF (.gguf)
 /// 源: [HuggingFace](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF)
 ///
+/// TEST-E2E-EMB-002: GGUF 格式 embedding 端到端推理
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 GGUF 模型并生成有效 embedding 向量
 #[test]
 fn e2e_embedding_gguf() {
     const MODEL: &str = "Qwen/Qwen3-Embedding-0.6B-GGUF";
@@ -108,6 +116,10 @@ fn e2e_embedding_gguf() {
 /// 模型: intfloat/multilingual-e5-small
 /// 格式: ONNX (onnx/model.onnx)
 /// 源: [HuggingFace](https://huggingface.co/intfloat/multilingual-e5-small)
+/// TEST-E2E-EMB-003: ONNX 格式 embedding 端到端推理
+/// **关联需求**: REQ-TEST-003
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载 ONNX 模型并生成有效 embedding 向量
 #[test]
 fn e2e_embedding_onnx() {
     const MODEL: &str = "intfloat/multilingual-e5-small";

@@ -26,6 +26,10 @@ impl TensorProvider for MockProvider {
     }
 }
 
+/// TEST-INFERENCE-002: DAG 模板到图的转换和优化
+/// **关联需求**: REQ-EXEC-002
+/// **测试类型**: 正向
+/// **期望结果**: 架构模板正确转换为 OnnxGraph 并通过优化器处理
 #[test]
 fn dag_refactor_template_to_graph_and_optimizer() {
     let yaml = r#"
@@ -74,6 +78,10 @@ graph:
         .any(|n| matches!(n.op, FusedOp::FusedQkvRope(_))));
 }
 
+/// TEST-INFERENCE-003: DAG 权重绑定和执行
+/// **关联需求**: REQ-EXEC-002
+/// **测试类型**: 正向
+/// **期望结果**: 图正确绑定权重数据并成功执行前向传播
 #[test]
 fn dag_refactor_bind_weights_and_execute() {
     let mut graph = FusedGraph::new();

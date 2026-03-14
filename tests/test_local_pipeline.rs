@@ -2,6 +2,10 @@
 
 use gllm::Client;
 
+/// TEST-INFERENCE-004: 本地 GGUF 管线端到端
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 本地 GGUF 模型文件成功加载并完成推理
 #[test]
 #[ignore]
 fn test_local_gguf_pipeline() {
@@ -13,6 +17,10 @@ fn test_local_gguf_pipeline() {
     assert!(!response.embeddings.is_empty());
 }
 
+/// TEST-INFERENCE-005: 本地 SafeTensors 管线端到端
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 本地 SafeTensors 模型文件成功加载并完成推理
 #[test]
 #[ignore]
 fn test_local_safetensors_pipeline() {
@@ -24,6 +32,10 @@ fn test_local_safetensors_pipeline() {
     assert!(!response.embeddings.is_empty());
 }
 
+/// TEST-INFERENCE-006: 本地 ONNX 管线端到端
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 本地 ONNX 模型文件成功加载并完成推理
 #[test]
 #[ignore]
 fn test_local_onnx_pipeline() {
@@ -80,6 +92,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+/// TEST-INFERENCE-007: SafeTensors 输出合理性检查
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: SafeTensors 模型输出的 embedding 向量满足合理性约束
 #[test]
 #[ignore]
 fn test_output_sanity_safetensors() {
@@ -104,6 +120,10 @@ fn test_output_sanity_safetensors() {
     );
 }
 
+/// TEST-INFERENCE-008: ONNX 输出合理性检查
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: ONNX 模型输出的 embedding 向量满足合理性约束
 #[test]
 #[ignore]
 fn test_output_sanity_onnx() {
@@ -127,6 +147,10 @@ fn test_output_sanity_onnx() {
     );
 }
 
+/// TEST-INFERENCE-009: GGUF 输出合理性检查
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: GGUF 模型输出的 embedding 向量满足合理性约束
 #[test]
 #[ignore]
 fn test_output_sanity_gguf() {
@@ -149,6 +173,10 @@ fn test_output_sanity_gguf() {
     );
 }
 
+/// TEST-INFERENCE-010: 跨格式一致性 ONNX vs SafeTensors
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: ONNX 和 SafeTensors 格式的推理结果余弦相似度 > 0.99
 #[test]
 #[ignore]
 fn test_cross_format_consistency_onnx_vs_safetensors() {
@@ -187,6 +215,10 @@ fn test_cross_format_consistency_onnx_vs_safetensors() {
     eprintln!("[cross-format] max element-wise diff: {max_diff}");
 }
 
+/// TEST-INFERENCE-011: 确定性输出验证
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 相同输入多次推理产生完全相同的输出
 #[test]
 #[ignore]
 fn test_deterministic_output() {
@@ -210,6 +242,10 @@ fn test_deterministic_output() {
 
 use gllm::loader::{GgufLoader, TensorProvider};
 
+/// TEST-INFERENCE-012: GGUF 张量调试信息
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 成功加载并打印 GGUF 模型的张量调试信息
 #[test]
 #[ignore]
 fn debug_gguf_tensors() {

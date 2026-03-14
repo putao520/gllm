@@ -1,6 +1,10 @@
 use gllm::client::Client;
 use gllm::manifest::ModelKind;
 
+/// TEST-INFERENCE-001: 客户端生命周期加载和卸载
+/// **关联需求**: REQ-LOADER-018
+/// **测试类型**: 正向
+/// **期望结果**: 客户端可以成功加载模型并正确卸载释放资源
 #[test]
 fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup

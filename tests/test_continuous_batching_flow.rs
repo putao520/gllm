@@ -11,6 +11,10 @@ fn make_sequence(id: RequestId, prompt_len: usize) -> Sequence {
     Sequence::new(id, tokens)
 }
 
+/// TEST-SCHED-001: 连续批处理 prefill 和 decode 混合调度
+/// **关联需求**: REQ-SCHED-003
+/// **测试类型**: 正向
+/// **期望结果**: 正确混合调度 prefill 和 decode 请求，维护批次一致性
 #[test]
 fn test_continuous_batching_prefill_and_decode_mix() {
     // 1. Setup
@@ -109,6 +113,10 @@ fn test_continuous_batching_prefill_and_decode_mix() {
     println!("Continuous Batching Test Passed: Mixed prefill/decode handled correctly.");
 }
 
+/// TEST-SCHED-002: 批处理中的 OOM 处理
+/// **关联需求**: REQ-SCHED-003
+/// **测试类型**: 负向
+/// **期望结果**: 内存不足时正确拒绝新请求而非崩溃
 #[test]
 fn test_oom_handling_in_batching() {
     // 1. Setup small memory: 4 blocks total.

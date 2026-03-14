@@ -287,6 +287,10 @@ fn full_llama_config_metadata() -> Vec<MetaEntry> {
     metadata
 }
 
+/// TEST-LOADER-001: 从 GGUF 元数据读取模型配置（无 config.json）
+/// **关联需求**: REQ-LOADER-022
+/// **测试类型**: 正向
+/// **期望结果**: 仅从 GGUF 元数据成功构建完整模型配置
 #[test]
 fn model_config_reads_from_gguf_metadata_without_config_json() {
     let metadata = full_llama_config_metadata();
@@ -335,6 +339,10 @@ fn model_config_reads_from_gguf_metadata_without_config_json() {
     assert_eq!(config.eos_token_id, Some(2));
 }
 
+/// TEST-LOADER-002: GGUF 元数据不完整时回退到 config.json
+/// **关联需求**: REQ-LOADER-022
+/// **测试类型**: 正向
+/// **期望结果**: GGUF 元数据缺失字段时从 config.json 补全配置
 #[test]
 fn model_config_falls_back_to_config_json_when_gguf_metadata_is_incomplete() {
     let mut metadata = full_llama_config_metadata();
@@ -380,6 +388,10 @@ fn model_config_falls_back_to_config_json_when_gguf_metadata_is_incomplete() {
     assert_eq!(config.eos_token_id, Some(12));
 }
 
+/// TEST-LOADER-003: GGUF 元数据优先于 config.json
+/// **关联需求**: REQ-LOADER-022
+/// **测试类型**: 正向
+/// **期望结果**: 两者都存在时优先使用 GGUF 元数据的值
 #[test]
 fn model_config_prefers_gguf_metadata_over_config_json_when_both_exist() {
     let metadata = full_llama_config_metadata();
@@ -424,6 +436,10 @@ fn model_config_prefers_gguf_metadata_over_config_json_when_both_exist() {
     assert_eq!(config.eos_token_id, Some(2));
 }
 
+/// TEST-LOADER-004: GGUF 和 config.json 都缺失时返回错误
+/// **关联需求**: REQ-LOADER-022
+/// **测试类型**: 负向
+/// **期望结果**: 返回明确的配置缺失错误
 #[test]
 fn model_config_returns_error_when_gguf_and_config_json_are_both_missing() {
     let metadata = base_metadata();

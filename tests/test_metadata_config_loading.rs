@@ -28,6 +28,10 @@ fn test_manifest() -> ModelManifest {
     }
 }
 
+/// TEST-LOADER-005: SafeTensors gllm 配置元数据加载
+/// **关联需求**: REQ-LOADER-007
+/// **测试类型**: 正向
+/// **期望结果**: 从 SafeTensors 文件的元数据中正确读取模型配置
 #[test]
 fn safetensors_gllm_config_metadata_is_used() {
     let dir = TempDir::new().expect("temp dir");
@@ -150,6 +154,10 @@ fn tensor_raw(
     tensor
 }
 
+/// TEST-LOADER-006: ONNX 数据类型元数据用于模型配置
+/// **关联需求**: REQ-LOADER-007
+/// **测试类型**: 正向
+/// **期望结果**: 从 ONNX 模型的数据类型信息正确推断 dtype_size
 #[test]
 fn onnx_dtype_metadata_is_used_for_model_config_dtype_size() {
     let dir = TempDir::new().expect("temp dir");
@@ -196,6 +204,10 @@ fn onnx_dtype_metadata_is_used_for_model_config_dtype_size() {
     assert_eq!(config.dtype_size, 2);
 }
 
+/// TEST-LOADER-007: ONNX 权重可上传用于 reranker
+/// **关联需求**: REQ-LOADER-007
+/// **测试类型**: 正向
+/// **期望结果**: ONNX 格式的权重可以成功上传到后端用于 reranker 推理
 #[test]
 fn onnx_weights_are_uploadable_for_reranker() {
     let dir = TempDir::new().expect("temp dir");

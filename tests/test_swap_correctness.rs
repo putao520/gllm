@@ -16,6 +16,10 @@ fn make_group(id: RequestId, context_len: usize) -> SequenceGroup {
     }
 }
 
+/// TEST-SCHED-003: 换出和恢复流程正确性
+/// **关联需求**: REQ-SCHED-005
+/// **测试类型**: 正向
+/// **期望结果**: 序列换出后可正确恢复，上下文长度和状态保持一致
 #[test]
 fn test_swap_out_and_restore_flow() {
     // Total 4 blocks, block size 1 token
