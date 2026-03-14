@@ -6,7 +6,7 @@ use gllm::loader::gguf::{
 };
 use gllm::loader::Loader;
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::model_config::{ModelConfig, ModelConfigError, RopeScalingType};
 use tempfile::TempDir;
@@ -151,7 +151,6 @@ fn make_manifest() -> ModelManifest {
         model_id: Cow::Borrowed("test/gguf"),
         file_map: EMPTY_FILE_MAP,
         arch: ModelArchitecture::Llama4,
-        tensor_rules: TensorNamingRule::Llama4,
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use log;
+
 use crate::compat::backend_trait::{Backend, Element};
 use crate::compat::CpuBackend;
 use crate::scheduler::types::{PageId, RequestId, StorageKey};
@@ -49,10 +51,18 @@ pub struct GeneratorForwardConfig {
     pub rope_interleaved: bool,
     pub rope_precompute: bool,
     pub position_encoding: PositionEncoding,
+    /// Architecture family (Encoder vs Decoder).
+    pub arch_family: crate::manifest::ArchFamily,
     /// FFN intermediate dimension.
     pub intermediate_size: usize,
     /// LayerNorm epsilon.
     pub norm_eps: f32,
+    /// Token ID for "yes" (used by decoder-based rerankers without a score head).
+    pub rerank_yes_token_id: Option<u32>,
+    /// Token ID for "no" (used by decoder-based rerankers without a score head).
+    pub rerank_no_token_id: Option<u32>,
+    /// Active kernel execution strategy from JIT scheduler.
+    pub kernel_strategy: crate::scheduler::jit_types::KernelStrategy,
 }
 
 /// KV-cache swap configuration.
@@ -79,6 +89,8 @@ pub struct KvCacheConfig {
 #[derive(Debug, Clone)]
 pub enum BackendError {
     Cuda(String),
+    Hip(String),
+    Metal(String),
     Cpu(String),
     Unimplemented(&'static str),
     Other(String),
@@ -88,6 +100,8 @@ impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BackendError::Cuda(msg) => write!(f, "CUDA error: {msg}"),
+            BackendError::Hip(msg) => write!(f, "HIP error: {msg}"),
+            BackendError::Metal(msg) => write!(f, "Metal error: {msg}"),
             BackendError::Cpu(msg) => write!(f, "CPU error: {msg}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented: {what}"),
             BackendError::Other(msg) => write!(f, "backend error: {msg}"),
@@ -107,15 +121,70 @@ pub struct LogitsHandle {
     pub data: Vec<f32>,
 }
 
-/// Attention topology descriptor (placeholder).
+/// Attention mask strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionMaskType {
+    /// BERT-style bidirectional (no causal mask needed).
+    Bidirectional,
+    /// GPT-style causal mask.
+    Causal,
+}
+
+/// Attention topology descriptor.
+///
+/// Lightweight struct that captures the attention geometry for a model.
+/// Constructed from `ModelConfig` without additional I/O.
 #[derive(Debug, Clone)]
 pub struct AttentionTopology {
-    _private: (),
+    /// Number of query attention heads.
+    pub num_heads: usize,
+    /// Number of key/value heads (for GQA; equals `num_heads` for MHA).
+    pub num_kv_heads: usize,
+    /// Dimension of each attention head.
+    pub head_dim: usize,
+    /// Attention mask type (bidirectional vs causal).
+    pub mask_type: AttentionMaskType,
+    /// Maximum sequence length the model supports.
+    pub max_seq_len: usize,
 }
 
 impl AttentionTopology {
+    /// Construct a bidirectional (encoder) topology for BERT-style models
+    /// (embedding / reranker).
+    pub fn bidirectional(
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        max_seq_len: usize,
+    ) -> Self {
+        Self {
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            mask_type: AttentionMaskType::Bidirectional,
+            max_seq_len,
+        }
+    }
+
+    /// Construct a causal (decoder) topology for GPT-style generator models.
+    pub fn causal(
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        max_seq_len: usize,
+    ) -> Self {
+        Self {
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            mask_type: AttentionMaskType::Causal,
+            max_seq_len,
+        }
+    }
+
+    /// Legacy compatibility constructor (minimal bidirectional topology).
     pub fn linear() -> Self {
-        Self { _private: () }
+        Self::bidirectional(1, 1, 1, 512)
     }
 }
 
@@ -148,7 +217,7 @@ use crate::scheduler::types::{BatchOrderPolicy, RequestKind};
 use crate::scheduler::vllm2024::Scheduler2024Config;
 use crate::scheduler::{
     BasicObserver, GlobalMemoryManager, MemoryManagerError, PagedScheduler, PolicyVariant,
-    ScheduledBatch, Sequence, SystemState, Tier, VirtualPageId,
+    PrefillPlan, ScheduledBatch, Sequence, SessionId, Tier, VirtualPageId,
 };
 use std::collections::HashMap;
 
@@ -161,6 +230,7 @@ struct RequestData {
     // kv_cache: KvCacheHandle, // Moved to Scheduler/BlockTable management
     max_new_tokens: usize,
     finished: bool,
+    session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -270,6 +340,7 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     kv_cache_slot: KvCacheSlot,
     memory_manager: GlobalMemoryManager,
     onnx_generator_plan: Option<OnnxGeneratorPlan>,
+    topology: AttentionTopology,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -311,24 +382,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rope_interleaved: model_config.rope_interleaved,
             rope_precompute: true,
             position_encoding,
+            arch_family: manifest.arch.family(),
             intermediate_size: model_config.intermediate_size.unwrap_or(0),
             norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12),
+            rerank_yes_token_id: None,
+            rerank_no_token_id: None,
+            kernel_strategy: crate::scheduler::jit_types::KernelStrategy::AccuracyFirst,
         };
-
-        // DEBUG: 打印配置信息
-        eprintln!("=== GeneratorForwardConfig ===");
-        eprintln!("num_layers: {}", forward_config.num_layers);
-        eprintln!("num_heads: {}", forward_config.num_heads);
-        eprintln!("num_kv_heads: {}", forward_config.num_kv_heads);
-        eprintln!("head_dim: {}", forward_config.head_dim);
-        eprintln!(
-            "hidden_size (calc): {} * {} = {}",
-            forward_config.num_heads,
-            forward_config.head_dim,
-            forward_config.num_heads * forward_config.head_dim
-        );
-        eprintln!("max_seq_len: {}", forward_config.max_seq_len);
-        eprintln!("vocab_size: {}", forward_config.vocab_size);
 
         let block_size = model_config.kv_cache_block_size;
         let hgal_config = HGALConfig::default();
@@ -367,6 +427,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let l3_capacity = total_blocks.saturating_mul(100);
         let memory_manager =
             GlobalMemoryManager::new_with_capacities(l1_capacity, l2_capacity, l3_capacity);
+        let topology = match manifest.kind {
+            ModelKind::Chat => AttentionTopology::causal(
+                model_config.num_attention_heads,
+                model_config.num_key_value_heads,
+                model_config.head_dim,
+                model_config.max_position_embeddings,
+            ),
+            ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(
+                model_config.num_attention_heads,
+                model_config.num_key_value_heads,
+                model_config.head_dim,
+                model_config.max_position_embeddings,
+            ),
+        };
         Ok(Self {
             backend,
             scheduler,
@@ -385,6 +459,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             observer: BasicObserver::new(),
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
+            topology,
         })
     }
 
@@ -473,7 +548,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(self
             .kv_cache
             .as_ref()
-            .expect("kv cache set")
+            .ok_or_else(|| ExecutorError::Config(ModelConfigError::InvalidConfig(
+                "KV cache not initialized".to_string()
+            )))?
             .front()
             .handle())
     }
@@ -484,10 +561,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .map(|cache| cache.slot(self.kv_cache_slot).handle())
     }
 
-    pub fn enqueue(&mut self, _kind: RequestKind, prompt: impl Into<String>) -> RequestId {
+    pub fn enqueue(&mut self, _kind: RequestKind, prompt: impl Into<String>) -> ExecutorResult<RequestId> {
         let id = self.requests.len() as RequestId + 1;
         let prompt_str = prompt.into();
-        let prompt_tokens = self.encode_prompt(&prompt_str).unwrap_or_default();
+        let prompt_tokens = self.encode_prompt(&prompt_str)?;
         let sequence = Sequence::new(id, prompt_tokens.clone());
 
         let request_data = RequestData {
@@ -497,11 +574,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             is_prefill: true,
             max_new_tokens: 128, // Default
             finished: false,
+            session_id: None,
         };
 
         self.requests.insert(id, request_data);
         self.batcher.enqueue(sequence);
-        id
+        Ok(id)
     }
 
     pub fn enqueue_with_config(
@@ -523,6 +601,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             is_prefill: true,
             max_new_tokens,
             finished: false,
+            session_id: None,
         };
 
         self.requests.insert(id, request_data);
@@ -538,6 +617,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         tokens: usize,
     ) -> RequestId {
         // Adapt for tests that manually specify token count but don't care about actual encoding
+        // intentional: test helper, callers don't check enqueue result
         let _ = self.enqueue_with_config(
             kind,
             prompt,
@@ -545,6 +625,39 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             SamplingConfig::default(),
         );
         self.requests.len() as RequestId
+    }
+
+    /// Register a new session for multi-turn KV cache reuse.
+    pub fn register_session(&mut self, session_id: SessionId) {
+        self.memory_manager.register_session(session_id);
+    }
+
+    /// Attach a session to an existing request for KV cache prefix reuse.
+    pub fn set_session_id(
+        &mut self,
+        request_id: RequestId,
+        session_id: SessionId,
+    ) -> ExecutorResult<()> {
+        let req = self
+            .requests
+            .get_mut(&request_id)
+            .ok_or(ExecutorError::RequestNotFound { request_id })?;
+        req.session_id = Some(session_id);
+        Ok(())
+    }
+
+    /// Enqueue a request with session affinity for multi-turn KV cache reuse.
+    pub fn enqueue_with_session(
+        &mut self,
+        kind: RequestKind,
+        prompt: impl Into<String>,
+        max_new_tokens: usize,
+        sampling_config: SamplingConfig,
+        session_id: SessionId,
+    ) -> ExecutorResult<RequestId> {
+        let req_id = self.enqueue_with_config(kind, prompt, max_new_tokens, sampling_config)?;
+        self.set_session_id(req_id, session_id)?;
+        Ok(req_id)
     }
 
     pub fn next_batch(&mut self) -> Option<ScheduledBatch> {
@@ -575,7 +688,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     ) -> ExecutorResult<u32> {
         let tokens = self.backend.sample_from_tensor(
             logits,
-            &AttentionTopology::linear(),
+            &self.topology,
             self.model_config.vocab_size,
             sampling,
         )?;
@@ -620,11 +733,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mut kv_caches = vec![kv_handle; batch_input.sequences.len()];
         Ok(self.backend.batch_forward_gpu_pure(
             batch_input,
-            &AttentionTopology::linear(),
+            &self.topology,
             &self.weights,
             &mut kv_caches,
             &self.forward_config,
         )?)
+    }
+
+    /// Hot-swap the scheduling policy. Takes effect on the next `step()` call.
+    pub fn set_policy(&mut self, policy: crate::scheduler::PolicyVariant) {
+        self.policy = policy;
     }
 
     /// Main Engine Step: Continuous Batching
@@ -637,18 +755,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.check_memory_pressure()?;
 
         // 0. Observability: Capture System State
-        let system_state = SystemState {
-            memory_pressure: self.backend.get_memory_pressure().unwrap_or(0.0), // Best effort
-            kv_fragmentation: self.scheduler.kv_fragmentation_ratio(),
-            waiting_queue_len: self.batcher.waiting_len(),
-            current_running_len: self.batcher.running_len(),
-            mean_context_len: self.batcher.mean_context_len(),
-            logits_entropy: 0.0, // Phase 2
-        };
-        self.observer.update(system_state);
+        let pressure_result = self.backend.get_memory_pressure()
+            .map_err(|e| format!("{e}"));
+        if let Err(e) = self.observer.update_memory_pressure(pressure_result) {
+            log::warn!("executor: update_memory_pressure failed: {e}");
+        }
+        self.observer.update_kv_fragmentation(self.scheduler.kv_fragmentation_ratio());
+        self.observer.update_scheduler_metrics(
+            self.batcher.waiting_len(),
+            self.batcher.running_len(),
+            self.batcher.running_len(),
+            self.batcher.mean_context_len(),
+        );
+        let system_state = self.observer.last_state;
 
         // 1. JIT Decision: Decide Scheduling Strategy
         let decision = self.policy.decide(&system_state);
+        self.forward_config.kernel_strategy = decision.kernel_strategy;
+        if decision.kernel_strategy != crate::scheduler::jit_types::KernelStrategy::AccuracyFirst {
+            log::info!("executor: kernel_strategy changed to {:?}", decision.kernel_strategy);
+        }
 
         // 2. Schedule
         // Pass dynamic decision parameters to batcher
@@ -671,7 +797,51 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mut sequences = Vec::with_capacity(batch.requests.len());
         let mut request_indices = Vec::with_capacity(batch.requests.len());
 
-        // 3. Prepare Batch
+        // 3. PrefillPlan + Session Prefix: plan memory for prefill requests
+        let page_size = self.scheduler.page_size().max(1);
+        let chunk_size = self.kv_cache_config.max_seq_len.max(1);
+        for &req_id in &batch.requests {
+            let (is_prefill, prompt_len, session_id) = {
+                let Some(req) = self.requests.get(&req_id) else {
+                    continue;
+                };
+                (req.is_prefill, req.prompt_tokens.len(), req.session_id)
+            };
+            if !is_prefill {
+                continue;
+            }
+
+            // Plan prefill page allocation strategy and pre-reclaim if pipelined
+            let plan = self
+                .memory_manager
+                .plan_prefill(prompt_len, chunk_size, page_size);
+            if let PrefillPlan::Pipelined { l1_pages, .. } = plan {
+                if l1_pages > 0 {
+                    self.reclaim_memory(l1_pages)?;
+                }
+            }
+
+            // If request has a session, try to claim cached prefix pages
+            if let Some(sid) = session_id {
+                let finalized = self
+                    .memory_manager
+                    .session_finalized_position(sid)
+                    .unwrap_or_else(|| {
+                        log::warn!("executor: session_finalized_position returned None for session {sid}");
+                        0
+                    });
+                let prefix_tokens = prompt_len.min(finalized);
+                if prefix_tokens > 0 {
+                    if let Err(e) = self
+                        .memory_manager
+                        .claim_session_prefix(sid, req_id, prefix_tokens) {
+                        log::warn!("executor: claim_session_prefix failed for session {sid}: {e}");
+                    }
+                }
+            }
+        }
+
+        // 4. Prepare Batch
         for req_id in batch.requests {
             self.ensure_pages_resident(req_id)?;
 
@@ -779,11 +949,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         }
 
-        for request_id in batch_results
-            .iter()
-            .filter(|result| matches!(result.action, BatchAction::Complete | BatchAction::Fail))
-            .map(|result| result.request_id)
-        {
+        // 7. Finalize sessions for completed requests
+        for result in &batch_results {
+            if !matches!(result.action, BatchAction::Complete | BatchAction::Fail) {
+                continue;
+            }
+            let request_id = result.request_id;
+            if let Some(req) = self.requests.get(&request_id) {
+                if let Some(sid) = req.session_id {
+                    let total_processed = req.prompt_tokens.len() + req.output_tokens.len();
+                    self.memory_manager
+                        .finalize_session_tokens(sid, total_processed);
+                }
+            }
             self.release_request_pages(request_id);
         }
 
@@ -808,7 +986,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let logits_list = self.backend.batch_forward_gpu_pure(
             &batch_input,
-            &AttentionTopology::linear(),
+            &self.topology,
             &self.weights,
             std::slice::from_mut(&mut kv_cache),
             &self.forward_config,
@@ -875,6 +1053,53 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(text)
     }
 
+    /// Generate with session affinity for multi-turn conversation KV cache reuse.
+    pub fn generate_with_session(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: SessionId,
+    ) -> ExecutorResult<String> {
+        if prompt.trim().is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        let sampling_config = SamplingConfig {
+            temperature,
+            top_k,
+            top_p,
+        };
+
+        let req_id = self.enqueue_with_session(
+            RequestKind::Chat,
+            prompt,
+            max_tokens,
+            sampling_config,
+            session_id,
+        )?;
+
+        loop {
+            self.step()?;
+
+            if let Some(req) = self.requests.get(&req_id) {
+                if req.finished {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        let req = self
+            .requests
+            .get(&req_id)
+            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
+        let text = self.decode_tokens(&req.output_tokens)?;
+        Ok(text)
+    }
+
     pub fn embed(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {
         let tokens = self.encode_prompt(input)?;
         if tokens.is_empty() {
@@ -882,7 +1107,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
         let embedding = self.backend.embedding_forward_gpu_pure(
             &tokens,
-            &AttentionTopology::linear(),
+            &self.topology,
             &self.weights,
             &self.forward_config,
         )?;
@@ -896,7 +1121,47 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
-            &AttentionTopology::linear(),
+            &self.topology,
+            &self.weights,
+            &self.forward_config,
+        )?;
+        Ok(scores)
+    }
+
+    /// Rerank with proper pair encoding (query + document as separate segments).
+    pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
+        let is_decoder = self.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
+        let tokens = if is_decoder {
+            // Decoder-based rerankers (Qwen3-Reranker) expect a chat-template formatted prompt
+            let prompt = format!(
+                "<|im_start|>system\nJudge whether the Document is relevant to the Query. Output only \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<query>{}</query>\n<document>{}</document><|im_end|>\n<|im_start|>assistant\n",
+                query, document
+            );
+            self.tokenizer.encode(&prompt, false)?
+        } else {
+            self.tokenizer.encode_pair(query, document, self.add_special_tokens)?
+        };
+        if tokens.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        // For decoder-based rerankers without a score head, resolve yes/no token IDs
+        if is_decoder && self.forward_config.rerank_yes_token_id.is_none() {
+            if let Ok(yes_ids) = self.tokenizer.encode("yes", false) {
+                if let Some(&id) = yes_ids.first() {
+                    self.forward_config.rerank_yes_token_id = Some(id);
+                }
+            }
+        }
+        if is_decoder && self.forward_config.rerank_no_token_id.is_none() {
+            if let Ok(no_ids) = self.tokenizer.encode("no", false) {
+                if let Some(&id) = no_ids.first() {
+                    self.forward_config.rerank_no_token_id = Some(id);
+                }
+            }
+        }
+        let scores = self.backend.rerank_forward_gpu_pure(
+            &tokens,
+            &self.topology,
             &self.weights,
             &self.forward_config,
         )?;
@@ -931,7 +1196,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             self.kv_cache = Some(KvCacheDoubleBuffer::new(front, back));
             self.kv_cache_slot = KvCacheSlot::Front;
         }
-        Ok(self.kv_cache.as_mut().expect("kv cache just allocated"))
+        Ok(self.kv_cache.as_mut().ok_or_else(|| ExecutorError::Config(ModelConfigError::InvalidConfig(
+            "KV cache not available after allocation".to_string()
+        )))?)
     }
 
     fn active_kv_handle(&mut self) -> ExecutorResult<KvCacheHandle> {
@@ -998,11 +1265,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         for (logical_idx, page_id) in self.scheduler.request_pages(request_id) {
             let virtual_id = VirtualPageId::new(request_id, logical_idx);
             if let Some(location) = self.memory_manager.unmap_virtual_page(virtual_id) {
-                let _ = self
+                if let Err(e) = self
                     .memory_manager
-                    .untrack_page(location.tier, location.physical_id);
+                    .untrack_page(location.tier, location.physical_id) {
+                    log::warn!("executor: untrack_page failed for request {request_id}: {e}");
+                }
             } else {
-                let _ = self.memory_manager.untrack_page(Tier::L1, page_id);
+                if let Err(e) = self.memory_manager.untrack_page(Tier::L1, page_id) {
+                    log::warn!("executor: untrack_page(L1) failed for request {request_id}: {e}");
+                }
             }
         }
     }
@@ -1063,11 +1334,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             for (virtual_id, l1_page_id, target_tier, target_page) in planned_remaps {
                 if let Some(old_location) = self.memory_manager.unmap_virtual_page(virtual_id) {
-                    let _ = self
+                    if let Err(e) = self
                         .memory_manager
-                        .untrack_page(old_location.tier, old_location.physical_id);
+                        .untrack_page(old_location.tier, old_location.physical_id) {
+                        log::warn!("executor: untrack_page failed during reclaim: {e}");
+                    }
                 } else {
-                    let _ = self.memory_manager.untrack_page(Tier::L1, l1_page_id);
+                    if let Err(e) = self.memory_manager.untrack_page(Tier::L1, l1_page_id) {
+                        log::warn!("executor: untrack_page(L1) failed during reclaim: {e}");
+                    }
                 }
                 self.memory_manager
                     .bind_virtual_page(virtual_id, target_tier, target_page)?;
@@ -1110,12 +1385,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
                     if let Some((tier, page)) = old_location {
                         if tier != Tier::L1 {
-                            let _ = self.memory_manager.untrack_page(tier, page);
+                            if let Err(e) = self.memory_manager.untrack_page(tier, page) {
+                                log::warn!("executor: untrack_page failed during swap-in: {e}");
+                            }
                         }
                     } else {
                         let offload_page = Self::storage_key_to_page_id(storage_key)?;
-                        let _ = self.memory_manager.untrack_page(Tier::L2, offload_page);
-                        let _ = self.memory_manager.untrack_page(Tier::L3, offload_page);
+                        if let Err(e) = self.memory_manager.untrack_page(Tier::L2, offload_page) {
+                            log::warn!("executor: untrack_page(L2) failed for offload page: {e}");
+                        }
+                        if let Err(e) = self.memory_manager.untrack_page(Tier::L3, offload_page) {
+                            log::warn!("executor: untrack_page(L3) failed for offload page: {e}");
+                        }
                     }
                 }
 
@@ -1140,7 +1421,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     self.ensure_l1_page_tracked(physical_id)?;
                     self.memory_manager
                         .remap_virtual_page(virtual_id, Tier::L1, physical_id)?;
-                    let _ = self.memory_manager.untrack_page(Tier::L1, mapped);
+                    if let Err(e) = self.memory_manager.untrack_page(Tier::L1, mapped) {
+                        log::warn!("executor: untrack_page(L1) failed for remapped page: {e}");
+                    }
                 }
                 Ok((tier @ Tier::L2, offload_id)) | Ok((tier @ Tier::L3, offload_id)) => {
                     self.reclaim_memory(1)?;
@@ -1167,7 +1450,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             for (virtual_id, old_tier, old_physical_id, new_physical_id) in remap_plan {
                 self.memory_manager
                     .remap_virtual_page(virtual_id, Tier::L1, new_physical_id)?;
-                let _ = self.memory_manager.untrack_page(old_tier, old_physical_id);
+                if let Err(e) = self.memory_manager.untrack_page(old_tier, old_physical_id) {
+                    log::warn!("executor: untrack_page failed during swap-in remap: {e}");
+                }
             }
             self.scheduler.on_swap_in(request_id, &swapped_pages);
         }

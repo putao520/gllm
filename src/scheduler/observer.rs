@@ -1,18 +1,29 @@
 use super::jit_types::SystemState;
 
-/// Observer trait for capturing system state.
-pub trait RuntimeObserver {
-    fn capture(&self) -> SystemState;
+/// Error type for observer operations.
+#[derive(Debug, Clone)]
+pub enum ObserverError {
+    BackendUnavailable(String),
 }
 
-/// Basic observer implementation.
-pub struct BasicObserver {
-    // We will inject closures or references to get real data
-    // For MVP, we might just pass values in, or hold refs to components if possible.
-    // However, to keep it decoupled and avoid borrow hell, we'll design it to be updated
-    // or pull from a shared stats source.
+impl std::fmt::Display for ObserverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BackendUnavailable(msg) => write!(f, "backend unavailable: {msg}"),
+        }
+    }
+}
 
-    // For now, let's assume it gets updated by the executor before decision.
+impl std::error::Error for ObserverError {}
+
+/// Runtime observer trait.
+pub trait RuntimeObserver {
+    fn capture(&self) -> Result<SystemState, ObserverError>;
+}
+
+/// Basic observer that holds the last captured state.
+/// The executor updates fields before calling capture().
+pub struct BasicObserver {
     pub last_state: SystemState,
 }
 
@@ -29,13 +40,38 @@ impl BasicObserver {
         }
     }
 
-    pub fn update(&mut self, state: SystemState) {
-        self.last_state = state;
+    /// Update resource metrics from external sources.
+    /// Called by executor before policy decision.
+    pub fn update_memory_pressure(&mut self, pressure: Result<f32, String>) -> Result<(), ObserverError> {
+        match pressure {
+            Ok(p) => {
+                self.last_state.memory_pressure = p;
+                Ok(())
+            }
+            Err(e) => Err(ObserverError::BackendUnavailable(e)),
+        }
+    }
+
+    pub fn update_scheduler_metrics(
+        &mut self,
+        waiting_queue_len: usize,
+        current_running_len: usize,
+        current_batch_size: usize,
+        mean_context_len: usize,
+    ) {
+        self.last_state.waiting_queue_len = waiting_queue_len;
+        self.last_state.current_running_len = current_running_len;
+        self.last_state.current_batch_size = current_batch_size;
+        self.last_state.mean_context_len = mean_context_len;
+    }
+
+    pub fn update_kv_fragmentation(&mut self, fragmentation: f32) {
+        self.last_state.kv_fragmentation = fragmentation;
     }
 }
 
 impl RuntimeObserver for BasicObserver {
-    fn capture(&self) -> SystemState {
-        self.last_state
+    fn capture(&self) -> Result<SystemState, ObserverError> {
+        Ok(self.last_state)
     }
 }

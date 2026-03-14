@@ -1110,6 +1110,13 @@ impl<B: Backend<E>, E: Element> crate::compat::backend_trait::TensorLookup<E, B>
     fn get_quantized(&self, name: &str) -> Option<&crate::loader::QuantizedTensor> {
         self.quantized.get(name)
     }
+
+    fn available_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tensors.keys().cloned().collect();
+        names.extend(self.quantized.keys().cloned());
+        names.sort();
+        names
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

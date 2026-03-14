@@ -49,6 +49,18 @@ impl TokenizerHandle {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// Encode a pair of texts (e.g., query + document for cross-encoder reranking).
+    /// Produces `[CLS] text_a [SEP] text_b [SEP]` with proper segment handling.
+    pub fn encode_pair(&self, text_a: &str, text_b: &str, add_special_tokens: bool) -> TokenizerResult<Vec<u32>> {
+        use tokenizers::EncodeInput;
+        let input = EncodeInput::Dual(text_a.into(), text_b.into());
+        let encoding = self
+            .tokenizer
+            .encode(input, add_special_tokens)
+            .map_err(|err| TokenizerError::Tokenizers(format!("{err}")))?;
+        Ok(encoding.get_ids().to_vec())
+    }
+
     pub fn decode(&self, tokens: &[u32], skip_special_tokens: bool) -> TokenizerResult<String> {
         self.tokenizer
             .decode(tokens, skip_special_tokens)

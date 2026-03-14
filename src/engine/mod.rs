@@ -13,6 +13,7 @@ pub use crate::scheduler::types::{PageId, PageState, RequestId};
 
 // Re-export engine types
 pub use executor::{
-    AttentionTopology, BackendError, BatchInput, GeneratorForwardConfig, KvCacheConfig,
-    KvCacheHandle, LogitsHandle, PositionEncoding, SamplingConfig, SequenceInput, SwapConfig,
+    AttentionMaskType, AttentionTopology, BackendError, BatchInput, GeneratorForwardConfig,
+    KvCacheConfig, KvCacheHandle, LogitsHandle, PositionEncoding, SamplingConfig, SequenceInput,
+    SwapConfig,
 };

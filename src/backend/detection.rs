@@ -1,6 +1,6 @@
 use crate::compat::backend_trait::Element;
 use crate::engine::executor::BackendError;
-use crate::compat::{CpuBackend, CudaBackend};
+use crate::compat::{CpuBackend, CudaBackend, HipBackend, MetalBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType {
@@ -14,6 +14,8 @@ pub enum BackendType {
 #[derive(Debug)]
 pub enum DetectedBackend<E: Element = f32> {
     Cuda(Box<CudaBackend<E>>),
+    Rocm(Box<HipBackend<E>>),
+    Metal(Box<MetalBackend<E>>),
     Cpu(Box<CpuBackend<E>>),
 }
 
@@ -21,6 +23,8 @@ impl<E: Element> DetectedBackend<E> {
     pub fn backend_type(&self) -> BackendType {
         match self {
             DetectedBackend::Cuda(_) => BackendType::Cuda,
+            DetectedBackend::Rocm(_) => BackendType::Rocm,
+            DetectedBackend::Metal(_) => BackendType::Metal,
             DetectedBackend::Cpu(_) => BackendType::Cpu,
         }
     }
@@ -47,18 +51,24 @@ pub fn detect_backend() -> Result<DetectedBackend<f32>, BackendError> {
 /// Detect backend for f32 element type.
 fn detect_f32() -> Result<DetectedBackend<f32>, BackendError> {
     let cuda_probe = CudaBackend::<f32>::new(0);
+    let rocm_probe = HipBackend::<f32>::new(0);
+    let metal_probe = MetalBackend::<f32>::new(0);
     let availability = BackendAvailability {
         cuda: cuda_probe.is_some(),
-        rocm: rocm_available(),
-        metal: metal_available(),
+        rocm: rocm_probe.is_some(),
+        metal: metal_probe.is_some(),
     };
     let selected = select_backend_type(availability);
     match selected {
         BackendType::Cuda => Ok(DetectedBackend::Cuda(Box::new(
-            cuda_probe.expect("cuda availability checked"),
+            cuda_probe.ok_or_else(|| BackendError::Other("CUDA probe succeeded but backend unavailable".into()))?,
         ))),
-        BackendType::Rocm => Err(BackendError::Unimplemented("rocm backend")),
-        BackendType::Metal => Err(BackendError::Unimplemented("metal backend")),
+        BackendType::Rocm => Ok(DetectedBackend::Rocm(Box::new(
+            rocm_probe.ok_or_else(|| BackendError::Other("ROCm probe succeeded but backend unavailable".into()))?,
+        ))),
+        BackendType::Metal => Ok(DetectedBackend::Metal(Box::new(
+            metal_probe.ok_or_else(|| BackendError::Other("Metal probe succeeded but backend unavailable".into()))?,
+        ))),
         BackendType::Cpu => Ok(DetectedBackend::Cpu(Box::new(CpuBackend::<f32>::new()))),
     }
 }
@@ -68,12 +78,15 @@ fn detect_f32() -> Result<DetectedBackend<f32>, BackendError> {
 /// Supports both CUDA and CPU backends for all Element types.
 /// CPU backend uses pseudo-SIMD (f32 promotion) for f16/bf16 types.
 pub fn detect_backend_generic<E: Element>() -> Result<DetectedBackend<E>, BackendError> {
-    // Try CUDA first (preferred for performance)
-    let cuda_probe = CudaBackend::<E>::new(0);
-    if let Some(backend) = cuda_probe {
+    if let Some(backend) = CudaBackend::<E>::new(0) {
         return Ok(DetectedBackend::Cuda(Box::new(backend)));
     }
-    // Fallback to CPU (now supports all Element types via SimdFloat)
+    if let Some(backend) = HipBackend::<E>::new(0) {
+        return Ok(DetectedBackend::Rocm(Box::new(backend)));
+    }
+    if let Some(backend) = MetalBackend::<E>::new(0) {
+        return Ok(DetectedBackend::Metal(Box::new(backend)));
+    }
     Ok(DetectedBackend::Cpu(Box::new(CpuBackend::<E>::new())))
 }
 
@@ -116,14 +129,6 @@ fn select_backend_type(availability: BackendAvailability) -> BackendType {
     } else {
         BackendType::Cpu
     }
-}
-
-fn rocm_available() -> bool {
-    false
-}
-
-fn metal_available() -> bool {
-    false
 }
 
 #[cfg(test)]

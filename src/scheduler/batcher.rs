@@ -146,7 +146,8 @@ impl ContinuousBatcher {
                     sequence.state = SequenceState::Paused;
                     continue;
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::warn!("scheduler: sequence {} failed: {e}", sequence.id);
                     sequence.state = SequenceState::Failed;
                     failed.push(sequence.id);
                 }
@@ -250,7 +251,8 @@ impl ContinuousBatcher {
                     sequence.mark_running(pages);
                     self.running.insert(request_id, sequence);
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::warn!("scheduler: sequence {} admit failed: {e}", request_id);
                     // 分配失败：放回队列末尾，等待下次 build_batch 时重试
                     // 关键：不在本次循环中重试，避免无限循环
                     sequence.state = SequenceState::Waiting;

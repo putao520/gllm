@@ -4,6 +4,12 @@ use crate::engine::executor::BackendError;
 
 use super::{BackendContext, BackendContextError, BackendExecutor};
 
+/// Result wrapper that indicates whether a fallback path was used.
+pub struct FallbackResult<T> {
+    pub value: T,
+    pub fallback_used: bool,
+}
+
 pub struct OomFallback<'a> {
     context: &'a BackendContext,
 }
@@ -13,16 +19,16 @@ impl<'a> OomFallback<'a> {
         Self { context }
     }
 
-    pub fn run<F, T>(&self, mut op: F) -> Result<T, BackendContextError>
+    pub fn run<F, T>(&self, mut op: F) -> Result<FallbackResult<T>, BackendContextError>
     where
         F: FnMut(&mut BackendExecutor) -> Result<T, ExecutorError>,
     {
         let (first_error, should_retry) = {
             let mut executor = self.context.executor_mut();
             match op(&mut executor) {
-                Ok(value) => return Ok(value),
+                Ok(value) => return Ok(FallbackResult { value, fallback_used: false }),
                 Err(err) => {
-                    let retry = executor.is_cuda() && is_oom_error(&err);
+                    let retry = executor.is_gpu() && is_oom_error(&err);
                     (err, retry)
                 }
             }
@@ -32,9 +38,11 @@ impl<'a> OomFallback<'a> {
             return Err(first_error.into());
         }
 
+        log::warn!("OOM fallback triggered: GPU→CPU rebuild");
         self.context.rebuild_cpu()?;
         let mut executor = self.context.executor_mut();
-        Ok(op(&mut executor)?)
+        let value = op(&mut executor)?;
+        Ok(FallbackResult { value, fallback_used: true })
     }
 }
 
@@ -59,6 +67,24 @@ impl<'a> FallbackGenerator<'a> {
     ) -> Result<String, BackendContextError> {
         self.fallback
             .run(|executor| executor.generate(prompt, max_tokens, temperature, top_k, top_p))
+            .map(|r| r.value)
+    }
+
+    pub fn generate_with_session(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: u64,
+    ) -> Result<String, BackendContextError> {
+        self.fallback.run(|executor| {
+            executor.generate_with_session(
+                prompt, max_tokens, temperature, top_k, top_p, session_id,
+            )
+        })
+        .map(|r| r.value)
     }
 }
 
@@ -81,6 +107,7 @@ impl<'a> FallbackEmbedder<'a> {
             }
             Ok(embeddings)
         })
+        .map(|r| r.value)
     }
 }
 
@@ -102,16 +129,13 @@ impl<'a> FallbackReranker<'a> {
     ) -> Result<Vec<f32>, BackendContextError> {
         self.fallback.run(|executor| {
             let mut scores = Vec::with_capacity(documents.len());
-            for doc in documents {
-                let mut payload = String::new();
-                payload.push_str(query);
-                payload.push('\n');
-                payload.push_str(doc);
-                let score = executor.rerank(&payload)?.first().copied().unwrap_or(0.0);
+            for doc in documents.iter() {
+                let score = executor.rerank_pair(query, doc)?.first().copied().unwrap_or(0.0);
                 scores.push(score);
             }
             Ok(scores)
         })
+        .map(|r| r.value)
     }
 }
 
@@ -142,6 +166,8 @@ fn is_loader_oom(err: &LoaderError) -> bool {
 fn is_backend_oom(err: &BackendError) -> bool {
     match err {
         BackendError::Cuda(message) => is_oom_message(message),
+        BackendError::Hip(message) => is_oom_message(message),
+        BackendError::Metal(message) => is_oom_message(message),
         _ => false,
     }
 }
@@ -152,11 +178,14 @@ fn is_oom_message(message: &str) -> bool {
         || lower.contains("outofmemory")
         || lower.contains("cuda_error_out_of_memory")
         || lower.contains("cuda error out of memory")
+        || lower.contains("hip_error_out_of_memory")
+        || lower.contains("hipErrorOutOfMemory")
         || lower.contains("device out of memory")
         || lower.contains("insufficient memory")
         || lower.contains("not enough memory")
         || lower.contains("memory allocation")
         || lower.contains("alloc failed")
+        || lower.contains("can't allocate")
 }
 
 #[cfg(test)]
@@ -170,6 +199,34 @@ mod tests {
         assert!(is_oom_error(&err));
 
         let err = ExecutorError::Backend(BackendError::Cuda("unknown".to_string()));
+        assert!(!is_oom_error(&err));
+    }
+
+    #[test]
+    fn detects_hip_oom_messages() {
+        let err =
+            ExecutorError::Backend(BackendError::Hip("HIP_ERROR_OUT_OF_MEMORY".to_string()));
+        assert!(is_oom_error(&err));
+
+        let err =
+            ExecutorError::Backend(BackendError::Hip("device out of memory".to_string()));
+        assert!(is_oom_error(&err));
+
+        let err = ExecutorError::Backend(BackendError::Hip("unknown".to_string()));
+        assert!(!is_oom_error(&err));
+    }
+
+    #[test]
+    fn detects_metal_oom_messages() {
+        let err =
+            ExecutorError::Backend(BackendError::Metal("can't allocate buffer".to_string()));
+        assert!(is_oom_error(&err));
+
+        let err =
+            ExecutorError::Backend(BackendError::Metal("insufficient memory".to_string()));
+        assert!(is_oom_error(&err));
+
+        let err = ExecutorError::Backend(BackendError::Metal("unknown".to_string()));
         assert!(!is_oom_error(&err));
     }
 

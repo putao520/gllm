@@ -79,6 +79,10 @@ pub fn register_builtin_templates() {
             registry.register(llama);
         }
 
+            // SmolLM2 and InternLM3 share the Llama template
+            registry.map_arch(ModelArchitecture::SmolLM2, "llama");
+            registry.map_arch(ModelArchitecture::InternLM3, "llama");
+
         registry
     });
 }

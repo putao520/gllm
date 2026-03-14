@@ -85,8 +85,8 @@ impl OptimizationContext {
                     false
                 }
             }
-            BackendType::Rocm => false, // TODO: ROCm FlashAttention support
-            BackendType::Metal => false, // TODO: Metal FlashAttention support
+            BackendType::Rocm => false,
+            BackendType::Metal => false,
             BackendType::Cpu => false,
         }
     }

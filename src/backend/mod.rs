@@ -1,5 +1,5 @@
 use crate::compat::backend_trait::Element;
-use crate::compat::{CpuBackend, CudaBackend};
+use crate::compat::{CpuBackend, CudaBackend, HipBackend, MetalBackend};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
@@ -14,7 +14,7 @@ pub use detection::{
     detect_backend, detect_backend_generic, BackendType, DetectedBackend, DetectedBackendF32,
     DetectedDtype,
 };
-pub use fallback::{FallbackEmbedder, FallbackGenerator, FallbackReranker};
+pub use fallback::{FallbackEmbedder, FallbackGenerator, FallbackReranker, FallbackResult};
 
 #[derive(Debug, Error)]
 pub enum BackendContextError {
@@ -34,6 +34,8 @@ pub enum BackendContextError {
 /// CPU backend uses pseudo-SIMD (f32 promotion) for f16/bf16 types.
 pub enum BackendExecutor<E: Element = f32> {
     Cuda(Box<Executor<CudaBackend<E>, E>>),
+    Rocm(Box<Executor<HipBackend<E>, E>>),
+    Metal(Box<Executor<MetalBackend<E>, E>>),
     Cpu(Box<Executor<CpuBackend<E>, E>>),
 }
 
@@ -73,6 +75,14 @@ impl DynBackendExecutor {
         }
     }
 
+    pub fn is_gpu(&self) -> bool {
+        match self {
+            DynBackendExecutor::F32(e) => e.is_gpu(),
+            DynBackendExecutor::F16(e) => e.is_gpu(),
+            DynBackendExecutor::BF16(e) => e.is_gpu(),
+        }
+    }
+
     pub fn thinking_head_available(&self) -> bool {
         match self {
             DynBackendExecutor::F32(e) => e.thinking_head_available(),
@@ -98,6 +108,28 @@ impl DynBackendExecutor {
         }
     }
 
+    pub fn generate_with_session(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: u64,
+    ) -> Result<String, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => {
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+            DynBackendExecutor::F16(e) => {
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+            DynBackendExecutor::BF16(e) => {
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+        }
+    }
+
     /// Embedding output is always f32 (API standardization)
     pub fn embed(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
         match self {
@@ -116,6 +148,15 @@ impl DynBackendExecutor {
         }
     }
 
+    /// Rerank with proper pair encoding (query + document as separate segments)
+    pub fn rerank_pair(&mut self, query: &str, document: &str) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.rerank_pair(query, document),
+            DynBackendExecutor::F16(e) => e.rerank_pair(query, document),
+            DynBackendExecutor::BF16(e) => e.rerank_pair(query, document),
+        }
+    }
+
     /// Returns the element type name for debugging/logging
     pub fn dtype_name(&self) -> &'static str {
         match self {
@@ -130,6 +171,8 @@ impl<E: Element> BackendExecutor<E> {
     pub fn backend_type(&self) -> BackendType {
         match self {
             BackendExecutor::Cuda(_) => BackendType::Cuda,
+            BackendExecutor::Rocm(_) => BackendType::Rocm,
+            BackendExecutor::Metal(_) => BackendType::Metal,
             BackendExecutor::Cpu(_) => BackendType::Cpu,
         }
     }
@@ -138,9 +181,15 @@ impl<E: Element> BackendExecutor<E> {
         matches!(self, BackendExecutor::Cuda(_))
     }
 
+    pub fn is_gpu(&self) -> bool {
+        matches!(self, BackendExecutor::Cuda(_) | BackendExecutor::Rocm(_) | BackendExecutor::Metal(_))
+    }
+
     pub fn thinking_head_available(&self) -> bool {
         match self {
             BackendExecutor::Cuda(exec) => exec.weights().thinking_head.is_some(),
+            BackendExecutor::Rocm(exec) => exec.weights().thinking_head.is_some(),
+            BackendExecutor::Metal(exec) => exec.weights().thinking_head.is_some(),
             BackendExecutor::Cpu(exec) => exec.weights().thinking_head.is_some(),
         }
     }
@@ -157,8 +206,39 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cuda(exec) => {
                 exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
             }
+            BackendExecutor::Rocm(exec) => {
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+            }
+            BackendExecutor::Metal(exec) => {
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+            }
             BackendExecutor::Cpu(exec) => {
                 exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+            }
+        }
+    }
+
+    pub fn generate_with_session(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: u64,
+    ) -> Result<String, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => {
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+            BackendExecutor::Rocm(exec) => {
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+            BackendExecutor::Metal(exec) => {
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+            }
+            BackendExecutor::Cpu(exec) => {
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
             }
         }
     }
@@ -166,6 +246,8 @@ impl<E: Element> BackendExecutor<E> {
     pub fn embed(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => exec.embed(input),
+            BackendExecutor::Rocm(exec) => exec.embed(input),
+            BackendExecutor::Metal(exec) => exec.embed(input),
             BackendExecutor::Cpu(exec) => exec.embed(input),
         }
     }
@@ -173,7 +255,18 @@ impl<E: Element> BackendExecutor<E> {
     pub fn rerank(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => exec.rerank(input),
+            BackendExecutor::Rocm(exec) => exec.rerank(input),
+            BackendExecutor::Metal(exec) => exec.rerank(input),
             BackendExecutor::Cpu(exec) => exec.rerank(input),
+        }
+    }
+
+    pub fn rerank_pair(&mut self, query: &str, document: &str) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.rerank_pair(query, document),
+            BackendExecutor::Rocm(exec) => exec.rerank_pair(query, document),
+            BackendExecutor::Metal(exec) => exec.rerank_pair(query, document),
+            BackendExecutor::Cpu(exec) => exec.rerank_pair(query, document),
         }
     }
 }
@@ -281,10 +374,35 @@ fn build_executor(
             if let Some(path) = tokenizer_path {
                 loader = loader.with_tokenizer(path.to_path_buf());
             }
-            // Load the weights into memory (REQ-LOADER-023: Universal weight loading)
             let mut loader = loader.load()?;
             let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
             Ok(BackendExecutor::Cuda(Box::new(executor)))
+        }
+        DetectedBackend::Rocm(backend) => {
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
+            let mut loader = loader.load()?;
+            let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
+            Ok(BackendExecutor::Rocm(Box::new(executor)))
+        }
+        DetectedBackend::Metal(backend) => {
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
+            let mut loader = loader.load()?;
+            let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
+            Ok(BackendExecutor::Metal(Box::new(executor)))
         }
         DetectedBackend::Cpu(backend) => {
             let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
@@ -295,7 +413,6 @@ fn build_executor(
             if let Some(path) = tokenizer_path {
                 loader = loader.with_tokenizer(path.to_path_buf());
             }
-            // Load the weights into memory (REQ-LOADER-023: Universal weight loading)
             let mut loader = loader.load()?;
             let executor = Executor::from_loader(*backend, manifest, &mut loader)?;
             Ok(BackendExecutor::Cpu(Box::new(executor)))
@@ -496,6 +613,30 @@ fn build_executor_generic<E: Element>(
             }
             let executor = Executor::from_loader(*cuda_backend, manifest, &mut loader)?;
             Ok(BackendExecutor::Cuda(Box::new(executor)))
+        }
+        DetectedBackend::Rocm(rocm_backend) => {
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
+            let executor = Executor::from_loader(*rocm_backend, manifest, &mut loader)?;
+            Ok(BackendExecutor::Rocm(Box::new(executor)))
+        }
+        DetectedBackend::Metal(metal_backend) => {
+            let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?
+                .with_weights(weight_paths.to_vec());
+            if let Some(path) = config_path {
+                loader = loader.with_config(path.to_path_buf());
+            }
+            if let Some(path) = tokenizer_path {
+                loader = loader.with_tokenizer(path.to_path_buf());
+            }
+            let executor = Executor::from_loader(*metal_backend, manifest, &mut loader)?;
+            Ok(BackendExecutor::Metal(Box::new(executor)))
         }
         DetectedBackend::Cpu(cpu_backend) => {
             let mut loader = Loader::from_env_with_manifest(manifest.as_ref().clone())?

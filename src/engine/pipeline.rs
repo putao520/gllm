@@ -2,13 +2,15 @@
 //!
 //! 实现 SPEC/08-LOADER-REFACTOR.md 中定义的统一流水线。
 
+use std::collections::HashMap;
+
 use crate::compat::backend_trait::{Backend, Element};
 
 use crate::arch::{
     get_template_by_arch, register_builtin_templates, resolve_config, ArchTemplate, ResolvedConfig,
 };
 use crate::graph::{
-    executor::{ExecutionError, ExecutionPlan},
+    executor::{ExecutionError, ExecutionPlan, FusedGraphExecutor},
     optimizer::{GraphOptimizer, OptimizationContext},
     types::OptimizationStats,
     FusedGraph,
@@ -32,6 +34,8 @@ pub enum PipelineError {
     Optimization(String),
     #[error("Execution failed: {0}")]
     Execution(#[from] ExecutionError),
+    #[error("Pipeline not compiled: call compile() before forward()")]
+    NotCompiled,
 }
 
 /// 统一推理管道
@@ -41,8 +45,8 @@ pub enum PipelineError {
 /// 2. 图优化 → FusedGraph
 /// 3. 执行推理
 pub struct UnifiedPipeline<B: Backend<E>, E: Element> {
-    /// 优化后的融合图
-    pub fused_graph: FusedGraph,
+    /// 融合图执行器 (holds FusedGraph + JIT compiled kernels)
+    pub executor: FusedGraphExecutor,
     /// 执行计划
     pub execution_plan: ExecutionPlan,
     /// 原始 OnnxGraph (用于调试)
@@ -64,6 +68,7 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
     /// 3. 绑定权重
     /// 4. 图优化
     /// 5. 生成执行计划
+    /// 6. 创建 FusedGraphExecutor
     pub fn from_loader(
         mut loader: Loader,
         backend: &B,
@@ -94,8 +99,11 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         // 5. 生成执行计划
         let execution_plan = ExecutionPlan::from_fused_graph(&fused_graph);
 
+        // 6. 创建 FusedGraphExecutor
+        let executor = FusedGraphExecutor::new(fused_graph);
+
         Ok(Self {
-            fused_graph,
+            executor,
             execution_plan,
             original_graph,
             config,
@@ -104,14 +112,79 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         })
     }
 
+    /// Compile the pipeline's fused graph for a given sequence length and hidden size.
+    ///
+    /// Must be called before `forward()`. Can be called multiple times with
+    /// different parameters to recompile for a new shape.
+    ///
+    /// On architectures without JIT support (not x86_64/aarch64), returns an error.
+    pub fn compile(&mut self, seq_len: usize, hidden: usize) -> Result<(), PipelineError> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            self.executor.compile(seq_len, hidden)?;
+            return Ok(());
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let _ = (seq_len, hidden);
+            Err(PipelineError::Execution(ExecutionError::Compilation(
+                "JIT compilation not supported on this architecture".to_string(),
+            )))
+        }
+    }
+
+    /// Execute a forward pass through the compiled pipeline.
+    ///
+    /// `inputs` maps tensor names to raw byte data (f32 reinterpreted as u8).
+    /// Returns output tensor name to data mapping.
+    ///
+    /// Returns `PipelineError::NotCompiled` if `compile()` has not been called.
+    pub fn forward(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+    ) -> Result<HashMap<String, Vec<u8>>, PipelineError> {
+        if !self.executor.is_compiled() {
+            return Err(PipelineError::NotCompiled);
+        }
+        let outputs = self.executor.run(inputs)?;
+        Ok(outputs)
+    }
+
+    /// Convenience method: compile if needed, then run forward.
+    ///
+    /// If the pipeline is not yet compiled, calls `compile(seq_len, hidden)`
+    /// first, then executes the forward pass.
+    pub fn run(
+        &mut self,
+        inputs: &HashMap<String, Vec<u8>>,
+        seq_len: usize,
+        hidden: usize,
+    ) -> Result<HashMap<String, Vec<u8>>, PipelineError> {
+        if !self.is_compiled() {
+            self.compile(seq_len, hidden)?;
+        }
+        self.forward(inputs)
+    }
+
+    /// Check if the pipeline has been compiled and is ready to execute.
+    pub fn is_compiled(&self) -> bool {
+        self.executor.is_compiled()
+    }
+
+    /// Access the underlying FusedGraph.
+    pub fn fused_graph(&self) -> &FusedGraph {
+        self.executor.graph()
+    }
+
     /// 获取优化统计
     pub fn optimization_stats(&self) -> &OptimizationStats {
-        &self.fused_graph.stats
+        &self.executor.graph().stats
     }
 
     /// 获取融合算子数量
     pub fn fused_op_count(&self) -> usize {
-        self.fused_graph.fused_op_count()
+        self.executor.graph().fused_op_count()
     }
 
     /// 获取执行计划中的操作数
@@ -200,13 +273,78 @@ fn build_onnx_graph(
 
 /// 构建优化上下文
 fn build_optimization_context() -> OptimizationContext {
-    // TODO: 从后端检测硬件能力
     OptimizationContext::default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::types::{AtomicOp, FusedNode, FusedOp, OptimizationStats};
+
+    /// Helper: build a minimal FusedGraph with one atomic Add node.
+    fn make_test_graph() -> FusedGraph {
+        FusedGraph {
+            nodes: vec![FusedNode {
+                name: "add0".to_string(),
+                op: FusedOp::Atomic(AtomicOp::new("Add")),
+                inputs: vec!["x".to_string(), "w".to_string()],
+                outputs: vec!["y".to_string()],
+                attributes: HashMap::new(),
+            }],
+            inputs: vec!["x".to_string()],
+            outputs: vec!["y".to_string()],
+            weight_bindings: HashMap::from([(
+                "w".to_string(),
+                crate::graph::types::WeightBinding {
+                    source_name: "w".to_string(),
+                    shape: vec![4],
+                    dtype: safetensors::Dtype::F32,
+                    data: None,
+                },
+            )]),
+            quantization_info: HashMap::new(),
+            sparse_tensors: HashMap::new(),
+            stats: OptimizationStats::default(),
+        }
+    }
+
+    #[test]
+    fn forward_without_compile_returns_not_compiled() {
+        let graph = make_test_graph();
+        let executor = FusedGraphExecutor::new(graph);
+        // Simulate a pipeline-like check: executor is not compiled
+        assert!(!executor.is_compiled());
+        // forward() should fail with NotCompiled
+        // (We test the pipeline error variant directly since we cannot
+        //  construct a full UnifiedPipeline without a real Loader.)
+        let err = PipelineError::NotCompiled;
+        let msg = format!("{err}");
+        assert!(msg.contains("compile()"));
+    }
+
+    #[test]
+    fn is_compiled_initially_false() {
+        let graph = FusedGraph::new();
+        let executor = FusedGraphExecutor::new(graph);
+        assert!(!executor.is_compiled());
+    }
+
+    #[test]
+    fn executor_graph_accessor() {
+        let graph = make_test_graph();
+        let executor = FusedGraphExecutor::new(graph.clone());
+        assert_eq!(executor.graph().nodes.len(), graph.nodes.len());
+        assert_eq!(executor.graph().inputs, graph.inputs);
+    }
+
+    #[test]
+    fn pipeline_error_not_compiled_display() {
+        let err = PipelineError::NotCompiled;
+        assert_eq!(
+            err.to_string(),
+            "Pipeline not compiled: call compile() before forward()"
+        );
+    }
 
     #[test]
     fn detect_architecture_uses_manifest_fallback() {

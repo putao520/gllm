@@ -41,21 +41,27 @@ pub enum ModelArchitecture {
     Gemma2,
     XlmR,
     XlmRNext,
+    DeepSeek,
+    SmolLM2,
+    InternLM3,
 }
 
+/// 架构族：决定权重命名约定和推理路径
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TensorNamingRule {
-    Qwen3,
-    Llama4,
-    Mistral3,
-    Ministral,
-    GLM4,
-    GLM5,
-    GPT2Next,
-    Phi4,
-    Gemma2,
-    XlmR,
-    XlmRNext,
+pub enum ArchFamily {
+    /// BERT/XLM-R 编码器族：绝对位置编码，双向注意力
+    Encoder,
+    /// LLaMA/Qwen/GPT 解码器族：RoPE，因果注意力
+    Decoder,
+}
+
+impl ModelArchitecture {
+    pub fn family(&self) -> ArchFamily {
+        match self {
+            Self::XlmR | Self::XlmRNext => ArchFamily::Encoder,
+            _ => ArchFamily::Decoder,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +94,7 @@ impl std::str::FromStr for ModelKind {
 pub enum RouterType {
     Qwen,
     Mixtral,
+    DeepSeek,
     Unknown,
 }
 
@@ -108,7 +115,6 @@ pub struct ModelManifest {
 
     // Architecture
     pub arch: ModelArchitecture,
-    pub tensor_rules: TensorNamingRule,
     pub kind: ModelKind,
 
     // Inference overrides (None means use config.json)
@@ -127,7 +133,9 @@ impl ModelManifest {
         self.moe_config.is_some()
             || matches!(
                 self.arch,
-                ModelArchitecture::Qwen3MoE | ModelArchitecture::Llama4
+                ModelArchitecture::Qwen3MoE
+                    | ModelArchitecture::Llama4
+                    | ModelArchitecture::DeepSeek
             )
     }
 }
@@ -138,7 +146,6 @@ impl Default for ModelManifest {
             model_id: Cow::Borrowed("default"),
             file_map: EMPTY_FILE_MAP,
             arch: ModelArchitecture::Llama4,
-            tensor_rules: TensorNamingRule::Llama4,
             kind: ModelKind::Chat,
             rope_base_override: None,
             max_context_override: None,
@@ -170,6 +177,10 @@ pub fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
         }
         "glm" | "glmforcausallm" => Some(ModelArchitecture::GLM5),
         "gpt2" | "gpt2lmheadmodel" | "gpt_oss" | "gptoss" => Some(ModelArchitecture::GPT2Next),
+        "deepseek" | "deepseekv2" | "deepseekv2forcausallm" | "deepseekv3"
+        | "deepseekv3forcausallm" => Some(ModelArchitecture::DeepSeek),
+        "smollm" | "smollm2" | "smollm2forcausallm" => Some(ModelArchitecture::SmolLM2),
+        "internlm" | "internlm3" | "internlm3forcausallm" | "internlm2" | "internlm2forcausallm" => Some(ModelArchitecture::InternLM3),
         "xlm_roberta" | "xlm_roberta_model" | "xlmr" | "roberta" | "bert" => {
             Some(ModelArchitecture::XlmR)
         }
@@ -188,25 +199,6 @@ fn normalize_architecture_token(token: &str) -> String {
             _ => ch.to_ascii_lowercase(),
         })
         .collect()
-}
-
-/// Get tensor naming rules for a given architecture.
-pub fn tensor_rules_for_arch(arch: ModelArchitecture) -> TensorNamingRule {
-    match arch {
-        ModelArchitecture::Qwen2_5 => TensorNamingRule::Llama4,
-        ModelArchitecture::Qwen3 => TensorNamingRule::Qwen3,
-        ModelArchitecture::Qwen3MoE => TensorNamingRule::Qwen3,
-        ModelArchitecture::Llama4 => TensorNamingRule::Llama4,
-        ModelArchitecture::Mistral3 => TensorNamingRule::Mistral3,
-        ModelArchitecture::Ministral => TensorNamingRule::Ministral,
-        ModelArchitecture::GLM4 => TensorNamingRule::GLM4,
-        ModelArchitecture::GLM5 => TensorNamingRule::GLM5,
-        ModelArchitecture::GPT2Next => TensorNamingRule::GPT2Next,
-        ModelArchitecture::Phi4 => TensorNamingRule::Phi4,
-        ModelArchitecture::Gemma2 => TensorNamingRule::Gemma2,
-        ModelArchitecture::XlmR => TensorNamingRule::XlmR,
-        ModelArchitecture::XlmRNext => TensorNamingRule::XlmRNext,
-    }
 }
 
 #[cfg(test)]
@@ -236,5 +228,21 @@ mod tests {
             Some(ModelArchitecture::Gemma2)
         );
         assert_eq!(map_architecture_token("custom-llama-adapter"), None);
+    }
+
+    #[test]
+    fn map_architecture_token_deepseek() {
+        assert_eq!(
+            map_architecture_token("DeepseekV2ForCausalLM"),
+            Some(ModelArchitecture::DeepSeek)
+        );
+        assert_eq!(
+            map_architecture_token("DeepseekV3ForCausalLM"),
+            Some(ModelArchitecture::DeepSeek)
+        );
+        assert_eq!(
+            map_architecture_token("deepseek"),
+            Some(ModelArchitecture::DeepSeek)
+        );
     }
 }

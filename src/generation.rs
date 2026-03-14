@@ -9,6 +9,7 @@ pub struct GenerationBuilder<'a> {
     temperature: f32,
     top_k: usize,
     top_p: f32,
+    session_id: Option<u64>,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -20,6 +21,7 @@ impl<'a> GenerationBuilder<'a> {
             temperature: 0.7,
             top_k: 0,
             top_p: 1.0,
+            session_id: None,
         }
     }
 
@@ -43,6 +45,12 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
+    /// Set session ID for multi-turn conversation KV cache reuse.
+    pub fn session_id(mut self, session_id: u64) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
     pub fn generate(self) -> Result<GenerationResponse, ClientError> {
         self.client.execute_generation(
             self.prompt,
@@ -50,6 +58,7 @@ impl<'a> GenerationBuilder<'a> {
             self.temperature,
             self.top_k,
             self.top_p,
+            self.session_id,
         )
     }
 }

@@ -498,3 +498,64 @@ assert!(!slice.data().is_empty()); // 原始字节
 let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 // gllm-kernels 只接收泛型参数，不依赖 GGUF 类型
 ```
+
+## 观测与调度测试 (TEST-OBS)
+
+### TEST-OBS-001: SystemState 采集完整性
+**关联需求**: REQ-OBS-001
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造 PagedScheduler 和 ContinuousBatcher 的已知状态
+2. 调用 `observer.capture()`
+3. 验证 6 个指标值与预期一致
+**期望结果**: 所有指标正确反映系统状态
+
+### TEST-OBS-002: AccuracyFirstPolicy 高压决策
+**关联需求**: REQ-OBS-002
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造 `SystemState { memory_pressure: 0.95, .. }`
+2. 调用 `AccuracyFirstPolicy.decide()`
+**期望结果**: `admit_new_prefill == false`, `force_swap_out_count > 0`
+
+### TEST-OBS-003: BalancedPolicy 中等压力决策
+**关联需求**: REQ-OBS-002
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造 `SystemState { memory_pressure: 0.86, .. }`
+2. 调用 `BalancedPolicy.decide()`
+**期望结果**: `admit_new_prefill == false`, `force_swap_out_count == 1`
+
+### TEST-OBS-004: KernelStrategy 端到端传递
+**关联需求**: REQ-OBS-003
+**测试类型**: 正向测试
+**测试步骤**:
+1. 设置 `PolicyVariant::Throughput`
+2. 执行 `step()`
+3. 检查 `forward_config.kernel_strategy`
+**期望结果**: `kernel_strategy == KernelStrategy::ThroughputFirst`
+
+## 错误处理测试 (TEST-ERR)
+
+### TEST-ERR-001: 内存压力采集失败传播
+**关联需求**: REQ-ERR-001
+**测试类型**: 负向测试
+**测试步骤**:
+1. 构造 backend 使 `get_memory_pressure()` 返回 `Err`
+2. 调用 `observer.capture()`
+**期望结果**: 返回 `Err(ObserverError::BackendUnavailable)`，不返回 `memory_pressure = 0.0`
+
+### TEST-ERR-002: OOM Fallback 标记
+**关联需求**: REQ-ERR-002
+**测试类型**: 正向测试
+**测试步骤**:
+1. 触发 GPU OOM（模拟）
+2. 检查 fallback 返回值
+**期望结果**: `fallback_used == true`
+
+### TEST-ERR-003: Backend Detection 不 panic
+**关联需求**: REQ-ERR-003
+**测试类型**: 负向测试
+**测试步骤**:
+1. 在无 GPU 环境下调用 `detect_backend()`
+**期望结果**: 返回 `Ok(CpuBackend)` 或 `Err`，不 panic

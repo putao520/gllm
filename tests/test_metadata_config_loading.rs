@@ -5,7 +5,7 @@ use std::fs;
 use gllm::loader::onnx::proto;
 use gllm::loader::Loader;
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::model_config::ModelConfig;
 use gllm::compat::CpuBackend;
@@ -20,7 +20,6 @@ fn test_manifest() -> ModelManifest {
         model_id: Cow::Borrowed("test/model"),
         file_map: EMPTY_FILE_MAP,
         arch: ModelArchitecture::Llama4,
-        tensor_rules: TensorNamingRule::Llama4,
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,
@@ -237,7 +236,6 @@ fn onnx_weights_are_uploadable_for_reranker() {
         model_id: Cow::Borrowed("test/reranker"),
         file_map: EMPTY_FILE_MAP,
         arch: ModelArchitecture::XlmR,
-        tensor_rules: TensorNamingRule::XlmR,
         kind: ModelKind::Reranker,
         rope_base_override: None,
         max_context_override: None,

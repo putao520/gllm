@@ -64,6 +64,43 @@ fn e2e_embedding_gguf() {
     let client = Client::new_embedding(MODEL).expect("Failed to load GGUF model");
     let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Embedding);
+
+    let response = client
+        .embeddings(["Hello, world!", "Rust programming language"])
+        .generate()
+        .expect("GGUF embedding inference failed");
+
+    assert_eq!(response.embeddings.len(), 2, "Should have 2 embeddings");
+
+    // 验证第一个 embedding
+    let emb1 = &response.embeddings[0].embedding;
+    assert!(!emb1.is_empty(), "Embedding should not be empty");
+
+    // 验证 L2 norm > 0（非零输出）
+    let norm1: f32 = emb1.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(norm1 > 0.0, "L2 norm should be positive, got {}", norm1);
+
+    // 验证第二个 embedding
+    let emb2 = &response.embeddings[1].embedding;
+    assert!(!emb2.is_empty(), "Embedding should not be empty");
+    assert_eq!(
+        emb1.len(),
+        emb2.len(),
+        "Both embeddings should have the same dimension"
+    );
+
+    let norm2: f32 = emb2.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(norm2 > 0.0, "L2 norm should be positive, got {}", norm2);
+
+    // 验证两个 embedding 不同（不同文本应产生不同嵌入）
+    let mut sum_diff = 0.0;
+    for (a, b) in emb1.iter().zip(emb2.iter()) {
+        sum_diff += (a - b).abs();
+    }
+    assert!(
+        sum_diff > 0.1,
+        "Different texts should have different embeddings"
+    );
 }
 
 /// ONNX 格式的 Embedding 测试

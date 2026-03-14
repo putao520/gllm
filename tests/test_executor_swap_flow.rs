@@ -1,7 +1,7 @@
 use gllm::engine::executor::Executor;
 use gllm::loader::Loader;
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::compat::CpuBackend;
 use std::borrow::Cow;
@@ -28,7 +28,6 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
         model_id: Cow::Borrowed(model_id),
         file_map: EMPTY_FILE_MAP,
         arch: ModelArchitecture::Llama4,
-        tensor_rules: TensorNamingRule::Llama4,
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,

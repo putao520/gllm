@@ -3,16 +3,23 @@
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemState {
     // Resource Metrics
-    pub memory_pressure: f32,  // [0.0, 1.0]
-    pub kv_fragmentation: f32, // [0.0, 1.0]
+    /// Memory pressure ratio [0.0, 1.0].
+    pub memory_pressure: f32,
+    /// KV cache fragmentation ratio [0.0, 1.0].
+    pub kv_fragmentation: f32,
+    /// Swap I/O rate (pages/sec).
+    pub swap_io_rate: f32,
 
     // Load Metrics
     pub waiting_queue_len: usize,
+    pub current_batch_size: usize,
     pub current_running_len: usize,
     pub mean_context_len: usize,
 
-    // Data Observability (Placeholder for Phase 2)
+    /// Phase 2: Shannon entropy of output logits distribution.
     pub logits_entropy: f32,
+    /// Phase 2: Attention weight sparsity ratio [0.0, 1.0].
+    pub attention_sparsity: f32,
 }
 
 /// Kernel execution strategy.

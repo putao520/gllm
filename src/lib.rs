@@ -20,9 +20,10 @@ pub mod quantization;
 pub mod rerank;
 pub mod tokenizer;
 pub mod weight_loader;
+pub mod weight_names;
 
 pub use manifest::{
-    FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType, TensorNamingRule,
+    ArchFamily, FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
 };
 
 // Re-export for convenience

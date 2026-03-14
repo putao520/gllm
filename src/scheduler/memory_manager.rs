@@ -596,6 +596,13 @@ impl GlobalMemoryManager {
         }
     }
 
+    /// Query a session's finalized position (returns None if session not found).
+    pub fn session_finalized_position(&self, session_id: SessionId) -> Option<usize> {
+        self.sessions
+            .get(&session_id)
+            .map(|cache| cache.finalized_position)
+    }
+
     /// 在指定管线分配页面
     pub fn allocate_page_in_pipeline(
         &mut self,
@@ -621,7 +628,9 @@ impl GlobalMemoryManager {
             .remove(&(KvPipeline::Working, request_id))
         {
             for pid in pages {
-                let _ = self.tier_manager.free(Tier::L1, pid);
+                if !self.tier_manager.free(Tier::L1, pid) {
+                    log::warn!("memory_manager: failed to free page {pid}");
+                }
             }
         }
     }
@@ -638,7 +647,9 @@ impl GlobalMemoryManager {
         for key in working_keys {
             if let Some(pages) = self.pipeline_pages.remove(&key) {
                 for pid in pages {
-                    let _ = self.tier_manager.free(Tier::L1, pid);
+                    if !self.tier_manager.free(Tier::L1, pid) {
+                        log::warn!("memory_manager: failed to free page {pid}");
+                    }
                 }
             }
         }

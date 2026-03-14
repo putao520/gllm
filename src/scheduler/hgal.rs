@@ -213,7 +213,9 @@ impl HGALScheduler {
                     // Protection expires; return to Standby so it can be considered for eviction.
                     meta.state = PageState::Standby;
                 }
-                _ => {}
+                _ => {
+                    log::debug!("hgal: no state transition for page {} (hot={hot}, state={:?})", meta.page_id, meta.state);
+                }
             }
         }
     }

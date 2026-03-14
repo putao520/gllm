@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, TensorNamingRule, EMPTY_FILE_MAP,
+    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 use gllm::compat::CpuBackend;
@@ -25,7 +25,6 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
         model_id: Cow::Borrowed("Qwen/Qwen3-235B-A22B-Instruct"),
         file_map: EMPTY_FILE_MAP,
         arch: ModelArchitecture::Qwen3MoE,
-        tensor_rules: TensorNamingRule::Qwen3,
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,

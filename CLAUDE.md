@@ -191,7 +191,7 @@ cargo test --lib
 - ✅ 未实现的 op 必须 `Err(format!("codegen not implemented for {:?}", op_kind))`
 - ✅ 仅 `Reshape` / `Transpose`（纯元数据 op，不需要计算）允许 NOP 处理
 
-**理由**：NOP placeholder 让编译成功、测试通过，但输出是全零或内存垃圾。这是最危险的 bug 类型 — 静默产生错误结果，无法通过常规测试发现。审查发现 aarch64 codegen 中有 8 处 `emit_nop_raw()` catch-all，导致所有非 GEMM op（LayerNorm、Softmax、Residual、MHA、MeanPool 等）在 aarch64 上被静默跳过。详见 `SPEC/09-MEANPOOL-JIT-GAPS.md`。
+**理由**：NOP placeholder 让编译成功、测试通过，但输出是全零或内存垃圾。这是最危险的 bug 类型 — 静默产生错误结果，无法通过常规测试发现。
 
 ## 🚨 JIT 编译管线（铁律）
 

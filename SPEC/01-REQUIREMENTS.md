@@ -158,3 +158,54 @@
 | **REQ-ARCH-001** | 零拷贝推理 | 推理过程中 GPU 数据不回传 CPU | 符合 ARCH-GPU-001 | 🟢 已实现 |
 | **REQ-ARCH-002** | 单一后端原则 | 全程在单一后端执行 | 符合 ARCH-SINGLE-BACKEND | 🟢 已实现 |
 | **REQ-ARCH-003** | 纯 Rust 依赖原则 | 禁止引入 `candle`、`tch` 等重量级深度学习框架依赖 | 1. Cargo.toml 中无 candle/tch<br>2. 仅使用 safetensors/gguf-rs 等底层解析库<br>3. 计算核心完全自研 (gllm-kernels) | 🟢 已实现 (2026-02-05) [commit: fc36508] |
+
+## 观测与调度 (REQ-OBS)
+
+### REQ-OBS-001: SystemState 实时采集
+- `BasicObserver::capture()` 必须从 scheduler/memory_manager/backend 实时采集所有指标
+- `memory_pressure` 采集失败必须返回 `Err`，禁止 `unwrap_or(0.0)`
+- `kv_fragmentation` 从 PagedScheduler 计算
+- `waiting_queue_len` / `current_running_len` 从 ContinuousBatcher 读取
+- **验收标准**: 构造已知状态，capture() 返回值与预期一致
+
+### REQ-OBS-002: SchedulingPolicy 完整实现
+- `AccuracyFirstPolicy` 使用 `memory_pressure` + `kv_fragmentation` + `waiting_queue_len` 三指标决策
+- 新增 `BalancedPolicy` 变体
+- `PolicyVariant` 枚举包含 Accuracy/Throughput/Balanced 三个变体
+- **验收标准**: 各策略在不同 SystemState 输入下返回符合决策矩阵的 SchedulerDecision
+
+### REQ-OBS-003: KernelStrategy 端到端传递
+- `SchedulerDecision.kernel_strategy` 存入 `GeneratorForwardConfig`
+- compat 层 forward 函数接收并记录 strategy
+- **验收标准**: 设置 ThroughputFirst 策略后，forward_config 中 kernel_strategy 正确
+
+### REQ-OBS-004: 策略热切换
+- `Executor::set_policy(PolicyVariant)` 方法
+- 下一个 `step()` 生效，不中断当前批次
+- **验收标准**: 调用 set_policy 后下一次 step 使用新策略
+
+## KV Cache 持久化 (REQ-KV)
+
+### REQ-KV-005: KV Cache 增量持久化
+- `update_kv_cache()` 必须将 JIT 计算的 K/V 值写入 cache buffer
+- 增量 decode 复用已缓存的 K/V，不重新计算
+- **验收标准**: 多步 decode 中 KV cache buffer 包含正确的 K/V 数据
+
+## 错误处理 (REQ-ERR)
+
+### REQ-ERR-001: 消除静默失败
+- 所有 `let _ = memory_manager.*` 替换为 `?` 传播或 `log::warn!`
+- 所有 `Err(_)` 替换为具体错误匹配
+- 所有 `unwrap_or(default)` 替换为 `?` 或显式错误处理
+- 所有生产代码 `expect()` 替换为 `Result` 返回
+- **验收标准**: `grep -rn "let _ =" src/ | grep -v test` 返回 0 匹配；`grep -rn "Err(_)" src/ | grep -v test` 返回 0 匹配
+
+### REQ-ERR-002: OOM Fallback 显式化
+- GPU→CPU fallback 必须 `log::warn!` 记录
+- 返回 `FallbackResult<T>` 携带 `fallback_used: bool` 标记
+- **验收标准**: 触发 OOM fallback 后返回值 `fallback_used == true`
+
+### REQ-ERR-003: Backend Detection 错误传播
+- `detection.rs` 的 `expect()` 替换为 `Result` 返回
+- 探测失败返回 `Err(BackendContextError)`，不 panic
+- **验收标准**: 后端探测失败时返回 Err 而非 panic

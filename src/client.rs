@@ -16,8 +16,7 @@ use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
 use crate::loader::{Loader, LoaderConfig, LoaderError, TensorProvider, WeightFormat};
 use crate::manifest::{
-    map_architecture_token, tensor_rules_for_arch, ModelArchitecture, ModelKind, ModelManifest,
-    EMPTY_FILE_MAP,
+    map_architecture_token, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
@@ -165,11 +164,16 @@ impl Client {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        session_id: Option<u64>,
     ) -> Result<GenerationResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let mut generator = FallbackGenerator::new(&loaded.backend);
-        let text = generator.generate(&prompt, max_tokens, temperature, top_k, top_p)?;
+        let text = if let Some(sid) = session_id {
+            generator.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
+        } else {
+            generator.generate(&prompt, max_tokens, temperature, top_k, top_p)?
+        };
         Ok(GenerationResponse {
             text,
             request_id: None,
@@ -248,7 +252,6 @@ impl Client {
                         model_id: Cow::Owned(model_id.to_string()),
                         file_map: EMPTY_FILE_MAP,
                         arch,
-                        tensor_rules: tensor_rules_for_arch(arch),
                         kind,
                         rope_base_override: None,
                         max_context_override: None,
@@ -271,7 +274,6 @@ impl Client {
                     model_id: Cow::Owned(model_id.to_string()),
                     file_map: EMPTY_FILE_MAP,
                     arch: ModelArchitecture::Llama4,
-                    tensor_rules: crate::manifest::TensorNamingRule::Llama4,
                     kind,
                     rope_base_override: None,
                     max_context_override: None,
@@ -289,7 +291,6 @@ impl Client {
                     model_id: Cow::Owned(model_id.to_string()),
                     file_map: EMPTY_FILE_MAP,
                     arch,
-                    tensor_rules: tensor_rules_for_arch(arch),
                     kind,
                     rope_base_override: None,
                     max_context_override: None,
