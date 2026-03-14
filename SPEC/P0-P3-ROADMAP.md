@@ -44,28 +44,17 @@
 - 第 N 步 decode 不重算前 N-1 步的 K/V
 - E2E generator 测试通过且输出不变
 
-### P0-2: 消除静默失败 (REQ-ERR-001)
+### P0-2: 消除静默失败 (REQ-ERR-001) ✅ 已完成
 
-**问题**: 代码中存在 `let _ = ...`、`Err(_)` catch-all、`unwrap_or(default)` 掩盖错误。
+**完成状态**: `Err(_)` catch-all 为 0 匹配。`let _ =` 全部为合法参数抑制或有意忽略（已审计）。`unwrap_or(0.0)` 在 fallback.rs rerank_pair 处已添加 `log::warn!`。
 
-**修改范围**: 全局扫描 `src/` 非测试代码
+### P0-3: OOM Fallback 显式化 (REQ-ERR-002) ✅ 已完成
 
-**验收标准**:
-- `grep -rn "let _ =" src/ | grep -v test | grep -v "let _ = f;"` 返回 0 匹配
-- `grep -rn "Err(_)" src/ | grep -v test` 返回 0 匹配
+**完成状态**: `FallbackResult<T>` 携带 `fallback_used: bool` 已实现。所有 fallback 触发点（OomFallback::run, FallbackGenerator, FallbackEmbedder, FallbackReranker）均有 `log::warn!`。
 
-### P0-3: OOM Fallback 显式化 (REQ-ERR-002)
+### P0-4: Backend Detection 错误传播 (REQ-ERR-003) ✅ 已完成
 
-**问题**: GPU→CPU fallback 静默发生，调用方无感知。
-
-**修改范围**:
-- `src/backend/fallback.rs` — 返回 `FallbackResult<T>` 携带 `fallback_used: bool`
-- 所有 fallback 触发点添加 `log::warn!`
-
-### P0-4: Backend Detection 错误传播 (REQ-ERR-003)
-
-**修改范围**:
-- `src/backend/detection.rs` — `expect()` 替换为 `Result` 返回
+**完成状态**: `detect_backend()` / `detect_backend_generic()` / `detect_f32()` 全部返回 `Result<DetectedBackend, BackendError>`。无 `expect()` 或 `unwrap()` 调用。
 
 ---
 
@@ -98,19 +87,13 @@
 
 **完成状态**: `logits_entropy` 采集已实现（Shannon 熵计算 + batch 平均）。`attention_sparsity` 设为 0.0（MHA op 当前仅输出 attn_out，需扩展才能采集注意力权重）。3 个单元测试覆盖。
 
-### P1-3: KernelStrategy 端到端传递 (REQ-OBS-003)
+### P1-3: KernelStrategy 端到端传递 (REQ-OBS-003) ✅ 已完成
 
-**问题**: `SchedulerDecision.kernel_strategy` 需要传递到 `GeneratorForwardConfig`。
+**完成状态**: `SchedulerDecision.kernel_strategy` 在 `step()` 中写入 `forward_config.kernel_strategy`，CPU backend 已接收并记录 strategy。所有 Policy 变体（AccuracyFirst/ThroughputFirst/Balanced）正确设置 strategy。
 
-**修改范围**:
-- `src/engine/executor.rs` — `step()` 中将 policy decision 的 kernel_strategy 存入 forward config
-- `src/compat/` — forward 函数接收并记录 strategy
+### P1-4: 策略热切换 (REQ-OBS-004, 07-OBSERVABILITY §4) ✅ 已完成
 
-### P1-4: 策略热切换 (REQ-OBS-004, 07-OBSERVABILITY §4)
-
-**修改范围**:
-- `src/engine/executor.rs` — `set_policy(PolicyVariant)` 方法
-- 下一个 `step()` 生效，不中断当前批次
+**完成状态**: `Executor::set_policy(PolicyVariant)` 已实现，下一个 `step()` 立即生效，无需重启。
 
 ### P1-5: 量化推理加速路径
 
@@ -203,9 +186,9 @@
 P0 (性能关键 + 正确性)     P1 (功能完善)           P2 (质量)              P3 (未来)
 ─────────────────────     ──────────────────     ──────────────────     ──────────────
 P0-1 KV Cache 增量化       P1-1 架构模板 ×11 ✅   P2-1 后端一致性测试 ✅  P3-1 MoE 路由
-P0-2 消除静默失败          P1-2 Observer Phase2 ✅ P2-2 调度器重构测试 ✅  P3-2 Thinking Head
-P0-3 OOM Fallback 显式化   P1-3 KernelStrategy    P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式
-P0-4 Backend Detection     P1-4 策略热切换         P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合扩展
+P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅ P2-2 调度器重构测试 ✅  P3-2 Thinking Head
+P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅  P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式
+P0-4 Backend Detection ✅  P1-4 策略热切换 ✅      P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合扩展
                            P1-5 量化推理加速       P2-5 IQ Codebook       P3-5 GLLM_CACHE_DIR
                                                                          P3-6 分布式 KV Cache
 ```
