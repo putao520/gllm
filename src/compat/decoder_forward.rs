@@ -312,6 +312,7 @@ fn scalar_moe_prefill_layer(
 /// 4. Runs FFN (SwiGLU) on the attention output
 ///
 /// This is O(total_seq * head_dim) per step instead of O(total_seq^2).
+#[allow(dead_code)] // Superseded by quantized_incremental_decode_layer; kept as reference
 fn scalar_incremental_decode_layer(
     hidden_state: &[f32],
     q_w: &[f32],
@@ -1244,7 +1245,7 @@ pub(crate) fn decoder_forward<E: Element>(
             };
 
             for layer in 0..num_layers {
-                // Load weights: prefer quantized raw blocks for direct quantized_matmul
+                // Load attention + norm weights
                 let q_w = get_weight_data(weights, backend,
                     &crate::weight_names::decoder_layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")))?;
                 let k_w = get_weight_data(weights, backend,
@@ -1255,20 +1256,14 @@ pub(crate) fn decoder_forward<E: Element>(
                     &crate::weight_names::decoder_layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")))?;
                 let rn1_w = get_f32_data(weights, backend,
                     &crate::weight_names::decoder_layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")))?;
-                let gate_w = get_weight_data(weights, backend,
-                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")))?;
-                let up_w = get_weight_data(weights, backend,
-                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")))?;
-                let down_w = get_weight_data(weights, backend,
-                    &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
                 let rn2_w = get_f32_data(weights, backend,
                     &crate::weight_names::decoder_layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")))?;
 
-                // K/V weights need f32 for update_kv_cache (writes into cache buffer)
+                // K/V weights need f32 for update_kv_cache
                 let k_w_f32 = weight_data_to_f32(&k_w, backend, transpose_weights, kv_dim, hidden)?;
                 let v_w_f32 = weight_data_to_f32(&v_w, backend, transpose_weights, kv_dim, hidden)?;
 
-                // Write new K/V into cache BEFORE attention (so attention sees them)
+                // Write new K/V into cache BEFORE attention
                 update_kv_cache(
                     backend, kv_caches[seq_idx],
                     layer, &hidden_state, &k_w_f32, &v_w_f32,
@@ -1276,7 +1271,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
                 )?;
 
-                // Read cached K/V for attention (includes the just-written new tokens)
+                // Read cached K/V for attention
                 let total_seq = cached_seq_len + seq_len;
                 let (kv_cache_k, kv_cache_v) = {
                     let store = backend.kv_store().lock().map_err(|e| {
@@ -1289,19 +1284,60 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
-                quantized_incremental_decode_layer(
-                    backend,
-                    &hidden_state,
-                    &q_w, &o_w, &rn1_w,
-                    &gate_w, &up_w, &down_w, &rn2_w,
-                    &positions,
-                    &kv_cache_k, &kv_cache_v,
-                    layer, total_seq, seq_len,
-                    hidden, num_heads, num_kv_heads, head_dim, inter,
-                    eps, rope_theta, max_seq_len,
-                    transpose_weights,
-                    &mut layer_out,
-                )?;
+
+                // Check if this layer uses MoE
+                let moe_weights = if moe_num_experts > 0 {
+                    load_moe_weights(
+                        weights, backend, layer,
+                        moe_num_experts, hidden, inter, transpose_weights,
+                    )?
+                } else {
+                    None
+                };
+
+                if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
+                    // MoE incremental: dequantize attention weights to f32
+                    let q_w_f32 = weight_data_to_f32(
+                        &q_w, backend, transpose_weights, num_heads * head_dim, hidden)?;
+                    let o_w_f32 = weight_data_to_f32(
+                        &o_w, backend, transpose_weights, hidden, num_heads * head_dim)?;
+
+                    scalar_incremental_moe_decode_layer(
+                        &hidden_state,
+                        &q_w_f32, &o_w_f32, &rn1_w, &rn2_w,
+                        &router_w, &expert_weights,
+                        shared_expert.as_ref(),
+                        &positions,
+                        &kv_cache_k, &kv_cache_v,
+                        layer, total_seq, seq_len,
+                        hidden, num_heads, num_kv_heads, head_dim, inter,
+                        eps, rope_theta, max_seq_len,
+                        moe_num_experts, moe_top_k,
+                        &mut layer_out,
+                    );
+                } else {
+                    // Dense layer: load standard FFN weights
+                    let gate_w = get_weight_data(weights, backend,
+                        &crate::weight_names::decoder_layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")))?;
+                    let up_w = get_weight_data(weights, backend,
+                        &crate::weight_names::decoder_layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")))?;
+                    let down_w = get_weight_data(weights, backend,
+                        &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
+
+                    quantized_incremental_decode_layer(
+                        backend,
+                        &hidden_state,
+                        &q_w, &o_w, &rn1_w,
+                        &gate_w, &up_w, &down_w, &rn2_w,
+                        &positions,
+                        &kv_cache_k, &kv_cache_v,
+                        layer, total_seq, seq_len,
+                        hidden, num_heads, num_kv_heads, head_dim, inter,
+                        eps, rope_theta, max_seq_len,
+                        transpose_weights,
+                        &mut layer_out,
+                    )?;
+                }
 
                 hidden_state.copy_from_slice(&layer_out);
             }
@@ -2102,4 +2138,108 @@ fn update_kv_cache<E: Element>(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moe_gate_softmax_sums_to_one() {
+        let hidden_size = 4;
+        let num_experts = 3;
+        let seq_len = 2;
+        let hidden = vec![1.0, 0.5, -0.3, 0.8, 0.2, -0.1, 0.6, 0.4];
+        let gate_w = vec![
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+            0.5, 0.5, 0.0,
+        ];
+        let probs = scalar_moe_gate(&hidden, &gate_w, seq_len, num_experts, hidden_size);
+        assert_eq!(probs.len(), seq_len * num_experts);
+        for s in 0..seq_len {
+            let row = &probs[s * num_experts..(s + 1) * num_experts];
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "row {s} sum = {sum}");
+            for &p in row {
+                assert!(p >= 0.0, "negative probability: {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn top_k_selects_correct_experts() {
+        let num_experts = 4;
+        let top_k = 2;
+        let seq_len = 1;
+        let probs = vec![0.3, 0.1, 0.5, 0.1];
+        let selections = scalar_top_k_experts(&probs, num_experts, top_k, seq_len);
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].len(), 2);
+        assert_eq!(selections[0][0].0, 2);
+        assert_eq!(selections[0][1].0, 0);
+        let sum: f32 = selections[0].iter().map(|(_, w)| w).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "renormalized sum = {sum}");
+    }
+
+    #[test]
+    fn top_k_renormalizes_weights() {
+        let num_experts = 3;
+        let top_k = 2;
+        let seq_len = 1;
+        let probs = vec![0.6, 0.3, 0.1];
+        let selections = scalar_top_k_experts(&probs, num_experts, top_k, seq_len);
+        let (idx0, w0) = selections[0][0];
+        let (idx1, w1) = selections[0][1];
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert!((w0 - 0.6667).abs() < 0.01, "w0 = {w0}");
+        assert!((w1 - 0.3333).abs() < 0.01, "w1 = {w1}");
+    }
+
+    #[test]
+    fn expert_ffn_produces_correct_shape() {
+        let hidden = 4;
+        let inter = 6;
+        let seq_len = 2;
+        let input = vec![0.1f32; seq_len * hidden];
+        let gate_w = vec![0.01f32; hidden * inter];
+        let up_w = vec![0.01f32; hidden * inter];
+        let down_w = vec![0.01f32; inter * hidden];
+        let out = scalar_expert_ffn(&input, &gate_w, &up_w, &down_w, seq_len, hidden, inter);
+        assert_eq!(out.len(), seq_len * hidden);
+        for &v in &out {
+            assert!(v.is_finite(), "non-finite output: {v}");
+        }
+    }
+
+    #[test]
+    fn moe_ffn_weighted_combine() {
+        let hidden = 4;
+        let inter = 6;
+        let seq_len = 1;
+        let num_experts = 2;
+        let top_k = 1;
+        let input = vec![1.0f32; hidden];
+        let router_w = vec![10.0, -10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let e0_gate = vec![0.1f32; hidden * inter];
+        let e0_up = vec![0.1f32; hidden * inter];
+        let e0_down = vec![0.1f32; inter * hidden];
+        let e1_gate = vec![0.2f32; hidden * inter];
+        let e1_up = vec![0.2f32; hidden * inter];
+        let e1_down = vec![0.2f32; inter * hidden];
+        let experts = vec![
+            (e0_gate, e0_up, e0_down),
+            (e1_gate, e1_up, e1_down),
+        ];
+        let out = scalar_moe_ffn(
+            &input, &router_w, &experts, None,
+            seq_len, hidden, inter, num_experts, top_k,
+        );
+        assert_eq!(out.len(), hidden);
+        for &v in &out {
+            assert!(v.is_finite(), "non-finite output: {v}");
+        }
+    }
 }
