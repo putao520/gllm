@@ -11,18 +11,14 @@
 //!   cargo run --release --example regression -- --loader  # Include PyTorch bin loader check
 
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheState};
-#[cfg(feature = "candle")]
 use gllm::loader::convert_bins_to_safetensors;
-#[cfg(feature = "candle")]
 use gllm::loader::PytorchConversionConfig;
 use gllm::scheduler::{GroupState, HGALConfig, PagedScheduler, SequenceGroup};
 use gllm::{Client, ModelKind};
 use gllm::compat::backend_trait::Backend;
 use gllm::compat::CpuBackend;
 use gllm::engine::KvCacheConfig;
-#[cfg(feature = "candle")]
 use hf_hub::api::sync::ApiBuilder;
-#[cfg(feature = "candle")]
 use safetensors::SafeTensors;
 use std::time::Instant;
 
@@ -615,7 +611,6 @@ fn kv_cache_check() -> InternalCheck {
     }
 }
 
-#[cfg(feature = "candle")]
 fn pytorch_loader_check() -> InternalCheck {
     let name = "PyTorch bin loader";
     let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -702,15 +697,6 @@ fn pytorch_loader_check() -> InternalCheck {
         name,
         passed: true,
         error: None,
-    }
-}
-
-#[cfg(not(feature = "candle"))]
-fn pytorch_loader_check() -> InternalCheck {
-    InternalCheck {
-        name: "PyTorch bin loader",
-        passed: false,
-        error: Some("candle feature disabled; rebuild with --features candle".to_string()),
     }
 }
 

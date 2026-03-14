@@ -135,6 +135,18 @@ src/
 
 **理由**：环境变量是公开 API，添加容易删除难。过度使用环境变量会导致配置爆炸和用户体验下降。
 
+## 🚨 禁止引入推理引擎/算法库依赖 (REQ-ARCH-003)
+
+**铁律：gllm 的计算核心完全自研，禁止引入任何外部推理引擎或深度学习算法库**：
+- ❌ 禁止引入 `candle`、`candle-core`、`tch`、`torch`、`ort`、`tract`、`burn` 等推理框架
+- ❌ 禁止引入 `pytorch`、`tensorflow`、`onnxruntime` 等深度学习运行时
+- ❌ 禁止通过 optional feature 绕过此规则（即使是 `optional = true` 也不行）
+- ✅ 计算核心必须完全由 gllm-kernels 提供
+- ✅ 仅允许底层工具库：`safetensors`（格式解析）、`zip`（解压缩）、`prost`（protobuf）、`half`（f16 类型）等
+- ✅ 需要的算法（如 pickle 解析、张量布局计算）必须自行实现
+
+**理由**：gllm 定位为底层算子库，引入同类推理框架会造成依赖冲突、二进制膨胀、架构污染。
+
 ## Common Commands
 
 ```bash

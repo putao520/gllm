@@ -9,7 +9,6 @@ use serde::Deserialize;
 
 use crate::manifest::{FileMap, EMPTY_FILE_MAP};
 
-#[cfg(feature = "candle")]
 use super::pytorch::{convert_bins_to_safetensors, PytorchConversionConfig};
 use super::{parallel::ParallelLoader, LoaderError, Result};
 
@@ -311,7 +310,6 @@ impl HfHubClient {
             }));
         }
 
-        #[cfg(feature = "candle")]
         if let Some((weights, index_path)) =
             self.try_download_pytorch_bins(repo, file_map, parallel)?
         {
@@ -492,7 +490,6 @@ impl HfHubClient {
             .filter(|base_repo| base_repo != repo)
     }
 
-    #[cfg(feature = "candle")]
     fn try_download_pytorch_bins(
         &self,
         repo: &str,

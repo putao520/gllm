@@ -124,7 +124,7 @@
 
 ### P3-3: PyTorch 格式支持 ✅ 已完成
 
-**完成状态**: `pytorch.rs` 实现完整的 pickle 反序列化 + safetensors 转换（595 行）。`Loader::load()` 的 `WeightFormat::PyTorch` 分支调用 `convert_bins_to_safetensors()` 转换后走标准 safetensors 加载路径。需 `candle` feature 启用。
+**完成状态**: `pytorch.rs` 纯 Rust 实现 pickle 反序列化 + safetensors 转换（内联最小化 pickle 协议解析器，无 candle/tch 依赖，符合 REQ-ARCH-003）。`Loader::load()` 的 `WeightFormat::PyTorch` 分支调用 `convert_bins_to_safetensors()` 转换后走标准 safetensors 加载路径。默认启用，无需 feature flag。
 
 ### P3-4: GPU TileLevelFusion / ComputeRoot
 

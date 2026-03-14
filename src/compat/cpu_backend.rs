@@ -68,26 +68,6 @@ impl KvCacheBuffer {
         }
         (self.max_seq_len + self.page_size - 1) / self.page_size
     }
-
-    /// Get a flat byte pointer to the K buffer (for JIT execute).
-    pub fn k_ptr(&self) -> *const u8 {
-        self.k.as_ptr() as *const u8
-    }
-
-    /// Get a mutable flat byte pointer to the K buffer.
-    pub fn k_ptr_mut(&mut self) -> *mut u8 {
-        self.k.as_mut_ptr() as *mut u8
-    }
-
-    /// Get a flat byte pointer to the V buffer.
-    pub fn v_ptr(&self) -> *const u8 {
-        self.v.as_ptr() as *const u8
-    }
-
-    /// Get a mutable flat byte pointer to the V buffer.
-    pub fn v_ptr_mut(&mut self) -> *mut u8 {
-        self.v.as_mut_ptr() as *mut u8
-    }
 }
 
 /// Shared KV cache store, indexed by handle ID.
