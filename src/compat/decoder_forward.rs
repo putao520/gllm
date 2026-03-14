@@ -45,7 +45,7 @@ pub(super) fn scalar_gemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usiz
 
 /// Scalar RoPE: apply rotary position embedding to x[seq_len, dim]
 /// dim = num_heads * head_dim, positions[seq_len]
-fn scalar_rope(x: &mut [f32], positions: &[u32], head_dim: usize, theta: f64) {
+pub(super) fn scalar_rope(x: &mut [f32], positions: &[u32], head_dim: usize, theta: f64) {
     let seq_len = positions.len();
     let dim = x.len() / seq_len;
     let n_heads = dim / head_dim;

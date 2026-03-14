@@ -856,7 +856,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     input: &BatchInput,
     _topology: &AttentionTopology,
     weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    _kv_caches: &mut [KvCacheHandle],
+    kv_caches: &mut [KvCacheHandle],
     config: &GeneratorForwardConfig,
 ) -> Result<Vec<LogitsHandle>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
@@ -903,7 +903,8 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     }
 
     // Compile decoder layer graph (once, reused across layers)
-    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps);
+    let rope_theta = config.rope_theta;
+    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
     let (_module, kernel_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &graph)?;
 
     // Per-layer GPU execution
@@ -942,6 +943,83 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
         cuda_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
         device.sync().map_err(|e| BE::Cuda(format!("GPU sync failed: {e}")))?;
+
+        // ── Write K/V to KV cache ──
+        if let Some(handle) = kv_caches.first() {
+            let kv_dim = num_kv_heads * head_dim;
+
+            // Find k_rope (post-RoPE) and v_proj TensorIds by name
+            let k_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "k_rope")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Cuda("k_rope tensor not found in graph".into()))?;
+            let v_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "v_proj")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Cuda("v_proj tensor not found in graph".into()))?;
+
+            // Download K (post-RoPE) and V from GPU
+            let kv_bytes = seq_len * kv_dim * 4;
+            let k_buf = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Cuda("k_rope buffer not found".into()))?;
+            let mut k_host = vec![0u8; kv_bytes];
+            device.dtoh(k_buf, &mut k_host, stream)
+                .map_err(|e| BE::Cuda(format!("dtoh k_rope failed: {e}")))?;
+
+            let v_buf = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Cuda("v_proj buffer not found".into()))?;
+            let mut v_host = vec![0u8; kv_bytes];
+            device.dtoh(v_buf, &mut v_host, stream)
+                .map_err(|e| BE::Cuda(format!("dtoh v_proj failed: {e}")))?;
+
+            // Write into GPU KV cache (K already has RoPE from GPU graph)
+            let meta_store = backend.kv_meta.lock()
+                .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
+            let meta = meta_store.get(&handle.0)
+                .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found", handle.0)))?;
+
+            let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
+
+            for head in 0..num_kv_heads {
+                let dst_k = handle.0
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut k_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    k_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&k_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&k_packed, dst_k, stream)
+                    .map_err(|e| BE::Cuda(format!("htod KV cache K failed: {e}")))?;
+
+                let dst_v = handle.0 + half_bytes as u64
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut v_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    v_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&v_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&v_packed, dst_v, stream)
+                    .map_err(|e| BE::Cuda(format!("htod KV cache V failed: {e}")))?;
+            }
+
+            drop(meta_store);
+
+            if layer == 0 {
+                let mut meta_store = backend.kv_meta.lock()
+                    .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
+                if let Some(meta) = meta_store.get_mut(&handle.0) {
+                    meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
+                }
+            }
+        }
 
         // Download output
         let output_tid = graph.outputs[0];
@@ -2090,6 +2168,7 @@ pub(crate) fn build_decoder_layer_graph(
     head_dim: usize,
     inter: usize,
     eps: f32,
+    rope_theta: f64,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     use gllm_kernels::types::DType;
@@ -2153,6 +2232,23 @@ pub(crate) fn build_decoder_layer_graph(
         "v_proj",
     );
 
+    // ── RoPE on Q and K ──
+    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim, theta: rope_theta },
+        vec![q_proj],
+        vec![q_rope],
+        "rope_q",
+    );
+
+    let k_rope = g.add_tensor("k_rope", vec![s, kv_h], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim, theta: rope_theta },
+        vec![k_proj],
+        vec![k_rope],
+        "rope_k",
+    );
+
     // ── Causal MultiHeadAttention ──
     let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
     g.add_op(
@@ -2161,7 +2257,7 @@ pub(crate) fn build_decoder_layer_graph(
             num_heads,
             head_dim,
         },
-        vec![q_proj, k_proj, v_proj],
+        vec![q_rope, k_rope, v_proj],
         vec![attn_out],
         "causal_attention",
     );
@@ -2234,6 +2330,284 @@ pub(crate) fn build_decoder_layer_graph(
 
     g.outputs = vec![output];
     g
+}
+
+/// Build a projection sub-graph for incremental decode:
+/// input[seq, hidden] → RmsNorm → Q/K/V Gemm → RoPE → outputs: [q_rope, k_rope, v_proj]
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(crate) fn build_projection_graph(
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+    rope_theta: f64,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+    let s = seq_len;
+    let h = hidden;
+    let q_dim = num_heads * head_dim;
+    let kv_h = num_kv_heads * head_dim;
+
+    let input = g.add_tensor("input", vec![s, h], dt);
+    let attn_norm_w = g.add_tensor("attn_norm_w", vec![h], dt);
+    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
+    let w_k = g.add_tensor("w_k", vec![h, kv_h], dt);
+    let w_v = g.add_tensor("w_v", vec![h, kv_h], dt);
+
+    g.inputs = vec![input];
+
+    let attn_normed = g.add_tensor("attn_normed", vec![s, h], dt);
+    g.add_op(
+        OpKind::RmsNorm { eps },
+        vec![input, attn_norm_w],
+        vec![attn_normed],
+        "attn_rms_norm",
+    );
+
+    let q_proj = g.add_tensor("q_proj", vec![s, q_dim], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: q_dim, k: h },
+        vec![attn_normed, w_q],
+        vec![q_proj],
+        "q_proj",
+    );
+
+    let k_proj = g.add_tensor("k_proj", vec![s, kv_h], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: kv_h, k: h },
+        vec![attn_normed, w_k],
+        vec![k_proj],
+        "k_proj",
+    );
+
+    let v_proj = g.add_tensor("v_proj", vec![s, kv_h], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: kv_h, k: h },
+        vec![attn_normed, w_v],
+        vec![v_proj],
+        "v_proj",
+    );
+
+    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim, theta: rope_theta },
+        vec![q_proj],
+        vec![q_rope],
+        "rope_q",
+    );
+
+    let k_rope = g.add_tensor("k_rope", vec![s, kv_h], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim, theta: rope_theta },
+        vec![k_proj],
+        vec![k_rope],
+        "rope_k",
+    );
+
+    g.outputs = vec![q_rope, k_rope, v_proj];
+    g
+}
+
+/// Build a post-attention sub-graph for incremental decode:
+/// (input[seq, hidden], attn_out[seq, q_dim]) → O Gemm → Residual → RmsNorm → FFN → Residual → output
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(crate) fn build_post_attention_graph(
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    eps: f32,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+    let s = seq_len;
+    let h = hidden;
+    let q_dim = num_heads * head_dim;
+
+    let input = g.add_tensor("input", vec![s, h], dt);
+    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
+    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
+    let ffn_norm_w = g.add_tensor("ffn_norm_w", vec![h], dt);
+    let w_gate = g.add_tensor("w_gate", vec![h, inter], dt);
+    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
+    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
+
+    g.inputs = vec![input, attn_out];
+
+    let o_proj = g.add_tensor("o_proj", vec![s, h], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: h, k: q_dim },
+        vec![attn_out, w_o],
+        vec![o_proj],
+        "o_proj",
+    );
+
+    let attn_residual = g.add_tensor("attn_residual", vec![s, h], dt);
+    g.add_op(
+        OpKind::Residual,
+        vec![input, o_proj],
+        vec![attn_residual],
+        "attn_residual",
+    );
+
+    let ffn_normed = g.add_tensor("ffn_normed", vec![s, h], dt);
+    g.add_op(
+        OpKind::RmsNorm { eps },
+        vec![attn_residual, ffn_norm_w],
+        vec![ffn_normed],
+        "ffn_rms_norm",
+    );
+
+    let gate = g.add_tensor("gate", vec![s, inter], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: inter, k: h },
+        vec![ffn_normed, w_gate],
+        vec![gate],
+        "gate_proj",
+    );
+
+    let up = g.add_tensor("up", vec![s, inter], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: inter, k: h },
+        vec![ffn_normed, w_up],
+        vec![up],
+        "up_proj",
+    );
+
+    let swiglu_out = g.add_tensor("swiglu_out", vec![s, inter], dt);
+    g.add_op(OpKind::SwiGlu, vec![gate, up], vec![swiglu_out], "swiglu");
+
+    let down = g.add_tensor("down", vec![s, h], dt);
+    g.add_op(
+        OpKind::Gemm { m: s, n: h, k: inter },
+        vec![swiglu_out, w_down],
+        vec![down],
+        "down_proj",
+    );
+
+    let output = g.add_tensor("output", vec![s, h], dt);
+    g.add_op(
+        OpKind::Residual,
+        vec![attn_residual, down],
+        vec![output],
+        "ffn_residual",
+    );
+
+    g.outputs = vec![output];
+    g
+}
+
+/// CPU-side causal attention using cached K/V from GPU KV cache.
+///
+/// q_rope: [seq_len, q_dim] — RoPE'd Q for new tokens
+/// kv_cache_k: [num_layers * num_kv_heads * max_seq_len * head_dim] — full K cache (flat)
+/// kv_cache_v: same layout — full V cache
+/// Returns attn_out: [seq_len, q_dim]
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn cpu_cached_attention(
+    q_rope: &[f32],
+    kv_cache_k: &[f32],
+    kv_cache_v: &[f32],
+    positions: &[u32],
+    layer: usize,
+    total_seq: usize,
+    seq_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_seq_len: usize,
+) -> Vec<f32> {
+    let q_dim = num_heads * head_dim;
+    let heads_per_group = num_heads / num_kv_heads;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+
+    for h in 0..num_heads {
+        let kv_h = h / heads_per_group;
+        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
+
+        for s in 0..seq_len {
+            let q_offset = s * q_dim + h * head_dim;
+
+            let mut scores = vec![0.0f32; total_seq];
+            for t in 0..total_seq {
+                let k_offset = cache_base + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q_rope[q_offset + d] * kv_cache_k[k_offset + d];
+                }
+                scores[t] = dot * scale;
+            }
+
+            let cur_pos = positions[s] as usize;
+            for t in 0..total_seq {
+                if t > cur_pos {
+                    scores[t] = f32::NEG_INFINITY;
+                }
+            }
+
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for t in 0..total_seq {
+                scores[t] = (scores[t] - max_score).exp();
+                sum += scores[t];
+            }
+            if sum > 0.0 {
+                for t in 0..total_seq {
+                    scores[t] /= sum;
+                }
+            }
+
+            let out_offset = s * q_dim + h * head_dim;
+            for d in 0..head_dim {
+                let mut val = 0.0f32;
+                for t in 0..total_seq {
+                    let v_offset = cache_base + t * head_dim;
+                    val += scores[t] * kv_cache_v[v_offset + d];
+                }
+                attn_out[out_offset + d] = val;
+            }
+        }
+    }
+
+    attn_out
+}
+
+/// Download K/V from GPU KV cache to host flat arrays.
+/// Returns (k_cache_flat, v_cache_flat) each [num_layers * num_kv_heads * max_seq_len * head_dim].
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn download_kv_cache_to_host(
+    handle: &KvCacheHandle,
+    half_bytes: usize,
+    total_kv_floats: usize,
+    device: &dyn gllm_kernels::gpu::GpuDevice,
+    stream: u64,
+) -> Result<(Vec<f32>, Vec<f32>), BE> {
+    let mut k_host_bytes = vec![0u8; half_bytes];
+    device.dtoh_raw(handle.0, &mut k_host_bytes, stream)
+        .map_err(|e| BE::Other(format!("dtoh KV cache K failed: {e}")))?;
+    let k_flat: Vec<f32> = unsafe {
+        std::slice::from_raw_parts(k_host_bytes.as_ptr() as *const f32, total_kv_floats)
+    }.to_vec();
+
+    let mut v_host_bytes = vec![0u8; half_bytes];
+    device.dtoh_raw(handle.0 + half_bytes as u64, &mut v_host_bytes, stream)
+        .map_err(|e| BE::Other(format!("dtoh KV cache V failed: {e}")))?;
+    let v_flat: Vec<f32> = unsafe {
+        std::slice::from_raw_parts(v_host_bytes.as_ptr() as *const f32, total_kv_floats)
+    }.to_vec();
+
+    Ok((k_flat, v_flat))
 }
 
 /// Build a CompilerGraph for the final lm_head projection: hidden -> vocab logits.
@@ -2344,7 +2718,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
     input: &BatchInput,
     _topology: &AttentionTopology,
     weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    _kv_caches: &mut [KvCacheHandle],
+    kv_caches: &mut [KvCacheHandle],
     config: &GeneratorForwardConfig,
 ) -> Result<Vec<LogitsHandle>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
@@ -2391,7 +2765,8 @@ pub(super) fn hip_decoder_forward<E: Element>(
     }
 
     // Compile decoder layer graph (once, reused across layers)
-    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps);
+    let rope_theta = config.rope_theta;
+    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
     let (_module, kernel_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &graph)?;
 
     // Per-layer GPU execution
@@ -2430,6 +2805,80 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         hip_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
         device.sync().map_err(|e| BE::Hip(format!("GPU sync failed: {e}")))?;
+
+        // ── Write K/V to KV cache ──
+        if let Some(handle) = kv_caches.first() {
+            let kv_dim = num_kv_heads * head_dim;
+
+            let k_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "k_rope")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Hip("k_rope tensor not found in graph".into()))?;
+            let v_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "v_proj")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Hip("v_proj tensor not found in graph".into()))?;
+
+            let kv_bytes = seq_len * kv_dim * 4;
+            let k_buf = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Hip("k_rope buffer not found".into()))?;
+            let mut k_host = vec![0u8; kv_bytes];
+            device.dtoh(k_buf, &mut k_host, stream)
+                .map_err(|e| BE::Hip(format!("dtoh k_rope failed: {e}")))?;
+
+            let v_buf = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Hip("v_proj buffer not found".into()))?;
+            let mut v_host = vec![0u8; kv_bytes];
+            device.dtoh(v_buf, &mut v_host, stream)
+                .map_err(|e| BE::Hip(format!("dtoh v_proj failed: {e}")))?;
+
+            let meta_store = backend.kv_meta.lock()
+                .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
+            let meta = meta_store.get(&handle.0)
+                .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found", handle.0)))?;
+
+            let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
+
+            for head in 0..num_kv_heads {
+                let dst_k = handle.0
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut k_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    k_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&k_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&k_packed, dst_k, stream)
+                    .map_err(|e| BE::Hip(format!("htod KV cache K failed: {e}")))?;
+
+                let dst_v = handle.0 + half_bytes as u64
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut v_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    v_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&v_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&v_packed, dst_v, stream)
+                    .map_err(|e| BE::Hip(format!("htod KV cache V failed: {e}")))?;
+            }
+
+            drop(meta_store);
+
+            if layer == 0 {
+                let mut meta_store = backend.kv_meta.lock()
+                    .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
+                if let Some(meta) = meta_store.get_mut(&handle.0) {
+                    meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
+                }
+            }
+        }
 
         // Download output
         let output_tid = graph.outputs[0];
@@ -2611,7 +3060,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
     input: &BatchInput,
     _topology: &AttentionTopology,
     weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    _kv_caches: &mut [KvCacheHandle],
+    kv_caches: &mut [KvCacheHandle],
     config: &GeneratorForwardConfig,
 ) -> Result<Vec<LogitsHandle>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
@@ -2661,7 +3110,8 @@ pub(super) fn metal_decoder_forward<E: Element>(
     }
 
     // Compile decoder layer graph (once)
-    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps);
+    let rope_theta = config.rope_theta;
+    let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
     let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
     // Per-layer GPU execution
@@ -2699,6 +3149,80 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
         metal_launch_graph(device, stream, &kernel_entries, &gpu_buffers, &graph)?;
         device.sync().map_err(|e| BE::Metal(format!("sync failed: {e}")))?;
+
+        // ── Write K/V to KV cache ──
+        if let Some(handle) = kv_caches.first() {
+            let kv_dim = num_kv_heads * head_dim;
+
+            let k_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "k_rope")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Metal("k_rope tensor not found in graph".into()))?;
+            let v_tid = graph.tensors.iter().enumerate()
+                .find(|(_, m)| m.name == "v_proj")
+                .map(|(i, _)| TensorId(i as u32))
+                .ok_or_else(|| BE::Metal("v_proj tensor not found in graph".into()))?;
+
+            let kv_bytes = seq_len * kv_dim * 4;
+            let k_buf = gpu_buffers.get(&k_tid)
+                .ok_or_else(|| BE::Metal("k_rope buffer not found".into()))?;
+            let mut k_host = vec![0u8; kv_bytes];
+            device.dtoh(k_buf, &mut k_host, stream)
+                .map_err(|e| BE::Metal(format!("dtoh k_rope failed: {e}")))?;
+
+            let v_buf = gpu_buffers.get(&v_tid)
+                .ok_or_else(|| BE::Metal("v_proj buffer not found".into()))?;
+            let mut v_host = vec![0u8; kv_bytes];
+            device.dtoh(v_buf, &mut v_host, stream)
+                .map_err(|e| BE::Metal(format!("dtoh v_proj failed: {e}")))?;
+
+            let meta_store = backend.kv_meta.lock()
+                .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
+            let meta = meta_store.get(&handle.0)
+                .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found", handle.0)))?;
+
+            let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+            let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
+
+            for head in 0..num_kv_heads {
+                let dst_k = handle.0
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut k_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    k_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&k_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&k_packed, dst_k, stream)
+                    .map_err(|e| BE::Metal(format!("htod KV cache K failed: {e}")))?;
+
+                let dst_v = handle.0 + half_bytes as u64
+                    + ((layer * meta.num_kv_heads + head) * head_stride
+                        + write_start * head_dim * meta.dtype_size) as u64;
+                let mut v_packed = vec![0u8; seq_len * head_dim * 4];
+                for s in 0..seq_len {
+                    let src_off = (s * kv_dim + head * head_dim) * 4;
+                    let dst_off = s * head_dim * 4;
+                    v_packed[dst_off..dst_off + head_dim * 4]
+                        .copy_from_slice(&v_host[src_off..src_off + head_dim * 4]);
+                }
+                device.htod_raw(&v_packed, dst_v, stream)
+                    .map_err(|e| BE::Metal(format!("htod KV cache V failed: {e}")))?;
+            }
+
+            drop(meta_store);
+
+            if layer == 0 {
+                let mut meta_store = backend.kv_meta.lock()
+                    .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
+                if let Some(meta) = meta_store.get_mut(&handle.0) {
+                    meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
+                }
+            }
+        }
 
         let output_tid = graph.outputs[0];
         let output_buf = gpu_buffers.get(&output_tid)
