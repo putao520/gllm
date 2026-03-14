@@ -203,7 +203,6 @@ build_decoder_layer_graph() 添加 kv_cache_ptr 输出参数
 ```
 
 **约束**：
-- 不修改 gllm-kernels（MHA op 已支持 K/V 输出）
 - 只修改 gllm 侧的 graph 构建和 buffer 管理
 
 ## 7. 演进路线

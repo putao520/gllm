@@ -37,7 +37,6 @@
 1. `build_decoder_layer_graph()` 新增 `k_cache`/`v_cache` 输出 tensor
 2. MHA op 计算 K/V 后写入 cache buffer（gllm-kernels MHA 已支持 K/V 输出）
 3. 增量 decode 时传入已缓存的 K/V 前缀，仅计算新 token 的 K/V
-4. 不修改 gllm-kernels（仅修改 gllm 侧 graph 构建和 buffer 管理）
 
 **验收标准**:
 - 多步 decode 中 KV cache buffer 包含正确的 K/V 数据
