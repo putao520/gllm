@@ -67,6 +67,34 @@ pub struct GeneratorForwardConfig {
     pub moe_config: Option<crate::manifest::MoEConfig>,
 }
 
+impl GeneratorForwardConfig {
+    /// Extract attention head geometry as a grouped struct.
+    #[allow(dead_code)]
+    pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
+        let q_dim = self.num_heads * self.head_dim;
+        let kv_dim = self.num_kv_heads * self.head_dim;
+        crate::compat::types::AttentionGeometry {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            q_dim,
+            kv_dim,
+            heads_per_group: self.num_heads / self.num_kv_heads.max(1),
+        }
+    }
+
+    /// Extract per-layer dimension constants.
+    #[allow(dead_code)]
+    pub(crate) fn layer_dims(&self) -> crate::compat::types::LayerDims {
+        crate::compat::types::LayerDims {
+            hidden: self.hidden_size,
+            inter: self.intermediate_size,
+            eps: self.norm_eps,
+            rope_theta: self.rope_theta,
+        }
+    }
+}
+
 /// KV-cache swap configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwapConfig {
@@ -290,7 +318,7 @@ enum OnnxKernelExecutionOp {
     SwiGlu,
     Rope,
     FusedQkvRope,
-    GQA,
+    Gqa,
     MoERouting,
     FusedRMSLinear,
     Atomic,
@@ -493,7 +521,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 FusedOp::SwiGLU(_) => OnnxKernelExecutionOp::SwiGlu,
                 FusedOp::RoPE(_) => OnnxKernelExecutionOp::Rope,
                 FusedOp::FusedQkvRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
-                FusedOp::GQA(_) => OnnxKernelExecutionOp::GQA,
+                FusedOp::GQA(_) => OnnxKernelExecutionOp::Gqa,
                 FusedOp::MoERouting(_) => OnnxKernelExecutionOp::MoERouting,
                 FusedOp::FusedRMSLinear(_) => OnnxKernelExecutionOp::FusedRMSLinear,
                 FusedOp::Atomic(_) => OnnxKernelExecutionOp::Atomic,
@@ -1213,9 +1241,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             self.kv_cache = Some(KvCacheDoubleBuffer::new(front, back));
             self.kv_cache_slot = KvCacheSlot::Front;
         }
-        Ok(self.kv_cache.as_mut().ok_or_else(|| ExecutorError::Config(ModelConfigError::InvalidConfig(
+        self.kv_cache.as_mut().ok_or_else(|| ExecutorError::Config(ModelConfigError::InvalidConfig(
             "KV cache not available after allocation".to_string()
-        )))?)
+        )))
     }
 
     fn active_kv_handle(&mut self) -> ExecutorResult<KvCacheHandle> {

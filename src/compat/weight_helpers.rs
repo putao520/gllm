@@ -32,7 +32,7 @@ pub(crate) fn get_f32_data<E: Element>(
             // skipping the padding blocks at the end of each row.
             // GGUF shape is [ne0, ne1, ...] where ne0 is the innermost dim (first element).
             let ne0 = if qt.shape.is_empty() { n } else { qt.shape[0] };
-            let blocks_per_row = (ne0 + blk_elems - 1) / blk_elems;
+            let blocks_per_row = ne0.div_ceil(blk_elems);
             let row_data_bytes = blocks_per_row * blk_bytes;
             let needs_row_dequant = ne0 % blk_elems != 0 && qt.shape.len() >= 2;
 
@@ -202,6 +202,7 @@ pub(crate) fn get_weight_data<E: Element>(
 ///
 /// When `weight` is `WeightData::F32`, falls back to the existing
 /// transpose + scalar_gemm path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn quantized_linear<E: Element>(
     backend: &CpuBackend<E>,
     input: &[f32],
@@ -257,7 +258,7 @@ pub(crate) fn quantized_linear<E: Element>(
             } else {
                 w_data.clone()
             };
-            super::decoder_forward::scalar_gemm(input, &w, output, seq_len, out_dim, in_dim);
+            super::scalar_ops::scalar_gemm(input, &w, output, seq_len, out_dim, in_dim);
             Ok(())
         }
     }
@@ -287,7 +288,7 @@ pub(crate) fn weight_data_to_f32<E: Element>(
             let mut f32_data = vec![0.0f32; total];
             let blk_bytes = quant_type.block_bytes();
             let blk_elems = quant_type.block_size();
-            let blocks_per_row = (w_in + blk_elems - 1) / blk_elems;
+            let blocks_per_row = w_in.div_ceil(blk_elems);
             let row_data_bytes = blocks_per_row * blk_bytes;
             let needs_row_dequant = w_in % blk_elems != 0;
 

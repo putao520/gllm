@@ -8,8 +8,17 @@
 
 mod weight_helpers;
 mod bert_forward;
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod decoder_forward;
 mod gpu_compile;
+#[allow(dead_code)]
+pub(crate) mod types;
+#[allow(clippy::too_many_arguments)]
+pub(crate) mod scalar_ops;
+#[allow(clippy::too_many_arguments)]
+pub(crate) mod jit_helpers;
+#[allow(dead_code)]
+pub(crate) mod gpu_helpers;
 pub mod cpu_backend;
 mod cuda_backend;
 mod hip_backend;
@@ -38,7 +47,7 @@ pub mod backend_trait {
 
     /// Abstract compute backend.
     pub trait Backend<E: Element>: Send + Sync + 'static + std::fmt::Debug {
-        type Tensor: std::fmt::Debug + Clone + Send + Sync + 'static;
+        type Tensor: std::fmt::Debug + Clone + Send + Sync + 'static + AsRef<[E]>;
 
         fn alloc_kv_cache(&self, config: &KvCacheConfig) -> Result<KvCacheHandle, BackendError>;
 
@@ -103,6 +112,7 @@ pub mod backend_trait {
         fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BackendError>;
 
         /// Quantized matrix multiplication dispatching to K-Quant/Classic/IQ kernels.
+        #[allow(clippy::too_many_arguments)]
         fn quantized_matmul(
             &self,
             _weight_blocks: &[u8],

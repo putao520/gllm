@@ -115,17 +115,12 @@ impl OptimizationContext {
 }
 
 /// 数据类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DType {
+    #[default]
     F32,
     F16,
     BF16,
-}
-
-impl Default for DType {
-    fn default() -> Self {
-        Self::F32
-    }
 }
 
 #[cfg(test)]

@@ -425,7 +425,7 @@ pub fn tensor_nbytes(dtype: GgmlDType, shape: &[u64]) -> Result<usize, GgufError
     let ne0 = usize::try_from(shape[0])
         .map_err(|_| GgufError::ParseError("tensor dimension overflows usize".to_string()))?;
 
-    let blocks_per_row = (ne0 + block_size - 1) / block_size;
+    let blocks_per_row = ne0.div_ceil(block_size);
     let row_bytes = blocks_per_row
         .checked_mul(bytes_per_block)
         .ok_or_else(|| GgufError::ParseError("row byte size overflow".to_string()))?;

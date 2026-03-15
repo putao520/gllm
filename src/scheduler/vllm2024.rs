@@ -322,9 +322,9 @@ pub fn cosine_similarity<E: Element>(a: &[E], b: &[E]) -> E {
     let mut na = E::ZERO;
     let mut nb = E::ZERO;
     for (x, y) in a.iter().zip(b.iter()) {
-        dot = dot + (*x) * (*y);
-        na = na + (*x) * (*x);
-        nb = nb + (*y) * (*y);
+        dot += (*x) * (*y);
+        na += (*x) * (*x);
+        nb += (*y) * (*y);
     }
     if na == E::ZERO || nb == E::ZERO {
         return E::ZERO;
@@ -345,13 +345,13 @@ pub fn approx_ppl_delta<E: Element>(original: &[Vec<E>], distilled: &[Vec<E>]) -
             let mut l2 = E::ZERO;
             for (x, y) in page.iter().zip(dp.iter()) {
                 let d = *x - *y;
-                l2 = l2 + d * d;
+                l2 += d * d;
             }
             let norm = page
                 .iter()
                 .fold(E::ZERO, |acc, v| acc + (*v) * (*v))
                 .max(E::from_f32(1e-6));
-            total = total + (l2 / norm).sqrt();
+            total += (l2 / norm).sqrt();
             count += 1;
         }
     }

@@ -9,7 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", proto_path);
 
     let mut config = prost_build::Config::new();
-    config.bytes(&[".onnx.TensorProto.raw_data"]);
+    config.bytes([".onnx.TensorProto.raw_data"]);
     config
         .compile_protos(&[proto_path], &["src/loader/onnx"])
         .expect("failed to compile onnx proto");

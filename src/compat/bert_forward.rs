@@ -1,5 +1,7 @@
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
+use super::jit_helpers::pack_weights;
+use super::types::BertLayerWeights;
 use super::weight_helpers::{get_f32_data, get_bias_data, needs_weight_transpose, transpose_f32};
 use super::{Element, PoolingMode};
 use crate::engine::executor::{BackendError as BE, GeneratorForwardConfig};
@@ -185,43 +187,22 @@ pub(crate) fn build_bert_layer_graph(
 pub(crate) fn execute_jit_bert_layer(
     compiled: &gllm_kernels::compiler::CompiledLayer,
     hidden_state: &[f32],
-    q_w: &[f32], q_b: &[f32],
-    k_w: &[f32], k_b: &[f32],
-    v_w: &[f32], v_b: &[f32],
-    out_w: &[f32], out_b: &[f32],
-    ln1_w: &[f32], ln1_b: &[f32],
-    ffn_up_w: &[f32], ffn_up_b: &[f32],
-    ffn_down_w: &[f32], ffn_down_b: &[f32],
-    ln2_w: &[f32], ln2_b: &[f32],
+    weights: &BertLayerWeights,
     seq_len: usize,
     output: &mut [f32],
 ) {
-    // Pack weights contiguously in graph input order:
-    // [w_q, b_q, w_k, b_k, w_v, b_v, w_o, b_o, ln1_w, ln1_b,
-    //  w_up, b_up, w_down, b_down, ln2_w, ln2_b]
-    let weight_slices: &[&[f32]] = &[
-        q_w, q_b, k_w, k_b, v_w, v_b, out_w, out_b,
-        ln1_w, ln1_b, ffn_up_w, ffn_up_b, ffn_down_w, ffn_down_b,
-        ln2_w, ln2_b,
-    ];
-    let total_weight_bytes: usize = weight_slices.iter().map(|s| s.len() * 4).sum();
-    let mut weights_buf = vec![0u8; total_weight_bytes];
-    let mut offset = 0;
-    for slice in weight_slices.iter() {
-        let bytes = slice.len() * 4;
-        weights_buf[offset..offset + bytes].copy_from_slice(
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes) }
-        );
-        offset += bytes;
-    }
-
-    let scratchpad_bytes = compiled.scratchpad_bytes;
-    let mut scratchpad = vec![0u8; scratchpad_bytes];
+    let weights_buf = pack_weights(&[
+        weights.q_w, weights.q_b, weights.k_w, weights.k_b,
+        weights.v_w, weights.v_b, weights.out_w, weights.out_b,
+        weights.ln1_w, weights.ln1_b, weights.ffn_up_w, weights.ffn_up_b,
+        weights.ffn_down_w, weights.ffn_down_b, weights.ln2_w, weights.ln2_b,
+    ]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     unsafe {
         compiled.execute(
             hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
             std::ptr::null_mut(), // no KV cache for BERT
             std::ptr::null(),     // no positions
             std::ptr::null(),     // no seq_lens
@@ -421,13 +402,18 @@ pub(crate) fn bert_encoder_forward<E: Element>(
             };
 
             let mut layer_out = vec![0.0f32; seq_len * hidden];
+            let bert_weights = BertLayerWeights {
+                q_w: &q_w, q_b: &q_b, k_w: &k_w, k_b: &k_b,
+                v_w: &v_w, v_b: &v_b, out_w: &out_w, out_b: &out_b,
+                ln1_w: &ln1_w, ln1_b: &ln1_b,
+                ffn_up_w: &ffn_up_w, ffn_up_b: &ffn_up_b,
+                ffn_down_w: &ffn_down_w, ffn_down_b: &ffn_down_b,
+                ln2_w: &ln2_w, ln2_b: &ln2_b,
+            };
             execute_jit_bert_layer(
                 compiled,
                 &hidden_state,
-                &q_w, &q_b, &k_w, &k_b, &v_w, &v_b,
-                &out_w, &out_b, &ln1_w, &ln1_b,
-                &ffn_up_w, &ffn_up_b, &ffn_down_w, &ffn_down_b,
-                &ln2_w, &ln2_b,
+                &bert_weights,
                 seq_len,
                 &mut layer_out,
             );

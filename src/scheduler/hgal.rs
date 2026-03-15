@@ -118,7 +118,7 @@ impl HGALScheduler {
             })
             .collect();
 
-        candidates.sort_by(|a, b| a.2.cmp(&b.2));
+        candidates.sort_by_key(|a| a.2);
 
         let mut selected = Vec::new();
         let mut accumulated_pages = 0usize;
@@ -348,8 +348,8 @@ impl HGALScheduler {
         if let Some(group) = self.sequence_groups.get_mut(&request_id) {
             group.last_access = Instant::now();
             group.state = GroupState::Running;
-            for page_id in group.pages.iter().copied() {
-                if let Some(meta) = self.page_metadata.get_mut(&page_id) {
+            for page_id in group.pages.iter() {
+                if let Some(meta) = self.page_metadata.get_mut(page_id) {
                     if meta.state != PageState::Swapped {
                         meta.state = PageState::Active;
                     }

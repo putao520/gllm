@@ -87,7 +87,7 @@ pub fn detect_backend_generic<E: Element>() -> Result<DetectedBackend<E>, Backen
     if let Some(backend) = MetalBackend::<E>::new(0) {
         return Ok(DetectedBackend::Metal(Box::new(backend)));
     }
-    Ok(DetectedBackend::Cpu(Box::new(CpuBackend::<E>::new())))
+    Ok(DetectedBackend::Cpu(Box::default()))
 }
 
 /// Detected dtype from model weights.

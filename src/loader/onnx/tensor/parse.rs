@@ -79,7 +79,7 @@ pub(super) fn byte_size_for_elements(
     use proto::tensor_proto::DataType as OnnxType;
     match data_type {
         // INT4/UINT4: 2 elements packed per byte
-        OnnxType::Int4 | OnnxType::Uint4 => (element_count + 1) / 2,
+        OnnxType::Int4 | OnnxType::Uint4 => element_count.div_ceil(2),
         // All other types use safetensors Dtype size
         _ => dtype.size() * element_count,
     }

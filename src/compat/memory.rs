@@ -7,7 +7,7 @@ use crate::engine::executor::BackendError as BE;
 pub(super) fn get_system_memory_pressure() -> Result<f32, BE> {
     #[cfg(target_os = "linux")]
     {
-        return get_memory_pressure_linux();
+        get_memory_pressure_linux()
     }
 
     #[cfg(target_os = "macos")]

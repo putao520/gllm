@@ -12,6 +12,7 @@ use safetensors::Dtype;
 
 use super::{LoaderError, Result, TensorSlice};
 
+#[allow(clippy::doc_overindented_list_items)]
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }

@@ -1,211 +1,23 @@
+
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
+use super::jit_helpers::{
+    build_decoder_layer_graph, build_final_norm_graph, build_kv_projection_graph,
+    build_lm_head_graph, execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+    execute_kv_projection, update_kv_cache, write_kv_to_cache,
+};
+use super::scalar_ops::{
+    cached_gqa_attention, scalar_gemm, scalar_moe_ffn, scalar_rms_norm, scalar_rope, swiglu_ffn,
+};
+use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
 use super::weight_helpers::{
-    get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear,
-    transpose_f32, try_get_f32_data, weight_data_to_f32, WeightData,
+    get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear, transpose_f32,
+    try_get_f32_data, weight_data_to_f32, WeightData,
 };
 use super::Element;
 use crate::engine::executor::{
     BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheHandle, LogitsHandle,
 };
-
-// ---------------------------------------------------------------------------
-// Scalar math helpers for KV cache computation (outside JIT)
-// ---------------------------------------------------------------------------
-
-/// Scalar RMSNorm: out[i] = (x[i] / rms) * w[i]
-/// where rms = sqrt(mean(x^2) + eps)
-fn scalar_rms_norm(x: &[f32], w: &[f32], out: &mut [f32], hidden: usize, eps: f32) {
-    let n = x.len() / hidden;
-    for row in 0..n {
-        let start = row * hidden;
-        let end = start + hidden;
-        let slice = &x[start..end];
-        let ss: f32 = slice.iter().map(|v| v * v).sum::<f32>() / hidden as f32;
-        let rms = (ss + eps).sqrt();
-        let inv_rms = 1.0 / rms;
-        for d in 0..hidden {
-            out[start + d] = slice[d] * inv_rms * w[d];
-        }
-    }
-}
-
-/// Scalar GEMM: C = A * B, A is [m, k], B is [k, n], C is [m, n] (row-major)
-pub(super) fn scalar_gemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for p in 0..k {
-                sum += a[i * k + p] * b[p * n + j];
-            }
-            c[i * n + j] = sum;
-        }
-    }
-}
-
-/// Scalar RoPE: apply rotary position embedding to x[seq_len, dim]
-/// dim = num_heads * head_dim, positions[seq_len]
-pub(super) fn scalar_rope(x: &mut [f32], positions: &[u32], head_dim: usize, theta: f64) {
-    let seq_len = positions.len();
-    let dim = x.len() / seq_len;
-    let n_heads = dim / head_dim;
-    let half = head_dim / 2;
-    for s in 0..seq_len {
-        let pos = positions[s] as f64;
-        for h in 0..n_heads {
-            let base = s * dim + h * head_dim;
-            for i in 0..half {
-                let freq = 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64);
-                let angle = pos * freq;
-                let cos_val = angle.cos() as f32;
-                let sin_val = angle.sin() as f32;
-                let x0 = x[base + i];
-                let x1 = x[base + i + half];
-                x[base + i] = x0 * cos_val - x1 * sin_val;
-                x[base + i + half] = x0 * sin_val + x1 * cos_val;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Scalar MoE (Mixture of Experts) helpers
-// ---------------------------------------------------------------------------
-
-/// Scalar MoE gate: hidden [seq_len, hidden_size] × gate_w [hidden_size, num_experts] → logits [seq_len, num_experts]
-/// Then softmax per row.
-fn scalar_moe_gate(
-    hidden: &[f32],
-    gate_w: &[f32],
-    seq_len: usize,
-    num_experts: usize,
-    hidden_size: usize,
-) -> Vec<f32> {
-    let mut logits = vec![0.0f32; seq_len * num_experts];
-    scalar_gemm(hidden, gate_w, &mut logits, seq_len, num_experts, hidden_size);
-    // Softmax per row
-    for s in 0..seq_len {
-        let row = &mut logits[s * num_experts..(s + 1) * num_experts];
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_sum: f32 = row.iter().map(|x| (x - max).exp()).sum();
-        for x in row.iter_mut() {
-            *x = (*x - max).exp() / exp_sum;
-        }
-    }
-    logits
-}
-
-/// Scalar top-k expert selection with renormalization.
-/// Returns (expert_index, renormalized_weight) pairs for each token position.
-fn scalar_top_k_experts(
-    gate_probs: &[f32],
-    num_experts: usize,
-    top_k: usize,
-    seq_len: usize,
-) -> Vec<Vec<(usize, f32)>> {
-    let mut result = Vec::with_capacity(seq_len);
-    for s in 0..seq_len {
-        let row = &gate_probs[s * num_experts..(s + 1) * num_experts];
-        let mut indexed: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        indexed.truncate(top_k);
-        // Renormalize weights
-        let sum: f32 = indexed.iter().map(|(_, w)| w).sum();
-        if sum > 0.0 {
-            for (_, w) in indexed.iter_mut() {
-                *w /= sum;
-            }
-        }
-        result.push(indexed);
-    }
-    result
-}
-
-/// Scalar SwiGLU FFN for a single expert.
-/// input: [seq_len, hidden_size]
-/// gate_w: [hidden_size, inter], up_w: [hidden_size, inter], down_w: [inter, hidden_size]
-/// output: [seq_len, hidden_size]
-fn scalar_expert_ffn(
-    input: &[f32],
-    gate_w: &[f32],
-    up_w: &[f32],
-    down_w: &[f32],
-    seq_len: usize,
-    hidden: usize,
-    inter: usize,
-) -> Vec<f32> {
-    let mut gate_out = vec![0.0f32; seq_len * inter];
-    scalar_gemm(input, gate_w, &mut gate_out, seq_len, inter, hidden);
-
-    let mut up_out = vec![0.0f32; seq_len * inter];
-    scalar_gemm(input, up_w, &mut up_out, seq_len, inter, hidden);
-
-    // SwiGLU: silu(gate) * up
-    let mut swiglu = vec![0.0f32; seq_len * inter];
-    for i in 0..seq_len * inter {
-        let g = gate_out[i];
-        let silu_g = g / (1.0 + (-g).exp());
-        swiglu[i] = silu_g * up_out[i];
-    }
-
-    let mut down_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&swiglu, down_w, &mut down_out, seq_len, hidden, inter);
-    down_out
-}
-
-/// Scalar MoE forward: gate routing + expert FFN + weighted combine.
-///
-/// For each token position:
-///   1. Compute gate logits → softmax probabilities
-///   2. Select top_k experts
-///   3. Run each selected expert's SwiGLU FFN
-///   4. Weighted sum of expert outputs (by renormalized gate probabilities)
-///
-/// If shared experts exist, their output is added to the routed output.
-fn scalar_moe_ffn(
-    input: &[f32],
-    router_w: &[f32],
-    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)], // [(gate, up, down) per expert]
-    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
-    seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    num_experts: usize,
-    top_k: usize,
-) -> Vec<f32> {
-    // Step 1: Gate routing
-    let gate_probs = scalar_moe_gate(input, router_w, seq_len, num_experts, hidden);
-
-    // Step 2: Top-K selection
-    let selections = scalar_top_k_experts(&gate_probs, num_experts, top_k, seq_len);
-
-    // Step 3+4: Per-token expert execution and weighted combine
-    let mut output = vec![0.0f32; seq_len * hidden];
-
-    for s in 0..seq_len {
-        let token_input = &input[s * hidden..(s + 1) * hidden];
-        for &(expert_idx, weight) in &selections[s] {
-            if expert_idx >= expert_weights.len() {
-                continue;
-            }
-            let (ref gw, ref uw, ref dw) = expert_weights[expert_idx];
-            let expert_out = scalar_expert_ffn(token_input, gw, uw, dw, 1, hidden, inter);
-            for d in 0..hidden {
-                output[s * hidden + d] += weight * expert_out[d];
-            }
-        }
-    }
-
-    // Step 5: Add shared expert output if present
-    if let Some((ref sg, ref su, ref sd)) = shared_expert {
-        let shared_out = scalar_expert_ffn(input, sg, su, sd, seq_len, hidden, inter);
-        for i in 0..seq_len * hidden {
-            output[i] += shared_out[i];
-        }
-    }
-
-    output
-}
 
 // ---------------------------------------------------------------------------
 // Scalar MoE-aware prefill layer
@@ -263,16 +75,16 @@ fn scalar_moe_prefill_layer(
         for s in 0..seq_len {
             let q_off = s * q_dim + h * head_dim;
             let mut scores = vec![f32::NEG_INFINITY; seq_len];
-            for t in 0..=s {
+            for (t, score) in scores.iter_mut().enumerate().take(s + 1) {
                 let k_off = t * kv_dim + kv_h * head_dim;
                 let mut dot = 0.0f32;
                 for d in 0..head_dim { dot += q_proj[q_off + d] * k_proj[k_off + d]; }
-                scores[t] = dot * scale;
+                *score = dot * scale;
             }
             let max_s = scores[..=s].iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
-            for t in 0..=s { scores[t] = (scores[t] - max_s).exp(); sum += scores[t]; }
-            if sum > 0.0 { for t in 0..=s { scores[t] /= sum; } }
+            for score in scores.iter_mut().take(s + 1) { *score = (*score - max_s).exp(); sum += *score; }
+            if sum > 0.0 { for score in scores.iter_mut().take(s + 1) { *score /= sum; } }
             let o_off = s * q_dim + h * head_dim;
             for d in 0..head_dim {
                 let mut val = 0.0f32;
@@ -338,115 +150,38 @@ fn scalar_incremental_decode_layer(
     max_seq_len: usize,
     output: &mut [f32],
 ) {
-    let q_dim = num_heads * head_dim;
-    let heads_per_group = num_heads / num_kv_heads;
+    let geom = AttentionGeometry {
+        num_heads, num_kv_heads, head_dim,
+        q_dim: num_heads * head_dim,
+        kv_dim: num_kv_heads * head_dim,
+        heads_per_group: num_heads / num_kv_heads,
+    };
+    let dims = LayerDims { hidden, inter, eps, rope_theta };
+    let seq = SeqContext { positions, seq_len, total_seq };
+    let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
 
-    // Step 1: Pre-attention RMSNorm
+    // RMSNorm + Q projection + RoPE
     let mut normed = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-
-    // Step 2: Q projection for new tokens only
-    let mut q_proj = vec![0.0f32; seq_len * q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
-
-    // Step 3: Apply RoPE to Q
+    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden);
     scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
 
-    // Step 4: Attention using cached K/V
-    // K/V cache layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
-    // We read total_seq tokens from the cache for this layer.
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+    // Cached GQA attention (replaces ~55 lines of duplicated attention code)
+    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
 
-    for h in 0..num_heads {
-        let kv_h = h / heads_per_group;
-        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
-
-        for s in 0..seq_len {
-            // Q vector for this head and position
-            let q_offset = s * q_dim + h * head_dim;
-
-            // Compute attention scores: dot(Q, K[t]) for t in 0..total_seq
-            let mut scores = vec![0.0f32; total_seq];
-            for t in 0..total_seq {
-                let k_offset = cache_base + t * head_dim;
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
-                }
-                scores[t] = dot * scale;
-            }
-
-            // Causal mask: only attend to positions <= current position
-            let cur_pos = positions[s] as usize;
-            for t in 0..total_seq {
-                if t > cur_pos {
-                    scores[t] = f32::NEG_INFINITY;
-                }
-            }
-
-            // Softmax
-            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for t in 0..total_seq {
-                scores[t] = (scores[t] - max_score).exp();
-                sum += scores[t];
-            }
-            if sum > 0.0 {
-                for t in 0..total_seq {
-                    scores[t] /= sum;
-                }
-            }
-
-            // Weighted sum of V
-            let out_offset = s * q_dim + h * head_dim;
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
-                for t in 0..total_seq {
-                    let v_offset = cache_base + t * head_dim;
-                    val += scores[t] * kv_cache_v[v_offset + d];
-                }
-                attn_out[out_offset + d] = val;
-            }
-        }
-    }
-
-    // Step 5: Output projection
+    // O projection + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
-
-    // Step 6: Residual connection 1
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim);
     let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden {
-        resid1[i] = hidden_state[i] + o_out[i];
-    }
+    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
 
-    // Step 7: Pre-FFN RMSNorm
+    // Pre-FFN RMSNorm + SwiGLU FFN (replaces ~20 lines of duplicated FFN code)
     let mut normed2 = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+    let down_out = swiglu_ffn(&normed2, gate_w, up_w, down_w, &dims, seq_len);
 
-    // Step 8: SwiGLU FFN
-    let mut gate_out = vec![0.0f32; seq_len * inter];
-    scalar_gemm(&normed2, gate_w, &mut gate_out, seq_len, inter, hidden);
-
-    let mut up_out = vec![0.0f32; seq_len * inter];
-    scalar_gemm(&normed2, up_w, &mut up_out, seq_len, inter, hidden);
-
-    // SwiGLU: silu(gate) * up
-    let mut swiglu = vec![0.0f32; seq_len * inter];
-    for i in 0..seq_len * inter {
-        let g = gate_out[i];
-        let silu_g = g / (1.0 + (-g).exp());
-        swiglu[i] = silu_g * up_out[i];
-    }
-
-    let mut down_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&swiglu, down_w, &mut down_out, seq_len, hidden, inter);
-
-    // Step 9: Residual connection 2
-    for i in 0..seq_len * hidden {
-        output[i] = resid1[i] + down_out[i];
-    }
+    for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
 }
 
 /// Execute a single decoder layer using cached K/V, with quantized matmul acceleration.
@@ -481,121 +216,48 @@ fn quantized_incremental_decode_layer<E: Element>(
     transpose_weights: bool,
     output: &mut [f32],
 ) -> Result<(), BE> {
-    let q_dim = num_heads * head_dim;
-    let heads_per_group = num_heads / num_kv_heads;
+    let geom = AttentionGeometry {
+        num_heads, num_kv_heads, head_dim,
+        q_dim: num_heads * head_dim,
+        kv_dim: num_kv_heads * head_dim,
+        heads_per_group: num_heads / num_kv_heads,
+    };
+    let seq = SeqContext { positions, seq_len, total_seq };
+    let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
 
-    // Step 1: Pre-attention RMSNorm
+    // RMSNorm + Q projection (quantized) + RoPE
     let mut normed = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-
-    // Step 2: Q projection (quantized acceleration)
-    let mut q_proj = vec![0.0f32; seq_len * q_dim];
-    quantized_linear(
-        backend, &normed, q_w, &mut q_proj,
-        seq_len, q_dim, hidden, transpose_weights,
-    )?;
-
-    // Step 3: Apply RoPE to Q
+    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
+    quantized_linear(backend, &normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden, transpose_weights)?;
     scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
 
-    // Step 4: Attention using cached K/V
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+    // Cached GQA attention
+    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
 
-    for h in 0..num_heads {
-        let kv_h = h / heads_per_group;
-        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
-
-        for s in 0..seq_len {
-            let q_offset = s * q_dim + h * head_dim;
-            let mut scores = vec![0.0f32; total_seq];
-            for t in 0..total_seq {
-                let k_offset = cache_base + t * head_dim;
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
-                }
-                scores[t] = dot * scale;
-            }
-
-            let cur_pos = positions[s] as usize;
-            for t in 0..total_seq {
-                if t > cur_pos {
-                    scores[t] = f32::NEG_INFINITY;
-                }
-            }
-
-            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for t in 0..total_seq {
-                scores[t] = (scores[t] - max_score).exp();
-                sum += scores[t];
-            }
-            if sum > 0.0 {
-                for t in 0..total_seq {
-                    scores[t] /= sum;
-                }
-            }
-
-            let out_offset = s * q_dim + h * head_dim;
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
-                for t in 0..total_seq {
-                    let v_offset = cache_base + t * head_dim;
-                    val += scores[t] * kv_cache_v[v_offset + d];
-                }
-                attn_out[out_offset + d] = val;
-            }
-        }
-    }
-
-    // Step 5: Output projection (quantized acceleration)
+    // O projection (quantized) + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(
-        backend, &attn_out, o_w, &mut o_out,
-        seq_len, hidden, q_dim, transpose_weights,
-    )?;
-
-    // Step 6: Residual connection 1
+    quantized_linear(backend, &attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim, transpose_weights)?;
     let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden {
-        resid1[i] = hidden_state[i] + o_out[i];
-    }
+    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
 
-    // Step 7: Pre-FFN RMSNorm
+    // Pre-FFN RMSNorm + SwiGLU FFN (quantized)
     let mut normed2 = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
-
-    // Step 8: SwiGLU FFN (quantized acceleration)
     let mut gate_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(
-        backend, &normed2, gate_w, &mut gate_out,
-        seq_len, inter, hidden, transpose_weights,
-    )?;
-
+    quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights)?;
     let mut up_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(
-        backend, &normed2, up_w, &mut up_out,
-        seq_len, inter, hidden, transpose_weights,
-    )?;
-
+    quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights)?;
     let mut swiglu = vec![0.0f32; seq_len * inter];
     for i in 0..seq_len * inter {
         let g = gate_out[i];
         let silu_g = g / (1.0 + (-g).exp());
         swiglu[i] = silu_g * up_out[i];
     }
-
     let mut down_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(
-        backend, &swiglu, down_w, &mut down_out,
-        seq_len, hidden, inter, transpose_weights,
-    )?;
+    quantized_linear(backend, &swiglu, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
 
-    // Step 9: Residual connection 2
-    for i in 0..seq_len * hidden {
-        output[i] = resid1[i] + down_out[i];
-    }
+    for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
     Ok(())
 }
 
@@ -630,617 +292,40 @@ fn scalar_incremental_moe_decode_layer(
     top_k: usize,
     output: &mut [f32],
 ) {
-    let q_dim = num_heads * head_dim;
-    let heads_per_group = num_heads / num_kv_heads;
+    let geom = AttentionGeometry {
+        num_heads, num_kv_heads, head_dim,
+        q_dim: num_heads * head_dim,
+        kv_dim: num_kv_heads * head_dim,
+        heads_per_group: num_heads / num_kv_heads,
+    };
+    let seq = SeqContext { positions, seq_len, total_seq };
+    let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
 
-    // Step 1: Pre-attention RMSNorm
+    // RMSNorm + Q projection + RoPE
     let mut normed = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-
-    // Step 2: Q projection
-    let mut q_proj = vec![0.0f32; seq_len * q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
-
-    // Step 3: RoPE on Q
+    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden);
     scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
 
-    // Step 4: Attention using cached K/V
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let mut attn_out = vec![0.0f32; seq_len * q_dim];
+    // Cached GQA attention
+    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
 
-    for h in 0..num_heads {
-        let kv_h = h / heads_per_group;
-        let cache_base = (layer * num_kv_heads + kv_h) * max_seq_len * head_dim;
-
-        for s in 0..seq_len {
-            let q_offset = s * q_dim + h * head_dim;
-            let mut scores = vec![0.0f32; total_seq];
-            for t in 0..total_seq {
-                let k_offset = cache_base + t * head_dim;
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q_proj[q_offset + d] * kv_cache_k[k_offset + d];
-                }
-                scores[t] = dot * scale;
-            }
-
-            let cur_pos = positions[s] as usize;
-            for t in 0..total_seq {
-                if t > cur_pos {
-                    scores[t] = f32::NEG_INFINITY;
-                }
-            }
-
-            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for t in 0..total_seq {
-                scores[t] = (scores[t] - max_score).exp();
-                sum += scores[t];
-            }
-            if sum > 0.0 {
-                for t in 0..total_seq {
-                    scores[t] /= sum;
-                }
-            }
-
-            let out_offset = s * q_dim + h * head_dim;
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
-                for t in 0..total_seq {
-                    let v_offset = cache_base + t * head_dim;
-                    val += scores[t] * kv_cache_v[v_offset + d];
-                }
-                attn_out[out_offset + d] = val;
-            }
-        }
-    }
-
-    // Step 5: Output projection
+    // O projection + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
-
-    // Step 6: Residual connection 1
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim);
     let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden {
-        resid1[i] = hidden_state[i] + o_out[i];
-    }
+    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
 
-    // Step 7: Pre-FFN RMSNorm
+    // MoE FFN
     let mut normed2 = vec![0.0f32; seq_len * hidden];
     scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
-
-    // Step 8: MoE FFN (replaces standard SwiGLU)
     let moe_out = scalar_moe_ffn(
         &normed2, router_w, expert_weights, shared_expert,
         seq_len, hidden, inter, num_experts, top_k,
     );
 
-    // Step 9: Residual connection 2
-    for i in 0..seq_len * hidden {
-        output[i] = resid1[i] + moe_out[i];
-    }
-}
-
-// ---------------------------------------------------------------------------
-// JIT compilation for decoder (LLaMA/Qwen-style) layers
-// ---------------------------------------------------------------------------
-
-/// Build a CompilerGraph for a single decoder layer (pre-norm, RMSNorm + SwiGLU).
-///
-/// Graph structure (per-layer):
-///   RMSNorm → Q/K/V projection → RoPE → MultiHeadAttention → O projection
-///   → Residual → RMSNorm → SwiGLU FFN → Residual
-///
-/// KV cache is handled outside the JIT graph (pre/post copy).
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_decoder_layer_graph(
-    seq_len: usize,
-    hidden: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    inter: usize,
-    eps: f32,
-    rope_theta: f64,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-
-    let mut g = CompilerGraph::new();
-    let dt = DType::F32;
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-    let kv_dim = num_kv_heads * head_dim;
-
-    // ── Graph inputs ──
-    let input = g.add_tensor("input", vec![s, h], dt);
-
-    // Attention weights (no bias for LLaMA-style)
-    // Q maps hidden → q_dim (q_dim may differ from hidden for Qwen3 etc.)
-    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_dim], dt);
-    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
-
-    // RMSNorm 1 (pre-attention)
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-
-    // FFN weights (SwiGLU: gate, up, down)
-    let w_gate = g.add_tensor("w_gate", vec![h, inter], dt);
-    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
-
-    // RMSNorm 2 (pre-FFN)
-    let rn2_w = g.add_tensor("rn2_w", vec![h], dt);
-
-    g.inputs = vec![
-        input, w_q, w_k, w_v, w_o, rn1_w,
-        w_gate, w_up, w_down, rn2_w,
-    ];
-
-    // ── Pre-attention RMSNorm ──
-    let normed1 = g.add_tensor("normed1", vec![s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, rn1_w],
-        vec![normed1],
-        "rms_norm_1",
-    );
-
-    // ── Q/K/V Projections ──
-    // Q = normed1 * W_q  [s, h] × [h, q_dim] → [s, q_dim]
-    let q_out = g.add_tensor("q", vec![s, q_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: q_dim, k: h },
-        vec![normed1, w_q],
-        vec![q_out],
-        "gemm_q",
-    );
-
-    // K = normed1 * W_k  [s, h] × [h, kv_dim] → [s, kv_dim]
-    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_dim, k: h },
-        vec![normed1, w_k],
-        vec![k_out],
-        "gemm_k",
-    );
-
-    // V = normed1 * W_v  [s, h] × [h, kv_dim] → [s, kv_dim]
-    let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_dim, k: h },
-        vec![normed1, w_v],
-        vec![v_out],
-        "gemm_v",
-    );
-
-    // ── RoPE on Q and K ──
-    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![q_out],
-        vec![q_rope],
-        "rope_q",
-    );
-
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![k_out],
-        vec![k_rope],
-        "rope_k",
-    );
-
-    // ── Multi-Head Attention ──
-    // For GQA: Q has num_heads, K/V have num_kv_heads.
-    // The MHA op handles head reshaping internally.
-    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
-    g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, head_dim },
-        vec![q_rope, k_rope, v_out],
-        vec![attn_out],
-        "mha",
-    );
-
-    // ── Output projection ──
-    // O = attn_out * W_o  [s, q_dim] × [q_dim, h] → [s, h]
-    let o_out = g.add_tensor("o_proj", vec![s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: q_dim },
-        vec![attn_out, w_o],
-        vec![o_out],
-        "gemm_o",
-    );
-
-    // ── Residual connection 1 ──
-    let resid1 = g.add_tensor("residual1", vec![s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![input, o_out],
-        vec![resid1],
-        "residual_1",
-    );
-
-    // ── Pre-FFN RMSNorm ──
-    let normed2 = g.add_tensor("normed2", vec![s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![resid1, rn2_w],
-        vec![normed2],
-        "rms_norm_2",
-    );
-
-    // ── SwiGLU FFN ──
-    // gate = normed2 * W_gate  [s, h] × [h, inter] → [s, inter]
-    let gate_out = g.add_tensor("ffn_gate", vec![s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
-        vec![normed2, w_gate],
-        vec![gate_out],
-        "gemm_gate",
-    );
-
-    // up = normed2 * W_up  [s, h] × [h, inter] → [s, inter]
-    let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
-        vec![normed2, w_up],
-        vec![up_out],
-        "gemm_up",
-    );
-
-    // SwiGLU: silu(gate) * up → [s, inter]
-    let swiglu_out = g.add_tensor("ffn_swiglu", vec![s, inter], dt);
-    g.add_op(
-        OpKind::SwiGlu,
-        vec![gate_out, up_out],
-        vec![swiglu_out],
-        "swiglu",
-    );
-
-    // down = swiglu_out * W_down  [s, inter] × [inter, h] → [s, h]
-    let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: inter },
-        vec![swiglu_out, w_down],
-        vec![down_out],
-        "gemm_down",
-    );
-
-    // ── Residual connection 2 ──
-    let output = g.add_tensor("output", vec![s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![resid1, down_out],
-        vec![output],
-        "residual_2",
-    );
-
-    g.outputs = vec![output];
-    g
-}
-
-/// Build a CompilerGraph for KV projection only: RmsNorm → K Gemm → K RoPE.
-///
-/// This graph computes the K projection with RoPE applied, which is the most
-/// compute-intensive part of KV cache update. V projection (RmsNorm → V Gemm)
-/// is computed separately via scalar GEMM since there is no Concat OpKind.
-///
-/// Inputs: [input, rn1_w, w_k]
-/// Output: k_rope [seq_len, kv_dim]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn build_kv_projection_graph(
-    seq_len: usize,
-    hidden: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    eps: f32,
-    rope_theta: f64,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-
-    let mut g = CompilerGraph::new();
-    let dt = DType::F32;
-    let s = seq_len;
-    let h = hidden;
-    let kv_dim = num_kv_heads * head_dim;
-
-    // Graph inputs
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
-
-    g.inputs = vec![input, rn1_w, w_k];
-
-    // RmsNorm
-    let normed = g.add_tensor("normed", vec![s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, rn1_w],
-        vec![normed],
-        "rms_norm_kv",
-    );
-
-    // K = normed * W_k  [s, h] × [h, kv_dim] → [s, kv_dim]
-    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_dim, k: h },
-        vec![normed, w_k],
-        vec![k_out],
-        "gemm_k",
-    );
-
-    // RoPE on K
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![k_out],
-        vec![k_rope],
-        "rope_k",
-    );
-
-    g.outputs = vec![k_rope];
-    g
-}
-
-/// Execute a JIT-compiled KV projection graph.
-///
-/// Computes K projection with RoPE via JIT, and V projection via scalar GEMM.
-/// The RmsNorm is computed once inside the JIT graph (for K) and reused for V
-/// via scalar computation.
-///
-/// Returns (k_rope, v_proj) both as [seq_len, kv_dim].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn execute_kv_projection(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    rn1_w: &[f32],
-    k_w: &[f32],
-    v_w: &[f32],
-    positions: &[u32],
-    seq_len: usize,
-    hidden: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    eps: f32,
-) -> (Vec<f32>, Vec<f32>) {
-    let kv_dim = num_kv_heads * head_dim;
-
-    // Execute JIT graph for K projection (RmsNorm → Gemm → RoPE)
-    let weight_slices: &[&[f32]] = &[rn1_w, k_w];
-    let total_weight_bytes: usize = weight_slices.iter().map(|s| s.len() * 4).sum();
-    let mut weights_buf = vec![0u8; total_weight_bytes];
-    let mut offset = 0;
-    for slice in weight_slices.iter() {
-        let bytes = slice.len() * 4;
-        weights_buf[offset..offset + bytes].copy_from_slice(
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes) }
-        );
-        offset += bytes;
-    }
-
-    let mut k_rope = vec![0.0f32; seq_len * kv_dim];
-    let scratchpad_bytes = compiled.scratchpad_bytes;
-    let mut scratchpad = vec![0u8; scratchpad_bytes];
-
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr() as *const u8,
-            std::ptr::null_mut(),
-            positions.as_ptr(),
-            std::ptr::null(),
-            1,
-            seq_len,
-            k_rope.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-
-    // Compute V projection via scalar: RmsNorm → V Gemm (no RoPE on V)
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-
-    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
-
-    (k_rope, v_proj)
-}
-
-/// Write pre-computed K/V data into the KV cache buffer.
-///
-/// Pure write operation — no computation. Takes k_data (post-RoPE) and v_data,
-/// copies them into the correct positions in the KvCacheBuffer.
-///
-/// KvCacheBuffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
-fn write_kv_to_cache<E: Element>(
-    backend: &CpuBackend<E>,
-    handle: KvCacheHandle,
-    layer: usize,
-    k_data: &[f32],
-    v_data: &[f32],
-    seq_len: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-) -> Result<(), BE> {
-    let kv_dim = num_kv_heads * head_dim;
-    let mut store = backend.kv_store().lock().map_err(|e| {
-        BE::Cpu(format!("KV store lock poisoned: {e}"))
-    })?;
-
-    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
-        BE::Cpu(format!("KV cache handle {} not found", handle.0))
-    })?;
-
-    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
-    let max_seq = buffer.max_seq_len;
-
-    if write_start + seq_len > max_seq {
-        return Err(BE::Cpu(format!(
-            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
-        )));
-    }
-
-    for h in 0..num_kv_heads {
-        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
-        for s in 0..seq_len {
-            let cache_offset = layer_head_base + (write_start + s) * head_dim;
-            let proj_offset = s * kv_dim + h * head_dim;
-            buffer.k[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&k_data[proj_offset..proj_offset + head_dim]);
-            buffer.v[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&v_data[proj_offset..proj_offset + head_dim]);
-        }
-    }
-
-    if layer == 0 {
-        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
-    }
-
-    log::debug!(
-        "write_kv_to_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
-        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
-    );
-
-    Ok(())
-}
-
-/// Execute a JIT-compiled decoder layer.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_jit_decoder_layer(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    q_w: &[f32],
-    k_w: &[f32],
-    v_w: &[f32],
-    o_w: &[f32],
-    rn1_w: &[f32],
-    gate_w: &[f32],
-    up_w: &[f32],
-    down_w: &[f32],
-    rn2_w: &[f32],
-    positions: &[u32],
-    seq_len: usize,
-    output: &mut [f32],
-) {
-    // Pack weights in graph input order:
-    // [w_q, w_k, w_v, w_o, rn1_w, w_gate, w_up, w_down, rn2_w]
-    let weight_slices: &[&[f32]] = &[
-        q_w, k_w, v_w, o_w, rn1_w,
-        gate_w, up_w, down_w, rn2_w,
-    ];
-    let total_weight_bytes: usize = weight_slices.iter().map(|s| s.len() * 4).sum();
-    let mut weights_buf = vec![0u8; total_weight_bytes];
-    let mut offset = 0;
-    for slice in weight_slices.iter() {
-        let bytes = slice.len() * 4;
-        weights_buf[offset..offset + bytes].copy_from_slice(
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes) }
-        );
-        offset += bytes;
-    }
-
-    let scratchpad_bytes = compiled.scratchpad_bytes;
-    let mut scratchpad = vec![0u8; scratchpad_bytes];
-
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr() as *const u8,
-            std::ptr::null_mut(), // KV cache managed externally
-            positions.as_ptr(),
-            std::ptr::null(),     // no seq_lens array needed for single-batch
-            1,                    // batch_size = 1
-            seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-}
-
-/// Build a CompilerGraph for the final RMSNorm + lm_head projection.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_lm_head_graph(
-    seq_len: usize,
-    hidden: usize,
-    vocab_size: usize,
-    eps: f32,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-
-    let mut g = CompilerGraph::new();
-    let dt = DType::F32;
-
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
-    let lm_w = g.add_tensor("lm_w", vec![hidden, vocab_size], dt);
-
-    g.inputs = vec![input, norm_w, lm_w];
-
-    // Final RMSNorm
-    let normed = g.add_tensor("normed", vec![seq_len, hidden], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, norm_w],
-        vec![normed],
-        "final_rms_norm",
-    );
-
-    // lm_head: [seq_len, hidden] × [hidden, vocab_size] → [seq_len, vocab_size]
-    let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
-    g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden },
-        vec![normed, lm_w],
-        vec![logits],
-        "lm_head",
-    );
-
-    g.outputs = vec![logits];
-    g
-}
-
-/// Execute the JIT-compiled lm_head (final norm + projection).
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_jit_lm_head(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    norm_w: &[f32],
-    lm_w: &[f32],
-    seq_len: usize,
-    output: &mut [f32],
-) {
-    let weight_slices: &[&[f32]] = &[norm_w, lm_w];
-    let total_weight_bytes: usize = weight_slices.iter().map(|s| s.len() * 4).sum();
-    let mut weights_buf = vec![0u8; total_weight_bytes];
-    let mut offset = 0;
-    for slice in weight_slices.iter() {
-        let bytes = slice.len() * 4;
-        weights_buf[offset..offset + bytes].copy_from_slice(
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes) }
-        );
-        offset += bytes;
-    }
-
-    let scratchpad_bytes = compiled.scratchpad_bytes;
-    let mut scratchpad = vec![0u8; scratchpad_bytes];
-
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr() as *const u8,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-            seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
+    for i in 0..seq_len * hidden { output[i] = resid1[i] + moe_out[i]; }
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,71 +901,6 @@ pub(crate) fn decoder_forward<E: Element>(
 // Decoder-based Embedding Forward (for Qwen3-Embedding, etc.)
 // ---------------------------------------------------------------------------
 
-/// Build a CompilerGraph for final RMSNorm only (no lm_head projection).
-///
-/// Used for decoder-based embedding models: after running all decoder layers,
-/// apply RMSNorm to get the hidden state, then mean pool externally.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_final_norm_graph(
-    seq_len: usize,
-    hidden: usize,
-    eps: f32,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-
-    let mut g = CompilerGraph::new();
-    let dt = DType::F32;
-
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
-    g.inputs = vec![input, norm_w];
-
-    let normed = g.add_tensor("normed", vec![seq_len, hidden], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, norm_w],
-        vec![normed],
-        "final_rms_norm",
-    );
-
-    g.outputs = vec![normed];
-    g
-}
-
-/// Execute JIT-compiled final norm (RMSNorm only, no lm_head).
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_jit_final_norm(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    norm_w: &[f32],
-    seq_len: usize,
-    output: &mut [f32],
-) {
-    let weight_bytes = norm_w.len() * 4;
-    let mut weights_buf = vec![0u8; weight_bytes];
-    weights_buf.copy_from_slice(
-        unsafe { std::slice::from_raw_parts(norm_w.as_ptr() as *const u8, weight_bytes) }
-    );
-
-    let scratchpad_bytes = compiled.scratchpad_bytes;
-    let mut scratchpad = vec![0u8; scratchpad_bytes];
-
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr() as *const u8,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-            seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-}
-
 /// Decoder-based embedding forward pass (for models like Qwen3-Embedding that
 /// use decoder architecture with RoPE instead of BERT-style absolute position embeddings).
 ///
@@ -2030,20 +1050,20 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     // (f) Mean pooling: average across all token positions
     let mut pooled = vec![0.0f32; hidden];
     for s in 0..seq_len {
-        for d in 0..hidden {
-            pooled[d] += normed[s * hidden + d];
+        for (d, p) in pooled.iter_mut().enumerate() {
+            *p += normed[s * hidden + d];
         }
     }
     let scale = 1.0 / seq_len as f32;
-    for d in 0..hidden {
-        pooled[d] *= scale;
+    for p in pooled.iter_mut() {
+        *p *= scale;
     }
 
     // (g) L2 normalize (standard for embedding models)
     let l2_norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
     if l2_norm > 1e-12 {
-        for d in 0..hidden {
-            pooled[d] /= l2_norm;
+        for p in pooled.iter_mut() {
+            *p /= l2_norm;
         }
     }
 
@@ -2240,13 +1260,13 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         }
 
         let mut scores = vec![0.0f32; num_labels];
-        for label in 0..num_labels {
+        for (label, score) in scores.iter_mut().enumerate() {
             let row_start = label * hidden;
             let mut dot = 0.0f32;
             for d in 0..hidden {
                 dot += last_hidden[d] * score_w[row_start + d];
             }
-            scores[label] = 1.0 / (1.0 + (-dot).exp());
+            *score = 1.0 / (1.0 + (-dot).exp());
         }
         Ok(scores)
     } else {
@@ -2282,100 +1302,10 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     }
 }
 
-/// Compute K/V post-RoPE for new tokens and write them into the KV cache buffer.
-///
-/// REQ-KV-005: KV Cache Incremental Persistence.
-///
-/// This function computes K and V projections (RMSNorm → GEMM → RoPE for K)
-/// using scalar Rust, then writes the results into the KvCacheBuffer at the
-/// correct position offset. This avoids recomputing all K/V from scratch on
-/// each decode step.
-///
-/// KvCacheBuffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
-fn update_kv_cache<E: Element>(
-    backend: &CpuBackend<E>,
-    handle: KvCacheHandle,
-    layer: usize,
-    hidden_state: &[f32],
-    k_w: &[f32],
-    v_w: &[f32],
-    rn1_w: &[f32],
-    positions: &[u32],
-    seq_len: usize,
-    hidden: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    eps: f32,
-    rope_theta: f64,
-) -> Result<(), BE> {
-    let kv_dim = num_kv_heads * head_dim;
-
-    // Step 1: RMSNorm on hidden_state (same norm as pre-attention)
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-
-    // Step 2: K = normed * W_k  [seq_len, hidden] × [hidden, kv_dim] → [seq_len, kv_dim]
-    let mut k_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, kv_dim, hidden);
-
-    // Step 3: V = normed * W_v  [seq_len, hidden] × [hidden, kv_dim] → [seq_len, kv_dim]
-    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
-
-    // Step 4: Apply RoPE to K (V does not get RoPE)
-    scalar_rope(&mut k_proj, positions, head_dim, rope_theta);
-
-    // Step 5: Write K/V into cache buffer
-    let mut store = backend.kv_store().lock().map_err(|e| {
-        BE::Cpu(format!("KV store lock poisoned: {e}"))
-    })?;
-
-    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
-        BE::Cpu(format!("KV cache handle {} not found", handle.0))
-    })?;
-
-    // Determine write position: current seq_len in buffer is the start offset
-    // (only read from layer 0 to avoid double-counting)
-    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
-    let max_seq = buffer.max_seq_len;
-
-    if write_start + seq_len > max_seq {
-        return Err(BE::Cpu(format!(
-            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
-        )));
-    }
-
-    // Buffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
-    // For a given (layer, head, pos), the flat index is:
-    //   (layer * num_kv_heads + head) * max_seq_len * head_dim + pos * head_dim
-    for h in 0..num_kv_heads {
-        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
-        for s in 0..seq_len {
-            let cache_offset = layer_head_base + (write_start + s) * head_dim;
-            let proj_offset = s * kv_dim + h * head_dim;
-            buffer.k[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&k_proj[proj_offset..proj_offset + head_dim]);
-            buffer.v[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&v_proj[proj_offset..proj_offset + head_dim]);
-        }
-    }
-
-    // Update seq_len counter (only on layer 0 to avoid double-counting)
-    if layer == 0 {
-        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
-    }
-
-    log::debug!(
-        "update_kv_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
-        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
-    );
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::scalar_ops::{scalar_moe_gate, scalar_top_k_experts, scalar_expert_ffn};
 
     #[test]
     fn moe_gate_softmax_sums_to_one() {

@@ -125,10 +125,7 @@ impl CacheLayout {
 }
 
 pub fn is_recoverable_error(err: &LoaderError) -> bool {
-    match err {
-        LoaderError::Network(_) | LoaderError::Io(_) | LoaderError::HfHub(_) => true,
-        _ => false,
-    }
+    matches!(err, LoaderError::Network(_) | LoaderError::Io(_) | LoaderError::HfHub(_))
 }
 
 pub fn fallback_source(source: ModelSource) -> ModelSource {
@@ -245,6 +242,7 @@ pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
 
 /// Build a reverse index from (TensorRole, Option<layer_idx>) to tensor name.
 /// Also indexes bias tensors: for each weight tensor "foo.weight", checks if "foo.bias" exists.
+#[allow(clippy::type_complexity)]
 pub fn build_tensor_role_index<'a>(
     tensor_names: impl Iterator<Item = &'a str>,
 ) -> (
@@ -278,8 +276,8 @@ pub fn build_tensor_role_index<'a>(
             // Try to find the corresponding weight
             let weight_name = if name.ends_with(".bias") {
                 format!("{}weight", &name[..name.len() - 4])
-            } else if name.ends_with("_bias") {
-                format!("{}_weight", &name[..name.len() - 5])
+            } else if let Some(stripped) = name.strip_suffix("_bias") {
+                format!("{stripped}_weight")
             } else {
                 continue;
             };
@@ -608,7 +606,7 @@ impl Loader {
     }
 
     pub fn weight_format(&self) -> WeightFormat {
-        self.format.clone()
+        self.format
     }
 
     pub fn config_path(&self) -> Option<&Path> {
@@ -899,7 +897,7 @@ fn upload_native_tensor<B: Backend<E>, E: Element>(
     data: &[u8],
 ) -> Result<B::Tensor> {
     let elem_size = std::mem::size_of::<E>();
-    if elem_size == 0 || data.len() % elem_size != 0 {
+    if elem_size == 0 || !data.len().is_multiple_of(elem_size) {
         return Err(LoaderError::InvalidQuantization(format!(
             "tensor {} has invalid byte length {} for element size {}",
             meta.name,

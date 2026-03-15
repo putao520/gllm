@@ -107,7 +107,7 @@ fn detect_formats_in_dir(dir: &Path) -> Result<Vec<WeightFormat>> {
 fn select_single_format(formats: Vec<WeightFormat>) -> Result<WeightFormat> {
     match formats.len() {
         0 => Err(LoaderError::MissingWeights),
-        1 => Ok(formats[0].clone()),
+        1 => Ok(formats[0]),
         _ => Err(LoaderError::MultipleWeightFormats(formats)),
     }
 }

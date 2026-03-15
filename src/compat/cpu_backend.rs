@@ -58,7 +58,7 @@ impl KvCacheBuffer {
         if self.page_size == 0 {
             return 0;
         }
-        (self.seq_len + self.page_size - 1) / self.page_size
+        self.seq_len.div_ceil(self.page_size)
     }
 
     /// Total number of pages this buffer can hold.
@@ -66,7 +66,7 @@ impl KvCacheBuffer {
         if self.page_size == 0 {
             return 0;
         }
-        (self.max_seq_len + self.page_size - 1) / self.page_size
+        self.max_seq_len.div_ceil(self.page_size)
     }
 }
 
@@ -207,9 +207,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         } else {
             // Uniform fallback
             let uniform = 1.0 / probs.len() as f32;
-            for p in &mut probs {
-                *p = uniform;
-            }
+            probs.fill(uniform);
         }
 
         // Top-p (nucleus) filtering

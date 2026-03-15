@@ -1,4 +1,5 @@
 //! Model config loader (metadata/tensor-driven, no config.json fallback).
+#![allow(clippy::manual_checked_ops)]
 
 use serde_json::Value;
 use std::collections::HashMap;

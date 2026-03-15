@@ -82,9 +82,7 @@ impl PagedScheduler {
         request_id: RequestId,
         logical_block_idx: usize,
     ) -> Result<StorageKey, SchedulerError> {
-        let req = u64::try_from(request_id).map_err(|_| SchedulerError::StorageKeyOverflow {
-            field: "request_id",
-        })?;
+        let req = request_id;
         let block =
             u64::try_from(logical_block_idx).map_err(|_| SchedulerError::StorageKeyOverflow {
                 field: "logical_block_idx",

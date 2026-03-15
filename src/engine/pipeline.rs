@@ -122,7 +122,7 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             self.executor.compile(seq_len, hidden)?;
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
