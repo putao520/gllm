@@ -8,6 +8,52 @@ use super::backend_trait::{self, Backend};
 
 use super::Element;
 use crate::engine::executor::BackendError as BE;
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+use crate::engine::executor::KvCacheConfig;
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+use crate::engine::executor::KvCacheHandle;
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+use crate::scheduler::types::{PageId, PageState, StorageKey};
+
+// ---------------------------------------------------------------------------
+// GpuBackendOps — trait abstracting device/error/store differences
+// ---------------------------------------------------------------------------
+
+/// Trait that abstracts the 3 backend-specific differences:
+/// 1. Device access (for alloc/htod/dtoh)
+/// 2. Error variant construction (BE::Cuda/Hip/Metal)
+/// 3. Swap store and KV metadata store access
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) trait GpuBackendOps {
+    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice;
+    fn gpu_error(&self, msg: String) -> BE;
+    fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore;
+    fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore;
+}
+
+#[cfg(feature = "cuda")]
+impl GpuBackendOps for super::cuda_backend::CudaBackend<f32> {
+    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn gpu_error(&self, msg: String) -> BE { BE::Cuda(msg) }
+    fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
+    fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
+}
+
+#[cfg(feature = "hip")]
+impl GpuBackendOps for super::hip_backend::HipBackend<f32> {
+    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn gpu_error(&self, msg: String) -> BE { BE::Hip(msg) }
+    fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
+    fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl GpuBackendOps for super::metal_backend::MetalBackend<f32> {
+    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn gpu_error(&self, msg: String) -> BE { BE::Metal(msg) }
+    fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
+    fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
+}
 
 /// Get tensor data as f32, trying quantized dequant first, then f32 fallback.
 ///
@@ -199,6 +245,55 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     Ok(hidden_state)
 }
 
+/// Load decoder layer weights into a HashMap for JIT execution.
+///
+/// Replaces `load_decoder_layer_weights_cuda` / `_hip` / `_metal`.
+pub(super) fn load_decoder_layer_weights_gpu<E: Element, B: Backend<E>>(
+    weights: &dyn backend_trait::TensorLookup<E, B>,
+    backend: &B,
+    layer: usize,
+    hidden: usize,
+    q_dim: usize,
+    kv_hidden: usize,
+    inter: usize,
+) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
+    let mut m = std::collections::HashMap::new();
+
+    macro_rules! load {
+        ($graph_name:expr, $aliases:expr) => {
+            m.insert($graph_name.to_string(), get_f32_data_gpu(weights, backend, $aliases)?);
+        };
+    }
+
+    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
+    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
+    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
+    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
+    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
+    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
+    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
+    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
+    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
+
+    if needs_weight_transpose_gpu(weights) {
+        let mut t = |name: &str, rows: usize, cols: usize| {
+            if let Some(data) = m.get(name) {
+                let transposed = crate::compat::weight_helpers::transpose_f32(data, rows, cols);
+                m.insert(name.to_string(), transposed);
+            }
+        };
+        t("w_q", q_dim, hidden);
+        t("w_k", kv_hidden, hidden);
+        t("w_v", kv_hidden, hidden);
+        t("w_o", hidden, q_dim);
+        t("w_gate", inter, hidden);
+        t("w_up", inter, hidden);
+        t("w_down", hidden, inter);
+    }
+
+    Ok(m)
+}
+
 /// Load BERT encoder layer weights into a HashMap for JIT execution.
 ///
 /// Replaces `load_bert_layer_weights_cuda` / `_hip` / `_metal`.
@@ -257,4 +352,196 @@ pub(super) fn load_bert_layer_weights_gpu<E: Element, B: Backend<E>>(
     }
 
     Ok(m)
+}
+
+// ---------------------------------------------------------------------------
+// Generic GPU ops using GpuBackendOps trait
+// ---------------------------------------------------------------------------
+
+/// GPU alloc_kv_cache: allocate GPU buffer for KV cache and register metadata.
+///
+/// Replaces `cuda_alloc_kv_cache` / `hip_alloc_kv_cache` / `metal_alloc_kv_cache`.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn gpu_alloc_kv_cache(
+    backend: &dyn GpuBackendOps,
+    config: &KvCacheConfig,
+) -> Result<KvCacheHandle, BE> {
+    use gllm_kernels::gpu::GpuBuffer;
+
+    let total_bytes = config.num_layers * 2
+        * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
+
+    let buf = backend.gpu_device().alloc(total_bytes)
+        .map_err(|e| backend.gpu_error(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
+
+    let ptr = buf.as_device_ptr();
+    std::mem::forget(buf);
+
+    let meta = super::gpu_compile::GpuKvCacheMeta::from_config(config, ptr);
+    backend.kv_meta().lock()
+        .map_err(|e| backend.gpu_error(format!("kv_meta lock poisoned: {e}")))?
+        .insert(ptr, meta);
+
+    Ok(KvCacheHandle(ptr))
+}
+
+/// GPU sample_from_tensor: download logits to CPU and sample.
+///
+/// Replaces `cuda_sample_from_tensor` / `hip_sample_from_tensor` / `metal_sample_from_tensor`.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn gpu_sample_from_tensor(
+    logits: &crate::engine::executor::LogitsHandle,
+    _topology: &crate::engine::executor::AttentionTopology,
+    vocab_size: usize,
+    sampling: &crate::engine::executor::SamplingConfig,
+) -> Result<Vec<u32>, BE> {
+    Ok(super::gpu_compile::sample_logits_cpu(&logits.data, vocab_size, sampling))
+}
+
+/// GPU swap_out_pages: download page data from GPU to host swap store.
+///
+/// Replaces `cuda_swap_out_pages` / `hip_swap_out_pages` / `metal_swap_out_pages`.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn gpu_swap_out_pages(
+    backend: &dyn GpuBackendOps,
+    handle: &KvCacheHandle,
+    mappings: &[(PageId, StorageKey)],
+) -> Result<(), BE> {
+    if mappings.is_empty() { return Ok(()); }
+
+    let meta_store = backend.kv_meta().lock()
+        .map_err(|e| backend.gpu_error(format!("kv_meta lock poisoned: {e}")))?;
+    let meta = meta_store.get(&handle.0)
+        .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
+
+    let device = backend.gpu_device();
+    let stream = device.default_stream();
+
+    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
+    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
+    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+    let total_page_bytes = meta.num_layers * meta.num_kv_heads * page_slice_bytes * 2;
+
+    let mut swap_store = backend.swap_store().lock()
+        .map_err(|e| backend.gpu_error(format!("swap_store lock poisoned: {e}")))?;
+
+    for &(page_id, storage_key) in mappings {
+        let token_start = page_id * meta.page_size;
+        if token_start >= meta.max_seq_len {
+            return Err(backend.gpu_error(format!(
+                "swap_out: page {} starts at token {} beyond max_seq_len {}",
+                page_id, token_start, meta.max_seq_len
+            )));
+        }
+
+        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
+        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
+        let mut host_buf = vec![0u8; total_page_bytes];
+        let mut dst_offset = 0usize;
+
+        for kv_half in 0..2usize {
+            let half_base = handle.0 + (kv_half * half_bytes) as u64;
+            for layer in 0..meta.num_layers {
+                for head in 0..meta.num_kv_heads {
+                    let src_offset = ((layer * meta.num_kv_heads + head) * head_stride
+                        + token_start * meta.head_dim * meta.dtype_size) as u64;
+                    let src_ptr = half_base + src_offset;
+
+                    device.dtoh_raw(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes], stream)
+                        .map_err(|e| backend.gpu_error(format!("swap_out dtoh failed: {e}")))?;
+
+                    dst_offset += page_slice_bytes;
+                }
+            }
+        }
+
+        swap_store.insert(storage_key, host_buf);
+    }
+
+    Ok(())
+}
+
+/// GPU swap_in_pages: upload page data from host swap store to GPU.
+///
+/// Replaces `cuda_swap_in_pages` / `hip_swap_in_pages` / `metal_swap_in_pages`.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn gpu_swap_in_pages(
+    backend: &dyn GpuBackendOps,
+    handle: &KvCacheHandle,
+    mappings: &[(PageId, StorageKey)],
+) -> Result<(), BE> {
+    if mappings.is_empty() { return Ok(()); }
+
+    let meta_store = backend.kv_meta().lock()
+        .map_err(|e| backend.gpu_error(format!("kv_meta lock poisoned: {e}")))?;
+    let meta = meta_store.get(&handle.0)
+        .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
+
+    let device = backend.gpu_device();
+    let stream = device.default_stream();
+
+    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
+    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
+    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+
+    let mut swap_store = backend.swap_store().lock()
+        .map_err(|e| backend.gpu_error(format!("swap_store lock poisoned: {e}")))?;
+
+    for &(page_id, storage_key) in mappings {
+        let host_buf = swap_store.remove(&storage_key)
+            .ok_or_else(|| backend.gpu_error(format!("swap_in: storage key {} not found in swap store", storage_key)))?;
+
+        let token_start = page_id * meta.page_size;
+        if token_start >= meta.max_seq_len {
+            return Err(backend.gpu_error(format!(
+                "swap_in: page {} starts at token {} beyond max_seq_len {}",
+                page_id, token_start, meta.max_seq_len
+            )));
+        }
+
+        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
+        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
+        let mut src_offset = 0usize;
+
+        for kv_half in 0..2usize {
+            let half_base = handle.0 + (kv_half * half_bytes) as u64;
+            for layer in 0..meta.num_layers {
+                for head in 0..meta.num_kv_heads {
+                    let dst_offset_gpu = ((layer * meta.num_kv_heads + head) * head_stride
+                        + token_start * meta.head_dim * meta.dtype_size) as u64;
+                    let dst_ptr = half_base + dst_offset_gpu;
+
+                    device.htod_raw(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr, stream)
+                        .map_err(|e| backend.gpu_error(format!("swap_in htod failed: {e}")))?;
+
+                    src_offset += page_slice_bytes;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// GPU get_page_states: return page states based on metadata.
+///
+/// Replaces `cuda_get_page_states` / `hip_get_page_states` / `metal_get_page_states`.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn gpu_get_page_states(
+    backend: &dyn GpuBackendOps,
+    handle: &KvCacheHandle,
+) -> Result<Vec<(PageId, PageState)>, BE> {
+    let meta_store = backend.kv_meta().lock()
+        .map_err(|e| backend.gpu_error(format!("kv_meta lock poisoned: {e}")))?;
+    let meta = meta_store.get(&handle.0)
+        .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
+
+    let active = meta.active_pages();
+    let total = meta.total_pages();
+    let mut states = Vec::with_capacity(total);
+    for page_id in 0..total {
+        let state = if page_id < active { PageState::Active } else { PageState::Free };
+        states.push((page_id, state));
+    }
+    Ok(states)
 }

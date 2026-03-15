@@ -518,10 +518,10 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
-    let transpose_w = needs_weight_transpose_cuda(weights);
+    let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
     // ── Step (a-d): Embedding lookup + LayerNorm (CPU, same as CPU path) ──
-    let mut hidden_state = embed_tokens_cpu(tokens, weights, backend, config)?;
+    let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
     // ── Compile BERT layer graph to PTX (once, reused across layers) ──
     let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
@@ -637,209 +637,6 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     Ok(pooled)
 }
 
-/// Embedding lookup and LayerNorm on CPU (shared between CPU and GPU paths).
-#[cfg(feature = "cuda")]
-fn embed_tokens_cpu<E: Element>(
-    tokens: &[u32],
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    backend: &CudaBackend<E>,
-    config: &GeneratorForwardConfig,
-) -> Result<Vec<f32>, BE> {
-    use gllm_kernels::Kernels;
-    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
-    let seq_len = tokens.len();
-    let hidden = config.hidden_size;
-    let eps = config.norm_eps;
-
-    // Word embeddings
-    let word_emb = get_f32_data_cuda(weights, backend,
-        &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")))?;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
-    let vocab = word_emb.len() / hidden;
-    for (s, &tok) in tokens.iter().enumerate() {
-        let v = tok as usize;
-        if v >= vocab {
-            return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-        }
-        hidden_state[s * hidden..(s + 1) * hidden]
-            .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
-    }
-
-    // Position embeddings
-    let pos_emb = get_f32_data_cuda(weights, backend,
-        &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")))?;
-    let max_pos = pos_emb.len() / hidden;
-    for s in 0..seq_len {
-        if s >= max_pos { break; }
-        for i in 0..hidden {
-            hidden_state[s * hidden + i] += pos_emb[s * hidden + i];
-        }
-    }
-
-    // Token type embeddings (type 0)
-    let tt_emb = get_f32_data_cuda(weights, backend,
-        &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")))?;
-    if tt_emb.len() >= hidden {
-        for s in 0..seq_len {
-            for i in 0..hidden {
-                hidden_state[s * hidden + i] += tt_emb[i];
-            }
-        }
-    }
-
-    // Embedding LayerNorm
-    let emb_ln_w = get_f32_data_cuda(weights, backend,
-        &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")))?;
-    let emb_ln_b = get_bias_data_cuda(weights,
-        &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")), hidden);
-    let mut normed = vec![0.0f32; hidden];
-    for s in 0..seq_len {
-        let row = &hidden_state[s * hidden..(s + 1) * hidden];
-        kern.layer_norm(row, &emb_ln_w, &emb_ln_b, &mut normed, eps);
-        hidden_state[s * hidden..(s + 1) * hidden].copy_from_slice(&normed);
-    }
-
-    Ok(hidden_state)
-}
-
-/// Get f32 data from CudaBackend weights (mirrors get_f32_data for CpuBackend).
-#[cfg(feature = "cuda")]
-fn get_f32_data_cuda<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    _backend: &CudaBackend<E>,
-    aliases: &[impl AsRef<str>],
-) -> Result<Vec<f32>, BE> {
-    // Try quantized path first
-    for name in aliases {
-        if let Some(qt) = weights.get_quantized(name.as_ref()) {
-            let n_elements = qt.shape.iter().product::<usize>();
-            let mut out = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
-            use gllm_kernels::Kernels;
-            let blk_elems = qt.quant_type.block_size();
-            let blk_bytes = qt.quant_type.block_bytes();
-            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes).zip(out.chunks_exact_mut(blk_elems)) {
-                match qt.quant_type {
-                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
-                    _ => {
-                        return Err(BE::Other(format!(
-                            "Unsupported quantization type {:?} for weight {:?}",
-                            qt.quant_type, name.as_ref()
-                        )));
-                    }
-                }
-            }
-            return Ok(out);
-        }
-    }
-
-    // Fall back to f32 tensor
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return Ok(slice.to_vec());
-        }
-    }
-
-    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
-}
-
-/// Get bias data from CudaBackend weights (zeros if not found).
-#[cfg(feature = "cuda")]
-fn get_bias_data_cuda<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    aliases: &[impl AsRef<str>],
-    size: usize,
-) -> Vec<f32> {
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return slice.to_vec();
-        }
-    }
-    vec![0.0f32; size]
-}
-
-/// Check if weights need transposition (SafeTensors stores [out, in]).
-#[cfg(feature = "cuda")]
-fn needs_weight_transpose_cuda<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-) -> bool {
-    crate::weight_names::has_any_embedding_weight(|n| weights.get_tensor(n).is_some())
-}
-
-// ===========================================================================
-// CUDA decoder forward pass
-// ===========================================================================
-
-/// CUDA alloc_kv_cache: allocate GPU buffer for KV cache and register metadata.
-#[cfg(feature = "cuda")]
-pub(super) fn cuda_alloc_kv_cache(
-    backend: &CudaBackend<f32>,
-    config: &KvCacheConfig,
-) -> Result<KvCacheHandle, BE> {
-    use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
-
-    let total_bytes = config.num_layers * 2
-        * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
-
-    let buf = backend.device.alloc(total_bytes)
-        .map_err(|e| BE::Cuda(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
-
-    let ptr = buf.as_device_ptr();
-    std::mem::forget(buf); // ownership transferred to handle
-
-    // Register metadata for swap support
-    let meta = GpuKvCacheMeta::from_config(config, ptr);
-    backend.kv_meta.lock()
-        .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?
-        .insert(ptr, meta);
-
-    Ok(KvCacheHandle(ptr))
-}
-
-/// CUDA sample_from_tensor: download logits to CPU and sample.
-#[cfg(feature = "cuda")]
-pub(super) fn cuda_sample_from_tensor(
-    logits: &LogitsHandle,
-    _topology: &AttentionTopology,
-    vocab_size: usize,
-    sampling: &SamplingConfig,
-) -> Result<Vec<u32>, BE> {
-    Ok(sample_logits_cpu(&logits.data, vocab_size, sampling))
-}
-
 /// Full decoder (generator) forward pass on CUDA GPU.
 ///
 /// 1. Token embedding lookup (CPU)
@@ -881,7 +678,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let seq_len = total_tokens;
 
     // Embedding lookup (CPU)
-    let word_emb = get_f32_data_cuda(weights, backend,
+    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
     let vocab = word_emb.len() / hidden;
     let mut hidden_state = vec![0.0f32; seq_len * hidden];
@@ -939,7 +736,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             .collect();
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_cuda(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -1051,7 +848,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         let (_module, kernel_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &graph)?;
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_cuda(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -1159,7 +956,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
     let (_lm_module, lm_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &lm_graph)?;
 
-    let lm_head_w = get_f32_data_cuda(weights, backend,
+    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
@@ -1220,54 +1017,6 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     }
 
     Ok(results)
-}
-
-/// Load decoder layer weights for CUDA backend.
-#[cfg(feature = "cuda")]
-fn load_decoder_layer_weights_cuda<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    backend: &CudaBackend<E>,
-    layer: usize,
-    hidden: usize,
-    q_dim: usize,
-    kv_hidden: usize,
-    inter: usize,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_cuda(weights, backend, $aliases)?);
-        };
-    }
-
-    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
-    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
-
-    if needs_weight_transpose_cuda(weights) {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", q_dim, hidden);
-        t("w_k", kv_hidden, hidden);
-        t("w_v", kv_hidden, hidden);
-        t("w_o", hidden, q_dim);
-        t("w_gate", inter, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,9 +1226,9 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
-    let transpose_w = needs_weight_transpose_hip(weights);
+    let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
-    let mut hidden_state = embed_tokens_cpu_hip(tokens, weights, backend, config)?;
+    let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
     let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
     let (_module, kernel_entries) = hip_compile_graph(
@@ -1578,162 +1327,6 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     }.to_vec();
 
     Ok(pooled)
-}
-
-/// Embedding lookup and LayerNorm on CPU (HIP variant).
-#[cfg(feature = "hip")]
-fn embed_tokens_cpu_hip<E: Element>(
-    tokens: &[u32],
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    backend: &HipBackend<E>,
-    config: &GeneratorForwardConfig,
-) -> Result<Vec<f32>, BE> {
-    use gllm_kernels::Kernels;
-    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
-    let seq_len = tokens.len();
-    let hidden = config.hidden_size;
-    let eps = config.norm_eps;
-
-    let word_emb = get_f32_data_hip(weights, backend,
-        &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")))?;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
-    let vocab = word_emb.len() / hidden;
-    for (s, &tok) in tokens.iter().enumerate() {
-        let v = tok as usize;
-        if v >= vocab {
-            return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-        }
-        hidden_state[s * hidden..(s + 1) * hidden]
-            .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
-    }
-
-    let pos_emb = get_f32_data_hip(weights, backend,
-        &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")))?;
-    let max_pos = pos_emb.len() / hidden;
-    for s in 0..seq_len {
-        if s >= max_pos { break; }
-        for i in 0..hidden {
-            hidden_state[s * hidden + i] += pos_emb[s * hidden + i];
-        }
-    }
-
-    let tt_emb = get_f32_data_hip(weights, backend,
-        &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")))?;
-    if tt_emb.len() >= hidden {
-        for s in 0..seq_len {
-            for i in 0..hidden {
-                hidden_state[s * hidden + i] += tt_emb[i];
-            }
-        }
-    }
-
-    let emb_ln_w = get_f32_data_hip(weights, backend,
-        &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")))?;
-    let emb_ln_b = get_bias_data_hip(weights,
-        &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")), hidden);
-    let mut normed = vec![0.0f32; hidden];
-    for s in 0..seq_len {
-        let row = &hidden_state[s * hidden..(s + 1) * hidden];
-        kern.layer_norm(row, &emb_ln_w, &emb_ln_b, &mut normed, eps);
-        hidden_state[s * hidden..(s + 1) * hidden].copy_from_slice(&normed);
-    }
-
-    Ok(hidden_state)
-}
-
-/// Get f32 data from HipBackend weights.
-#[cfg(feature = "hip")]
-fn get_f32_data_hip<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    _backend: &HipBackend<E>,
-    aliases: &[impl AsRef<str>],
-) -> Result<Vec<f32>, BE> {
-    for name in aliases {
-        if let Some(qt) = weights.get_quantized(name.as_ref()) {
-            let n_elements = qt.shape.iter().product::<usize>();
-            let mut out = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
-            use gllm_kernels::Kernels;
-            let blk_elems = qt.quant_type.block_size();
-            let blk_bytes = qt.quant_type.block_bytes();
-            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes).zip(out.chunks_exact_mut(blk_elems)) {
-                match qt.quant_type {
-                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
-                    _ => {
-                        return Err(BE::Other(format!(
-                            "Unsupported quantization type {:?} for weight {:?}",
-                            qt.quant_type, name.as_ref()
-                        )));
-                    }
-                }
-            }
-            return Ok(out);
-        }
-    }
-
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return Ok(slice.to_vec());
-        }
-    }
-
-    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
-}
-
-/// Get bias data from HipBackend weights (zeros if not found).
-#[cfg(feature = "hip")]
-fn get_bias_data_hip<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    aliases: &[impl AsRef<str>],
-    size: usize,
-) -> Vec<f32> {
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return slice.to_vec();
-        }
-    }
-    vec![0.0f32; size]
-}
-
-/// Check if weights need transposition (HIP variant).
-#[cfg(feature = "hip")]
-fn needs_weight_transpose_hip<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-) -> bool {
-    crate::weight_names::has_any_embedding_weight(|n| weights.get_tensor(n).is_some())
 }
 
 // ===========================================================================
@@ -1895,10 +1488,10 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
-    let transpose_w = needs_weight_transpose_metal(weights);
+    let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
     // Embedding lookup on CPU
-    let mut hidden_state = embed_tokens_cpu_metal(tokens, weights, backend, config)?;
+    let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
     // Compile BERT layer graph to Metal pipelines (once)
     let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
@@ -1990,160 +1583,6 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     }.to_vec();
 
     Ok(pooled)
-}
-
-/// Embedding lookup for Metal backend (CPU side).
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn embed_tokens_cpu_metal<E: Element>(
-    tokens: &[u32],
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    backend: &super::metal_backend::MetalBackend<E>,
-    config: &GeneratorForwardConfig,
-) -> Result<Vec<f32>, BE> {
-    use gllm_kernels::Kernels;
-    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
-    let seq_len = tokens.len();
-    let hidden = config.hidden_size;
-    let eps = config.norm_eps;
-
-    let word_emb = get_f32_data_metal(weights, backend,
-        &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")))?;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
-    let vocab = word_emb.len() / hidden;
-    for (s, &tok) in tokens.iter().enumerate() {
-        let v = tok as usize;
-        if v >= vocab {
-            return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-        }
-        hidden_state[s * hidden..(s + 1) * hidden]
-            .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
-    }
-
-    let pos_emb = get_f32_data_metal(weights, backend,
-        &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")))?;
-    let max_pos = pos_emb.len() / hidden;
-    for s in 0..seq_len {
-        if s >= max_pos { break; }
-        for i in 0..hidden {
-            hidden_state[s * hidden + i] += pos_emb[s * hidden + i];
-        }
-    }
-
-    let tt_emb = get_f32_data_metal(weights, backend,
-        &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")))?;
-    if tt_emb.len() >= hidden {
-        for s in 0..seq_len {
-            for i in 0..hidden {
-                hidden_state[s * hidden + i] += tt_emb[i];
-            }
-        }
-    }
-
-    let emb_ln_w = get_f32_data_metal(weights, backend,
-        &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")))?;
-    let emb_ln_b = get_bias_data_metal(weights,
-        &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")), hidden);
-    let mut normed = vec![0.0f32; hidden];
-    for s in 0..seq_len {
-        let row = &hidden_state[s * hidden..(s + 1) * hidden];
-        kern.layer_norm(row, &emb_ln_w, &emb_ln_b, &mut normed, eps);
-        hidden_state[s * hidden..(s + 1) * hidden].copy_from_slice(&normed);
-    }
-
-    Ok(hidden_state)
-}
-
-/// Get f32 data from Metal backend weights.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn get_f32_data_metal<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    _backend: &super::metal_backend::MetalBackend<E>,
-    aliases: &[impl AsRef<str>],
-) -> Result<Vec<f32>, BE> {
-    for name in aliases {
-        if let Some(qt) = weights.get_quantized(name.as_ref()) {
-            let n_elements = qt.shape.iter().product::<usize>();
-            let mut out = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
-            use gllm_kernels::Kernels;
-            let blk_elems = qt.quant_type.block_size();
-            let blk_bytes = qt.quant_type.block_bytes();
-            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes).zip(out.chunks_exact_mut(blk_elems)) {
-                match qt.quant_type {
-                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
-                    _ => {
-                        return Err(BE::Other(format!(
-                            "Unsupported quantization type {:?} for weight {:?}",
-                            qt.quant_type, name.as_ref()
-                        )));
-                    }
-                }
-            }
-            return Ok(out);
-        }
-    }
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return Ok(slice.to_vec());
-        }
-    }
-    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
-}
-
-/// Get bias data from Metal backend weights (zeros if not found).
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn get_bias_data_metal<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    aliases: &[impl AsRef<str>],
-    size: usize,
-) -> Vec<f32> {
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    tensor.as_ptr() as *const f32,
-                    tensor.len() * std::mem::size_of::<E>() / 4,
-                )
-            };
-            return slice.to_vec();
-        }
-    }
-    vec![0.0f32; size]
-}
-
-/// Check if weights need transposition (Metal variant).
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn needs_weight_transpose_metal<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-) -> bool {
-    crate::weight_names::has_any_embedding_weight(|n| weights.get_tensor(n).is_some())
 }
 
 // ===========================================================================
@@ -2746,7 +2185,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let seq_len = total_tokens;
 
     // Embedding lookup (CPU)
-    let word_emb = get_f32_data_hip(weights, backend,
+    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
     let vocab = word_emb.len() / hidden;
     let mut hidden_state = vec![0.0f32; seq_len * hidden];
@@ -2803,7 +2242,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             .collect();
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_hip(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -2914,7 +2353,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
         let (_module, kernel_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &graph)?;
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_hip(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -3022,7 +2461,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
     let (_lm_module, lm_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &lm_graph)?;
 
-    let lm_head_w = get_f32_data_hip(weights, backend,
+    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
@@ -3085,91 +2524,6 @@ pub(super) fn hip_decoder_forward<E: Element>(
     Ok(results)
 }
 
-/// Load decoder layer weights for HIP backend.
-#[cfg(feature = "hip")]
-fn load_decoder_layer_weights_hip<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    backend: &HipBackend<E>,
-    layer: usize,
-    hidden: usize,
-    q_dim: usize,
-    kv_hidden: usize,
-    inter: usize,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_hip(weights, backend, $aliases)?);
-        };
-    }
-
-    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
-    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
-
-    if needs_weight_transpose_hip(weights) {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", q_dim, hidden);
-        t("w_k", kv_hidden, hidden);
-        t("w_v", kv_hidden, hidden);
-        t("w_o", hidden, q_dim);
-        t("w_gate", inter, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
-}
-
-/// HIP alloc_kv_cache: allocate GPU buffer for KV cache and register metadata.
-#[cfg(feature = "hip")]
-pub(super) fn hip_alloc_kv_cache(
-    backend: &HipBackend<f32>,
-    config: &KvCacheConfig,
-) -> Result<KvCacheHandle, BE> {
-    use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
-
-    let total_bytes = config.num_layers * 2
-        * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
-
-    let buf = backend.device.alloc(total_bytes)
-        .map_err(|e| BE::Hip(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
-
-    let ptr = buf.as_device_ptr();
-    std::mem::forget(buf);
-
-    // Register metadata for swap support
-    let meta = GpuKvCacheMeta::from_config(config, ptr);
-    backend.kv_meta.lock()
-        .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?
-        .insert(ptr, meta);
-
-    Ok(KvCacheHandle(ptr))
-}
-
-/// HIP sample_from_tensor: download logits to CPU and sample.
-#[cfg(feature = "hip")]
-pub(super) fn hip_sample_from_tensor(
-    logits: &LogitsHandle,
-    _topology: &AttentionTopology,
-    vocab_size: usize,
-    sampling: &SamplingConfig,
-) -> Result<Vec<u32>, BE> {
-    Ok(sample_logits_cpu(&logits.data, vocab_size, sampling))
-}
-
 // ===========================================================================
 // Metal decoder forward pass
 // ===========================================================================
@@ -3213,7 +2567,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let seq_len = total_tokens;
 
     // Embedding lookup (CPU)
-    let word_emb = get_f32_data_metal(weights, backend,
+    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
     let vocab = word_emb.len() / hidden;
     let mut hidden_state = vec![0.0f32; seq_len * hidden];
@@ -3270,7 +2624,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             .collect();
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_metal(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -3379,7 +2733,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
         let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
         for layer in 0..num_layers {
-            let layer_weights = load_decoder_layer_weights_metal(
+            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter,
             )?;
 
@@ -3483,7 +2837,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
     let lm_entries = metal_compile_graph(device, gpu_profile, gpu_family, &lm_graph)?;
 
-    let lm_head_w = get_f32_data_metal(weights, backend,
+    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
 
     let mut lm_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
@@ -3540,547 +2894,4 @@ pub(super) fn metal_decoder_forward<E: Element>(
     }
 
     Ok(results)
-}
-
-/// Load decoder layer weights for Metal backend.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn load_decoder_layer_weights_metal<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    backend: &super::metal_backend::MetalBackend<E>,
-    layer: usize,
-    hidden: usize,
-    q_dim: usize,
-    kv_hidden: usize,
-    inter: usize,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_metal(weights, backend, $aliases)?);
-        };
-    }
-
-    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
-    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
-
-    if needs_weight_transpose_metal(weights) {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = super::weight_helpers::transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", q_dim, hidden);
-        t("w_k", kv_hidden, hidden);
-        t("w_v", kv_hidden, hidden);
-        t("w_o", hidden, q_dim);
-        t("w_gate", inter, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
-}
-
-/// Metal alloc_kv_cache: allocate Metal buffer for KV cache and register metadata.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(super) fn metal_alloc_kv_cache(
-    backend: &super::metal_backend::MetalBackend<f32>,
-    config: &KvCacheConfig,
-) -> Result<KvCacheHandle, BE> {
-    use gllm_kernels::gpu::GpuDevice;
-
-    let total_bytes = config.num_layers * 2
-        * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
-
-    let buf = backend.device().alloc(total_bytes)
-        .map_err(|e| BE::Metal(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
-
-    let ptr = buf.as_device_ptr();
-    std::mem::forget(buf);
-
-    // Register metadata for swap support
-    let meta = GpuKvCacheMeta::from_config(config, ptr);
-    backend.kv_meta.lock()
-        .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?
-        .insert(ptr, meta);
-
-    Ok(KvCacheHandle(ptr))
-}
-
-/// Metal sample_from_tensor: download logits to CPU and sample.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(super) fn metal_sample_from_tensor(
-    logits: &LogitsHandle,
-    _topology: &AttentionTopology,
-    vocab_size: usize,
-    sampling: &SamplingConfig,
-) -> Result<Vec<u32>, BE> {
-    Ok(sample_logits_cpu(&logits.data, vocab_size, sampling))
-}
-
-// ===========================================================================
-// GPU swap helpers (CUDA / HIP / Metal)
-// ===========================================================================
-//
-// The GPU KV cache is a contiguous buffer: [K_all_layers | V_all_layers].
-// Each half has layout: [layer][head][seq_pos][head_dim].
-// A "page" spans `page_size` consecutive seq positions.
-//
-// swap_out: for each (page_id, storage_key):
-//   1. Compute byte offset for each (layer, head) slice within K and V blocks.
-//   2. dtoh to download page data from GPU to host.
-//   3. Store in swap_store keyed by storage_key.
-//
-// swap_in: reverse of swap_out (htod from host to GPU).
-
-/// CUDA swap_out_pages: download page data from GPU to host swap store.
-#[cfg(feature = "cuda")]
-pub(super) fn cuda_swap_out_pages(
-    backend: &CudaBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = &*backend.device;
-    let stream = device.default_stream();
-
-    // Each half (K or V) size in bytes
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    // Bytes per page slice (one head, one layer)
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    // Stride between consecutive seq positions for one (layer, head): max_seq_len * head_dim * dtype_size
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    // Total bytes per page across all layers/heads (K+V)
-    let total_page_bytes = meta.num_layers * meta.num_kv_heads * page_slice_bytes * 2;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Cuda(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Cuda(format!(
-                "swap_out: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut host_buf = vec![0u8; total_page_bytes];
-        let mut dst_offset = 0usize;
-
-        // Download K pages then V pages
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let src_offset = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let src_ptr = half_base + src_offset;
-
-                    device.dtoh_raw(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes], stream)
-                        .map_err(|e| BE::Cuda(format!("swap_out dtoh failed: {e}")))?;
-
-                    dst_offset += page_slice_bytes;
-                }
-            }
-        }
-
-        swap_store.insert(storage_key, host_buf);
-    }
-
-    Ok(())
-}
-
-/// CUDA swap_in_pages: upload page data from host swap store to GPU.
-#[cfg(feature = "cuda")]
-pub(super) fn cuda_swap_in_pages(
-    backend: &CudaBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = &*backend.device;
-    let stream = device.default_stream();
-
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Cuda(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let host_buf = swap_store.remove(&storage_key)
-            .ok_or_else(|| BE::Cuda(format!("swap_in: storage key {} not found in swap store", storage_key)))?;
-
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Cuda(format!(
-                "swap_in: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut src_offset = 0usize;
-
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let dst_offset_gpu = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let dst_ptr = half_base + dst_offset_gpu;
-
-                    device.htod_raw(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr, stream)
-                        .map_err(|e| BE::Cuda(format!("swap_in htod failed: {e}")))?;
-
-                    src_offset += page_slice_bytes;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// CUDA get_page_states: return page states based on metadata.
-#[cfg(feature = "cuda")]
-pub(super) fn cuda_get_page_states(
-    backend: &CudaBackend<f32>,
-    handle: &KvCacheHandle,
-) -> Result<Vec<(PageId, PageState)>, BE> {
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let active = meta.active_pages();
-    let total = meta.total_pages();
-    let mut states = Vec::with_capacity(total);
-    for page_id in 0..total {
-        let state = if page_id < active { PageState::Active } else { PageState::Free };
-        states.push((page_id, state));
-    }
-    Ok(states)
-}
-
-/// HIP swap_out_pages: download page data from GPU to host swap store.
-#[cfg(feature = "hip")]
-pub(super) fn hip_swap_out_pages(
-    backend: &HipBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = &*backend.device;
-    let stream = device.default_stream();
-
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let total_page_bytes = meta.num_layers * meta.num_kv_heads * page_slice_bytes * 2;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Hip(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Hip(format!(
-                "swap_out: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut host_buf = vec![0u8; total_page_bytes];
-        let mut dst_offset = 0usize;
-
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let src_offset = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let src_ptr = half_base + src_offset;
-
-                    device.dtoh_raw(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes], stream)
-                        .map_err(|e| BE::Hip(format!("swap_out dtoh failed: {e}")))?;
-
-                    dst_offset += page_slice_bytes;
-                }
-            }
-        }
-
-        swap_store.insert(storage_key, host_buf);
-    }
-
-    Ok(())
-}
-
-/// HIP swap_in_pages: upload page data from host swap store to GPU.
-#[cfg(feature = "hip")]
-pub(super) fn hip_swap_in_pages(
-    backend: &HipBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = &*backend.device;
-    let stream = device.default_stream();
-
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Hip(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let host_buf = swap_store.remove(&storage_key)
-            .ok_or_else(|| BE::Hip(format!("swap_in: storage key {} not found in swap store", storage_key)))?;
-
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Hip(format!(
-                "swap_in: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut src_offset = 0usize;
-
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let dst_offset_gpu = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let dst_ptr = half_base + dst_offset_gpu;
-
-                    device.htod_raw(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr, stream)
-                        .map_err(|e| BE::Hip(format!("swap_in htod failed: {e}")))?;
-
-                    src_offset += page_slice_bytes;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// HIP get_page_states: return page states based on metadata.
-#[cfg(feature = "hip")]
-pub(super) fn hip_get_page_states(
-    backend: &HipBackend<f32>,
-    handle: &KvCacheHandle,
-) -> Result<Vec<(PageId, PageState)>, BE> {
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let active = meta.active_pages();
-    let total = meta.total_pages();
-    let mut states = Vec::with_capacity(total);
-    for page_id in 0..total {
-        let state = if page_id < active { PageState::Active } else { PageState::Free };
-        states.push((page_id, state));
-    }
-    Ok(states)
-}
-
-/// Metal swap_out_pages: download page data from GPU to host swap store.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(super) fn metal_swap_out_pages(
-    backend: &super::metal_backend::MetalBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = backend.device();
-    let stream = device.default_stream();
-
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let total_page_bytes = meta.num_layers * meta.num_kv_heads * page_slice_bytes * 2;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Metal(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Metal(format!(
-                "swap_out: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut host_buf = vec![0u8; total_page_bytes];
-        let mut dst_offset = 0usize;
-
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let src_offset = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let src_ptr = half_base + src_offset;
-
-                    device.dtoh_raw(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes], stream)
-                        .map_err(|e| BE::Metal(format!("swap_out dtoh failed: {e}")))?;
-
-                    dst_offset += page_slice_bytes;
-                }
-            }
-        }
-
-        swap_store.insert(storage_key, host_buf);
-    }
-
-    Ok(())
-}
-
-/// Metal swap_in_pages: upload page data from host swap store to GPU.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(super) fn metal_swap_in_pages(
-    backend: &super::metal_backend::MetalBackend<f32>,
-    handle: &KvCacheHandle,
-    mappings: &[(PageId, StorageKey)],
-) -> Result<(), BE> {
-    if mappings.is_empty() { return Ok(()); }
-
-    use gllm_kernels::gpu::GpuDevice;
-
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = backend.device();
-    let stream = device.default_stream();
-
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
-
-    let mut swap_store = backend.swap_store.lock()
-        .map_err(|e| BE::Metal(format!("swap_store lock poisoned: {e}")))?;
-
-    for &(page_id, storage_key) in mappings {
-        let host_buf = swap_store.remove(&storage_key)
-            .ok_or_else(|| BE::Metal(format!("swap_in: storage key {} not found in swap store", storage_key)))?;
-
-        let token_start = page_id * meta.page_size;
-        if token_start >= meta.max_seq_len {
-            return Err(BE::Metal(format!(
-                "swap_in: page {} starts at token {} beyond max_seq_len {}",
-                page_id, token_start, meta.max_seq_len
-            )));
-        }
-
-        let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
-        let mut src_offset = 0usize;
-
-        for kv_half in 0..2usize {
-            let half_base = handle.0 + (kv_half * half_bytes) as u64;
-            for layer in 0..meta.num_layers {
-                for head in 0..meta.num_kv_heads {
-                    let dst_offset_gpu = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
-                    let dst_ptr = half_base + dst_offset_gpu;
-
-                    device.htod_raw(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr, stream)
-                        .map_err(|e| BE::Metal(format!("swap_in htod failed: {e}")))?;
-
-                    src_offset += page_slice_bytes;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Metal get_page_states: return page states based on metadata.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(super) fn metal_get_page_states(
-    backend: &super::metal_backend::MetalBackend<f32>,
-    handle: &KvCacheHandle,
-) -> Result<Vec<(PageId, PageState)>, BE> {
-    let meta_store = backend.kv_meta.lock()
-        .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-    let meta = meta_store.get(&handle.0)
-        .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let active = meta.active_pages();
-    let total = meta.total_pages();
-    let mut states = Vec::with_capacity(total);
-    for page_id in 0..total {
-        let state = if page_id < active { PageState::Active } else { PageState::Free };
-        states.push((page_id, state));
-    }
-    Ok(states)
 }

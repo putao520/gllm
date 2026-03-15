@@ -128,11 +128,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
     fn alloc_kv_cache(&self, config: &KvCacheConfig) -> Result<KvCacheHandle, BE> {
         #[cfg(feature = "hip")]
         {
-            // Safety: we know E = f32 for generator paths; the handle is
-            // backend-specific and stores a HIP device pointer.
-            super::gpu_compile::hip_alloc_kv_cache(
-                // SAFETY: HipBackend<E> has identical layout regardless of E;
-                // alloc_kv_cache only uses self.device (Arc<HipDevice>).
+            super::gpu_helpers::gpu_alloc_kv_cache(
                 unsafe { &*(self as *const HipBackend<E> as *const HipBackend<f32>) },
                 config,
             )
@@ -172,7 +168,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
     ) -> Result<Vec<u32>, BE> {
         #[cfg(feature = "hip")]
         {
-            super::gpu_compile::hip_sample_from_tensor(logits, topology, vocab_size, sampling)
+            super::gpu_helpers::gpu_sample_from_tensor(logits, topology, vocab_size, sampling)
         }
         #[cfg(not(feature = "hip"))]
         {
@@ -233,7 +229,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
     fn swap_out_pages(&self, handle: &mut KvCacheHandle, mappings: &[(PageId, StorageKey)]) -> Result<(), BE> {
         #[cfg(feature = "hip")]
         {
-            super::gpu_compile::hip_swap_out_pages(
+            super::gpu_helpers::gpu_swap_out_pages(
                 unsafe { &*(self as *const HipBackend<E> as *const HipBackend<f32>) },
                 handle,
                 mappings,
@@ -249,7 +245,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
     fn swap_in_pages(&self, handle: &mut KvCacheHandle, mappings: &[(PageId, StorageKey)]) -> Result<(), BE> {
         #[cfg(feature = "hip")]
         {
-            super::gpu_compile::hip_swap_in_pages(
+            super::gpu_helpers::gpu_swap_in_pages(
                 unsafe { &*(self as *const HipBackend<E> as *const HipBackend<f32>) },
                 handle,
                 mappings,
@@ -265,7 +261,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
     fn get_page_states(&self, handle: &KvCacheHandle) -> Result<Vec<(PageId, PageState)>, BE> {
         #[cfg(feature = "hip")]
         {
-            super::gpu_compile::hip_get_page_states(
+            super::gpu_helpers::gpu_get_page_states(
                 unsafe { &*(self as *const HipBackend<E> as *const HipBackend<f32>) },
                 handle,
             )

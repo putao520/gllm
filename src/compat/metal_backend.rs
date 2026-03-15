@@ -125,7 +125,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
     fn alloc_kv_cache(&self, config: &KvCacheConfig) -> Result<KvCacheHandle, BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            super::gpu_compile::metal_alloc_kv_cache(
+            super::gpu_helpers::gpu_alloc_kv_cache(
                 unsafe { &*(self as *const MetalBackend<E> as *const MetalBackend<f32>) },
                 config,
             )
@@ -159,7 +159,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
     ) -> Result<Vec<u32>, BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            super::gpu_compile::metal_sample_from_tensor(logits, topology, vocab_size, sampling)
+            super::gpu_helpers::gpu_sample_from_tensor(logits, topology, vocab_size, sampling)
         }
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
         {
@@ -216,7 +216,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
     fn swap_out_pages(&self, handle: &mut KvCacheHandle, mappings: &[(PageId, StorageKey)]) -> Result<(), BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            super::gpu_compile::metal_swap_out_pages(
+            super::gpu_helpers::gpu_swap_out_pages(
                 unsafe { &*(self as *const MetalBackend<E> as *const MetalBackend<f32>) },
                 handle,
                 mappings,
@@ -232,7 +232,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
     fn swap_in_pages(&self, handle: &mut KvCacheHandle, mappings: &[(PageId, StorageKey)]) -> Result<(), BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            super::gpu_compile::metal_swap_in_pages(
+            super::gpu_helpers::gpu_swap_in_pages(
                 unsafe { &*(self as *const MetalBackend<E> as *const MetalBackend<f32>) },
                 handle,
                 mappings,
@@ -248,7 +248,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
     fn get_page_states(&self, handle: &KvCacheHandle) -> Result<Vec<(PageId, PageState)>, BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            super::gpu_compile::metal_get_page_states(
+            super::gpu_helpers::gpu_get_page_states(
                 unsafe { &*(self as *const MetalBackend<E> as *const MetalBackend<f32>) },
                 handle,
             )

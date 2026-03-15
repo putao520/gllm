@@ -282,6 +282,7 @@ pub(crate) fn swiglu_ffn(
 ///
 /// Takes complete Q [seq_len, q_dim], K [seq_len, kv_dim], V [seq_len, kv_dim]
 /// projections and computes causal self-attention.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn prefill_gqa_attention(
     q: &[f32],
     k: &[f32],

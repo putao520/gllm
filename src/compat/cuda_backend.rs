@@ -229,7 +229,7 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
     fn alloc_kv_cache(&self, config: &KvCacheConfig) -> Result<KvCacheHandle, BE> {
         #[cfg(feature = "cuda")]
         {
-            super::gpu_compile::cuda_alloc_kv_cache(
+            super::gpu_helpers::gpu_alloc_kv_cache(
                 unsafe { &*(self as *const CudaBackend<E> as *const CudaBackend<f32>) },
                 config,
             )
@@ -269,7 +269,7 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
     ) -> Result<Vec<u32>, BE> {
         #[cfg(feature = "cuda")]
         {
-            super::gpu_compile::cuda_sample_from_tensor(logits, topology, vocab_size, sampling)
+            super::gpu_helpers::gpu_sample_from_tensor(logits, topology, vocab_size, sampling)
         }
         #[cfg(not(feature = "cuda"))]
         {
@@ -342,7 +342,7 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
     ) -> Result<(), BE> {
         #[cfg(feature = "cuda")]
         {
-            super::gpu_compile::cuda_swap_out_pages(
+            super::gpu_helpers::gpu_swap_out_pages(
                 unsafe { &*(self as *const CudaBackend<E> as *const CudaBackend<f32>) },
                 handle,
                 mappings,
@@ -362,7 +362,7 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
     ) -> Result<(), BE> {
         #[cfg(feature = "cuda")]
         {
-            super::gpu_compile::cuda_swap_in_pages(
+            super::gpu_helpers::gpu_swap_in_pages(
                 unsafe { &*(self as *const CudaBackend<E> as *const CudaBackend<f32>) },
                 handle,
                 mappings,
@@ -381,7 +381,7 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
     ) -> Result<Vec<(PageId, PageState)>, BE> {
         #[cfg(feature = "cuda")]
         {
-            super::gpu_compile::cuda_get_page_states(
+            super::gpu_helpers::gpu_get_page_states(
                 unsafe { &*(self as *const CudaBackend<E> as *const CudaBackend<f32>) },
                 handle,
             )
