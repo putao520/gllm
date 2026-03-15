@@ -244,7 +244,7 @@ use std::sync::Arc;
 use crate::scheduler::batcher::{BatchAction, BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
 use crate::scheduler::types::{BatchOrderPolicy, RequestKind};
-use crate::scheduler::vllm2024::Scheduler2024Config;
+use crate::scheduler::vllm2024::{AdaptiveChunkPolicy, Scheduler2024Config};
 use crate::scheduler::{
     BasicObserver, GlobalMemoryManager, MemoryManagerError, PagedScheduler, PolicyVariant,
     PrefillPlan, ScheduledBatch, Sequence, SessionId, Tier, VirtualPageId,
@@ -839,7 +839,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // 3. PrefillPlan + Session Prefix: plan memory for prefill requests
         let page_size = self.scheduler.page_size().max(1);
-        let chunk_size = self.kv_cache_config.max_seq_len.max(1);
+        // Adaptive chunk sizing (REQ-KV-EXT-001): use runtime load signals
+        // instead of the static max_seq_len.
+        let adaptive = AdaptiveChunkPolicy::new(
+            &Scheduler2024Config::default().chunked,
+            self.kv_cache_config.max_seq_len,
+        );
+        let l1_usage = self.memory_manager.tier_usage(Tier::L1);
+        let l1_ratio = if l1_usage.capacity > 0 {
+            (l1_usage.capacity.saturating_sub(l1_usage.used)) as f32
+                / l1_usage.capacity as f32
+        } else {
+            1.0
+        };
+        let concurrent = batch.requests.len();
         for &req_id in &batch.requests {
             let (is_prefill, prompt_len, session_id) = {
                 let Some(req) = self.requests.get(&req_id) else {
@@ -851,6 +864,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 continue;
             }
 
+            let chunk_size = adaptive.compute(l1_ratio, concurrent, prompt_len);
             // Plan prefill page allocation strategy and pre-reclaim if pipelined
             let plan = self
                 .memory_manager

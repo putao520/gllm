@@ -28,6 +28,60 @@ impl Default for ChunkedConfig {
     }
 }
 
+/// Adaptive chunk size policy (REQ-KV-EXT-001).
+///
+/// Dynamically adjusts prefill chunk_size based on runtime load instead of
+/// using the static `max_seq_len`.
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptiveChunkPolicy {
+    /// Lower bound — from `ChunkedConfig::chunk_size` (default 64).
+    pub min_chunk: usize,
+    /// Upper bound — from `max_seq_len`.
+    pub max_chunk: usize,
+}
+
+impl AdaptiveChunkPolicy {
+    pub fn new(chunked: &ChunkedConfig, max_seq_len: usize) -> Self {
+        Self {
+            min_chunk: chunked.chunk_size.max(1),
+            max_chunk: max_seq_len.max(chunked.chunk_size),
+        }
+    }
+
+    /// Compute optimal chunk_size from runtime load signals.
+    ///
+    /// - `l1_available_ratio`: fraction of L1 pages still free (0.0–1.0)
+    /// - `concurrent_reqs`: number of in-flight requests in this batch
+    /// - `prompt_len`: token count of the prompt being planned
+    pub fn compute(
+        &self,
+        l1_available_ratio: f32,
+        concurrent_reqs: usize,
+        prompt_len: usize,
+    ) -> usize {
+        if prompt_len <= self.min_chunk {
+            return prompt_len.max(1);
+        }
+
+        let base = if l1_available_ratio < 0.25 {
+            self.min_chunk
+        } else if l1_available_ratio > 0.75 {
+            self.max_chunk
+        } else {
+            // Linear interpolation between min and max.
+            let t = (l1_available_ratio - 0.25) / 0.50;
+            let range = self.max_chunk - self.min_chunk;
+            self.min_chunk + (range as f32 * t) as usize
+        };
+
+        // Concurrency penalty: shrink 10% per extra concurrent request.
+        let penalty = (1.0 - 0.1 * concurrent_reqs.saturating_sub(1) as f32).max(0.2);
+        let adjusted = (base as f32 * penalty) as usize;
+
+        adjusted.clamp(self.min_chunk, self.max_chunk.min(prompt_len))
+    }
+}
+
 /// SwiftKV configuration (ARCH-SCHED-SWIFTKV).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwiftKVConfig {
@@ -190,6 +244,8 @@ pub struct SwiftKvState {
     pub config: SwiftKVConfig,
     /// Last distillation result (for metrics/tests).
     pub last_result: Option<DistillPagesSummary>,
+    /// Tracks the page boundary of the last incremental distillation (REQ-KV-EXT-002).
+    pub last_distilled_page: usize,
 }
 
 impl SwiftKvState {
@@ -197,6 +253,7 @@ impl SwiftKvState {
         Self {
             config,
             last_result: None,
+            last_distilled_page: 0,
         }
     }
 
@@ -314,6 +371,53 @@ impl SwiftKvState {
             ppl_diff,
             precision_fallback,
         }
+    }
+
+    /// Incremental distillation (REQ-KV-EXT-002): only process pages added
+    /// since the last call, with SIKV sliding-window overlap for continuity.
+    pub fn distill_cpu_incremental<E: Element + Float>(
+        &mut self,
+        pages: &[Vec<E>],
+    ) -> DistillOutcome<E> {
+        if pages.is_empty() {
+            return DistillOutcome {
+                result: DistillResult {
+                    original_pages: vec![],
+                    distilled_pages: vec![],
+                },
+                ppl_diff: E::ZERO,
+                precision_fallback: false,
+            };
+        }
+
+        // If page count shrank (session reset), fall back to full distillation.
+        if pages.len() < self.last_distilled_page {
+            self.last_distilled_page = 0;
+        }
+
+        // No new pages since last distillation.
+        if self.last_distilled_page >= pages.len() {
+            return self.distill_cpu(pages);
+        }
+
+        // SIKV sliding window needs overlap to maintain continuity at the boundary.
+        let overlap = self.config.window_size.min(self.last_distilled_page);
+        let start = self.last_distilled_page.saturating_sub(overlap);
+        let delta_pages = &pages[start..];
+
+        // Distill only the delta slice.
+        let outcome = self.distill_cpu(delta_pages);
+
+        // Update boundary.
+        self.last_distilled_page = pages.len();
+
+        outcome
+    }
+
+    /// Reset distillation boundary (called by Working pipeline on turn end).
+    pub fn reset_distill_boundary(&mut self) {
+        self.last_distilled_page = 0;
+        self.last_result = None;
     }
 }
 

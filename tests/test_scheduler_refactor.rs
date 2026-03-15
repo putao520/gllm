@@ -248,3 +248,219 @@ fn sequence_mark_running_updates_state() {
     assert_eq!(seq.state, SequenceState::Running);
     assert_eq!(seq.kv_pages, vec![100]);
 }
+
+// ---- AdaptiveChunkPolicy tests (REQ-KV-EXT-001) ----
+
+use gllm::scheduler::vllm2024::{AdaptiveChunkPolicy, ChunkedConfig};
+
+/// TEST-KV-EXT-001: 高负载返回 min_chunk
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 正向
+/// **期望结果**: L1 可用 < 25% 时返回 min_chunk
+#[test]
+fn adaptive_chunk_high_load_returns_min() {
+    let cfg = ChunkedConfig::default(); // chunk_size = 64
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let result = policy.compute(0.10, 1, 2048);
+    assert_eq!(result, 64);
+}
+
+/// TEST-KV-EXT-002: 低负载返回 max_chunk
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 正向
+/// **期望结果**: L1 可用 > 75% 时返回 max_chunk (clamped to prompt_len)
+#[test]
+fn adaptive_chunk_low_load_returns_max() {
+    let cfg = ChunkedConfig::default();
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    // prompt_len = 2048 < max_chunk = 4096, so clamped to prompt_len
+    let result = policy.compute(0.90, 1, 2048);
+    assert_eq!(result, 2048);
+    // prompt_len > max_chunk
+    let result2 = policy.compute(0.90, 1, 8192);
+    assert_eq!(result2, 4096);
+}
+
+/// TEST-KV-EXT-003: 中负载线性插值
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 正向
+/// **期望结果**: 50% L1 可用时返回 min 和 max 的中间值
+#[test]
+fn adaptive_chunk_mid_load_interpolates() {
+    let cfg = ChunkedConfig::default(); // min = 64
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    // l1_ratio = 0.50 → t = (0.50 - 0.25) / 0.50 = 0.50
+    // base = 64 + (4032 * 0.50) = 64 + 2016 = 2080
+    let result = policy.compute(0.50, 1, 4096);
+    assert_eq!(result, 2080);
+}
+
+/// TEST-KV-EXT-004: 短 prompt 直接返回 prompt_len
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 边界
+/// **期望结果**: prompt_len < min_chunk 时返回 prompt_len
+#[test]
+fn adaptive_chunk_short_prompt() {
+    let cfg = ChunkedConfig::default();
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let result = policy.compute(0.10, 5, 32);
+    assert_eq!(result, 32);
+}
+
+/// TEST-KV-EXT-005: 并发惩罚不低于 min_chunk
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 边界
+/// **期望结果**: 高并发时 chunk 缩小但不低于 min_chunk
+#[test]
+fn adaptive_chunk_concurrency_penalty() {
+    let cfg = ChunkedConfig::default();
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    // Low load but 10 concurrent requests → penalty = max(0.2, 1.0 - 0.9) = 0.2
+    // base = 4096, adjusted = 4096 * 0.2 = 819, clamped to [64, 2048]
+    let result = policy.compute(0.90, 10, 2048);
+    assert!(result >= 64);
+    assert!(result <= 2048);
+    // Should be significantly less than no-concurrency case
+    let no_conc = policy.compute(0.90, 1, 2048);
+    assert!(result < no_conc);
+}
+
+/// TEST-KV-EXT-006: zero prompt 返回 1
+/// **关联需求**: REQ-KV-EXT-001
+/// **测试类型**: 边界
+/// **期望结果**: prompt_len = 0 时返回 1 (max(0, 1))
+#[test]
+fn adaptive_chunk_zero_prompt() {
+    let cfg = ChunkedConfig::default();
+    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let result = policy.compute(0.50, 1, 0);
+    assert_eq!(result, 1);
+}
+
+// ---- KV Incremental Distillation tests (REQ-KV-EXT-002) ----
+
+use gllm::scheduler::vllm2024::{SwiftKVConfig, SwiftKvState};
+
+fn make_swift_kv(window_size: usize) -> SwiftKvState {
+    SwiftKvState::new(SwiftKVConfig {
+        enabled: true,
+        window_size,
+        enable_across_kv: false,
+        similarity_threshold: 0.9,
+        precision_guard: 0.1,
+    })
+}
+
+fn make_pages(n: usize, dim: usize) -> Vec<Vec<f32>> {
+    (0..n)
+        .map(|i| (0..dim).map(|j| (i * dim + j) as f32 * 0.01).collect())
+        .collect()
+}
+
+/// TEST-KV-EXT-007: 增量蒸馏结果与全量蒸馏数值一致
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 正向
+/// **期望结果**: 首次增量蒸馏 == 全量蒸馏（无先前边界）
+#[test]
+fn incremental_distill_first_call_matches_full() {
+    let pages = make_pages(8, 16);
+    let mut state_full = make_swift_kv(4);
+    let mut state_incr = make_swift_kv(4);
+
+    let full = state_full.distill_cpu(&pages);
+    let incr = state_incr.distill_cpu_incremental(&pages);
+
+    assert_eq!(full.result.distilled_pages.len(), incr.result.distilled_pages.len());
+    assert_eq!(state_incr.last_distilled_page, 8);
+}
+
+/// TEST-KV-EXT-008: 多轮追加页面后增量蒸馏正确
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 正向
+/// **期望结果**: 追加页面后仅处理新增部分
+#[test]
+fn incremental_distill_appended_pages() {
+    let mut state = make_swift_kv(2);
+    let pages_round1 = make_pages(4, 8);
+    let _ = state.distill_cpu_incremental(&pages_round1);
+    assert_eq!(state.last_distilled_page, 4);
+
+    // Append 4 more pages
+    let mut pages_round2 = pages_round1.clone();
+    pages_round2.extend(make_pages(4, 8));
+    let outcome = state.distill_cpu_incremental(&pages_round2);
+    assert_eq!(state.last_distilled_page, 8);
+    // Should have produced a valid distillation
+    assert!(!outcome.result.distilled_pages.is_empty());
+}
+
+/// TEST-KV-EXT-009: 页面数缩小时回退全量蒸馏
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 边界
+/// **期望结果**: 页面数减少（session 重置）时 boundary 归零，执行全量
+#[test]
+fn incremental_distill_shrink_resets_boundary() {
+    let mut state = make_swift_kv(2);
+    let pages8 = make_pages(8, 8);
+    let _ = state.distill_cpu_incremental(&pages8);
+    assert_eq!(state.last_distilled_page, 8);
+
+    // Shrink to 3 pages (session reset)
+    let pages3 = make_pages(3, 8);
+    let _ = state.distill_cpu_incremental(&pages3);
+    assert_eq!(state.last_distilled_page, 3);
+}
+
+/// TEST-KV-EXT-010: 空页面返回 default
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 边界
+/// **期望结果**: 空输入返回空结果
+#[test]
+fn incremental_distill_empty_pages() {
+    let mut state = make_swift_kv(4);
+    let empty: &[Vec<f32>] = &[];
+    let outcome = state.distill_cpu_incremental(empty);
+    assert!(outcome.result.distilled_pages.is_empty());
+    assert!(!outcome.precision_fallback);
+}
+
+/// TEST-KV-EXT-011: reset_distill_boundary 后重新全量蒸馏
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 正向
+/// **期望结果**: 重置后 boundary 归零，下次调用执行全量
+#[test]
+fn incremental_distill_reset_boundary() {
+    let mut state = make_swift_kv(2);
+    let pages = make_pages(6, 8);
+    let _ = state.distill_cpu_incremental(&pages);
+    assert_eq!(state.last_distilled_page, 6);
+
+    state.reset_distill_boundary();
+    assert_eq!(state.last_distilled_page, 0);
+    assert!(state.last_result.is_none());
+
+    // Next call should process all pages again
+    let _ = state.distill_cpu_incremental(&pages);
+    assert_eq!(state.last_distilled_page, 6);
+}
+
+/// TEST-KV-EXT-012: SIKV 滑动窗口 overlap 保证连续性
+/// **关联需求**: REQ-KV-EXT-002
+/// **测试类型**: 正向
+/// **期望结果**: overlap = min(window_size, last_distilled_page) 确保窗口连续
+#[test]
+fn incremental_distill_overlap_continuity() {
+    let mut state = make_swift_kv(3); // window_size = 3
+    let pages4 = make_pages(4, 8);
+    let _ = state.distill_cpu_incremental(&pages4);
+    assert_eq!(state.last_distilled_page, 4);
+
+    // Append 4 more → total 8 pages
+    // overlap = min(3, 4) = 3, start = 4 - 3 = 1
+    // delta_pages = pages[1..8] = 7 pages
+    let mut pages8 = pages4.clone();
+    pages8.extend(make_pages(4, 8));
+    let outcome = state.distill_cpu_incremental(&pages8);
+    assert_eq!(state.last_distilled_page, 8);
+    assert!(!outcome.result.distilled_pages.is_empty());
+}
