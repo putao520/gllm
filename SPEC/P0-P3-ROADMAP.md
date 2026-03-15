@@ -134,25 +134,9 @@
 
 **完成状态**: `pytorch.rs` 纯 Rust 实现 pickle 反序列化 + safetensors 转换（内联最小化 pickle 协议解析器，无 candle/tch 依赖，符合 REQ-ARCH-003）。`Loader::load()` 的 `WeightFormat::PyTorch` 分支调用 `convert_bins_to_safetensors()` 转换后走标准 safetensors 加载路径。默认启用，无需 feature flag。
 
-### P3-4: GPU TileLevelFusion / ComputeRoot → 🔄 立即开发
+### P3-4: GPU TileLevelFusion / ComputeRoot ✅ 已完成
 
-**需求**: REQ-KERNELS-GPU-001 ~ REQ-KERNELS-GPU-003
-
-**修改范围**: gllm-kernels 仓库
-- `src/compiler/codegen/gpu_ir/plan_emitter.rs` — 移除 L62-69 error，实现 TileLevelFusion/ComputeRoot GPU codegen
-- `src/compiler/codegen/gpu_ir/` — 新增 shared memory 分配和 tiling 逻辑
-- `src/dispatch/mod.rs` — `DeviceProfile` 新增 `shared_memory_per_block()` 方法
-
-**架构方案**:
-- TileLevelFusion: shared memory 替代 CPU L1 cache tiling
-  - 分配 `tile_rows × k × dtype_size` shared memory
-  - Norm 输出写入 shared memory → GEMM 从 shared memory 读取
-  - Thread block 内 MC 循环映射到 shared memory tiles
-- ComputeRoot: 全量 Norm 输出写入 global memory（shared memory 不够时）或 shared memory（够时）
-  - 决策阈值: shared_memory_per_block × 75%（复用 CPU 侧 75% L1 逻辑）
-- 三后端 (PTX/HIP C++/MSL) 各自实现 shared memory 语义
-
-**依赖**: 无，可与 P2-5 并行
+**完成状态**: `gpu_emit_plan` 新增 `gpu_profile` 参数（shared_mem 阈值）。`GpuDialect` trait 新增 `emit_tile_level_fusion_kernel` / `emit_compute_root_kernel` 方法（带默认 `Err` 实现）。HipDialect 实现 fused norm→GEMM kernel（shared memory tiling）和 ComputeRoot 两阶段 kernel。plan_emitter 分发 TileLevelFusion/ComputeRoot（替代 Err）。3 个 text-only codegen 测试覆盖。
 
 ### P3-5: GLLM_CACHE_DIR 环境变量 (ARCH-MODEL-CACHE) ✅ 已完成
 
