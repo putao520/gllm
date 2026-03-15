@@ -8,7 +8,7 @@ use super::jit_helpers::{
 };
 use super::scalar_ops::{
     cached_gqa_attention, prefill_gqa_attention, scalar_gemm, scalar_moe_ffn, scalar_rms_norm,
-    scalar_rope, swiglu_ffn,
+    scalar_rope,
 };
 use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
 use super::weight_helpers::{
@@ -79,78 +79,8 @@ fn scalar_moe_prefill_layer(
 }
 
 // ---------------------------------------------------------------------------
-// Scalar incremental decode layer (uses cached K/V, O(n) per step)
+// Quantized incremental decode layer (uses cached K/V, O(n) per step)
 // ---------------------------------------------------------------------------
-
-/// Execute a single decoder layer using cached K/V for attention.
-///
-/// For incremental decode (position > 0), this avoids recomputing all K/V
-/// from scratch. Instead, it:
-/// 1. Computes Q for the new token(s) only
-/// 2. Computes new K/V and appends to cache (done by update_kv_cache)
-/// 3. Runs attention using full cached K/V sequence
-/// 4. Runs FFN (SwiGLU) on the attention output
-///
-/// This is O(total_seq * head_dim) per step instead of O(total_seq^2).
-#[allow(dead_code)] // Superseded by quantized_incremental_decode_layer; kept as reference
-fn scalar_incremental_decode_layer(
-    hidden_state: &[f32],
-    q_w: &[f32],
-    o_w: &[f32],
-    rn1_w: &[f32],
-    gate_w: &[f32],
-    up_w: &[f32],
-    down_w: &[f32],
-    rn2_w: &[f32],
-    positions: &[u32],
-    kv_cache_k: &[f32],
-    kv_cache_v: &[f32],
-    layer: usize,
-    total_seq: usize,
-    seq_len: usize,
-    hidden: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    inter: usize,
-    eps: f32,
-    rope_theta: f64,
-    max_seq_len: usize,
-    output: &mut [f32],
-) {
-    let geom = AttentionGeometry {
-        num_heads, num_kv_heads, head_dim,
-        q_dim: num_heads * head_dim,
-        kv_dim: num_kv_heads * head_dim,
-        heads_per_group: num_heads / num_kv_heads,
-    };
-    let dims = LayerDims { hidden, inter, eps, rope_theta };
-    let seq = SeqContext { positions, seq_len, total_seq };
-    let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
-
-    // RMSNorm + Q projection + RoPE
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden);
-    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
-
-    // Cached GQA attention (replaces ~55 lines of duplicated attention code)
-    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
-
-    // O projection + residual
-    let mut o_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim);
-    let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
-
-    // Pre-FFN RMSNorm + SwiGLU FFN (replaces ~20 lines of duplicated FFN code)
-    let mut normed2 = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
-    let down_out = swiglu_ffn(&normed2, gate_w, up_w, down_w, &dims, seq_len);
-
-    for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
-}
 
 /// Execute a single decoder layer using cached K/V, with quantized matmul acceleration.
 ///

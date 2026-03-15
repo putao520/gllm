@@ -252,6 +252,7 @@ pub(crate) fn cached_gqa_attention(
 /// SwiGLU FFN: RMSNorm → gate/up projections → SiLU → down projection.
 ///
 /// Replaces the duplicated FFN blocks in incremental decode layers.
+#[allow(dead_code)]
 pub(crate) fn swiglu_ffn(
     normed: &[f32],
     gate_w: &[f32],
