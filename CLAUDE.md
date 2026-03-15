@@ -49,6 +49,41 @@
 - **Constraint**: 调度/执行层必须优先选择融合算子 (Fused Kernels)。仅在无法匹配融合模式时，才降级使用原子算子 (Atomic Kernels)。
 - **Constraint**: ONNX Loader 必须实现 Graph Pattern Matching，将子图映射为 Fused Kernels，严禁 naive 的 1:1 翻译。
 
+### 5. JIT 编译融合算子推理引擎（核心技术基础）
+
+gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA/ISV（Instruction Set Architecture / Vector），结合模型参数动态生成最佳性能的融合算子机器码。
+
+**设计目标**：不依赖预编译的算子库，而是在运行时根据 (模型结构 × 硬件能力) 的笛卡尔积生成最优代码。
+
+**四阶段管线** (`gllm-kernels/src/compiler/`):
+
+| 阶段 | 模块 | 职责 |
+|------|------|------|
+| Phase 0: Scalar + SymExec | `registry.rs` + `symexec/` | 标量参考实现 → 符号执行提取 `OpTrace` + `ComputePattern` |
+| Phase 1: SemanticDAG | `semantic_dag.rs` | CompilerGraph + OpTrace → OpClass 自动分类 (ElemWise/Injective/Reduction/Gemm/Opaque) |
+| Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 融合决策 (EpilogueInjection/LoopFusion/TileLevelFusion/QkvSharedInput/NormIntoGemm) + 缓存层级约束 |
+| Phase 3: ISA Lowering | `codegen/x86_64.rs` / `aarch64_dynasm.rs` | DeviceProfile 驱动的 SIMD 代码生成 (AVX2/AVX-512/NEON/SVE) |
+
+**融合模式** (gllm-kernels 层):
+- `EpilogueInjection`: GEMM + 激活/bias/残差 融合到累加器寄存器
+- `LoopFusion`: 逐元素算子链合并为单循环
+- `TileLevelFusion`: 前驱算子嵌入 GEMM MC 循环（输出 > 75% L1 时）
+- `ComputeRoot`: 前驱算子完整计算后驻留 L1/L2（输出 ≤ 75% L1 时）
+- `QkvSharedInput`: Q/K/V 三个 GEMM 共享 pack_a
+- `NormIntoGemm`: RmsNorm 输出直接喂入 GEMM（无中间写回）
+
+**融合模式** (gllm 图优化层, `src/graph/optimizer/`):
+- FlashAttention / GQA / FusedQkvRope / SwiGLU / MoERouting / FusedRMSLinear
+- HardwareFusionPass: 硬件不支持时降级到 Atomic
+- DeadCodeElimination: 移除未使用节点
+
+**设备适配** (`DeviceProfile`):
+- x86_64: SSE2 → AVX → AVX2 → AVX-512（通过 `simd_width` / `use_avx512` 参数化）
+- AArch64: NEON → SVE（通过 `use_neon` / `use_sve` 参数化）
+- GPU: CUDA (PTX) / HIP (AMDGPU) / Metal (AIR)（feature-gated）
+
+**铁律**：所有算子必须走完整管线（Scalar → SymExec → IR → ISA Lowering），禁止跳过任何阶段。详见下方「JIT 编译管线（铁律）」章节。
+
 ## Directory Structure
 
 ```
