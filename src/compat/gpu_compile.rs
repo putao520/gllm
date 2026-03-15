@@ -532,7 +532,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     // ── Per-layer GPU execution ──
     for layer in 0..num_layers {
         // Load all weight tensors for this layer (CPU side)
-        let layer_weights = load_bert_layer_weights_cuda(
+        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
         )?;
 
@@ -700,66 +700,6 @@ fn embed_tokens_cpu<E: Element>(
     }
 
     Ok(hidden_state)
-}
-
-/// Load all weight tensors for a single BERT encoder layer (CUDA variant).
-#[cfg(feature = "cuda")]
-fn load_bert_layer_weights_cuda<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CudaBackend<E>>,
-    backend: &CudaBackend<E>,
-    layer: usize,
-    _seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    transpose: bool,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_cuda(weights, backend, $aliases)?);
-        };
-    }
-    macro_rules! load_bias {
-        ($graph_name:expr, $aliases:expr, $size:expr) => {
-            m.insert($graph_name.to_string(), get_bias_data_cuda(weights, $aliases, $size));
-        };
-    }
-
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
-    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
-    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
-    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
-    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
-    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
-    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
-    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
-    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
-    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
-    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
-
-    // Apply weight transposition if needed (SafeTensors stores [out, in])
-    if transpose {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", hidden, hidden);
-        t("w_k", hidden, hidden);
-        t("w_v", hidden, hidden);
-        t("w_o", hidden, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
 }
 
 /// Get f32 data from CudaBackend weights (mirrors get_f32_data for CpuBackend).
@@ -1547,7 +1487,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     )?;
 
     for layer in 0..num_layers {
-        let layer_weights = load_bert_layer_weights_hip(
+        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
         )?;
 
@@ -1699,65 +1639,6 @@ fn embed_tokens_cpu_hip<E: Element>(
     }
 
     Ok(hidden_state)
-}
-
-/// Load all weight tensors for a single BERT encoder layer (HIP variant).
-#[cfg(feature = "hip")]
-fn load_bert_layer_weights_hip<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, HipBackend<E>>,
-    backend: &HipBackend<E>,
-    layer: usize,
-    _seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    transpose: bool,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_hip(weights, backend, $aliases)?);
-        };
-    }
-    macro_rules! load_bias {
-        ($graph_name:expr, $aliases:expr, $size:expr) => {
-            m.insert($graph_name.to_string(), get_bias_data_hip(weights, $aliases, $size));
-        };
-    }
-
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
-    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
-    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
-    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
-    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
-    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
-    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
-    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
-    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
-    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
-    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
-
-    if transpose {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", hidden, hidden);
-        t("w_k", hidden, hidden);
-        t("w_v", hidden, hidden);
-        t("w_o", hidden, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
 }
 
 /// Get f32 data from HipBackend weights.
@@ -2025,7 +1906,7 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
     // Per-layer GPU execution
     for layer in 0..num_layers {
-        let layer_weights = load_bert_layer_weights_metal(
+        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
         )?;
 
@@ -2170,65 +2051,6 @@ fn embed_tokens_cpu_metal<E: Element>(
     }
 
     Ok(hidden_state)
-}
-
-/// Load BERT layer weights for Metal backend.
-#[cfg(all(target_os = "macos", feature = "metal"))]
-fn load_bert_layer_weights_metal<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, super::metal_backend::MetalBackend<E>>,
-    backend: &super::metal_backend::MetalBackend<E>,
-    layer: usize,
-    _seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    transpose: bool,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_metal(weights, backend, $aliases)?);
-        };
-    }
-    macro_rules! load_bias {
-        ($graph_name:expr, $aliases:expr, $size:expr) => {
-            m.insert($graph_name.to_string(), get_bias_data_metal(weights, $aliases, $size));
-        };
-    }
-
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
-    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
-    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
-    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
-    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
-    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
-    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
-    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
-    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
-    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
-    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
-
-    if transpose {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = super::weight_helpers::transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", hidden, hidden);
-        t("w_k", hidden, hidden);
-        t("w_v", hidden, hidden);
-        t("w_o", hidden, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
 }
 
 /// Get f32 data from Metal backend weights.
