@@ -84,6 +84,35 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 
 **铁律**：所有算子必须走完整管线（Scalar → SymExec → IR → ISA Lowering），禁止跳过任何阶段。详见下方「JIT 编译管线（铁律）」章节。
 
+### 5.1 JIT 编译管线实现完成度（审计 2026-03-15）
+
+| 阶段 | 模块 | 完成度 | 状态 |
+|------|------|--------|------|
+| Phase 0: Scalar + SymExec | `registry.rs` + `symexec/` | 95% | ✅ 全算子注册 + x86_64 SymExec 完整；AArch64 SymExec 缺失 |
+| Phase 1: SemanticDAG | `semantic_dag.rs` | 100% | ✅ OpClass 自动分类 + AI 计算 + Bottleneck 分类 |
+| Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 95% | ✅ 6 种融合模式全部实现 + 寄存器/L1 约束检查 |
+| Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX |
+| Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 60% | ⚠️ GEMM 完整，TileLevelFusion/ComputeRoot 仅 fallback，Norm JIT 缺失 |
+| Phase 3: GPU | `codegen/gpu_ir/` | 95% | ✅ PTX/HIP/MSL 统一框架 + TileLevelFusion/ComputeRoot codegen |
+| gllm 图优化 | `src/graph/optimizer/` | 100% | ✅ 6 个 Pattern Pass + HardwareFusionPass + DCE |
+
+**未完成项（按优先级）**：
+1. **P2**: AArch64 TileLevelFusion/ComputeRoot 分块融合（当前 fallback 到 standalone 执行）
+2. **P2**: AArch64 Norm JIT（RmsNorm/LayerNorm 逐行 JIT 未实现）
+3. **P3**: SVE codegen（框架存在，ISA Lowering 未完成）
+
+### 5.2 背景要求（AI 开发必读）
+
+> **核心定位**：gllm 是一个以 JIT 编译为技术基础的融合算子推理引擎。所有性能关键路径必须通过 JIT 管线生成机器码，而非手写汇编或预编译库。
+>
+> **开发约束**：
+> 1. 新增算子必须走完整四阶段管线（Scalar → SymExec → IR → ISA Lowering），禁止跳过
+> 2. 融合决策由 Phase 2 自动完成，禁止在 codegen 层硬编码融合逻辑
+> 3. ISA 选择由 `DeviceProfile` 驱动，codegen 通过 `simd_width` / `use_avx512` 等参数适配，禁止写死特定 ISA
+> 4. GPU codegen 通过 `GpuDialect` trait 抽象，新增后端只需实现 trait 方法
+> 5. 性能优化的优先级：融合算子 > 原子算子 > scalar fallback
+> 6. 任何"绕过 JIT 管线"的 workaround（如直接调用预编译函数、静默 NOP、scalar fallback）均视为 bug
+
 ## Directory Structure
 
 ```
