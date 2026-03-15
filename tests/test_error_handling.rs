@@ -5,7 +5,7 @@ use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
 use gllm::loader::{Loader, LoaderError};
 use gllm::manifest::{
-    map_architecture_token, tensor_rules_for_arch, ModelArchitecture, ModelKind, ModelManifest,
+    map_architecture_token, ModelArchitecture, ModelKind, ModelManifest,
     EMPTY_FILE_MAP,
 };
 use gllm::engine::BackendError;
@@ -39,7 +39,6 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
         model_id: Cow::Owned(alias.to_string()),
         file_map: EMPTY_FILE_MAP,
         arch,
-        tensor_rules: tensor_rules_for_arch(arch),
         kind,
         rope_base_override: None,
         max_context_override: None,

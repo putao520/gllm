@@ -106,7 +106,9 @@ fn dag_refactor_bind_weights_and_execute() {
     assert_eq!(graph.bind_weights(&provider), 1);
     assert!(graph.weight_bindings.contains_key("w"));
 
-    let executor = FusedGraphExecutor::new(graph);
+    let mut executor = FusedGraphExecutor::new(graph);
+    // Compile before run (JIT requires compilation first)
+    executor.compile(1, 1).unwrap();
     let outputs = executor
         .run(&HashMap::from([("x".to_string(), vec![0u8; 4])]))
         .unwrap();

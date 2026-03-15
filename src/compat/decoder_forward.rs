@@ -852,14 +852,8 @@ pub(crate) fn decoder_forward<E: Element>(
             &crate::weight_names::decoder_final_norm_aliases())?;
 
         let lm_head_w = get_f32_data(weights, backend,
-            &crate::weight_names::lm_head_aliases())?;
-
-        // If lm_head weight not found, try tied embeddings (embed_tokens.weight)
-        let lm_head_w = if lm_head_w.is_empty() {
-            get_f32_data(weights, backend, &crate::weight_names::decoder_embed_aliases())?
-        } else {
-            lm_head_w
-        };
+            &crate::weight_names::lm_head_aliases())
+            .or_else(|_| get_f32_data(weights, backend, &crate::weight_names::decoder_embed_aliases()))?;
 
         let lm_head_w = if transpose_weights {
             transpose_f32(&lm_head_w, vocab_size, hidden)

@@ -36,6 +36,7 @@ pub use safetensors::SafeTensorsLoader;
 
 use gllm_kernels::quant::QuantType;
 pub use adapter::ggml_dtype_to_quant_type;
+pub use pytorch::{convert_bins_to_safetensors, PytorchConversionConfig, PytorchConversionOutput};
 
 /// A quantized tensor stored as raw block bytes with its QuantType metadata.
 /// These are not uploaded via `Backend::upload_weights()` — they stay as raw bytes

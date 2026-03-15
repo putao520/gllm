@@ -58,7 +58,7 @@ fn e2e_generator_gguf() {
     // Debug: print config
     println!("=== Manifest Config ===");
     println!("kind: {:?}", manifest.kind);
-    println!("tensor_rules: {:?}", manifest.tensor_rules);
+    println!("arch: {:?}", manifest.arch);
 
     let response = client
         .generate("The capital of France is")
