@@ -402,6 +402,11 @@ impl GgufReader {
         self.get_arch_u64("expert_intermediate_size")
     }
 
+    pub fn num_experts_per_tok(&self) -> Option<u64> {
+        self.get_arch_u64("expert_used_count")
+            .or_else(|| self.get_arch_u64("num_experts_per_tok"))
+    }
+
     pub fn feed_forward_length(&self) -> Option<u64> {
         self.get_arch_u64("feed_forward_length")
     }

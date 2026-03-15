@@ -93,6 +93,7 @@ pub struct ModelConfig {
     pub num_hidden_layers: usize,
     pub intermediate_size: Option<usize>,
     pub num_experts: Option<usize>,
+    pub num_experts_per_tok: Option<usize>,
     pub expert_intermediate_size: Option<usize>,
     pub vocab_size: usize,
     pub max_position_embeddings: usize,
@@ -277,6 +278,7 @@ impl ModelConfig {
             derived,
             intermediate_size,
             num_experts,
+            num_experts_per_tok,
             expert_intermediate_size,
             max_position_embeddings,
             rope_theta,
@@ -364,6 +366,7 @@ impl ModelConfig {
                     "GGUF metadata field invalid: num_experts".to_string(),
                 ));
             }
+            let num_experts_per_tok = optional_gguf_usize(reader.num_experts_per_tok(), "expert_used_count")?;
             let expert_intermediate_size = optional_gguf_usize(
                 reader.expert_intermediate_size(),
                 "expert_intermediate_size",
@@ -411,6 +414,7 @@ impl ModelConfig {
                 derived,
                 intermediate_size,
                 num_experts,
+                num_experts_per_tok,
                 expert_intermediate_size,
                 max_position_embeddings,
                 rope_theta,
@@ -446,6 +450,7 @@ impl ModelConfig {
             num_hidden_layers: base_derived.num_hidden_layers,
             intermediate_size,
             num_experts,
+            num_experts_per_tok,
             expert_intermediate_size,
             vocab_size: base_derived.vocab_size,
             max_position_embeddings,
@@ -493,7 +498,8 @@ impl ModelConfig {
             value,
             &["intermediate_size", "n_inner", "ffn_inter_dim", "d_ff"],
         );
-        let num_experts = find_usize(value, &["num_experts", "moe.num_experts"]);
+        let num_experts = find_usize(value, &["num_experts", "moe.num_experts", "num_local_experts", "n_routed_experts"]);
+        let num_experts_per_tok = find_usize(value, &["num_experts_per_tok", "num_selected_experts", "num_experts_per_token", "moe.num_experts_per_tok"]);
         let expert_intermediate_size = find_usize(
             value,
             &[
@@ -629,6 +635,7 @@ impl ModelConfig {
             num_hidden_layers,
             intermediate_size,
             num_experts,
+            num_experts_per_tok,
             expert_intermediate_size,
             vocab_size,
             max_position_embeddings,
@@ -648,6 +655,25 @@ impl ModelConfig {
             eos_token_id: find_u32(value, &["eos_token_id"]),
             pad_token_id: find_u32(value, &["pad_token_id"]),
             tensor_map: manifest.tensor_map.clone(),
+        })
+    }
+
+    /// Build MoEConfig from extracted metadata, if this is a MoE model.
+    pub fn build_moe_config(&self, arch: crate::manifest::ModelArchitecture) -> Option<crate::manifest::MoEConfig> {
+        let num_experts = self.num_experts?;
+        if num_experts <= 1 {
+            return None;
+        }
+        let num_experts_per_tok = self.num_experts_per_tok.unwrap_or(2);
+        let router_type = match arch {
+            crate::manifest::ModelArchitecture::DeepSeek => crate::manifest::RouterType::DeepSeek,
+            crate::manifest::ModelArchitecture::Qwen3MoE => crate::manifest::RouterType::Qwen,
+            _ => crate::manifest::RouterType::Mixtral,
+        };
+        Some(crate::manifest::MoEConfig {
+            num_experts,
+            num_experts_per_tok,
+            router_type,
         })
     }
 }
@@ -1566,5 +1592,76 @@ mod tests {
             err.to_string().contains("cross-layer") || err.to_string().contains("ambiguous"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn build_moe_config_deepseek() {
+        use crate::manifest::{ModelArchitecture, RouterType};
+        let cfg = ModelConfig {
+            hidden_size: 2048,
+            num_attention_heads: 16,
+            num_key_value_heads: 16,
+            num_hidden_layers: 28,
+            intermediate_size: Some(10944),
+            num_experts: Some(64),
+            num_experts_per_tok: Some(6),
+            expert_intermediate_size: Some(1408),
+            vocab_size: 102400,
+            max_position_embeddings: 4096,
+            rope_theta: 10000.0,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            rope_scaling: None,
+            kv_cache_block_size: 128,
+            head_dim: 128,
+            dtype_size: 2,
+            use_cache: None,
+            tie_word_embeddings: None,
+            attention_dropout: None,
+            hidden_act: None,
+            layer_norm_epsilon: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+            tensor_map: HashMap::new(),
+        };
+        let moe = cfg.build_moe_config(ModelArchitecture::DeepSeek).unwrap();
+        assert_eq!(moe.num_experts, 64);
+        assert_eq!(moe.num_experts_per_tok, 6);
+        assert_eq!(moe.router_type, RouterType::DeepSeek);
+    }
+
+    #[test]
+    fn build_moe_config_none_for_dense() {
+        use crate::manifest::ModelArchitecture;
+        let cfg = ModelConfig {
+            hidden_size: 2048,
+            num_attention_heads: 16,
+            num_key_value_heads: 16,
+            num_hidden_layers: 28,
+            intermediate_size: Some(10944),
+            num_experts: None,
+            num_experts_per_tok: None,
+            expert_intermediate_size: None,
+            vocab_size: 102400,
+            max_position_embeddings: 4096,
+            rope_theta: 10000.0,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            rope_scaling: None,
+            kv_cache_block_size: 128,
+            head_dim: 128,
+            dtype_size: 2,
+            use_cache: None,
+            tie_word_embeddings: None,
+            attention_dropout: None,
+            hidden_act: None,
+            layer_norm_epsilon: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+            tensor_map: HashMap::new(),
+        };
+        assert!(cfg.build_moe_config(ModelArchitecture::Llama4).is_none());
     }
 }

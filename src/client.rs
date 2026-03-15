@@ -250,7 +250,7 @@ impl Client {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
                 if let Some(arch) = map_architecture_token(arch_str) {
-                    ModelManifest {
+                    let dummy_manifest = ModelManifest {
                         model_id: Cow::Owned(model_id.to_string()),
                         file_map: EMPTY_FILE_MAP,
                         arch,
@@ -258,6 +258,19 @@ impl Client {
                         rope_base_override: None,
                         max_context_override: None,
                         moe_config: None,
+                        tensor_map: HashMap::new(),
+                    };
+                    let moe_config = crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)
+                        .ok()
+                        .and_then(|cfg| cfg.build_moe_config(arch));
+                    ModelManifest {
+                        model_id: Cow::Owned(model_id.to_string()),
+                        file_map: EMPTY_FILE_MAP,
+                        arch,
+                        kind,
+                        rope_base_override: None,
+                        max_context_override: None,
+                        moe_config,
                         tensor_map: HashMap::new(),
                     }
                 } else {
@@ -283,11 +296,14 @@ impl Client {
                     tensor_map: HashMap::new(),
                 };
 
-                let _derived_config =
+                let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
                 // 2. Detect Architecture from Tensor Names
                 let arch = detect_architecture(&loader).unwrap_or(ModelArchitecture::Llama4);
+
+                // 3. Build MoE config from derived metadata
+                let moe_config = derived_config.build_moe_config(arch);
 
                 ModelManifest {
                     model_id: Cow::Owned(model_id.to_string()),
@@ -296,7 +312,7 @@ impl Client {
                     kind,
                     rope_base_override: None,
                     max_context_override: None,
-                    moe_config: None,
+                    moe_config,
                     tensor_map: HashMap::new(),
                 }
             }
