@@ -103,12 +103,17 @@
 | **REQ-KV-003** | KvPipeline 双管线隔离 | Thinking/Reasoning 不污染会话主缓存 | 1. `KvPipeline::{Conversation,Working}` 定义完整<br>2. `prepare_next_turn` 释放 Working，保留 Conversation<br>3. 管线维度参与虚拟页标识 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 | **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | 1. `distill_cpu<E: Element>` 泛型接口<br>2. 相关相似度/评估接口同步泛型化<br>3. 禁止出现 `Vec<f32>` 固定签名作为核心实现 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 
+### 4.2 自适应 Chunk 与 KV 增量更新 (REQ-KV-EXT)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-KV-EXT-001** | 自适应 Chunk 大小 | 根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len | 1. `AdaptiveChunkPolicy` 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size<br>2. Executor 调用 `plan_prefill()` 时使用自适应 chunk_size 而非 `max_seq_len`<br>3. chunk_size 范围 `[ChunkedConfig::chunk_size, max_seq_len]`，下界为 ChunkedConfig 默认值 64<br>4. 高负载（L1 可用 < 25%）时 chunk_size 缩小至下界<br>5. 低负载（L1 可用 > 75%）时 chunk_size 扩大至 max_seq_len<br>6. 单元测试覆盖高/低/中三种负载场景 | 📋 待开发 |
+| **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 📋 待开发 |
+
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
 |------|------|------|
 | **L3 分布式缓存** | Redis/NATS 等分布式后端支持 | 📋 未来计划 |
-| **自适应 Chunk 大小** | 根据负载动态调整 chunk_size | 📋 未来计划 |
-| **KV 增量更新** | 仅蒸馏变化的 KV 部分 | 📋 未来计划 |
 
 ## 5. 测试矩阵 (REQ-TEST)
 
@@ -209,3 +214,29 @@
 - `detection.rs` 的 `expect()` 替换为 `Result` 返回
 - 探测失败返回 `Err(BackendContextError)`，不 panic
 - **验收标准**: 后端探测失败时返回 Err 而非 panic
+
+## gllm-kernels 侧需求 (REQ-KERNELS)
+
+> **仓库**: `/home/putao/code/rust/gllm-kernels/`
+> **关联**: 以下需求在 gllm-kernels 仓库实现，gllm 侧仅记录需求定义和验收标准
+
+### 8.1 IQ Codebook 嵌入 (REQ-KERNELS-IQ)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-KERNELS-IQ-001** | IQ1_S dequant 实现 | 替换 `dequant_iq1_s` stub，使用 `IQ1S_GRID`（2048×u64 E8-lattice）实现真实反量化 | 1. 输出非全零<br>2. 与 llama.cpp IQ1_S 参考实现数值一致（容差 < 1e-4）<br>3. block_bytes=50, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-002** | IQ1_M dequant 实现 | 替换 `dequant_iq1_m` stub，使用 `IQ1S_GRID` + 额外 scale 字段 | 1. 输出非全零<br>2. 与 llama.cpp IQ1_M 参考实现数值一致<br>3. block_bytes=56, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-003** | IQ2_XXS dequant 实现 | 替换 `dequant_iq2_xxs` stub，使用 D4-lattice codebook（256×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_XXS 参考实现数值一致<br>3. block_bytes=66, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-004** | IQ2_XS dequant 实现 | 替换 `dequant_iq2_xs` stub，使用 `KSIGNS_IQ2XS`/`KMASK_IQ2XS` + D4-lattice（512×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_XS 参考实现数值一致<br>3. block_bytes=74, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-005** | IQ2_S dequant 实现 | 替换 `dequant_iq2_s` stub，使用 D4-lattice（1024×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_S 参考实现数值一致<br>3. block_bytes=82, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-006** | IQ3_XXS dequant 实现 | 替换 `dequant_iq3_xxs` stub，使用 D4-lattice（256×u32） | 1. 输出非全零<br>2. 与 llama.cpp IQ3_XXS 参考实现数值一致<br>3. block_bytes=98, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-007** | IQ3_S dequant 实现 | 替换 `dequant_iq3_s` stub，使用 D4-lattice（512×u32） | 1. 输出非全零<br>2. 与 llama.cpp IQ3_S 参考实现数值一致<br>3. block_bytes=110, QK_K=256 | 📋 待开发 |
+| **REQ-KERNELS-IQ-008** | IQ matmul 集成 | `iq_matmul()` 调用真实 dequant 而非 stub，支持所有 7 种 IQ 格式 | 1. IQ 格式权重的 matmul 输出非全零<br>2. 与逐元素 dequant→f32 matmul 结果一致 | 📋 待开发 |
+
+### 8.2 GPU TileLevelFusion / ComputeRoot (REQ-KERNELS-GPU)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × dtype_size`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 📋 待开发 |
+| **REQ-KERNELS-GPU-002** | GPU ComputeRoot | `plan_emitter.rs` 支持 `FusionMode::ComputeRoot`，全量 Norm 输出写入 shared/global memory 后执行 GEMM | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. Norm 全量输出缓冲区分配正确<br>3. 与 CPU ComputeRoot 数值一致（容差 < 1e-5） | 📋 待开发 |
+| **REQ-KERNELS-GPU-003** | GPU 融合模式决策复用 | GPU codegen 复用 `detect_tile_vs_compute_root()` 的 75% L1 阈值决策逻辑，GPU 侧用 shared memory 容量替代 L1 | 1. `DeviceProfile` 提供 `shared_memory_per_block()` 方法<br>2. 阈值决策对 GPU 使用 shared memory 容量而非 L1 cache | 📋 待开发 |

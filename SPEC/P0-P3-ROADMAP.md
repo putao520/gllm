@@ -102,13 +102,73 @@
 
 **完成状态**: 15 个测试文件补充了 SPEC 06-TESTING-STRATEGY §1.2 格式注释，共 74 条 TEST-XXX 注释覆盖 21 个测试文件。格式: `TEST-{TYPE}-{SEQ}` + 关联需求 + 测试类型 + 期望结果。
 
-### P2-5: IQ 系列 Codebook 嵌入
+### P2-5: IQ 系列 Codebook 嵌入 → 🔄 立即开发
 
 **问题**: IQ1S/IQ1M/IQ2XXS/IQ2XS/IQ2S/IQ3XXS/IQ3S 在 gllm-kernels 中输出 zeros（codebook 未嵌入）。
 
-**修改范围**: gllm-kernels `src/backend/mod.rs` — 嵌入 E8/D4 lattice codebook 表。
+**需求**: REQ-KERNELS-IQ-001 ~ REQ-KERNELS-IQ-008
 
-**注意**: 这是 gllm-kernels 侧修改，不在 gllm 仓库内。
+**修改范围**: gllm-kernels 仓库
+- `src/backend/mod.rs` — 7 个 `dequant_iq*` stub 替换为真实实现
+- `src/codebooks.rs` — 已有 `IQ1S_GRID`/`IQ2XXS_GRID` 等表，需验证完整性
+- 新增单元测试验证每种格式输出非全零
+
+**实施顺序**: 可与 P3-4 并行，无依赖
+
+---
+
+## P1-EXT — 新增立即开发项
+
+### P1-EXT-1: 自适应 Chunk 大小 (REQ-KV-EXT-001)
+
+**问题**: Executor 当前用 `max_seq_len`（如 4096）作为 `plan_prefill()` 的 chunk_size，导致 prefill 实际未分块。`ChunkedConfig::chunk_size`（默认 64）未被使用。
+
+**修改范围**: gllm 仓库
+- `src/scheduler/vllm2024.rs` — 新增 `AdaptiveChunkPolicy` 结构体
+- `src/engine/executor.rs` — `plan_prefill()` 调用处替换为自适应 chunk_size
+- `src/scheduler/memory_manager.rs` — `plan_prefill()` 无需修改（已支持任意 chunk_size）
+
+**架构方案**:
+```
+AdaptiveChunkPolicy {
+    min_chunk: usize,      // = ChunkedConfig::chunk_size (64)
+    max_chunk: usize,      // = max_seq_len
+}
+
+fn compute_chunk_size(&self, l1_available_ratio: f32, concurrent_requests: usize, prompt_len: usize) -> usize {
+    // 高负载 (l1 < 25%): min_chunk
+    // 中负载 (25% <= l1 <= 75%): 线性插值
+    // 低负载 (l1 > 75%): max_chunk
+    // 短 prompt (< min_chunk): prompt_len
+}
+```
+
+**依赖**: 无，可立即开始
+
+### P1-EXT-2: KV 增量蒸馏 (REQ-KV-EXT-002)
+
+**问题**: `SwiftKvState::distill_cpu()` 每次处理全部 KV 页面，多轮对话中大量已蒸馏页面被重复处理。
+
+**修改范围**: gllm 仓库
+- `src/scheduler/vllm2024.rs` — `SwiftKvState` 新增 `last_distilled_page` 字段 + `distill_cpu_incremental()` 方法
+- `src/scheduler/types.rs` — `KvPipeline::prepare_next_turn()` 重置 Working 管线蒸馏边界
+
+**架构方案**:
+```
+SwiftKvState {
+    config: SwiftKVConfig,
+    last_result: Option<DistillPagesSummary>,
+    last_distilled_page: usize,  // 新增：上次蒸馏边界
+}
+
+fn distill_cpu_incremental<E: Element + Float>(&mut self, pages: &[Vec<E>]) -> DistillOutcome<E> {
+    // 仅处理 pages[self.last_distilled_page..]
+    // 边界页面需要 window_size 重叠以保证 SIKV 滑动窗口连续性
+    // 更新 self.last_distilled_page = pages.len()
+}
+```
+
+**依赖**: 无，可立即开始（与 P1-EXT-1 并行）
 
 ---
 
@@ -126,11 +186,25 @@
 
 **完成状态**: `pytorch.rs` 纯 Rust 实现 pickle 反序列化 + safetensors 转换（内联最小化 pickle 协议解析器，无 candle/tch 依赖，符合 REQ-ARCH-003）。`Loader::load()` 的 `WeightFormat::PyTorch` 分支调用 `convert_bins_to_safetensors()` 转换后走标准 safetensors 加载路径。默认启用，无需 feature flag。
 
-### P3-4: GPU TileLevelFusion / ComputeRoot
+### P3-4: GPU TileLevelFusion / ComputeRoot → 🔄 立即开发
 
-**问题**: 这两种融合模式在 GPU codegen 中返回 error。
+**需求**: REQ-KERNELS-GPU-001 ~ REQ-KERNELS-GPU-003
 
-**修改范围**: gllm-kernels GPU codegen 扩展。
+**修改范围**: gllm-kernels 仓库
+- `src/compiler/codegen/gpu_ir/plan_emitter.rs` — 移除 L62-69 error，实现 TileLevelFusion/ComputeRoot GPU codegen
+- `src/compiler/codegen/gpu_ir/` — 新增 shared memory 分配和 tiling 逻辑
+- `src/dispatch/mod.rs` — `DeviceProfile` 新增 `shared_memory_per_block()` 方法
+
+**架构方案**:
+- TileLevelFusion: shared memory 替代 CPU L1 cache tiling
+  - 分配 `tile_rows × k × dtype_size` shared memory
+  - Norm 输出写入 shared memory → GEMM 从 shared memory 读取
+  - Thread block 内 MC 循环映射到 shared memory tiles
+- ComputeRoot: 全量 Norm 输出写入 global memory（shared memory 不够时）或 shared memory（够时）
+  - 决策阈值: shared_memory_per_block × 75%（复用 CPU 侧 75% L1 逻辑）
+- 三后端 (PTX/HIP C++/MSL) 各自实现 shared memory 语义
+
+**依赖**: 无，可与 P2-5 并行
 
 ### P3-5: GLLM_CACHE_DIR 环境变量 (ARCH-MODEL-CACHE) ✅ 已完成
 
@@ -147,14 +221,15 @@
 ## 优先级总览
 
 ```
-P0 (性能关键 + 正确性)     P1 (功能完善)           P2 (质量)              P3 (未来)
-─────────────────────     ──────────────────     ──────────────────     ──────────────
-P0-1 KV Cache 增量化 ✅    P1-1 架构模板 ×11 ✅   P2-1 后端一致性测试 ✅  P3-1 MoE 路由 ✅
-P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅ P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
-P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅  P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
-P0-4 Backend Detection ✅  P1-4 策略热切换 ✅      P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合扩展
-                           P1-5 量化推理加速 ✅    P2-5 IQ Codebook       P3-5 GLLM_CACHE_DIR ✅
-                                                                         P3-6 分布式 KV Cache
+P0 (性能关键 + 正确性)     P1 (功能完善)              P2 (质量)              P3 (未来)
+─────────────────────     ──────────────────────    ──────────────────     ──────────────
+P0-1 KV Cache 增量化 ✅    P1-1 架构模板 ×11 ✅      P2-1 后端一致性测试 ✅  P3-1 MoE 路由 ✅
+P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅    P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
+P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅     P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
+P0-4 Backend Detection ✅  P1-4 策略热切换 ✅         P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合 🔄
+                           P1-5 量化推理加速 ✅       P2-5 IQ Codebook 🔄    P3-5 GLLM_CACHE_DIR ✅
+                           P1-EXT-1 自适应 Chunk 🔄                         P3-6 分布式 KV Cache
+                           P1-EXT-2 KV 增量蒸馏 🔄
 ```
 
 ## 依赖关系
@@ -167,9 +242,12 @@ P1-2 (Observer Phase2) ← 依赖 P0-1（需要 forward 路径中的 logits/atte
 P1-3 (KernelStrategy) ← 无依赖
 P1-4 (策略热切换) ← 依赖 P1-3
 P1-5 (量化加速) ← 依赖 P0-1（需要 KV cache 正确工作）
+P1-EXT-1 (自适应 Chunk) ← 无依赖，可立即开始
+P1-EXT-2 (KV 增量蒸馏) ← 无依赖，可与 P1-EXT-1 并行
 P2-1 (后端一致性) ← 依赖 P0-1
-P2-5 (IQ Codebook) ← gllm-kernels 侧修改
+P2-5 (IQ Codebook) ← gllm-kernels 侧修改，无 gllm 依赖
 P3-1 (MoE) ← 依赖 P1-1g (DeepSeek 模板) + gllm-kernels MoE kernel
+P3-4 (GPU 融合) ← gllm-kernels 侧修改，无 gllm 依赖，可与 P2-5 并行
 ```
 
 ## 修改文件清单
@@ -186,6 +264,13 @@ P3-1 (MoE) ← 依赖 P1-1g (DeepSeek 模板) + gllm-kernels MoE kernel
 | P1-3 | `src/engine/executor.rs` | kernel_strategy 传递 |
 | P1-4 | `src/engine/executor.rs` | set_policy() 方法 |
 | P1-5 | `src/compat/decoder_forward.rs` | quantized_matmul 接入 |
+| P1-EXT-1 | `src/scheduler/vllm2024.rs` | AdaptiveChunkPolicy 结构体 |
+| P1-EXT-1 | `src/engine/executor.rs` | plan_prefill() 自适应 chunk_size |
+| P1-EXT-2 | `src/scheduler/vllm2024.rs` | SwiftKvState 增量蒸馏 |
 | P2-1 | `tests/test_backend_compat.rs` | 新增 |
 | P2-2 | `tests/test_scheduler_refactor.rs` | 新增 |
 | P2-3 | `tests/e2e_alignment/` | 新增目录 |
+| P2-5 | `gllm-kernels/src/backend/mod.rs` | 7 个 IQ dequant 实现 |
+| P2-5 | `gllm-kernels/src/codebooks.rs` | codebook 表验证/补全 |
+| P3-4 | `gllm-kernels/src/compiler/codegen/gpu_ir/plan_emitter.rs` | TileLevelFusion/ComputeRoot GPU codegen |
+| P3-4 | `gllm-kernels/src/dispatch/mod.rs` | DeviceProfile shared_memory_per_block() |
