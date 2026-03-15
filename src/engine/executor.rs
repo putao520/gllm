@@ -754,6 +754,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     "ONNX execution plan has no logits output".to_string(),
                 ));
             }
+
+            // Validate KV cache layer count matches ONNX graph KV outputs
+            if !plan.kv_outputs.is_empty() {
+                let onnx_layers = onnx_kv_layer_count(&plan.kv_outputs);
+                if onnx_layers > 0 && onnx_layers != self.kv_cache_config.num_layers {
+                    log::warn!(
+                        "ONNX KV output layers ({}) differs from model config layers ({}); \
+                         KV cache managed by compat layer using model config",
+                        onnx_layers,
+                        self.kv_cache_config.num_layers
+                    );
+                }
+            }
         }
 
         let kv_handle = self.active_kv_handle()?;
@@ -1563,6 +1576,19 @@ fn is_onnx_logits_output(name: &str) -> bool {
     normalized.contains("logits")
 }
 
+/// Extract the number of KV cache layers from ONNX KV output names.
+///
+/// ONNX models typically expose KV outputs as `present.{layer}.key` and
+/// `present.{layer}.value`. Each layer has exactly one key and one value
+/// output, so the layer count is `kv_outputs.len() / 2`.
+fn onnx_kv_layer_count(kv_outputs: &[String]) -> usize {
+    if kv_outputs.is_empty() {
+        return 0;
+    }
+    // Each layer produces a key + value pair
+    kv_outputs.len() / 2
+}
+
 fn shannon_entropy(logits: &[f32]) -> f32 {
     if logits.is_empty() {
         return 0.0;
@@ -1626,5 +1652,33 @@ mod tests {
     fn shannon_entropy_empty() {
         let h = super::shannon_entropy(&[]);
         assert_eq!(h, 0.0);
+    }
+
+    #[test]
+    fn onnx_kv_layer_count_from_outputs() {
+        // 2 layers × (key + value) = 4 outputs → 2 layers
+        let kv = vec![
+            "present.0.key".to_string(),
+            "present.0.value".to_string(),
+            "present.1.key".to_string(),
+            "present.1.value".to_string(),
+        ];
+        assert_eq!(super::onnx_kv_layer_count(&kv), 2);
+    }
+
+    #[test]
+    fn onnx_kv_layer_count_empty() {
+        assert_eq!(super::onnx_kv_layer_count(&[]), 0);
+    }
+
+    #[test]
+    fn onnx_kv_layer_count_odd_outputs() {
+        // 3 outputs (malformed) → floor(3/2) = 1
+        let kv = vec![
+            "present.0.key".to_string(),
+            "present.0.value".to_string(),
+            "present.1.key".to_string(),
+        ];
+        assert_eq!(super::onnx_kv_layer_count(&kv), 1);
     }
 }
