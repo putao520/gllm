@@ -58,7 +58,7 @@ pub mod backend_trait {
             weights: &dyn TensorLookup<E, Self>,
             kv_caches: &mut [KvCacheHandle],
             config: &GeneratorForwardConfig,
-        ) -> Result<Vec<LogitsHandle>, BackendError>
+        ) -> Result<(Vec<LogitsHandle>, f32), BackendError>
         where
             Self: Sized;
 

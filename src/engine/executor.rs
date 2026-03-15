@@ -725,7 +725,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         tokens.into_iter().next().ok_or(ExecutorError::EmptySample)
     }
 
-    fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<Vec<LogitsHandle>> {
+    fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<(Vec<LogitsHandle>, f32)> {
         if let Some(plan) = self.onnx_generator_plan.as_ref() {
             if plan.execution_order.is_empty() {
                 return Err(ExecutorError::OnnxPlan(
@@ -942,7 +942,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let batch_input = BatchInput { sequences };
 
         // 4. Run Backend Forward
-        let logits_list = self.run_batch_forward(&batch_input)?;
+        let (logits_list, batch_sparsity) = self.run_batch_forward(&batch_input)?;
 
         // 5. Process Results
         // Note: batch_forward_gpu_pure must return results in the same order as input sequences
@@ -970,10 +970,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         };
         self.observer.update_logits_entropy(batch_entropy);
-        // attention_sparsity: MHA op currently only outputs attn_out, not attention weights.
-        // Requires MHA op extension to return weights for actual sparsity measurement.
-        // Setting to 0.0 per SPEC "Phase 2 — reserved" positioning.
-        self.observer.update_attention_sparsity(0.0);
+        self.observer.update_attention_sparsity(batch_sparsity);
 
         // Processing results loop
         for (i, logits) in logits_list.iter().enumerate() {
@@ -1054,7 +1051,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mut kv_cache = self.active_kv_handle()?;
 
-        let logits_list = self.backend.batch_forward_gpu_pure(
+        let (logits_list, _sparsity) = self.backend.batch_forward_gpu_pure(
             &batch_input,
             &self.topology,
             &self.weights,

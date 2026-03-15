@@ -152,7 +152,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
-    ) -> Result<Vec<LogitsHandle>, BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
         if config.kernel_strategy != crate::scheduler::jit_types::KernelStrategy::AccuracyFirst {
             log::info!("cpu_backend: executing with {:?} strategy", config.kernel_strategy);
         }

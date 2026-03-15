@@ -147,10 +147,11 @@ impl<E: Element> Backend<E> for HipBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
-    ) -> Result<Vec<LogitsHandle>, BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
         #[cfg(feature = "hip")]
         {
             super::gpu_compile::hip_decoder_forward(self, input, topology, weights, kv_caches, config)
+                .map(|logits| (logits, 0.0))
         }
         #[cfg(not(feature = "hip"))]
         {

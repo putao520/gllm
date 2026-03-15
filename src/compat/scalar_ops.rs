@@ -181,19 +181,23 @@ pub(crate) fn scalar_moe_ffn(
 // Extracted composite operations (eliminate 3× attention duplication)
 // ---------------------------------------------------------------------------
 
+/// Sparsity threshold: softmax weights below this are considered "sparse".
+const ATTN_SPARSITY_THRESHOLD: f32 = 0.01;
+
 /// Cached GQA attention: compute attention scores using cached K/V.
 ///
-/// Replaces the 3 duplicated ~55-line attention blocks in the original
-/// `scalar_incremental_decode_layer`, `quantized_incremental_decode_layer`,
-/// and `scalar_incremental_moe_decode_layer`.
+/// Returns `(attn_output, sparsity)` where sparsity is the fraction of
+/// softmax weights below `ATTN_SPARSITY_THRESHOLD` across all heads and positions.
 pub(crate) fn cached_gqa_attention(
     q: &[f32],
     kv: &KvCacheSlice,
     seq: &SeqContext,
     geom: &AttentionGeometry,
-) -> Vec<f32> {
+) -> (Vec<f32>, f32) {
     let scale = 1.0 / (geom.head_dim as f32).sqrt();
     let mut attn_out = vec![0.0f32; seq.seq_len * geom.q_dim];
+    let mut sparse_count: u64 = 0;
+    let mut total_count: u64 = 0;
 
     for h in 0..geom.num_heads {
         let kv_h = h / geom.heads_per_group;
@@ -233,6 +237,15 @@ pub(crate) fn cached_gqa_attention(
                 }
             }
 
+            // Sparsity: count weights below threshold (only valid positions)
+            let valid_len = (cur_pos + 1).min(seq.total_seq);
+            for &w in scores.iter().take(valid_len) {
+                if w < ATTN_SPARSITY_THRESHOLD {
+                    sparse_count += 1;
+                }
+                total_count += 1;
+            }
+
             // Weighted sum of V
             let out_offset = s * geom.q_dim + h * geom.head_dim;
             for d in 0..geom.head_dim {
@@ -246,7 +259,12 @@ pub(crate) fn cached_gqa_attention(
         }
     }
 
-    attn_out
+    let sparsity = if total_count > 0 {
+        sparse_count as f32 / total_count as f32
+    } else {
+        0.0
+    };
+    (attn_out, sparsity)
 }
 
 /// SwiGLU FFN: RMSNorm → gate/up projections → SiLU → down projection.
@@ -281,8 +299,8 @@ pub(crate) fn swiglu_ffn(
 
 /// Full-sequence GQA attention for prefill (no KV cache).
 ///
-/// Takes complete Q [seq_len, q_dim], K [seq_len, kv_dim], V [seq_len, kv_dim]
-/// projections and computes causal self-attention.
+/// Returns `(attn_output, sparsity)` where sparsity is the fraction of
+/// softmax weights below `ATTN_SPARSITY_THRESHOLD` across all heads and positions.
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn prefill_gqa_attention(
     q: &[f32],
@@ -290,9 +308,11 @@ pub(crate) fn prefill_gqa_attention(
     v: &[f32],
     seq_len: usize,
     geom: &AttentionGeometry,
-) -> Vec<f32> {
+) -> (Vec<f32>, f32) {
     let scale = 1.0 / (geom.head_dim as f32).sqrt();
     let mut attn_out = vec![0.0f32; seq_len * geom.q_dim];
+    let mut sparse_count: u64 = 0;
+    let mut total_count: u64 = 0;
 
     for h in 0..geom.num_heads {
         let kv_h = h / geom.heads_per_group;
@@ -318,6 +338,15 @@ pub(crate) fn prefill_gqa_attention(
                     *score /= sum;
                 }
             }
+
+            // Sparsity: count weights below threshold
+            for &w in scores.iter().take(s + 1) {
+                if w < ATTN_SPARSITY_THRESHOLD {
+                    sparse_count += 1;
+                }
+                total_count += 1;
+            }
+
             let o_off = s * geom.q_dim + h * geom.head_dim;
             for d in 0..geom.head_dim {
                 let mut val = 0.0f32;
@@ -329,5 +358,10 @@ pub(crate) fn prefill_gqa_attention(
         }
     }
 
-    attn_out
+    let sparsity = if total_count > 0 {
+        sparse_count as f32 / total_count as f32
+    } else {
+        0.0
+    };
+    (attn_out, sparsity)
 }

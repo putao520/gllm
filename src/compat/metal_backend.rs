@@ -141,10 +141,11 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
         &self, input: &BatchInput, topology: &AttentionTopology,
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle], config: &GeneratorForwardConfig,
-    ) -> Result<Vec<LogitsHandle>, BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             super::gpu_compile::metal_decoder_forward(self, input, topology, weights, kv_caches, config)
+                .map(|logits| (logits, 0.0))
         }
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
         {

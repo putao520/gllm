@@ -46,7 +46,7 @@ fn scalar_moe_prefill_layer(
     num_experts: usize,
     top_k: usize,
     output: &mut [f32],
-) {
+) -> f32 {
     let mut normed = vec![0.0f32; seq_len * dims.hidden];
     scalar_rms_norm(hidden_state, rn1_w, &mut normed, dims.hidden, dims.eps);
 
@@ -60,7 +60,7 @@ fn scalar_moe_prefill_layer(
     scalar_rope(&mut q_proj, positions, geom.head_dim, dims.rope_theta);
     scalar_rope(&mut k_proj, positions, geom.head_dim, dims.rope_theta);
 
-    let attn_out = prefill_gqa_attention(&q_proj, &k_proj, &v_proj, seq_len, geom);
+    let (attn_out, sparsity) = prefill_gqa_attention(&q_proj, &k_proj, &v_proj, seq_len, geom);
 
     let mut o_out = vec![0.0f32; seq_len * dims.hidden];
     scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, dims.hidden, geom.q_dim);
@@ -76,6 +76,7 @@ fn scalar_moe_prefill_layer(
     );
 
     for i in 0..seq_len * dims.hidden { output[i] = resid1[i] + moe_out[i]; }
+    sparsity
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     max_seq_len: usize,
     transpose_weights: bool,
     output: &mut [f32],
-) -> Result<(), BE> {
+) -> Result<f32, BE> {
     let geom = AttentionGeometry {
         num_heads, num_kv_heads, head_dim,
         q_dim: num_heads * head_dim,
@@ -131,7 +132,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
 
     // Cached GQA attention
-    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
+    let (attn_out, sparsity) = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
 
     // O projection (quantized) + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
@@ -156,7 +157,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     quantized_linear(backend, &swiglu, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
 
     for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
-    Ok(())
+    Ok(sparsity)
 }
 
 /// Execute a single MoE decoder layer using cached K/V for attention.
@@ -189,7 +190,7 @@ fn scalar_incremental_moe_decode_layer(
     num_experts: usize,
     top_k: usize,
     output: &mut [f32],
-) {
+) -> f32 {
     let geom = AttentionGeometry {
         num_heads, num_kv_heads, head_dim,
         q_dim: num_heads * head_dim,
@@ -207,7 +208,7 @@ fn scalar_incremental_moe_decode_layer(
     scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
 
     // Cached GQA attention
-    let attn_out = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
+    let (attn_out, sparsity) = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
 
     // O projection + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
@@ -224,6 +225,7 @@ fn scalar_incremental_moe_decode_layer(
     );
 
     for i in 0..seq_len * hidden { output[i] = resid1[i] + moe_out[i]; }
+    sparsity
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +334,7 @@ pub(crate) fn decoder_forward<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     kv_caches: &mut [KvCacheHandle],
     config: &GeneratorForwardConfig,
-) -> Result<Vec<LogitsHandle>, BE> {
+) -> Result<(Vec<LogitsHandle>, f32), BE> {
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
         return Err(BE::Other("Decoder forward only supports f32 element type".into()));
     }
@@ -354,6 +356,8 @@ pub(crate) fn decoder_forward<E: Element>(
     let moe_top_k = moe_cfg.map(|c| c.num_experts_per_tok).unwrap_or(0);
 
     let mut results = Vec::with_capacity(input.sequences.len());
+    let mut total_sparsity = 0.0f32;
+    let mut sparsity_layers = 0u32;
 
     for (seq_idx, seq) in input.sequences.iter().enumerate() {
         let tokens = &seq.tokens;
@@ -500,7 +504,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     let o_w_f32 = weight_data_to_f32(
                         &o_w, backend, transpose_weights, hidden, num_heads * head_dim)?;
 
-                    scalar_incremental_moe_decode_layer(
+                    let layer_sparsity = scalar_incremental_moe_decode_layer(
                         &hidden_state,
                         &q_w_f32, &o_w_f32, &rn1_w, &rn2_w,
                         &router_w, &expert_weights,
@@ -513,6 +517,8 @@ pub(crate) fn decoder_forward<E: Element>(
                         moe_num_experts, moe_top_k,
                         &mut layer_out,
                     );
+                    total_sparsity += layer_sparsity;
+                    sparsity_layers += 1;
                 } else {
                     // Dense layer: load standard FFN weights
                     let gate_w = get_weight_data(weights, backend,
@@ -522,7 +528,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     let down_w = get_weight_data(weights, backend,
                         &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
 
-                    quantized_incremental_decode_layer(
+                    let layer_sparsity = quantized_incremental_decode_layer(
                         backend,
                         &hidden_state,
                         &q_w, &o_w, &rn1_w,
@@ -535,6 +541,8 @@ pub(crate) fn decoder_forward<E: Element>(
                         transpose_weights,
                         &mut layer_out,
                     )?;
+                    total_sparsity += layer_sparsity;
+                    sparsity_layers += 1;
                 }
 
                 hidden_state.copy_from_slice(&layer_out);
@@ -623,7 +631,7 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
-                scalar_moe_prefill_layer(
+                let layer_sparsity = scalar_moe_prefill_layer(
                     &hidden_state,
                     &q_w, &k_w, &v_w, &o_w,
                     &rn1_w, &rn2_w,
@@ -636,6 +644,8 @@ pub(crate) fn decoder_forward<E: Element>(
                     moe_num_experts, moe_top_k,
                     &mut layer_out,
                 );
+                total_sparsity += layer_sparsity;
+                sparsity_layers += 1;
 
                 // Update KV cache for this layer
                 if has_kv_cache {
@@ -788,7 +798,12 @@ pub(crate) fn decoder_forward<E: Element>(
         results.push(LogitsHandle { data: logits });
     }
 
-    Ok(results)
+    let avg_sparsity = if sparsity_layers > 0 {
+        total_sparsity / sparsity_layers as f32
+    } else {
+        0.0
+    };
+    Ok((results, avg_sparsity))
 }
 
 // ---------------------------------------------------------------------------
