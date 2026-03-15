@@ -92,12 +92,11 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 | Phase 1: SemanticDAG | `semantic_dag.rs` | 100% | ✅ OpClass 自动分类 + AI 计算 + Bottleneck 分类 |
 | Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 95% | ✅ 6 种融合模式全部实现 + 寄存器/L1 约束检查 |
 | Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX |
-| Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 90% | ✅ GEMM 完整 + TileLevelFusion/ComputeRoot 真正 NEON norm JIT 融合 + emit_norm_row_jit_neon()。⚠️ SVE codegen 未完成 |
-| Phase 3: GPU | `codegen/gpu_ir/` | 95% | ✅ PTX/HIP/MSL 统一框架 + TileLevelFusion/ComputeRoot codegen |
+| Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 100% | ✅ GEMM + TileLevelFusion/ComputeRoot NEON/SVE norm JIT 融合 + emit_norm_row_jit() 自动分派 SVE/NEON |
+| Phase 3: GPU | `codegen/gpu_ir/` | 100% | ✅ PTX/HIP/MSL 三后端 TileLevelFusion/ComputeRoot codegen 全部实现 |
 | gllm 图优化 | `src/graph/optimizer/` | 100% | ✅ 6 个 Pattern Pass + HardwareFusionPass + DCE |
 
-**未完成项（按优先级）**：
-1. **P3**: SVE codegen（框架存在，ISA Lowering 未完成）
+**全部完成** (2026-03-15 审计确认)
 
 ### 5.2 背景要求（AI 开发必读）
 

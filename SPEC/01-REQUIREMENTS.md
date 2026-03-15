@@ -237,6 +237,6 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × dtype_size`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 🟡 HIP ✅ / PTX ❌ / MSL ❌ |
-| **REQ-KERNELS-GPU-002** | GPU ComputeRoot | `plan_emitter.rs` 支持 `FusionMode::ComputeRoot`，全量 Norm 输出写入 shared/global memory 后执行 GEMM | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. Norm 全量输出缓冲区分配正确<br>3. 与 CPU ComputeRoot 数值一致（容差 < 1e-5） | 🟡 HIP ✅ / PTX ❌ / MSL ❌ |
+| **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × dtype_size`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
+| **REQ-KERNELS-GPU-002** | GPU ComputeRoot | `plan_emitter.rs` 支持 `FusionMode::ComputeRoot`，全量 Norm 输出写入 shared/global memory 后执行 GEMM | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. Norm 全量输出缓冲区分配正确<br>3. 与 CPU ComputeRoot 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
 | **REQ-KERNELS-GPU-003** | GPU 融合模式决策复用 | GPU codegen 复用 `detect_tile_vs_compute_root()` 的 75% L1 阈值决策逻辑，GPU 侧用 shared memory 容量替代 L1 | 1. `DeviceProfile` 提供 `shared_memory_per_block()` 方法<br>2. 阈值决策对 GPU 使用 shared memory 容量而非 L1 cache | 🟢 已实现 |
