@@ -102,73 +102,21 @@
 
 **完成状态**: 15 个测试文件补充了 SPEC 06-TESTING-STRATEGY §1.2 格式注释，共 74 条 TEST-XXX 注释覆盖 21 个测试文件。格式: `TEST-{TYPE}-{SEQ}` + 关联需求 + 测试类型 + 期望结果。
 
-### P2-5: IQ 系列 Codebook 嵌入 → 🔄 立即开发
+### P2-5: IQ 系列 Codebook 嵌入 ✅ 已完成
 
-**问题**: IQ1S/IQ1M/IQ2XXS/IQ2XS/IQ2S/IQ3XXS/IQ3S 在 gllm-kernels 中输出 zeros（codebook 未嵌入）。
-
-**需求**: REQ-KERNELS-IQ-001 ~ REQ-KERNELS-IQ-008
-
-**修改范围**: gllm-kernels 仓库
-- `src/backend/mod.rs` — 7 个 `dequant_iq*` stub 替换为真实实现
-- `src/codebooks.rs` — 已有 `IQ1S_GRID`/`IQ2XXS_GRID` 等表，需验证完整性
-- 新增单元测试验证每种格式输出非全零
-
-**实施顺序**: 可与 P3-4 并行，无依赖
+**完成状态**: 7 个 IQ dequant 函数已完整实现（codebook 查表），8 个单元测试已通过。`iq_stub_dequant` 死代码已移除。
 
 ---
 
 ## P1-EXT — 新增立即开发项
 
-### P1-EXT-1: 自适应 Chunk 大小 (REQ-KV-EXT-001)
+### P1-EXT-1: 自适应 Chunk 大小 (REQ-KV-EXT-001) ✅ 已完成
 
-**问题**: Executor 当前用 `max_seq_len`（如 4096）作为 `plan_prefill()` 的 chunk_size，导致 prefill 实际未分块。`ChunkedConfig::chunk_size`（默认 64）未被使用。
+**完成状态**: `AdaptiveChunkPolicy` 结构体已实现，支持基于 L1 可用页数/并发请求数/prompt 长度动态调整 chunk_size。6 个单元测试覆盖高/低/中负载场景。
 
-**修改范围**: gllm 仓库
-- `src/scheduler/vllm2024.rs` — 新增 `AdaptiveChunkPolicy` 结构体
-- `src/engine/executor.rs` — `plan_prefill()` 调用处替换为自适应 chunk_size
-- `src/scheduler/memory_manager.rs` — `plan_prefill()` 无需修改（已支持任意 chunk_size）
+### P1-EXT-2: KV 增量蒸馏 (REQ-KV-EXT-002) ✅ 已完成
 
-**架构方案**:
-```
-AdaptiveChunkPolicy {
-    min_chunk: usize,      // = ChunkedConfig::chunk_size (64)
-    max_chunk: usize,      // = max_seq_len
-}
-
-fn compute_chunk_size(&self, l1_available_ratio: f32, concurrent_requests: usize, prompt_len: usize) -> usize {
-    // 高负载 (l1 < 25%): min_chunk
-    // 中负载 (25% <= l1 <= 75%): 线性插值
-    // 低负载 (l1 > 75%): max_chunk
-    // 短 prompt (< min_chunk): prompt_len
-}
-```
-
-**依赖**: 无，可立即开始
-
-### P1-EXT-2: KV 增量蒸馏 (REQ-KV-EXT-002)
-
-**问题**: `SwiftKvState::distill_cpu()` 每次处理全部 KV 页面，多轮对话中大量已蒸馏页面被重复处理。
-
-**修改范围**: gllm 仓库
-- `src/scheduler/vllm2024.rs` — `SwiftKvState` 新增 `last_distilled_page` 字段 + `distill_cpu_incremental()` 方法
-- `src/scheduler/types.rs` — `KvPipeline::prepare_next_turn()` 重置 Working 管线蒸馏边界
-
-**架构方案**:
-```
-SwiftKvState {
-    config: SwiftKVConfig,
-    last_result: Option<DistillPagesSummary>,
-    last_distilled_page: usize,  // 新增：上次蒸馏边界
-}
-
-fn distill_cpu_incremental<E: Element + Float>(&mut self, pages: &[Vec<E>]) -> DistillOutcome<E> {
-    // 仅处理 pages[self.last_distilled_page..]
-    // 边界页面需要 window_size 重叠以保证 SIKV 滑动窗口连续性
-    // 更新 self.last_distilled_page = pages.len()
-}
-```
-
-**依赖**: 无，可立即开始（与 P1-EXT-1 并行）
+**完成状态**: `SwiftKvState::last_distilled_page` 字段 + `distill_cpu_incremental()` 方法已实现。增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）。6 个单元测试覆盖。
 
 ---
 
@@ -226,10 +174,10 @@ P0 (性能关键 + 正确性)     P1 (功能完善)              P2 (质量)    
 P0-1 KV Cache 增量化 ✅    P1-1 架构模板 ×11 ✅      P2-1 后端一致性测试 ✅  P3-1 MoE 路由 ✅
 P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅    P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
 P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅     P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
-P0-4 Backend Detection ✅  P1-4 策略热切换 ✅         P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合 🔄
-                           P1-5 量化推理加速 ✅       P2-5 IQ Codebook 🔄    P3-5 GLLM_CACHE_DIR ✅
-                           P1-EXT-1 自适应 Chunk 🔄                         P3-6 分布式 KV Cache
-                           P1-EXT-2 KV 增量蒸馏 🔄
+P0-4 Backend Detection ✅  P1-4 策略热切换 ✅         P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合 ✅
+                           P1-5 量化推理加速 ✅       P2-5 IQ Codebook ✅    P3-5 GLLM_CACHE_DIR ✅
+                           P1-EXT-1 自适应 Chunk ✅                         P3-6 分布式 KV Cache
+                           P1-EXT-2 KV 增量蒸馏 ✅
 ```
 
 ## 依赖关系

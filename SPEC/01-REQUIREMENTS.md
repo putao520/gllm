@@ -107,8 +107,8 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-KV-EXT-001** | 自适应 Chunk 大小 | 根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len | 1. `AdaptiveChunkPolicy` 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size<br>2. Executor 调用 `plan_prefill()` 时使用自适应 chunk_size 而非 `max_seq_len`<br>3. chunk_size 范围 `[ChunkedConfig::chunk_size, max_seq_len]`，下界为 ChunkedConfig 默认值 64<br>4. 高负载（L1 可用 < 25%）时 chunk_size 缩小至下界<br>5. 低负载（L1 可用 > 75%）时 chunk_size 扩大至 max_seq_len<br>6. 单元测试覆盖高/低/中三种负载场景 | 📋 待开发 |
-| **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 📋 待开发 |
+| **REQ-KV-EXT-001** | 自适应 Chunk 大小 | 根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len | 1. `AdaptiveChunkPolicy` 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size<br>2. Executor 调用 `plan_prefill()` 时使用自适应 chunk_size 而非 `max_seq_len`<br>3. chunk_size 范围 `[ChunkedConfig::chunk_size, max_seq_len]`，下界为 ChunkedConfig 默认值 64<br>4. 高负载（L1 可用 < 25%）时 chunk_size 缩小至下界<br>5. 低负载（L1 可用 > 75%）时 chunk_size 扩大至 max_seq_len<br>6. 单元测试覆盖高/低/中三种负载场景 | 🟢 已实现 (2026-03-15) |
+| **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 🟢 已实现 (2026-03-15) |
 
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
