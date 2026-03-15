@@ -266,6 +266,29 @@ cargo test --lib
 
 **理由**：NOP placeholder 让编译成功、测试通过，但输出是全零或内存垃圾。这是最危险的 bug 类型 — 静默产生错误结果，无法通过常规测试发现。
 
+## 🚨 禁止以 "OP 不足" 为借口的 Scalar Fallback (NO_SCALAR_BYPASS)
+
+**铁律：已有 JIT 实现的算子禁止在任何运行时路径中调用 Phase 0 scalar 参考实现**。
+
+**背景（2026-03-16 审计发现）**：
+MoE 层和量化 decode 层以"MoE routing 没有 JIT OpKind"为借口，将整层所有算子（包括 RmsNorm、GEMM、RoPE、Attention）全部降级为 scalar 执行。但这些算子在 JIT 管线中早已完整实现，MoE routing 的缺失不是把其他算子也拉回 scalar 的理由。
+
+**违规代码（待修复）**：
+- `scalar_moe_prefill_layer()`: RmsNorm×2 + GEMM×4 + RoPE×2 + Attention 全部 scalar
+- `scalar_incremental_moe_decode_layer()`: RmsNorm×2 + GEMM×2 + RoPE + Attention 全部 scalar
+- `quantized_incremental_decode_layer()`: RmsNorm×2 + RoPE + Attention 用 scalar
+- `update_kv_cache()` (MoE 路径): RmsNorm + RoPE 用 scalar
+
+**禁止规则**：
+- ❌ 禁止在运行时推理路径中直接调用 `scalar_rms_norm()` / `scalar_gemm()` / `scalar_rope()`
+- ❌ 禁止因"某个 op 没有 JIT 实现"就把同层其他已有 JIT 实现的 op 一起降级为 scalar
+- ❌ 禁止 `scalar_*` 函数出现在 `decoder_forward.rs` 的运行时调用链中（import 除外）
+- ✅ Phase 0 scalar 参考实现仅用于 SymExec trace 提取和单元测试验证
+- ✅ MoE 层正确做法：RmsNorm → Q/K/V GEMM → RoPE → Attention → O GEMM 走 JIT，仅 MoE routing（gate → top-k → expert dispatch）用 scalar
+- ✅ 量化 decode 层正确做法：RmsNorm / RoPE / Attention 走 JIT，仅 `quantized_linear` 保留（量化 GEMM 是独立优化路径）
+
+**理由**：scalar 参考实现的性能比 JIT 生成的 SIMD 代码慢 4-16 倍（取决于 AVX2/AVX-512/SVE 向量宽度）。以"部分 op 缺失"为借口把整层拉回 scalar，等于放弃了 JIT 引擎的全部性能优势。这是架构腐化的典型模式——一旦允许，scalar fallback 会像癌细胞一样扩散到所有路径。
+
 ## 🚨 JIT 编译管线（铁律）
 
 **所有算子必须走完整的 JIT 编译管线，无例外**：
