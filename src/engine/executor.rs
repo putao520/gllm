@@ -69,7 +69,6 @@ pub struct GeneratorForwardConfig {
 
 impl GeneratorForwardConfig {
     /// Extract attention head geometry as a grouped struct.
-    #[allow(dead_code)]
     pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
         let q_dim = self.num_heads * self.head_dim;
         let kv_dim = self.num_kv_heads * self.head_dim;
@@ -84,7 +83,6 @@ impl GeneratorForwardConfig {
     }
 
     /// Extract per-layer dimension constants.
-    #[allow(dead_code)]
     pub(crate) fn layer_dims(&self) -> crate::compat::types::LayerDims {
         crate::compat::types::LayerDims {
             hidden: self.hidden_size,

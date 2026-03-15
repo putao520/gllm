@@ -7,7 +7,8 @@ use super::jit_helpers::{
     execute_kv_projection, update_kv_cache, write_kv_to_cache,
 };
 use super::scalar_ops::{
-    cached_gqa_attention, scalar_gemm, scalar_moe_ffn, scalar_rms_norm, scalar_rope, swiglu_ffn,
+    cached_gqa_attention, prefill_gqa_attention, scalar_gemm, scalar_moe_ffn, scalar_rms_norm,
+    scalar_rope, swiglu_ffn,
 };
 use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
 use super::weight_helpers::{
@@ -40,74 +41,41 @@ fn scalar_moe_prefill_layer(
     shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
     positions: &[u32],
     seq_len: usize,
-    hidden: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    inter: usize,
+    geom: &AttentionGeometry,
+    dims: &LayerDims,
     num_experts: usize,
     top_k: usize,
-    eps: f32,
-    rope_theta: f64,
     output: &mut [f32],
 ) {
-    let q_dim = num_heads * head_dim;
-    let kv_dim = num_kv_heads * head_dim;
-    let heads_per_group = num_heads / num_kv_heads;
+    let mut normed = vec![0.0f32; seq_len * dims.hidden];
+    scalar_rms_norm(hidden_state, rn1_w, &mut normed, dims.hidden, dims.eps);
 
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
+    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, dims.hidden);
+    let mut k_proj = vec![0.0f32; seq_len * geom.kv_dim];
+    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, geom.kv_dim, dims.hidden);
+    let mut v_proj = vec![0.0f32; seq_len * geom.kv_dim];
+    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, geom.kv_dim, dims.hidden);
 
-    let mut q_proj = vec![0.0f32; seq_len * q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, q_dim, hidden);
-    let mut k_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, kv_dim, hidden);
-    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
+    scalar_rope(&mut q_proj, positions, geom.head_dim, dims.rope_theta);
+    scalar_rope(&mut k_proj, positions, geom.head_dim, dims.rope_theta);
 
-    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
-    scalar_rope(&mut k_proj, positions, head_dim, rope_theta);
+    let attn_out = prefill_gqa_attention(&q_proj, &k_proj, &v_proj, seq_len, geom);
 
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let mut attn_out = vec![0.0f32; seq_len * q_dim];
-    for h in 0..num_heads {
-        let kv_h = h / heads_per_group;
-        for s in 0..seq_len {
-            let q_off = s * q_dim + h * head_dim;
-            let mut scores = vec![f32::NEG_INFINITY; seq_len];
-            for (t, score) in scores.iter_mut().enumerate().take(s + 1) {
-                let k_off = t * kv_dim + kv_h * head_dim;
-                let mut dot = 0.0f32;
-                for d in 0..head_dim { dot += q_proj[q_off + d] * k_proj[k_off + d]; }
-                *score = dot * scale;
-            }
-            let max_s = scores[..=s].iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for score in scores.iter_mut().take(s + 1) { *score = (*score - max_s).exp(); sum += *score; }
-            if sum > 0.0 { for score in scores.iter_mut().take(s + 1) { *score /= sum; } }
-            let o_off = s * q_dim + h * head_dim;
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
-                for t in 0..=s { val += scores[t] * v_proj[t * kv_dim + kv_h * head_dim + d]; }
-                attn_out[o_off + d] = val;
-            }
-        }
-    }
+    let mut o_out = vec![0.0f32; seq_len * dims.hidden];
+    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, dims.hidden, geom.q_dim);
+    let mut resid1 = vec![0.0f32; seq_len * dims.hidden];
+    for i in 0..seq_len * dims.hidden { resid1[i] = hidden_state[i] + o_out[i]; }
 
-    let mut o_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, q_dim);
-    let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
-
-    let mut normed2 = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+    let mut normed2 = vec![0.0f32; seq_len * dims.hidden];
+    scalar_rms_norm(&resid1, rn2_w, &mut normed2, dims.hidden, dims.eps);
 
     let moe_out = scalar_moe_ffn(
         &normed2, router_w, expert_weights, shared_expert,
-        seq_len, hidden, inter, num_experts, top_k,
+        seq_len, dims.hidden, dims.inter, num_experts, top_k,
     );
 
-    for i in 0..seq_len * hidden { output[i] = resid1[i] + moe_out[i]; }
+    for i in 0..seq_len * dims.hidden { output[i] = resid1[i] + moe_out[i]; }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,8 +700,10 @@ pub(crate) fn decoder_forward<E: Element>(
                     &router_w, &expert_weights,
                     shared_expert.as_ref(),
                     &positions,
-                    seq_len, hidden, num_heads, num_kv_heads, head_dim,
-                    inter, moe_num_experts, moe_top_k, eps, rope_theta,
+                    seq_len,
+                    &config.attention_geometry(),
+                    &config.layer_dims(),
+                    moe_num_experts, moe_top_k,
                     &mut layer_out,
                 );
 

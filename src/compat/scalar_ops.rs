@@ -277,3 +277,55 @@ pub(crate) fn swiglu_ffn(
     scalar_gemm(&swiglu, down_w, &mut down_out, seq_len, dims.hidden, dims.inter);
     down_out
 }
+
+/// Full-sequence GQA attention for prefill (no KV cache).
+///
+/// Takes complete Q [seq_len, q_dim], K [seq_len, kv_dim], V [seq_len, kv_dim]
+/// projections and computes causal self-attention.
+pub(crate) fn prefill_gqa_attention(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    seq_len: usize,
+    geom: &AttentionGeometry,
+) -> Vec<f32> {
+    let scale = 1.0 / (geom.head_dim as f32).sqrt();
+    let mut attn_out = vec![0.0f32; seq_len * geom.q_dim];
+
+    for h in 0..geom.num_heads {
+        let kv_h = h / geom.heads_per_group;
+        for s in 0..seq_len {
+            let q_off = s * geom.q_dim + h * geom.head_dim;
+            let mut scores = vec![f32::NEG_INFINITY; seq_len];
+            for t in 0..=s {
+                let k_off = t * geom.kv_dim + kv_h * geom.head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..geom.head_dim {
+                    dot += q[q_off + d] * k[k_off + d];
+                }
+                scores[t] = dot * scale;
+            }
+            let max_s = scores[..=s].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for score in scores.iter_mut().take(s + 1) {
+                *score = (*score - max_s).exp();
+                sum += *score;
+            }
+            if sum > 0.0 {
+                for score in scores.iter_mut().take(s + 1) {
+                    *score /= sum;
+                }
+            }
+            let o_off = s * geom.q_dim + h * geom.head_dim;
+            for d in 0..geom.head_dim {
+                let mut val = 0.0f32;
+                for t in 0..=s {
+                    val += scores[t] * v[t * geom.kv_dim + kv_h * geom.head_dim + d];
+                }
+                attn_out[o_off + d] = val;
+            }
+        }
+    }
+
+    attn_out
+}
