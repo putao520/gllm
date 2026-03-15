@@ -59,7 +59,7 @@
 | P1-1d | Gemma2 | Google 生态 |
 | P1-1e | GPT2Next (GPT-OSS) | OpenAI 开源模型 |
 | P1-1f | XlmR, XlmRNext | Embedding/Reranker 架构（BERT-like） |
-| P1-1g | DeepSeek (REQ-LOADER-020) | MoE 671B，需要 DeepSeekAdapter |
+| P1-1g | DeepSeek (REQ-LOADER-020) ✅ | MoE 671B，DeepSeekAdapter + MoEConfig 元数据提取 |
 
 **每个模板需要**:
 1. `src/arch/templates/{arch}.yaml` — 层定义

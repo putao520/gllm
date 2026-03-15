@@ -37,7 +37,7 @@
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 | **REQ-LOADER-019** | GGUF 架构元数据读取 | 从 GGUF 文件读取架构信息 | 1. 读取 GGUF 内置 `general.architecture` 字段 (如 "llama", "qwen2", "deepseek")<br>2. **禁止基于 Model ID 推断架构** (Ω1: 真实性原则)<br>3. 如果 GGUF 缺少架构元数据，返回明确的错误而非推测 | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
-| **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 📋 待实现 |
+| **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 🟢 已实现 (2026-03-15) |
 | **REQ-LOADER-021** | 融合权重元数据驱动分割 | 融合权重 (如 QKV) 分割完全基于 config.json，禁止硬编码 | 1. `split_phi4_qkv` 等函数接收 `ModelConfig` 参数<br>2. Q 维度 = `config.hidden_size`<br>3. KV 维度 = `config.num_key_value_heads * config.head_dim`<br>4. **禁止**硬编码任何维度值 (如 3072, 1024)<br>5. 支持同一架构的不同变体 (不同 hidden_size / num_kv_heads)<br>6. **关联**: ARCH-QUANT-METADATA-001, ARCH-LOADER-FUSED-METADATA | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 | **REQ-LOADER-022** | 张量驱动配置推导 (Tensor-Driven) | 基于 Tensor Role Matching (Regex) 和张量形状推导配置，优先于硬编码逻辑 | 1. **核心**: 定义 `TensorRole` (Embedding/Attention/FFN)<br>2. **推导**: 纯张量形状推导 `hidden_size`, `num_heads`, `head_dim`<br>3. **禁止**: `if model == "llama"` 硬编码逻辑<br>4. **优先级**: 张量形状 > config.json | 🟢 已实现 (2026-02-08) |
 | **REQ-LOADER-023** | 通用权重加载适配器 (Universal) | Loader 作为通用适配器，透明处理格式差异与精度转换 | 1. **F16->F32**: 后端需要时自动转换<br>2. **Universal**: 统一处理 SafeTensors/ONNX/GGUF<br>3. **Zero-Copy**: 仅在必要时转换，否则保持零拷贝<br>4. **关联**: ARCH-LOADER-003<br>5. **GGUF 量化分流**: 量化 tensor 存入 QuantizedTensor，native float 走 upload_native_tensor_with_convert | 🟢 已实现 (2026-02-08) |
@@ -74,7 +74,7 @@
 | **REQ-SCHED-013** | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. 允许 Prefill 内 ChunkedConfig 分块，不允许 Prefill/Decode 混批<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 🟢 已实现 (2026-02-07) [commit: 3a0957d] |
-| **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 📋 待实现 |
+| **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 🟢 已实现 (2026-03-15) |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-002** | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
 | **REQ-SCHED-003** | 动态批处理 | 支持 Continuous Batching | 1. 吞吐量优于 Static Batching<br>2. **序列完成自动移除**<br>3. **新序列动态加入**<br>4. **BatchAction 决策** (Continue/Complete/Pause)<br>5. **企业级死锁防护** (admit_waiting 无限循环修复) | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
@@ -131,7 +131,7 @@
 | **REQ-TEST-002** | Generator 模型矩阵 | 覆盖所有 Generator 模型类型 | 1. qwen3-7b (基准)<br>2. llama-4-8b (多模态)<br>3. phi-4-mini (轻量)<br>4. qwen3-moe (MoE)<br>5. smollm2-135m (超轻量)<br>6. smollm3-3b (轻量多用途)<br>7. internlm3-8b (高效推理) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-003** | Embedding 模型矩阵 | 覆盖所有 Embedding 模型 | 1. qwen3-embed<br>2. bge-m3 (中文)<br>3. bge-m4 (升级版)<br>4. e5-small (轻量)<br>5. e5-base (标准)<br>6. e5-large (高精度)<br>7. m3e-base (中文)<br>8. jina-embeddings-v2-small (轻量英文)<br>9. jina-embeddings-v2-base (标准英文)<br>10. jina-embeddings-v4 (最新) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-004** | Reranker 模型矩阵 | 覆盖所有 Reranker 模型 | 1. qwen3-rerank<br>2. bge-reranker-v2-m3 (轻量中文)<br>3. bge-rerank-v3 (升级版) | 🟢 已实现 (2026-02-02) [commit: fc36508] |
-| **REQ-TEST-005** | 功能模块覆盖 | 分层功能测试 | 1. Loader: 权重加载、格式转换<br>2. Inference: 生成、嵌入、重排序<br>3. Scheduler: PagedAttention、CB、Swap<br>4. Quantization: AWQ/GPTQ<br>5. Scheduler Refactor: PrefixIndex、SessionKvCache、KvPipeline、BatchOrderPolicy | 📋 待实现（随 REQ-SCHED-015~018 / REQ-KV-001~004 落地） |
+| **REQ-TEST-005** | 功能模块覆盖 | 分层功能测试 | 1. Loader: 权重加载、格式转换<br>2. Inference: 生成、嵌入、重排序<br>3. Scheduler: PagedAttention、CB、Swap<br>4. Quantization: AWQ/GPTQ<br>5. Scheduler Refactor: PrefixIndex、SessionKvCache、KvPipeline、BatchOrderPolicy | 🟢 已实现 (2026-03-15) |
 | **REQ-TEST-006** | 量化格式测试 | 多种量化格式验证 | 1. AWQ (已实现)<br>2. GPTQ<br>3. SmoothQuant<br>4. 动态量化 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-007** | 错误处理测试 | 边界条件和错误场景 | 1. OOM 处理<br>2. 无效输入<br>3. 权重损坏<br>4. 不支持的架构 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
 | **REQ-TEST-008** | 性能基准测试 | 吞吐量和延迟验证 | 1. Tokens/sec 吞吐量<br>2. 首token 延迟 (TTFT)<br>3. 内存占用<br>4. 性能回归检测 | 🟢 已实现 (2026-02-02) [commit: fc36508] |
@@ -149,7 +149,7 @@
 | `tests/test_moe_routing.rs` | MoE 专项 (REQ-TEST-009) | 🟢 已实现 |
 | `tests/test_performance.rs` | 性能基准 (REQ-TEST-008) | 🟢 已实现 |
 | `tests/quantization_metadata.rs` | 量化格式 (REQ-TEST-006) | 🟢 已实现 |
-| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 📋 待实现 |
+| `tests/test_backend_compat.rs` | 后端一致性 (REQ-TEST-010) | 🟢 已实现 |
 
 ## 6. 架构约束 (REQ-ARCH)
 
