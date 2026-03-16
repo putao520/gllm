@@ -4,7 +4,6 @@
 //! shared across CPU decoder forward, embedding forward, and rerank forward paths.
 
 use super::cpu_backend::CpuBackend;
-use super::scalar_ops::{scalar_gemm, scalar_rms_norm, scalar_rope};
 use super::Element;
 use crate::engine::executor::{BackendError as BE, KvCacheHandle};
 
@@ -156,7 +155,7 @@ pub(crate) fn execute_jit_decoder_layer(
 
 /// Build a CompilerGraph for KV projection only: RmsNorm → K Gemm → K RoPE.
 ///
-/// V projection is computed separately via scalar GEMM (no Concat OpKind).
+/// V projection is computed via a separate JIT graph (build_v_projection_graph).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn build_kv_projection_graph(
     seq_len: usize,
@@ -193,9 +192,44 @@ pub(crate) fn build_kv_projection_graph(
     g
 }
 
+/// Build a CompilerGraph for V projection only: RmsNorm → V Gemm (no RoPE).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_v_projection_graph(
+    seq_len: usize,
+    hidden: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+    let s = seq_len;
+    let h = hidden;
+    let kv_dim = num_kv_heads * head_dim;
+
+    let input = g.add_tensor("input", vec![s, h], dt);
+    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
+    let w_v = g.add_tensor("w_v", vec![h, kv_dim], dt);
+    g.inputs = vec![input, rn1_w, w_v];
+
+    let normed = g.add_tensor("normed", vec![s, h], dt);
+    g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_v");
+
+    let v_out = g.add_tensor("v_proj", vec![s, kv_dim], dt);
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed, w_v], vec![v_out], "gemm_v");
+
+    g.outputs = vec![v_out];
+    g
+}
+
 /// Execute a JIT-compiled KV projection graph.
 ///
 /// Returns (k_rope, v_proj) both as [seq_len, kv_dim].
+/// K uses the pre-compiled graph (RmsNorm → K Gemm → RoPE).
+/// V uses a separately compiled graph (RmsNorm → V Gemm).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_kv_projection(
     compiled: &gllm_kernels::compiler::CompiledLayer,
@@ -230,11 +264,28 @@ pub(crate) fn execute_kv_projection(
         );
     }
 
-    // V projection via scalar: RmsNorm → V Gemm (no RoPE on V)
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+    // V projection via JIT: RmsNorm → V Gemm (no RoPE on V)
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps);
+    let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+    let v_compiled = v_compiler.compile_graph(&v_graph)
+        .expect("JIT compile v_projection failed");
+
+    let v_weights_buf = pack_weights(&[rn1_w, v_w]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
+    let mut v_scratchpad = vec![0u8; v_compiled.scratchpad_bytes];
+
+    unsafe {
+        v_compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            v_weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            v_proj.as_mut_ptr() as *mut u8,
+            v_scratchpad.as_mut_ptr(),
+        );
+    }
 
     (k_rope, v_proj)
 }
@@ -502,14 +553,48 @@ pub(crate) fn execute_moe_pre_attention(
         );
     }
 
-    // k_rope and v_proj via scalar (JIT graph only outputs q_rope due to single-output ABI)
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+    // k_rope and v_proj via separate JIT graphs (single-output ABI limitation)
+    // K: RmsNorm → K Gemm → RoPE
+    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0);
+    let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+    let k_compiled = k_compiler.compile_graph(&k_graph)
+        .expect("JIT compile k_projection failed");
+    let k_weights_buf = pack_weights(&[rn1_w, k_w]);
     let mut k_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, kv_dim, hidden);
+    let mut k_scratch = vec![0u8; k_compiled.scratchpad_bytes];
+    unsafe {
+        k_compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            k_weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            positions.as_ptr(),
+            std::ptr::null(),
+            1, seq_len,
+            k_proj.as_mut_ptr() as *mut u8,
+            k_scratch.as_mut_ptr(),
+        );
+    }
+
+    // V: RmsNorm → V Gemm (no RoPE)
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps);
+    let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+    let v_compiled = v_compiler.compile_graph(&v_graph)
+        .expect("JIT compile v_projection failed");
+    let v_weights_buf = pack_weights(&[rn1_w, v_w]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, kv_dim, hidden);
-    scalar_rope(&mut k_proj, positions, head_dim, 10000.0);
+    let mut v_scratch = vec![0u8; v_compiled.scratchpad_bytes];
+    unsafe {
+        v_compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            v_weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            v_proj.as_mut_ptr() as *mut u8,
+            v_scratch.as_mut_ptr(),
+        );
+    }
 
     (q_rope, k_proj, v_proj)
 }
@@ -629,13 +714,12 @@ pub(crate) fn execute_cached_gqa(
 }
 
 // ---------------------------------------------------------------------------
-// MoE FFN via JIT (expert FFN is JIT, routing is scalar)
+// MoE FFN via JIT (all stages JIT-compiled)
 // ---------------------------------------------------------------------------
 
-/// Execute MoE FFN: scalar routing (gate → topk) + JIT expert FFN + scalar weighted combine.
+/// Execute MoE FFN: JIT routing (gate → topk) + JIT expert FFN + JIT weighted combine.
 ///
-/// Only the routing logic (gate softmax + top-k selection) uses scalar.
-/// Each expert's SwiGLU FFN runs through JIT.
+/// All stages use JIT-compiled graphs. Zero scalar runtime calls.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_moe_ffn_jit(
     normed2: &[f32],
@@ -650,44 +734,41 @@ pub(crate) fn execute_moe_ffn_jit(
 ) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
     use crate::engine::executor::BackendError as BE;
 
-    // Step 1: MoE routing via scalar (gate → softmax → topk)
-    let mut gate_probs = vec![0.0f32; seq_len * num_experts];
-    // Gate: normed2 @ router_w → softmax
-    for s in 0..seq_len {
-        for e in 0..num_experts {
-            let mut acc = 0.0f32;
-            for h in 0..hidden {
-                acc += normed2[s * hidden + h] * router_w[h * num_experts + e];
-            }
-            gate_probs[s * num_experts + e] = acc;
-        }
-        // Row softmax
-        let row = &mut gate_probs[s * num_experts..(s + 1) * num_experts];
-        let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for v in row.iter_mut() {
-            *v = (*v - max_val).exp();
-            sum += *v;
-        }
-        let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
-        for v in row.iter_mut() { *v *= inv; }
+    // Step 1: MoE routing via JIT (MoEGate → TopK)
+    let routing_graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k);
+    let mut routing_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+    let routing_compiled = routing_compiler.compile_graph(&routing_graph).map_err(|e| {
+        BE::Other(format!("MoE routing JIT failed: {e}"))
+    })?;
+
+    let routing_weights = pack_weights(&[router_w]);
+    // Output: [seq_len * top_k * 2] — first half indices (u32 as f32 bits), second half weights
+    let routing_out_size = seq_len * top_k * 2;
+    let mut routing_out = vec![0.0f32; routing_out_size];
+    let mut routing_scratch = vec![0u8; routing_compiled.scratchpad_bytes];
+
+    unsafe {
+        routing_compiled.execute(
+            normed2.as_ptr() as *const u8,
+            routing_weights.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            routing_out.as_mut_ptr() as *mut u8,
+            routing_scratch.as_mut_ptr(),
+        );
     }
 
-    // Top-K selection
+    // Parse routing output: indices (u32 stored as f32 bits) + weights
+    let indices_raw = &routing_out[..seq_len * top_k];
+    let weights_raw = &routing_out[seq_len * top_k..];
+
     let mut indices = vec![0usize; seq_len * top_k];
     let mut weights = vec![0.0f32; seq_len * top_k];
-    for s in 0..seq_len {
-        let row = &gate_probs[s * num_experts..(s + 1) * num_experts];
-        let mut top: Vec<(usize, f32)> = row.iter().cloned().enumerate().collect();
-        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut wsum = 0.0f32;
-        for ki in 0..top_k {
-            indices[s * top_k + ki] = top[ki].0;
-            weights[s * top_k + ki] = top[ki].1;
-            wsum += top[ki].1;
-        }
-        let inv = if wsum > 0.0 { 1.0 / wsum } else { 0.0 };
-        for ki in 0..top_k { weights[s * top_k + ki] *= inv; }
+    for i in 0..seq_len * top_k {
+        indices[i] = indices_raw[i].to_bits() as usize;
+        weights[i] = weights_raw[i];
     }
 
     // Step 2: Expert FFN via JIT (compile once, execute per expert)
@@ -723,17 +804,44 @@ pub(crate) fn execute_moe_ffn_jit(
         expert_outputs.insert(expert_idx, expert_out);
     }
 
-    // Step 3: Weighted combine
+    // Step 3: Weighted combine via JIT (WeightedSum)
+    let combine_graph = build_moe_combine_graph(seq_len, hidden, top_k);
+    let mut combine_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+    let combine_compiled = combine_compiler.compile_graph(&combine_graph).map_err(|e| {
+        BE::Other(format!("MoE combine JIT failed: {e}"))
+    })?;
+
+    // Build flat expert_outputs buffer: [top_k, seq_len, hidden]
+    // We need to lay out the selected experts' outputs contiguously.
+    // The WeightedSum op expects expert_outputs indexed by the indices array.
+    // Build a flat buffer with all num_experts slots (only needed ones populated).
+    let expert_buf_size = num_experts * seq_len * hidden;
+    let mut expert_flat = vec![0.0f32; expert_buf_size];
+    for (&expert_idx, expert_out) in &expert_outputs {
+        let base = expert_idx * seq_len * hidden;
+        expert_flat[base..base + seq_len * hidden].copy_from_slice(expert_out);
+    }
+
+    // Prepare indices as f32 bits (already in routing_out format) and weights
+    let indices_f32: Vec<f32> = indices.iter().map(|&i| f32::from_bits(i as u32)).collect();
+
+    // Pack: expert_outputs, indices, weights
+    let combine_input = pack_weights(&[&expert_flat]);
+    let combine_weights = pack_weights(&[&indices_f32, &weights]);
     let mut output = vec![0.0f32; seq_len * hidden];
-    for s in 0..seq_len {
-        for ki in 0..top_k {
-            let expert_idx = indices[s * top_k + ki];
-            let w = weights[s * top_k + ki];
-            let expert_out = &expert_outputs[&expert_idx];
-            for d in 0..hidden {
-                output[s * hidden + d] += w * expert_out[s * hidden + d];
-            }
-        }
+    let mut combine_scratch = vec![0u8; combine_compiled.scratchpad_bytes];
+
+    unsafe {
+        combine_compiled.execute(
+            combine_input.as_ptr(),
+            combine_weights.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            combine_scratch.as_mut_ptr(),
+        );
     }
 
     // Shared expert (if present)
@@ -767,7 +875,6 @@ pub(crate) fn execute_moe_ffn_jit(
 
 /// Build a CompilerGraph for MoE routing: gate → topk.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-#[allow(dead_code)]
 pub(crate) fn build_moe_routing_graph(
     seq_len: usize,
     hidden: usize,
@@ -807,7 +914,6 @@ pub(crate) fn build_moe_routing_graph(
 
 /// Build a CompilerGraph for a single expert FFN: Gate Gemm → Up Gemm → SwiGLU → Down Gemm.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-#[allow(dead_code)]
 pub(crate) fn build_expert_ffn_graph(
     seq_len: usize,
     hidden: usize,
@@ -845,7 +951,6 @@ pub(crate) fn build_expert_ffn_graph(
 
 /// Build a CompilerGraph for MoE combine: weighted sum of expert outputs.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-#[allow(dead_code)]
 pub(crate) fn build_moe_combine_graph(
     seq_len: usize,
     hidden: usize,
