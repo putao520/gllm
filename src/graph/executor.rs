@@ -326,7 +326,7 @@ fn build_fused_qkv_rope_graph(
 
     let q_out = g.add_tensor("q", vec![seq_len, q_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden },
+        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype: DType::F32 },
         vec![input, w_q],
         vec![q_out],
         "gemm_q",
@@ -334,7 +334,7 @@ fn build_fused_qkv_rope_graph(
 
     let k_out = g.add_tensor("k", vec![seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype: DType::F32 },
         vec![input, w_k],
         vec![k_out],
         "gemm_k",
@@ -342,7 +342,7 @@ fn build_fused_qkv_rope_graph(
 
     let v_out = g.add_tensor("v", vec![seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype: DType::F32 },
         vec![input, w_v],
         vec![v_out],
         "gemm_v",
@@ -398,7 +398,7 @@ fn build_fused_rms_linear_graph(
 
     let out = g.add_tensor("rms_linear_out", vec![seq_len, h], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: h, k: h },
+        OpKind::Gemm { m: seq_len, n: h, k: h, dtype: DType::F32 },
         vec![normed, linear_w],
         vec![out],
         "linear",
@@ -467,7 +467,7 @@ fn build_moe_routing_graph(
 
     let gate_logits = g.add_tensor("gate_logits", vec![seq_len, n], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n, k: hidden },
+        OpKind::Gemm { m: seq_len, n, k: hidden, dtype: DType::F32 },
         vec![input, gate_w],
         vec![gate_logits],
         "gate_gemm",
@@ -494,6 +494,7 @@ fn atomic_op_to_kind(
     input_shapes: &[Vec<usize>],
 ) -> Result<gllm_kernels::compiler::OpKind, ExecutionError> {
     use gllm_kernels::compiler::OpKind;
+    use gllm_kernels::types::DType;
 
     match op_type {
         "Add" => Ok(OpKind::Add),
@@ -517,7 +518,7 @@ fn atomic_op_to_kind(
             let m = a[a.len() - 2];
             let k = a[a.len() - 1];
             let n = b[b.len() - 1];
-            Ok(OpKind::Gemm { m, n, k })
+            Ok(OpKind::Gemm { m, n, k, dtype: DType::F32 })
         }
         "LayerNorm" | "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),

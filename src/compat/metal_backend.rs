@@ -84,8 +84,10 @@ impl<E: Element> MetalBackend<E> {
             total_memory,
             memory_bandwidth_gbs: 200.0,
             peak_gflops_f32: 5000.0,
+            peak_gflops_f16: 10000.0,
             has_matrix_unit: true,
             clock_mhz: 1000,
+            isv: gllm_kernels::gpu::GpuIsvCapabilities::default(),
         };
 
         eprintln!("[MetalBackend] Detected: {}", device_name);

@@ -69,7 +69,7 @@ pub(crate) fn build_bert_layer_graph(
     // Q = input * W_q + b_q  [s, h] × [h, h] → [s, h]
     let q_out = g.add_tensor("q", vec![s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_q, b_q],
         vec![q_out],
         "gemm_q",
@@ -78,7 +78,7 @@ pub(crate) fn build_bert_layer_graph(
     // K = input * W_k + b_k
     let k_out = g.add_tensor("k", vec![s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_k, b_k],
         vec![k_out],
         "gemm_k",
@@ -87,7 +87,7 @@ pub(crate) fn build_bert_layer_graph(
     // V = input * W_v + b_v
     let v_out = g.add_tensor("v", vec![s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_v, b_v],
         vec![v_out],
         "gemm_v",
@@ -105,7 +105,7 @@ pub(crate) fn build_bert_layer_graph(
     // Output projection + bias
     let o_out = g.add_tensor("o_proj", vec![s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![attn_out, w_o, b_o],
         vec![o_out],
         "gemm_o",
@@ -134,7 +134,7 @@ pub(crate) fn build_bert_layer_graph(
     // Up projection + GELU: GemmBias + Gelu → EpilogueInjection candidate
     let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: inter, k: h },
+        OpKind::GemmBias { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![normed1, w_up, b_up],
         vec![up_out],
         "gemm_ffn_up",
@@ -151,7 +151,7 @@ pub(crate) fn build_bert_layer_graph(
     // Down projection
     let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: inter },
+        OpKind::GemmBias { m: s, n: h, k: inter, dtype: DType::F32 },
         vec![act_out, w_down, b_down],
         vec![down_out],
         "gemm_ffn_down",

@@ -503,7 +503,7 @@ pub(crate) fn decoder_forward<E: Element>(
                             let b_in = og.add_tensor("b", vec![geom.q_dim, hidden], dt);
                             og.inputs = vec![a_in, b_in];
                             let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
-                            og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                            og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: DType::F32 }, vec![a_in, b_in], vec![c_out], "gemm_o");
                             og.outputs = vec![c_out];
                             let mut oc = gllm_kernels::compiler::InferenceCompiler::new();
                             let o_compiled = oc.compile_graph(&og).map_err(|e| {
@@ -784,7 +784,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         let b_in = og.add_tensor("b", vec![geom.q_dim, hidden], dt);
                         og.inputs = vec![a_in, b_in];
                         let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
-                        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: DType::F32 }, vec![a_in, b_in], vec![c_out], "gemm_o");
                         og.outputs = vec![c_out];
                         let mut oc = gllm_kernels::compiler::InferenceCompiler::new();
                         let o_compiled = oc.compile_graph(&og).map_err(|e| {

@@ -74,11 +74,11 @@ pub(crate) fn build_decoder_layer_graph(
 
     // Q/K/V Projections
     let q_out = g.add_tensor("q", vec![s, q_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h }, vec![normed1, w_q], vec![q_out], "gemm_q");
+    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 }, vec![normed1, w_q], vec![q_out], "gemm_q");
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed1, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed1, w_k], vec![k_out], "gemm_k");
     let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed1, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed1, w_v], vec![v_out], "gemm_v");
 
     // RoPE
     let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
@@ -95,7 +95,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     // Output projection + Residual 1
     let o_out = g.add_tensor("o_proj", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 }, vec![attn_out, w_o], vec![o_out], "gemm_o");
     let resid1 = g.add_tensor("residual1", vec![s, h], dt);
     g.add_op(OpKind::Residual, vec![input, o_out], vec![resid1], "residual_1");
 
@@ -105,13 +105,13 @@ pub(crate) fn build_decoder_layer_graph(
 
     // SwiGLU FFN
     let gate_out = g.add_tensor("ffn_gate", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
     let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h }, vec![normed2, w_up], vec![up_out], "gemm_up");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 }, vec![normed2, w_up], vec![up_out], "gemm_up");
     let swiglu_out = g.add_tensor("ffn_swiglu", vec![s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: inter }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: DType::F32 }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     // Residual 2
     let output = g.add_tensor("output", vec![s, h], dt);
@@ -183,7 +183,7 @@ pub(crate) fn build_kv_projection_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_kv");
 
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_k], vec![k_out], "gemm_k");
 
     let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
@@ -219,7 +219,7 @@ pub(crate) fn build_v_projection_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_v");
 
     let v_out = g.add_tensor("v_proj", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     g.outputs = vec![v_out];
     g
@@ -375,7 +375,7 @@ pub(crate) fn build_lm_head_graph(
 
     let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden },
+        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: DType::F32 },
         vec![normed, lm_w], vec![logits], "lm_head",
     );
 
@@ -501,11 +501,11 @@ pub(crate) fn build_moe_pre_attention_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_1");
 
     let q_out = g.add_tensor("q", vec![s, q_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h }, vec![normed, w_q], vec![q_out], "gemm_q");
+    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 }, vec![normed, w_q], vec![q_out], "gemm_q");
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_k], vec![k_out], "gemm_k");
     let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h }, vec![normed, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
@@ -628,7 +628,7 @@ pub(crate) fn build_post_attention_graph(
     g.inputs = vec![attn_out, w_o, residual_in, rn2_w];
 
     let o_out = g.add_tensor("o_proj", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 }, vec![attn_out, w_o], vec![o_out], "gemm_o");
 
     let resid1 = g.add_tensor("residual1", vec![s, h], dt);
     g.add_op(OpKind::Residual, vec![residual_in, o_out], vec![resid1], "residual_1");
@@ -669,7 +669,7 @@ pub(crate) fn build_cached_gqa_graph(
 
     let attn_out = g.add_tensor("attn_out", vec![seq_len, q_dim + 1], dt); // +1 for sparsity
     g.add_op(
-        OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim },
+        OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy: gllm_kernels::compiler::graph::AttentionStrategy::Naive, kv_dtype: gllm_kernels::types::DType::F32 },
         vec![q_in, k_cache, v_cache], vec![attn_out], "cached_gqa",
     );
 
@@ -933,13 +933,13 @@ pub(crate) fn build_expert_ffn_graph(
     g.inputs = vec![input, w_gate, w_up, w_down];
 
     let gate_out = g.add_tensor("gate", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden }, vec![input, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: DType::F32 }, vec![input, w_gate], vec![gate_out], "gemm_gate");
     let up_out = g.add_tensor("up", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden }, vec![input, w_up], vec![up_out], "gemm_up");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: DType::F32 }, vec![input, w_up], vec![up_out], "gemm_up");
     let swiglu_out = g.add_tensor("swiglu", vec![s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     let down_out = g.add_tensor("down", vec![s, hidden], dt);
-    g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter, dtype: DType::F32 }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     g.outputs = vec![down_out];
     g
@@ -1024,28 +1024,27 @@ pub(crate) fn update_kv_cache_jit<E: Element>(
 ///
 /// Builds a single-op CompilerGraph with `OpKind::Gemm`, compiles to native SIMD
 /// (AVX2/AVX-512/NEON/SVE based on DeviceProfile), and executes.
-/// This replaces all `scalar_gemm` calls in production code paths.
+/// DType is passed through to the JIT compiler for future F16/BF16 support.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn jit_f32_gemm(
+pub(crate) fn jit_gemm(
     input: &[f32],
     weight: &[f32],
     output: &mut [f32],
     m: usize,
     n: usize,
     k: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> Result<(), String> {
     use gllm_kernels::compiler::{CompilerGraph, OpKind, InferenceCompiler};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
 
-    let a = g.add_tensor("input", vec![m, k], dt);
-    let b = g.add_tensor("weight", vec![k, n], dt);
+    let a = g.add_tensor("input", vec![m, k], dtype);
+    let b = g.add_tensor("weight", vec![k, n], dtype);
     g.inputs = vec![a, b];
 
-    let c = g.add_tensor("output", vec![m, n], dt);
-    g.add_op(OpKind::Gemm { m, n, k }, vec![a, b], vec![c], "gemm");
+    let c = g.add_tensor("output", vec![m, n], dtype);
+    g.add_op(OpKind::Gemm { m, n, k, dtype }, vec![a, b], vec![c], "gemm");
     g.outputs = vec![c];
 
     let mut compiler = InferenceCompiler::new();

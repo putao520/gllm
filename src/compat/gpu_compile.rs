@@ -264,14 +264,14 @@ pub(crate) fn build_kernel_params(
     use gllm_kernels::compiler::OpKind;
 
     match op_kind {
-        OpKind::GemmBias { m, n, k } => {
+        OpKind::GemmBias { m, n, k, .. } => {
             Ok(vec![
                 input_ptrs[0], input_ptrs[1], output_ptr,
                 *m as u64, *n as u64, *k as u64,
                 input_ptrs[2], // bias
             ])
         }
-        OpKind::Gemm { m, n, k } => {
+        OpKind::Gemm { m, n, k, .. } => {
             Ok(vec![
                 input_ptrs[0], input_ptrs[1], output_ptr,
                 *m as u64, *n as u64, *k as u64,
@@ -1648,7 +1648,7 @@ pub(crate) fn build_decoder_layer_graph(
     // ── Q/K/V projections ──
     let q_proj = g.add_tensor("q_proj", vec![s, q_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: q_dim, k: h },
+        OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 },
         vec![attn_normed, w_q],
         vec![q_proj],
         "q_proj",
@@ -1656,7 +1656,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     let k_proj = g.add_tensor("k_proj", vec![s, kv_h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h },
+        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: DType::F32 },
         vec![attn_normed, w_k],
         vec![k_proj],
         "k_proj",
@@ -1664,7 +1664,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     let v_proj = g.add_tensor("v_proj", vec![s, kv_h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h },
+        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: DType::F32 },
         vec![attn_normed, w_v],
         vec![v_proj],
         "v_proj",
@@ -1703,7 +1703,7 @@ pub(crate) fn build_decoder_layer_graph(
     // ── Output projection ──
     let o_proj = g.add_tensor("o_proj", vec![s, h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: h, k: q_dim },
+        OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 },
         vec![attn_out, w_o],
         vec![o_proj],
         "o_proj",
@@ -1730,7 +1730,7 @@ pub(crate) fn build_decoder_layer_graph(
     // ── Gate + Up projections ──
     let gate = g.add_tensor("gate", vec![s, inter], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
+        OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![ffn_normed, w_gate],
         vec![gate],
         "gate_proj",
@@ -1738,7 +1738,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     let up = g.add_tensor("up", vec![s, inter], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
+        OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![ffn_normed, w_up],
         vec![up],
         "up_proj",
@@ -1751,7 +1751,7 @@ pub(crate) fn build_decoder_layer_graph(
     // ── Down projection ──
     let down = g.add_tensor("down", vec![s, h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: h, k: inter },
+        OpKind::Gemm { m: s, n: h, k: inter, dtype: DType::F32 },
         vec![swiglu_out, w_down],
         vec![down],
         "down_proj",
@@ -1810,7 +1810,7 @@ pub(crate) fn build_projection_graph(
 
     let q_proj = g.add_tensor("q_proj", vec![s, q_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: q_dim, k: h },
+        OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 },
         vec![attn_normed, w_q],
         vec![q_proj],
         "q_proj",
@@ -1818,7 +1818,7 @@ pub(crate) fn build_projection_graph(
 
     let k_proj = g.add_tensor("k_proj", vec![s, kv_h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h },
+        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: DType::F32 },
         vec![attn_normed, w_k],
         vec![k_proj],
         "k_proj",
@@ -1826,7 +1826,7 @@ pub(crate) fn build_projection_graph(
 
     let v_proj = g.add_tensor("v_proj", vec![s, kv_h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h },
+        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: DType::F32 },
         vec![attn_normed, w_v],
         vec![v_proj],
         "v_proj",
@@ -1884,7 +1884,7 @@ pub(crate) fn build_post_attention_graph(
 
     let o_proj = g.add_tensor("o_proj", vec![s, h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: h, k: q_dim },
+        OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 },
         vec![attn_out, w_o],
         vec![o_proj],
         "o_proj",
@@ -1908,7 +1908,7 @@ pub(crate) fn build_post_attention_graph(
 
     let gate = g.add_tensor("gate", vec![s, inter], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
+        OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![ffn_normed, w_gate],
         vec![gate],
         "gate_proj",
@@ -1916,7 +1916,7 @@ pub(crate) fn build_post_attention_graph(
 
     let up = g.add_tensor("up", vec![s, inter], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h },
+        OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![ffn_normed, w_up],
         vec![up],
         "up_proj",
@@ -1927,7 +1927,7 @@ pub(crate) fn build_post_attention_graph(
 
     let down = g.add_tensor("down", vec![s, h], dt);
     g.add_op(
-        OpKind::Gemm { m: s, n: h, k: inter },
+        OpKind::Gemm { m: s, n: h, k: inter, dtype: DType::F32 },
         vec![swiglu_out, w_down],
         vec![down],
         "down_proj",
@@ -2067,7 +2067,7 @@ pub(crate) fn build_lm_head_graph(
 
     let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden },
+        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: DType::F32 },
         vec![input, w_lm],
         vec![logits],
         "lm_head",

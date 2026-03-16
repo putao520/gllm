@@ -201,7 +201,7 @@ pub(crate) fn get_weight_data<E: Element>(
 /// directly on the raw block data, skipping dequantization and transpose.
 ///
 /// When `weight` is `WeightData::F32`, uses JIT-compiled GEMM via
-/// `jit_f32_gemm` for hardware-optimal SIMD execution.
+/// `jit_gemm` for hardware-optimal SIMD execution.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn quantized_linear<E: Element>(
     backend: &CpuBackend<E>,
@@ -260,8 +260,8 @@ pub(crate) fn quantized_linear<E: Element>(
             };
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
-                super::jit_helpers::jit_f32_gemm(input, &w, output, seq_len, out_dim, in_dim)
-                    .map_err(|e| BE::Other(format!("JIT F32 GEMM failed: {e}")))?;
+                super::jit_helpers::jit_gemm(input, &w, output, seq_len, out_dim, in_dim, gllm_kernels::types::DType::F32)
+                    .map_err(|e| BE::Other(format!("JIT GEMM failed: {e}")))?;
             }
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
