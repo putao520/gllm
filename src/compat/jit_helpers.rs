@@ -683,7 +683,7 @@ pub(crate) fn build_cached_gqa_graph(
     let profile = DeviceProfile::detect();
     let strategy = select_attention_strategy(
         seq_len, total_seq, head_dim, num_heads,
-        &profile, None, None,
+        dtype, &profile, None, None,
     );
 
     let mut g = CompilerGraph::new();
