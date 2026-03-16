@@ -6,6 +6,23 @@
 use super::cpu_backend::CpuBackend;
 use super::Element;
 use crate::engine::executor::{BackendError as BE, KvCacheHandle};
+use gllm_kernels::types::DType;
+
+/// Convert ModelConfig.dtype_size (bytes per element) to gllm-kernels DType.
+///
+/// The JIT codegen currently only has F32 SIMD implementations; F16/BF16
+/// paths return `Err` at codegen time. So we always use F32 for the
+/// *computation* dtype in graph construction — the model's storage dtype
+/// is handled at the weight-loading boundary (dequant / convert to f32).
+///
+/// When F16/BF16 codegen lands (AVX-512 FP16, NEON FP16), this function
+/// will return the native dtype and the JIT pipeline will emit native
+/// half-precision instructions automatically.
+#[inline]
+pub(crate) fn computation_dtype(_dtype_size: usize) -> DType {
+    // TODO: return DType::F16 when dtype_size == 2 && codegen supports it
+    DType::F32
+}
 
 // ---------------------------------------------------------------------------
 // Weight packing helper (shared by all JIT execute_* functions)
@@ -41,12 +58,12 @@ pub(crate) fn build_decoder_layer_graph(
     inter: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -74,11 +91,11 @@ pub(crate) fn build_decoder_layer_graph(
 
     // Q/K/V Projections
     let q_out = g.add_tensor("q", vec![s, q_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 }, vec![normed1, w_q], vec![q_out], "gemm_q");
+    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed1, w_q], vec![q_out], "gemm_q");
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed1, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_k], vec![k_out], "gemm_k");
     let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed1, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_v], vec![v_out], "gemm_v");
 
     // RoPE
     let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
@@ -95,7 +112,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     // Output projection + Residual 1
     let o_out = g.add_tensor("o_proj", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
     let resid1 = g.add_tensor("residual1", vec![s, h], dt);
     g.add_op(OpKind::Residual, vec![input, o_out], vec![resid1], "residual_1");
 
@@ -105,13 +122,13 @@ pub(crate) fn build_decoder_layer_graph(
 
     // SwiGLU FFN
     let gate_out = g.add_tensor("ffn_gate", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
     let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: DType::F32 }, vec![normed2, w_up], vec![up_out], "gemm_up");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_up], vec![up_out], "gemm_up");
     let swiglu_out = g.add_tensor("ffn_swiglu", vec![s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: DType::F32 }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     // Residual 2
     let output = g.add_tensor("output", vec![s, h], dt);
@@ -164,12 +181,12 @@ pub(crate) fn build_kv_projection_graph(
     head_dim: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
@@ -183,7 +200,7 @@ pub(crate) fn build_kv_projection_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_kv");
 
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
 
     let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
@@ -200,12 +217,12 @@ pub(crate) fn build_v_projection_graph(
     num_kv_heads: usize,
     head_dim: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
@@ -219,7 +236,7 @@ pub(crate) fn build_v_projection_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_v");
 
     let v_out = g.add_tensor("v_proj", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     g.outputs = vec![v_out];
     g
@@ -265,7 +282,7 @@ pub(crate) fn execute_kv_projection(
     }
 
     // V projection via JIT: RmsNorm → V Gemm (no RoPE on V)
-    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps);
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, DType::F32);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .expect("JIT compile v_projection failed");
@@ -358,12 +375,12 @@ pub(crate) fn build_lm_head_graph(
     hidden: usize,
     vocab_size: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let input = g.add_tensor("input", vec![seq_len, hidden], dt);
     let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
@@ -375,7 +392,7 @@ pub(crate) fn build_lm_head_graph(
 
     let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
         vec![normed, lm_w], vec![logits], "lm_head",
     );
 
@@ -420,12 +437,12 @@ pub(crate) fn build_final_norm_graph(
     seq_len: usize,
     hidden: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let input = g.add_tensor("input", vec![seq_len, hidden], dt);
     let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
@@ -479,12 +496,12 @@ pub(crate) fn build_moe_pre_attention_graph(
     head_dim: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -501,11 +518,11 @@ pub(crate) fn build_moe_pre_attention_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_1");
 
     let q_out = g.add_tensor("q", vec![s, q_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: DType::F32 }, vec![normed, w_q], vec![q_out], "gemm_q");
+    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
     let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
     let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: DType::F32 }, vec![normed, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
@@ -555,7 +572,7 @@ pub(crate) fn execute_moe_pre_attention(
 
     // k_rope and v_proj via separate JIT graphs (single-output ABI limitation)
     // K: RmsNorm → K Gemm → RoPE
-    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0);
+    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0, DType::F32);
     let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let k_compiled = k_compiler.compile_graph(&k_graph)
         .expect("JIT compile k_projection failed");
@@ -576,7 +593,7 @@ pub(crate) fn execute_moe_pre_attention(
     }
 
     // V: RmsNorm → V Gemm (no RoPE)
-    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps);
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, DType::F32);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .expect("JIT compile v_projection failed");
@@ -611,12 +628,12 @@ pub(crate) fn build_post_attention_graph(
     num_heads: usize,
     head_dim: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -628,7 +645,7 @@ pub(crate) fn build_post_attention_graph(
     g.inputs = vec![attn_out, w_o, residual_in, rn2_w];
 
     let o_out = g.add_tensor("o_proj", vec![s, h], dt);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: DType::F32 }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
 
     let resid1 = g.add_tensor("residual1", vec![s, h], dt);
     g.add_op(OpKind::Residual, vec![residual_in, o_out], vec![resid1], "residual_1");
@@ -646,6 +663,10 @@ pub(crate) fn build_post_attention_graph(
 
 /// Build a CompilerGraph for cached GQA attention.
 /// Q[seq_len, q_dim] × K_cache[total_seq, kv_dim] → softmax(causal) → × V_cache → out[seq_len, q_dim]
+///
+/// The attention strategy is auto-selected based on hardware profile and sequence
+/// dimensions via `select_attention_strategy`. Short sequences use Naive O(N²),
+/// long sequences trigger FlashV2 tiled attention, GPU paths use PagedAttention.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn build_cached_gqa_graph(
     seq_len: usize,
@@ -653,12 +674,20 @@ pub(crate) fn build_cached_gqa_graph(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
+    use gllm_kernels::compiler::codegen::attention_strategy::select_attention_strategy;
+    use gllm_kernels::dispatch::DeviceProfile;
+
+    let profile = DeviceProfile::detect();
+    let strategy = select_attention_strategy(
+        seq_len, total_seq, head_dim, num_heads,
+        &profile, None, None,
+    );
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
@@ -669,7 +698,7 @@ pub(crate) fn build_cached_gqa_graph(
 
     let attn_out = g.add_tensor("attn_out", vec![seq_len, q_dim + 1], dt); // +1 for sparsity
     g.add_op(
-        OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy: gllm_kernels::compiler::graph::AttentionStrategy::Naive, kv_dtype: gllm_kernels::types::DType::F32 },
+        OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dt },
         vec![q_in, k_cache, v_cache], vec![attn_out], "cached_gqa",
     );
 
@@ -735,7 +764,7 @@ pub(crate) fn execute_moe_ffn_jit(
     use crate::engine::executor::BackendError as BE;
 
     // Step 1: MoE routing via JIT (MoEGate → TopK)
-    let routing_graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k);
+    let routing_graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k, DType::F32);
     let mut routing_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let routing_compiled = routing_compiler.compile_graph(&routing_graph).map_err(|e| {
         BE::Other(format!("MoE routing JIT failed: {e}"))
@@ -772,7 +801,7 @@ pub(crate) fn execute_moe_ffn_jit(
     }
 
     // Step 2: Expert FFN via JIT (compile once, execute per expert)
-    let ffn_graph = build_expert_ffn_graph(seq_len, hidden, inter);
+    let ffn_graph = build_expert_ffn_graph(seq_len, hidden, inter, DType::F32);
     let mut ffn_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let ffn_compiled = ffn_compiler.compile_graph(&ffn_graph).map_err(|e| {
         BE::Other(format!("MoE expert FFN JIT failed: {e}"))
@@ -805,7 +834,7 @@ pub(crate) fn execute_moe_ffn_jit(
     }
 
     // Step 3: Weighted combine via JIT (WeightedSum)
-    let combine_graph = build_moe_combine_graph(seq_len, hidden, top_k);
+    let combine_graph = build_moe_combine_graph(seq_len, hidden, top_k, DType::F32);
     let mut combine_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let combine_compiled = combine_compiler.compile_graph(&combine_graph).map_err(|e| {
         BE::Other(format!("MoE combine JIT failed: {e}"))
@@ -880,12 +909,12 @@ pub(crate) fn build_moe_routing_graph(
     hidden: usize,
     num_experts: usize,
     top_k: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
 
     let normed2 = g.add_tensor("normed2", vec![s, hidden], dt);
@@ -918,12 +947,12 @@ pub(crate) fn build_expert_ffn_graph(
     seq_len: usize,
     hidden: usize,
     inter: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
 
     let input = g.add_tensor("input", vec![s, hidden], dt);
@@ -933,13 +962,13 @@ pub(crate) fn build_expert_ffn_graph(
     g.inputs = vec![input, w_gate, w_up, w_down];
 
     let gate_out = g.add_tensor("gate", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: DType::F32 }, vec![input, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_gate], vec![gate_out], "gemm_gate");
     let up_out = g.add_tensor("up", vec![s, inter], dt);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: DType::F32 }, vec![input, w_up], vec![up_out], "gemm_up");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_up], vec![up_out], "gemm_up");
     let swiglu_out = g.add_tensor("swiglu", vec![s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     let down_out = g.add_tensor("down", vec![s, hidden], dt);
-    g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter, dtype: DType::F32 }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     g.outputs = vec![down_out];
     g
@@ -955,12 +984,12 @@ pub(crate) fn build_moe_combine_graph(
     seq_len: usize,
     hidden: usize,
     top_k: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
 
     let expert_outputs = g.add_tensor("expert_outputs", vec![top_k, s, hidden], dt);
@@ -1003,7 +1032,7 @@ pub(crate) fn update_kv_cache_jit<E: Element>(
     eps: f32,
     rope_theta: f64,
 ) -> Result<(), BE> {
-    let kv_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta);
+    let kv_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, DType::F32);
     let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let compiled = compiler.compile_graph(&kv_graph)
         .map_err(|e| BE::Cpu(format!("JIT compile kv_projection failed: {e}")))?;

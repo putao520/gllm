@@ -4,7 +4,7 @@ use super::cpu_backend::CpuBackend;
 use super::jit_helpers::{
     build_decoder_layer_graph, build_final_norm_graph, build_kv_projection_graph,
     build_lm_head_graph, build_moe_pre_attention_graph, build_post_attention_graph,
-    execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+    computation_dtype, execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
     execute_kv_projection, pack_weights, update_kv_cache_jit, write_kv_to_cache,
 };
 use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
@@ -66,7 +66,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut normed = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
         let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let norm_compiled = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
             BE::Other(format!("quantized decode RmsNorm1 JIT failed: {e}"))
@@ -115,7 +115,7 @@ fn quantized_incremental_decode_layer<E: Element>(
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
-                seq_len, total_seq, num_heads, num_kv_heads, head_dim,
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim, computation_dtype(4),
             );
             let mut gqa_compiler = gllm_kernels::compiler::InferenceCompiler::new();
             let gqa_compiled = gqa_compiler.compile_graph(&gqa_graph).map_err(|e| {
@@ -138,7 +138,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut normed2 = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let norm2_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+        let norm2_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
         let mut norm2_compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let norm2_compiled = norm2_compiler.compile_graph(&norm2_graph).map_err(|e| {
             BE::Other(format!("quantized decode RmsNorm2 JIT failed: {e}"))
@@ -357,7 +357,7 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let kv_proj_decode: gllm_kernels::compiler::CompiledLayer = {
                 let kv_graph = build_kv_projection_graph(
-                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
                 );
                 let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                 kv_compiler.compile_graph(&kv_graph).map_err(|e| {
@@ -454,7 +454,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                         // Step 1: Pre-attention via JIT (RmsNorm → Q Gemm → RoPE)
                         let pre_graph = build_moe_pre_attention_graph(
-                            seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta,
+                            seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
                         );
                         let mut pre_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         let pre_compiled = pre_compiler.compile_graph(&pre_graph).map_err(|e| {
@@ -480,7 +480,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         // Step 2: Cached GQA attention via JIT
                         let (attn_out, layer_sparsity) = {
                             let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
-                                seq_len, total_seq, num_heads, num_kv_heads, head_dim,
+                                seq_len, total_seq, num_heads, num_kv_heads, head_dim, computation_dtype(4),
                             );
                             let mut gqa_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                             let gqa_compiled = gqa_compiler.compile_graph(&gqa_graph).map_err(|e| {
@@ -529,7 +529,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                         let mut normed2 = vec![0.0f32; seq_len * hidden];
                         // RmsNorm2 via JIT
-                        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+                        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
                         let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         let norm_compiled = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
                             BE::Other(format!("MoE decode RmsNorm2 JIT failed: {e}"))
@@ -669,7 +669,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                     // Step 1: Pre-attention via JIT (RmsNorm → Q/K/V Gemm → RoPE)
                     let pre_attn_graph = build_moe_pre_attention_graph(
-                        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta,
+                        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
                     );
                     let mut pre_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                     let pre_compiled = pre_compiler.compile_graph(&pre_attn_graph).map_err(|e| {
@@ -694,7 +694,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                     // K/V projection via JIT KV graph (reuse existing pattern)
                     let kv_graph = build_kv_projection_graph(
-                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
                     );
                     let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                     let kv_compiled = kv_compiler.compile_graph(&kv_graph).map_err(|e| {
@@ -746,7 +746,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                     // Step 3: Post-attention via JIT (O Gemm → Residual → RmsNorm2)
                     let post_graph = build_post_attention_graph(
-                        seq_len, hidden, num_heads, head_dim, eps,
+                        seq_len, hidden, num_heads, head_dim, eps, computation_dtype(4),
                     );
                     let mut post_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                     let post_compiled = post_compiler.compile_graph(&post_graph).map_err(|e| {
@@ -839,7 +839,7 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let jit_layer: gllm_kernels::compiler::CompiledLayer = {
                 let graph = build_decoder_layer_graph(
-                    seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta,
+                    seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, computation_dtype(4),
                 );
                 let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                 compiler.compile_graph(&graph).map_err(|e| {
@@ -851,7 +851,7 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let kv_proj_compiled: Option<gllm_kernels::compiler::CompiledLayer> = if has_kv_cache {
                 let kv_graph = build_kv_projection_graph(
-                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
                 );
                 let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
                 Some(kv_compiler.compile_graph(&kv_graph).map_err(|e| {
@@ -947,7 +947,7 @@ pub(crate) fn decoder_forward<E: Element>(
         // JIT compile and execute lm_head
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let logits = {
-            let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, eps);
+            let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, eps, computation_dtype(4));
             let mut lm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
             let compiled_lm = lm_compiler.compile_graph(&lm_graph).map_err(|e| {
                 BE::Other(format!("lm_head JIT compilation failed: {e}"))
@@ -1042,7 +1042,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let jit_layer: gllm_kernels::compiler::CompiledLayer = {
         let graph = build_decoder_layer_graph(
-            seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta,
+            seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, computation_dtype(4),
         );
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| {
@@ -1112,7 +1112,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let normed = {
-        let norm_graph = build_final_norm_graph(seq_len, hidden, eps);
+        let norm_graph = build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
         let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled_norm = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
             BE::Other(format!("Final norm JIT compilation failed: {e}"))
@@ -1211,7 +1211,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let jit_layer: gllm_kernels::compiler::CompiledLayer = {
         let graph = build_decoder_layer_graph(
-            seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta,
+            seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, computation_dtype(4),
         );
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| {
@@ -1281,7 +1281,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let normed = {
-        let norm_graph = build_final_norm_graph(seq_len, hidden, eps);
+        let norm_graph = build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
         let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled_norm = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
             BE::Other(format!("Final norm JIT compilation failed: {e}"))
