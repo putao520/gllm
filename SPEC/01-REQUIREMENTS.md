@@ -240,3 +240,15 @@
 | **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × dtype_size`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
 | **REQ-KERNELS-GPU-002** | GPU ComputeRoot | `plan_emitter.rs` 支持 `FusionMode::ComputeRoot`，全量 Norm 输出写入 shared/global memory 后执行 GEMM | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. Norm 全量输出缓冲区分配正确<br>3. 与 CPU ComputeRoot 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
 | **REQ-KERNELS-GPU-003** | GPU 融合模式决策复用 | GPU codegen 复用 `detect_tile_vs_compute_root()` 的 75% L1 阈值决策逻辑，GPU 侧用 shared memory 容量替代 L1 | 1. `DeviceProfile` 提供 `shared_memory_per_block()` 方法<br>2. 阈值决策对 GPU 使用 shared memory 容量而非 L1 cache | 🟢 已实现 |
+
+### 8.3 PTX 算法多版本支持 (REQ-KERNELS-PTX-MULTIVER)
+
+> **核心理念**: 同一算法（如 FlashAttention）可维护多个 PTX 实现版本，每个版本针对特定 SM 架构深度优化。运行时通过 JIT 全链路根据 GPU compute capability 动态选择最优内核，**禁止 Fallback**——不支持的 SM 版本必须明确报错。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-KERNELS-PTX-MV-001** | PTX 内核版本注册表 | `PtxKernelRegistry` 支持同一算法注册多个 SM 版本特化实现，每个实现声明 `SmRange { min_sm, max_sm }` | 1. 注册表支持 `register(algorithm, sm_range, emitter_fn)` 注册<br>2. 同一算法可注册多个不重叠的 SM 范围<br>3. SM 范围重叠时编译期/注册期报错 | 🟢 已实现 |
+| **REQ-KERNELS-PTX-MV-002** | SM 版本检测与验证 | 启动时通过 CUDA Driver API 检测 GPU compute capability，与注册表匹配 | 1. `CudaDevice` 已有 `sm_version` 字段（现有）<br>2. `PtxKernelRegistry::select()` 返回精确匹配的实现或 `Err`<br>3. 无匹配时返回 `Err("SM {ver} not supported for {algorithm}, requires SM {ranges}")` | 🟢 已实现 |
+| **REQ-KERNELS-PTX-MV-003** | 禁止 Fallback 机制 | 不支持的 SM 版本必须返回明确错误，禁止降级到次优实现 | 1. 无 `_ => fallback()` 分支<br>2. 无 `default` 实现<br>3. 错误信息包含当前 SM 版本和所有已注册的 SM 范围 | 🟢 已实现 |
+| **REQ-KERNELS-PTX-MV-004** | FlashAttention 多版本实现 | 以 FlashAttention 为首个案例，注册 4 个 SM 版本特化内核 | 1. FA-v1 (sm_70-79): wmma tiled attention<br>2. FA-v2 (sm_80-89): mma.sync + cp.async + Split-Q<br>3. FA-v3 (sm_90-99): TMA + WGMMA + warp specialization<br>4. FA-v4 (sm_100+): TMEM + tcgen05.mma + 2-CTA cooperative<br>5. 每个版本独立 codegen 函数，走完整 JIT 管线 | 🟢 已实现 |
+| **REQ-KERNELS-PTX-MV-005** | JIT 全链路集成 | 多版本内核选择集成到现有 JIT 编译管线（Phase 3 ISA Lowering） | 1. `PtxDialect::emit_gemm_kernel` 中 CachedGQA/FlashV2 分支查询注册表<br>2. 选择结果传递到 `kernel_builder` 层<br>3. 生成的 PTX 代码包含正确的 `.target sm_XX` 和对应指令集 | 🟢 已实现 |
