@@ -22,6 +22,8 @@ pub mod tokenizer;
 pub mod weight_loader;
 pub mod weight_names;
 
+pub mod ffi;
+
 pub use manifest::{
     ArchFamily, FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
 };

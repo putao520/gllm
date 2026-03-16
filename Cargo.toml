@@ -13,6 +13,7 @@ categories = ["algorithms", "science", "text-processing"]
 [lib]
 name = "gllm"
 path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
 
 [[bin]]
 name = "download"
