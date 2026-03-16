@@ -1,8 +1,10 @@
 use super::allocator::BlockAllocator;
 use super::hgal::{HGALConfig, HGALScheduler};
+use super::prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 use super::types::{GroupState, SequenceGroup};
 use super::vllm2024::{Scheduler2024Config, Scheduler2024State};
 use super::types::{PageId, PageState, RequestId, StorageKey};
+use crate::scheduler::memory_manager::VirtualPageId;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -63,6 +65,8 @@ pub struct PagedScheduler {
     pending_swap_ins: HashMap<RequestId, Vec<(PageId, StorageKey)>>,
     block_size: usize,
     pub(crate) vllm_state: Option<Scheduler2024State>,
+    /// KV cache prefix tree for prompt sharing across requests.
+    pub(crate) prefix_index: KvPrefixIndex,
 }
 
 impl PagedScheduler {
@@ -75,6 +79,7 @@ impl PagedScheduler {
             pending_swap_ins: HashMap::new(),
             block_size,
             vllm_state: None,
+            prefix_index: KvPrefixIndex::new(),
         }
     }
 
@@ -142,6 +147,23 @@ impl PagedScheduler {
         self.hgal.upsert_group(group);
 
         Ok(())
+    }
+
+    /// Query the prefix tree for the longest matching prefix of `tokens`.
+    /// Returns `Some(PrefixMatch)` if a shared prefix is found.
+    pub fn find_prefix(&self, tokens: &[TokenId]) -> Option<PrefixMatch> {
+        self.prefix_index.find_longest_prefix(tokens)
+    }
+
+    /// Insert a completed prefill's token sequence into the prefix tree,
+    /// mapping each token position to its corresponding virtual page.
+    pub fn insert_prefix(&mut self, request_id: RequestId, tokens: &[TokenId]) {
+        let pages: Vec<VirtualPageId> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, _)| VirtualPageId::new(request_id, i / self.block_size))
+            .collect();
+        self.prefix_index.insert(tokens, &pages);
     }
 
     pub fn allocate_next_token(

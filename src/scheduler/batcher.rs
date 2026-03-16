@@ -172,6 +172,11 @@ impl ContinuousBatcher {
 
             match result.action {
                 BatchAction::Continue => {
+                    // Insert prompt tokens into prefix tree on first decode step
+                    // (prefill just completed: generated_tokens is still empty before push)
+                    if sequence.generated_tokens.is_empty() && !sequence.prompt_tokens.is_empty() {
+                        scheduler.insert_prefix(sequence.id, &sequence.prompt_tokens);
+                    }
                     if let Some(token) = result.generated_token {
                         sequence.push_generated_token(token);
                     }
@@ -240,6 +245,14 @@ impl ContinuousBatcher {
 
         for mut sequence in waiting_sequences {
             let request_id = sequence.id;
+
+            // Query prefix tree for shared KV cache pages
+            if let Some(prefix_match) = scheduler.find_prefix(&sequence.prompt_tokens) {
+                log::info!(
+                    "scheduler: sequence {} prefix hit: {} tokens matched, {} pages reusable",
+                    request_id, prefix_match.matched_tokens, prefix_match.matched_pages.len(),
+                );
+            }
 
             match scheduler.add_sequence(sequence.to_sequence_group()) {
                 Ok(()) => {
