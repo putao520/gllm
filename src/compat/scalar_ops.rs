@@ -138,6 +138,7 @@ pub(crate) fn scalar_expert_ffn(
 }
 
 /// Scalar MoE forward: gate routing + expert FFN + weighted combine.
+#[allow(dead_code)]
 pub(crate) fn scalar_moe_ffn(
     input: &[f32],
     router_w: &[f32],
@@ -182,12 +183,14 @@ pub(crate) fn scalar_moe_ffn(
 // ---------------------------------------------------------------------------
 
 /// Sparsity threshold: softmax weights below this are considered "sparse".
+#[allow(dead_code)]
 const ATTN_SPARSITY_THRESHOLD: f32 = 0.01;
 
 /// Cached GQA attention: compute attention scores using cached K/V.
 ///
 /// Returns `(attn_output, sparsity)` where sparsity is the fraction of
 /// softmax weights below `ATTN_SPARSITY_THRESHOLD` across all heads and positions.
+#[allow(dead_code)]
 pub(crate) fn cached_gqa_attention(
     q: &[f32],
     kv: &KvCacheSlice,
@@ -302,6 +305,7 @@ pub(crate) fn swiglu_ffn(
 /// Returns `(attn_output, sparsity)` where sparsity is the fraction of
 /// softmax weights below `ATTN_SPARSITY_THRESHOLD` across all heads and positions.
 #[allow(clippy::needless_range_loop)]
+#[allow(dead_code)]
 pub(crate) fn prefill_gqa_attention(
     q: &[f32],
     k: &[f32],

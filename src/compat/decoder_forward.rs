@@ -3,12 +3,9 @@ use super::backend_trait;
 use super::cpu_backend::CpuBackend;
 use super::jit_helpers::{
     build_decoder_layer_graph, build_final_norm_graph, build_kv_projection_graph,
-    build_lm_head_graph, execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
-    execute_kv_projection, update_kv_cache, write_kv_to_cache,
-};
-use super::scalar_ops::{
-    cached_gqa_attention, prefill_gqa_attention, scalar_gemm, scalar_moe_ffn, scalar_rms_norm,
-    scalar_rope,
+    build_lm_head_graph, build_moe_pre_attention_graph, build_post_attention_graph,
+    execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+    execute_kv_projection, pack_weights, update_kv_cache_jit, write_kv_to_cache,
 };
 use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
 use super::weight_helpers::{
@@ -19,65 +16,6 @@ use super::Element;
 use crate::engine::executor::{
     BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheHandle, LogitsHandle,
 };
-
-// ---------------------------------------------------------------------------
-// Scalar MoE-aware prefill layer
-// ---------------------------------------------------------------------------
-
-/// Scalar MoE-aware decoder layer (full prefill, no KV cache).
-///
-/// Same structure as the JIT decoder layer but replaces the dense SwiGLU FFN
-/// with MoE routing (gate -> top-k -> expert dispatch -> combine).
-fn scalar_moe_prefill_layer(
-    hidden_state: &[f32],
-    q_w: &[f32],
-    k_w: &[f32],
-    v_w: &[f32],
-    o_w: &[f32],
-    rn1_w: &[f32],
-    rn2_w: &[f32],
-    router_w: &[f32],
-    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)],
-    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
-    positions: &[u32],
-    seq_len: usize,
-    geom: &AttentionGeometry,
-    dims: &LayerDims,
-    num_experts: usize,
-    top_k: usize,
-    output: &mut [f32],
-) -> f32 {
-    let mut normed = vec![0.0f32; seq_len * dims.hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, dims.hidden, dims.eps);
-
-    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, dims.hidden);
-    let mut k_proj = vec![0.0f32; seq_len * geom.kv_dim];
-    scalar_gemm(&normed, k_w, &mut k_proj, seq_len, geom.kv_dim, dims.hidden);
-    let mut v_proj = vec![0.0f32; seq_len * geom.kv_dim];
-    scalar_gemm(&normed, v_w, &mut v_proj, seq_len, geom.kv_dim, dims.hidden);
-
-    scalar_rope(&mut q_proj, positions, geom.head_dim, dims.rope_theta);
-    scalar_rope(&mut k_proj, positions, geom.head_dim, dims.rope_theta);
-
-    let (attn_out, sparsity) = prefill_gqa_attention(&q_proj, &k_proj, &v_proj, seq_len, geom);
-
-    let mut o_out = vec![0.0f32; seq_len * dims.hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, dims.hidden, geom.q_dim);
-    let mut resid1 = vec![0.0f32; seq_len * dims.hidden];
-    for i in 0..seq_len * dims.hidden { resid1[i] = hidden_state[i] + o_out[i]; }
-
-    let mut normed2 = vec![0.0f32; seq_len * dims.hidden];
-    scalar_rms_norm(&resid1, rn2_w, &mut normed2, dims.hidden, dims.eps);
-
-    let moe_out = scalar_moe_ffn(
-        &normed2, router_w, expert_weights, shared_expert,
-        seq_len, dims.hidden, dims.inter, num_experts, top_k,
-    );
-
-    for i in 0..seq_len * dims.hidden { output[i] = resid1[i] + moe_out[i]; }
-    sparsity
-}
 
 // ---------------------------------------------------------------------------
 // Quantized incremental decode layer (uses cached K/V, O(n) per step)
@@ -124,15 +62,71 @@ fn quantized_incremental_decode_layer<E: Element>(
     let seq = SeqContext { positions, seq_len, total_seq };
     let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
 
-    // RMSNorm + Q projection (quantized) + RoPE
+    // RMSNorm via JIT + Q projection (quantized) + RoPE via JIT
     let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+        let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let norm_compiled = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
+            BE::Other(format!("quantized decode RmsNorm1 JIT failed: {e}"))
+        })?;
+        super::jit_helpers::execute_jit_final_norm(
+            &norm_compiled, hidden_state, rn1_w, seq_len, &mut normed,
+        );
+    }
     let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
     quantized_linear(backend, &normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden, transpose_weights)?;
-    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
+    // RoPE via JIT
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+        use gllm_kernels::types::DType;
+        let mut rg = CompilerGraph::new();
+        let dt = DType::F32;
+        let q_in = rg.add_tensor("q_in", vec![seq_len, geom.q_dim], dt);
+        rg.inputs = vec![q_in];
+        let q_rope_out = rg.add_tensor("q_rope", vec![seq_len, geom.q_dim], dt);
+        rg.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_in], vec![q_rope_out], "rope_q");
+        rg.outputs = vec![q_rope_out];
+        let mut rc = gllm_kernels::compiler::InferenceCompiler::new();
+        let rope_compiled = rc.compile_graph(&rg).map_err(|e| {
+            BE::Other(format!("quantized decode RoPE JIT failed: {e}"))
+        })?;
+        let mut q_rope_result = vec![0.0f32; seq_len * geom.q_dim];
+        let mut rope_scratch = vec![0u8; rope_compiled.scratchpad_bytes];
+        unsafe {
+            rope_compiled.execute(
+                q_proj.as_ptr() as *const u8,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                positions.as_ptr(),
+                std::ptr::null(),
+                1, seq_len,
+                q_rope_result.as_mut_ptr() as *mut u8,
+                rope_scratch.as_mut_ptr(),
+            );
+        }
+        q_proj.copy_from_slice(&q_rope_result);
+    }
 
-    // Cached GQA attention
-    let (attn_out, sparsity) = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
+    // Cached GQA attention via JIT
+    let (attn_out, sparsity) = {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim,
+            );
+            let mut gqa_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+            let gqa_compiled = gqa_compiler.compile_graph(&gqa_graph).map_err(|e| {
+                BE::Other(format!("CachedGQA JIT failed: {e}"))
+            })?;
+            super::jit_helpers::execute_cached_gqa(
+                &gqa_compiled, &q_proj, kv_cache_k, kv_cache_v,
+                seq_len, num_heads, head_dim,
+            )
+        }
+    };
 
     // O projection (quantized) + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
@@ -140,9 +134,19 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut resid1 = vec![0.0f32; seq_len * hidden];
     for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
 
-    // Pre-FFN RMSNorm + SwiGLU FFN (quantized)
+    // Pre-FFN RMSNorm via JIT + SwiGLU FFN (quantized)
     let mut normed2 = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let norm2_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+        let mut norm2_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let norm2_compiled = norm2_compiler.compile_graph(&norm2_graph).map_err(|e| {
+            BE::Other(format!("quantized decode RmsNorm2 JIT failed: {e}"))
+        })?;
+        super::jit_helpers::execute_jit_final_norm(
+            &norm2_compiled, &resid1, rn2_w, seq_len, &mut normed2,
+        );
+    }
     let mut gate_out = vec![0.0f32; seq_len * inter];
     quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights)?;
     let mut up_out = vec![0.0f32; seq_len * inter];
@@ -158,74 +162,6 @@ fn quantized_incremental_decode_layer<E: Element>(
 
     for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
     Ok(sparsity)
-}
-
-/// Execute a single MoE decoder layer using cached K/V for attention.
-///
-/// Same as `scalar_incremental_decode_layer` but replaces the SwiGLU FFN
-/// with MoE routing: gate → top-k selection → expert FFN → weighted combine.
-fn scalar_incremental_moe_decode_layer(
-    hidden_state: &[f32],
-    q_w: &[f32],
-    o_w: &[f32],
-    rn1_w: &[f32],
-    rn2_w: &[f32],
-    router_w: &[f32],
-    expert_weights: &[(Vec<f32>, Vec<f32>, Vec<f32>)],
-    shared_expert: Option<&(Vec<f32>, Vec<f32>, Vec<f32>)>,
-    positions: &[u32],
-    kv_cache_k: &[f32],
-    kv_cache_v: &[f32],
-    layer: usize,
-    total_seq: usize,
-    seq_len: usize,
-    hidden: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    inter: usize,
-    eps: f32,
-    rope_theta: f64,
-    max_seq_len: usize,
-    num_experts: usize,
-    top_k: usize,
-    output: &mut [f32],
-) -> f32 {
-    let geom = AttentionGeometry {
-        num_heads, num_kv_heads, head_dim,
-        q_dim: num_heads * head_dim,
-        kv_dim: num_kv_heads * head_dim,
-        heads_per_group: num_heads / num_kv_heads,
-    };
-    let seq = SeqContext { positions, seq_len, total_seq };
-    let kv = KvCacheSlice { k: kv_cache_k, v: kv_cache_v, layer, max_seq_len };
-
-    // RMSNorm + Q projection + RoPE
-    let mut normed = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(hidden_state, rn1_w, &mut normed, hidden, eps);
-    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
-    scalar_gemm(&normed, q_w, &mut q_proj, seq_len, geom.q_dim, hidden);
-    scalar_rope(&mut q_proj, positions, head_dim, rope_theta);
-
-    // Cached GQA attention
-    let (attn_out, sparsity) = cached_gqa_attention(&q_proj, &kv, &seq, &geom);
-
-    // O projection + residual
-    let mut o_out = vec![0.0f32; seq_len * hidden];
-    scalar_gemm(&attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim);
-    let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
-
-    // MoE FFN
-    let mut normed2 = vec![0.0f32; seq_len * hidden];
-    scalar_rms_norm(&resid1, rn2_w, &mut normed2, hidden, eps);
-    let moe_out = scalar_moe_ffn(
-        &normed2, router_w, expert_weights, shared_expert,
-        seq_len, hidden, inter, num_experts, top_k,
-    );
-
-    for i in 0..seq_len * hidden { output[i] = resid1[i] + moe_out[i]; }
-    sparsity
 }
 
 // ---------------------------------------------------------------------------
@@ -459,8 +395,9 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 if moe_weights.is_some() {
-                    // MoE layers: use scalar update_kv_cache (no JIT optimization)
-                    update_kv_cache(
+                    // MoE layers: JIT KV projection (replaces scalar update_kv_cache)
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    update_kv_cache_jit(
                         backend, kv_caches[seq_idx],
                         layer, &hidden_state, &k_w_f32, &v_w_f32,
                         &rn1_w, &positions,
@@ -498,27 +435,119 @@ pub(crate) fn decoder_forward<E: Element>(
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
 
                 if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
-                    // MoE incremental: dequantize attention weights to f32
+                    // MoE incremental: JIT pre-attention + cached attention + scalar MoE FFN
                     let q_w_f32 = weight_data_to_f32(
                         &q_w, backend, transpose_weights, num_heads * head_dim, hidden)?;
                     let o_w_f32 = weight_data_to_f32(
                         &o_w, backend, transpose_weights, hidden, num_heads * head_dim)?;
 
-                    let layer_sparsity = scalar_incremental_moe_decode_layer(
-                        &hidden_state,
-                        &q_w_f32, &o_w_f32, &rn1_w, &rn2_w,
-                        &router_w, &expert_weights,
-                        shared_expert.as_ref(),
-                        &positions,
-                        &kv_cache_k, &kv_cache_v,
-                        layer, total_seq, seq_len,
-                        hidden, num_heads, num_kv_heads, head_dim, inter,
-                        eps, rope_theta, max_seq_len,
-                        moe_num_experts, moe_top_k,
-                        &mut layer_out,
-                    );
-                    total_sparsity += layer_sparsity;
-                    sparsity_layers += 1;
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    {
+                        let geom = AttentionGeometry {
+                            num_heads, num_kv_heads, head_dim,
+                            q_dim: num_heads * head_dim,
+                            kv_dim: num_kv_heads * head_dim,
+                            heads_per_group: num_heads / num_kv_heads,
+                        };
+                        let seq = SeqContext { positions: &positions, seq_len, total_seq };
+                        let kv = KvCacheSlice { k: &kv_cache_k, v: &kv_cache_v, layer, max_seq_len };
+
+                        // Step 1: Pre-attention via JIT (RmsNorm → Q Gemm → RoPE)
+                        let pre_graph = build_moe_pre_attention_graph(
+                            seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta,
+                        );
+                        let mut pre_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                        let pre_compiled = pre_compiler.compile_graph(&pre_graph).map_err(|e| {
+                            BE::Other(format!("MoE decode pre-attention JIT failed: {e}"))
+                        })?;
+
+                        let weights_buf = pack_weights(&[&rn1_w, &q_w_f32, &k_w_f32, &v_w_f32]);
+                        let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
+                        let mut scratchpad = vec![0u8; pre_compiled.scratchpad_bytes];
+                        unsafe {
+                            pre_compiled.execute(
+                                hidden_state.as_ptr() as *const u8,
+                                weights_buf.as_ptr(),
+                                std::ptr::null_mut(),
+                                positions.as_ptr(),
+                                std::ptr::null(),
+                                1, seq_len,
+                                q_rope.as_mut_ptr() as *mut u8,
+                                scratchpad.as_mut_ptr(),
+                            );
+                        }
+
+                        // Step 2: Cached GQA attention via JIT
+                        let (attn_out, layer_sparsity) = {
+                            let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
+                                seq_len, total_seq, num_heads, num_kv_heads, head_dim,
+                            );
+                            let mut gqa_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                            let gqa_compiled = gqa_compiler.compile_graph(&gqa_graph).map_err(|e| {
+                                BE::Other(format!("MoE decode CachedGQA JIT failed: {e}"))
+                            })?;
+                            super::jit_helpers::execute_cached_gqa(
+                                &gqa_compiled, &q_rope, &kv_cache_k, &kv_cache_v,
+                                seq_len, num_heads, head_dim,
+                            )
+                        };
+
+                        // Step 3: O projection via JIT + residual + RmsNorm2 via JIT
+                        let mut o_out = vec![0.0f32; seq_len * hidden];
+                        {
+                            use gllm_kernels::compiler::{CompilerGraph, OpKind};
+                            use gllm_kernels::types::DType;
+                            let mut og = CompilerGraph::new();
+                            let dt = DType::F32;
+                            let a_in = og.add_tensor("a", vec![seq_len, geom.q_dim], dt);
+                            let b_in = og.add_tensor("b", vec![geom.q_dim, hidden], dt);
+                            og.inputs = vec![a_in, b_in];
+                            let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
+                            og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                            og.outputs = vec![c_out];
+                            let mut oc = gllm_kernels::compiler::InferenceCompiler::new();
+                            let o_compiled = oc.compile_graph(&og).map_err(|e| {
+                                BE::Other(format!("MoE decode O Gemm JIT failed: {e}"))
+                            })?;
+                            let o_weights = pack_weights(&[&o_w_f32]);
+                            let mut o_scratch = vec![0u8; o_compiled.scratchpad_bytes];
+                            unsafe {
+                                o_compiled.execute(
+                                    attn_out.as_ptr() as *const u8,
+                                    o_weights.as_ptr(),
+                                    std::ptr::null_mut(),
+                                    std::ptr::null(),
+                                    std::ptr::null(),
+                                    1, seq_len,
+                                    o_out.as_mut_ptr() as *mut u8,
+                                    o_scratch.as_mut_ptr(),
+                                );
+                            }
+                        }
+                        let mut resid1 = vec![0.0f32; seq_len * hidden];
+                        for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
+
+                        let mut normed2 = vec![0.0f32; seq_len * hidden];
+                        // RmsNorm2 via JIT
+                        let norm_graph = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps);
+                        let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                        let norm_compiled = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
+                            BE::Other(format!("MoE decode RmsNorm2 JIT failed: {e}"))
+                        })?;
+                        super::jit_helpers::execute_jit_final_norm(
+                            &norm_compiled, &resid1, &rn2_w, seq_len, &mut normed2,
+                        );
+
+                        // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
+                        let moe_out = super::jit_helpers::execute_moe_ffn_jit(
+                            &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
+                            seq_len, hidden, inter, moe_num_experts, moe_top_k,
+                        )?;
+
+                        for i in 0..seq_len * hidden { layer_out[i] = resid1[i] + moe_out[i]; }
+                        total_sparsity += layer_sparsity;
+                        sparsity_layers += 1;
+                    }
                 } else {
                     // Dense layer: load standard FFN weights
                     let gate_w = get_weight_data(weights, backend,
@@ -631,25 +660,169 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
-                let layer_sparsity = scalar_moe_prefill_layer(
-                    &hidden_state,
-                    &q_w, &k_w, &v_w, &o_w,
-                    &rn1_w, &rn2_w,
-                    &router_w, &expert_weights,
-                    shared_expert.as_ref(),
-                    &positions,
-                    seq_len,
-                    &config.attention_geometry(),
-                    &config.layer_dims(),
-                    moe_num_experts, moe_top_k,
-                    &mut layer_out,
-                );
-                total_sparsity += layer_sparsity;
-                sparsity_layers += 1;
 
-                // Update KV cache for this layer
+                // JIT MoE prefill: pre-attention (JIT) → attention (JIT) → post-attention (JIT) → MoE FFN (scalar routing only)
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                {
+                    let geom = config.attention_geometry();
+                    let dims = config.layer_dims();
+
+                    // Step 1: Pre-attention via JIT (RmsNorm → Q/K/V Gemm → RoPE)
+                    let pre_attn_graph = build_moe_pre_attention_graph(
+                        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta,
+                    );
+                    let mut pre_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                    let pre_compiled = pre_compiler.compile_graph(&pre_attn_graph).map_err(|e| {
+                        BE::Other(format!("MoE pre-attention JIT failed: {e}"))
+                    })?;
+
+                    let weights_buf = pack_weights(&[&rn1_w, &q_w, &k_w, &v_w]);
+                    let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
+                    let mut scratchpad = vec![0u8; pre_compiled.scratchpad_bytes];
+                    unsafe {
+                        pre_compiled.execute(
+                            hidden_state.as_ptr() as *const u8,
+                            weights_buf.as_ptr(),
+                            std::ptr::null_mut(),
+                            positions.as_ptr(),
+                            std::ptr::null(),
+                            1, seq_len,
+                            q_rope.as_mut_ptr() as *mut u8,
+                            scratchpad.as_mut_ptr(),
+                        );
+                    }
+
+                    // K/V projection via JIT KV graph (reuse existing pattern)
+                    let kv_graph = build_kv_projection_graph(
+                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                    );
+                    let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                    let kv_compiled = kv_compiler.compile_graph(&kv_graph).map_err(|e| {
+                        BE::Other(format!("MoE KV projection JIT failed: {e}"))
+                    })?;
+                    let (k_rope, v_proj) = execute_kv_projection(
+                        &kv_compiled, &hidden_state, &rn1_w, &k_w, &v_w,
+                        &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                    );
+
+                    // Step 2: Prefill attention via JIT (MHA with GQA)
+                    let (attn_out, layer_sparsity) = {
+                        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+                        use gllm_kernels::types::DType;
+                        let mut ag = CompilerGraph::new();
+                        let dt = DType::F32;
+                        let q_in = ag.add_tensor("q", vec![seq_len, geom.q_dim], dt);
+                        let k_in = ag.add_tensor("k", vec![seq_len, geom.kv_dim], dt);
+                        let v_in = ag.add_tensor("v", vec![seq_len, geom.kv_dim], dt);
+                        ag.inputs = vec![q_in, k_in, v_in];
+                        let a_out = ag.add_tensor("attn", vec![seq_len, geom.q_dim], dt);
+                        ag.add_op(
+                            OpKind::MultiHeadAttention { seq_len, num_heads, head_dim },
+                            vec![q_in, k_in, v_in], vec![a_out], "mha",
+                        );
+                        ag.outputs = vec![a_out];
+                        let mut ac = gllm_kernels::compiler::InferenceCompiler::new();
+                        let a_compiled = ac.compile_graph(&ag).map_err(|e| {
+                            BE::Other(format!("MoE prefill MHA JIT failed: {e}"))
+                        })?;
+                        let attn_weights = pack_weights(&[&k_rope, &v_proj]);
+                        let mut attn_result = vec![0.0f32; seq_len * geom.q_dim];
+                        let mut attn_scratch = vec![0u8; a_compiled.scratchpad_bytes];
+                        unsafe {
+                            a_compiled.execute(
+                                q_rope.as_ptr() as *const u8,
+                                attn_weights.as_ptr(),
+                                std::ptr::null_mut(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                1, seq_len,
+                                attn_result.as_mut_ptr() as *mut u8,
+                                attn_scratch.as_mut_ptr(),
+                            );
+                        }
+                        // Sparsity not available from MHA JIT (non-causal prefill), use 0.0
+                        (attn_result, 0.0f32)
+                    };
+
+                    // Step 3: Post-attention via JIT (O Gemm → Residual → RmsNorm2)
+                    let post_graph = build_post_attention_graph(
+                        seq_len, hidden, num_heads, head_dim, eps,
+                    );
+                    let mut post_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                    let post_compiled = post_compiler.compile_graph(&post_graph).map_err(|e| {
+                        BE::Other(format!("MoE post-attention JIT failed: {e}"))
+                    })?;
+
+                    let post_weights = pack_weights(&[&o_w, &rn2_w]);
+                    // Post-attention needs: attn_out as input, o_w + residual_in(hidden_state) + rn2_w as weights
+                    // But the graph expects 4 inputs: attn_out, w_o, residual_in, rn2_w
+                    // We pack w_o and rn2_w as weights, and pass attn_out + hidden_state via input/kv ptrs
+                    let mut normed2 = vec![0.0f32; seq_len * hidden];
+                    let mut post_scratch = vec![0u8; post_compiled.scratchpad_bytes];
+                    unsafe {
+                        post_compiled.execute(
+                            attn_out.as_ptr() as *const u8,
+                            post_weights.as_ptr(),
+                            hidden_state.as_ptr() as *mut u8, // residual input via kv_cache ptr
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            1, seq_len,
+                            normed2.as_mut_ptr() as *mut u8,
+                            post_scratch.as_mut_ptr(),
+                        );
+                    }
+
+                    // Compute resid1 for final residual (hidden_state + o_proj)
+                    let mut o_out = vec![0.0f32; seq_len * hidden];
+                    // O Gemm via JIT
+                    {
+                        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+                        use gllm_kernels::types::DType;
+                        let mut og = CompilerGraph::new();
+                        let dt = DType::F32;
+                        let a_in = og.add_tensor("a", vec![seq_len, geom.q_dim], dt);
+                        let b_in = og.add_tensor("b", vec![geom.q_dim, hidden], dt);
+                        og.inputs = vec![a_in, b_in];
+                        let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
+                        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                        og.outputs = vec![c_out];
+                        let mut oc = gllm_kernels::compiler::InferenceCompiler::new();
+                        let o_compiled = oc.compile_graph(&og).map_err(|e| {
+                            BE::Other(format!("MoE prefill O Gemm JIT failed: {e}"))
+                        })?;
+                        let o_weights = pack_weights(&[&o_w]);
+                        let mut o_scratch = vec![0u8; o_compiled.scratchpad_bytes];
+                        unsafe {
+                            o_compiled.execute(
+                                attn_out.as_ptr() as *const u8,
+                                o_weights.as_ptr(),
+                                std::ptr::null_mut(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                1, seq_len,
+                                o_out.as_mut_ptr() as *mut u8,
+                                o_scratch.as_mut_ptr(),
+                            );
+                        }
+                    }
+                    let mut resid1 = vec![0.0f32; seq_len * hidden];
+                    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
+
+                    // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
+                    let moe_out = super::jit_helpers::execute_moe_ffn_jit(
+                        &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
+                        seq_len, dims.hidden, dims.inter, moe_num_experts, moe_top_k,
+                    )?;
+
+                    for i in 0..seq_len * hidden { layer_out[i] = resid1[i] + moe_out[i]; }
+                    total_sparsity += layer_sparsity;
+                    sparsity_layers += 1;
+                }
+
+                // Update KV cache for this layer (JIT path)
                 if has_kv_cache {
-                    update_kv_cache(
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    update_kv_cache_jit(
                         backend, kv_caches[seq_idx],
                         layer, &hidden_state, &k_w, &v_w,
                         &rn1_w, &positions,
@@ -1214,7 +1387,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::scalar_ops::{scalar_moe_gate, scalar_top_k_experts, scalar_expert_ffn};
+    use super::super::scalar_ops::{scalar_moe_ffn, scalar_moe_gate, scalar_top_k_experts, scalar_expert_ffn};
 
     #[test]
     fn moe_gate_softmax_sums_to_one() {
