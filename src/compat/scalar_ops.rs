@@ -7,6 +7,7 @@ use super::types::{AttentionGeometry, KvCacheSlice, LayerDims, SeqContext};
 
 /// Scalar RMSNorm: out[i] = (x[i] / rms) * w[i]
 /// where rms = sqrt(mean(x^2) + eps)
+#[allow(dead_code)]
 pub(crate) fn scalar_rms_norm(x: &[f32], w: &[f32], out: &mut [f32], hidden: usize, eps: f32) {
     let n = x.len() / hidden;
     for row in 0..n {
@@ -37,6 +38,7 @@ pub(crate) fn scalar_gemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usiz
 
 /// Scalar RoPE: apply rotary position embedding to x[seq_len, dim]
 /// dim = num_heads * head_dim, positions[seq_len]
+#[allow(dead_code)]
 pub(crate) fn scalar_rope(x: &mut [f32], positions: &[u32], head_dim: usize, theta: f64) {
     let seq_len = positions.len();
     let dim = x.len() / seq_len;

@@ -156,7 +156,7 @@ pub(crate) enum WeightData {
 ///
 /// For quantized (GGUF) weights with 2D shape, returns `WeightData::Quantized`
 /// so the caller can dispatch to `quantized_matmul` directly, skipping the
-/// expensive dequantize + transpose + scalar_gemm path.
+/// expensive dequantize + transpose path.
 ///
 /// For native f32 tensors or 1D quantized tensors (e.g. norm weights),
 /// returns `WeightData::F32`.
@@ -200,8 +200,8 @@ pub(crate) fn get_weight_data<E: Element>(
 /// When `weight` is `WeightData::Quantized`, calls `backend.quantized_matmul()`
 /// directly on the raw block data, skipping dequantization and transpose.
 ///
-/// When `weight` is `WeightData::F32`, falls back to the existing
-/// transpose + scalar_gemm path.
+/// When `weight` is `WeightData::F32`, uses JIT-compiled GEMM via
+/// `jit_f32_gemm` for hardware-optimal SIMD execution.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn quantized_linear<E: Element>(
     backend: &CpuBackend<E>,
@@ -258,7 +258,15 @@ pub(crate) fn quantized_linear<E: Element>(
             } else {
                 w_data.clone()
             };
-            super::scalar_ops::scalar_gemm(input, &w, output, seq_len, out_dim, in_dim);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            {
+                super::jit_helpers::jit_f32_gemm(input, &w, output, seq_len, out_dim, in_dim)
+                    .map_err(|e| BE::Other(format!("JIT F32 GEMM failed: {e}")))?;
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                compile_error!("F32 GEMM requires JIT support (x86_64 or aarch64)");
+            }
             Ok(())
         }
     }

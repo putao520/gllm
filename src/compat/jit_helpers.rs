@@ -1016,3 +1016,56 @@ pub(crate) fn update_kv_cache_jit<E: Element>(
     write_kv_to_cache(backend, handle, layer, &k_rope, &v_proj, seq_len, num_kv_heads, head_dim)
 }
 
+// ---------------------------------------------------------------------------
+// JIT F32 GEMM (replaces scalar_gemm in all runtime paths)
+// ---------------------------------------------------------------------------
+
+/// Perform F32 GEMM via JIT compilation: output[m, n] = input[m, k] @ weight[k, n].
+///
+/// Builds a single-op CompilerGraph with `OpKind::Gemm`, compiles to native SIMD
+/// (AVX2/AVX-512/NEON/SVE based on DeviceProfile), and executes.
+/// This replaces all `scalar_gemm` calls in production code paths.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_f32_gemm(
+    input: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(), String> {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, InferenceCompiler};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+
+    let a = g.add_tensor("input", vec![m, k], dt);
+    let b = g.add_tensor("weight", vec![k, n], dt);
+    g.inputs = vec![a, b];
+
+    let c = g.add_tensor("output", vec![m, n], dt);
+    g.add_op(OpKind::Gemm { m, n, k }, vec![a, b], vec![c], "gemm");
+    g.outputs = vec![c];
+
+    let mut compiler = InferenceCompiler::new();
+    let compiled = compiler.compile_graph(&g).map_err(|e| format!("{e:?}"))?;
+
+    let weights_buf = pack_weights(&[weight]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+
+    unsafe {
+        compiled.execute(
+            input.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, m,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(())
+}
+

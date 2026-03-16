@@ -25,7 +25,7 @@ use crate::engine::executor::{
 ///
 /// Same logic as `scalar_incremental_decode_layer` but dispatches GEMM operations
 /// through `quantized_linear` which uses `quantized_matmul` for quantized weights,
-/// avoiding the expensive dequantize + transpose + scalar_gemm path.
+/// avoiding the expensive dequantize + transpose path.
 fn quantized_incremental_decode_layer<E: Element>(
     backend: &CpuBackend<E>,
     hidden_state: &[f32],
