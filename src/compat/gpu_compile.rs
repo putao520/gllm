@@ -418,9 +418,13 @@ pub(crate) fn cuda_launch_graph(
 
     for entry in entries {
         let input_ptrs: Vec<u64> = entry.input_tids.iter()
-            .map(|tid| tensor_ptrs.get(tid).copied().unwrap_or(0))
-            .collect();
-        let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().unwrap_or(0);
+            .map(|tid| tensor_ptrs.get(tid).copied().ok_or_else(|| {
+                BE::Gpu(format!("missing tensor pointer for input {:?}", tid))
+            }))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().ok_or_else(|| {
+            BE::Gpu(format!("missing tensor pointer for output {:?}", entry.output_tid))
+        })?;
 
         // Build typed params based on op kind
         let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr)?;
@@ -1132,9 +1136,13 @@ pub(crate) fn hip_launch_graph(
 
     for entry in entries {
         let input_ptrs: Vec<u64> = entry.input_tids.iter()
-            .map(|tid| tensor_ptrs.get(tid).copied().unwrap_or(0))
-            .collect();
-        let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().unwrap_or(0);
+            .map(|tid| tensor_ptrs.get(tid).copied().ok_or_else(|| {
+                BE::Gpu(format!("missing tensor pointer for input {:?}", tid))
+            }))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().ok_or_else(|| {
+            BE::Gpu(format!("missing tensor pointer for output {:?}", entry.output_tid))
+        })?;
 
         let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr)?;
 

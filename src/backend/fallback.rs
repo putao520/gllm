@@ -128,10 +128,12 @@ impl<'a> FallbackReranker<'a> {
             let mut scores = Vec::with_capacity(documents.len());
             for doc in documents.iter() {
                 let score = executor.rerank_pair(query, doc)?;
-                if score.is_empty() {
-                    log::warn!("rerank_pair returned empty scores for query/doc pair, defaulting to 0.0");
-                }
-                scores.push(score.first().copied().unwrap_or(0.0));
+                let val = score.first().copied().ok_or_else(|| {
+                    crate::engine::executor::BackendError::Cpu(
+                        "rerank_pair returned empty scores for query/doc pair".into(),
+                    )
+                })?;
+                scores.push(val);
             }
             Ok(scores)
         })

@@ -108,7 +108,9 @@ fn get_memory_pressure_macos() -> Result<f32, BE> {
     for line in vm_stat.lines() {
         if let Some(rest) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ") {
             if let Some(num) = rest.strip_suffix(" bytes)") {
-                page_size = num.parse().unwrap_or(4096);
+                page_size = num.parse().map_err(|_| {
+                    BE::Cpu(format!("failed to parse vm_stat page size: {:?}", num))
+                })?;
             }
         } else if let Some(rest) = line.strip_prefix("Pages free:") {
             free_pages = parse_vm_stat_value(rest);
