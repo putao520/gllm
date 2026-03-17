@@ -128,19 +128,13 @@ impl ModelConfig {
             }
         }
 
-        // SafeTensors 格式：优先张量驱动推导 (REQ-LOADER-022)，回退 gllm.config
+        // SafeTensors 格式：张量驱动推导 (REQ-LOADER-022)，无 fallback
         if loader.weight_format() == WeightFormat::SafeTensors {
-            // 优先尝试张量驱动推导
             match Self::from_safetensors_loader_tensor_driven(manifest, loader) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
-                    log::debug!("tensor-driven config failed, falling back to gllm.config: {e}");
-                    // 回退到 gllm.config 元数据
-                    match Self::from_safetensors_loader(manifest, loader) {
-                        Ok(Some(config)) => return Ok(config),
-                        Ok(None) => {}
-                        Err(err) => safetensors_metadata_error = Some(err),
-                    }
+                    // 张量驱动失败时不静默降级，直接传播错误
+                    return Err(e);
                 }
             }
         }

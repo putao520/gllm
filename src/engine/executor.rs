@@ -538,10 +538,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .collect::<Vec<_>>();
         let kv_outputs = extract_onnx_kv_outputs(&graph_outputs);
         if kv_outputs.is_empty() {
-            log::warn!(
+            return Err(ExecutorError::OnnxPlan(
                 "ONNX graph does not expose identifiable KV cache outputs; \
-                 falling back to no-KV-cache mode (O(n²) per step)"
-            );
+                 cannot proceed without KV cache (O(n²) fallback is not authorized)".into(),
+            ));
         }
 
         Ok(Some(OnnxGeneratorPlan {
@@ -875,13 +875,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             // If request has a session, try to claim cached prefix pages
             if let Some(sid) = session_id {
-                let finalized = self
+                let finalized = match self
                     .memory_manager
                     .session_finalized_position(sid)
-                    .unwrap_or_else(|| {
-                        log::warn!("executor: session_finalized_position returned None for session {sid}");
-                        0
-                    });
+                {
+                    Some(pos) => pos,
+                    None => {
+                        return Err(ExecutorError::Scheduler(
+                            format!("session_finalized_position returned None for session {sid}")
+                        ));
+                    }
+                };
                 let prefix_tokens = prompt_len.min(finalized);
                 if prefix_tokens > 0 {
                     if let Err(e) = self

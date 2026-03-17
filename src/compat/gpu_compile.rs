@@ -1478,7 +1478,11 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     use gllm_kernels::compiler::codegen::emitter::Platform;
     let gpu_family = match gpu_profile.platform {
         Platform::Metal { gpu_family } => gpu_family,
-        _ => 9, // default to Apple9
+        other => {
+            return Err(GpuCompileError::Unsupported(format!(
+                "expected Metal platform for Metal backend, got {:?}", other
+            )));
+        }
     };
 
     let seq_len = tokens.len();
@@ -2551,7 +2555,11 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let gpu_profile = backend.gpu_profile();
     let gpu_family = match gpu_profile.platform {
         Platform::Metal { gpu_family } => gpu_family,
-        _ => 9,
+        other => {
+            return Err(BE::Other(format!(
+                "expected Metal platform for Metal backend, got {:?}", other
+            )));
+        }
     };
 
     let hidden = config.hidden_size;

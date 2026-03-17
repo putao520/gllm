@@ -1360,8 +1360,12 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         )?;
 
         let vocab_size = config.vocab_size;
-        let yes_id = config.rerank_yes_token_id.unwrap_or(9454) as usize;
-        let no_id = config.rerank_no_token_id.unwrap_or(2753) as usize;
+        let yes_id = config.rerank_yes_token_id.ok_or_else(|| {
+            BE::Cpu("rerank_yes_token_id not set in model config".into())
+        })? as usize;
+        let no_id = config.rerank_no_token_id.ok_or_else(|| {
+            BE::Cpu("rerank_no_token_id not set in model config".into())
+        })? as usize;
 
         // embed_data is [vocab_size, hidden] in row-major (each row = one token embedding)
         // lm_head logit for token t = dot(last_hidden, embed_data[t])

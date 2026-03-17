@@ -128,7 +128,9 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let total_bytes = (buffer.k.len() + buffer.v.len()) * std::mem::size_of::<f32>();
 
         // Check memory pressure before allocating
-        let pressure = get_system_memory_pressure().unwrap_or(0.0);
+        let pressure = get_system_memory_pressure().map_err(|e| {
+            BE::Cpu(format!("failed to read system memory pressure: {e}"))
+        })?;
         if pressure > 0.95 {
             return Err(BE::Cpu(format!(
                 "cannot allocate KV cache ({} bytes): memory pressure {:.1}%",
@@ -205,9 +207,9 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 *p /= sum;
             }
         } else {
-            // Uniform fallback
-            let uniform = 1.0 / probs.len() as f32;
-            probs.fill(uniform);
+            return Err(BE::Cpu(
+                "softmax produced zero-sum probabilities: all logits are -inf after scaling".into(),
+            ));
         }
 
         // Top-p (nucleus) filtering

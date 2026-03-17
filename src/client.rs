@@ -300,7 +300,9 @@ impl Client {
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
                 // 2. Detect Architecture from Tensor Names
-                let arch = detect_architecture(&loader).unwrap_or(ModelArchitecture::Llama4);
+                let arch = detect_architecture(&loader).ok_or_else(|| {
+                    ClientError::UnknownModel("failed to detect model architecture from tensor names".into())
+                })?;
 
                 // 3. Build MoE config from derived metadata
                 let moe_config = derived_config.build_moe_config(arch);
