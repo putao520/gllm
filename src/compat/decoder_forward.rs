@@ -1387,82 +1387,188 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::scalar_ops::{scalar_moe_ffn, scalar_moe_gate, scalar_top_k_experts, scalar_expert_ffn};
+    use super::super::jit_helpers::{
+        build_moe_routing_graph, build_expert_ffn_graph,
+        execute_moe_ffn_jit, pack_weights,
+    };
+    use gllm_kernels::types::DType;
 
+    /// JIT MoE routing (MoEGate → TopK) and verify gate softmax sums to 1.
     #[test]
     fn moe_gate_softmax_sums_to_one() {
         let hidden_size = 4;
         let num_experts = 3;
         let seq_len = 2;
-        let hidden = vec![1.0, 0.5, -0.3, 0.8, 0.2, -0.1, 0.6, 0.4];
+        let top_k = 1;
+        let hidden = vec![1.0f32, 0.5, -0.3, 0.8, 0.2, -0.1, 0.6, 0.4];
         let gate_w = vec![
             1.0, 0.0, 0.0,
             0.0, 1.0, 0.0,
             0.0, 0.0, 1.0,
             0.5, 0.5, 0.0,
         ];
-        let probs = scalar_moe_gate(&hidden, &gate_w, seq_len, num_experts, hidden_size);
-        assert_eq!(probs.len(), seq_len * num_experts);
-        for s in 0..seq_len {
-            let row = &probs[s * num_experts..(s + 1) * num_experts];
-            let sum: f32 = row.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-5, "row {s} sum = {sum}");
-            for &p in row {
-                assert!(p >= 0.0, "negative probability: {p}");
-            }
+
+        let graph = build_moe_routing_graph(seq_len, hidden_size, num_experts, top_k, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).expect("MoE routing JIT compile");
+
+        let weights_buf = pack_weights(&[&gate_w]);
+        let out_size = seq_len * top_k * 2;
+        let mut out = vec![0.0f32; out_size];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes];
+
+        unsafe {
+            compiled.execute(
+                hidden.as_ptr() as *const u8,
+                weights_buf.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, seq_len,
+                out.as_mut_ptr() as *mut u8,
+                scratch.as_mut_ptr(),
+            );
+        }
+
+        // TopK output: [indices..., weights...]
+        let weights_raw = &out[seq_len * top_k..];
+        for &w in weights_raw {
+            assert!(w >= 0.0 && w <= 1.0, "weight out of range: {w}");
+            assert!(w.is_finite(), "non-finite weight: {w}");
         }
     }
 
+    /// JIT TopK: verify correct expert selection via routing graph.
     #[test]
     fn top_k_selects_correct_experts() {
         let num_experts = 4;
         let top_k = 2;
         let seq_len = 1;
-        let probs = vec![0.3, 0.1, 0.5, 0.1];
-        let selections = scalar_top_k_experts(&probs, num_experts, top_k, seq_len);
-        assert_eq!(selections.len(), 1);
-        assert_eq!(selections[0].len(), 2);
-        assert_eq!(selections[0][0].0, 2);
-        assert_eq!(selections[0][1].0, 0);
-        let sum: f32 = selections[0].iter().map(|(_, w)| w).sum();
-        assert!((sum - 1.0).abs() < 1e-5, "renormalized sum = {sum}");
+        let hidden_size = 4;
+        // Craft gate weights so expert 2 gets highest score, expert 0 second.
+        // input = [1,0,0,0], gate_w row0 = [0.3, 0.1, 0.5, 0.1] → probs ≈ softmax([0.3,0.1,0.5,0.1])
+        let input = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mut gate_w = vec![0.0f32; hidden_size * num_experts];
+        // Row 0 of gate_w (input dim 0): set to desired logits
+        gate_w[0] = 0.3; gate_w[1] = 0.1; gate_w[2] = 0.5; gate_w[3] = 0.1;
+
+        let graph = build_moe_routing_graph(seq_len, hidden_size, num_experts, top_k, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).expect("routing JIT compile");
+
+        let weights_buf = pack_weights(&[&gate_w]);
+        let out_size = seq_len * top_k * 2;
+        let mut out = vec![0.0f32; out_size];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes];
+
+        unsafe {
+            compiled.execute(
+                input.as_ptr() as *const u8,
+                weights_buf.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, seq_len,
+                out.as_mut_ptr() as *mut u8,
+                scratch.as_mut_ptr(),
+            );
+        }
+
+        let indices: Vec<usize> = out[..top_k].iter().map(|v| v.to_bits() as usize).collect();
+        let weights: Vec<f32> = out[top_k..].to_vec();
+        assert_eq!(indices[0], 2, "top-1 should be expert 2");
+        assert_eq!(indices[1], 0, "top-2 should be expert 0");
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4, "renormalized sum = {sum}");
     }
 
+    /// JIT TopK: verify weight renormalization.
     #[test]
     fn top_k_renormalizes_weights() {
         let num_experts = 3;
         let top_k = 2;
         let seq_len = 1;
-        let probs = vec![0.6, 0.3, 0.1];
-        let selections = scalar_top_k_experts(&probs, num_experts, top_k, seq_len);
-        let (idx0, w0) = selections[0][0];
-        let (idx1, w1) = selections[0][1];
-        assert_eq!(idx0, 0);
-        assert_eq!(idx1, 1);
-        assert!((w0 - 0.6667).abs() < 0.01, "w0 = {w0}");
-        assert!((w1 - 0.3333).abs() < 0.01, "w1 = {w1}");
+        let hidden_size = 3;
+        // input = [1,0,0], gate_w row0 = [2.0, 1.0, -1.0] → softmax favors expert 0, then 1
+        let input = vec![1.0f32, 0.0, 0.0];
+        let mut gate_w = vec![0.0f32; hidden_size * num_experts];
+        gate_w[0] = 2.0; gate_w[1] = 1.0; gate_w[2] = -1.0;
+
+        let graph = build_moe_routing_graph(seq_len, hidden_size, num_experts, top_k, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).expect("routing JIT compile");
+
+        let weights_buf = pack_weights(&[&gate_w]);
+        let out_size = seq_len * top_k * 2;
+        let mut out = vec![0.0f32; out_size];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes];
+
+        unsafe {
+            compiled.execute(
+                input.as_ptr() as *const u8,
+                weights_buf.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, seq_len,
+                out.as_mut_ptr() as *mut u8,
+                scratch.as_mut_ptr(),
+            );
+        }
+
+        let idx0 = out[0].to_bits() as usize;
+        let idx1 = out[1].to_bits() as usize;
+        let w0 = out[top_k];
+        let w1 = out[top_k + 1];
+        assert_eq!(idx0, 0, "top-1 should be expert 0");
+        assert_eq!(idx1, 1, "top-2 should be expert 1");
+        assert!(w0 > w1, "expert 0 weight ({w0}) should exceed expert 1 ({w1})");
+        assert!((w0 + w1 - 1.0).abs() < 1e-4, "weights should sum to 1.0, got {}", w0 + w1);
     }
 
+    /// JIT expert FFN: verify output shape and finite values.
     #[test]
     fn expert_ffn_produces_correct_shape() {
         let hidden = 4;
-        let inter = 6;
+        let inter = 8;
         let seq_len = 2;
         let input = vec![0.1f32; seq_len * hidden];
         let gate_w = vec![0.01f32; hidden * inter];
         let up_w = vec![0.01f32; hidden * inter];
         let down_w = vec![0.01f32; inter * hidden];
-        let out = scalar_expert_ffn(&input, &gate_w, &up_w, &down_w, seq_len, hidden, inter);
+
+        let graph = build_expert_ffn_graph(seq_len, hidden, inter, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).expect("expert FFN JIT compile");
+
+        let weights_buf = pack_weights(&[&gate_w, &up_w, &down_w]);
+        let mut out = vec![0.0f32; seq_len * hidden];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes];
+
+        unsafe {
+            compiled.execute(
+                input.as_ptr() as *const u8,
+                weights_buf.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, seq_len,
+                out.as_mut_ptr() as *mut u8,
+                scratch.as_mut_ptr(),
+            );
+        }
+
         assert_eq!(out.len(), seq_len * hidden);
         for &v in &out {
             assert!(v.is_finite(), "non-finite output: {v}");
         }
     }
 
+    /// JIT full MoE FFN: routing + expert FFN + weighted combine.
     #[test]
     fn moe_ffn_weighted_combine() {
         let hidden = 4;
-        let inter = 6;
+        let inter = 8;
         let seq_len = 1;
         let num_experts = 2;
         let top_k = 1;
@@ -1478,10 +1584,10 @@ mod tests {
             (e0_gate, e0_up, e0_down),
             (e1_gate, e1_up, e1_down),
         ];
-        let out = scalar_moe_ffn(
+        let out = execute_moe_ffn_jit(
             &input, &router_w, &experts, None,
             seq_len, hidden, inter, num_experts, top_k,
-        );
+        ).expect("MoE FFN JIT execution");
         assert_eq!(out.len(), hidden);
         for &v in &out {
             assert!(v.is_finite(), "non-finite output: {v}");

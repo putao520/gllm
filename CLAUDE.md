@@ -267,29 +267,30 @@ cargo test --lib
 
 **理由**：NOP placeholder 让编译成功、测试通过，但输出是全零或内存垃圾。这是最危险的 bug 类型 — 静默产生错误结果，无法通过常规测试发现。
 
-## 🚨 禁止以 "OP 不足" 为借口的 Scalar Fallback (NO_SCALAR_BYPASS)
+## 🚨 Scalar 函数全面禁止 (NO_SCALAR — 零容忍)
 
-**铁律：已有 JIT 实现的算子禁止在任何运行时路径中调用 Phase 0 scalar 参考实现**。
+**铁律：`scalar_ops.rs` 中的所有函数禁止在任何代码路径中被调用，包括运行时和测试代码**。
 
-**背景（2026-03-16 审计发现）**：
-MoE 层和量化 decode 层以"MoE routing 没有 JIT OpKind"为借口，将整层所有算子（包括 RmsNorm、GEMM、RoPE、Attention）全部降级为 scalar 执行。但这些算子在 JIT 管线中早已完整实现，MoE routing 的缺失不是把其他算子也拉回 scalar 的理由。
+**背景**：
+gllm 的核心定位是 JIT 编译融合算子推理引擎。所有计算必须通过 JIT 管线（Scalar→SymExec→IR→ISA Lowering）生成硬件最优代码。scalar 参考实现仅作为 Phase 0 的算子语义定义，供 SymExec trace 提取使用，不得在任何其他场景被调用。
 
-**违规代码（待修复）**：
-- `scalar_moe_prefill_layer()`: RmsNorm×2 + GEMM×4 + RoPE×2 + Attention 全部 scalar
-- `scalar_incremental_moe_decode_layer()`: RmsNorm×2 + GEMM×2 + RoPE + Attention 全部 scalar
-- `quantized_incremental_decode_layer()`: RmsNorm×2 + RoPE + Attention 用 scalar
-- `update_kv_cache()` (MoE 路径): RmsNorm + RoPE 用 scalar
+**禁止的函数**（`src/compat/scalar_ops.rs`）：
+- `scalar_gemm()` / `scalar_rms_norm()` / `scalar_rope()`
+- `scalar_moe_gate()` / `scalar_top_k_experts()` / `scalar_expert_ffn()` / `scalar_moe_ffn()`
+- `cached_gqa_attention()` / `prefill_gqa_attention()` / `swiglu_ffn()`
 
 **禁止规则**：
-- ❌ 禁止在运行时推理路径中直接调用 `scalar_rms_norm()` / `scalar_gemm()` / `scalar_rope()`
-- ❌ 禁止因"某个 op 没有 JIT 实现"就把同层其他已有 JIT 实现的 op 一起降级为 scalar
-- ❌ 禁止 `scalar_*` 函数出现在 `decoder_forward.rs` / `weight_helpers.rs` / `jit_helpers.rs` 的运行时调用链中（import 除外）
-- ❌ 禁止以"量化 GEMM 独立优化路径"为借口在 `quantized_linear` 的 F32 分支中调用 `scalar_gemm`
-- ✅ Phase 0 scalar 参考实现仅用于 SymExec trace 提取和单元测试验证
-- ✅ `quantized_linear` 的 F32 权重分支必须通过 JIT 编译图（CompilerGraph + Gemm OpKind）执行
-- ✅ 所有 GEMM 运算（无论权重是量化还是 F32）都必须走 JIT 或硬件优化路径
+- ❌ 禁止在运行时推理路径中调用任何 `scalar_*` 函数
+- ❌ 禁止在单元测试中调用 `scalar_*` 函数验证算子正确性（必须用 JIT 编译的算子测试）
+- ❌ 禁止以"测试需要参考实现"为借口在 `#[cfg(test)]` 中调用 scalar 函数
+- ❌ 禁止以"量化 GEMM 独立优化路径"为借口调用 `scalar_gemm`
+- ❌ 禁止以"某个 op 没有 JIT 实现"为借口把同层其他 op 降级为 scalar
+- ❌ 禁止 `use.*scalar_ops` 出现在 `scalar_ops.rs` 以外的任何文件中
+- ✅ `scalar_ops.rs` 中的函数仅供 `ScalarOpRegistry` 注册 + SymExec trace 提取
+- ✅ 测试必须通过 JIT 编译图（`CompilerGraph` → `compile_and_run`）验证算子正确性
+- ✅ 所有计算（GEMM、RmsNorm、RoPE、Attention、MoE）都必须走 JIT 或硬件优化路径
 
-**理由**：scalar 参考实现的性能比 JIT 生成的 SIMD 代码慢 4-16 倍（取决于 AVX2/AVX-512/SVE 向量宽度）。以"部分 op 缺失"为借口把整层拉回 scalar，等于放弃了 JIT 引擎的全部性能优势。这是架构腐化的典型模式——一旦允许，scalar fallback 会像癌细胞一样扩散到所有路径。
+**理由**：scalar 实现比 JIT SIMD 代码慢 4-16 倍。允许任何 scalar 调用（即使在测试中）会掩盖 JIT 管线的真实问题，导致"测试通过但性能灾难"的假象。测试必须验证 JIT 生成代码的正确性，而非 scalar 参考实现的正确性。
 
 ## 🚨 JIT 编译管线（铁律）
 

@@ -840,21 +840,29 @@ pub(crate) fn execute_moe_ffn_jit(
         BE::Other(format!("MoE combine JIT failed: {e}"))
     })?;
 
-    // Build flat expert_outputs buffer: [top_k, seq_len, hidden]
-    // We need to lay out the selected experts' outputs contiguously.
-    // The WeightedSum op expects expert_outputs indexed by the indices array.
-    // Build a flat buffer with all num_experts slots (only needed ones populated).
-    let expert_buf_size = num_experts * seq_len * hidden;
+    // Build compact expert_outputs buffer: [top_k, seq_len, hidden]
+    // Layout: slot 0 = first selected expert's output, slot 1 = second, etc.
+    // Indices are remapped to local 0..top_k offsets for WeightedSum.
+    let expert_buf_size = top_k * seq_len * hidden;
     let mut expert_flat = vec![0.0f32; expert_buf_size];
-    for (&expert_idx, expert_out) in &expert_outputs {
-        let base = expert_idx * seq_len * hidden;
-        expert_flat[base..base + seq_len * hidden].copy_from_slice(expert_out);
+    let mut local_indices = vec![0usize; seq_len * top_k];
+
+    for s in 0..seq_len {
+        for t in 0..top_k {
+            let global_idx = indices[s * top_k + t];
+            let expert_out = expert_outputs.get(&global_idx).expect("missing expert output");
+            let src_base = s * hidden;
+            let dst_slot = t;
+            let dst_base = dst_slot * seq_len * hidden + s * hidden;
+            expert_flat[dst_base..dst_base + hidden]
+                .copy_from_slice(&expert_out[src_base..src_base + hidden]);
+            local_indices[s * top_k + t] = t;
+        }
     }
 
-    // Prepare indices as f32 bits (already in routing_out format) and weights
-    let indices_f32: Vec<f32> = indices.iter().map(|&i| f32::from_bits(i as u32)).collect();
+    let indices_f32: Vec<f32> = local_indices.iter().map(|&i| f32::from_bits(i as u32)).collect();
 
-    // Pack: expert_outputs, indices, weights
+    // Pack: expert_outputs (input), indices + weights (weights)
     let combine_input = pack_weights(&[&expert_flat]);
     let combine_weights = pack_weights(&[&indices_f32, &weights]);
     let mut output = vec![0.0f32; seq_len * hidden];
