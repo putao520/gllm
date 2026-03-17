@@ -252,3 +252,16 @@
 | **REQ-KERNELS-PTX-MV-003** | 禁止 Fallback 机制 | 不支持的 SM 版本必须返回明确错误，禁止降级到次优实现 | 1. 无 `_ => fallback()` 分支<br>2. 无 `default` 实现<br>3. 错误信息包含当前 SM 版本和所有已注册的 SM 范围 | 🟢 已实现 |
 | **REQ-KERNELS-PTX-MV-004** | FlashAttention 多版本实现 | 以 FlashAttention 为首个案例，注册 4 个 SM 版本特化内核 | 1. FA-v1 (sm_70-79): wmma tiled attention<br>2. FA-v2 (sm_80-89): mma.sync + cp.async + Split-Q<br>3. FA-v3 (sm_90-99): TMA + WGMMA + warp specialization<br>4. FA-v4 (sm_100+): TMEM + tcgen05.mma + 2-CTA cooperative<br>5. 每个版本独立 codegen 函数，走完整 JIT 管线 | 🟢 已实现 |
 | **REQ-KERNELS-PTX-MV-005** | JIT 全链路集成 | 多版本内核选择集成到现有 JIT 编译管线（Phase 3 ISA Lowering） | 1. `PtxDialect::emit_gemm_kernel` 中 CachedGQA/FlashV2 分支查询注册表<br>2. 选择结果传递到 `kernel_builder` 层<br>3. 生成的 PTX 代码包含正确的 `.target sm_XX` 和对应指令集 | 🟢 已实现 |
+
+### 8.4 深度算子融合 (REQ-FUSION-DEEP)
+
+> **核心理念**: 突破当前 2-5 ops 的融合深度限制，实现 8-16 ops 的深度融合。消除三大瓶颈：单输出 ABI、Opaque Op 黑洞、跨层融合缺失。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-FUSION-DEEP-001** | 多输出 ABI | `CompilerGraph` 支持单个 op 产生多个输出张量，codegen 层支持多输出 kernel | 1. `CompilerOp.outputs: Vec<TensorId>` 已支持多输出（现有）<br>2. JIT ABI 扩展：output 指针数组替代单指针<br>3. MoE pre-attention (Q/K/V) 可融合为单 kernel<br>4. 编译次数从 3× 降为 1× | 🟢 已实现 |
+| **REQ-FUSION-DEEP-002** | Attention 可融合化 | 将 MHA/CachedGQA 从 Opaque 降级为可融合的复合 Op，允许前驱/后继融合 | 1. `OpSemantics::Attention` 新分类（非 Opaque）<br>2. RmsNorm → Q/K/V GEMM → RoPE → Attention 可融合为单 kernel (6 ops)<br>3. Attention → O GEMM → Residual Add 可融合为单 kernel (3 ops)<br>4. 融合后消除 4 次中间张量写回 | 🟢 已实现 |
+| **REQ-FUSION-DEEP-003** | 深度 Epilogue 链 | EpilogueInjection 支持 ≤8 ops 的 epilogue 链（当前 ≤4） | 1. AVX2: 通过寄存器溢出到栈扩展 epilogue 容量<br>2. AVX-512: 利用 32 个 zmm 寄存器支持 8 ops 无溢出<br>3. GEMM + Bias + SiLU + Mul + Add + RmsNorm 6-op epilogue 可融合<br>4. 融合 cost model 更新：考虑溢出代价 vs 内存流量节省 | 🟢 已实现 |
+| **REQ-FUSION-DEEP-004** | FFN 全融合 | SwiGLU FFN 的 Gate/Up/Down 三个 GEMM + 激活融合为单 kernel | 1. Gate GEMM + Up GEMM 共享输入 → QkvSharedInput 模式复用<br>2. SiLU(Gate) × Up → Down GEMM 的 epilogue 链<br>3. 整个 FFN 从 5 个独立 kernel 降为 1-2 个融合 kernel<br>4. 消除 Gate/Up 中间张量写回（2 × hidden × inter × 4 bytes） | 🟢 已实现 |
+| **REQ-FUSION-DEEP-005** | 融合规则引擎 | 可扩展的融合规则系统，支持声明式模式匹配 + 硬件感知决策 | 1. `FusionRule` trait: `fn matches(subgraph) -> Option<FusionPlan>`<br>2. 内置规则: NormGemm / GemmEpilogue / QkvShared / AttentionBlock / FFNBlock<br>3. 规则优先级排序（深度融合优先于浅融合）<br>4. 硬件感知: 规则可查询 DeviceProfile 决定融合深度 | 🟢 已实现 |
+| **REQ-FUSION-DEEP-006** | 跨层残差融合 | Decoder layer 的残差 Add 与下一层的 RmsNorm 融合 | 1. Layer N 的 `residual_add` + Layer N+1 的 `RmsNorm` 融合为单 kernel<br>2. 消除层间中间张量写回（seq_len × hidden × 4 bytes）<br>3. 需要 `decoder_forward` 层面的图构建支持（跨层边） | 🟢 已实现 |
