@@ -1,22 +1,21 @@
-# gllm: Pure Rust Next-Gen Inference Engine (2026)
+# gllm: Pure Rust JIT Inference Engine
 
 [![Crates.io](https://img.shields.io/crates/v/gllm.svg)](https://crates.io/crates/gllm)
 [![Documentation](https://docs.rs/gllm/badge.svg)](https://docs.rs/gllm)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**gllm** is a high-performance, pure Rust library for local text embeddings, reranking, and text generation. It is built on [gllm-kernels](https://github.com/anthropics/gllm-kernels) for **Driver API-based** native GPU acceleration (CUDA/Metal/ROCm) without requiring external SDKs.
-
-> **Targeting 2026 SOTA**: Optimized for Qwen3, Llama 4, and GLM-5 architectures.
+**gllm** is a pure Rust inference library for local text generation, embeddings, and reranking. Built on [gllm-kernels](https://github.com/anthropics/gllm-kernels) — a JIT-compiled fusion kernel engine that generates hardware-optimal machine code at runtime for x86_64 (AVX2/AVX-512/AMX), AArch64 (NEON/SVE), and GPU (CUDA/ROCm/Metal).
 
 ## Features
 
-- **L3 GPU-Pure Architecture** - Zero-copy inference loop (only token IDs transfer between CPU/GPU).
-- **Next-Gen Models** - Native support for **Qwen3 (Thinking)**, **Llama 4 (MoE)**, **GLM-5**, and **Mistral 3**.
-- **Unified Driver API** - AOT compiled kernels (CUBIN) with no runtime compilation (JIT) overhead.
-- **Tree Attention** - Native support for speculative decoding topologies (EAGLE-2 / Medusa-2).
-- **Multi-Source Loader** - Auto-switching between HuggingFace and ModelScope (China mirror).
-- **Quantization** - Block-wise Int4/Int8 support with hand-written SIMD kernels.
-- **Pure Rust** - Static compilation ready, no `libcudart`, `libhip`, or C++ build dependencies.
+- **JIT-First Architecture** — All operators compiled via 4-stage pipeline (Scalar → SymExec → IR → ISA Lowering), no precompiled libraries
+- **Accuracy > Throughput** — Deterministic scheduling, strict causal ordering, phase-isolated prefill/decode
+- **20+ Model Architectures** — Qwen3, Llama 4, GLM-5, Mistral 3, GPT-OSS, Phi-4, Gemma2, and more
+- **Multi-Format Loader** — SafeTensors (zero-copy), GGUF (21 quantization types), ONNX, PyTorch
+- **Multi-Source Download** — HuggingFace with automatic ModelScope fallback
+- **Fused Kernels** — FlashAttention, SwiGLU, FusedQkvRope, MoE routing, FusedRMSLinear
+- **PagedAttention + Continuous Batching** — KV cache as virtual memory pages with prefix sharing
+- **Pure Rust** — No `libcudart`, `libhip`, or C++ build dependencies
 
 ## Installation
 
@@ -29,18 +28,21 @@ gllm = "0.11"
 
 | Feature | Default | Description |
 |---------|---------|-------------|
+| `cuda` | No | NVIDIA GPU backend (PTX JIT, sm_70/80/90/100+) |
+| `hip` | No | AMD GPU backend (HIP codegen) |
+| `metal` | No | Apple GPU backend (MSL codegen) |
 | `tokio` | No | Async interface support |
+| `paged-attention` | No | PagedAttention KV cache management |
+| `flash-attention` | No | FlashAttention v2 tiled attention |
 
 ## Quick Start
 
-### Text Generation (Qwen3)
+### Text Generation
 
 ```rust
 use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Automatically downloads from HF or ModelScope
-    // Qwen3-7B (2026 SOTA)
     let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
 
     let response = client
@@ -54,20 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Text Embeddings (Next-Gen)
+### Text Embeddings
 
 ```rust
 use gllm::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Qwen3-Embedding (2048 dims)
     let client = Client::new_embedding("Qwen/Qwen3-Embedding")?;
 
     let response = client
         .embeddings(["Future of AI", "Rust programming"])
         .generate()?;
 
-    for emb in response.embeddings {
+    for emb in &response.embeddings {
         println!("Vector dim: {}", emb.embedding.len());
     }
     Ok(())
@@ -80,7 +81,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 use gllm::{Client, ModelKind};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // BGE-Reranker-v3 (XLM-R-Next architecture)
     let client = Client::new("BAAI/bge-reranker-v3", ModelKind::Reranker)?;
 
     let response = client
@@ -96,30 +96,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Supported Models (2026 SOTA Only)
+## Supported Models
 
-We strictly support the latest generation of models. Legacy models (Qwen2.5, Llama 3) are deprecated.
+Latest generation only. See [SPEC/SUPPORTED_MODELS.md](SPEC/SUPPORTED_MODELS.md) for full details.
 
-| Category | Model ID | Architecture | Specs |
-|----------|----------|--------------|-------|
-| **Generator** | `qwen3-7b` | Qwen3 | 7B Dense |
-| | `qwen3-moe` | Qwen3MoE | A22B (235B) |
-| | `llama-4-8b` | Llama4 | 8B MoE |
-| | `glm-5-9b` | GLM-5 | 9B Dense |
-| | `mistral-small-3` | Mistral3 | 14B |
-| **Embedding** | `qwen3-embed` | Qwen3 | 2048 dims |
-| | `bge-m4` | XLM-R-Next | 1536 dims |
-| **Rerank** | `qwen3-rerank` | Qwen3 | - |
-| | `bge-rerank-v3` | XLM-R-Next | - |
+| Category | Models | Architecture |
+|----------|--------|--------------|
+| **Generator** | Qwen3 (7B, MoE 235B, Thinking 32B), Llama 4 (8B MoE, Scout 17B), Mistral 3 (14B), GLM-4.7/5, GPT-OSS (1.5B/12B), Phi-4 (14B), SmolLM, InternLM3, Gemma2 | Dense / MoE / Thinking |
+| **Embedding** | Qwen3-Embed (2048D), BGE-M3 (1024D), BGE-M4 (1536D), E5 (384/768/1024D), M3E, Jina v2/v4 | Bi-encoder |
+| **Reranker** | Qwen3-Rerank, BGE-Reranker-v2-m3, BGE-Rerank-v3 | Cross-encoder |
 
 ## Backend Support
 
-The system automatically detects the best available hardware at runtime (Zero Config):
+Auto-detected at runtime, zero configuration:
 
-1.  **CUDA** (NVIDIA): Direct `libcuda.so` loading. AOT Kernels for sm_80/86/89/90.
-2.  **Metal** (Apple): Native `Metal.framework` binding.
-3.  **ROCm** (AMD): Direct `libhsa-runtime64.so` loading.
-4.  **CPU** (Fallback): `faer` (AVX-512/NEON) pure Rust SIMD.
+| Backend | Hardware | Method |
+|---------|----------|--------|
+| **CUDA** | NVIDIA GPU | JIT PTX codegen, SM 版本特化 (sm_70/80/90/100+) |
+| **ROCm** | AMD GPU | JIT HIP codegen via `libhsa-runtime64.so` |
+| **Metal** | Apple GPU | JIT MSL codegen via `Metal.framework` |
+| **CPU** | x86_64 / AArch64 | JIT SIMD codegen (AVX2/AVX-512/AMX/NEON/SVE) |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│  Layer 1: Manifest (Static Model Definition)    │
+│  config.json / GGUF metadata / ONNX graph       │
+├─────────────────────────────────────────────────┤
+│  Layer 2: Adapter (Logic Adaptation)            │
+│  ModelAdapter / WeightMapper / TokenizerAdapter  │
+├─────────────────────────────────────────────────┤
+│  Layer 3: Engine (Runtime Scheduling)           │
+│  Executor / PagedAttention / ContinuousBatcher   │
+├─────────────────────────────────────────────────┤
+│  Layer 4: Driver (Hardware Execution)           │
+│  gllm-kernels JIT: Scalar→SymExec→IR→ISA        │
+└─────────────────────────────────────────────────┘
+```
 
 ## License
 

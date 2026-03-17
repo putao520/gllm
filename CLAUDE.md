@@ -1,23 +1,35 @@
 # gllm
 
-**Inference Client** - High-level library for model management, scheduling, and engine orchestration.
-
-> **🚨 TABULA RASA (2026-02)**: This project has been reset.
+**Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth)
+- `./SPEC/` (Single Source of Truth, 9 documents, 85+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
+
+## SPEC Index
+
+| Document | Content |
+|----------|---------|
+| `01-REQUIREMENTS.md` | 104+ functional requirements (REQ-MODEL/LOADER/QUANT/CORE/SCHED/KV/TEST/ARCH/OBS/ERR) |
+| `02-ARCHITECTURE.md` | 4-layer architecture (Manifest→Adapter→Engine→Driver), Ω1 truth principle |
+| `03-DATA-STRUCTURE.md` | Core data structures and type definitions |
+| `04-API-DESIGN.md` | Public API surface (Client builder, generate/embed/rerank) |
+| `06-TESTING-STRATEGY.md` | Test matrix and coverage requirements |
+| `07-OBSERVABILITY.md` | SystemState, RuntimeObserver, scheduling policies |
+| `ARCH-4-FEATURES.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking |
+| `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
+| `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
 
 ## Technology Stack
 
 | Component | Technology | Role |
 |-----------|------------|------|
-| **Loader** | `hf-hub`, `safetensors`, `prost`, `memmap2` | Model fetching, zero-copy loading, ONNX/GGUF parsing |
+| **Loader** | `hf-hub`, `safetensors`, `prost`, `memmap2` | Model fetching, zero-copy loading, ONNX/GGUF/PyTorch parsing |
 | **Tokenizer** | `tokenizers` | Text <-> ID conversion |
-| **Scheduler** | Custom (HGAL) | PagedAttention & Continuous Batching |
-| **Engine** | `gllm-kernels` + `compat` shim | Hardware abstraction layer (compat bridges types) |
-| **Graph** | Custom DAG + `serde_yaml` | Unified OnnxGraph representation & optimization |
-| **Backend** | `gllm-kernels` | Auto-detect CUDA/ROCm/Metal/CPU |
+| **Scheduler** | Custom (HGAL) | PagedAttention, Continuous Batching, KvPrefixIndex |
+| **Engine** | `gllm-kernels` + `compat/` shim | Hardware abstraction (compat bridges types + forward passes) |
+| **Graph** | Custom DAG + `serde_yaml` | Unified OnnxGraph representation & fusion optimization |
+| **Backend** | `gllm-kernels` | Auto-detect CUDA/ROCm/Metal/CPU, JIT codegen |
 
 ## Core Architecture
 
@@ -85,17 +97,17 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 
 **铁律**：所有算子必须走完整管线（Scalar → SymExec → IR → ISA Lowering），禁止跳过任何阶段。详见下方「JIT 编译管线（铁律）」章节。
 
-### 5.1 JIT 编译管线实现完成度（审计 2026-03-15）
+### 5.1 JIT 编译管线实现完成度（审计 2026-03-17）
 
 | 阶段 | 模块 | 完成度 | 状态 |
 |------|------|--------|------|
 | Phase 0: Scalar + SymExec | `registry.rs` + `symexec/` | 95% | ✅ 全算子注册 + x86_64 SymExec 完整；AArch64 SymExec 缺失 |
 | Phase 1: SemanticDAG | `semantic_dag.rs` | 100% | ✅ OpClass 自动分类 + AI 计算 + Bottleneck 分类 |
-| Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 95% | ✅ 6 种融合模式全部实现 + 寄存器/L1 约束检查 |
-| Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX |
-| Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 100% | ✅ GEMM + TileLevelFusion/ComputeRoot NEON/SVE norm JIT 融合 + emit_norm_row_jit() 自动分派 SVE/NEON |
+| Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 100% | ✅ 7 条 FusionRule + FusionEngine + 寄存器/L1 约束检查 |
+| Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX + FMA 全指令族 |
+| Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 100% | ✅ GEMM + TileLevelFusion/ComputeRoot NEON/SVE norm JIT 融合 + FMA 全指令族 |
 | Phase 3: GPU | `codegen/gpu_ir/` | 100% | ✅ PTX/HIP/MSL 三后端 TileLevelFusion/ComputeRoot codegen 全部实现 |
-| gllm 图优化 | `src/graph/optimizer/` | 100% | ✅ 6 个 Pattern Pass + HardwareFusionPass + DCE |
+| gllm 图优化 | `src/graph/optimizer/` | 100% | ✅ 6 个 Pattern Pass + HardwareFusionPass + ConstantFolding + DCE |
 
 **全部完成** (2026-03-15 审计确认)
 
@@ -116,7 +128,6 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 ```
 src/
 ├── lib.rs              # Library entry & public API re-exports
-├── compat.rs           # Compatibility shim: re-exports gllm-kernels types (Backend, CpuBackend, Element, etc.)
 ├── client.rs           # Client / AsyncClient (sync/async inference API)
 ├── embeddings.rs       # Embeddings API
 ├── rerank.rs           # Rerank API
@@ -124,8 +135,25 @@ src/
 ├── tokenizer.rs        # Tokenizer integration
 ├── model_config.rs     # Tensor-driven model config (Ω1)
 ├── weight_loader.rs    # Weight loading utilities
+├── weight_names.rs     # Canonical weight name mappings
 ├── kv_cache.rs         # KV Cache structures
 ├── quantization.rs     # Quantization support
+├── ffi.rs              # C FFI exports (gllm_init/generate/destroy/client_version)
+├── compat/             # gllm-kernels compatibility shim & forward passes
+│   ├── mod.rs          # Re-exports gllm-kernels types (Backend, Element, etc.)
+│   ├── types.rs        # Bridged type definitions
+│   ├── scalar_ops.rs   # Scalar reference impls (Phase 0 only, NO runtime calls)
+│   ├── jit_helpers.rs  # JIT compilation helpers
+│   ├── weight_helpers.rs # Weight tensor manipulation
+│   ├── bert_forward.rs # BERT/encoder forward pass
+│   ├── decoder_forward.rs # Decoder (GPT-style) forward pass
+│   ├── gpu_compile.rs  # GPU graph compilation & kernel launch
+│   ├── gpu_helpers.rs  # GPU memory & transfer utilities
+│   ├── memory.rs       # Memory management abstractions
+│   ├── cpu_backend.rs  # CPU inference backend
+│   ├── cuda_backend.rs # CUDA inference backend
+│   ├── hip_backend.rs  # HIP (ROCm) inference backend
+│   └── metal_backend.rs # Metal inference backend
 ├── loader/             # Model fetching & parsing
 │   ├── mod.rs          # Unified loading entry (auto format detection)
 │   ├── hf_hub.rs       # HuggingFace Hub downloader
@@ -137,7 +165,19 @@ src/
 │   ├── parallel.rs     # Parallel layer loading
 │   ├── pytorch.rs      # PyTorch format support
 │   ├── gguf/           # GGUF parser (zero-copy, Ω1 compliant)
+│   │   ├── mod.rs
+│   │   ├── reader.rs   # GGUF file reader
+│   │   ├── slice.rs    # Zero-copy tensor slicing
+│   │   └── types.rs    # GGUF type definitions
 │   └── onnx/           # ONNX protobuf parser (prost, graph pattern matching)
+│       ├── mod.rs
+│       ├── model.rs    # ONNX model loading
+│       ├── attributes.rs # ONNX attribute parsing
+│       ├── types.rs    # ONNX type mappings
+│       ├── external.rs # External data loading
+│       ├── pack.rs     # Tensor packing
+│       ├── tests.rs    # ONNX parser tests
+│       └── tensor/     # Tensor parsing
 ├── arch/               # Architecture YAML templates → OnnxGraph
 │   ├── mod.rs          # Template registry
 │   ├── registry.rs     # Architecture registry
@@ -147,7 +187,13 @@ src/
 │   ├── mod.rs
 │   ├── types.rs        # OnnxGraph extended types
 │   ├── executor.rs     # FusedGraph executor
-│   └── optimizer/      # Optimization passes (pattern/hardware fusion, DCE)
+│   └── optimizer/      # Optimization passes
+│       ├── mod.rs
+│       ├── pass.rs           # Pass trait & registry
+│       ├── pattern_fusion.rs # Pattern-based fusion (FlashAttn, SwiGLU, etc.)
+│       ├── hardware_fusion.rs # Hardware-aware fusion/degradation
+│       ├── constant_folding.rs # Constant folding pass
+│       └── dead_code.rs      # Dead code elimination
 ├── engine/             # Execution engine (wraps gllm-kernels)
 │   ├── mod.rs
 │   ├── executor.rs     # Executor (batch orchestration)
@@ -162,17 +208,20 @@ src/
 │   ├── prefix_index.rs # KvPrefixIndex (trie-based)
 │   ├── sequence.rs     # SequenceGroup
 │   ├── types.rs        # Scheduler types
-│   ├── observer.rs     # RuntimeObserver
-│   ├── policy.rs       # JIT scheduling policies
+│   ├── observer.rs     # RuntimeObserver (metrics & tracing)
+│   ├── policy.rs       # JIT scheduling policies (hot-switchable)
 │   ├── jit_types.rs    # JIT type definitions
-│   └── vllm2024.rs     # SwiftKV / legacy structures
+│   └── vllm2024.rs     # SwiftKV / Scheduler2024Config / AdaptiveChunkPolicy
 ├── backend/            # Backend detection & fallback
 │   ├── mod.rs
 │   ├── detection.rs    # Auto-detect CUDA→ROCm→Metal→CPU
 │   └── fallback.rs     # OOM fallback (GPU→CPU)
-└── manifest/           # Model manifest types
-    ├── mod.rs
-    └── types.rs
+├── manifest/           # Model manifest types
+│   ├── mod.rs
+│   └── types.rs
+└── bin/                # Binary utilities
+    ├── download.rs     # Model download CLI
+    └── debug_shape.rs  # Shape debugging tool
 ```
 
 ## Cache Directory
@@ -212,8 +261,20 @@ src/
 ## Common Commands
 
 ```bash
+# 编译检查
 cargo check
-cargo test
+
+# 单元测试（可并行）
+cargo test --lib
+
+# E2E 测试（必须单线程）
+cargo test --test test_e2e_embedding -- --test-threads=1
+cargo test --test test_e2e_generator -- --test-threads=1
+cargo test --test test_e2e_reranker -- --test-threads=1
+
+# gllm-kernels 测试
+cd ../gllm-kernels && cargo test --lib
+cd ../gllm-kernels && cargo test --test decision_audit
 ```
 
 ## 🧪 E2E 测试约束
