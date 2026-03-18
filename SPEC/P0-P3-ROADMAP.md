@@ -124,7 +124,7 @@
 
 ### P3-1: MoE 路由执行 (REQ-MODEL-004) ✅ 已完成
 
-**完成状态**: Scalar MoE 路由已在 executor forward 路径中实现（专家选择 + top-k gating）。
+**完成状态**: MoE 路由已通过 JIT 编译路径实现（专家选择 + top-k gating），scalar 参考实现仅供 SymExec trace 使用。
 
 ### P3-2: Thinking Head 提取 ✅ 已完成
 

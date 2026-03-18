@@ -421,12 +421,12 @@ Client::new_chat("Qwen/Qwen3-0.6B")
         - `vocab_size` = `Embedding` 张量的较大维度
         - `head_dim` = `AttentionQuery` 张量维度 / `num_heads`
         - `num_layers` = 匹配到的最大 `layer_idx` + 1
-    - **F32 Adapter**: Loader 层负责将 F16/BF16 转换为 F32（如果后端不支持低精度），对上层 Engine 透明。
+    - **DType Adapter**: Loader 层根据后端能力决定数据类型处理策略。当 `has_bf16 && use_avx512` 时，BF16 张量保持原格式走原生 VDPBF16PS 路径；否则在 pack 阶段转换为 F32。F16 同理（依赖 `has_avx512fp16`）。对上层 Engine 透明。
 
 6.  **量化 Per-Tensor 混合精度加载 (ARCH-LOADER-QUANT)**
     - **目的**: GGUF 量化模型的 tensor 按原始精度分流加载，量化 tensor 不经 GPU upload。
     - **QuantizedTensor**: 量化 tensor 以原始 block bytes + QuantType 元数据存储在 `WeightsHandle.quantized` HashMap。
-    - **Native Float 转换**: F16/BF16 tensor 在 CPU 侧自动转换为 f32（当 Backend Element 为 f32 时）。
+    - **Native Float 处理**: F16/BF16 tensor 根据硬件 ISA 能力动态决策：支持原生指令时保持原格式（BF16→VDPBF16PS, F16→AVX-512 FP16），否则在 pack 阶段转换为 F32。
     - **TensorProvider::ggml_dtype()**: 新增 default method，GGUF 实现返回原始 GgmlDType。
     - **adapter::ggml_dtype_to_quant_type()**: 桥接 GgmlDType → QuantType，覆盖 21 种量化类型。
     - **Backend::quantized_matmul()**: 按 QuantType 分发到 kquant_matmul/classic_matmul/iq_matmul。

@@ -3,7 +3,7 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 9 documents, 85+ REQs)
+- `./SPEC/` (Single Source of Truth, 9 documents, 104+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## SPEC Index
@@ -104,12 +104,12 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 | Phase 0: Scalar + SymExec | `registry.rs` + `symexec/` | 95% | ✅ 全算子注册 + x86_64 SymExec 完整；AArch64 SymExec 缺失 |
 | Phase 1: SemanticDAG | `semantic_dag.rs` | 100% | ✅ OpClass 自动分类 + AI 计算 + Bottleneck 分类 |
 | Phase 2: Fusion + HW | `fusion.rs` + `hw_constraints.rs` | 100% | ✅ 7 条 FusionRule + FusionEngine + 寄存器/L1 约束检查 |
-| Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX + FMA 全指令族 |
+| Phase 3: x86_64 | `codegen/x86_64.rs` | 100% | ✅ 生产就绪：6 种融合模式 + AVX2/AVX-512 + BLIS + Norm JIT + AMX + FMA 全指令族 + VDPBF16PS 原生 BF16 路径 |
 | Phase 3: AArch64 | `codegen/aarch64_dynasm.rs` | 100% | ✅ GEMM + TileLevelFusion/ComputeRoot NEON/SVE norm JIT 融合 + FMA 全指令族 |
 | Phase 3: GPU | `codegen/gpu_ir/` | 100% | ✅ PTX/HIP/MSL 三后端 TileLevelFusion/ComputeRoot codegen 全部实现 |
 | gllm 图优化 | `src/graph/optimizer/` | 100% | ✅ 6 个 Pattern Pass + HardwareFusionPass + ConstantFolding + DCE |
 
-**全部完成** (2026-03-15 审计确认)
+**全部完成** (2026-03-17 审计确认)
 
 ### 5.2 背景要求（AI 开发必读）
 
@@ -161,7 +161,7 @@ src/
 │   ├── downloader.rs   # Download orchestration (HF→MS fallback)
 │   ├── format_detector.rs # Auto format detection
 │   ├── safetensors.rs  # SafeTensors parser (zero-copy)
-│   ├── adapter.rs      # GGUF→kernels type adapter
+│   ├── adapter.rs      # 类型桥接层 (DType/KernelTensorView/GgufAdapter/QuantType 映射)
 │   ├── parallel.rs     # Parallel layer loading
 │   ├── pytorch.rs      # PyTorch format support
 │   ├── gguf/           # GGUF parser (zero-copy, Ω1 compliant)
@@ -182,7 +182,16 @@ src/
 │   ├── mod.rs          # Template registry
 │   ├── registry.rs     # Architecture registry
 │   ├── resolve.rs      # Architecture resolution from metadata
-│   └── template.rs     # YAML → OnnxGraph parser
+│   ├── template.rs     # YAML → OnnxGraph parser
+│   └── templates/      # Model architecture YAML definitions
+│       ├── deepseek.yaml
+│       ├── gemma2.yaml
+│       ├── glm4.yaml
+│       ├── gpt2next.yaml
+│       ├── mistral3.yaml
+│       ├── phi4.yaml
+│       ├── qwen3.yaml
+│       └── xlmr.yaml
 ├── graph/              # DAG optimizer (unified representation)
 │   ├── mod.rs
 │   ├── types.rs        # OnnxGraph extended types
@@ -231,7 +240,7 @@ src/
 下载的模型文件存储在此目录。内部子目录结构由下载库（hf-hub/ModelScope）管理。
 
 **Environment Variables**:
-- `GLLM_CACHE_DIR`: 自定义缓存路径（默认：`~/.gllm/models`）— 📋 计划中，尚未实现
+- `GLLM_CACHE_DIR`: 自定义缓存路径（默认：`~/.gllm/models`）
 - `HF_TOKEN`: HuggingFace 认证 token
 
 > **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定来源。

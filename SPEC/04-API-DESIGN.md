@@ -201,26 +201,33 @@ let data = tensor.as_bytes(); // &[u8] 原始字节
 // 适配层: 负责类型映射
 let adapter = GgufAdapter::new(reader)?;
 let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
-// 返回 gllm_kernels::TensorData
+// 返回 KernelTensorView<'_>
 ```
 
 ### 6.4 适配层接口 (API-GGUF-ADAPTER)
 
 ```rust
-use gllm::loader::adapter::{GgufAdapter, AdapterError};
+use gllm::loader::adapter::{GgufAdapter, KernelTensorView, DType, PackedBits};
 
 /// 创建适配器
 let adapter = GgufAdapter::new(reader)?;
+// 或直接从文件打开
+let adapter = GgufAdapter::open("model.gguf")?;
 
 /// 将 GGUF Tensor 转换为 gllm-kernels 格式
 let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 
-/// gllm-kernels TensorData 结构
-pub struct TensorData {
-    pub dtype: KernelDType,      // 映射后的类型
+/// KernelTensorView — 零拷贝张量视图
+pub struct KernelTensorView<'a> {
+    pub dtype: DType,            // 映射后的类型
     pub shape: Vec<usize>,       // 形状
-    pub data: *const u8,         // 原始字节指针
-    pub len: usize,              // 字节长度
+    pub data: &'a [u8],          // 生命周期绑定的字节切片（零拷贝）
+}
+
+/// DType — 适配层扩展类型（含量化打包类型）
+pub enum DType {
+    F32, F16, BF16, U8,
+    PackedU8(PackedBits),        // Int1/Int2/Int4 量化打包
 }
 ```
 
@@ -229,16 +236,22 @@ pub struct TensorData {
 > **关联架构**: gllm-kernels ARCH-QUANT-GENERIC
 >
 > - GGUF 解析器使用 `GgmlDType` 枚举 (文件格式层)
-> - gllm-kernels 使用 `QuantizedStorage<const N: usize, const BITS: u8>` 泛型
-> - 适配层负责映射，不违反泛型约束
+> - 适配层通过 `map_dtype()` 映射到 `DType`（运行时类型）
+> - 量化内核分派通过 `ggml_dtype_to_quant_type()` 映射到 `QuantType`
+> - 两层映射职责分离：`map_dtype` 负责存储布局，`ggml_dtype_to_quant_type` 负责内核选择
 
-| GGUF 类型 | gllm-kernels 类型 | 映射位置 |
-|-----------|------------------|----------|
-| F32 | F32Block | adapter.rs |
-| Q4_0 | Q4_0Block | adapter.rs |
-| Q8_0 | Q8_0Block | adapter.rs |
-| Q5_K | Q5_KBlock | adapter.rs |
-| ... | ... | ... |
+| GGUF 类型 | adapter DType | QuantType | 映射位置 |
+|-----------|--------------|-----------|----------|
+| F32 | F32 | None | adapter.rs |
+| F16 | F16 | None | adapter.rs |
+| BF16 | BF16 | None | adapter.rs |
+| Q4_0/Q4_1/Q4_K/IQ4_NL/IQ4_XS/MXFP4 | PackedU8(Int4) | Q4_0/Q4_1/Q4K/IQ4NL/IQ4XS/— | adapter.rs |
+| Q2_K/IQ2_XXS/IQ2_XS/IQ2_S/TQ2_0 | PackedU8(Int2) | Q2K/IQ2XXS/IQ2XS/IQ2S/— | adapter.rs |
+| IQ1_S/IQ1_M/TQ1_0 | PackedU8(Int1) | IQ1S/IQ1M/— | adapter.rs |
+| Q8_0/Q8_1/Q8_K/I8 | U8 | Q8_0/Q8_1/Q8K/— | adapter.rs |
+| Q3_K/Q5_0/Q5_1/Q5_K/Q6_K/IQ3_XXS/IQ3_S | UnsupportedType | Q3K/Q5_0/Q5_1/Q5K/Q6K/IQ3XXS/IQ3S | adapter.rs (注1) |
+
+> **注1**: Q3/Q5/Q6/IQ3 系列在 `ggml_dtype_to_quant_type()` 中有 QuantType 映射，但 `map_dtype()` 返回 `UnsupportedType`。这些类型的量化内核可用，但适配层 DType 映射尚未覆盖（需要扩展 PackedBits 或新增 DType 变体）。
 
 ### 6.6 错误处理
 
