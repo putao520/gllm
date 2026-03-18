@@ -128,13 +128,13 @@ impl ModelConfig {
             }
         }
 
-        // SafeTensors 格式：张量驱动推导 (REQ-LOADER-022)，无 fallback
-        if loader.weight_format() == WeightFormat::SafeTensors {
+        // SafeTensors 格式：张量驱动推导 (REQ-LOADER-022)
+        // PyTorch format is auto-converted to SafeTensors by Loader::load(), so treat it the same.
+        if matches!(loader.weight_format(), WeightFormat::SafeTensors | WeightFormat::PyTorch) {
             match Self::from_safetensors_loader_tensor_driven(manifest, loader) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
-                    // 张量驱动失败时不静默降级，直接传播错误
-                    return Err(e);
+                    safetensors_metadata_error = Some(e);
                 }
             }
         }
@@ -208,13 +208,19 @@ impl ModelConfig {
         manifest: &ModelManifest,
         loader: &mut Loader,
     ) -> ModelConfigResult<Self> {
+        // Try to extract head_dim hint from config.json to disambiguate
+        // when q_out is divisible by multiple valid head_dims.
+        // This is NOT a fallback — tensor shapes remain the truth source;
+        // config.json only provides a hint to resolve ambiguity.
+        let hints = Self::extract_head_dim_hint_from_config(loader);
+
         let derived = {
             let st_loader = loader.safetensors_loader().map_err(|err| {
                 ModelConfigError::InvalidConfig(format!(
                     "failed to access SafeTensors loader: {err}"
                 ))
             })?;
-            derive_config_from_tensors(st_loader)?
+            derive_config_from_tensors_with_hints(st_loader, hints)?
         };
 
         let base_value = loader
@@ -234,6 +240,37 @@ impl ModelConfig {
 
         let base = Self::from_value(manifest, &base_value, Some(derived.dtype_size))?;
         apply_tensor_derived(base, derived)
+    }
+
+    /// Extract head_dim hint from config.json's num_attention_heads field.
+    /// Returns default hints if config.json is unavailable or missing the field.
+    fn extract_head_dim_hint_from_config(loader: &Loader) -> TensorDeriveHints {
+        let config_path = match loader.config_path() {
+            Some(p) => p,
+            None => return TensorDeriveHints::default(),
+        };
+        let data = match std::fs::read_to_string(config_path) {
+            Ok(d) => d,
+            Err(_) => return TensorDeriveHints::default(),
+        };
+        let json: Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(_) => return TensorDeriveHints::default(),
+        };
+        let num_heads = json
+            .get("num_attention_heads")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0);
+        let hidden_size = json
+            .get("hidden_size")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0);
+        match (num_heads, hidden_size) {
+            (Some(nh), Some(hs)) if hs as usize % nh as usize == 0 => TensorDeriveHints {
+                head_dim: Some(hs as usize / nh as usize),
+            },
+            _ => TensorDeriveHints::default(),
+        }
     }
 
     /// REQ-LOADER-023: ONNX 张量驱动配置推导

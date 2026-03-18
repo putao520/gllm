@@ -492,31 +492,13 @@ impl Loader {
 
     /// 从本地目录加载模型文件
     fn from_local_dir(dir: &Path) -> Result<Self> {
-        let mut weight_paths = Vec::new();
-        let mut aux_files = Vec::new();
-
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            match path.extension().and_then(|e| e.to_str()) {
-                Some("safetensors" | "gguf" | "onnx") => weight_paths.push(path),
-                Some("json") => aux_files.push(path),
-                _ => {}
-            }
-        }
-
-        if weight_paths.is_empty() {
-            return Err(LoaderError::MissingWeights);
-        }
+        let local = format_detector::collect_local_files(dir, None)?;
 
         let mut loader = Self::new(ModelManifest::default());
-        loader.weight_paths = weight_paths;
-        loader.detect_format();
+        loader.weight_paths = local.weights;
+        loader.format = local.format;
 
-        for path in aux_files {
+        for path in local.aux_files {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name == "config.json" {
                     loader.config_path = Some(path);
@@ -793,9 +775,11 @@ impl Loader {
                 let provider = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
                 self.upload_provider(provider, backend)
             }
-            WeightFormat::PyTorch => Err(LoaderError::UnsupportedWeightExtension(
-                "PyTorch not supported yet".into(),
-            )),
+            WeightFormat::PyTorch => {
+                // PyTorch is auto-converted to SafeTensors by load()
+                let provider = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
+                self.upload_provider(provider, backend)
+            }
         }
     }
 

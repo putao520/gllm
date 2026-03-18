@@ -280,7 +280,7 @@ impl Client {
                     )));
                 }
             }
-            WeightFormat::SafeTensors | WeightFormat::Onnx => {
+            WeightFormat::SafeTensors | WeightFormat::Onnx | WeightFormat::PyTorch => {
                 // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
                 loader = loader.load()?;
 
@@ -317,11 +317,6 @@ impl Client {
                     moe_config,
                     tensor_map: HashMap::new(),
                 }
-            }
-            WeightFormat::PyTorch => {
-                return Err(ClientError::UnknownModel(
-                    "PyTorch format not supported, use SafeTensors or GGUF".to_string(),
-                ));
             }
         };
 
@@ -370,11 +365,15 @@ fn detect_architecture(loader: &Loader) -> Option<ModelArchitecture> {
         if lower.contains("mistral") {
             return Some(ModelArchitecture::Mistral3);
         }
+        // BERT-family bare names (no "bert." prefix): encoder.layer.N.attention.self.query
+        if lower.contains("encoder.layer.") || lower.contains("attention.self.query") {
+            return Some(ModelArchitecture::XlmR);
+        }
         None
     };
 
     match loader.weight_format() {
-        WeightFormat::SafeTensors => {
+        WeightFormat::SafeTensors | WeightFormat::PyTorch => {
             if let Some(st) = loader.safetensors_ref() {
                 for meta in st.iter_tensors() {
                     if let Some(arch) = check_name(&meta.name) {

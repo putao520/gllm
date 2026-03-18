@@ -47,6 +47,21 @@ fn test_local_onnx_pipeline() {
     assert!(!response.embeddings.is_empty());
 }
 
+/// TEST-INFERENCE-013: 本地 PyTorch 管线端到端
+/// **关联需求**: REQ-CORE-001
+/// **测试类型**: 正向
+/// **期望结果**: 本地 PyTorch 模型文件成功加载（自动转换为 SafeTensors）并完成推理
+#[test]
+#[ignore]
+fn test_local_pytorch_pipeline() {
+    let client = Client::new_embedding("test_models/pytorch").expect("load pytorch model");
+    let response = client
+        .embeddings(["hello world"])
+        .generate()
+        .expect("pytorch embedding");
+    assert!(!response.embeddings.is_empty());
+}
+
 /// 输出正确性验证：检测退化输出（全零、全相同、NaN/Inf）
 fn assert_embedding_sane(emb: &[f32], label: &str) {
     assert!(!emb.is_empty(), "{label}: embedding is empty");

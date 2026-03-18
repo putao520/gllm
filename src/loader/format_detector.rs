@@ -100,6 +100,9 @@ fn detect_formats_in_dir(dir: &Path) -> Result<Vec<WeightFormat>> {
     if !collect_onnx_candidates(dir).is_empty() {
         formats.push(WeightFormat::Onnx);
     }
+    if formats.is_empty() && !collect_pytorch_candidates(dir).is_empty() {
+        formats.push(WeightFormat::PyTorch);
+    }
 
     Ok(formats)
 }
@@ -119,7 +122,10 @@ pub fn select_preferred_format(formats: &[WeightFormat]) -> WeightFormat {
     if formats.contains(&WeightFormat::Gguf) {
         return WeightFormat::Gguf;
     }
-    WeightFormat::Onnx
+    if formats.contains(&WeightFormat::Onnx) {
+        return WeightFormat::Onnx;
+    }
+    WeightFormat::PyTorch
 }
 
 fn collect_weights_in_dir(dir: &Path, format: WeightFormat) -> Result<Vec<PathBuf>> {
@@ -223,6 +229,16 @@ fn collect_onnx_candidates(dir: &Path) -> Vec<PathBuf> {
         }
     }
     files.extend(find_files_with_extension(dir, "onnx"));
+    files
+}
+
+fn collect_pytorch_candidates(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for candidate_dir in candidate_dirs(dir) {
+        files.extend(find_files_with_extension(&candidate_dir, "bin"));
+        files.extend(find_files_with_extension(&candidate_dir, "pth"));
+        files.extend(find_files_with_extension(&candidate_dir, "pt"));
+    }
     files
 }
 
