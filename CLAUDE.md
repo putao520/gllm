@@ -267,6 +267,19 @@ src/
 
 **理由**：gllm 定位为底层算子库，引入同类推理框架会造成依赖冲突、二进制膨胀、架构污染。
 
+## 🚨 禁止调用外部 BLAS 库 (GPU GEMM 全 JIT)
+
+**铁律：GPU GEMM 全部走 JIT codegen 生成设备原生二进制，禁止调用 cuBLAS/rocBLAS 等外部 BLAS 库**：
+- ❌ 禁止在 GPU 推理路径中调用 cuBLAS/rocBLAS/cuDNN
+- ❌ 禁止在 `dispatch_isv_sgemm` 中添加 GPU BLAS 分支
+- ❌ 禁止在 `GpuIsvCapabilities` 中添加外部库可用性字段
+- ✅ GPU GEMM 由 JIT 编译管线生成 PTX/HIP/MSL 原生二进制
+- ✅ `GpuIsvCapabilities` 仅包含 `tensor_core_gen`（硬件矩阵单元代数），驱动 JIT 指令选择
+- ✅ `GemmStrategy` GPU 路径为 `JitGpuTensorCore` / `JitGpu`，不存在 `CuBlas` / `RocBlas`
+- ✅ CPU ISV（oneDNN/Accelerate）保留，因为 CPU 路径无 JIT GPU codegen
+
+**理由**：JIT 融合算子直接驻留缓存对齐内存页，调用外部预编译库的 ROI 过低。gllm 的 JIT 可以根据 (模型结构 × 硬件能力) 生成比预编译库更优的代码。
+
 ## Common Commands
 
 ```bash

@@ -535,3 +535,624 @@ pub enum PrefillPlan {
 1. `FullyResident` 表示 prefill 页面可全部驻留 L1。
 2. `Pipelined` 表示需要分批装载/预取，不改变 Phase Isolation。
 3. `chunk_schedule` 仅在 Prefill 阶段生效，不参与 Decode 混批。
+
+---
+
+## 9. 硬件能力与 Codegen 维度 (DATA-HW-CODEGEN)
+
+> **关联需求**: REQ-ARCH-001, REQ-ARCH-003
+> **关联架构**: 02-ARCHITECTURE.md §5 (JIT 编译管线), ARCH-4-FEATURES.md 功能 7
+> **核心原则**: JIT codegen 的最终机器码由 `f(算法语义, ISA, DType, 设备参数)` 的笛卡尔积决定
+
+### 9.1 Codegen 维度模型 (DATA-CODEGEN-DIMENSIONS)
+
+JIT 编译管线的 Phase 3 (ISA Lowering) 根据以下 6 个正交维度生成最优机器码：
+
+| 维度 | 类型 | 影响范围 | 示例 |
+|------|------|---------|------|
+| **ISA 级别** | `IsaLevel` | 指令集选择、向量宽度 | AVX2 vs AVX-512 vs NEON vs SVE |
+| **ISA 扩展** | `IsaFeatures` | 特化指令路径 | VNNI, BF16, FP16, AMX, SVE2 |
+| **数据类型** | `DType` | 内存布局、加载/存储转换、FMA 模式 | F32 vs BF16 vs F16 |
+| **寄存器预算** | `TargetDesc` | Tile 大小、溢出策略、SW pipeline 深度 | 16 ymm vs 32 zmm vs 32 v-reg |
+| **设备参数** | `KernelConfig` | Cache blocking、prefetch、NUMA | L1/L2/L3 大小, cacheline, core count |
+| **GPU 计算能力** | `GpuDeviceProfile` | SM 版本特化、shared memory、tensor core 代 | sm_70 vs sm_90 vs gfx1100 |
+
+**铁律**: 这 6 个维度的任何组合都必须通过 JIT 管线动态生成代码，禁止硬编码特定组合。
+
+### 9.2 ISA 级别 (DATA-ISA-LEVEL)
+
+> **实现位置**: `gllm-kernels/src/dispatch/device_profile.rs`
+
+```rust
+pub enum IsaLevel {
+    Scalar,      // 无 SIMD，仅用于 Phase 0 参考实现
+    Avx2,        // x86_64: 256-bit SIMD, 16 ymm regs
+    Avx512,      // x86_64: 512-bit SIMD, 32 zmm regs
+    Avx512Amx,   // x86_64: AVX-512 + Intel AMX (Sapphire Rapids+)
+    Neon,        // AArch64: 128-bit SIMD, 32 v-regs
+    Sve,         // AArch64: 可变长 SIMD (128~2048-bit), 32 z-regs
+    Sve2,        // AArch64: SVE2 超集
+    NeonAmx,     // AArch64: Apple AMX (M1+)
+}
+```
+
+| 变体 | 向量宽度 (bits) | SIMD 寄存器数 | 典型平台 |
+|------|----------------|--------------|---------|
+| `Scalar` | — | — | Phase 0 SymExec only |
+| `Avx2` | 256 | 16 ymm | Haswell+ (2013) |
+| `Avx512` | 512 | 32 zmm | Skylake-X+ (2017) |
+| `Avx512Amx` | 512 + tile | 32 zmm + 8 tmm | Sapphire Rapids+ (2023) |
+| `Neon` | 128 | 32 v-reg | ARMv8+ 全系 |
+| `Sve` | 128~2048 | 32 z-reg | Neoverse V1+ (2021) |
+| `Sve2` | 128~2048 | 32 z-reg | Neoverse V2+ (2023) |
+| `NeonAmx` | 128 + AMX block | 32 v-reg + AMX | Apple M1+ (2020) |
+
+**分派规则**: `DeviceProfile::detect()` 运行时检测 → `IsaLevel` → codegen 选择 x86_64 / AArch64 后端。
+
+### 9.3 ISA 扩展特性 (DATA-ISA-FEATURES)
+
+> **实现位置**: `gllm-kernels/src/autotuning/hw_info.rs`
+
+```rust
+pub struct IsaFeatures {
+    // x86_64 扩展
+    pub avx2: bool,
+    pub fma: bool,
+    pub avx512f: bool,
+    pub avx512bw: bool,
+    pub avx512vnni: bool,     // INT8 dot product (Cascade Lake+)
+    pub avx512fp16: bool,     // 原生 F16 运算 (Sapphire Rapids+)
+    pub avx512bf16: bool,     // VDPBF16PS 原生 BF16 (Cooper Lake+)
+    // AArch64 扩展
+    pub neon: bool,
+    pub sve: bool,
+    pub sve2: bool,
+    pub sve_vl_bytes: usize,  // SVE 向量长度 (0 = SVE 不可用)
+}
+```
+
+**ISA 扩展 → Codegen 路径映射**:
+
+| 扩展 | 守卫条件 | 激活的 Codegen 路径 |
+|------|---------|-------------------|
+| `avx512bf16` | `has_bf16 && use_avx512 && gemm_dtype == BF16` | VDPBF16PS 原生 BF16 BLIS 路径 (K-pair pack + `vdpbf16ps`) |
+| `avx512fp16` | `has_avx512fp16 && gemm_dtype == F16` | 原生 F16 运算路径 |
+| `avx512vnni` | `has_vnni && gemm_dtype == INT8` | VPDPBUSD INT8 dot product |
+| `sve` | `use_sve && sve_vl_bytes > 0` | SVE 可变长向量 codegen (替代 NEON 固定 128-bit) |
+| `amx` (x86) | `has_amx && amx_gemm_eligible(m,n,k)` | Intel AMX tile GEMM (`tdpbf16ps` / `tdpbssd`) |
+| `amx` (Apple) | `IsaLevel::NeonAmx` | Apple AMX block 运算 |
+
+**铁律**: 扩展不可用时必须降级到基础 ISA 路径 (AVX2/NEON)，禁止返回错误。这是 SPEC 授权的唯一 ISA 级别 fallback。
+
+### 9.4 数据类型维度 (DATA-DTYPE-DIMENSION)
+
+> **实现位置**: `X86CodeGen.gemm_dtype` / `DynasmAArch64CodeGen.gemm_dtype`
+
+```rust
+pub enum DType {
+    F32,   // 4 bytes/element, 直接 FMA
+    F16,   // 2 bytes/element, 需 vcvtph2ps/vcvtps2ph 转换
+    BF16,  // 2 bytes/element, 需 vpmovzxwd+vpslld / vpsrld+vpmovdw 转换
+}
+```
+
+DType 影响 codegen 的 4 个层面：
+
+| 层面 | F32 | BF16 | F16 |
+|------|-----|------|-----|
+| **内存寻址** | `r12 * 4` | `r12 * 2` | `r12 * 2` |
+| **标量加载** | `vmovss(dword_ptr)` | `movzx(word_ptr)` → `shl 16` → `vmovd` | `movzx(word_ptr)` → `vmovd` → `vcvtph2ps` |
+| **向量加载** | `vmovups(zmmword_ptr)` 64B | `vpmovzxwd(ymmword_ptr)` 32B → `vpslld 16` | `vcvtph2ps(ymmword_ptr)` 32B |
+| **存储转换** | 直接 `vmovups` | `vpsrld 16` → `vpmovdw` | `vcvtps2ph` |
+
+**累加器始终 F32**: 无论源 DType，FMA 运算在 F32 精度下进行 (`vfmadd231ps`)。
+
+### 9.5 寄存器预算与分配策略 (DATA-REGISTER-BUDGET)
+
+> **实现位置**: `gllm-kernels/src/compiler/codegen/target_desc.rs`
+
+```rust
+pub struct TargetDesc {
+    pub simd_width_f32: usize,   // F32 元素/向量: 4=NEON, 8=AVX2, 16=AVX-512
+    pub num_simd_regs: usize,    // 总 SIMD 寄存器数: 16=AVX2, 32=NEON/AVX-512
+    pub n_scratch_regs: usize,   // 可用 scratch = total - accumulators - reserved
+    pub mr: usize,               // Tile M 维度
+    pub nr: usize,               // Tile N 维度
+    pub simd_bytes: usize,       // 向量字节数: 16=NEON, 32=AVX2, 64=AVX-512
+}
+```
+
+**寄存器预算公式**:
+
+```
+accumulators = mr × nr_vecs           (nr_vecs = nr / simd_width_f32)
+scratch      = n_scratch_regs         (A broadcast + B conversion)
+total_used   = accumulators + scratch
+free_regs    = num_simd_regs - total_used
+```
+
+**寄存器预算约束表**:
+
+| ISA | 总寄存器 | 典型 Tile (mr×nr) | 累加器 | Scratch | 剩余 (epilogue) |
+|-----|---------|-------------------|--------|---------|----------------|
+| AVX2 | 16 ymm | 6×16 (6×2 vecs) | 12 | 2 | 2 |
+| AVX-512 | 32 zmm | 6×48 (6×3 vecs) | 18 | 2 | 12 |
+| NEON | 32 v-reg | 8×16 (8×4 vecs) | 32 | 0 | 0 (需溢出) |
+| SVE (256-bit) | 32 z-reg | 6×16 (6×2 vecs) | 12 | 2 | 18 |
+
+**寄存器分配作为 Codegen 维度**:
+
+寄存器预算直接决定以下 codegen 行为：
+
+| 寄存器压力 | Tile 大小 | SW Pipeline | Epilogue 策略 |
+|-----------|----------|-------------|--------------|
+| 充裕 (free ≥ 8) | 最大 tile | depth=2 双缓冲 | 全寄存器 epilogue |
+| 适中 (free 4~7) | 标准 tile | depth=1 单缓冲 | 部分溢出 |
+| 紧张 (free < 4) | 缩小 tile | depth=0 无流水线 | 栈溢出 (spill/reload) |
+
+### 9.6 设备参数 (DATA-DEVICE-PARAMS)
+
+> **实现位置**: `gllm-kernels/src/microarch.rs`, `gllm-kernels/src/autotuning/hw_info.rs`
+
+#### 9.6.1 硬件信息 (HwInfo)
+
+```rust
+pub struct HwInfo {
+    pub vendor: String,
+    pub model_name: String,
+    pub physical_cores: usize,
+    pub logical_cores: usize,
+    pub l1d_bytes: usize,        // L1 数据缓存
+    pub l2_bytes: usize,         // L2 缓存
+    pub l3_bytes: usize,         // L3 缓存
+    pub cacheline_bytes: usize,  // 缓存行大小 (通常 64)
+    pub isa: IsaFeatures,
+}
+```
+
+#### 9.6.2 内核配置 (KernelConfig)
+
+```rust
+pub struct KernelConfig {
+    pub arch: MicroArch,
+    // 微内核几何
+    pub mr: usize,               // Tile M 维度
+    pub nr: usize,               // Tile N 维度
+    pub simd_width: usize,       // SIMD 宽度 (F32 元素数)
+    // Cache blocking
+    pub kc: usize,               // K 维度分块
+    pub mc: usize,               // M 维度分块
+    pub nc: usize,               // N 维度分块
+    // Cache 大小
+    pub l1d: usize,
+    pub l2: usize,
+    pub l3: usize,
+    // Prefetch
+    pub pf_distance_b: usize,    // B 矩阵预取距离
+    pub pf_distance_a: usize,    // A 矩阵预取距离
+    pub pf_hint_gemv: u8,        // GEMV 预取提示 (0=T0, 1=T1, 2=T2, 3=NTA)
+    pub pf_rows_gemv: usize,     // GEMV 预取行数
+    // 硬件特性 (从 IsaFeatures 提取的 codegen 开关)
+    pub use_avx512: bool,
+    pub zmm_downclocking: bool,  // Zen4 等 AVX-512 降频平台
+    pub has_amx: bool,
+    pub has_vnni: bool,
+    pub has_avx512fp16: bool,
+    pub has_bf16: bool,
+    pub has_sve: bool,
+    pub has_sve2: bool,
+    pub sve_vl_bytes: usize,
+}
+```
+
+**KernelConfig → Codegen 贯通路径**: `DeviceProfile::detect()` → `MicroArch::kernel_config()` → `X86CodeGen::new(config)` / `DynasmAArch64CodeGen::new(config)`。所有字段在 codegen 构造时一次性注入，运行时不可变。
+
+#### 9.6.3 NUMA 拓扑 (NumaTopology)
+
+```rust
+pub struct NumaTopology {
+    pub nodes: Vec<NumaNode>,
+}
+
+pub struct NumaNode {
+    pub node_id: usize,
+    pub l3_bytes: usize,
+    pub core_count: usize,
+}
+```
+
+**NUMA → Codegen**: 多节点时 `nc_for_node_l3()` 缩小 NC 分块以适配单节点 L3。
+
+### 9.7 GPU 计算能力 (DATA-GPU-PROFILE)
+
+> **实现位置**: `gllm-kernels/src/gpu/mod.rs`
+
+#### 9.7.1 GPU 平台 (Platform)
+
+```rust
+pub enum Platform {
+    X86_64 { avx512: bool, amx: bool },
+    Aarch64 { sve: bool, amx: bool },
+    #[cfg(feature = "jit-cuda")]
+    Cuda { sm_version: u32 },    // SM 版本: 70=Volta, 80=Ampere, 90=Hopper, 100=Blackwell
+    #[cfg(feature = "jit-hip")]
+    Hip { gfx_arch: u32 },       // GFX 架构: 1100=RDNA3, 942=CDNA3
+    #[cfg(feature = "jit-metal")]
+    Metal { gpu_family: u32 },   // GPU Family: 7=M1, 8=M2, 9=M3
+}
+```
+
+#### 9.7.2 GPU 设备描述 (GpuDeviceProfile)
+
+```rust
+pub struct GpuDeviceProfile {
+    pub platform: Platform,
+    pub compute_units: u32,
+    pub shared_mem_per_block: u32,
+    pub max_registers_per_thread: u32,
+    pub warp_size: u32,
+    pub max_threads_per_block: u32,
+    pub max_block_dim: [u32; 3],
+    pub max_grid_dim: [u32; 3],
+    pub total_memory: usize,
+    pub memory_bandwidth_gbs: f64,
+    pub peak_gflops_f32: f64,
+    pub peak_gflops_f16: f64,
+    pub has_matrix_unit: bool,    // Tensor Core / Matrix Core
+    pub clock_mhz: u32,
+    pub isv: GpuIsvCapabilities,
+}
+```
+
+#### 9.7.3 SM 版本分派 (SmRange + PtxKernelRegistry)
+
+```rust
+pub struct SmRange {
+    pub min_sm: u32,   // 包含
+    pub max_sm: u32,   // 不包含 (u32::MAX = 无上界)
+}
+
+pub struct PtxKernelRegistry {
+    entries: HashMap<PtxAlgorithm, Vec<PtxKernelEntry>>,
+}
+
+pub enum PtxAlgorithm {
+    FlashAttention,
+    Gemm,
+}
+```
+
+**SM 版本 → Kernel 映射**:
+
+| 算法 | SM 范围 | 关键指令 | Tensor Core 代 |
+|------|---------|---------|---------------|
+| FlashAttention v1 | [70, 80) | `wmma.load` / `wmma.mma` | Gen 1 (Volta) |
+| FlashAttention v2 | [80, 90) | `mma.sync` / `cp.async` | Gen 2 (Ampere) |
+| FlashAttention v3 | [90, 100) | `wgmma` / `cp.async.bulk` / TMA | Gen 3 (Hopper) |
+| FlashAttention v4 | [100, ∞) | `tcgen05.mma` / TMEM / 2-CTA | Gen 4 (Blackwell) |
+| GEMM TC sm70 | [70, 80) | `wmma` | Gen 1 |
+| GEMM TC sm80 | [80, 90) | `mma.sync` | Gen 2 |
+| GEMM TC sm89+ | [90, ∞) | `mma.sync` + FP8 | Gen 3+ |
+
+**铁律**: SM < 70 必须返回 `Err`，禁止 fallback (REQ-KERNELS-PTX-MV-003)。
+
+#### 9.7.4 GPU 硬件能力 (GpuIsvCapabilities)
+
+```rust
+pub struct GpuIsvCapabilities {
+    pub tensor_core_gen: u8,  // 0=none, 1=Volta/gfx900, 2=Ampere/CDNA2, 3=Hopper/CDNA3
+}
+```
+
+> **设计决策**: GPU GEMM 全部走 JIT codegen 生成设备原生二进制（PTX/HIP/MSL），不调用外部 BLAS 库（cuBLAS/rocBLAS）。
+> JIT 融合算子直接驻留缓存对齐内存页，调用外部预编译库的 ROI 过低。
+> `tensor_core_gen` 作为 JIT codegen 的硬件能力信号，驱动 WMMA/MMA/MFMA 指令选择。
+
+### 9.8 算法策略选择 (DATA-ALGORITHM-STRATEGY)
+
+> **实现位置**: `gllm-kernels/src/compiler/codegen/gemm_dispatch.rs`, `gllm-kernels/src/compiler/graph.rs`
+
+#### 9.8.1 GEMM 策略 (GemmStrategy)
+
+```rust
+pub enum GemmStrategy {
+    JitBlis,              // JIT 编译 BLIS 微内核 (CPU 默认)
+    OneDnn,               // Intel oneDNN ISV 库 (CPU, 大矩阵)
+    Amx,                  // Intel AMX tile GEMM (CPU, BF16)
+    AppleAmx,             // Apple AMX block GEMM (CPU, macOS)
+    JitGpuTensorCore,     // JIT GPU GEMM + Tensor Core/MFMA
+    JitGpu,               // JIT GPU GEMM (无矩阵加速单元)
+}
+```
+
+**选择决策树**: `select_gemm_strategy()` 按优先级：GPU + tensor_core_gen → JitGpuTensorCore / JitGpu → CPU AMX → oneDNN → Accelerate → JIT BLIS。
+
+#### 9.8.2 Attention 策略 (AttentionStrategy)
+
+```rust
+pub enum AttentionStrategy {
+    Naive,                                          // O(n²) 参考实现
+    FlashV2 { block_m: usize, block_n: usize },    // FlashAttention-2 tiled
+    Paged { page_size: usize },                     // PagedAttention (vLLM-style)
+    SlidingWindow { window_size: usize },           // 滑动窗口 (Mistral-style)
+}
+```
+
+**选择依据**: `select_attention_strategy()` 根据 L1 cache 阈值 + DType 感知自动选择。
+
+### 9.9 Codegen 提示 (DATA-CODEGEN-HINTS)
+
+> **实现位置**: `gllm-kernels/src/compiler/semantic_dag.rs`
+
+```rust
+pub struct CodegenHints {
+    pub is_memory_bound: bool,       // Roofline 分类: 内存密集型
+    pub arithmetic_intensity: f32,   // 算术强度 (FLOP/byte)
+    pub prefetch_hint: u8,           // 预取策略: 0=T0, 1=T1, 2=T2, 3=NTA
+    pub use_nt_stores: bool,         // 非临时存储 (bypass cache)
+}
+```
+
+**SemanticDAG → CodegenHints → Codegen**: Phase 1 分析算子 AI/bottleneck → 聚合为 hints → Phase 3 codegen 据此调整预取距离、NT store、融合决策。
+
+### 9.10 DeviceProfile 聚合 (DATA-DEVICE-PROFILE)
+
+> **实现位置**: `gllm-kernels/src/dispatch/device_profile.rs`
+
+```rust
+pub struct DeviceProfile {
+    pub arch: MicroArch,
+    pub isa: IsaLevel,
+    pub kernel_config: KernelConfig,
+    pub hw_info: HwInfo,
+    pub numa: NumaTopology,
+    pub peak_gflops_f32: f64,
+    pub peak_bandwidth_gbs: f64,
+    pub physical_cores: usize,
+    pub logical_cores: usize,
+    pub isv: IsvCapabilities,
+}
+```
+
+**关键方法**:
+
+| 方法 | 返回 | 用途 |
+|------|------|------|
+| `detect()` | `DeviceProfile` | 运行时自动检测所有硬件能力 |
+| `num_simd_regs()` | `usize` | 寄存器预算计算 |
+| `simd_width()` | `usize` | F32 元素/向量 |
+| `cache_sizes()` | `(l1, l2, l3)` | Cache blocking 决策 |
+| `gemm_blocking(m, n, k)` | `GemmBlocking` | MC/NC/KC 分块参数 |
+| `roofline_ridge_point()` | `f64` | Roofline 模型拐点 (FLOP/byte) |
+
+**DeviceProfile 是所有 codegen 维度的聚合入口**: 从 `detect()` 开始，经过 `KernelConfig` 注入 codegen，驱动 Phase 3 ISA Lowering 的所有分派决策。
+
+### 9.11 量化位宽维度 (DATA-QUANT-DISPATCH)
+
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs`, `gllm-kernels/src/compiler/graph.rs`
+
+量化 GEMM 的位宽是独立于 DType 的分派维度，不同位宽走完全不同的 dequant + GEMM 路径：
+
+```rust
+pub enum OpKind {
+    // ...
+    QuantGemm { m: usize, n: usize, k: usize, bits: u8 },
+}
+```
+
+| 位宽 | Dequant 路径 | 内存布局 | 指令特化 |
+|------|-------------|---------|---------|
+| 8-bit (Q8_0) | `emit_dequant_q8_0_loop()` — 逐 block scale×i8 | 32 元素/block, 2B scale + 32B data | VNNI 可用时 `vpdpbusd` |
+| 4-bit (Q4_0) | `emit_dequant_q4_0_loop()` — nibble unpack + scale | 32 元素/block, 2B scale + 16B data | 位操作 `vpand`/`vpsrlw` |
+| 其他 | `Err("unsupported bits")` | — | — |
+
+**与 DType 维度的关系**: `QuantGemm` 的源数据是整数量化格式，累加器仍为 F32。DType 维度 (§9.4) 控制浮点 GEMM 路径，量化位宽维度控制整数 dequant+GEMM 路径，两者正交。
+
+### 9.11.1 JIT 算子覆盖矩阵 (DATA-OPKIND-COVERAGE)
+
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs`, `aarch64_dynasm.rs`, `gpu_ir/`
+
+所有算子必须走完整 JIT 管线（Scalar→SymExec→IR→ISA Lowering），以下为三平台覆盖状态：
+
+| OpKind | x86_64 | AArch64 | GPU (PTX/HIP/MSL) | 备注 |
+|--------|--------|---------|-------------------|------|
+| Gemm | ✅ | ✅ | ✅ | BLIS 微内核，DType 多态 |
+| GemmBias | ✅ | ✅ | ✅ | Gemm + EpilogueInjection bias |
+| QuantGemm | ✅ | ✅ | ✅ | Dequant 融合进 GEMM（见 §9.11.2） |
+| RmsNorm | ✅ | ✅ | ✅ | |
+| LayerNorm | ✅ | ✅ | ✅ | |
+| RoPE | ✅ | ✅ | ✅ | |
+| Softmax | ✅ | ✅ | ✅ | |
+| Silu | ✅ | ✅ | ✅ | |
+| Gelu | ✅ | ✅ | ✅ | |
+| SwiGlu | ✅ | ✅ | — | GPU 走图优化层 SwiGLU 融合 |
+| GeGlu | — | ✅ | — | AArch64 独立实现 |
+| Add / Mul / Residual | ✅ | ✅ | ✅ | |
+| MultiHeadAttention | ✅ | ✅ | ✅ | |
+| CachedGQA | ✅ | ✅ | ✅ (trace) | 带 KV cache 的 GQA |
+| MoEGate | ✅ | ✅ | ✅ (trace) | |
+| TopK | ✅ | ✅ | ✅ (trace) | |
+| WeightedSum | ✅ | ✅ | ✅ (trace) | MoE expert 加权合并 |
+| MeanPool | ✅ | ✅ | ✅ | Encoder 平均池化 |
+| L2Normalize | ✅ | ✅ | ✅ | Embedding 归一化 |
+| Dequantize | 融合 | ✅ | ✅ | x86_64 融合进 QuantGemm（见 §9.11.2） |
+| Reshape / Transpose | NOP | NOP | NOP | 纯元数据操作，不生成指令 |
+
+### 9.11.2 算子融合关系 (DATA-OP-FUSION-MAP)
+
+算子之间存在两层融合：**gllm-kernels Phase 2 硬件融合** 和 **gllm 图优化层模式融合**。
+
+#### Phase 2 硬件融合模式 (gllm-kernels)
+
+> **实现位置**: `gllm-kernels/src/compiler/fusion.rs`, `hw_constraints.rs`
+
+| FusionMode | 融合关系 | 触发条件 |
+|------------|---------|---------|
+| EpilogueInjection | GEMM + 激活/bias/残差 → 融合到累加器寄存器 | 后继是 Silu/Gelu/Add/Bias |
+| LoopFusion | 逐元素算子链 → 合并为单循环 | 连续 Elementwise ops |
+| TileLevelFusion | 前驱算子嵌入 GEMM MC 循环 | 前驱输出 > 75% L1 |
+| ComputeRoot | 前驱算子完整计算后驻留 L1/L2 | 前驱输出 ≤ 75% L1 |
+| QkvSharedInput | Q/K/V 三个 GEMM 共享 pack_a | 连续 3 个 GEMM 共享输入 |
+| NormIntoGemm | RmsNorm 输出直接喂入 GEMM | RmsNorm → GEMM 无中间写回 |
+| Standalone | 不融合，独立执行 | 硬件约束违反时降级 |
+
+#### 关键融合实例
+
+**Dequantize × QuantGemm 融合**（x86_64 特有）：
+```
+独立 Dequantize op → ❌ x86_64 不生成
+QuantGemm 内部调用 emit_dequant_q8_0_loop / emit_dequant_q4_0_loop
+  → dequant 到 scratchpad (L1 驻留) → 立即 GEMM 消费
+  → 零中间内存写回，数据在寄存器/L1 中完成全生命周期
+```
+AArch64 和 GPU 将 Dequantize 作为独立 OpKind 处理，因为其 codegen 架构按 op 逐个 emit。
+
+**FFNBlock 深度融合**（三平台）：
+```
+Gate GEMM + Up GEMM → fused activation × multiply → Down GEMM
+  → Gate/Up 共享 pack_a (QkvSharedInput 模式)
+  → activation×mul 融合到 Gate GEMM epilogue (EpilogueInjection)
+```
+
+**CrossLayerResidual 深度融合**（三平台）：
+```
+Add (残差) → RmsNorm → GEMM
+  → Add 输出直接进 RmsNorm scratchpad (ComputeRoot)
+  → RmsNorm 输出直接喂 GEMM (NormIntoGemm)
+  → 跨层零中间写回
+```
+
+#### gllm 图优化层模式融合
+
+> **实现位置**: `gllm/src/graph/optimizer/`
+
+| Pattern Pass | 融合关系 | 输入子图 → 输出节点 |
+|-------------|---------|-------------------|
+| FlashAttention | Q×K^T → Scale → Mask → Softmax → ×V | → FlashAttn 单节点 |
+| GQA | Multi-head attention + KV repeat | → GQA 单节点 |
+| FusedQkvRope | Q/K/V projection + RoPE | → QkvRope 单节点 |
+| SwiGLU | Gate GEMM × Silu × Up GEMM | → SwiGLU 单节点 |
+| MoERouting | Gate → TopK → Expert FFN → WeightedSum | → MoE 单节点 |
+| FusedRMSLinear | RmsNorm → Linear | → RMSLinear 单节点 |
+| HardwareFusionPass | 硬件不支持时降级到 Atomic | 按 DeviceProfile 决策 |
+| ConstantFolding | 常量表达式预计算 | 编译期求值 |
+| DeadCodeElimination | 移除未使用节点 | 图瘦身 |
+
+### 9.12 JitParams 自动调优维度 (DATA-JITPARAMS)
+
+> **实现位置**: `gllm-kernels/src/autotuning/search_space.rs`
+
+JitParams 是运行时自动调优的参数空间，每个参数都是独立的 codegen 分派维度：
+
+```rust
+pub struct JitParams {
+    pub k_unroll: usize,
+    pub prefetch_distance: usize,
+    pub reg_alloc_strategy: RegAllocStrategy,
+    pub sw_pipeline_depth: usize,
+    pub nr_variant: usize,
+}
+
+pub enum RegAllocStrategy {
+    MaxAccumulators,  // 2 scratch regs — 最大化累加器 tile
+    Balanced,         // 4 scratch regs — 平衡
+    MinSpill,         // 6 scratch regs — 最小化寄存器溢出
+}
+```
+
+| 参数 | 搜索范围 | 影响的 Codegen 行为 |
+|------|---------|-------------------|
+| `k_unroll` | 1, 2, 4, 8 | K 循环展开因子，影响指令级并行度 |
+| `prefetch_distance` | 0~16 | B 矩阵预取距离 (0=禁用)，影响 cache miss 率 |
+| `reg_alloc_strategy` | 3 种 | Scratch 寄存器数量，影响 tile 大小上限 |
+| `sw_pipeline_depth` | 0, 1, 2 | 软件流水线深度 (0=无, 1=单缓冲, 2=双缓冲) |
+| `nr_variant` | 0 或具体值 | NR tile 宽度覆盖 (0=使用 blocking 默认值) |
+
+**与静态维度的关系**: §9.1~§9.7 的维度在 `DeviceProfile::detect()` 时确定，运行期间不变。JitParams 是在静态维度确定后，通过 autotuning 搜索在参数空间中找到最优组合。两层维度的笛卡尔积构成完整的 codegen 空间。
+
+### 9.13 硬件加速 Eligibility 阈值 (DATA-HW-ELIGIBILITY)
+
+> **实现位置**: 各 codegen 后端
+
+硬件加速单元（AMX、Tensor Core、Matrix Core）有最小问题规模要求，低于阈值时降级到通用路径：
+
+#### 9.13.1 Intel AMX (x86_64)
+
+```rust
+fn amx_gemm_eligible(m: usize, n: usize, k: usize, bf16: bool) -> bool {
+    bf16 && m >= 32 && n >= 32 && m % 16 == 0 && n % 16 == 0 && k > 0
+}
+```
+
+- 不满足 → 降级到 JIT BLIS 路径
+
+#### 9.13.2 Apple AMX (AArch64)
+
+```rust
+fn apple_amx_gemm_eligible(m: usize, n: usize, k: usize) -> bool {
+    m >= 32 && n >= 32 && m % 32 == 0 && n % 32 == 0 && k > 0
+}
+```
+
+- 不满足 → 降级到 NEON BLIS 路径
+
+#### 9.13.3 CUDA Tensor Core
+
+| SM 范围 | 最低要求 | 降级路径 |
+|---------|---------|---------|
+| sm < 70 | — | `Err` (禁止 fallback) |
+| sm ≥ 70 | `has_matrix_unit = true` | 标量 tiled GEMM |
+
+#### 9.13.4 HIP Matrix Core (MFMA)
+
+| GFX 架构 | 条件 | 降级路径 |
+|----------|------|---------|
+| gfx < 908 | 无 MFMA | 标量 tiled GEMM |
+| gfx ≥ 908 | `v_mfma_f32_16x16x16f16` | — |
+
+**Warp/Wave 大小**: `gfx ≥ 1000` (RDNA) → wave32; `gfx < 1000` (CDNA) → wave64
+
+#### 9.13.5 Metal Simdgroup Matrix
+
+| GPU Family | 条件 | 降级路径 |
+|-----------|------|---------|
+| < 7 | 无 simdgroup matrix | 标量 tiled GEMM |
+| ≥ 7 (M1+) | `simdgroup_multiply_accumulate` | — |
+
+### 9.14 完整维度分类总览 (DATA-DIMENSION-TAXONOMY)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Codegen 维度分类                                                │
+│                                                                  │
+│  第一层: 编译时维度 (Cargo feature)                               │
+│  ├── GPU 后端选择: jit-cuda / jit-hip / jit-metal               │
+│                                                                  │
+│  第二层: 检测时维度 (DeviceProfile::detect(), 运行期不变)         │
+│  ├── ISA 级别: IsaLevel (AVX2/AVX-512/NEON/SVE/...)            │
+│  ├── ISA 扩展: IsaFeatures (VNNI/BF16/FP16/AMX/SVE2/...)      │
+│  ├── 微架构: MicroArch (tile 几何/prefetch/FMA ports)           │
+│  ├── 设备参数: HwInfo (cache/cacheline/cores)                   │
+│  ├── NUMA 拓扑: NumaTopology (节点数/per-node L3)               │
+│  ├── GPU 能力: GpuDeviceProfile (SM/GFX/Family/shared_mem)     │
+│  └── ISV 库: IsvCapabilities (CPU: oneDNN/Accelerate)           │
+│                                                                  │
+│  第三层: 算子时维度 (per-op, 每个算子可能不同)                    │
+│  ├── 数据类型: DType (F32/F16/BF16)                             │
+│  ├── 量化位宽: bits (4/8)                                       │
+│  ├── 算法策略: GemmStrategy / AttentionStrategy                 │
+│  ├── Codegen 提示: CodegenHints (memory_bound/AI/prefetch)      │
+│  └── HW Eligibility: 加速单元最小规模阈值                        │
+│                                                                  │
+│  第四层: 调优时维度 (JitParams, autotuning 搜索)                 │
+│  ├── k_unroll: K 循环展开因子                                    │
+│  ├── prefetch_distance: 预取距离                                 │
+│  ├── reg_alloc_strategy: 寄存器分配策略                          │
+│  ├── sw_pipeline_depth: 软件流水线深度                           │
+│  └── nr_variant: NR tile 宽度覆盖                               │
+│                                                                  │
+│  最终机器码 = f(第一层 × 第二层 × 第三层 × 第四层)               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**维度总数**: 27 个独立分派点，分布在 4 个层级。JIT 编译的核心价值在于：预编译库无法覆盖这 27 个维度的笛卡尔积，而 JIT 管线在运行时根据实际组合动态生成最优代码。
