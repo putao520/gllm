@@ -201,30 +201,39 @@ pub(crate) fn launch_config_for_op(
     match op_kind {
         OpKind::Add | OpKind::Mul | OpKind::Silu | OpKind::Gelu
         | OpKind::Residual | OpKind::SwiGlu | OpKind::GeGlu => {
-            profile.launch_config_1d(65536)
+            // Scale grid to saturate compute units
+            let default_n = (profile.compute_units * profile.max_threads_per_block) as usize;
+            profile.launch_config_1d(default_n.max(65536))
         }
-        OpKind::RoPE { head_dim, .. } => {
-            // One thread per (position, dimension_pair) — covers all heads
-            profile.launch_config_1d(*head_dim * 1024)
+        OpKind::RoPE { head_dim, seq_len, .. } => {
+            // Use actual seq_len when available
+            let n = *head_dim * (*seq_len).max(1);
+            profile.launch_config_1d(n)
         }
-        OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
-            profile.launch_config_row_wise(1024, 256)
+        OpKind::LayerNorm { hidden_size, .. } | OpKind::RmsNorm { hidden_size, .. } => {
+            let block = (*hidden_size as u32).next_power_of_two()
+                .min(profile.max_threads_per_block);
+            profile.launch_config_row_wise(1024, block)
         }
         OpKind::Softmax => {
-            profile.launch_config_row_wise(1024, 256)
+            let block = profile.max_threads_per_block.min(256);
+            profile.launch_config_row_wise(1024, block)
         }
         OpKind::Gemm { m, n, .. } | OpKind::GemmBias { m, n, .. } => {
-            let tile: u32 = 16;
+            // Tile size derived from warp_size: sqrt(32)=5→8, sqrt(64)=8
+            let tile = ((profile.warp_size as f32).sqrt() as u32).max(8).min(32);
             let grid_x = ((*n as u32) + tile - 1) / tile;
             let grid_y = ((*m as u32) + tile - 1) / tile;
+            let shared = (2 * tile * tile * 4).min(profile.shared_mem_per_block);
             gllm_kernels::gpu::LaunchConfig {
                 grid_dim: [grid_x * grid_y, 1, 1],
                 block_dim: [tile * tile, 1, 1],
-                shared_mem_bytes: 2 * tile * tile * 4,
+                shared_mem_bytes: shared,
             }
         }
         OpKind::MultiHeadAttention { seq_len, num_heads, head_dim } => {
-            let block = (*head_dim as u32).next_power_of_two().min(256);
+            let block = (*head_dim as u32).next_power_of_two()
+                .min(profile.max_threads_per_block);
             gllm_kernels::gpu::LaunchConfig {
                 grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
                 block_dim: [block, 1, 1],
