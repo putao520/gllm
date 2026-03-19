@@ -33,31 +33,31 @@ pub(crate) fn build_bert_layer_graph(
     let h = hidden;
 
     // ── Graph inputs ──
-    let input = g.add_tensor("input", vec![s, h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
 
     // Attention weights + biases
-    let w_q = g.add_tensor("w_q", vec![h, h], dt);
-    let b_q = g.add_tensor("b_q", vec![h], dt);
-    let w_k = g.add_tensor("w_k", vec![h, h], dt);
-    let b_k = g.add_tensor("b_k", vec![h], dt);
-    let w_v = g.add_tensor("w_v", vec![h, h], dt);
-    let b_v = g.add_tensor("b_v", vec![h], dt);
-    let w_o = g.add_tensor("w_o", vec![h, h], dt);
-    let b_o = g.add_tensor("b_o", vec![h], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[h, h], dt);
+    let b_q = g.add_tensor_concrete("b_q", &[h], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, h], dt);
+    let b_k = g.add_tensor_concrete("b_k", &[h], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, h], dt);
+    let b_v = g.add_tensor_concrete("b_v", &[h], dt);
+    let w_o = g.add_tensor_concrete("w_o", &[h, h], dt);
+    let b_o = g.add_tensor_concrete("b_o", &[h], dt);
 
     // LayerNorm 1 weights
-    let ln1_w = g.add_tensor("ln1_w", vec![h], dt);
-    let ln1_b = g.add_tensor("ln1_b", vec![h], dt);
+    let ln1_w = g.add_tensor_concrete("ln1_w", &[h], dt);
+    let ln1_b = g.add_tensor_concrete("ln1_b", &[h], dt);
 
     // FFN weights + biases
-    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
-    let b_up = g.add_tensor("b_up", vec![inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
-    let b_down = g.add_tensor("b_down", vec![h], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
+    let b_up = g.add_tensor_concrete("b_up", &[inter], dt);
+    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
+    let b_down = g.add_tensor_concrete("b_down", &[h], dt);
 
     // LayerNorm 2 weights
-    let ln2_w = g.add_tensor("ln2_w", vec![h], dt);
-    let ln2_b = g.add_tensor("ln2_b", vec![h], dt);
+    let ln2_w = g.add_tensor_concrete("ln2_w", &[h], dt);
+    let ln2_b = g.add_tensor_concrete("ln2_b", &[h], dt);
 
     g.inputs = vec![
         input, w_q, b_q, w_k, b_k, w_v, b_v, w_o, b_o,
@@ -67,7 +67,7 @@ pub(crate) fn build_bert_layer_graph(
     // ── Self-Attention ──
 
     // Q = input * W_q + b_q  [s, h] × [h, h] → [s, h]
-    let q_out = g.add_tensor("q", vec![s, h], dt);
+    let q_out = g.add_tensor_concrete("q", &[s, h], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_q, b_q],
@@ -76,7 +76,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // K = input * W_k + b_k
-    let k_out = g.add_tensor("k", vec![s, h], dt);
+    let k_out = g.add_tensor_concrete("k", &[s, h], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_k, b_k],
@@ -85,7 +85,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // V = input * W_v + b_v
-    let v_out = g.add_tensor("v", vec![s, h], dt);
+    let v_out = g.add_tensor_concrete("v", &[s, h], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![input, w_v, b_v],
@@ -94,7 +94,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Multi-head attention: Q[s,h], K[s,h], V[s,h] → attn_out[s,h]
-    let attn_out = g.add_tensor("attn_out", vec![s, h], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, h], dt);
     g.add_op(
         OpKind::MultiHeadAttention { seq_len: s, num_heads, head_dim },
         vec![q_out, k_out, v_out],
@@ -103,7 +103,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Output projection + bias
-    let o_out = g.add_tensor("o_proj", vec![s, h], dt);
+    let o_out = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
         vec![attn_out, w_o, b_o],
@@ -112,7 +112,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Residual₁: input + o_out
-    let resid1 = g.add_tensor("residual1", vec![s, h], dt);
+    let resid1 = g.add_tensor_concrete("residual1", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![input, o_out],
@@ -121,7 +121,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Post-attention LayerNorm
-    let normed1 = g.add_tensor("normed1", vec![s, h], dt);
+    let normed1 = g.add_tensor_concrete("normed1", &[s, h], dt);
     g.add_op(
         OpKind::LayerNorm { eps },
         vec![resid1, ln1_w, ln1_b],
@@ -132,7 +132,7 @@ pub(crate) fn build_bert_layer_graph(
     // ── FFN ──
 
     // Up projection + GELU: GemmBias + Gelu → EpilogueInjection candidate
-    let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
+    let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: inter, k: h, dtype: DType::F32 },
         vec![normed1, w_up, b_up],
@@ -140,7 +140,7 @@ pub(crate) fn build_bert_layer_graph(
         "gemm_ffn_up",
     );
 
-    let act_out = g.add_tensor("ffn_act", vec![s, inter], dt);
+    let act_out = g.add_tensor_concrete("ffn_act", &[s, inter], dt);
     g.add_op(
         OpKind::Gelu,
         vec![up_out],
@@ -149,7 +149,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Down projection
-    let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
+    let down_out = g.add_tensor_concrete("ffn_down", &[s, h], dt);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: inter, dtype: DType::F32 },
         vec![act_out, w_down, b_down],
@@ -158,7 +158,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Residual₂: normed1 + down_out
-    let resid2 = g.add_tensor("residual2", vec![s, h], dt);
+    let resid2 = g.add_tensor_concrete("residual2", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![normed1, down_out],
@@ -167,7 +167,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Post-FFN LayerNorm
-    let output = g.add_tensor("output", vec![s, h], dt);
+    let output = g.add_tensor_concrete("output", &[s, h], dt);
     g.add_op(
         OpKind::LayerNorm { eps },
         vec![resid2, ln2_w, ln2_b],
@@ -225,8 +225,8 @@ pub(crate) fn build_mean_pool_graph(
     let mut g = CompilerGraph::new();
     let dt = DType::F32;
 
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let output = g.add_tensor("output", vec![hidden], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let output = g.add_tensor_concrete("output", &[hidden], dt);
 
     g.add_op(
         OpKind::MeanPool { seq_len, hidden },

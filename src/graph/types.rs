@@ -83,6 +83,7 @@ impl FusedGraph {
                             shape: meta.shape,
                             dtype: meta.dtype,
                             data: None,
+                            ptr: None,
                         },
                     );
                     bound += 1;
@@ -270,8 +271,19 @@ pub struct WeightBinding {
     pub source_name: String,
     pub shape: Vec<usize>,
     pub dtype: safetensors::Dtype,
+    /// Embedded weight bytes (constant weights loaded at graph-build time).
     pub data: Option<Vec<u8>>,
+    /// Runtime weight pointer injected by the caller (e.g. from WeightsHandle).
+    /// When set, takes priority over `data` during execution.
+    /// The caller guarantees the pointed-to memory outlives any execution using
+    /// this binding.
+    pub ptr: Option<*const f32>,
 }
+
+// Safety: WeightBinding only stores a raw pointer; it does not own the data.
+// The caller is responsible for ensuring the pointer remains valid.
+unsafe impl Send for WeightBinding {}
+unsafe impl Sync for WeightBinding {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantizationInfo {

@@ -18,3 +18,41 @@ mod template;
 pub use registry::{get_template, get_template_by_arch, register_builtin_templates, ArchRegistry};
 pub use resolve::{resolve_config, ResolvedConfig};
 pub use template::{ArchTemplate, GraphNode, NodeDef, RepeatBlock};
+
+/// Build a `FusedGraphExecutor` from a registered YAML template name.
+///
+/// Steps:
+/// 1. Look up the template in the global registry (calls `register_builtin_templates`
+///    if not yet initialised).
+/// 2. Expand the template with `config` → `OnnxGraph`.
+/// 3. Run graph optimisation passes + JIT-compile every node.
+///
+/// `seq_len` and `hidden` are the concrete shape dimensions used for JIT
+/// compilation (they can be representative values; symbolic dims are resolved
+/// at runtime via `ShapeBinding`).
+///
+/// Returns `Err` if the template is unknown, expansion fails, or JIT
+/// compilation fails for any node.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+pub fn build_executor_from_yaml(
+    arch_name: &str,
+    config: &ResolvedConfig,
+    seq_len: usize,
+    hidden: usize,
+) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
+    register_builtin_templates();
+
+    let template = get_template(arch_name).ok_or_else(|| {
+        crate::graph::executor::ExecutorError::CompilationFailed(format!(
+            "unknown architecture template: '{arch_name}'"
+        ))
+    })?;
+
+    let onnx_graph = template.to_onnx_graph(config).map_err(|e| {
+        crate::graph::executor::ExecutorError::CompilationFailed(format!(
+            "template expansion for '{arch_name}': {e}"
+        ))
+    })?;
+
+    crate::graph::executor::FusedGraphExecutor::from_graph(onnx_graph, seq_len, hidden)
+}

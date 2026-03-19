@@ -10,6 +10,7 @@ mod weight_helpers;
 mod bert_forward;
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod decoder_forward;
+pub(crate) mod jit_cache;
 mod gpu_compile;
 #[allow(dead_code)]
 pub(crate) mod types;

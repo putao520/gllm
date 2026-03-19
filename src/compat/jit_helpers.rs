@@ -69,16 +69,16 @@ pub(crate) fn build_decoder_layer_graph(
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_dim], dt);
-    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-    let w_gate = g.add_tensor("w_gate", vec![h, inter], dt);
-    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
-    let rn2_w = g.add_tensor("rn2_w", vec![h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, kv_dim], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, kv_dim], dt);
+    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
+    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], dt);
+    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
+    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
+    let rn2_w = g.add_tensor_concrete("rn2_w", &[h], dt);
 
     g.inputs = vec![
         input, w_q, w_k, w_v, w_o, rn1_w,
@@ -86,52 +86,52 @@ pub(crate) fn build_decoder_layer_graph(
     ];
 
     // Pre-attention RMSNorm
-    let normed1 = g.add_tensor("normed1", vec![s, h], dt);
+    let normed1 = g.add_tensor_concrete("normed1", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed1], "rms_norm_1");
 
     // Q/K/V Projections
-    let q_out = g.add_tensor("q", vec![s, q_dim], dt);
+    let q_out = g.add_tensor_concrete("q", &[s, q_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed1, w_q], vec![q_out], "gemm_q");
-    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
+    let k_out = g.add_tensor_concrete("k", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_k], vec![k_out], "gemm_k");
-    let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
+    let v_out = g.add_tensor_concrete("v", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_v], vec![v_out], "gemm_v");
 
     // RoPE
-    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
+    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
 
     // Multi-Head Attention
-    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
     g.add_op(
         OpKind::MultiHeadAttention { seq_len: s, num_heads, head_dim },
         vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
     );
 
     // Output projection + Residual 1
-    let o_out = g.add_tensor("o_proj", vec![s, h], dt);
+    let o_out = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
-    let resid1 = g.add_tensor("residual1", vec![s, h], dt);
+    let resid1 = g.add_tensor_concrete("residual1", &[s, h], dt);
     g.add_op(OpKind::Residual, vec![input, o_out], vec![resid1], "residual_1");
 
     // Pre-FFN RMSNorm
-    let normed2 = g.add_tensor("normed2", vec![s, h], dt);
+    let normed2 = g.add_tensor_concrete("normed2", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![resid1, rn2_w], vec![normed2], "rms_norm_2");
 
     // SwiGLU FFN
-    let gate_out = g.add_tensor("ffn_gate", vec![s, inter], dt);
+    let gate_out = g.add_tensor_concrete("ffn_gate", &[s, inter], dt);
     g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
-    let up_out = g.add_tensor("ffn_up", vec![s, inter], dt);
+    let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], dt);
     g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_up], vec![up_out], "gemm_up");
-    let swiglu_out = g.add_tensor("ffn_swiglu", vec![s, inter], dt);
+    let swiglu_out = g.add_tensor_concrete("ffn_swiglu", &[s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
-    let down_out = g.add_tensor("ffn_down", vec![s, h], dt);
+    let down_out = g.add_tensor_concrete("ffn_down", &[s, h], dt);
     g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     // Residual 2
-    let output = g.add_tensor("output", vec![s, h], dt);
+    let output = g.add_tensor_concrete("output", &[s, h], dt);
     g.add_op(OpKind::Residual, vec![resid1, down_out], vec![output], "residual_2");
 
     g.outputs = vec![output];
@@ -191,18 +191,18 @@ pub(crate) fn build_kv_projection_graph(
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, kv_dim], dt);
     g.inputs = vec![input, rn1_w, w_k];
 
-    let normed = g.add_tensor("normed", vec![s, h], dt);
+    let normed = g.add_tensor_concrete("normed", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_kv");
 
-    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
+    let k_out = g.add_tensor_concrete("k", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
 
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
+    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
 
     g.outputs = vec![k_rope];
@@ -227,15 +227,15 @@ pub(crate) fn build_v_projection_graph(
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_dim], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, kv_dim], dt);
     g.inputs = vec![input, rn1_w, w_v];
 
-    let normed = g.add_tensor("normed", vec![s, h], dt);
+    let normed = g.add_tensor_concrete("normed", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_v");
 
-    let v_out = g.add_tensor("v_proj", vec![s, kv_dim], dt);
+    let v_out = g.add_tensor_concrete("v_proj", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     g.outputs = vec![v_out];
@@ -382,15 +382,15 @@ pub(crate) fn build_lm_head_graph(
     let mut g = CompilerGraph::new();
     let dt = dtype;
 
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
-    let lm_w = g.add_tensor("lm_w", vec![hidden, vocab_size], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let norm_w = g.add_tensor_concrete("norm_w", &[hidden], dt);
+    let lm_w = g.add_tensor_concrete("lm_w", &[hidden, vocab_size], dt);
     g.inputs = vec![input, norm_w, lm_w];
 
-    let normed = g.add_tensor("normed", vec![seq_len, hidden], dt);
+    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, norm_w], vec![normed], "final_rms_norm");
 
-    let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
+    let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], dt);
     g.add_op(
         OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
         vec![normed, lm_w], vec![logits], "lm_head",
@@ -444,11 +444,11 @@ pub(crate) fn build_final_norm_graph(
     let mut g = CompilerGraph::new();
     let dt = dtype;
 
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let norm_w = g.add_tensor("norm_w", vec![hidden], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let norm_w = g.add_tensor_concrete("norm_w", &[hidden], dt);
     g.inputs = vec![input, norm_w];
 
-    let normed = g.add_tensor("normed", vec![seq_len, hidden], dt);
+    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, norm_w], vec![normed], "final_rms_norm");
 
     g.outputs = vec![normed];
@@ -507,26 +507,26 @@ pub(crate) fn build_moe_pre_attention_graph(
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let rn1_w = g.add_tensor("rn1_w", vec![h], dt);
-    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_dim], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_dim], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, kv_dim], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, kv_dim], dt);
     g.inputs = vec![input, rn1_w, w_q, w_k, w_v];
 
-    let normed = g.add_tensor("normed", vec![s, h], dt);
+    let normed = g.add_tensor_concrete("normed", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_1");
 
-    let q_out = g.add_tensor("q", vec![s, q_dim], dt);
+    let q_out = g.add_tensor_concrete("q", &[s, q_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
-    let k_out = g.add_tensor("k", vec![s, kv_dim], dt);
+    let k_out = g.add_tensor_concrete("k", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
-    let v_out = g.add_tensor("v", vec![s, kv_dim], dt);
+    let v_out = g.add_tensor_concrete("v", &[s, kv_dim], dt);
     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
-    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_dim], dt);
+    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
 
     // Output: q_rope (primary output). k_rope and v_out are extracted from scratchpad.
@@ -638,19 +638,19 @@ pub(crate) fn build_post_attention_graph(
     let h = hidden;
     let q_dim = num_heads * head_dim;
 
-    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
-    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
-    let residual_in = g.add_tensor("residual_in", vec![s, h], dt);
-    let rn2_w = g.add_tensor("rn2_w", vec![h], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
+    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
+    let residual_in = g.add_tensor_concrete("residual_in", &[s, h], dt);
+    let rn2_w = g.add_tensor_concrete("rn2_w", &[h], dt);
     g.inputs = vec![attn_out, w_o, residual_in, rn2_w];
 
-    let o_out = g.add_tensor("o_proj", vec![s, h], dt);
+    let o_out = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
 
-    let resid1 = g.add_tensor("residual1", vec![s, h], dt);
+    let resid1 = g.add_tensor_concrete("residual1", &[s, h], dt);
     g.add_op(OpKind::Residual, vec![residual_in, o_out], vec![resid1], "residual_1");
 
-    let normed2 = g.add_tensor("normed2", vec![s, h], dt);
+    let normed2 = g.add_tensor_concrete("normed2", &[s, h], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![resid1, rn2_w], vec![normed2], "rms_norm_2");
 
     g.outputs = vec![normed2];
@@ -664,9 +664,9 @@ pub(crate) fn build_post_attention_graph(
 /// Build a CompilerGraph for cached GQA attention.
 /// Q[seq_len, q_dim] × K_cache[total_seq, kv_dim] → softmax(causal) → × V_cache → out[seq_len, q_dim]
 ///
-/// The attention strategy is auto-selected based on hardware profile and sequence
-/// dimensions via `select_attention_strategy`. Short sequences use Naive O(N²),
-/// long sequences trigger FlashV2 tiled attention, GPU paths use PagedAttention.
+/// `total_seq` is Concrete: full JIT loop-unrolling/tiling optimizations are preserved.
+/// The caller (DecodeCachedJit) caches compiled layers per unique total_seq value,
+/// so each value is compiled exactly once and reused on subsequent steps.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn build_cached_gqa_graph(
     seq_len: usize,
@@ -691,12 +691,12 @@ pub(crate) fn build_cached_gqa_graph(
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
-    let q_in = g.add_tensor("q", vec![seq_len, q_dim], dt);
-    let k_cache = g.add_tensor("k_cache", vec![total_seq, kv_dim], dt);
-    let v_cache = g.add_tensor("v_cache", vec![total_seq, kv_dim], dt);
+    let q_in = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
+    let k_cache = g.add_tensor_concrete("k_cache", &[total_seq, kv_dim], dt);
+    let v_cache = g.add_tensor_concrete("v_cache", &[total_seq, kv_dim], dt);
     g.inputs = vec![q_in, k_cache, v_cache];
 
-    let attn_out = g.add_tensor("attn_out", vec![seq_len, q_dim + 1], dt); // +1 for sparsity
+    let attn_out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim + 1], dt); // +1 for sparsity
     g.add_op(
         OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dt },
         vec![q_in, k_cache, v_cache], vec![attn_out], "cached_gqa",
@@ -925,17 +925,17 @@ pub(crate) fn build_moe_routing_graph(
     let dt = dtype;
     let s = seq_len;
 
-    let normed2 = g.add_tensor("normed2", vec![s, hidden], dt);
-    let router_w = g.add_tensor("router_w", vec![hidden, num_experts], dt);
+    let normed2 = g.add_tensor_concrete("normed2", &[s, hidden], dt);
+    let router_w = g.add_tensor_concrete("router_w", &[hidden, num_experts], dt);
     g.inputs = vec![normed2, router_w];
 
-    let gate_probs = g.add_tensor("gate_probs", vec![s, num_experts], dt);
+    let gate_probs = g.add_tensor_concrete("gate_probs", &[s, num_experts], dt);
     g.add_op(
         OpKind::MoEGate { seq_len: s, num_experts, hidden },
         vec![normed2, router_w], vec![gate_probs], "moe_gate",
     );
 
-    let topk_out = g.add_tensor("topk_out", vec![s, top_k * 2], dt);
+    let topk_out = g.add_tensor_concrete("topk_out", &[s, top_k * 2], dt);
     g.add_op(
         OpKind::TopK { seq_len: s, num_experts, top_k },
         vec![gate_probs], vec![topk_out], "topk",
@@ -963,19 +963,19 @@ pub(crate) fn build_expert_ffn_graph(
     let dt = dtype;
     let s = seq_len;
 
-    let input = g.add_tensor("input", vec![s, hidden], dt);
-    let w_gate = g.add_tensor("w_gate", vec![hidden, inter], dt);
-    let w_up = g.add_tensor("w_up", vec![hidden, inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, hidden], dt);
+    let input = g.add_tensor_concrete("input", &[s, hidden], dt);
+    let w_gate = g.add_tensor_concrete("w_gate", &[hidden, inter], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[hidden, inter], dt);
+    let w_down = g.add_tensor_concrete("w_down", &[inter, hidden], dt);
     g.inputs = vec![input, w_gate, w_up, w_down];
 
-    let gate_out = g.add_tensor("gate", vec![s, inter], dt);
+    let gate_out = g.add_tensor_concrete("gate", &[s, inter], dt);
     g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_gate], vec![gate_out], "gemm_gate");
-    let up_out = g.add_tensor("up", vec![s, inter], dt);
+    let up_out = g.add_tensor_concrete("up", &[s, inter], dt);
     g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_up], vec![up_out], "gemm_up");
-    let swiglu_out = g.add_tensor("swiglu", vec![s, inter], dt);
+    let swiglu_out = g.add_tensor_concrete("swiglu", &[s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
-    let down_out = g.add_tensor("down", vec![s, hidden], dt);
+    let down_out = g.add_tensor_concrete("down", &[s, hidden], dt);
     g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     g.outputs = vec![down_out];
@@ -1000,12 +1000,12 @@ pub(crate) fn build_moe_combine_graph(
     let dt = dtype;
     let s = seq_len;
 
-    let expert_outputs = g.add_tensor("expert_outputs", vec![top_k, s, hidden], dt);
-    let indices = g.add_tensor("indices", vec![s, top_k], dt);
-    let weights = g.add_tensor("weights", vec![s, top_k], dt);
+    let expert_outputs = g.add_tensor_concrete("expert_outputs", &[top_k, s, hidden], dt);
+    let indices = g.add_tensor_concrete("indices", &[s, top_k], dt);
+    let weights = g.add_tensor_concrete("weights", &[s, top_k], dt);
     g.inputs = vec![expert_outputs, indices, weights];
 
-    let output = g.add_tensor("output", vec![s, hidden], dt);
+    let output = g.add_tensor_concrete("output", &[s, hidden], dt);
     g.add_op(
         OpKind::WeightedSum { seq_len: s, hidden, top_k },
         vec![expert_outputs, indices, weights], vec![output], "weighted_sum",
@@ -1076,11 +1076,11 @@ pub(crate) fn jit_gemm(
 
     let mut g = CompilerGraph::new();
 
-    let a = g.add_tensor("input", vec![m, k], dtype);
-    let b = g.add_tensor("weight", vec![k, n], dtype);
+    let a = g.add_tensor_concrete("input", &[m, k], dtype);
+    let b = g.add_tensor_concrete("weight", &[k, n], dtype);
     g.inputs = vec![a, b];
 
-    let c = g.add_tensor("output", vec![m, n], dtype);
+    let c = g.add_tensor_concrete("output", &[m, n], dtype);
     g.add_op(OpKind::Gemm { m, n, k, dtype }, vec![a, b], vec![c], "gemm");
     g.outputs = vec![c];
 
@@ -1103,5 +1103,263 @@ pub(crate) fn jit_gemm(
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// GPT-2 JIT graph builders
+// ---------------------------------------------------------------------------
+
+/// Build a CompilerGraph for GPT-2 LayerNorm + fused QKV GemmBias.
+///
+/// Inputs (weight blob order): ln_w[hidden], ln_b[hidden], qkv_w[hidden, 3*hidden], qkv_b[3*hidden]
+/// Output: qkv[seq_len, 3*hidden]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_gpt2_ln_qkv_graph(
+    seq_len: usize,
+    hidden: usize,
+    eps: f32,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+    let dt = DType::F32;
+    let qkv_dim = 3 * hidden;
+    let mut g = CompilerGraph::new();
+    let input  = g.add_tensor_concrete("input",  &[seq_len, hidden],  dt);
+    let ln_w   = g.add_tensor_concrete("ln_w",   &[hidden],           dt);
+    let ln_b   = g.add_tensor_concrete("ln_b",   &[hidden],           dt);
+    let qkv_w  = g.add_tensor_concrete("qkv_w",  &[hidden, qkv_dim],  dt);
+    let qkv_b  = g.add_tensor_concrete("qkv_b",  &[qkv_dim],          dt);
+    g.inputs = vec![input, ln_w, ln_b, qkv_w, qkv_b];
+    let normed  = g.add_tensor_concrete("normed",  &[seq_len, hidden],  dt);
+    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln_w, ln_b], vec![normed], "ln1");
+    let qkv_out = g.add_tensor_concrete("qkv", &[seq_len, qkv_dim], dt);
+    g.add_op(
+        OpKind::GemmBias { m: seq_len, n: qkv_dim, k: hidden, dtype: dt },
+        vec![normed, qkv_w, qkv_b], vec![qkv_out], "gemm_qkv",
+    );
+    g.outputs = vec![qkv_out];
+    g
+}
+
+/// Execute GPT-2 LayerNorm + fused QKV GemmBias. Returns qkv[seq_len, 3*hidden].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn execute_gpt2_ln_qkv(
+    compiled: &gllm_kernels::compiler::CompiledLayer,
+    hidden_state: &[f32],
+    ln_w: &[f32], ln_b: &[f32],
+    qkv_w: &[f32], qkv_b: &[f32],
+    seq_len: usize, hidden: usize,
+) -> Vec<f32> {
+    let qkv_dim = 3 * hidden;
+    let mut output = vec![0.0f32; seq_len * qkv_dim];
+    let weights_buf = pack_weights(&[ln_w, ln_b, qkv_w, qkv_b]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    output
+}
+
+/// Build a CompilerGraph for GPT-2 O projection GemmBias + residual add.
+///
+/// Inputs: attn_out[seq_len, q_dim], o_w[q_dim, hidden], o_b[hidden], residual[seq_len, hidden]
+/// Output: out[seq_len, hidden]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_gpt2_o_proj_graph(
+    seq_len: usize,
+    hidden: usize,
+    q_dim: usize,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+    let dt = DType::F32;
+    let mut g = CompilerGraph::new();
+    let attn_out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim],  dt);
+    let o_w      = g.add_tensor_concrete("o_w",      &[q_dim, hidden],   dt);
+    let o_b      = g.add_tensor_concrete("o_b",      &[hidden],          dt);
+    let residual = g.add_tensor_concrete("residual", &[seq_len, hidden], dt);
+    g.inputs = vec![attn_out, o_w, o_b, residual];
+    let o_out = g.add_tensor_concrete("o_proj", &[seq_len, hidden], dt);
+    g.add_op(
+        OpKind::GemmBias { m: seq_len, n: hidden, k: q_dim, dtype: dt },
+        vec![attn_out, o_w, o_b], vec![o_out], "gemm_o",
+    );
+    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dt);
+    g.add_op(OpKind::Residual, vec![residual, o_out], vec![out], "residual_1");
+    g.outputs = vec![out];
+    g
+}
+
+/// Execute GPT-2 O projection + residual. Returns hidden[seq_len, hidden].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn execute_gpt2_o_proj(
+    compiled: &gllm_kernels::compiler::CompiledLayer,
+    attn_out: &[f32],
+    o_w: &[f32], o_b: &[f32],
+    residual: &[f32],
+    seq_len: usize, hidden: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; seq_len * hidden];
+    // ABI: activation = attn_out; weights blob = [o_w, o_b, residual]
+    let weights_buf = pack_weights(&[o_w, o_b, residual]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            attn_out.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    output
+}
+
+/// Build a CompilerGraph for GPT-2 LayerNorm2 + MLP (c_fc GemmBias + Gelu + c_proj GemmBias) + residual.
+///
+/// Inputs: hidden[seq_len, hidden], ln2_w[hidden], ln2_b[hidden],
+///         fc_w[hidden, inter], fc_b[inter], proj_w[inter, hidden], proj_b[hidden],
+///         residual[seq_len, hidden]
+/// Output: out[seq_len, hidden]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_gpt2_ln_mlp_graph(
+    seq_len: usize,
+    hidden: usize,
+    inter: usize,
+    eps: f32,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+    let dt = DType::F32;
+    let mut g = CompilerGraph::new();
+    let input    = g.add_tensor_concrete("input",    &[seq_len, hidden], dt);
+    let ln2_w    = g.add_tensor_concrete("ln2_w",    &[hidden],          dt);
+    let ln2_b    = g.add_tensor_concrete("ln2_b",    &[hidden],          dt);
+    let fc_w     = g.add_tensor_concrete("fc_w",     &[hidden, inter],   dt);
+    let fc_b     = g.add_tensor_concrete("fc_b",     &[inter],           dt);
+    let proj_w   = g.add_tensor_concrete("proj_w",   &[inter, hidden],   dt);
+    let proj_b   = g.add_tensor_concrete("proj_b",   &[hidden],          dt);
+    let residual = g.add_tensor_concrete("residual", &[seq_len, hidden], dt);
+    g.inputs = vec![input, ln2_w, ln2_b, fc_w, fc_b, proj_w, proj_b, residual];
+    let normed2 = g.add_tensor_concrete("normed2", &[seq_len, hidden], dt);
+    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln2_w, ln2_b], vec![normed2], "ln2");
+    let fc_out = g.add_tensor_concrete("fc_out", &[seq_len, inter], dt);
+    g.add_op(
+        OpKind::GemmBias { m: seq_len, n: inter, k: hidden, dtype: dt },
+        vec![normed2, fc_w, fc_b], vec![fc_out], "gemm_fc",
+    );
+    let gelu_out = g.add_tensor_concrete("gelu_out", &[seq_len, inter], dt);
+    g.add_op(OpKind::Gelu, vec![fc_out], vec![gelu_out], "gelu");
+    let proj_out = g.add_tensor_concrete("proj_out", &[seq_len, hidden], dt);
+    g.add_op(
+        OpKind::GemmBias { m: seq_len, n: hidden, k: inter, dtype: dt },
+        vec![gelu_out, proj_w, proj_b], vec![proj_out], "gemm_proj",
+    );
+    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dt);
+    g.add_op(OpKind::Residual, vec![residual, proj_out], vec![out], "residual_2");
+    g.outputs = vec![out];
+    g
+}
+
+/// Execute GPT-2 LayerNorm2 + MLP + residual. Returns hidden[seq_len, hidden].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn execute_gpt2_ln_mlp(
+    compiled: &gllm_kernels::compiler::CompiledLayer,
+    hidden_state: &[f32],
+    ln2_w: &[f32], ln2_b: &[f32],
+    fc_w: &[f32], fc_b: &[f32],
+    proj_w: &[f32], proj_b: &[f32],
+    residual: &[f32],
+    seq_len: usize, hidden: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; seq_len * hidden];
+    let weights_buf = pack_weights(&[ln2_w, ln2_b, fc_w, fc_b, proj_w, proj_b, residual]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    output
+}
+
+/// Build a CompilerGraph for GPT-2 final LayerNorm + lm_head (tied embedding, no bias).
+///
+/// `embed_w` must be pre-transposed to [hidden, vocab_size] before packing.
+/// Inputs: hidden[seq_len, hidden], ln_f_w[hidden], ln_f_b[hidden], embed_w_t[hidden, vocab]
+/// Output: logits[seq_len, vocab]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_gpt2_final_ln_lm_head_graph(
+    seq_len: usize,
+    hidden: usize,
+    vocab_size: usize,
+    eps: f32,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+    let dt = DType::F32;
+    let mut g = CompilerGraph::new();
+    let input   = g.add_tensor_concrete("input",   &[seq_len, hidden],    dt);
+    let ln_f_w  = g.add_tensor_concrete("ln_f_w",  &[hidden],             dt);
+    let ln_f_b  = g.add_tensor_concrete("ln_f_b",  &[hidden],             dt);
+    let embed_w = g.add_tensor_concrete("embed_w", &[hidden, vocab_size], dt);
+    g.inputs = vec![input, ln_f_w, ln_f_b, embed_w];
+    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
+    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln_f_w, ln_f_b], vec![normed], "ln_f");
+    let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], dt);
+    g.add_op(
+        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
+        vec![normed, embed_w], vec![logits], "lm_head",
+    );
+    g.outputs = vec![logits];
+    g
+}
+
+/// Execute GPT-2 final LayerNorm + lm_head.
+/// `embed_w_t` must be pre-transposed to [hidden, vocab_size].
+/// Returns logits[seq_len, vocab_size].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn execute_gpt2_final_ln_lm_head(
+    compiled: &gllm_kernels::compiler::CompiledLayer,
+    hidden_state: &[f32],
+    ln_f_w: &[f32], ln_f_b: &[f32],
+    embed_w_t: &[f32],
+    seq_len: usize, vocab_size: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; seq_len * vocab_size];
+    let weights_buf = pack_weights(&[ln_f_w, ln_f_b, embed_w_t]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            hidden_state.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    output
 }
 

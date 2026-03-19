@@ -265,3 +265,23 @@
 | **REQ-FUSION-DEEP-004** | FFN 全融合 | SwiGLU FFN 的 Gate/Up/Down 三个 GEMM + 激活融合为单 kernel | 1. Gate GEMM + Up GEMM 共享输入 → QkvSharedInput 模式复用<br>2. SiLU(Gate) × Up → Down GEMM 的 epilogue 链<br>3. 整个 FFN 从 5 个独立 kernel 降为 1-2 个融合 kernel<br>4. 消除 Gate/Up 中间张量写回（2 × hidden × inter × 4 bytes） | 🟢 已实现 |
 | **REQ-FUSION-DEEP-005** | 融合规则引擎 | 可扩展的融合规则系统，支持声明式模式匹配 + 硬件感知决策 | 1. `FusionRule` trait: `fn matches(subgraph) -> Option<FusionPlan>`<br>2. 内置规则: NormGemm / GemmEpilogue / QkvShared / AttentionBlock / FFNBlock<br>3. 规则优先级排序（深度融合优先于浅融合）<br>4. 硬件感知: 规则可查询 DeviceProfile 决定融合深度 | 🟢 已实现 |
 | **REQ-FUSION-DEEP-006** | 跨层残差融合 | Decoder layer 的残差 Add 与下一层的 RmsNorm 融合 | 1. Layer N 的 `residual_add` + Layer N+1 的 `RmsNorm` 融合为单 kernel<br>2. 消除层间中间张量写回（seq_len × hidden × 4 bytes）<br>3. 需要 `decoder_forward` 层面的图构建支持（跨层边） | 🟢 已实现 |
+
+### 8.5 JIT 图执行通用化 (REQ-JIT-GRAPH)
+
+> **背景**: 当前存在三个相互关联的问题：(1) GPT-2 路径使用 scalar 三重循环 GEMM，违反 NO_SCALAR 铁律；(2) `CompilerGraph` shape 在构建时硬编码为具体数值，`total_seq` 每步 +1 导致 CachedGQA 图每步重编译；(3) YAML 模板与实际执行路径断层，每新增模型都需在 `decoder_forward.rs` 手写分支。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-JIT-GRAPH-001** | JIT 图 Symbolic Shape 支持 | `CompilerGraph` 支持 symbolic 维度，运行时传入具体值，避免 shape 变化时重编译 | 1. `CompilerGraph` 支持 `SymDim`（符号维度），可声明 `Concrete(usize)` 或 `Symbolic(String)`<br>2. `total_seq`、`batch_size` 等动态维度必须声明为 `SymDim::Symbolic`<br>3. 编译一次，运行时通过 shape binding 传入具体值<br>4. CachedGQA 图不再每 decode step 重编译<br>5. 禁止在图构建时将动态维度硬编码为具体数值 | 📋 待实现 |
+| **REQ-JIT-GRAPH-002** | GPT-2 路径 JIT 化 | `gpt2_forward_sequence()` 中所有 GEMM 必须走 JIT `CompilerGraph`，禁止 scalar 三重循环 | 1. QKV projection（fused `c_attn`）走 JIT `OpKind::Gemm`<br>2. O projection（`c_proj`）走 JIT `OpKind::Gemm`<br>3. MLP `c_fc` / `c_proj` 走 JIT `OpKind::Gemm`<br>4. LayerNorm 走 JIT（复用现有 RmsNorm 路径或新增 LayerNorm OpKind）<br>5. 零 scalar GEMM 调用，符合 NO_SCALAR 铁律<br>6. 数值结果与当前实现一致（容差 < 1e-5） | 📋 待实现 |
+| **REQ-JIT-GRAPH-003** | 图执行器打通（YAML → JIT 端到端） | `OnnxGraph`（从 YAML 展开）直接驱动 JIT 执行，消除 `decoder_forward.rs` 手写分支 | 1. `src/graph/executor.rs` 的 `FusedGraph` 执行器能执行完整 decoder forward（含 KV cache）<br>2. 新模型只需提供 YAML 文件，不需要修改任何 Rust 代码<br>3. YAML → `OnnxGraph` → 图优化 → JIT 编译 → 执行链路端到端跑通<br>4. 现有手写分支（GPT-2、MoE、GQA）逐步迁移到图执行器<br>5. 图执行器支持 symbolic shape binding（依赖 REQ-JIT-GRAPH-001） | 📋 待实现 |
+
+### 8.6 JIT 编译缓存 (REQ-JIT-CACHE)
+
+> **背景**: 当前 `DecodeCachedJit` / `MoeDecodeCachedJit` / `Gpt2CachedJit` 在 `decoder_forward()` 函数栈上创建，每次推理调用都重新 JIT 编译所有固定图（`q_rope`、`norm2` 等），`gqa_cache` 也随函数返回销毁。同一进程中加载多个模型时编译结果完全不共享，进程重启后所有编译结果丢失。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-JIT-CACHE-001** | 模型实例级 JIT 缓存 | `DecodeCachedJit` / `MoeDecodeCachedJit` / `Gpt2CachedJit` 必须从函数栈提升到模型实例生命周期（与模型权重共存亡） | 1. JIT 图在模型加载时编译一次，存储在模型实例中<br>2. 同一模型实例的所有推理调用共享同一套编译结果<br>3. 模型卸载时 JIT 缓存随之释放<br>4. `gqa_cache` 在整个模型实例生命周期内累积，不在每次推理调用时重置 | 📋 待实现 |
+| **REQ-JIT-CACHE-002** | 进程级全局 JIT 缓存 | 新增进程级全局 JIT 缓存，以 `(ModelArchKey, GraphKey)` 为键，`Arc<CompiledLayer>` 为值，同架构模型共享编译结果 | 1. 同一进程中相同架构参数的模型（无论加载/卸载多少次）共享 JIT 编译结果<br>2. 缓存使用 `Arc<CompiledLayer>` 避免重复内存占用<br>3. 缓存容量上限可配置（默认 512 个条目），超出时按 LRU 淘汰<br>4. 线程安全：`RwLock<HashMap<...>>` 保护全局缓存 | 📋 待实现 |
+| **REQ-JIT-CACHE-003** | 磁盘持久化 JIT 缓存 | 将编译后的机器码序列化到磁盘（`~/.gllm/jit_cache/{arch_key}/{graph_key}.bin`），进程重启后直接加载，跳过重新编译 | 1. 首次编译后自动序列化到磁盘<br>2. 进程启动时优先从磁盘加载，命中则跳过 JIT 编译<br>3. 缓存文件包含版本校验（gllm 版本 + CPU 特性指纹），不匹配时重新编译<br>4. 磁盘缓存失效条件：gllm 版本变更、CPU 特性变更、手动清除<br>5. 磁盘 I/O 失败时静默降级到内存编译（不报错） | 📋 待实现 |

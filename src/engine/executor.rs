@@ -66,7 +66,22 @@ pub struct GeneratorForwardConfig {
     pub kernel_strategy: crate::scheduler::jit_types::KernelStrategy,
     /// MoE configuration (None for dense models).
     pub moe_config: Option<crate::manifest::MoEConfig>,
+    /// Model-instance JIT cache pointer (x86_64/aarch64 only).
+    /// Points into the Executor's `jit_cache` Mutex; valid for the duration of any forward call.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub jit_cache_ptr: *mut crate::compat::jit_cache::ModelJitCache,
+    /// YAML→JIT graph executor pointer (x86_64/aarch64/cuda only).
+    /// Points into the Executor's `graph_executor` Option; null when not available.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub graph_executor_ptr: *mut crate::graph::executor::FusedGraphExecutor,
 }
+
+// SAFETY: jit_cache_ptr is only written/read while the Executor's Mutex is held,
+// and the Executor itself is not Send across threads without synchronization.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unsafe impl Send for GeneratorForwardConfig {}
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unsafe impl Sync for GeneratorForwardConfig {}
 
 impl GeneratorForwardConfig {
     /// Extract attention head geometry as a grouped struct.
@@ -370,6 +385,13 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     memory_manager: GlobalMemoryManager,
     onnx_generator_plan: Option<OnnxGeneratorPlan>,
     topology: AttentionTopology,
+    /// Model-instance JIT cache: lives with this Executor, released when model is dropped.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    jit_cache: std::sync::Mutex<crate::compat::jit_cache::ModelJitCache>,
+    /// YAML→JIT graph executor (built at load time, used preferentially in forward pass).
+    /// None when the architecture template is not registered or JIT compilation fails.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    graph_executor: Option<crate::graph::executor::FusedGraphExecutor>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -420,6 +442,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rerank_no_token_id: None,
             kernel_strategy: crate::scheduler::jit_types::KernelStrategy::AccuracyFirst,
             moe_config: manifest.moe_config,
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            jit_cache_ptr: std::ptr::null_mut(),
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+            graph_executor_ptr: std::ptr::null_mut(),
         };
 
         let block_size = model_config.kv_cache_block_size;
@@ -473,6 +499,33 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 model_config.max_position_embeddings,
             ),
         };
+
+        // Build YAML→JIT graph executor (best-effort; None if template not registered).
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        let graph_executor = {
+            use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template_by_arch, ResolvedConfig};
+            register_builtin_templates();
+            let resolved = ResolvedConfig {
+                num_hidden_layers: model_config.num_hidden_layers,
+                hidden_size: model_config.hidden_size,
+                num_attention_heads: model_config.num_attention_heads,
+                num_key_value_heads: model_config.num_key_value_heads,
+                head_dim: model_config.head_dim,
+                intermediate_size: model_config.intermediate_size,
+                vocab_size: model_config.vocab_size,
+                rope_theta: model_config.rope_theta as f64,
+                dtype: "f32".to_string(),
+                extra: std::collections::HashMap::new(),
+            };
+            let hidden = model_config.hidden_size;
+            // Look up template name via arch mapping, then build executor
+            get_template_by_arch(manifest.arch)
+                .map(|tmpl| tmpl.name.clone())
+                .and_then(|arch_name| {
+                    build_executor_from_yaml(&arch_name, &resolved, 1, hidden).ok()
+                })
+        };
+
         Ok(Self {
             backend,
             scheduler,
@@ -492,6 +545,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
             topology,
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            jit_cache: std::sync::Mutex::new(crate::compat::jit_cache::ModelJitCache::new()),
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+            graph_executor,
         })
     }
 
@@ -772,6 +829,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let kv_handle = self.active_kv_handle()?;
         let mut kv_caches = vec![kv_handle; batch_input.sequences.len()];
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let mut guard = self.jit_cache.lock().map_err(|e| {
+                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
+            })?;
+            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            self.forward_config.graph_executor_ptr = self
+                .graph_executor
+                .as_mut()
+                .map(|ge| ge as *mut _)
+                .unwrap_or(std::ptr::null_mut());
+        }
         Ok(self.backend.batch_forward_gpu_pure(
             batch_input,
             &self.topology,
@@ -1058,6 +1130,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mut kv_cache = self.active_kv_handle()?;
 
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let mut guard = self.jit_cache.lock().map_err(|e| {
+                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
+            })?;
+            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            self.forward_config.graph_executor_ptr = self
+                .graph_executor
+                .as_mut()
+                .map(|ge| ge as *mut _)
+                .unwrap_or(std::ptr::null_mut());
+        }
         let (logits_list, _sparsity) = self.backend.batch_forward_gpu_pure(
             &batch_input,
             &self.topology,
@@ -1179,12 +1266,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        let embedding = self.backend.embedding_forward_gpu_pure(
-            &tokens,
-            &self.topology,
-            &self.weights,
-            &self.forward_config,
-        )?;
+        let embedding = {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            {
+                let mut guard = self.jit_cache.lock().map_err(|e| {
+                    ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
+                })?;
+                self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
+            }
+            self.backend.embedding_forward_gpu_pure(
+                &tokens,
+                &self.topology,
+                &self.weights,
+                &self.forward_config,
+            )?
+        };
         Ok(embedding)
     }
 
@@ -1192,6 +1288,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let tokens = self.encode_prompt(input)?;
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let mut guard = self.jit_cache.lock().map_err(|e| {
+                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
+            })?;
+            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            self.forward_config.graph_executor_ptr = self
+                .graph_executor
+                .as_mut()
+                .map(|ge| ge as *mut _)
+                .unwrap_or(std::ptr::null_mut());
         }
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
@@ -1232,6 +1343,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     self.forward_config.rerank_no_token_id = Some(id);
                 }
             }
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let mut guard = self.jit_cache.lock().map_err(|e| {
+                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
+            })?;
+            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            self.forward_config.graph_executor_ptr = self
+                .graph_executor
+                .as_mut()
+                .map(|ge| ge as *mut _)
+                .unwrap_or(std::ptr::null_mut());
         }
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,

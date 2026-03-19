@@ -109,6 +109,7 @@ impl GraphOptimizer {
                     shape: tensor.shape.clone(),
                     dtype: tensor.dtype,
                     data: Some(tensor.raw_data().to_vec()),
+                    ptr: None,
                 },
             );
         }
@@ -137,6 +138,7 @@ impl GraphOptimizer {
                     shape: sparse.values.shape.clone(),
                     dtype: sparse.values.dtype,
                     data: Some(sparse.values.raw_data().to_vec()),
+                    ptr: None,
                 },
             );
             fused.weight_bindings.insert(
@@ -146,6 +148,7 @@ impl GraphOptimizer {
                     shape: sparse.indices.shape.clone(),
                     dtype: sparse.indices.dtype,
                     data: Some(sparse.indices.raw_data().to_vec()),
+                    ptr: None,
                 },
             );
         }

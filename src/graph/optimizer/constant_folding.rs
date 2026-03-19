@@ -131,6 +131,7 @@ fn fold_binary_numeric(
         shape: lhs.shape.clone(),
         dtype: lhs.dtype,
         data: Some(out),
+        ptr: None,
     })
 }
 
@@ -152,6 +153,7 @@ fn fold_reshape(
         shape: target_shape,
         dtype: src.dtype,
         data: Some(src_data),
+        ptr: None,
     })
 }
 
@@ -168,6 +170,7 @@ fn fold_transpose(
             shape: vec![],
             dtype: src.dtype,
             data: Some(src_data.clone()),
+            ptr: None,
         });
     }
 
@@ -231,6 +234,7 @@ fn fold_transpose(
         shape: out_shape,
         dtype: src.dtype,
         data: Some(out_data),
+        ptr: None,
     })
 }
 
@@ -381,6 +385,7 @@ mod tests {
                         shape: vec![2],
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[1.0, 2.0])),
+                        ptr: None,
                     },
                 ),
                 (
@@ -390,6 +395,7 @@ mod tests {
                         shape: vec![2],
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[3.0, 4.0])),
+                        ptr: None,
                     },
                 ),
             ]),
@@ -435,6 +441,7 @@ mod tests {
                         shape: vec![2, 2],
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[1.0, 2.0, 3.0, 4.0])),
+                        ptr: None,
                     },
                 ),
                 (
@@ -444,6 +451,7 @@ mod tests {
                         shape: vec![2],
                         dtype: safetensors::Dtype::I64,
                         data: Some(vec![4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+                        ptr: None,
                     },
                 ),
             ]),
@@ -484,6 +492,7 @@ mod tests {
                     shape: vec![2, 3],
                     dtype: safetensors::Dtype::F32,
                     data: Some(f32_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+                    ptr: None,
                 },
             )]),
             quantization_info: HashMap::new(),

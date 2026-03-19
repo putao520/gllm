@@ -1,11 +1,19 @@
 
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use super::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::compat::DType;
 use super::jit_helpers::{
     build_decoder_layer_graph, build_final_norm_graph, build_kv_projection_graph,
     build_lm_head_graph, build_moe_pre_attention_graph, build_post_attention_graph,
     computation_dtype, execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
     execute_kv_projection, pack_weights, update_kv_cache_jit, write_kv_to_cache,
+    build_gpt2_ln_qkv_graph, execute_gpt2_ln_qkv,
+    build_gpt2_o_proj_graph, execute_gpt2_o_proj,
+    build_gpt2_ln_mlp_graph, execute_gpt2_ln_mlp,
+    build_gpt2_final_ln_lm_head_graph, execute_gpt2_final_ln_lm_head,
 };
 use super::types::AttentionGeometry;
 use super::weight_helpers::{
@@ -32,17 +40,22 @@ use crate::engine::executor::{
 struct MoeDecodeCachedJit {
     /// RmsNorm → Q/K/V Gemm → RoPE (pre-attention)
     pre_attn: gllm_kernels::compiler::CompiledLayer,
-    /// CachedGQA attention
-    gqa: gllm_kernels::compiler::CompiledLayer,
+    /// CachedGQA attention — compiled per unique total_seq, cached thereafter (same as DecodeCachedJit)
+    gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer>,
     /// O projection Gemm
     o_gemm: gllm_kernels::compiler::CompiledLayer,
     /// Pre-FFN RmsNorm
     norm2: gllm_kernels::compiler::CompiledLayer,
+    /// Parameters for lazy GQA compilation
+    seq_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn compile_moe_decode_jit(
-    seq_len: usize, total_seq: usize,
+    seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
     eps: f32, rope_theta: f64,
 ) -> Result<MoeDecodeCachedJit, BE> {
@@ -56,41 +69,54 @@ fn compile_moe_decode_jit(
         BE::Other(format!("MoE decode JIT: pre-attention compile failed: {e}"))
     })?;
 
-    let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
-        seq_len, total_seq, num_heads, num_kv_heads, head_dim, computation_dtype(4),
-    );
-    let mut c2 = gllm_kernels::compiler::InferenceCompiler::new();
-    let gqa = c2.compile_graph(&gqa_graph).map_err(|e| {
-        BE::Other(format!("MoE decode JIT: CachedGQA compile failed: {e}"))
-    })?;
-
     // O projection Gemm
-    {
+    let o_gemm = {
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
         use gllm_kernels::types::DType;
         let dt = DType::F32;
         let mut og = CompilerGraph::new();
-        let a_in = og.add_tensor("a", vec![seq_len, q_dim], dt);
-        let b_in = og.add_tensor("b", vec![q_dim, hidden], dt);
+        let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
+        let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
         og.inputs = vec![a_in, b_in];
-        let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
+        let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
         og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
         og.outputs = vec![c_out];
         let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
-        let o_gemm = c3.compile_graph(&og).map_err(|e| {
+        c3.compile_graph(&og).map_err(|e| {
             BE::Other(format!("MoE decode JIT: O Gemm compile failed: {e}"))
-        })?;
+        })?
+    };
 
-        let norm2_graph = super::jit_helpers::build_final_norm_graph(
-            seq_len, hidden, eps, computation_dtype(4),
+    let norm2_graph = super::jit_helpers::build_final_norm_graph(
+        seq_len, hidden, eps, computation_dtype(4),
+    );
+    let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
+    let norm2 = c4.compile_graph(&norm2_graph).map_err(|e| {
+        BE::Other(format!("MoE decode JIT: RmsNorm2 compile failed: {e}"))
+    })?;
+
+    Ok(MoeDecodeCachedJit {
+        pre_attn, o_gemm, norm2,
+        gqa_cache: std::collections::HashMap::new(),
+        seq_len, num_heads, num_kv_heads, head_dim,
+    })
+}
+
+/// Get or compile a CachedGQA CompiledLayer for MoE path.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn get_or_compile_moe_gqa(jit: &mut MoeDecodeCachedJit, total_seq: usize) -> Result<&gllm_kernels::compiler::CompiledLayer, BE> {
+    if !jit.gqa_cache.contains_key(&total_seq) {
+        let graph = super::jit_helpers::build_cached_gqa_graph(
+            jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
+            computation_dtype(4),
         );
-        let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
-        let norm2 = c4.compile_graph(&norm2_graph).map_err(|e| {
-            BE::Other(format!("MoE decode JIT: RmsNorm2 compile failed: {e}"))
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).map_err(|e| {
+            BE::Other(format!("MoE decode JIT: CachedGQA(total_seq={total_seq}) compile failed: {e}"))
         })?;
-
-        Ok(MoeDecodeCachedJit { pre_attn, gqa, o_gemm, norm2 })
+        jit.gqa_cache.insert(total_seq, compiled);
     }
+    Ok(jit.gqa_cache.get(&total_seq).unwrap())
 }
 
 /// Pre-compiled JIT graphs for incremental decode (invariant across layers).
@@ -98,10 +124,19 @@ fn compile_moe_decode_jit(
 struct DecodeCachedJit {
     /// RmsNorm → Q Gemm → RoPE (fused)
     q_rope: gllm_kernels::compiler::CompiledLayer,
-    /// CachedGQA attention (recompiled per step when total_seq changes)
-    gqa: gllm_kernels::compiler::CompiledLayer,
+    /// CachedGQA attention — compiled per unique total_seq value, cached thereafter.
+    /// Key = total_seq. First call with a new total_seq triggers one-time JIT compilation;
+    /// subsequent calls with the same value reuse the cached CompiledLayer.
+    /// This preserves full JIT loop-unrolling/tiling optimizations (Concrete dims)
+    /// while eliminating redundant recompilation for repeated total_seq values.
+    gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer>,
     /// Pre-FFN RmsNorm
     norm2: gllm_kernels::compiler::CompiledLayer,
+    /// Parameters needed to compile new GQA entries on demand
+    seq_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -113,24 +148,25 @@ fn build_q_rope_graph(
     use gllm_kernels::types::DType;
     let dt = DType::F32;
     let mut g = CompilerGraph::new();
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let rn1 = g.add_tensor("rn1_w", vec![hidden], dt);
-    let w_q = g.add_tensor("w_q", vec![hidden, q_dim], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let rn1 = g.add_tensor_concrete("rn1_w", &[hidden], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[hidden, q_dim], dt);
     g.inputs = vec![input, rn1, w_q];
-    let normed = g.add_tensor("normed", vec![seq_len, hidden], dt);
+    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1], vec![normed], "rms_norm");
-    let q_out = g.add_tensor("q", vec![seq_len, q_dim], dt);
+    let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
     g.add_op(OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
-    let q_rope = g.add_tensor("q_rope", vec![seq_len, q_dim], dt);
+    let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
     g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
     g.outputs = vec![q_rope];
     g
 }
 
-/// Pre-compile all invariant JIT graphs for incremental decode.
+/// Pre-compile invariant JIT graphs for incremental decode.
+/// GQA is NOT compiled here — it is lazily compiled on first use per unique total_seq value.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn compile_decode_jit(
-    seq_len: usize, total_seq: usize,
+    seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
     eps: f32, rope_theta: f64,
 ) -> Result<DecodeCachedJit, BE> {
@@ -142,14 +178,6 @@ fn compile_decode_jit(
         BE::Other(format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
     })?;
 
-    let gqa_graph = super::jit_helpers::build_cached_gqa_graph(
-        seq_len, total_seq, num_heads, num_kv_heads, head_dim, computation_dtype(4),
-    );
-    let mut c2 = gllm_kernels::compiler::InferenceCompiler::new();
-    let gqa = c2.compile_graph(&gqa_graph).map_err(|e| {
-        BE::Other(format!("decode JIT: CachedGQA compile failed: {e}"))
-    })?;
-
     let norm2_graph = super::jit_helpers::build_final_norm_graph(
         seq_len, hidden, eps, computation_dtype(4),
     );
@@ -158,7 +186,30 @@ fn compile_decode_jit(
         BE::Other(format!("decode JIT: RmsNorm2 compile failed: {e}"))
     })?;
 
-    Ok(DecodeCachedJit { q_rope, gqa, norm2 })
+    Ok(DecodeCachedJit {
+        q_rope, norm2,
+        gqa_cache: std::collections::HashMap::new(),
+        seq_len, num_heads, num_kv_heads, head_dim,
+    })
+}
+
+/// Get or compile a CachedGQA CompiledLayer for the given total_seq.
+/// Uses Concrete dims → full JIT loop-unrolling/tiling optimizations.
+/// Compiles once per unique total_seq value, then caches indefinitely.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn get_or_compile_gqa(jit: &mut DecodeCachedJit, total_seq: usize) -> Result<&gllm_kernels::compiler::CompiledLayer, BE> {
+    if !jit.gqa_cache.contains_key(&total_seq) {
+        let graph = super::jit_helpers::build_cached_gqa_graph(
+            jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
+            computation_dtype(4),
+        );
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).map_err(|e| {
+            BE::Other(format!("decode JIT: CachedGQA(total_seq={total_seq}) compile failed: {e}"))
+        })?;
+        jit.gqa_cache.insert(total_seq, compiled);
+    }
+    Ok(jit.gqa_cache.get(&total_seq).unwrap())
 }
 
 fn quantized_incremental_decode_layer<E: Element>(
@@ -185,7 +236,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     max_seq_len: usize,
     transpose_weights: bool,
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    jit: &DecodeCachedJit,
+    jit: &mut DecodeCachedJit,
     output: &mut [f32],
 ) -> Result<f32, BE> {
     let geom = AttentionGeometry {
@@ -233,12 +284,13 @@ fn quantized_incremental_decode_layer<E: Element>(
         }
     }
 
-    // CachedGQA attention (pre-compiled)
+    // CachedGQA attention — get cached CompiledLayer for this total_seq (compile once on first use)
     let (attn_out, sparsity) = {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
+            let gqa_compiled = get_or_compile_gqa(jit, total_seq)?;
             super::jit_helpers::execute_cached_gqa(
-                &jit.gqa, &q_proj, &k_slice, &v_slice,
+                gqa_compiled, &q_proj, &k_slice, &v_slice,
                 seq_len, num_heads, head_dim,
             )
         }
@@ -371,24 +423,85 @@ fn load_moe_weights<E: Element>(
 // GPT-2 forward pass (LayerNorm + fused QKV + GELU MLP + learned pos embed)
 // ---------------------------------------------------------------------------
 
-fn gpt2_layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output: &mut [f32], hidden: usize) {
-    let seq_len = input.len() / hidden;
-    for s in 0..seq_len {
-        let row = &input[s * hidden..(s + 1) * hidden];
-        let mean: f32 = row.iter().sum::<f32>() / hidden as f32;
-        let var: f32 = row.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / hidden as f32;
-        let inv_std = 1.0 / (var + eps).sqrt();
-        let out = &mut output[s * hidden..(s + 1) * hidden];
-        for i in 0..hidden {
-            out[i] = (row[i] - mean) * inv_std * weight[i] + bias[i];
-        }
-    }
+/// Pre-compiled JIT graphs for GPT-2 forward pass (invariant across layers).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+struct Gpt2CachedJit {
+    /// LayerNorm1 + fused QKV GemmBias
+    ln_qkv: gllm_kernels::compiler::CompiledLayer,
+    /// CachedGQA attention — compiled per unique total_seq, cached thereafter
+    gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer>,
+    /// O projection GemmBias + residual add
+    o_proj: gllm_kernels::compiler::CompiledLayer,
+    /// LayerNorm2 + MLP (c_fc GemmBias + Gelu + c_proj GemmBias) + residual
+    ln_mlp: gllm_kernels::compiler::CompiledLayer,
+    /// Final LayerNorm + lm_head (tied embedding)
+    final_ln_lm_head: gllm_kernels::compiler::CompiledLayer,
+    /// Parameters for lazy GQA compilation
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
 }
 
-fn gpt2_gelu(x: f32) -> f32 {
-    // gelu_new: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    let c = 0.7978845608028654f32; // sqrt(2/pi)
-    0.5 * x * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
+/// Compile all invariant JIT graphs for GPT-2 forward pass (once, reused across all layers).
+/// GQA is NOT compiled here — lazily compiled on first use per unique total_seq value.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn compile_gpt2_jit(
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    head_dim: usize,
+    inter: usize,
+    vocab_size: usize,
+    eps: f32,
+) -> Result<Gpt2CachedJit, BE> {
+    let q_dim = num_heads * head_dim;
+
+    let ln_qkv_graph = build_gpt2_ln_qkv_graph(seq_len, hidden, eps);
+    let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
+    let ln_qkv = c1.compile_graph(&ln_qkv_graph).map_err(|e| {
+        BE::Other(format!("GPT-2 JIT: LN+QKV compile failed: {e}"))
+    })?;
+
+    let o_proj_graph = build_gpt2_o_proj_graph(seq_len, hidden, q_dim);
+    let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
+    let o_proj = c3.compile_graph(&o_proj_graph).map_err(|e| {
+        BE::Other(format!("GPT-2 JIT: O-proj compile failed: {e}"))
+    })?;
+
+    let ln_mlp_graph = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps);
+    let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
+    let ln_mlp = c4.compile_graph(&ln_mlp_graph).map_err(|e| {
+        BE::Other(format!("GPT-2 JIT: LN+MLP compile failed: {e}"))
+    })?;
+
+    let final_graph = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps);
+    let mut c5 = gllm_kernels::compiler::InferenceCompiler::new();
+    let final_ln_lm_head = c5.compile_graph(&final_graph).map_err(|e| {
+        BE::Other(format!("GPT-2 JIT: final LN+lm_head compile failed: {e}"))
+    })?;
+
+    Ok(Gpt2CachedJit {
+        ln_qkv, o_proj, ln_mlp, final_ln_lm_head,
+        gqa_cache: std::collections::HashMap::new(),
+        seq_len, num_heads, head_dim,
+    })
+}
+
+/// Get or compile a CachedGQA CompiledLayer for GPT-2 path.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn get_or_compile_gpt2_gqa(jit: &mut Gpt2CachedJit, total_seq: usize) -> Result<&gllm_kernels::compiler::CompiledLayer, BE> {
+    if !jit.gqa_cache.contains_key(&total_seq) {
+        let graph = super::jit_helpers::build_cached_gqa_graph(
+            jit.seq_len, total_seq, jit.num_heads, jit.num_heads, jit.head_dim,
+            computation_dtype(4),
+        );
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&graph).map_err(|e| {
+            BE::Other(format!("GPT-2 JIT: CachedGQA(total_seq={total_seq}) compile failed: {e}"))
+        })?;
+        jit.gqa_cache.insert(total_seq, compiled);
+    }
+    Ok(jit.gqa_cache.get(&total_seq).unwrap())
 }
 
 fn gpt2_forward_sequence<E: Element>(
@@ -408,6 +521,7 @@ fn gpt2_forward_sequence<E: Element>(
     kv_caches: &mut [KvCacheHandle],
     seq_idx: usize,
     _position: usize,
+    config: &GeneratorForwardConfig,
 ) -> Result<Vec<f32>, BE> {
     let num_kv_heads = num_heads; // GPT-2: no GQA
     let kv_dim = num_kv_heads * head_dim;
@@ -447,37 +561,100 @@ fn gpt2_forward_sequence<E: Element>(
         1024
     };
 
+    // Compile all JIT graphs once per model instance (L1 cache); GQA compiled lazily per total_seq.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+        if l1.gpt2_ln_qkv.is_none() {
+            let arch_key = ModelArchKey {
+                arch_name: "gpt2".into(),
+                hidden_size: hidden,
+                num_heads,
+                num_kv_heads: num_heads,
+                head_dim,
+                dtype: DType::F32,
+            };
+            let cache = global_jit_cache();
+            let ln_qkv = cache.get_or_compile(
+                JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2LnQkv },
+                || {
+                    let g = build_gpt2_ln_qkv_graph(seq_len, hidden, eps);
+                    let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                    c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: LN+QKV compile failed: {e}"))
+                },
+            ).map_err(BE::Other)?;
+            let o_proj = cache.get_or_compile(
+                JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2OProj },
+                || {
+                    let g = build_gpt2_o_proj_graph(seq_len, hidden, num_heads * head_dim);
+                    let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                    c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: O-proj compile failed: {e}"))
+                },
+            ).map_err(BE::Other)?;
+            let ln_mlp = cache.get_or_compile(
+                JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2LnMlp },
+                || {
+                    let g = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps);
+                    let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                    c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: LN+MLP compile failed: {e}"))
+                },
+            ).map_err(BE::Other)?;
+            let final_ln_lm_head = cache.get_or_compile(
+                JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2FinalLnLmHead { vocab_size } },
+                || {
+                    let g = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps);
+                    let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                    c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: final LN+lm_head compile failed: {e}"))
+                },
+            ).map_err(BE::Other)?;
+            l1.gpt2_ln_qkv = Some(ln_qkv);
+            l1.gpt2_o_proj = Some(o_proj);
+            l1.gpt2_ln_mlp = Some(ln_mlp);
+            l1.gpt2_final_ln_lm_head = Some(final_ln_lm_head);
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let mut jit = {
+        let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+        let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+            gllm_kernels::compiler::CompiledLayer::from_code(
+                arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
+            ).expect("clone CompiledLayer from Arc")
+        };
+        Gpt2CachedJit {
+            ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().unwrap()),
+            o_proj: clone_arc(l1.gpt2_o_proj.as_ref().unwrap()),
+            ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().unwrap()),
+            final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().unwrap()),
+            gqa_cache: std::collections::HashMap::new(),
+            seq_len, num_heads, head_dim,
+        }
+    };
+
     for layer in 0..num_layers {
-        // LayerNorm 1
+        // LayerNorm1 + fused QKV GemmBias → JIT
         let ln1_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln1_aliases(layer))?;
         let ln1_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln1_bias_aliases(layer))?;
-        let mut normed = vec![0.0f32; seq_len * hidden];
-        gpt2_layer_norm(hidden_state, &ln1_w, &ln1_b, eps, &mut normed, hidden);
-
-        // Fused QKV projection: [seq_len, hidden] × [hidden, 3*hidden] + bias
         let qkv_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_fused_qkv_aliases(layer))?;
         let qkv_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_fused_qkv_bias_aliases(layer))?;
-        let qkv_dim = 3 * hidden;
-        let mut qkv = vec![0.0f32; seq_len * qkv_dim];
-        // GPT-2 weights are [hidden, 3*hidden] (not transposed)
-        for s in 0..seq_len {
-            for j in 0..qkv_dim {
-                let mut sum = qkv_b[j];
-                for k in 0..hidden {
-                    sum += normed[s * hidden + k] * qkv_w[k * qkv_dim + j];
-                }
-                qkv[s * qkv_dim + j] = sum;
-            }
-        }
 
-        // Split Q, K, V
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let qkv = execute_gpt2_ln_qkv(&jit.ln_qkv, hidden_state, &ln1_w, &ln1_b, &qkv_w, &qkv_b, seq_len, hidden);
+
+        // Split Q, K, V from fused QKV output
+        let qkv_dim = 3 * hidden;
         let mut q = vec![0.0f32; seq_len * q_dim];
         let mut k_new = vec![0.0f32; seq_len * kv_dim];
         let mut v_new = vec![0.0f32; seq_len * kv_dim];
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         for s in 0..seq_len {
-            q[s * q_dim..(s + 1) * q_dim].copy_from_slice(&qkv[s * qkv_dim..s * qkv_dim + q_dim]);
-            k_new[s * kv_dim..(s + 1) * kv_dim].copy_from_slice(&qkv[s * qkv_dim + q_dim..s * qkv_dim + q_dim + kv_dim]);
-            v_new[s * kv_dim..(s + 1) * kv_dim].copy_from_slice(&qkv[s * qkv_dim + q_dim + kv_dim..s * qkv_dim + qkv_dim]);
+            q[s * q_dim..(s + 1) * q_dim]
+                .copy_from_slice(&qkv[s * qkv_dim..s * qkv_dim + q_dim]);
+            k_new[s * kv_dim..(s + 1) * kv_dim]
+                .copy_from_slice(&qkv[s * qkv_dim + q_dim..s * qkv_dim + q_dim + kv_dim]);
+            v_new[s * kv_dim..(s + 1) * kv_dim]
+                .copy_from_slice(&qkv[s * qkv_dim + q_dim + kv_dim..s * qkv_dim + qkv_dim]);
         }
 
         // Write K, V to cache
@@ -497,7 +674,6 @@ fn gpt2_forward_sequence<E: Element>(
             let buffer = store.get(&kv_caches[seq_idx].0).ok_or_else(|| {
                 BE::Cpu("KV cache not found".into())
             })?;
-            // Extract layer slice → [total_seq, kv_dim]
             let layer_stride = num_kv_heads * max_seq_len * head_dim;
             let layer_base = layer * layer_stride;
             let mut ks = vec![0.0f32; total_seq * kv_dim];
@@ -517,128 +693,67 @@ fn gpt2_forward_sequence<E: Element>(
             (k_new.clone(), v_new.clone())
         };
 
-        let kv_seq = if has_kv_cache { total_seq } else { seq_len };
+        // CachedGQA attention via JIT — get cached CompiledLayer for this total_seq
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let (attn_out, _sparsity) = {
+            let gqa_compiled = get_or_compile_gpt2_gqa(&mut jit, total_seq)?;
+            super::jit_helpers::execute_cached_gqa(
+                gqa_compiled, &q, &k_full, &v_full,
+                seq_len, num_heads, head_dim,
+            )
+        };
 
-        // Multi-head attention (scalar)
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let mut attn_out = vec![0.0f32; seq_len * q_dim];
-        for h in 0..num_heads {
-            for s in 0..seq_len {
-                // Q[s, h] dot K[t, h] for all t
-                let mut scores = vec![0.0f32; kv_seq];
-                for t in 0..kv_seq {
-                    let mut dot = 0.0f32;
-                    for d in 0..head_dim {
-                        dot += q[s * q_dim + h * head_dim + d] * k_full[t * kv_dim + h * head_dim + d];
-                    }
-                    scores[t] = dot * scale;
-                }
-                // Causal mask: only attend to positions <= current
-                let cur_pos = positions[s] as usize;
-                for t in 0..kv_seq {
-                    if t > cur_pos {
-                        scores[t] = f32::NEG_INFINITY;
-                    }
-                }
-                // Softmax
-                let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0.0f32;
-                for t in 0..kv_seq {
-                    scores[t] = (scores[t] - max_score).exp();
-                    sum += scores[t];
-                }
-                if sum > 0.0 {
-                    for t in 0..kv_seq { scores[t] /= sum; }
-                }
-                // Weighted sum of V
-                for d in 0..head_dim {
-                    let mut val = 0.0f32;
-                    for t in 0..kv_seq {
-                        val += scores[t] * v_full[t * kv_dim + h * head_dim + d];
-                    }
-                    attn_out[s * q_dim + h * head_dim + d] = val;
-                }
-            }
-        }
-
-        // O projection + bias
+        // O projection GemmBias + residual → JIT
         let o_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_attn_proj_aliases(layer))?;
         let o_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_attn_proj_bias_aliases(layer))?;
-        let mut o_out = vec![0.0f32; seq_len * hidden];
-        for s in 0..seq_len {
-            for j in 0..hidden {
-                let mut sum = o_b[j];
-                for k in 0..q_dim {
-                    sum += attn_out[s * q_dim + k] * o_w[k * hidden + j];
-                }
-                o_out[s * hidden + j] = sum;
-            }
-        }
 
-        // Residual 1
-        for i in 0..seq_len * hidden {
-            hidden_state[i] += o_out[i];
-        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let resid1 = execute_gpt2_o_proj(&jit.o_proj, &attn_out, &o_w, &o_b, hidden_state, seq_len, hidden);
 
-        // LayerNorm 2
-        let ln2_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_aliases(layer))?;
-        let ln2_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_bias_aliases(layer))?;
-        let mut normed2 = vec![0.0f32; seq_len * hidden];
-        gpt2_layer_norm(hidden_state, &ln2_w, &ln2_b, eps, &mut normed2, hidden);
+        // Update hidden_state in-place for next layer
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        hidden_state.copy_from_slice(&resid1);
 
-        // MLP: c_fc (GELU) → c_proj
-        let fc_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_aliases(layer))?;
-        let fc_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_bias_aliases(layer))?;
-        let mut fc_out = vec![0.0f32; seq_len * inter];
-        for s in 0..seq_len {
-            for j in 0..inter {
-                let mut sum = fc_b[j];
-                for k in 0..hidden {
-                    sum += normed2[s * hidden + k] * fc_w[k * inter + j];
-                }
-                fc_out[s * inter + j] = gpt2_gelu(sum);
-            }
-        }
-
+        // LayerNorm2 + MLP + residual → JIT
+        let ln2_w  = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_aliases(layer))?;
+        let ln2_b  = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_bias_aliases(layer))?;
+        let fc_w   = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_aliases(layer))?;
+        let fc_b   = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_bias_aliases(layer))?;
         let proj_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_proj_aliases(layer))?;
         let proj_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_proj_bias_aliases(layer))?;
-        let mut proj_out = vec![0.0f32; seq_len * hidden];
-        for s in 0..seq_len {
-            for j in 0..hidden {
-                let mut sum = proj_b[j];
-                for k in 0..inter {
-                    sum += fc_out[s * inter + k] * proj_w[k * hidden + j];
-                }
-                proj_out[s * hidden + j] = sum;
-            }
-        }
 
-        // Residual 2
-        for i in 0..seq_len * hidden {
-            hidden_state[i] += proj_out[i];
-        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let resid2 = execute_gpt2_ln_mlp(
+            &jit.ln_mlp, hidden_state,
+            &ln2_w, &ln2_b, &fc_w, &fc_b, &proj_w, &proj_b,
+            hidden_state, seq_len, hidden,
+        );
+
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        hidden_state.copy_from_slice(&resid2);
     }
 
-    // Final LayerNorm
-    let ln_f_w = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_aliases())?;
-    let ln_f_b = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_bias_aliases())?;
-    let mut final_normed = vec![0.0f32; seq_len * hidden];
-    gpt2_layer_norm(hidden_state, &ln_f_w, &ln_f_b, eps, &mut final_normed, hidden);
+    // Final LayerNorm + lm_head via JIT
+    let ln_f_w   = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_aliases())?;
+    let ln_f_b   = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_bias_aliases())?;
+    let embed_raw = get_f32_data(weights, backend, &crate::weight_names::decoder_embed_aliases())?;
 
-    // lm_head: use tied embedding (wte.weight), shape [vocab, hidden]
-    let embed_data = get_f32_data(weights, backend, &crate::weight_names::decoder_embed_aliases())?;
-    // Only compute logits for last token
-    let last = seq_len - 1;
-    let mut logits = vec![0.0f32; vocab_size];
-    for v in 0..vocab_size {
-        let mut sum = 0.0f32;
-        for k in 0..hidden {
-            sum += final_normed[last * hidden + k] * embed_data[v * hidden + k];
-        }
-        logits[v] = sum;
+    // embed_raw is [vocab, hidden]; transpose to [hidden, vocab] for Gemm
+    let embed_t = super::weight_helpers::transpose_f32(&embed_raw, vocab_size, hidden);
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let all_logits = execute_gpt2_final_ln_lm_head(
+        &jit.final_ln_lm_head, hidden_state,
+        &ln_f_w, &ln_f_b, &embed_t,
+        seq_len, vocab_size,
+    );
+
+    // Return only last-token logits
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let last = seq_len - 1;
+        Ok(all_logits[last * vocab_size..(last + 1) * vocab_size].to_vec())
     }
-
-    Ok(logits)
 }
 
 /// Full decoder forward pass for a single sequence.
@@ -717,7 +832,7 @@ pub(crate) fn decoder_forward<E: Element>(
             let logits = gpt2_forward_sequence(
                 backend, &mut hidden_state, &positions,
                 seq_len, hidden, num_heads, head_dim, num_layers, gpt2_inter, eps, vocab_size,
-                weights, transpose_weights, kv_caches, seq_idx, position,
+                weights, transpose_weights, kv_caches, seq_idx, position, config,
             )?;
             results.push(LogitsHandle { data: logits });
             continue;
@@ -743,6 +858,64 @@ pub(crate) fn decoder_forward<E: Element>(
 
         let kv_dim = num_kv_heads * head_dim;
 
+        // ── Graph executor path (YAML→JIT, preferred when available) ──
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        if !config.graph_executor_ptr.is_null() {
+            let ge = unsafe { &mut *config.graph_executor_ptr };
+            // Build inputs: hidden_state as bytes
+            let mut inputs = std::collections::HashMap::new();
+            let hs_bytes: Vec<u8> = hidden_state
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect();
+            inputs.insert("hidden_state".to_string(), hs_bytes);
+
+            // Get KV cache pointers for this sequence
+            let (kv_cache_k_ptr, kv_cache_v_ptr) = if has_kv_cache && seq_idx < kv_caches.len() {
+                let store = backend.kv_store().lock().map_err(|e| {
+                    BE::Cpu(format!("KV store lock poisoned: {e}"))
+                })?;
+                if let Some(buf) = store.get(&kv_caches[seq_idx].0) {
+                    let k_ptr = buf.k.as_ptr() as *mut f32;
+                    let v_ptr = buf.v.as_ptr() as *mut f32;
+                    (k_ptr, v_ptr)
+                } else {
+                    (std::ptr::null_mut(), std::ptr::null_mut())
+                }
+            } else {
+                (std::ptr::null_mut(), std::ptr::null_mut())
+            };
+
+            let total_seq = cached_seq_len + seq_len;
+            let positions: Vec<u32> = (0..seq_len).map(|i| (position + i) as u32).collect();
+
+            let output = ge.run_with_kv_cache(
+                &inputs,
+                kv_cache_k_ptr,
+                kv_cache_v_ptr,
+                0, // layer 0; graph executor handles all layers internally
+                total_seq,
+                positions.as_ptr(),
+            ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
+
+            // Extract logits from graph output
+            if let Some(logits_bytes) = output.get("logits").or_else(|| output.values().next()) {
+                let logits: Vec<f32> = logits_bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                // Return last-token logits
+                let last_start = if logits.len() >= vocab_size {
+                    logits.len() - vocab_size
+                } else {
+                    0
+                };
+                results.push(LogitsHandle { data: logits[last_start..].to_vec() });
+                continue;
+            }
+            // If graph executor produced no recognizable output, fall through to hand-written path
+        }
+
         if is_incremental {
             // ── Incremental decode path: use cached K/V, O(n) per step ──
             log::debug!(
@@ -756,34 +929,156 @@ pub(crate) fn decoder_forward<E: Element>(
                 store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(0)
             };
 
-            // Pre-compile all invariant JIT graphs for this decode step
+            // Pre-compile all invariant JIT graphs for this decode step (once per model instance).
             let total_seq = cached_seq_len + seq_len;
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            let kv_proj_decode: gllm_kernels::compiler::CompiledLayer = {
-                let kv_graph = build_kv_projection_graph(
-                    seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
-                );
-                let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-                kv_compiler.compile_graph(&kv_graph).map_err(|e| {
-                    BE::Other(format!("KV projection (decode) JIT compilation failed: {e}"))
-                })?
+            let kv_proj_decode: std::sync::Arc<gllm_kernels::compiler::CompiledLayer> = {
+                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+                if l1.kv_proj.is_none() {
+                    let arch_key = ModelArchKey {
+                        arch_name: "decoder".into(),
+                        hidden_size: hidden,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        dtype: DType::F32,
+                    };
+                    let arc = global_jit_cache().get_or_compile(
+                        JitCacheKey { arch: arch_key, graph: GraphType::KvProjection },
+                        || {
+                            let kv_graph = build_kv_projection_graph(
+                                seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
+                            );
+                            let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                            kv_compiler.compile_graph(&kv_graph)
+                                .map_err(|e| format!("KV projection (decode) JIT compilation failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    l1.kv_proj = Some(arc);
+                }
+                l1.kv_proj.as_ref().unwrap().clone()
             };
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            let decode_jit = compile_decode_jit(
-                seq_len, total_seq,
-                hidden, num_heads, num_kv_heads, head_dim,
-                eps, rope_theta,
-            )?;
+            {
+                // Ensure q_rope and norm2 are compiled and stored in L1 cache.
+                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+                if l1.q_rope.is_none() {
+                    let arch_key = ModelArchKey {
+                        arch_name: "decoder".into(),
+                        hidden_size: hidden,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        dtype: DType::F32,
+                    };
+                    let cache = global_jit_cache();
+                    let q_dim = num_heads * head_dim;
+                    let arc = cache.get_or_compile(
+                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::QRope },
+                        || {
+                            let g = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta);
+                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                            c.compile_graph(&g).map_err(|e| format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    l1.q_rope = Some(arc);
+                    let arc2 = cache.get_or_compile(
+                        JitCacheKey { arch: arch_key, graph: GraphType::Norm2 },
+                        || {
+                            let g = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
+                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                            c.compile_graph(&g).map_err(|e| format!("decode JIT: RmsNorm2 compile failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    l1.norm2 = Some(arc2);
+                }
+                if moe_num_experts > 0 && l1.moe_pre_attn.is_none() {
+                    let arch_key = ModelArchKey {
+                        arch_name: "moe_decoder".into(),
+                        hidden_size: hidden,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        dtype: DType::F32,
+                    };
+                    let cache = global_jit_cache();
+                    let q_dim = num_heads * head_dim;
+                    let pre_attn = cache.get_or_compile(
+                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::MoePreAttn },
+                        || {
+                            let g = build_moe_pre_attention_graph(
+                                seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(4),
+                            );
+                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                            c.compile_graph(&g).map_err(|e| format!("MoE decode JIT: pre-attention compile failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    let o_gemm = cache.get_or_compile(
+                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::MoeOGemm },
+                        || {
+                            use gllm_kernels::compiler::{CompilerGraph, OpKind};
+                            use gllm_kernels::types::DType;
+                            let dt = DType::F32;
+                            let mut og = CompilerGraph::new();
+                            let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
+                            let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
+                            og.inputs = vec![a_in, b_in];
+                            let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
+                            og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                            og.outputs = vec![c_out];
+                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                            c.compile_graph(&og).map_err(|e| format!("MoE decode JIT: O Gemm compile failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    let norm2 = cache.get_or_compile(
+                        JitCacheKey { arch: arch_key, graph: GraphType::MoeNorm2 },
+                        || {
+                            let g = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype(4));
+                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+                            c.compile_graph(&g).map_err(|e| format!("MoE decode JIT: RmsNorm2 compile failed: {e}"))
+                        },
+                    ).map_err(BE::Other)?;
+                    l1.moe_pre_attn = Some(pre_attn);
+                    l1.moe_o_gemm = Some(o_gemm);
+                    l1.moe_norm2 = Some(norm2);
+                }
+            }
+
+            // Build thin wrappers that borrow from L1 cache Arcs.
+            // These are cheap (Arc clone = refcount bump) and hold no compiled code themselves.
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let mut decode_jit = {
+                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+                    gllm_kernels::compiler::CompiledLayer::from_code(
+                        arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
+                    ).expect("clone CompiledLayer from Arc")
+                };
+                DecodeCachedJit {
+                    q_rope: clone_arc(l1.q_rope.as_ref().unwrap()),
+                    norm2: clone_arc(l1.norm2.as_ref().unwrap()),
+                    gqa_cache: std::collections::HashMap::new(),
+                    seq_len, num_heads, num_kv_heads, head_dim,
+                }
+            };
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            let moe_jit = if moe_num_experts > 0 {
-                Some(compile_moe_decode_jit(
-                    seq_len, total_seq,
-                    hidden, num_heads, num_kv_heads, head_dim,
-                    eps, rope_theta,
-                )?)
+            let mut moe_jit = if moe_num_experts > 0 {
+                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+                    gllm_kernels::compiler::CompiledLayer::from_code(
+                        arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
+                    ).expect("clone CompiledLayer from Arc")
+                };
+                Some(MoeDecodeCachedJit {
+                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().unwrap()),
+                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().unwrap()),
+                    norm2: clone_arc(l1.moe_norm2.as_ref().unwrap()),
+                    gqa_cache: std::collections::HashMap::new(),
+                    seq_len, num_heads, num_kv_heads, head_dim,
+                })
             } else {
                 None
             };
@@ -865,7 +1160,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                     {
-                        let moe_c = moe_jit.as_ref().unwrap();
+                        let moe_c = moe_jit.as_mut().unwrap();
                         let geom = AttentionGeometry {
                             num_heads, num_kv_heads, head_dim,
                             q_dim: num_heads * head_dim,
@@ -890,10 +1185,11 @@ pub(crate) fn decoder_forward<E: Element>(
                             );
                         }
 
-                        // Step 2: Cached GQA attention (pre-compiled)
+                        // Step 2: Cached GQA attention — get cached CompiledLayer for this total_seq
                         let (attn_out, layer_sparsity) = {
+                            let gqa_compiled = get_or_compile_moe_gqa(moe_c, total_seq)?;
                             super::jit_helpers::execute_cached_gqa(
-                                &moe_c.gqa, &q_rope, &kv_cache_k, &kv_cache_v,
+                                gqa_compiled, &q_rope, &kv_cache_k, &kv_cache_v,
                                 seq_len, num_heads, head_dim,
                             )
                         };
@@ -955,7 +1251,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         max_seq_len,
                         transpose_weights,
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                        &decode_jit,
+                        &mut decode_jit,
                         &mut layer_out,
                     )?;
                     total_sparsity += layer_sparsity;
@@ -1099,11 +1395,11 @@ pub(crate) fn decoder_forward<E: Element>(
                         use gllm_kernels::types::DType;
                         let mut ag = CompilerGraph::new();
                         let dt = DType::F32;
-                        let q_in = ag.add_tensor("q", vec![seq_len, geom.q_dim], dt);
-                        let k_in = ag.add_tensor("k", vec![seq_len, geom.kv_dim], dt);
-                        let v_in = ag.add_tensor("v", vec![seq_len, geom.kv_dim], dt);
+                        let q_in = ag.add_tensor_concrete("q", &[seq_len, geom.q_dim], dt);
+                        let k_in = ag.add_tensor_concrete("k", &[seq_len, geom.kv_dim], dt);
+                        let v_in = ag.add_tensor_concrete("v", &[seq_len, geom.kv_dim], dt);
                         ag.inputs = vec![q_in, k_in, v_in];
-                        let a_out = ag.add_tensor("attn", vec![seq_len, geom.q_dim], dt);
+                        let a_out = ag.add_tensor_concrete("attn", &[seq_len, geom.q_dim], dt);
                         ag.add_op(
                             OpKind::MultiHeadAttention { seq_len, num_heads, head_dim },
                             vec![q_in, k_in, v_in], vec![a_out], "mha",
@@ -1168,10 +1464,10 @@ pub(crate) fn decoder_forward<E: Element>(
                         use gllm_kernels::types::DType;
                         let mut og = CompilerGraph::new();
                         let dt = DType::F32;
-                        let a_in = og.add_tensor("a", vec![seq_len, geom.q_dim], dt);
-                        let b_in = og.add_tensor("b", vec![geom.q_dim, hidden], dt);
+                        let a_in = og.add_tensor_concrete("a", &[seq_len, geom.q_dim], dt);
+                        let b_in = og.add_tensor_concrete("b", &[geom.q_dim, hidden], dt);
                         og.inputs = vec![a_in, b_in];
-                        let c_out = og.add_tensor("c", vec![seq_len, hidden], dt);
+                        let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
                         og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: DType::F32 }, vec![a_in, b_in], vec![c_out], "gemm_o");
                         og.outputs = vec![c_out];
                         let mut oc = gllm_kernels::compiler::InferenceCompiler::new();

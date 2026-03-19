@@ -288,6 +288,7 @@ mod tests {
                     shape: vec![4],
                     dtype: safetensors::Dtype::F32,
                     data: None,
+                    ptr: None,
                 },
             )]),
             quantization_info: HashMap::new(),

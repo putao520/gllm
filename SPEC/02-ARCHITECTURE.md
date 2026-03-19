@@ -820,3 +820,75 @@ pub trait TensorProvider {
   - `K_out % Head Dim == 0`
   - `Num Heads % Num KV Heads == 0` (GQA 约束)
 - **Ω1 违规**: 任何推导出的配置与物理张量形状冲突时，以**物理张量**为准，并可能需要覆盖 Config。
+
+---
+
+### 5.3 JIT 图 Shape 动态化 (REQ-JIT-GRAPH-001)
+
+> **关联需求**: REQ-JIT-GRAPH-001
+> **实现位置**: `gllm-kernels/src/compiler/graph.rs`（新增 `SymDim`）+ `src/compat/jit_helpers.rs`（更新图构建函数）
+
+#### 问题描述
+
+当前 `CompilerGraph` 在构建时将所有张量维度硬编码为具体的 `usize` 数值。在 decoder 推理循环中，`total_seq`（KV cache 已缓存的序列长度）每个 decode step 递增 1，导致 `CachedGQA` 图的 shape 每步都不同，触发重编译。`DecodeCachedJit` 的注释已明确记录此问题：
+
+```
+/// CachedGQA attention (recompiled per step when total_seq changes)
+```
+
+这使得 JIT 编译缓存完全失效，每步都承担完整的编译开销。
+
+#### 设计方案：SymDim
+
+在 `gllm-kernels/src/compiler/graph.rs` 中新增 `SymDim` 枚举，替代裸 `usize` 作为张量维度类型：
+
+```rust
+/// 张量维度：可以是具体值，也可以是符号名（运行时绑定）
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SymDim {
+    /// 编译时已知的具体维度
+    Concrete(usize),
+    /// 运行时绑定的符号维度，名称用于 shape binding 查找
+    Symbolic(String),
+}
+```
+
+`CompilerGraph::add_tensor` 的 shape 参数类型从 `&[usize]` 改为 `&[SymDim]`，允许混合具体维度和符号维度：
+
+```rust
+// 示例：hidden_size 是具体值，total_seq 是符号维度
+graph.add_tensor("kv_cache", &[
+    SymDim::Concrete(num_layers),
+    SymDim::Symbolic("total_seq".to_string()),
+    SymDim::Concrete(kv_dim),
+]);
+```
+
+`CompiledLayer::execute` 接受运行时 shape binding，在执行前将符号维度替换为具体值：
+
+```rust
+pub struct ShapeBinding {
+    pub bindings: HashMap<String, usize>,
+}
+
+impl CompiledLayer {
+    pub fn execute(&self, inputs: &[*const f32], outputs: &[*mut f32],
+                   binding: &ShapeBinding) -> Result<(), KernelError>;
+}
+```
+
+#### 铁律
+
+- ❌ 禁止在图构建时将 `total_seq`、`batch_size` 等动态维度硬编码为具体数值
+- ❌ 禁止因 shape 变化而重新调用 `compile_and_run` 构建新图
+- ✅ 动态维度必须声明为 `SymDim::Symbolic`，名称与 `ShapeBinding` 的 key 一致
+- ✅ 编译一次，通过 `ShapeBinding` 在每个 decode step 传入当前 `total_seq`
+- ✅ `Concrete` 维度在编译时参与代码生成优化（循环展开、tile 大小等）；`Symbolic` 维度在运行时从 binding 读取，生成通用循环
+
+#### 受影响的图构建函数
+
+| 函数 | 文件 | 需要符号化的维度 |
+|------|------|----------------|
+| `compile_decode_jit` (CachedGQA 图) | `src/compat/jit_helpers.rs` | `total_seq` |
+| `compile_decode_jit` (RmsNorm+Q+RoPE 图) | `src/compat/jit_helpers.rs` | `seq_len`（prefill 时动态） |
+| `gpt2_forward_sequence` JIT 图（REQ-JIT-GRAPH-002） | `src/compat/decoder_forward.rs` | `seq_len`、`total_seq` |
