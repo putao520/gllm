@@ -229,7 +229,7 @@ let metadata = loader.quantization_metadata()?
 **环境变量**:
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `GLLM_CACHE_DIR` | `~/.gllm/models` | 覆盖缓存根目录（📋 计划中，尚未实现） |
+| `GLLM_CACHE_DIR` | `~/.gllm/models` | 覆盖缓存根目录 |
 | `HF_TOKEN` | (空) | HuggingFace 认证 token |
 
 > **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定模型来源。

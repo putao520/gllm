@@ -442,3 +442,60 @@ pub fn tensor_nbytes(dtype: GgmlDType, shape: &[u64]) -> Result<usize, GgufError
 
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TEST-GGUF-005: 量化类型识别 — 所有 GgmlDType 变体可从 u32 正确解析
+    #[test]
+    fn test_gguf_005_quant_type_recognition() {
+        let cases: &[(u32, GgmlDType)] = &[
+            (0, GgmlDType::F32),
+            (1, GgmlDType::F16),
+            (2, GgmlDType::Q4_0),
+            (3, GgmlDType::Q4_1),
+            (6, GgmlDType::Q5_0),
+            (7, GgmlDType::Q5_1),
+            (8, GgmlDType::Q8_0),
+            (9, GgmlDType::Q8_1),
+            (10, GgmlDType::Q2_K),
+            (11, GgmlDType::Q3_K),
+            (12, GgmlDType::Q4_K),
+            (13, GgmlDType::Q5_K),
+            (14, GgmlDType::Q6_K),
+            (15, GgmlDType::Q8_K),
+            (16, GgmlDType::IQ2_XXS),
+            (17, GgmlDType::IQ2_XS),
+            (18, GgmlDType::IQ3_XXS),
+            (19, GgmlDType::IQ1_S),
+            (20, GgmlDType::IQ4_NL),
+            (21, GgmlDType::IQ3_S),
+            (22, GgmlDType::IQ2_S),
+            (23, GgmlDType::IQ4_XS),
+            (24, GgmlDType::I8),
+            (25, GgmlDType::I16),
+            (26, GgmlDType::I32),
+            (27, GgmlDType::I64),
+            (28, GgmlDType::F64),
+            (29, GgmlDType::IQ1_M),
+            (30, GgmlDType::BF16),
+            (34, GgmlDType::TQ1_0),
+            (35, GgmlDType::TQ2_0),
+            (39, GgmlDType::MXFP4),
+        ];
+
+        for &(raw, expected) in cases {
+            let parsed = GgmlDType::try_from(raw)
+                .unwrap_or_else(|_| panic!("GgmlDType::try_from({raw}) failed"));
+            assert_eq!(parsed, expected, "dtype mismatch for raw={raw}");
+            // as_str() must not panic
+            let _ = parsed.as_str();
+        }
+
+        // 未知类型必须返回 Err
+        assert!(GgmlDType::try_from(4).is_err());
+        assert!(GgmlDType::try_from(5).is_err());
+        assert!(GgmlDType::try_from(99).is_err());
+    }
+}
