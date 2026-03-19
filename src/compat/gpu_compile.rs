@@ -107,7 +107,8 @@ pub(super) type GpuKvMetaStore = std::sync::Arc<std::sync::Mutex<std::collection
 /// `k_host` / `v_host`: raw bytes `[seq_len, kv_dim]` in f32 layout (from dtoh of GPU tensors).
 /// Repacks per-head `[seq_len, head_dim]` and writes via `htod_raw` into the correct KV cache offsets.
 /// `write_start`: the seq position at which to start writing.
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+/// Write k/v host bytes into the GPU KV cache using raw CUDA memcpy.
+#[cfg(feature = "cuda")]
 fn gpu_write_kv_cache(
     k_host: &[u8],
     v_host: &[u8],
@@ -120,8 +121,8 @@ fn gpu_write_kv_cache(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    device: &dyn gllm_kernels::gpu::GpuDevice,
-    stream: u64,
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+    _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
 ) -> Result<(), BE> {
     let dtype_size = 4; // f32
     for head in 0..num_kv_heads {
@@ -135,7 +136,71 @@ fn gpu_write_kv_cache(
             k_packed[dst_off..dst_off + head_dim * dtype_size]
                 .copy_from_slice(&k_host[src_off..src_off + head_dim * dtype_size]);
         }
-        device.htod_raw(&k_packed, dst_k, stream)
+        let res = unsafe {
+            (device.driver().cuMemcpyHtoD_v2)(
+                dst_k,
+                k_packed.as_ptr() as *const _,
+                k_packed.len(),
+            )
+        };
+        if res != 0 {
+            return Err(BE::Other(format!("htod KV cache K failed: CUDA error {res}")));
+        }
+
+        let dst_v = handle.0 + half_bytes as u64
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+        let mut v_packed = vec![0u8; seq_len * head_dim * dtype_size];
+        for s in 0..seq_len {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let dst_off = s * head_dim * dtype_size;
+            v_packed[dst_off..dst_off + head_dim * dtype_size]
+                .copy_from_slice(&v_host[src_off..src_off + head_dim * dtype_size]);
+        }
+        let res = unsafe {
+            (device.driver().cuMemcpyHtoD_v2)(
+                dst_v,
+                v_packed.as_ptr() as *const _,
+                v_packed.len(),
+            )
+        };
+        if res != 0 {
+            return Err(BE::Other(format!("htod KV cache V failed: CUDA error {res}")));
+        }
+    }
+    Ok(())
+}
+
+/// Write k/v host bytes into the HIP KV cache using raw HIP memcpy.
+#[cfg(feature = "hip")]
+fn gpu_write_kv_cache_hip(
+    k_host: &[u8],
+    v_host: &[u8],
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    handle: &KvCacheHandle,
+    layer: usize,
+    half_bytes: usize,
+    write_start: usize,
+    head_stride: usize,
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    _stream: &gllm_kernels::gpu::hip::HipGpuStream,
+) -> Result<(), BE> {
+    let dtype_size = 4; // f32
+    for head in 0..num_kv_heads {
+        let dst_k = handle.0
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+        let mut k_packed = vec![0u8; seq_len * head_dim * dtype_size];
+        for s in 0..seq_len {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let dst_off = s * head_dim * dtype_size;
+            k_packed[dst_off..dst_off + head_dim * dtype_size]
+                .copy_from_slice(&k_host[src_off..src_off + head_dim * dtype_size]);
+        }
+        device.htod_raw(&k_packed, dst_k)
             .map_err(|e| BE::Other(format!("htod KV cache K failed: {e}")))?;
 
         let dst_v = handle.0 + half_bytes as u64
@@ -148,7 +213,7 @@ fn gpu_write_kv_cache(
             v_packed[dst_off..dst_off + head_dim * dtype_size]
                 .copy_from_slice(&v_host[src_off..src_off + head_dim * dtype_size]);
         }
-        device.htod_raw(&v_packed, dst_v, stream)
+        device.htod_raw(&v_packed, dst_v)
             .map_err(|e| BE::Other(format!("htod KV cache V failed: {e}")))?;
     }
     Ok(())
@@ -182,7 +247,7 @@ pub(crate) fn compile_graph_to_ptx(
     let dialect = PtxDialect::new(sm_version);
     let mut ptx = String::new();
     dialect.emit_header(&mut ptx);
-    gpu_emit_plan(&dialect, &mut ptx, &plan, graph, Some(&registry))
+    gpu_emit_plan(&dialect, &mut ptx, &plan, graph, Some(&registry), None)
         .map_err(|e| BE::Other(format!("PTX emission failed: {e}")))?;
 
     let mut ptx_bytes = ptx.into_bytes();
@@ -205,14 +270,12 @@ pub(crate) fn launch_config_for_op(
             let default_n = (profile.compute_units * profile.max_threads_per_block) as usize;
             profile.launch_config_1d(default_n.max(65536))
         }
-        OpKind::RoPE { head_dim, seq_len, .. } => {
-            // Use actual seq_len when available
-            let n = *head_dim * (*seq_len).max(1);
-            profile.launch_config_1d(n)
+        OpKind::RoPE { head_dim, .. } => {
+            let n = *head_dim * 1;
+            profile.launch_config_1d(n.max(64))
         }
-        OpKind::LayerNorm { hidden_size, .. } | OpKind::RmsNorm { hidden_size, .. } => {
-            let block = (*hidden_size as u32).next_power_of_two()
-                .min(profile.max_threads_per_block);
+        OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
+            let block = profile.max_threads_per_block.min(256);
             profile.launch_config_row_wise(profile.max_threads_per_block as usize, block)
         }
         OpKind::Softmax => {
@@ -430,11 +493,11 @@ pub(crate) fn cuda_launch_graph(
     for entry in entries {
         let input_ptrs: Vec<u64> = entry.input_tids.iter()
             .map(|tid| tensor_ptrs.get(tid).copied().ok_or_else(|| {
-                BE::Gpu(format!("missing tensor pointer for input {:?}", tid))
+                BE::Cuda(format!("missing tensor pointer for input {:?}", tid))
             }))
             .collect::<Result<Vec<_>, _>>()?;
         let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().ok_or_else(|| {
-            BE::Gpu(format!("missing tensor pointer for output {:?}", entry.output_tid))
+            BE::Cuda(format!("missing tensor pointer for output {:?}", entry.output_tid))
         })?;
 
         // Build typed params based on op kind
@@ -445,41 +508,43 @@ pub(crate) fn cuda_launch_graph(
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
-                let n = *input_meta.shape.last().unwrap_or(&1);
+                let n = input_meta.shape.last()
+                    .and_then(|d| d.as_concrete())
+                    .unwrap_or(1);
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for binary op input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::Silu | OpKind::Gelu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for activation input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::SwiGlu | OpKind::GeGlu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for SwiGlu/GeGlu input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
-                let seq_len = input_meta.shape[0];
+                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1);
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
             OpKind::Softmax => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for Softmax input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
@@ -491,10 +556,16 @@ pub(crate) fn cuda_launch_graph(
             .map(|p| p as *mut u64 as *mut c_void)
             .collect();
 
-        device.launch_kernel(entry.func, &entry.config, stream, &mut param_ptrs)
-            .map_err(|e| BE::Other(format!(
-                "Kernel launch failed for {:?}: {e}", entry.op_kind
-            )))?;
+        let cfg = &entry.config;
+        device.launch_kernel(
+            entry.func,
+            (cfg.grid_dim[0], cfg.grid_dim[1], cfg.grid_dim[2]),
+            (cfg.block_dim[0], cfg.block_dim[1], cfg.block_dim[2]),
+            &param_ptrs,
+            stream,
+        ).map_err(|e| BE::Other(format!(
+            "Kernel launch failed for {:?}: {e}", entry.op_kind
+        )))?;
     }
 
     Ok(())
@@ -559,7 +630,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements: usize = meta.shape.iter().product();
+            let n_elements = meta.concrete_numel();
             let size_bytes = n_elements * 4; // f32
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Other(format!("GPU alloc failed for {}: {e}", meta.name)))?;
@@ -761,7 +832,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Cuda(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
@@ -830,7 +901,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let mut post_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Cuda(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
@@ -877,7 +948,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = meta.shape.iter().product();
+                let n_elements = meta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Cuda(format!("GPU alloc failed for {}: {e}", meta.name)))?;
@@ -984,7 +1055,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
-        let n_elements: usize = meta.shape.iter().product();
+        let n_elements = meta.concrete_numel();
         let size_bytes = n_elements * 4;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Cuda(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
@@ -1155,11 +1226,11 @@ pub(crate) fn hip_launch_graph(
     for entry in entries {
         let input_ptrs: Vec<u64> = entry.input_tids.iter()
             .map(|tid| tensor_ptrs.get(tid).copied().ok_or_else(|| {
-                BE::Gpu(format!("missing tensor pointer for input {:?}", tid))
+                BE::Cuda(format!("missing tensor pointer for input {:?}", tid))
             }))
             .collect::<Result<Vec<_>, _>>()?;
         let output_ptr = tensor_ptrs.get(&entry.output_tid).copied().ok_or_else(|| {
-            BE::Gpu(format!("missing tensor pointer for output {:?}", entry.output_tid))
+            BE::Cuda(format!("missing tensor pointer for output {:?}", entry.output_tid))
         })?;
 
         let mut raw_params = build_kernel_params(&entry.op_kind, &input_ptrs, output_ptr)?;
@@ -1168,41 +1239,43 @@ pub(crate) fn hip_launch_graph(
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
-                let n = *input_meta.shape.last().unwrap_or(&1);
+                let n = input_meta.shape.last()
+                    .and_then(|d| d.as_concrete())
+                    .unwrap_or(1);
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for binary op input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::Silu | OpKind::Gelu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for activation input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::SwiGlu | OpKind::GeGlu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for SwiGlu/GeGlu input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
-                let seq_len = input_meta.shape[0];
+                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1);
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
             OpKind::Softmax => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for Softmax input {:?}", entry.input_tids[0])))?;
-                let n: usize = input_meta.shape.iter().product();
+                let n = input_meta.concrete_numel();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
@@ -1213,6 +1286,7 @@ pub(crate) fn hip_launch_graph(
             .map(|p| p as *mut u64 as *mut c_void)
             .collect();
 
+        let cfg = &entry.config;
         device.launch_kernel(entry.func, &entry.config, stream, &mut param_ptrs)
             .map_err(|e| BE::Other(format!(
                 "HIP kernel launch failed for {:?}: {e}", entry.op_kind
@@ -1271,7 +1345,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements: usize = meta.shape.iter().product();
+            let n_elements = meta.concrete_numel();
             let size_bytes = n_elements * 4;
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Other(format!("GPU alloc failed for {}: {e}", meta.name)))?;
@@ -1541,7 +1615,7 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements: usize = meta.shape.iter().product();
+            let n_elements = meta.concrete_numel();
             let size_bytes = n_elements * 4;
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Metal(format!("alloc failed for {}: {e}", meta.name)))?;
@@ -1652,25 +1726,25 @@ pub(crate) fn build_decoder_layer_graph(
     let kv_h = num_kv_heads * head_dim;
 
     // ── Graph inputs ──
-    let input = g.add_tensor("input", vec![s, h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
 
     // Attention weights (q_dim may differ from hidden for Qwen3 etc.)
-    let attn_norm_w = g.add_tensor("attn_norm_w", vec![h], dt);
-    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_h], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_h], dt);
-    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
+    let attn_norm_w = g.add_tensor_concrete("attn_norm_w", &[h], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, kv_h], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, kv_h], dt);
+    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
 
     // FFN weights
-    let ffn_norm_w = g.add_tensor("ffn_norm_w", vec![h], dt);
-    let w_gate = g.add_tensor("w_gate", vec![h, inter], dt);
-    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
+    let ffn_norm_w = g.add_tensor_concrete("ffn_norm_w", &[h], dt);
+    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
+    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
 
     g.inputs = vec![input];
 
     // ── Pre-attention RmsNorm ──
-    let attn_normed = g.add_tensor("attn_normed", vec![s, h], dt);
+    let attn_normed = g.add_tensor_concrete("attn_normed", &[s, h], dt);
     g.add_op(
         OpKind::RmsNorm { eps },
         vec![input, attn_norm_w],
@@ -1679,7 +1753,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Q/K/V projections ──
-    let q_proj = g.add_tensor("q_proj", vec![s, q_dim], dt);
+    let q_proj = g.add_tensor_concrete("q_proj", &[s, q_dim], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt },
         vec![attn_normed, w_q],
@@ -1687,7 +1761,7 @@ pub(crate) fn build_decoder_layer_graph(
         "q_proj",
     );
 
-    let k_proj = g.add_tensor("k_proj", vec![s, kv_h], dt);
+    let k_proj = g.add_tensor_concrete("k_proj", &[s, kv_h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
         vec![attn_normed, w_k],
@@ -1695,7 +1769,7 @@ pub(crate) fn build_decoder_layer_graph(
         "k_proj",
     );
 
-    let v_proj = g.add_tensor("v_proj", vec![s, kv_h], dt);
+    let v_proj = g.add_tensor_concrete("v_proj", &[s, kv_h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
         vec![attn_normed, w_v],
@@ -1704,7 +1778,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── RoPE on Q and K ──
-    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
     g.add_op(
         OpKind::RoPE { head_dim, theta: rope_theta },
         vec![q_proj],
@@ -1712,7 +1786,7 @@ pub(crate) fn build_decoder_layer_graph(
         "rope_q",
     );
 
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_h], dt);
+    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_h], dt);
     g.add_op(
         OpKind::RoPE { head_dim, theta: rope_theta },
         vec![k_proj],
@@ -1721,7 +1795,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Causal MultiHeadAttention ──
-    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
     g.add_op(
         OpKind::MultiHeadAttention {
             seq_len: s,
@@ -1734,7 +1808,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Output projection ──
-    let o_proj = g.add_tensor("o_proj", vec![s, h], dt);
+    let o_proj = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt },
         vec![attn_out, w_o],
@@ -1743,7 +1817,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Attention residual ──
-    let attn_residual = g.add_tensor("attn_residual", vec![s, h], dt);
+    let attn_residual = g.add_tensor_concrete("attn_residual", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![input, o_proj],
@@ -1752,7 +1826,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Pre-FFN RmsNorm ──
-    let ffn_normed = g.add_tensor("ffn_normed", vec![s, h], dt);
+    let ffn_normed = g.add_tensor_concrete("ffn_normed", &[s, h], dt);
     g.add_op(
         OpKind::RmsNorm { eps },
         vec![attn_residual, ffn_norm_w],
@@ -1761,7 +1835,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── Gate + Up projections ──
-    let gate = g.add_tensor("gate", vec![s, inter], dt);
+    let gate = g.add_tensor_concrete("gate", &[s, inter], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
         vec![ffn_normed, w_gate],
@@ -1769,7 +1843,7 @@ pub(crate) fn build_decoder_layer_graph(
         "gate_proj",
     );
 
-    let up = g.add_tensor("up", vec![s, inter], dt);
+    let up = g.add_tensor_concrete("up", &[s, inter], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
         vec![ffn_normed, w_up],
@@ -1778,11 +1852,11 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── SwiGLU: silu(gate) * up ──
-    let swiglu_out = g.add_tensor("swiglu_out", vec![s, inter], dt);
+    let swiglu_out = g.add_tensor_concrete("swiglu_out", &[s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate, up], vec![swiglu_out], "swiglu");
 
     // ── Down projection ──
-    let down = g.add_tensor("down", vec![s, h], dt);
+    let down = g.add_tensor_concrete("down", &[s, h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: h, k: inter, dtype: dt },
         vec![swiglu_out, w_down],
@@ -1791,7 +1865,7 @@ pub(crate) fn build_decoder_layer_graph(
     );
 
     // ── FFN residual ──
-    let output = g.add_tensor("output", vec![s, h], dt);
+    let output = g.add_tensor_concrete("output", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![attn_residual, down],
@@ -1825,15 +1899,15 @@ pub(crate) fn build_projection_graph(
     let q_dim = num_heads * head_dim;
     let kv_h = num_kv_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let attn_norm_w = g.add_tensor("attn_norm_w", vec![h], dt);
-    let w_q = g.add_tensor("w_q", vec![h, q_dim], dt);
-    let w_k = g.add_tensor("w_k", vec![h, kv_h], dt);
-    let w_v = g.add_tensor("w_v", vec![h, kv_h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let attn_norm_w = g.add_tensor_concrete("attn_norm_w", &[h], dt);
+    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
+    let w_k = g.add_tensor_concrete("w_k", &[h, kv_h], dt);
+    let w_v = g.add_tensor_concrete("w_v", &[h, kv_h], dt);
 
     g.inputs = vec![input];
 
-    let attn_normed = g.add_tensor("attn_normed", vec![s, h], dt);
+    let attn_normed = g.add_tensor_concrete("attn_normed", &[s, h], dt);
     g.add_op(
         OpKind::RmsNorm { eps },
         vec![input, attn_norm_w],
@@ -1841,7 +1915,7 @@ pub(crate) fn build_projection_graph(
         "attn_rms_norm",
     );
 
-    let q_proj = g.add_tensor("q_proj", vec![s, q_dim], dt);
+    let q_proj = g.add_tensor_concrete("q_proj", &[s, q_dim], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt },
         vec![attn_normed, w_q],
@@ -1849,7 +1923,7 @@ pub(crate) fn build_projection_graph(
         "q_proj",
     );
 
-    let k_proj = g.add_tensor("k_proj", vec![s, kv_h], dt);
+    let k_proj = g.add_tensor_concrete("k_proj", &[s, kv_h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
         vec![attn_normed, w_k],
@@ -1857,7 +1931,7 @@ pub(crate) fn build_projection_graph(
         "k_proj",
     );
 
-    let v_proj = g.add_tensor("v_proj", vec![s, kv_h], dt);
+    let v_proj = g.add_tensor_concrete("v_proj", &[s, kv_h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
         vec![attn_normed, w_v],
@@ -1865,7 +1939,7 @@ pub(crate) fn build_projection_graph(
         "v_proj",
     );
 
-    let q_rope = g.add_tensor("q_rope", vec![s, q_dim], dt);
+    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
     g.add_op(
         OpKind::RoPE { head_dim, theta: rope_theta },
         vec![q_proj],
@@ -1873,7 +1947,7 @@ pub(crate) fn build_projection_graph(
         "rope_q",
     );
 
-    let k_rope = g.add_tensor("k_rope", vec![s, kv_h], dt);
+    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_h], dt);
     g.add_op(
         OpKind::RoPE { head_dim, theta: rope_theta },
         vec![k_proj],
@@ -1905,17 +1979,17 @@ pub(crate) fn build_post_attention_graph(
     let h = hidden;
     let q_dim = num_heads * head_dim;
 
-    let input = g.add_tensor("input", vec![s, h], dt);
-    let attn_out = g.add_tensor("attn_out", vec![s, q_dim], dt);
-    let w_o = g.add_tensor("w_o", vec![q_dim, h], dt);
-    let ffn_norm_w = g.add_tensor("ffn_norm_w", vec![h], dt);
-    let w_gate = g.add_tensor("w_gate", vec![h, inter], dt);
-    let w_up = g.add_tensor("w_up", vec![h, inter], dt);
-    let w_down = g.add_tensor("w_down", vec![inter, h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
+    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
+    let ffn_norm_w = g.add_tensor_concrete("ffn_norm_w", &[h], dt);
+    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
+    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
 
     g.inputs = vec![input, attn_out];
 
-    let o_proj = g.add_tensor("o_proj", vec![s, h], dt);
+    let o_proj = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt },
         vec![attn_out, w_o],
@@ -1923,7 +1997,7 @@ pub(crate) fn build_post_attention_graph(
         "o_proj",
     );
 
-    let attn_residual = g.add_tensor("attn_residual", vec![s, h], dt);
+    let attn_residual = g.add_tensor_concrete("attn_residual", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![input, o_proj],
@@ -1931,7 +2005,7 @@ pub(crate) fn build_post_attention_graph(
         "attn_residual",
     );
 
-    let ffn_normed = g.add_tensor("ffn_normed", vec![s, h], dt);
+    let ffn_normed = g.add_tensor_concrete("ffn_normed", &[s, h], dt);
     g.add_op(
         OpKind::RmsNorm { eps },
         vec![attn_residual, ffn_norm_w],
@@ -1939,7 +2013,7 @@ pub(crate) fn build_post_attention_graph(
         "ffn_rms_norm",
     );
 
-    let gate = g.add_tensor("gate", vec![s, inter], dt);
+    let gate = g.add_tensor_concrete("gate", &[s, inter], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
         vec![ffn_normed, w_gate],
@@ -1947,7 +2021,7 @@ pub(crate) fn build_post_attention_graph(
         "gate_proj",
     );
 
-    let up = g.add_tensor("up", vec![s, inter], dt);
+    let up = g.add_tensor_concrete("up", &[s, inter], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
         vec![ffn_normed, w_up],
@@ -1955,10 +2029,10 @@ pub(crate) fn build_post_attention_graph(
         "up_proj",
     );
 
-    let swiglu_out = g.add_tensor("swiglu_out", vec![s, inter], dt);
+    let swiglu_out = g.add_tensor_concrete("swiglu_out", &[s, inter], dt);
     g.add_op(OpKind::SwiGlu, vec![gate, up], vec![swiglu_out], "swiglu");
 
-    let down = g.add_tensor("down", vec![s, h], dt);
+    let down = g.add_tensor_concrete("down", &[s, h], dt);
     g.add_op(
         OpKind::Gemm { m: s, n: h, k: inter, dtype: dt },
         vec![swiglu_out, w_down],
@@ -1966,7 +2040,7 @@ pub(crate) fn build_post_attention_graph(
         "down_proj",
     );
 
-    let output = g.add_tensor("output", vec![s, h], dt);
+    let output = g.add_tensor_concrete("output", &[s, h], dt);
     g.add_op(
         OpKind::Residual,
         vec![attn_residual, down],
@@ -2053,25 +2127,63 @@ fn jit_cached_attention(
 /// kv_cache_v: same layout — full V cache
 /// Returns attn_out: [seq_len, q_dim]
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-/// Download K/V from GPU KV cache to host flat arrays.
+/// Download K/V from GPU KV cache to host flat arrays (CUDA).
 /// Returns (k_cache_flat, v_cache_flat) each [num_layers * num_kv_heads * max_seq_len * head_dim].
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+#[cfg(feature = "cuda")]
 fn download_kv_cache_to_host(
     handle: &KvCacheHandle,
     half_bytes: usize,
     total_kv_floats: usize,
-    device: &dyn gllm_kernels::gpu::GpuDevice,
-    stream: u64,
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+    _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
 ) -> Result<(Vec<f32>, Vec<f32>), BE> {
     let mut k_host_bytes = vec![0u8; half_bytes];
-    device.dtoh_raw(handle.0, &mut k_host_bytes, stream)
+    let res = unsafe {
+        (device.driver().cuMemcpyDtoH_v2)(
+            k_host_bytes.as_mut_ptr() as *mut _,
+            handle.0,
+            half_bytes,
+        )
+    };
+    if res != 0 { return Err(BE::Other(format!("dtoh KV cache K failed: CUDA error {res}"))); }
+    let k_flat: Vec<f32> = unsafe {
+        std::slice::from_raw_parts(k_host_bytes.as_ptr() as *const f32, total_kv_floats)
+    }.to_vec();
+
+    let mut v_host_bytes = vec![0u8; half_bytes];
+    let res = unsafe {
+        (device.driver().cuMemcpyDtoH_v2)(
+            v_host_bytes.as_mut_ptr() as *mut _,
+            handle.0 + half_bytes as u64,
+            half_bytes,
+        )
+    };
+    if res != 0 { return Err(BE::Other(format!("dtoh KV cache V failed: CUDA error {res}"))); }
+    let v_flat: Vec<f32> = unsafe {
+        std::slice::from_raw_parts(v_host_bytes.as_ptr() as *const f32, total_kv_floats)
+    }.to_vec();
+
+    Ok((k_flat, v_flat))
+}
+
+/// Download K/V from GPU KV cache to host flat arrays (HIP).
+#[cfg(feature = "hip")]
+fn download_kv_cache_to_host_hip(
+    handle: &KvCacheHandle,
+    half_bytes: usize,
+    total_kv_floats: usize,
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    _stream: &gllm_kernels::gpu::hip::HipGpuStream,
+) -> Result<(Vec<f32>, Vec<f32>), BE> {
+    let mut k_host_bytes = vec![0u8; half_bytes];
+    device.dtoh_raw(handle.0, &mut k_host_bytes)
         .map_err(|e| BE::Other(format!("dtoh KV cache K failed: {e}")))?;
     let k_flat: Vec<f32> = unsafe {
         std::slice::from_raw_parts(k_host_bytes.as_ptr() as *const f32, total_kv_floats)
     }.to_vec();
 
     let mut v_host_bytes = vec![0u8; half_bytes];
-    device.dtoh_raw(handle.0 + half_bytes as u64, &mut v_host_bytes, stream)
+    device.dtoh_raw(handle.0 + half_bytes as u64, &mut v_host_bytes)
         .map_err(|e| BE::Other(format!("dtoh KV cache V failed: {e}")))?;
     let v_flat: Vec<f32> = unsafe {
         std::slice::from_raw_parts(v_host_bytes.as_ptr() as *const f32, total_kv_floats)
@@ -2093,11 +2205,11 @@ pub(crate) fn build_lm_head_graph(
     let mut g = CompilerGraph::new();
     let dt = dtype;
 
-    let input = g.add_tensor("input", vec![seq_len, hidden], dt);
-    let w_lm = g.add_tensor("w_lm", vec![hidden, vocab_size], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let w_lm = g.add_tensor_concrete("w_lm", &[hidden, vocab_size], dt);
     g.inputs = vec![input, w_lm];
 
-    let logits = g.add_tensor("logits", vec![seq_len, vocab_size], dt);
+    let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], dt);
     g.add_op(
         OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
         vec![input, w_lm],
@@ -2284,7 +2396,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Hip(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
@@ -2353,7 +2465,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let mut post_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Hip(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
@@ -2399,7 +2511,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = meta.shape.iter().product();
+                let n_elements = meta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Hip(format!("GPU alloc failed for {}: {e}", meta.name)))?;
@@ -2506,7 +2618,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
-        let n_elements: usize = meta.shape.iter().product();
+        let n_elements = meta.concrete_numel();
         let size_bytes = n_elements * 4;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Hip(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
@@ -2675,7 +2787,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc proj {} failed: {e}", tmeta.name)))?;
@@ -2743,7 +2855,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = tmeta.shape.iter().product();
+                let n_elements = tmeta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc post {} failed: {e}", tmeta.name)))?;
@@ -2788,7 +2900,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements: usize = meta.shape.iter().product();
+                let n_elements = meta.concrete_numel();
                 let size_bytes = n_elements * 4;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc failed for {}: {e}", meta.name)))?;
@@ -2891,7 +3003,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
-        let n_elements: usize = meta.shape.iter().product();
+        let n_elements = meta.concrete_numel();
         let size_bytes = n_elements * 4;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Metal(format!("alloc lm_head {} failed: {e}", meta.name)))?;

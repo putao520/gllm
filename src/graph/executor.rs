@@ -969,7 +969,7 @@ impl FusedGraphExecutor {
 
             for (tidx, meta) in gcn.graph.tensors.iter().enumerate() {
                 let tid = TensorId(tidx as u32);
-                let n_elements: usize = meta.shape.iter().product();
+                let n_elements = meta.concrete_numel();
                 let size_bytes = n_elements * 4; // f32
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| ExecutionError::Backend(format!(

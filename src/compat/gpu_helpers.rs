@@ -25,7 +25,12 @@ use crate::scheduler::types::{PageId, PageState, StorageKey};
 /// 3. Swap store and KV metadata store access
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) trait GpuBackendOps {
-    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice;
+    /// Raw device→host copy: src_ptr is a device pointer, dst is host slice.
+    fn raw_dtoh(&self, src_ptr: u64, dst: &mut [u8]) -> Result<(), BE>;
+    /// Raw host→device copy: src is host slice, dst_ptr is a device pointer.
+    fn raw_htod(&self, src: &[u8], dst_ptr: u64) -> Result<(), BE>;
+    /// Allocate device memory, return device pointer.
+    fn raw_alloc(&self, bytes: usize) -> Result<u64, BE>;
     fn gpu_error(&self, msg: String) -> BE;
     fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore;
     fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore;
@@ -33,7 +38,34 @@ pub(super) trait GpuBackendOps {
 
 #[cfg(feature = "cuda")]
 impl GpuBackendOps for super::cuda_backend::CudaBackend<f32> {
-    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn raw_dtoh(&self, src_ptr: u64, dst: &mut [u8]) -> Result<(), BE> {
+        let res = unsafe {
+            (self.device.driver().cuMemcpyDtoH_v2)(
+                dst.as_mut_ptr() as *mut _,
+                src_ptr,
+                dst.len(),
+            )
+        };
+        if res != 0 { Err(BE::Cuda(format!("cuMemcpyDtoH failed: {res}"))) } else { Ok(()) }
+    }
+    fn raw_htod(&self, src: &[u8], dst_ptr: u64) -> Result<(), BE> {
+        let res = unsafe {
+            (self.device.driver().cuMemcpyHtoD_v2)(
+                dst_ptr,
+                src.as_ptr() as *const _,
+                src.len(),
+            )
+        };
+        if res != 0 { Err(BE::Cuda(format!("cuMemcpyHtoD failed: {res}"))) } else { Ok(()) }
+    }
+    fn raw_alloc(&self, bytes: usize) -> Result<u64, BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        use gllm_kernels::gpu::GpuBuffer;
+        let buf = self.device.alloc(bytes).map_err(|e| BE::Cuda(format!("alloc failed: {e}")))?;
+        let ptr = buf.as_device_ptr();
+        std::mem::forget(buf);
+        Ok(ptr)
+    }
     fn gpu_error(&self, msg: String) -> BE { BE::Cuda(msg) }
     fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
     fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
@@ -41,7 +73,21 @@ impl GpuBackendOps for super::cuda_backend::CudaBackend<f32> {
 
 #[cfg(feature = "hip")]
 impl GpuBackendOps for super::hip_backend::HipBackend<f32> {
-    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn raw_dtoh(&self, src_ptr: u64, dst: &mut [u8]) -> Result<(), BE> {
+        self.device.dtoh_raw(src_ptr, dst)
+            .map_err(|e| BE::Hip(format!("dtoh_raw failed: {e}")))
+    }
+    fn raw_htod(&self, src: &[u8], dst_ptr: u64) -> Result<(), BE> {
+        self.device.htod_raw(src, dst_ptr)
+            .map_err(|e| BE::Hip(format!("htod_raw failed: {e}")))
+    }
+    fn raw_alloc(&self, bytes: usize) -> Result<u64, BE> {
+        use gllm_kernels::gpu::GpuBuffer;
+        let buf = self.device.alloc(bytes).map_err(|e| BE::Hip(format!("alloc failed: {e}")))?;
+        let ptr = buf.as_device_ptr();
+        std::mem::forget(buf);
+        Ok(ptr)
+    }
     fn gpu_error(&self, msg: String) -> BE { BE::Hip(msg) }
     fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
     fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
@@ -49,7 +95,21 @@ impl GpuBackendOps for super::hip_backend::HipBackend<f32> {
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl GpuBackendOps for super::metal_backend::MetalBackend<f32> {
-    fn gpu_device(&self) -> &dyn gllm_kernels::gpu::GpuDevice { &*self.device }
+    fn raw_dtoh(&self, src_ptr: u64, dst: &mut [u8]) -> Result<(), BE> {
+        self.device().dtoh_raw(src_ptr, dst)
+            .map_err(|e| BE::Metal(format!("dtoh_raw failed: {e}")))
+    }
+    fn raw_htod(&self, src: &[u8], dst_ptr: u64) -> Result<(), BE> {
+        self.device().htod_raw(src, dst_ptr)
+            .map_err(|e| BE::Metal(format!("htod_raw failed: {e}")))
+    }
+    fn raw_alloc(&self, bytes: usize) -> Result<u64, BE> {
+        use gllm_kernels::gpu::GpuBuffer;
+        let buf = self.device().alloc(bytes).map_err(|e| BE::Metal(format!("alloc failed: {e}")))?;
+        let ptr = buf.as_device_ptr();
+        std::mem::forget(buf);
+        Ok(ptr)
+    }
     fn gpu_error(&self, msg: String) -> BE { BE::Metal(msg) }
     fn swap_store(&self) -> &super::gpu_compile::GpuSwapStore { &self.swap_store }
     fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
@@ -386,11 +446,8 @@ pub(super) fn gpu_alloc_kv_cache(
     let total_bytes = config.num_layers * 2
         * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
 
-    let buf = backend.gpu_device().alloc(total_bytes)
+    let ptr = backend.raw_alloc(total_bytes)
         .map_err(|e| backend.gpu_error(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
-
-    let ptr = buf.as_device_ptr();
-    std::mem::forget(buf);
 
     let meta = super::gpu_compile::GpuKvCacheMeta::from_config(config, ptr);
     backend.kv_meta().lock()
@@ -429,9 +486,6 @@ pub(super) fn gpu_swap_out_pages(
     let meta = meta_store.get(&handle.0)
         .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
 
-    let device = backend.gpu_device();
-    let stream = device.default_stream();
-
     let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
     let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
     let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
@@ -462,7 +516,7 @@ pub(super) fn gpu_swap_out_pages(
                         + token_start * meta.head_dim * meta.dtype_size) as u64;
                     let src_ptr = half_base + src_offset;
 
-                    device.dtoh_raw(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes], stream)
+                    backend.raw_dtoh(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes])
                         .map_err(|e| backend.gpu_error(format!("swap_out dtoh failed: {e}")))?;
 
                     dst_offset += page_slice_bytes;
@@ -491,9 +545,6 @@ pub(super) fn gpu_swap_in_pages(
         .map_err(|e| backend.gpu_error(format!("kv_meta lock poisoned: {e}")))?;
     let meta = meta_store.get(&handle.0)
         .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
-
-    let device = backend.gpu_device();
-    let stream = device.default_stream();
 
     let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
     let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
@@ -526,7 +577,7 @@ pub(super) fn gpu_swap_in_pages(
                         + token_start * meta.head_dim * meta.dtype_size) as u64;
                     let dst_ptr = half_base + dst_offset_gpu;
 
-                    device.htod_raw(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr, stream)
+                    backend.raw_htod(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr)
                         .map_err(|e| backend.gpu_error(format!("swap_in htod failed: {e}")))?;
 
                     src_offset += page_slice_bytes;

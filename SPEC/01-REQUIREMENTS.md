@@ -268,17 +268,17 @@
 
 ### 8.5 JIT 图执行通用化 (REQ-JIT-GRAPH)
 
-> **背景**: 当前存在三个相互关联的问题：(1) GPT-2 路径使用 scalar 三重循环 GEMM，违反 NO_SCALAR 铁律；(2) `CompilerGraph` shape 在构建时硬编码为具体数值，`total_seq` 每步 +1 导致 CachedGQA 图每步重编译；(3) YAML 模板与实际执行路径断层，每新增模型都需在 `decoder_forward.rs` 手写分支。
+> **背景**: 当前存在三个相互关联的问题：(1) `CompilerGraph` shape 在构建时硬编码为具体数值，`total_seq` 每步 +1 导致 CachedGQA 图每步重编译；(2) YAML 模板与实际执行路径断层，每新增模型都需在 `decoder_forward.rs` 手写分支。GPT-2 架构已于 2026-03-19 从支持列表中移除（Latest Version Only 策略）。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-JIT-GRAPH-001** | JIT 图 Symbolic Shape 支持 | `CompilerGraph` 支持 symbolic 维度，运行时传入具体值，避免 shape 变化时重编译 | 1. `CompilerGraph` 支持 `SymDim`（符号维度），可声明 `Concrete(usize)` 或 `Symbolic(String)`<br>2. `total_seq`、`batch_size` 等动态维度必须声明为 `SymDim::Symbolic`<br>3. 编译一次，运行时通过 shape binding 传入具体值<br>4. CachedGQA 图不再每 decode step 重编译<br>5. 禁止在图构建时将动态维度硬编码为具体数值 | 🟢 已实现 |
-| **REQ-JIT-GRAPH-002** | GPT-2 路径 JIT 化 | `gpt2_forward_sequence()` 中所有 GEMM 必须走 JIT `CompilerGraph`，禁止 scalar 三重循环 | 1. QKV projection（fused `c_attn`）走 JIT `OpKind::Gemm`<br>2. O projection（`c_proj`）走 JIT `OpKind::Gemm`<br>3. MLP `c_fc` / `c_proj` 走 JIT `OpKind::Gemm`<br>4. LayerNorm 走 JIT（复用现有 RmsNorm 路径或新增 LayerNorm OpKind）<br>5. 零 scalar GEMM 调用，符合 NO_SCALAR 铁律<br>6. 数值结果与当前实现一致（容差 < 1e-5） | 🟢 已实现 |
+| **REQ-JIT-GRAPH-002** | GPT-2 路径 JIT 化 | ~~`gpt2_forward_sequence()` 中所有 GEMM 必须走 JIT `CompilerGraph`~~ | ~~已实现后废弃~~ | ⚠️ 已废弃 (GPT-2 于 2026-03-19 移除) |
 | **REQ-JIT-GRAPH-003** | 图执行器打通（YAML → JIT 端到端） | `OnnxGraph`（从 YAML 展开）直接驱动 JIT 执行，消除 `decoder_forward.rs` 手写分支 | 1. `src/graph/executor.rs` 的 `FusedGraph` 执行器能执行完整 decoder forward（含 KV cache）<br>2. 新模型只需提供 YAML 文件，不需要修改任何 Rust 代码<br>3. YAML → `OnnxGraph` → 图优化 → JIT 编译 → 执行链路端到端跑通<br>4. 现有手写分支（GPT-2、MoE、GQA）逐步迁移到图执行器<br>5. 图执行器支持 symbolic shape binding（依赖 REQ-JIT-GRAPH-001） | 🟢 已实现 |
 
 ### 8.6 JIT 编译缓存 (REQ-JIT-CACHE)
 
-> **背景**: 当前 `DecodeCachedJit` / `MoeDecodeCachedJit` / `Gpt2CachedJit` 在 `decoder_forward()` 函数栈上创建，每次推理调用都重新 JIT 编译所有固定图（`q_rope`、`norm2` 等），`gqa_cache` 也随函数返回销毁。同一进程中加载多个模型时编译结果完全不共享，进程重启后所有编译结果丢失。
+> **背景**: 当前 `DecodeCachedJit` / `MoeDecodeCachedJit` 在 `decoder_forward()` 函数栈上创建，每次推理调用都重新 JIT 编译所有固定图（`q_rope`、`norm2` 等），`gqa_cache` 也随函数返回销毁。同一进程中加载多个模型时编译结果完全不共享，进程重启后所有编译结果丢失。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
