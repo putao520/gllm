@@ -246,15 +246,28 @@ impl ContinuousBatcher {
         for mut sequence in waiting_sequences {
             let request_id = sequence.id;
 
-            // Query prefix tree for shared KV cache pages
-            if let Some(prefix_match) = scheduler.find_prefix(&sequence.prompt_tokens) {
-                log::info!(
-                    "scheduler: sequence {} prefix hit: {} tokens matched, {} pages reusable",
-                    request_id, prefix_match.matched_tokens, prefix_match.matched_pages.len(),
-                );
-            }
+            // Use prefix-reuse path when prompt tokens are available
+            let admit_result = if !sequence.prompt_tokens.is_empty() {
+                match scheduler.add_sequence_with_prefix_reuse(
+                    sequence.to_sequence_group(),
+                    &sequence.prompt_tokens,
+                ) {
+                    Ok(reused_tokens) => {
+                        if reused_tokens > 0 {
+                            log::info!(
+                                "scheduler: sequence {} prefix hit: {} tokens reused",
+                                request_id, reused_tokens,
+                            );
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                scheduler.add_sequence(sequence.to_sequence_group())
+            };
 
-            match scheduler.add_sequence(sequence.to_sequence_group()) {
+            match admit_result {
                 Ok(()) => {
                     let pages = scheduler
                         .block_tables
