@@ -669,19 +669,24 @@ fn gpt2_forward_sequence<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let mut jit = {
         let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
-        let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+        let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| -> Result<gllm_kernels::compiler::CompiledLayer, BE> {
             gllm_kernels::compiler::CompiledLayer::from_code(
                 arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
-            ).expect("clone CompiledLayer from Arc")
+            ).map_err(|e| BE::Other(format!("clone CompiledLayer from Arc failed: {e}")))
         };
         // Seed gqa_cache from L1 accumulated entries (REQ-JIT-CACHE-001 criterion 4).
-        let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
-            l1.gpt2_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
+        let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> = {
+            let mut m = std::collections::HashMap::new();
+            for (&ts, arc) in l1.gpt2_gqa_cache.iter() {
+                m.insert(ts, clone_arc(arc)?);
+            }
+            m
+        };
         Gpt2CachedJit {
-            ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_qkv not compiled".into()))?),
-            o_proj: clone_arc(l1.gpt2_o_proj.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: o_proj not compiled".into()))?),
-            ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_mlp not compiled".into()))?),
-            final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: final_ln_lm_head not compiled".into()))?),
+            ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_qkv not compiled".into()))?)?,
+            o_proj: clone_arc(l1.gpt2_o_proj.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: o_proj not compiled".into()))?)?,
+            ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_mlp not compiled".into()))?)?,
+            final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: final_ln_lm_head not compiled".into()))?)?,
             gqa_cache,
             seq_len, num_heads, head_dim,
             dtype_size: config.dtype_size,
@@ -794,13 +799,11 @@ fn gpt2_forward_sequence<E: Element>(
     {
         let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
         for (ts, compiled) in jit.gqa_cache.drain() {
-            l1.gpt2_gqa_cache.entry(ts).or_insert_with(|| {
-                std::sync::Arc::new(
-                    gllm_kernels::compiler::CompiledLayer::from_code(
-                        compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
-                    ).expect("clone CompiledLayer for GPT-2 L1 writeback")
-                )
-            });
+            if let Ok(layer) = gllm_kernels::compiler::CompiledLayer::from_code(
+                compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+            ) {
+                l1.gpt2_gqa_cache.entry(ts).or_insert_with(|| std::sync::Arc::new(layer));
+            }
         }
     }
 
@@ -1124,17 +1127,20 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let mut decode_jit = {
                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
-                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| -> Result<gllm_kernels::compiler::CompiledLayer, BE> {
                     gllm_kernels::compiler::CompiledLayer::from_code(
                         arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
-                    ).expect("clone CompiledLayer from Arc")
+                    ).map_err(|e| BE::Other(format!("clone CompiledLayer from Arc failed: {e}")))
                 };
                 // Seed gqa_cache from L1 accumulated entries.
-                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
-                    l1.gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
+                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> = {
+                    let mut m = std::collections::HashMap::new();
+                    for (&ts, arc) in l1.gqa_cache.iter() { m.insert(ts, clone_arc(arc)?); }
+                    m
+                };
                 DecodeCachedJit {
-                    q_rope: clone_arc(l1.q_rope.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: q_rope".into()))?),
-                    norm2: clone_arc(l1.norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: norm2".into()))?),
+                    q_rope: clone_arc(l1.q_rope.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: q_rope".into()))?)?,
+                    norm2: clone_arc(l1.norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: norm2".into()))?)?,
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                     dtype_size: config.dtype_size,
@@ -1144,18 +1150,21 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let mut moe_jit = if moe_num_experts > 0 {
                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
-                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| {
+                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| -> Result<gllm_kernels::compiler::CompiledLayer, BE> {
                     gllm_kernels::compiler::CompiledLayer::from_code(
                         arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
-                    ).expect("clone CompiledLayer from Arc")
+                    ).map_err(|e| BE::Other(format!("clone CompiledLayer from Arc failed: {e}")))
                 };
                 // Seed moe_gqa_cache from L1 accumulated entries.
-                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
-                    l1.moe_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
+                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> = {
+                    let mut m = std::collections::HashMap::new();
+                    for (&ts, arc) in l1.moe_gqa_cache.iter() { m.insert(ts, clone_arc(arc)?); }
+                    m
+                };
                 Some(MoeDecodeCachedJit {
-                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_pre_attn".into()))?),
-                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_o_gemm".into()))?),
-                    norm2: clone_arc(l1.moe_norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_norm2".into()))?),
+                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_pre_attn".into()))?)?,
+                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_o_gemm".into()))?)?,
+                    norm2: clone_arc(l1.moe_norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_norm2".into()))?)?,
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                     dtype_size: config.dtype_size,
@@ -1356,19 +1365,20 @@ pub(crate) fn decoder_forward<E: Element>(
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
-                let clone_arc = |layer: &gllm_kernels::compiler::CompiledLayer| {
-                    std::sync::Arc::new(
-                        gllm_kernels::compiler::CompiledLayer::from_code(
-                            layer.code_bytes(), layer.scratchpad_bytes, layer.config_hash,
-                        ).expect("clone CompiledLayer for L1 writeback")
-                    )
-                };
                 for (ts, compiled) in decode_jit.gqa_cache.drain() {
-                    l1.gqa_cache.entry(ts).or_insert_with(|| clone_arc(&compiled));
+                    if let Ok(layer) = gllm_kernels::compiler::CompiledLayer::from_code(
+                        compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+                    ) {
+                        l1.gqa_cache.entry(ts).or_insert_with(|| std::sync::Arc::new(layer));
+                    }
                 }
                 if let Some(ref mut mj) = moe_jit {
                     for (ts, compiled) in mj.gqa_cache.drain() {
-                        l1.moe_gqa_cache.entry(ts).or_insert_with(|| clone_arc(&compiled));
+                        if let Ok(layer) = gllm_kernels::compiler::CompiledLayer::from_code(
+                            compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+                        ) {
+                            l1.moe_gqa_cache.entry(ts).or_insert_with(|| std::sync::Arc::new(layer));
+                        }
                     }
                 }
             }
