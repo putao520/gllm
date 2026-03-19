@@ -43,6 +43,20 @@ pub enum GraphType {
     Gpt2LnMlp,
     Gpt2FinalLnLmHead { vocab_size: usize },
     Gpt2CachedGqa { total_seq: usize },
+    /// MoE FFN: routing (MoEGate → TopK), keyed by (num_experts, top_k)
+    MoeFfnRouting { num_experts: usize, top_k: usize },
+    /// MoE FFN: expert FFN (SwiGLU), keyed by inter_size
+    MoeFfnExpert { inter_size: usize },
+    /// MoE FFN: weighted combine (WeightedSum), keyed by top_k
+    MoeFfnCombine { top_k: usize },
+    /// BERT encoder layer (Attention + FFN), keyed by inter_size
+    BertLayer { inter_size: usize },
+    /// BERT mean pooling
+    BertMeanPool,
+    /// SwiGLU activation only (gate * silu(gate) * up), keyed by inter_size
+    SwiGluActivation { inter_size: usize },
+    /// Element-wise add (residual connection), keyed by numel
+    ResidualAdd { numel: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -203,10 +203,15 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
                 "position {} out of range for position_embeddings (max {})", s, max_pos
             )));
         }
-        for i in 0..hidden {
-            hidden_state[s * hidden + i] += pos_emb[s * hidden + i];
-        }
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden])
+            .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
+        hidden_state.copy_from_slice(&added);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
 
     // Token type embeddings (type 0)
     let tt_emb = get_f32_data_gpu(
@@ -214,11 +219,16 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")),
     )?;
     if tt_emb.len() >= hidden {
-        for s in 0..seq_len {
-            for i in 0..hidden {
-                hidden_state[s * hidden + i] += tt_emb[i];
-            }
+        // Broadcast tt_emb[hidden] across all seq positions → [seq_len, hidden]
+        let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast)
+                .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
+            hidden_state.copy_from_slice(&added);
         }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
     }
 
     // Embedding LayerNorm

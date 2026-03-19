@@ -300,9 +300,13 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut o_out = vec![0.0f32; seq_len * hidden];
     quantized_linear(backend, &attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim, transpose_weights)?;
     let mut resid1 = vec![0.0f32; seq_len * hidden];
-    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
-
-    // Pre-FFN RmsNorm (pre-compiled) + SwiGLU FFN (quantized)
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        resid1 = super::jit_helpers::jit_add(&hidden_state[..seq_len * hidden], &o_out)
+            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
     let mut normed2 = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -315,21 +319,28 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut up_out = vec![0.0f32; seq_len * inter];
     quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights)?;
     let mut swiglu = vec![0.0f32; seq_len * inter];
-    for i in 0..seq_len * inter {
-        let g = gate_out[i];
-        let silu_g = g / (1.0 + (-g).exp());
-        swiglu[i] = silu_g * up_out[i];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        swiglu = super::jit_helpers::jit_swiglu(&gate_out, &up_out, seq_len, inter)
+            .map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        return Err(BE::Other("SwiGLU JIT requires x86_64 or aarch64".to_string()));
     }
     let mut down_out = vec![0.0f32; seq_len * hidden];
     quantized_linear(backend, &swiglu, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
 
-    for i in 0..seq_len * hidden { output[i] = resid1[i] + down_out[i]; }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let result = super::jit_helpers::jit_add(&resid1, &down_out)
+            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+        output.copy_from_slice(&result);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
     Ok(sparsity)
 }
-
-// ---------------------------------------------------------------------------
-// MoE weight loading helpers
-// ---------------------------------------------------------------------------
 
 /// Load all routed expert weights for a given layer.
 /// Returns a Vec of (gate_proj, up_proj, down_proj) tuples, one per expert.
@@ -1271,22 +1282,24 @@ pub(crate) fn decoder_forward<E: Element>(
                                 );
                             }
                         }
-                        let mut resid1 = vec![0.0f32; seq_len * hidden];
-                        for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
+                        let resid1 = super::jit_helpers::jit_add(
+                            &hidden_state[..seq_len * hidden], &o_out,
+                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
 
                         let mut normed2 = vec![0.0f32; seq_len * hidden];
                         super::jit_helpers::execute_jit_final_norm(
                             &moe_c.norm2, &resid1, &rn2_w, seq_len, &mut normed2,
                         );
 
-                        // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
+                        // Step 4: MoE FFN via JIT
                         let moe_out = super::jit_helpers::execute_moe_ffn_jit(
                             &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
                             seq_len, hidden, inter, moe_num_experts, moe_top_k,
                         )?;
 
-                        for i in 0..seq_len * hidden { layer_out[i] = resid1[i] + moe_out[i]; }
-                        total_sparsity += layer_sparsity;
+                        let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out)
+                            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                        layer_out.copy_from_slice(&layer_out_vec);
                         sparsity_layers += 1;
                     }
                 } else {
@@ -1570,8 +1583,9 @@ pub(crate) fn decoder_forward<E: Element>(
                             );
                         }
                     }
-                    let mut resid1 = vec![0.0f32; seq_len * hidden];
-                    for i in 0..seq_len * hidden { resid1[i] = hidden_state[i] + o_out[i]; }
+                    let resid1 = super::jit_helpers::jit_add(
+                        &hidden_state[..seq_len * hidden], &o_out,
+                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
 
                     // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
                     let moe_out = super::jit_helpers::execute_moe_ffn_jit(
@@ -1579,7 +1593,9 @@ pub(crate) fn decoder_forward<E: Element>(
                         seq_len, dims.hidden, dims.inter, moe_num_experts, moe_top_k,
                     )?;
 
-                    for i in 0..seq_len * hidden { layer_out[i] = resid1[i] + moe_out[i]; }
+                    let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out)
+                        .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                    layer_out.copy_from_slice(&layer_out_vec);
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
                 }
@@ -1895,17 +1911,12 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         normed_out
     };
 
-    // (f) Mean pooling: average across all token positions
-    let mut pooled = vec![0.0f32; hidden];
-    for s in 0..seq_len {
-        for (d, p) in pooled.iter_mut().enumerate() {
-            *p += normed[s * hidden + d];
-        }
-    }
-    let scale = 1.0 / seq_len as f32;
-    for p in pooled.iter_mut() {
-        *p *= scale;
-    }
+    // (f) Mean pooling: average across all token positions via JIT
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let pooled = super::jit_helpers::jit_mean_pool(&normed, seq_len, hidden)
+        .map_err(|e| BE::Other(format!("mean pool JIT failed: {e}")))?;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let pooled = { return Err(BE::Other("mean pool JIT requires x86_64 or aarch64".to_string())); };
 
     // (g) L2 normalize via JIT (standard for embedding models)
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -2109,14 +2120,62 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         }
 
         let mut scores = vec![0.0f32; num_labels];
-        for (label, score) in scores.iter_mut().enumerate() {
-            let row_start = label * hidden;
-            let mut dot = 0.0f32;
-            for d in 0..hidden {
-                dot += last_hidden[d] * score_w[row_start + d];
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+            use crate::compat::DType as GllmDType;
+            use gllm_kernels::compiler::{CompilerGraph, OpKind};
+            use gllm_kernels::types::DType;
+            let key = JitCacheKey {
+                arch: ModelArchKey {
+                    arch_name: "reranker_score".to_string(),
+                    hidden_size: hidden,
+                    num_heads: num_labels,
+                    num_kv_heads: 0,
+                    head_dim: 0,
+                    dtype: GllmDType::F32,
+                },
+                graph: GraphType::ResidualAdd { numel: num_labels * hidden },
+            };
+            let compiled = global_jit_cache().get_or_compile(key, || {
+                let mut g = CompilerGraph::new();
+                let dt = DType::F32;
+                let x = g.add_tensor_concrete("x", &[1, hidden], dt);
+                let w = g.add_tensor_concrete("w", &[hidden, num_labels], dt);
+                g.inputs = vec![x, w];
+                let out = g.add_tensor_concrete("logits", &[1, num_labels], dt);
+                g.add_op(OpKind::Gemm { m: 1, n: num_labels, k: hidden, dtype: dt }, vec![x, w], vec![out], "score_gemm");
+                g.outputs = vec![out];
+                let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                compiler.compile_graph(&g).map_err(|e| format!("reranker score JIT failed: {e}"))
+            }).map_err(|e| BE::Other(e))?;
+            // score_w is [num_labels, hidden] row-major; GEMM expects w as [hidden, num_labels]
+            let w_t = super::weight_helpers::transpose_f32(&score_w, num_labels, hidden);
+            let w_bytes = w_t.len() * 4;
+            let mut weight_buf = vec![0u8; w_bytes];
+            unsafe {
+                std::ptr::copy_nonoverlapping(w_t.as_ptr() as *const u8, weight_buf.as_mut_ptr(), w_bytes);
             }
-            *score = 1.0 / (1.0 + (-dot).exp());
+            let mut logits = vec![0.0f32; num_labels];
+            let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+            unsafe {
+                compiled.execute(
+                    last_hidden.as_ptr() as *const u8,
+                    weight_buf.as_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1, 1,
+                    logits.as_mut_ptr() as *mut u8,
+                    scratchpad.as_mut_ptr(),
+                );
+            }
+            for (i, s) in scores.iter_mut().enumerate() {
+                *s = 1.0 / (1.0 + (-logits[i]).exp());
+            }
         }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        { return Err(BE::Other("reranker score JIT requires x86_64 or aarch64".to_string())); }
         Ok(scores)
     } else {
         // Generative reranker path: use tied embeddings (lm_head) to get logits,
@@ -2139,11 +2198,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         let logit_fn = |token_id: usize| -> f32 {
             if token_id >= vocab_size { return 0.0; }
             let row_start = token_id * hidden;
-            let mut dot = 0.0f32;
-            for d in 0..hidden {
-                dot += last_hidden[d] * embed_data[row_start + d];
-            }
-            dot
+            last_hidden.iter().zip(embed_data[row_start..row_start + hidden].iter())
+                .map(|(a, b)| a * b).sum::<f32>()
         };
 
         let logit_yes = logit_fn(yes_id);

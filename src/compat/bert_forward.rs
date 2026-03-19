@@ -267,17 +267,28 @@ pub(crate) fn bert_encoder_forward<E: Element>(
 
     // Build BERT layer graph and attempt JIT compilation.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let jit_layer: Option<gllm_kernels::compiler::CompiledLayer> = {
-        let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
-        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        match compiler.compile_graph(&graph) {
-            Ok(compiled) => {
-                Some(compiled)
-            }
-            Err(e) => {
-                return Err(BE::Other(format!("BERT JIT compilation failed: {e}")));
-            }
-        }
+    let jit_layer: Option<std::sync::Arc<gllm_kernels::compiler::CompiledLayer>> = {
+        use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+        use crate::compat::DType as CompatDType;
+        let key = JitCacheKey {
+            arch: ModelArchKey {
+                arch_name: "bert".to_string(),
+                hidden_size: hidden,
+                num_heads,
+                num_kv_heads: num_heads,
+                head_dim,
+                dtype: CompatDType::F32,
+            },
+            graph: GraphType::BertLayer { inter_size: inter },
+        };
+        let compiled = global_jit_cache()
+            .get_or_compile(key, || {
+                let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+                let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                compiler.compile_graph(&graph).map_err(|e| format!("BERT JIT compilation failed: {e}"))
+            })
+            .map_err(|e| BE::Other(e))?;
+        Some(compiled)
     };
 
     // Step (a): Token embedding lookup
@@ -316,11 +327,15 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     "position {} out of range for position_embeddings (max {})", s, max_pos
                 )));
             }
-            let row = &mut hidden_state[s * hidden..(s + 1) * hidden];
-            for i in 0..hidden {
-                row[i] += pos_emb[s * hidden + i];
-            }
         }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden])
+                .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
+            hidden_state.copy_from_slice(&added);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
     }
 
     // Step (c): Add token_type embeddings (all type 0)
@@ -330,12 +345,15 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     )?;
     // All formats: [num_types, hidden] row-major. Type 0 is the first row.
     if tt_emb.len() >= hidden {
-        for s in 0..seq_len {
-            let row = &mut hidden_state[s * hidden..(s + 1) * hidden];
-            for i in 0..hidden {
-                row[i] += tt_emb[i]; // first row = type 0
-            }
+        let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast)
+                .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
+            hidden_state.copy_from_slice(&added);
         }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
     }
 
     // Step (d): Embedding LayerNorm
@@ -432,10 +450,26 @@ pub(crate) fn bert_encoder_forward<E: Element>(
             // Mean pooling over all tokens (JIT-compiled SIMD, no fallback)
             let mut pooled = vec![0.0f32; hidden];
             {
-                let pool_graph = build_mean_pool_graph(seq_len, hidden);
-                let mut pool_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-                let compiled = pool_compiler.compile_graph(&pool_graph)
-                    .map_err(|e| BE::Other(format!("MeanPool JIT compilation failed: {e}")))?;
+                use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+                use crate::compat::DType as CompatDType;
+                let key = JitCacheKey {
+                    arch: ModelArchKey {
+                        arch_name: "bert".to_string(),
+                        hidden_size: hidden,
+                        num_heads: 0,
+                        num_kv_heads: 0,
+                        head_dim: 0,
+                        dtype: CompatDType::F32,
+                    },
+                    graph: GraphType::BertMeanPool,
+                };
+                let compiled = global_jit_cache()
+                    .get_or_compile(key, || {
+                        let pool_graph = build_mean_pool_graph(seq_len, hidden);
+                        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                        compiler.compile_graph(&pool_graph).map_err(|e| format!("MeanPool JIT compilation failed: {e}"))
+                    })
+                    .map_err(|e| BE::Other(e))?;
                 let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
                 unsafe {
                     compiled.execute(
@@ -472,32 +506,61 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 let out_proj_b = get_bias_data(weights,
                     &crate::weight_names::classifier_aliases("out_proj.bias"), 1);
 
-                // dense: x = tanh(W @ cls + b)
-                let mut x = vec![0.0f32; hidden];
-                if transpose_weights {
-                    for i in 0..hidden {
-                        let mut sum = dense_b[i];
-                        for j in 0..hidden {
-                            sum += dense_w[i * hidden + j] * cls[j];
-                        }
-                        x[i] = sum.tanh();
-                    }
+                // dense: x = tanh(W @ cls + b) — GEMM via JIT, tanh via iterator
+                let dense_w_t = if transpose_weights {
+                    dense_w.clone()
                 } else {
-                    for i in 0..hidden {
-                        let mut sum = dense_b[i];
-                        for j in 0..hidden {
-                            sum += dense_w[j * hidden + i] * cls[j];
-                        }
-                        x[i] = sum.tanh();
+                    super::weight_helpers::transpose_f32(&dense_w, hidden, hidden)
+                };
+                let x = {
+                    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+                    use crate::compat::DType as GllmDType;
+                    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+                    use gllm_kernels::types::DType;
+                    let key = JitCacheKey {
+                        arch: ModelArchKey {
+                            arch_name: "bert_dense_gemm".to_string(),
+                            hidden_size: hidden,
+                            num_heads: 0, num_kv_heads: 0, head_dim: 0,
+                            dtype: GllmDType::F32,
+                        },
+                        graph: GraphType::BertLayer { inter_size: hidden },
+                    };
+                    let compiled = global_jit_cache().get_or_compile(key, || {
+                        let mut g = CompilerGraph::new();
+                        let dt = DType::F32;
+                        let x_in = g.add_tensor_concrete("x", &[1, hidden], dt);
+                        let w_in = g.add_tensor_concrete("w", &[hidden, hidden], dt);
+                        let b_in = g.add_tensor_concrete("b", &[hidden], dt);
+                        g.inputs = vec![x_in, w_in, b_in];
+                        let out = g.add_tensor_concrete("out", &[1, hidden], dt);
+                        g.add_op(OpKind::GemmBias { m: 1, n: hidden, k: hidden, dtype: dt }, vec![x_in, w_in, b_in], vec![out], "dense_gemm");
+                        g.outputs = vec![out];
+                        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+                        compiler.compile_graph(&g).map_err(|e| format!("bert dense JIT failed: {e}"))
+                    }).map_err(|e| BE::Other(e))?;
+                    let w_bytes = dense_w_t.len() * 4;
+                    let b_bytes = dense_b.len() * 4;
+                    let mut wbuf = vec![0u8; w_bytes + b_bytes];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(dense_w_t.as_ptr() as *const u8, wbuf.as_mut_ptr(), w_bytes);
+                        std::ptr::copy_nonoverlapping(dense_b.as_ptr() as *const u8, wbuf.as_mut_ptr().add(w_bytes), b_bytes);
                     }
-                }
+                    let mut gemm_out = vec![0.0f32; hidden];
+                    let mut scratch = vec![0u8; compiled.scratchpad_bytes];
+                    unsafe {
+                        compiled.execute(
+                            cls.as_ptr() as *const u8, wbuf.as_ptr(),
+                            std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
+                            1, 1, gemm_out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr(),
+                        );
+                    }
+                    // tanh activation (element-wise, compiler auto-vectorizes)
+                    gemm_out.iter().map(|v| v.tanh()).collect::<Vec<f32>>()
+                };
 
-                // out_proj: logit = W @ x + b
-                let mut logit = 0.0f32;
-                for j in 0..hidden {
-                    logit += out_proj_w[j] * x[j];
-                }
-                logit += out_proj_b[0];
+                // out_proj: logit = dot(out_proj_w, x) + b
+                let logit = out_proj_b[0] + out_proj_w.iter().zip(x.iter()).map(|(a, b)| a * b).sum::<f32>();
                 logit
             } else {
                 // Single-layer: classifier.weight [num_labels, hidden] @ cls + bias
@@ -507,10 +570,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 let b = get_bias_data(weights,
                     &crate::weight_names::classifier_aliases("bias"), 1);
 
-                let mut logit = b[0];
-                for j in 0..hidden {
-                    logit += w[j] * cls[j];
-                }
+                let logit = b[0] + w.iter().zip(cls.iter()).map(|(a, b)| a * b).sum::<f32>();
                 logit
             };
 

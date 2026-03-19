@@ -763,12 +763,30 @@ pub(crate) fn execute_moe_ffn_jit(
 ) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
     use crate::engine::executor::BackendError as BE;
 
-    // Step 1: MoE routing via JIT (MoEGate → TopK)
-    let routing_graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k, DType::F32);
-    let mut routing_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-    let routing_compiled = routing_compiler.compile_graph(&routing_graph).map_err(|e| {
-        BE::Other(format!("MoE routing JIT failed: {e}"))
-    })?;
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as CompatDType;
+
+    let arch_key = ModelArchKey {
+        arch_name: "moe_ffn".to_string(),
+        hidden_size: hidden,
+        num_heads: 0,
+        num_kv_heads: 0,
+        head_dim: 0,
+        dtype: CompatDType::F32,
+    };
+
+    // Step 1: MoE routing via JIT (MoEGate → TopK) — cached
+    let routing_key = JitCacheKey {
+        arch: arch_key.clone(),
+        graph: GraphType::MoeFfnRouting { num_experts, top_k },
+    };
+    let routing_compiled = global_jit_cache()
+        .get_or_compile(routing_key, || {
+            let graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k, DType::F32);
+            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+            compiler.compile_graph(&graph).map_err(|e| format!("MoE routing JIT failed: {e}"))
+        })
+        .map_err(|e| BE::Other(e))?;
 
     let routing_weights = pack_weights(&[router_w]);
     // Output: [seq_len * top_k * 2] — first half indices (u32 as f32 bits), second half weights
@@ -800,12 +818,18 @@ pub(crate) fn execute_moe_ffn_jit(
         weights[i] = weights_raw[i];
     }
 
-    // Step 2: Expert FFN via JIT (compile once, execute per expert)
-    let ffn_graph = build_expert_ffn_graph(seq_len, hidden, inter, DType::F32);
-    let mut ffn_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-    let ffn_compiled = ffn_compiler.compile_graph(&ffn_graph).map_err(|e| {
-        BE::Other(format!("MoE expert FFN JIT failed: {e}"))
-    })?;
+    // Step 2: Expert FFN via JIT (compile once, execute per expert) — cached
+    let ffn_key = JitCacheKey {
+        arch: arch_key.clone(),
+        graph: GraphType::MoeFfnExpert { inter_size: inter },
+    };
+    let ffn_compiled = global_jit_cache()
+        .get_or_compile(ffn_key, || {
+            let graph = build_expert_ffn_graph(seq_len, hidden, inter, DType::F32);
+            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+            compiler.compile_graph(&graph).map_err(|e| format!("MoE expert FFN JIT failed: {e}"))
+        })
+        .map_err(|e| BE::Other(e))?;
 
     // Collect which experts are needed
     let mut needed_experts: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -833,12 +857,18 @@ pub(crate) fn execute_moe_ffn_jit(
         expert_outputs.insert(expert_idx, expert_out);
     }
 
-    // Step 3: Weighted combine via JIT (WeightedSum)
-    let combine_graph = build_moe_combine_graph(seq_len, hidden, top_k, DType::F32);
-    let mut combine_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-    let combine_compiled = combine_compiler.compile_graph(&combine_graph).map_err(|e| {
-        BE::Other(format!("MoE combine JIT failed: {e}"))
-    })?;
+    // Step 3: Weighted combine via JIT (WeightedSum) — cached
+    let combine_key = JitCacheKey {
+        arch: arch_key,
+        graph: GraphType::MoeFfnCombine { top_k },
+    };
+    let combine_compiled = global_jit_cache()
+        .get_or_compile(combine_key, || {
+            let graph = build_moe_combine_graph(seq_len, hidden, top_k, DType::F32);
+            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+            compiler.compile_graph(&graph).map_err(|e| format!("MoE combine JIT failed: {e}"))
+        })
+        .map_err(|e| BE::Other(e))?;
 
     // Build compact expert_outputs buffer: [top_k, seq_len, hidden]
     // Layout: slot 0 = first selected expert's output, slot 1 = second, etc.
@@ -907,8 +937,82 @@ pub(crate) fn execute_moe_ffn_jit(
 }
 
 // ---------------------------------------------------------------------------
-// MoE routing graph: MoEGate → TopK
+// SwiGLU activation JIT helper (for quantized FFN path)
 // ---------------------------------------------------------------------------
+
+/// Build a CompilerGraph for SwiGLU activation only: gate * silu(gate) * up.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn build_swiglu_graph(seq_len: usize, inter: usize) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let dt = DType::F32;
+
+    let gate = g.add_tensor_concrete("gate", &[seq_len, inter], dt);
+    let up = g.add_tensor_concrete("up", &[seq_len, inter], dt);
+    g.inputs = vec![gate, up];
+
+    let out = g.add_tensor_concrete("swiglu_out", &[seq_len, inter], dt);
+    g.add_op(OpKind::SwiGlu, vec![gate, up], vec![out], "swiglu");
+    g.outputs = vec![out];
+    g
+}
+
+/// Execute SwiGLU activation via JIT (cached).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_swiglu(
+    gate: &[f32],
+    up: &[f32],
+    seq_len: usize,
+    inter: usize,
+) -> Result<Vec<f32>, String> {
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as GllmDType;
+
+    let key = JitCacheKey {
+        arch: ModelArchKey {
+            arch_name: "swiglu".to_string(),
+            hidden_size: inter,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            dtype: GllmDType::F32,
+        },
+        graph: GraphType::SwiGluActivation { inter_size: inter },
+    };
+
+    let compiled = global_jit_cache().get_or_compile(key, || {
+        let graph = build_swiglu_graph(seq_len, inter);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        compiler.compile_graph(&graph).map_err(|e| format!("SwiGLU JIT failed: {e}"))
+    })?;
+
+    let gate_bytes = gate.len() * 4;
+    let up_bytes = up.len() * 4;
+    let mut input_buf = vec![0u8; gate_bytes + up_bytes];
+    unsafe {
+        std::ptr::copy_nonoverlapping(gate.as_ptr() as *const u8, input_buf.as_mut_ptr(), gate_bytes);
+        std::ptr::copy_nonoverlapping(up.as_ptr() as *const u8, input_buf.as_mut_ptr().add(gate_bytes), up_bytes);
+    }
+
+    let mut output = vec![0.0f32; seq_len * inter];
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            input_buf.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(output)
+}
+
 
 /// Build a CompilerGraph for MoE routing: gate → topk.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1495,6 +1599,118 @@ pub(crate) fn jit_l2_normalize(
     })?;
 
     let mut output = vec![0.0f32; seq_len * hidden];
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            input.as_ptr() as *const u8,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Residual add JIT helper
+// ---------------------------------------------------------------------------
+
+/// Execute element-wise add via JIT (cached): output = a + b.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_add(a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as GllmDType;
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let numel = a.len();
+    let key = JitCacheKey {
+        arch: ModelArchKey {
+            arch_name: "residual_add".to_string(),
+            hidden_size: numel,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            dtype: GllmDType::F32,
+        },
+        graph: GraphType::ResidualAdd { numel },
+    };
+
+    let compiled = global_jit_cache().get_or_compile(key, || {
+        let mut g = CompilerGraph::new();
+        let dt = DType::F32;
+        let x = g.add_tensor_concrete("a", &[numel], dt);
+        let y = g.add_tensor_concrete("b", &[numel], dt);
+        g.inputs = vec![x, y];
+        let out = g.add_tensor_concrete("out", &[numel], dt);
+        g.add_op(OpKind::Add, vec![x, y], vec![out], "add");
+        g.outputs = vec![out];
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        compiler.compile_graph(&g).map_err(|e| format!("residual add JIT failed: {e}"))
+    })?;
+
+    let a_bytes = numel * 4;
+    let b_bytes = numel * 4;
+    let mut input_buf = vec![0u8; a_bytes + b_bytes];
+    unsafe {
+        std::ptr::copy_nonoverlapping(a.as_ptr() as *const u8, input_buf.as_mut_ptr(), a_bytes);
+        std::ptr::copy_nonoverlapping(b.as_ptr() as *const u8, input_buf.as_mut_ptr().add(a_bytes), b_bytes);
+    }
+
+    let mut output = vec![0.0f32; numel];
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            input_buf.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, numel,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Mean pool JIT helper
+// ---------------------------------------------------------------------------
+
+/// Execute mean pooling via JIT (cached): average [seq_len, hidden] → [hidden].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_mean_pool(
+    input: &[f32],
+    seq_len: usize,
+    hidden: usize,
+) -> Result<Vec<f32>, String> {
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as GllmDType;
+
+    let key = JitCacheKey {
+        arch: ModelArchKey {
+            arch_name: "mean_pool".to_string(),
+            hidden_size: hidden,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            dtype: GllmDType::F32,
+        },
+        graph: GraphType::BertMeanPool,
+    };
+
+    let compiled = global_jit_cache().get_or_compile(key, || {
+        let graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        compiler.compile_graph(&graph).map_err(|e| format!("mean pool JIT failed: {e}"))
+    })?;
+
+    let mut output = vec![0.0f32; hidden];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
