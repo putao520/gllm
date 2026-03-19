@@ -1998,21 +1998,33 @@ fn jit_cached_attention(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, DType::F32);
-        let mut compiler = InferenceCompiler::new();
-        match compiler.compile_graph(&graph) {
-            Ok(compiled) => {
-                let (attn_out, _sparsity) = execute_cached_gqa(
-                    &compiled, q_rope, k_layer, v_layer,
-                    seq_len, num_heads, head_dim,
-                );
-                return attn_out;
-            }
-            Err(e) => {
-                // JIT compilation failed — propagate as panic (NO_SILENT_FALLBACK)
-                panic!("jit_cached_attention: JIT compilation failed: {e}");
-            }
-        }
+        use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+        use crate::compat::DType as GllmDType;
+        use gllm_kernels::types::DType;
+
+        let key = JitCacheKey {
+            arch: ModelArchKey {
+                arch_name: "gpu_cached_gqa".to_string(),
+                hidden_size: num_heads * head_dim,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                dtype: GllmDType::F32,
+            },
+            graph: GraphType::CachedGqa { total_seq },
+        };
+
+        let compiled = global_jit_cache().get_or_compile(key, || {
+            let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, DType::F32);
+            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+            compiler.compile_graph(&graph).map_err(|e| e.to_string())
+        }).unwrap_or_else(|e| panic!("jit_cached_attention: JIT compilation failed: {e}"));
+
+        let (attn_out, _sparsity) = super::jit_helpers::execute_cached_gqa(
+            &compiled, q_rope, k_layer, v_layer,
+            seq_len, num_heads, head_dim,
+        );
+        return attn_out;
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
