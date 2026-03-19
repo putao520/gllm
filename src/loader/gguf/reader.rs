@@ -690,3 +690,140 @@ fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8
     *pos = end;
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memmap2::MmapOptions;
+
+    /// Build a minimal GGUF v3 binary in memory with the given metadata KV pairs and no tensors.
+    fn build_gguf(kvs: &[(&str, GgufValue)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // header
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes()); // version
+        buf.extend_from_slice(&0u64.to_le_bytes()); // tensor_count
+        buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes()); // kv_count
+
+        for (key, value) in kvs {
+            write_string(&mut buf, key);
+            write_value(&mut buf, value);
+        }
+
+        // alignment padding (default 32)
+        let pos = buf.len();
+        let aligned = (pos + 31) & !31;
+        buf.resize(aligned, 0u8);
+
+        buf
+    }
+
+    fn write_string(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    fn write_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_u64(buf: &mut Vec<u8>, v: u64) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_value(buf: &mut Vec<u8>, value: &GgufValue) {
+        match value {
+            GgufValue::String(s) => {
+                write_u32(buf, GgufValueType::String as u32);
+                write_string(buf, s);
+            }
+            GgufValue::Uint32(v) => {
+                write_u32(buf, GgufValueType::Uint32 as u32);
+                write_u32(buf, *v);
+            }
+            GgufValue::Uint64(v) => {
+                write_u32(buf, GgufValueType::Uint64 as u32);
+                write_u64(buf, *v);
+            }
+            GgufValue::Array(arr) => {
+                write_u32(buf, GgufValueType::Array as u32);
+                write_u32(buf, arr.item_type as u32);
+                write_u64(buf, arr.items.len() as u64);
+                for item in &arr.items {
+                    match item {
+                        GgufValue::String(s) => write_string(buf, s),
+                        GgufValue::Uint32(v) => write_u32(buf, *v),
+                        _ => panic!("unsupported array item type in test helper"),
+                    }
+                }
+            }
+            _ => panic!("unsupported value type in test helper"),
+        }
+    }
+
+    fn parse_from_bytes(bytes: Vec<u8>) -> Result<GgufReader, GgufError> {
+        // SAFETY: test-only in-memory buffer mapped as anonymous mmap
+        let mmap = unsafe {
+            let mut anon = MmapOptions::new().len(bytes.len()).map_anon().unwrap();
+            anon.copy_from_slice(&bytes);
+            let frozen: Mmap = anon.make_read_only().unwrap();
+            Arc::new(frozen)
+        };
+        GgufReader::parse(mmap)
+    }
+
+    /// TEST-GGUF-002: ARRAY[STRING] 解析正确性
+    /// 验证 tokenizer.ggml.tokens 返回完整 token 列表，不截断
+    #[test]
+    fn test_gguf_002_array_string_parsing() {
+        let tokens: Vec<GgufValue> = vec![
+            GgufValue::String(Arc::from("<unk>")),
+            GgufValue::String(Arc::from("<s>")),
+            GgufValue::String(Arc::from("</s>")),
+            GgufValue::String(Arc::from("▁the")),
+            GgufValue::String(Arc::from("▁of")),
+        ];
+        let arr = GgufArray {
+            item_type: GgufValueType::String,
+            items: tokens,
+        };
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("llama"))),
+            ("tokenizer.ggml.tokens", GgufValue::Array(arr)),
+        ]);
+
+        let reader = parse_from_bytes(bytes).expect("parse GGUF");
+        let result = reader.tokenizer_tokens().expect("tokenizer_tokens");
+
+        assert_eq!(result.len(), 5, "must return all 5 tokens, not truncated");
+        assert_eq!(result[0], "<unk>");
+        assert_eq!(result[1], "<s>");
+        assert_eq!(result[2], "</s>");
+        assert_eq!(result[3], "▁the");
+        assert_eq!(result[4], "▁of");
+    }
+
+    /// TEST-GGUF-004: Ω1 真实性原则 — 元数据读取禁止默认值
+    /// 验证 architecture() 从 general.architecture 读取；缺失时返回错误
+    #[test]
+    fn test_gguf_004_omega1_metadata_no_defaults() {
+        // 有 general.architecture 时正确返回
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("llama"))),
+        ]);
+        let reader = parse_from_bytes(bytes).expect("parse GGUF");
+        assert_eq!(reader.architecture().expect("architecture"), "llama");
+
+        // 缺失 general.architecture 时返回 Err，不使用默认值
+        let bytes_no_arch = build_gguf(&[]);
+        let reader2 = parse_from_bytes(bytes_no_arch).expect("parse GGUF");
+        assert!(
+            reader2.architecture().is_err(),
+            "missing general.architecture must return Err, not a default"
+        );
+
+        // 缺失任意 key 时 get_metadata_u64 返回 None，不 panic
+        assert!(reader.get_metadata_u64("nonexistent.key").is_none());
+    }
+}

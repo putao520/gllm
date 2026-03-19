@@ -374,9 +374,9 @@ tests/e2e_alignment/
 | TEST-ID | 测试名称 | 测试类型 | 关联 REQ | 重要性 |
 |---------|----------|----------|----------|--------|
 | TEST-GGUF-001 | 头部解析 (magic, version) | 正向 | REQ-LOADER-011 | P0 |
-| TEST-GGUF-002 | ARRAY[STRING] 解析 | 正向 | REQ-LOADER-011 | 🔴 P0 |
+| TEST-GGUF-002 | ARRAY[STRING] 解析 | 正向 | REQ-LOADER-011 | 🟢 P0 |
 | TEST-GGUF-003 | Tensor info 解析 | 正向 | REQ-LOADER-011 | P0 |
-| TEST-GGUF-004 | Ω1: 元数据读取（禁止默认值） | 正向 | REQ-LOADER-019 | 🔴 P0 |
+| TEST-GGUF-004 | Ω1: 元数据读取（禁止默认值） | 正向 | REQ-LOADER-019 | 🟢 P0 |
 | TEST-GGUF-005 | 量化类型识别 (28 种) | 正向 | REQ-LOADER-014 | P0 |
 | TEST-GGUF-006 | TensorSlice 零拷贝 | 正向 | REQ-LOADER-011 | P0 |
 | TEST-GGUF-007 | 无效 magic 检测 | 负向 | REQ-LOADER-011 | P1 |
