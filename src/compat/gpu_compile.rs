@@ -597,6 +597,16 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     let gpu_profile = &backend.gpu_profile;
     let sm_version = backend.sm_version();
 
+    // SM < 70: GPU kernel_builder emits C-like code for non-GEMM ops (LayerNorm, MHA, Softmax)
+    // which is invalid PTX. Fall back to CPU path via OOM error signal.
+    if sm_version < 70 {
+        return Err(BE::Cuda(format!(
+            "GPU forward requires SM >= 70 for full kernel support (got SM {}). \
+             Falling back to CPU. alloc failed",
+            sm_version
+        )));
+    }
+
     let seq_len = tokens.len();
     let hidden = config.hidden_size;
     let num_heads = config.num_heads;
@@ -749,6 +759,16 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let stream = device.default_stream();
     let gpu_profile = &backend.gpu_profile;
     let sm_version = backend.sm_version();
+
+    // SM < 70: GPU kernel_builder emits C-like code for non-GEMM ops (RmsNorm, MHA, SwiGLU)
+    // which is invalid PTX. Fall back to CPU path via OOM error signal.
+    if sm_version < 70 {
+        return Err(BE::Cuda(format!(
+            "GPU forward requires SM >= 70 for full kernel support (got SM {}). \
+             Falling back to CPU. alloc failed",
+            sm_version
+        )));
+    }
 
     let hidden = config.hidden_size;
     let num_heads = config.num_heads;
