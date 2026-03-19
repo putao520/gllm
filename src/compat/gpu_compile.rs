@@ -213,11 +213,11 @@ pub(crate) fn launch_config_for_op(
         OpKind::LayerNorm { hidden_size, .. } | OpKind::RmsNorm { hidden_size, .. } => {
             let block = (*hidden_size as u32).next_power_of_two()
                 .min(profile.max_threads_per_block);
-            profile.launch_config_row_wise(1024, block)
+            profile.launch_config_row_wise(profile.max_threads_per_block as usize, block)
         }
         OpKind::Softmax => {
             let block = profile.max_threads_per_block.min(256);
-            profile.launch_config_row_wise(1024, block)
+            profile.launch_config_row_wise(profile.max_threads_per_block as usize, block)
         }
         OpKind::Gemm { m, n, .. } | OpKind::GemmBias { m, n, .. } => {
             // Tile size derived from warp_size: sqrt(32)=5→8, sqrt(64)=8
@@ -249,7 +249,7 @@ pub(crate) fn launch_config_for_op(
         OpKind::Reshape { .. } | OpKind::Transpose { .. } => {
             profile.launch_config_1d(1) // metadata NOP
         }
-        _ => profile.launch_config_1d(1024),
+        _ => profile.launch_config_1d(profile.max_threads_per_block as usize),
     }
 }
 
@@ -391,8 +391,10 @@ pub(crate) fn cuda_compile_graph(
         // For EpilogueInjection, inputs come from anchor, output from last epilogue op.
         let input_tids = anchor.inputs.clone();
         let output_tid = if !group.epilogue.is_empty() {
-            let last_epi = *group.epilogue.last().unwrap();
-            let last_op = graph.op(last_epi).unwrap();
+            let last_epi = *group.epilogue.last()
+                .ok_or_else(|| BE::Other("empty epilogue in fusion group".into()))?;
+            let last_op = graph.op(last_epi)
+                .ok_or_else(|| BE::Other(format!("missing epilogue op {:?}", last_epi)))?;
             last_op.outputs[0]
         } else {
             anchor.outputs[0]
@@ -442,41 +444,41 @@ pub(crate) fn cuda_launch_graph(
         match &entry.op_kind {
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for LayerNorm/RmsNorm input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
                 let n = *input_meta.shape.last().unwrap_or(&1);
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for binary op input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for binary op input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::Silu | OpKind::Gelu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for activation input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for activation input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::SwiGlu | OpKind::GeGlu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for SwiGlu/GeGlu input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for SwiGlu/GeGlu input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for RoPE input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
                 let seq_len = input_meta.shape[0];
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
             OpKind::Softmax => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for Softmax input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for Softmax input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
@@ -729,7 +731,8 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let (_post_mod, post_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &post_graph)?;
 
-        let handle = kv_caches.first().unwrap();
+        let handle = kv_caches.first()
+            .ok_or_else(|| BE::Cuda("no KV cache handles provided".into()))?;
         let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
@@ -781,17 +784,20 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let v_tid = proj_graph.outputs[2]; // v_proj
 
             let q_bytes = seq_len * q_dim * 4;
-            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b).unwrap();
+            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Cuda(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
             let mut q_host = vec![0u8; q_bytes];
             device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Cuda(format!("dtoh q_rope: {e}")))?;
             let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
 
             let kv_bytes = seq_len * kv_dim * 4;
-            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b).unwrap();
+            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Cuda(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
             let mut k_host = vec![0u8; kv_bytes];
             device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Cuda(format!("dtoh k_rope: {e}")))?;
 
-            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b).unwrap();
+            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Cuda(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
             let mut v_host = vec![0u8; kv_bytes];
             device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Cuda(format!("dtoh v_proj: {e}")))?;
 
@@ -817,7 +823,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
                 super::jit_helpers::computation_dtype_from_config(config),
-            );
+            )?;
 
             // ── GPU: post-attention graph (O Gemm → Residual → FFN → Residual) ──
             let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
@@ -1113,8 +1119,10 @@ pub(crate) fn hip_compile_graph(
 
         let input_tids = anchor.inputs.clone();
         let output_tid = if !group.epilogue.is_empty() {
-            let last_epi = *group.epilogue.last().unwrap();
-            let last_op = graph.op(last_epi).unwrap();
+            let last_epi = *group.epilogue.last()
+                .ok_or_else(|| BE::Other("empty epilogue in fusion group".into()))?;
+            let last_op = graph.op(last_epi)
+                .ok_or_else(|| BE::Other(format!("missing epilogue op {:?}", last_epi)))?;
             last_op.outputs[0]
         } else {
             anchor.outputs[0]
@@ -1159,41 +1167,41 @@ pub(crate) fn hip_launch_graph(
         match &entry.op_kind {
             OpKind::LayerNorm { .. } | OpKind::RmsNorm { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for LayerNorm/RmsNorm input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
                 let n = *input_meta.shape.last().unwrap_or(&1);
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for binary op input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for binary op input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::Silu | OpKind::Gelu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for activation input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for activation input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::SwiGlu | OpKind::GeGlu => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for SwiGlu/GeGlu input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for SwiGlu/GeGlu input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
             }
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for RoPE input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
                 let seq_len = input_meta.shape[0];
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
             OpKind::Softmax => {
                 let input_meta = graph.tensor(entry.input_tids[0])
-                    .expect("tensor meta for Softmax input");
+                    .ok_or_else(|| BE::Other(format!("tensor meta for Softmax input {:?}", entry.input_tids[0])))?;
                 let n: usize = input_meta.shape.iter().product();
                 let last = raw_params.len() - 1;
                 raw_params[last] = n as u64;
@@ -1424,8 +1432,10 @@ pub(crate) fn metal_compile_graph(
 
         let input_tids = anchor.inputs.clone();
         let output_tid = if !group.epilogue.is_empty() {
-            let last_epi = *group.epilogue.last().unwrap();
-            let last_op = graph.op(last_epi).unwrap();
+            let last_epi = *group.epilogue.last()
+                .ok_or_else(|| BE::Metal("empty epilogue in fusion group".into()))?;
+            let last_op = graph.op(last_epi)
+                .ok_or_else(|| BE::Metal(format!("missing epilogue op {:?}", last_epi)))?;
             last_op.outputs[0]
         } else {
             anchor.outputs[0]
@@ -1595,7 +1605,8 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     metal_launch_graph(device, stream, &pool_entries, &pool_bufs, &pool_graph)?;
     device.sync().map_err(|e| BE::Metal(format!("sync pool: {e}")))?;
 
-    let output_buf = pool_bufs.get(&pool_graph.outputs[0]).unwrap();
+    let output_buf = pool_bufs.get(&pool_graph.outputs[0])
+        .ok_or_else(|| BE::Metal("pool output buffer not found".into()))?;
     let mut pooled_bytes = vec![0u8; hidden * 4];
     device.dtoh(output_buf, &mut pooled_bytes, stream)
         .map_err(|e| BE::Metal(format!("dtoh pool output: {e}")))?;
@@ -1986,7 +1997,7 @@ fn jit_cached_attention(
     head_dim: usize,
     max_seq_len: usize,
     dtype: gllm_kernels::types::DType,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BE> {
     use super::jit_helpers::{build_cached_gqa_graph, execute_cached_gqa};
     use gllm_kernels::compiler::InferenceCompiler;
 
@@ -2019,13 +2030,13 @@ fn jit_cached_attention(
             let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, dtype);
             let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
             compiler.compile_graph(&graph).map_err(|e| e.to_string())
-        }).unwrap_or_else(|e| panic!("jit_cached_attention: JIT compilation failed: {e}"));
+        }).map_err(|e| BE::Other(format!("jit_cached_attention: JIT compilation failed: {e}")))?;
 
         let (attn_out, _sparsity) = super::jit_helpers::execute_cached_gqa(
             &compiled, q_rope, k_layer, v_layer,
             seq_len, num_heads, head_dim,
         );
-        return attn_out;
+        return Ok(attn_out);
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -2243,7 +2254,8 @@ pub(super) fn hip_decoder_forward<E: Element>(
         let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let (_post_mod, post_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &post_graph)?;
 
-        let handle = kv_caches.first().unwrap();
+        let handle = kv_caches.first()
+            .ok_or_else(|| BE::Hip("no KV cache handles provided".into()))?;
         let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
@@ -2295,17 +2307,20 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let v_tid = proj_graph.outputs[2];
 
             let q_bytes = seq_len * q_dim * 4;
-            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b).unwrap();
+            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Hip(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
             let mut q_host = vec![0u8; q_bytes];
             device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Hip(format!("dtoh q_rope: {e}")))?;
             let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
 
             let kv_bytes = seq_len * kv_dim * 4;
-            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b).unwrap();
+            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Hip(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
             let mut k_host = vec![0u8; kv_bytes];
             device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Hip(format!("dtoh k_rope: {e}")))?;
 
-            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b).unwrap();
+            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                .ok_or_else(|| BE::Hip(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
             let mut v_host = vec![0u8; kv_bytes];
             device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Hip(format!("dtoh v_proj: {e}")))?;
 
@@ -2331,7 +2346,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
                 super::jit_helpers::computation_dtype_from_config(config),
-            );
+            )?;
 
             // ── GPU: post-attention graph ──
             let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
@@ -2630,7 +2645,8 @@ pub(super) fn metal_decoder_forward<E: Element>(
         let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let post_entries = metal_compile_graph(device, gpu_profile, gpu_family, &post_graph)?;
 
-        let handle = kv_caches.first().unwrap();
+        let handle = kv_caches.first()
+            .ok_or_else(|| BE::Metal("no KV cache handles provided".into()))?;
         let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
@@ -2681,17 +2697,20 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let v_tid = proj_graph.outputs[2];
 
             let q_bytes = seq_len * q_dim * 4;
-            let q_buf = proj_bufs.get(&q_tid).unwrap();
+            let q_buf = proj_bufs.get(&q_tid)
+                .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
             let mut q_host = vec![0u8; q_bytes];
             device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Metal(format!("dtoh q_rope: {e}")))?;
             let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
 
             let kv_bytes = seq_len * kv_dim * 4;
-            let k_buf = proj_bufs.get(&k_tid).unwrap();
+            let k_buf = proj_bufs.get(&k_tid)
+                .ok_or_else(|| BE::Metal(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
             let mut k_host = vec![0u8; kv_bytes];
             device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Metal(format!("dtoh k_rope: {e}")))?;
 
-            let v_buf = proj_bufs.get(&v_tid).unwrap();
+            let v_buf = proj_bufs.get(&v_tid)
+                .ok_or_else(|| BE::Metal(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
             let mut v_host = vec![0u8; kv_bytes];
             device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Metal(format!("dtoh v_proj: {e}")))?;
 
@@ -2717,7 +2736,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
                 super::jit_helpers::computation_dtype_from_config(config),
-            );
+            )?;
 
             // ── GPU: post-attention graph ──
             let mut post_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
