@@ -1391,6 +1391,7 @@ pub(crate) fn build_layer_norm_graph(
 }
 
 /// Execute JIT LayerNorm with bias over [seq_len, hidden] input.
+/// Uses global_jit_cache to avoid recompilation across calls.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn jit_layer_norm(
     input: &[f32],
@@ -1399,11 +1400,28 @@ pub(crate) fn jit_layer_norm(
     seq_len: usize,
     hidden: usize,
 ) -> Result<Vec<f32>, String> {
-    use gllm_kernels::compiler::InferenceCompiler;
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as GllmDType;
     use gllm_kernels::types::DType;
-    let graph = build_layer_norm_graph(seq_len, hidden, DType::F32);
-    let mut compiler = InferenceCompiler::new();
-    let compiled = compiler.compile_graph(&graph).map_err(|e| e.to_string())?;
+
+    let key = JitCacheKey {
+        arch: ModelArchKey {
+            arch_name: "layer_norm".to_string(),
+            hidden_size: hidden,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            dtype: GllmDType::F32,
+        },
+        graph: GraphType::Norm2, // reuse Norm2 slot for LayerNorm
+    };
+
+    let compiled = global_jit_cache().get_or_compile(key, || {
+        let graph = build_layer_norm_graph(seq_len, hidden, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        compiler.compile_graph(&graph).map_err(|e| e.to_string())
+    })?;
+
     let mut output = vec![0.0f32; seq_len * hidden];
     let weights_buf = pack_weights(&[gamma, beta]);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
@@ -1447,17 +1465,35 @@ pub(crate) fn build_l2_norm_graph(
 }
 
 /// Execute JIT L2 normalization over [seq_len, hidden] input.
+/// Uses global_jit_cache to avoid recompilation across calls.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn jit_l2_normalize(
     input: &[f32],
     seq_len: usize,
     hidden: usize,
 ) -> Result<Vec<f32>, String> {
-    use gllm_kernels::compiler::InferenceCompiler;
+    use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+    use crate::compat::DType as GllmDType;
     use gllm_kernels::types::DType;
-    let graph = build_l2_norm_graph(seq_len, hidden, DType::F32);
-    let mut compiler = InferenceCompiler::new();
-    let compiled = compiler.compile_graph(&graph).map_err(|e| e.to_string())?;
+
+    let key = JitCacheKey {
+        arch: ModelArchKey {
+            arch_name: "l2_normalize".to_string(),
+            hidden_size: hidden,
+            num_heads: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            dtype: GllmDType::F32,
+        },
+        graph: GraphType::Norm2,
+    };
+
+    let compiled = global_jit_cache().get_or_compile(key, || {
+        let graph = build_l2_norm_graph(seq_len, hidden, DType::F32);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        compiler.compile_graph(&graph).map_err(|e| e.to_string())
+    })?;
+
     let mut output = vec![0.0f32; seq_len * hidden];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
