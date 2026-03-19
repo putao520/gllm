@@ -117,7 +117,8 @@ fn get_or_compile_moe_gqa(jit: &mut MoeDecodeCachedJit, total_seq: usize) -> Res
         })?;
         jit.gqa_cache.insert(total_seq, compiled);
     }
-    Ok(jit.gqa_cache.get(&total_seq).unwrap())
+    jit.gqa_cache.get(&total_seq)
+        .ok_or_else(|| BE::Other("MoE GQA cache entry missing after insert".into()))
 }
 
 /// Pre-compiled JIT graphs for incremental decode (invariant across layers).
@@ -209,7 +210,8 @@ fn get_or_compile_gqa(jit: &mut DecodeCachedJit, total_seq: usize) -> Result<&gl
         })?;
         jit.gqa_cache.insert(total_seq, compiled);
     }
-    Ok(jit.gqa_cache.get(&total_seq).unwrap())
+    jit.gqa_cache.get(&total_seq)
+        .ok_or_else(|| BE::Other("decode GQA cache entry missing after insert".into()))
 }
 
 fn quantized_incremental_decode_layer<E: Element>(
@@ -514,7 +516,8 @@ fn get_or_compile_gpt2_gqa(jit: &mut Gpt2CachedJit, total_seq: usize) -> Result<
         })?;
         jit.gqa_cache.insert(total_seq, compiled);
     }
-    Ok(jit.gqa_cache.get(&total_seq).unwrap())
+    jit.gqa_cache.get(&total_seq)
+        .ok_or_else(|| BE::Other("GPT-2 GQA cache entry missing after insert".into()))
 }
 
 fn gpt2_forward_sequence<E: Element>(
@@ -675,10 +678,10 @@ fn gpt2_forward_sequence<E: Element>(
         let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
             l1.gpt2_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
         Gpt2CachedJit {
-            ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().unwrap()),
-            o_proj: clone_arc(l1.gpt2_o_proj.as_ref().unwrap()),
-            ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().unwrap()),
-            final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().unwrap()),
+            ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_qkv not compiled".into()))?),
+            o_proj: clone_arc(l1.gpt2_o_proj.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: o_proj not compiled".into()))?),
+            ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: ln_mlp not compiled".into()))?),
+            final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().ok_or_else(|| BE::Other("GPT-2 JIT cache: final_ln_lm_head not compiled".into()))?),
             gqa_cache,
             seq_len, num_heads, head_dim,
             dtype_size: config.dtype_size,
@@ -970,8 +973,11 @@ pub(crate) fn decoder_forward<E: Element>(
             if let Some(logits_bytes) = output.get("logits").or_else(|| output.values().next()) {
                 let logits: Vec<f32> = logits_bytes
                     .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                    .collect();
+                    .map(|c| {
+                        let arr: [u8; 4] = c.try_into().map_err(|_| BE::Other("invalid f32 bytes in logits output".into()))?;
+                        Ok(f32::from_le_bytes(arr))
+                    })
+                    .collect::<Result<Vec<f32>, BE>>()?;
                 // Return last-token logits
                 let last_start = if logits.len() >= vocab_size {
                     logits.len() - vocab_size
@@ -1025,7 +1031,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     ).map_err(BE::Other)?;
                     l1.kv_proj = Some(arc);
                 }
-                l1.kv_proj.as_ref().unwrap().clone()
+                l1.kv_proj.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: kv_proj".into()))?.clone()
             };
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1127,8 +1133,8 @@ pub(crate) fn decoder_forward<E: Element>(
                 let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
                     l1.gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
                 DecodeCachedJit {
-                    q_rope: clone_arc(l1.q_rope.as_ref().unwrap()),
-                    norm2: clone_arc(l1.norm2.as_ref().unwrap()),
+                    q_rope: clone_arc(l1.q_rope.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: q_rope".into()))?),
+                    norm2: clone_arc(l1.norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: norm2".into()))?),
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                     dtype_size: config.dtype_size,
@@ -1147,9 +1153,9 @@ pub(crate) fn decoder_forward<E: Element>(
                 let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
                     l1.moe_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
                 Some(MoeDecodeCachedJit {
-                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().unwrap()),
-                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().unwrap()),
-                    norm2: clone_arc(l1.moe_norm2.as_ref().unwrap()),
+                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_pre_attn".into()))?),
+                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_o_gemm".into()))?),
+                    norm2: clone_arc(l1.moe_norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_norm2".into()))?),
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                     dtype_size: config.dtype_size,
@@ -1237,7 +1243,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                     {
-                        let moe_c = moe_jit.as_mut().unwrap();
+                        let moe_c = moe_jit.as_mut().ok_or_else(|| BE::Other("JIT cache entry missing: moe_jit".into()))?;
                         let geom = AttentionGeometry {
                             num_heads, num_kv_heads, head_dim,
                             q_dim: num_heads * head_dim,
