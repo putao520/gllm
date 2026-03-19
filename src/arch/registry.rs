@@ -70,6 +70,8 @@ pub fn register_builtin_templates() {
         if let Ok(qwen3) = ArchTemplate::from_yaml(QWEN3_TEMPLATE) {
             registry.map_arch(ModelArchitecture::Qwen3, "qwen3");
             registry.map_arch(ModelArchitecture::Qwen3MoE, "qwen3");
+            // Qwen2.5 shares the same GQA+SwiGLU+RoPE architecture as Qwen3
+            registry.map_arch(ModelArchitecture::Qwen2_5, "qwen3");
             registry.register(qwen3);
         }
 
