@@ -1363,3 +1363,114 @@ pub(crate) fn execute_gpt2_final_ln_lm_head(
     output
 }
 
+
+// ---------------------------------------------------------------------------
+// JIT LayerNorm (with bias) — for embedding LayerNorm in BERT/GPT-2
+// ---------------------------------------------------------------------------
+
+/// Build a JIT graph for LayerNorm with bias: out = layernorm(x, gamma, beta).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_layer_norm_graph(
+    seq_len: usize,
+    hidden: usize,
+    dtype: DType,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    let mut g = CompilerGraph::new();
+    let x = g.add_tensor_concrete("x", &[seq_len, hidden], dtype);
+    let gamma = g.add_tensor_concrete("gamma", &[hidden], dtype);
+    let beta = g.add_tensor_concrete("beta", &[hidden], dtype);
+    g.inputs = vec![x, gamma, beta];
+    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dtype);
+    g.add_op(
+        OpKind::LayerNorm { eps: 1e-5 },
+        vec![x, gamma, beta], vec![out], "layer_norm",
+    );
+    g.outputs = vec![out];
+    g
+}
+
+/// Execute JIT LayerNorm with bias over [seq_len, hidden] input.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_layer_norm(
+    input: &[f32],
+    gamma: &[f32],
+    beta: &[f32],
+    seq_len: usize,
+    hidden: usize,
+) -> Result<Vec<f32>, String> {
+    use gllm_kernels::compiler::InferenceCompiler;
+    use gllm_kernels::types::DType;
+    let graph = build_layer_norm_graph(seq_len, hidden, DType::F32);
+    let mut compiler = InferenceCompiler::new();
+    let compiled = compiler.compile_graph(&graph).map_err(|e| e.to_string())?;
+    let mut output = vec![0.0f32; seq_len * hidden];
+    let weights_buf = pack_weights(&[gamma, beta]);
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            input.as_ptr() as *const u8,
+            weights_buf.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// JIT L2 Normalize — for embedding output normalization
+// ---------------------------------------------------------------------------
+
+/// Build a JIT graph for L2 normalization: out = x / ||x||_2.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn build_l2_norm_graph(
+    seq_len: usize,
+    hidden: usize,
+    dtype: DType,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    let mut g = CompilerGraph::new();
+    let x = g.add_tensor_concrete("x", &[seq_len, hidden], dtype);
+    g.inputs = vec![x];
+    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dtype);
+    g.add_op(
+        OpKind::L2Normalize { hidden: hidden },
+        vec![x], vec![out], "l2_norm",
+    );
+    g.outputs = vec![out];
+    g
+}
+
+/// Execute JIT L2 normalization over [seq_len, hidden] input.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn jit_l2_normalize(
+    input: &[f32],
+    seq_len: usize,
+    hidden: usize,
+) -> Result<Vec<f32>, String> {
+    use gllm_kernels::compiler::InferenceCompiler;
+    use gllm_kernels::types::DType;
+    let graph = build_l2_norm_graph(seq_len, hidden, DType::F32);
+    let mut compiler = InferenceCompiler::new();
+    let compiled = compiler.compile_graph(&graph).map_err(|e| e.to_string())?;
+    let mut output = vec![0.0f32; seq_len * hidden];
+    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+    unsafe {
+        compiled.execute(
+            input.as_ptr() as *const u8,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, seq_len,
+            output.as_mut_ptr() as *mut u8,
+            scratchpad.as_mut_ptr(),
+        );
+    }
+    Ok(output)
+}

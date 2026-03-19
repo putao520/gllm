@@ -232,14 +232,13 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         hidden,
     );
     {
-        let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
-        use gllm_kernels::Kernels;
-        let mut normed = vec![0.0f32; hidden];
-        for s in 0..seq_len {
-            let row = &hidden_state[s * hidden..(s + 1) * hidden];
-            kern.layer_norm(row, &emb_ln_w, &emb_ln_b, &mut normed, eps);
-            hidden_state[s * hidden..(s + 1) * hidden].copy_from_slice(&normed);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            hidden_state = super::jit_helpers::jit_layer_norm(&hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden)
+                .map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
         }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        compile_error!("embedding LayerNorm requires JIT support (x86_64 or aarch64)");
     }
 
     Ok(hidden_state)

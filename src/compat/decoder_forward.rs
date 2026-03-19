@@ -1874,13 +1874,14 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         *p *= scale;
     }
 
-    // (g) L2 normalize (standard for embedding models)
-    let l2_norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if l2_norm > 1e-12 {
-        for p in pooled.iter_mut() {
-            *p /= l2_norm;
-        }
-    }
+    // (g) L2 normalize via JIT (standard for embedding models)
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let pooled = {
+        super::jit_helpers::jit_l2_normalize(&pooled, 1, hidden)
+            .map_err(|e| BE::Other(format!("L2 normalize JIT failed: {e}")))?
+    };
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("L2 normalize requires JIT support (x86_64 or aarch64)");
 
     Ok(pooled)
 }

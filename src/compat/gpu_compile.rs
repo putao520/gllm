@@ -813,7 +813,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
 
             // CPU cached attention
-            let attn_out = cpu_cached_attention(
+            let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
             );
@@ -1966,6 +1966,62 @@ pub(crate) fn build_post_attention_graph(
     g
 }
 
+/// JIT-compiled cached GQA attention for GPU backends (CPU-side execution on downloaded KV).
+///
+/// Replaces the hand-written `cpu_cached_attention` scalar loops with JIT-compiled
+/// CachedGQA kernel (AVX2/AVX-512/NEON). Extracts the current layer's K/V slice
+/// from the full flat KV cache before passing to JIT.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn jit_cached_attention(
+    q_rope: &[f32],
+    kv_cache_k: &[f32],
+    kv_cache_v: &[f32],
+    positions: &[u32],
+    layer: usize,
+    total_seq: usize,
+    seq_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_seq_len: usize,
+) -> Vec<f32> {
+    use super::jit_helpers::{build_cached_gqa_graph, execute_cached_gqa};
+    use gllm_kernels::compiler::InferenceCompiler;
+    use gllm_kernels::types::DType;
+
+    let kv_dim = num_kv_heads * head_dim;
+    let layer_stride = num_kv_heads * max_seq_len * head_dim;
+
+    // Extract current layer's K/V slice: [total_seq, kv_dim]
+    let k_layer = &kv_cache_k[layer * layer_stride..layer * layer_stride + total_seq * kv_dim];
+    let v_layer = &kv_cache_v[layer * layer_stride..layer * layer_stride + total_seq * kv_dim];
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, DType::F32);
+        let mut compiler = InferenceCompiler::new();
+        match compiler.compile_graph(&graph) {
+            Ok(compiled) => {
+                let (attn_out, _sparsity) = execute_cached_gqa(
+                    &compiled, q_rope, k_layer, v_layer,
+                    seq_len, num_heads, head_dim,
+                );
+                return attn_out;
+            }
+            Err(e) => {
+                // JIT compilation failed — propagate as panic (NO_SILENT_FALLBACK)
+                panic!("jit_cached_attention: JIT compilation failed: {e}");
+            }
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (positions, layer_stride);
+        compile_error!("jit_cached_attention requires x86_64 or aarch64");
+    }
+}
+
 /// CPU-side causal attention using cached K/V from GPU KV cache.
 ///
 /// q_rope: [seq_len, q_dim] — RoPE'd Q for new tokens
@@ -2327,7 +2383,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
 
             // CPU cached attention
-            let attn_out = cpu_cached_attention(
+            let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
             );
@@ -2712,7 +2768,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
 
             // CPU cached attention
-            let attn_out = cpu_cached_attention(
+            let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
             );
