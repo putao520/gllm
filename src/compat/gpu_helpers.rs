@@ -169,7 +169,7 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> Result<Vec<f32>, BE> {
     let hidden = config.hidden_size;
-    let eps = config.norm_eps;
+    let _eps = config.norm_eps;
 
     // Word embeddings
     let word_emb = get_f32_data_gpu(

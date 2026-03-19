@@ -248,13 +248,14 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     config: &GeneratorForwardConfig,
     pooling: PoolingMode,
 ) -> Result<Vec<f32>, BE> {
+    #[allow(unused_imports)]
     use gllm_kernels::Kernels;
 
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
         return Err(BE::Other("BERT encoder only supports f32 element type".into()));
     }
 
-    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
+    let _kern = gllm_kernels::backend::CpuKernels::<f32>::new();
     let transpose_weights = needs_weight_transpose(weights);
 
     let seq_len = tokens.len();

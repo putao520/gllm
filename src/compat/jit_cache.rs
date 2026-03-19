@@ -30,6 +30,7 @@ pub struct ModelArchKey {
 
 /// Identifies a specific compiled graph within an architecture.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum GraphType {
     QRope,
     Norm2,
@@ -195,6 +196,7 @@ impl LruCache {
         self.map.insert(key, value);
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.map.len()
     }

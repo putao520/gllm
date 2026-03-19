@@ -1,7 +1,7 @@
 use super::allocator::BlockAllocator;
 use super::hgal::{HGALConfig, HGALScheduler};
 use super::memory_manager::{
-    EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PrefillPlan, Tier, TierManager,
+    EvictionPolicy, GlobalMemoryManager, PrefillPlan, Tier, TierManager,
     VirtualPageId,
 };
 use super::prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};

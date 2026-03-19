@@ -3,8 +3,6 @@ use super::backend_trait;
 use super::cpu_backend::CpuBackend;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use super::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use crate::compat::DType;
 use super::jit_helpers::{
     build_decoder_layer_graph, build_final_norm_graph, build_kv_projection_graph,
     build_lm_head_graph, build_moe_pre_attention_graph, build_post_attention_graph,
@@ -56,6 +54,7 @@ struct MoeDecodeCachedJit {
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[allow(dead_code)]
 fn compile_moe_decode_jit(
     seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
@@ -166,6 +165,7 @@ fn build_q_rope_graph(
 /// Pre-compile invariant JIT graphs for incremental decode.
 /// GQA is NOT compiled here — it is lazily compiled on first use per unique total_seq value.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[allow(dead_code)]
 fn compile_decode_jit(
     seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
@@ -458,6 +458,7 @@ struct Gpt2CachedJit {
 }
 /// GQA is NOT compiled here — lazily compiled on first use per unique total_seq value.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[allow(dead_code)]
 fn compile_gpt2_jit(
     seq_len: usize,
     hidden: usize,
@@ -552,7 +553,7 @@ fn gpt2_forward_sequence<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         use gllm_kernels::compiler::{CompilerGraph, InferenceCompiler, OpKind};
-        use gllm_kernels::types::DType;
+        
         // Gather position embedding rows for this batch: [seq_len, hidden]
         let mut pos_rows = vec![0.0f32; seq_len * hidden];
         for s in 0..seq_len {
@@ -1284,7 +1285,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         }
 
                         // Step 2: Cached GQA attention — get cached CompiledLayer for this total_seq
-                        let (attn_out, layer_sparsity) = {
+                        let (attn_out, _layer_sparsity) = {
                             let gqa_compiled = get_or_compile_moe_gqa(moe_c, total_seq)?;
                             super::jit_helpers::execute_cached_gqa(
                                 gqa_compiled, &q_rope, &kv_cache_k, &kv_cache_v,
@@ -2166,9 +2167,9 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-            use crate::compat::DType as GllmDType;
+            
             use gllm_kernels::compiler::{CompilerGraph, OpKind};
-            use gllm_kernels::types::DType;
+            
             let key = JitCacheKey {
                 arch: ModelArchKey {
                     arch_name: "reranker_score".to_string(),
