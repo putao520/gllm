@@ -469,9 +469,10 @@ assert!(matches!(kernel_tensor.dtype, gllm_kernels::DType::Q4_0));
 ```
 
 **覆盖类型**:
-- P0 类型 (已实现): Q4_0, Q8_0, Q5_K
-- P1 类型 (待实现): Q4_K, Q6_K, Q8_K
-- P2 类型 (待实现): Q2_K, Q3_K
+- P0 类型 (已实现): Q4_0, Q8_0, Q5_K, F32, F16, BF16
+- P1 类型 (已实现): Q4_K, Q8_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ1_M
+- P2 类型 (已实现): Q2_K, TQ2_0, TQ1_0, MXFP4
+- 不支持类型 (返回 Err): Q5_0, Q5_1, Q6_K, Q3_K, Q5_K(5-bit), IQ3_XXS, IQ3_S, I16, I32, I64, F64
 
 ### 11.7 TEST-GGUF-011: 泛型约束验证
 
