@@ -1222,13 +1222,17 @@ impl FusedGraphExecutor {
             }
         }
 
-        // Build a flat KV cache pointer: combine K and V into a single *mut f32
-        // by passing kv_cache_k as the kv_cache argument (the compiled kernel
-        // uses the layer offset stored in the scratchpad config to locate its slice).
-        // The V pointer is passed via the positions slot when kv_cache_v is non-null;
-        // for now we pass kv_cache_k as the unified cache pointer and rely on the
-        // kernel's internal layer-stride arithmetic.
-        let _ = (kv_cache_v, layer, total_seq); // used by caller for layout; kernel uses kv_cache_k
+        // Build unified KV cache pointer for the compiled kernel.
+        // gllm KV cache layout: [K_all_layers | V_all_layers], each half is
+        // [num_layers][num_kv_heads][max_seq_len][head_dim].
+        // The compiled CachedGQA kernel receives kv_cache pointing to K start;
+        // it locates V by adding the half-buffer offset stored in its scratchpad config.
+        // We pass kv_cache_k directly — the kernel uses layer/head/seq strides internally.
+        // kv_cache_v is the V-half start pointer; we store it in the seq_lens slot
+        // (second pointer argument) so the kernel can access both halves.
+        let kv_cache_ptr = kv_cache_k as *mut u8;
+        let kv_cache_v_ptr = kv_cache_v as *mut u8;
+        let _ = (layer, total_seq); // used by caller for layout; kernel uses internal strides
 
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
@@ -1272,9 +1276,9 @@ impl FusedGraphExecutor {
                     } else {
                         weight_blob.as_ptr()
                     },
-                    kv_cache_k as *mut u8,
+                    kv_cache_ptr,
                     positions,
-                    std::ptr::null(),
+                    kv_cache_v_ptr as *const usize,
                     1,
                     seq_len,
                     output_buf.as_mut_ptr(),
