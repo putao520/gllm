@@ -583,6 +583,7 @@ impl Loader {
                     parallel::ParallelLoader::new(true),
                 )?;
                 self.safetensors = Some(loader);
+                self.format = WeightFormat::SafeTensors;
             }
         }
         Ok(self)
@@ -680,17 +681,17 @@ impl Loader {
                     .to_onnx_graph(&config)
                     .map_err(|e| LoaderError::Onnx(format!("Template to graph failed: {}", e)))
             }
-            WeightFormat::PyTorch => Err(LoaderError::Onnx(
-                "PyTorch format not supported for unified graph".to_string(),
-            )),
+            _ => unreachable!("PyTorch is converted to SafeTensors by load()"),
         }
     }
 
-    /// 检测模型架构
-    fn detect_architecture(&self) -> crate::manifest::ModelArchitecture {
+    /// 检测模型架构（统一入口）
+    ///
+    /// 优先级：GGUF metadata > 张量名称模式匹配 > manifest fallback
+    pub fn detect_architecture(&self) -> crate::manifest::ModelArchitecture {
         use crate::manifest::map_architecture_token;
 
-        // 优先从 GGUF metadata 获取
+        // 1. GGUF metadata
         if let Some(gguf) = &self.gguf {
             if let Ok(arch_str) = gguf.architecture() {
                 if let Some(arch) = map_architecture_token(arch_str) {
@@ -699,8 +700,58 @@ impl Loader {
             }
         }
 
-        // 从 manifest 获取
+        // 2. 张量名称模式匹配
+        if let Some(arch) = self.detect_architecture_from_tensors() {
+            return arch;
+        }
+
+        // 3. manifest fallback
         self.manifest.arch
+    }
+
+    /// 从张量名称推断架构
+    fn detect_architecture_from_tensors(&self) -> Option<crate::manifest::ModelArchitecture> {
+        use crate::manifest::ModelArchitecture;
+
+        let check_name = |name: &str| -> Option<ModelArchitecture> {
+            let lower = name.to_lowercase();
+            if lower.contains("bert") || lower.contains("roberta") {
+                return Some(ModelArchitecture::XlmR);
+            }
+            if lower.contains("gpt2") {
+                return Some(ModelArchitecture::GPT2Next);
+            }
+            if lower.contains("mistral") {
+                return Some(ModelArchitecture::Mistral3);
+            }
+            if lower.contains("encoder.layer.") || lower.contains("attention.self.query") {
+                return Some(ModelArchitecture::XlmR);
+            }
+            None
+        };
+
+        if let Some(st) = self.safetensors.as_ref() {
+            for meta in st.iter_tensors() {
+                if let Some(arch) = check_name(&meta.name) {
+                    return Some(arch);
+                }
+            }
+        }
+        if let Some(onnx) = self.onnx.as_ref() {
+            for meta in onnx.iter_tensors() {
+                if let Some(arch) = check_name(&meta.name) {
+                    return Some(arch);
+                }
+            }
+        }
+        if let Some(gguf) = self.gguf.as_ref() {
+            for meta in gguf.iter_tensors() {
+                if let Some(arch) = check_name(&meta.name) {
+                    return Some(arch);
+                }
+            }
+        }
+        None
     }
 
     pub fn set_manifest_if_missing(&mut self, manifest: &ModelManifest) {
@@ -775,11 +826,7 @@ impl Loader {
                 let provider = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
                 self.upload_provider(provider, backend)
             }
-            WeightFormat::PyTorch => {
-                // PyTorch is auto-converted to SafeTensors by load()
-                let provider = self.safetensors.as_ref().ok_or(LoaderError::MissingWeights)?;
-                self.upload_provider(provider, backend)
-            }
+            _ => unreachable!("PyTorch is converted to SafeTensors by load()"),
         }
     }
 

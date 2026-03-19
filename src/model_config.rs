@@ -128,23 +128,12 @@ impl ModelConfig {
             }
         }
 
-        // SafeTensors 格式：张量驱动推导 (REQ-LOADER-022)
-        // PyTorch format is auto-converted to SafeTensors by Loader::load(), so treat it the same.
-        if matches!(loader.weight_format(), WeightFormat::SafeTensors | WeightFormat::PyTorch) {
-            match Self::from_safetensors_loader_tensor_driven(manifest, loader) {
+        // SafeTensors / ONNX 格式：统一张量驱动推导 (REQ-LOADER-022, REQ-LOADER-023)
+        if matches!(loader.weight_format(), WeightFormat::SafeTensors | WeightFormat::Onnx) {
+            match Self::from_tensor_driven(manifest, loader) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
                     safetensors_metadata_error = Some(e);
-                }
-            }
-        }
-
-        // ONNX 格式：张量驱动推导 (REQ-LOADER-023)
-        if loader.weight_format() == WeightFormat::Onnx {
-            match Self::from_onnx_loader_tensor_driven(manifest, loader) {
-                Ok(config) => return Ok(config),
-                Err(err) => {
-                    safetensors_metadata_error = Some(err);
                 }
             }
         }
@@ -172,72 +161,77 @@ impl ModelConfig {
         Err(ModelConfigError::MissingConfig)
     }
 
-    fn from_safetensors_loader(
-        manifest: &ModelManifest,
-        loader: &mut Loader,
-    ) -> ModelConfigResult<Option<Self>> {
-        let Some(value) = loader
-            .safetensors_gllm_config()
-            .map_err(|err| {
-                ModelConfigError::InvalidConfig(format!(
-                    "failed to load safetensors gllm.config metadata: {err}"
-                ))
-            })?
-            .cloned()
-        else {
-            return Ok(None);
-        };
-
-        let weight_dtype_size = loader.detect_weight_dtype_size().map_err(|err| {
-            ModelConfigError::InvalidConfig(format!(
-                "failed to detect model dtype from weights: {err}"
-            ))
-        })?;
-
-        Self::from_value(manifest, &value, weight_dtype_size).map(Some)
-    }
-
-    /// REQ-LOADER-022: SafeTensors 张量驱动配置推导
+    /// REQ-LOADER-022 / REQ-LOADER-023: 统一张量驱动配置推导 (SafeTensors + ONNX)
     ///
     /// 遵循 ARCH-TENSOR-DRIVEN 原则：
-    /// - 优先级：张量形状 > gllm.config 元数据
+    /// - 优先级：张量形状 > 元数据
     /// - 从 embedding 张量推导 vocab_size（取较大维度）
     /// - 从 Q 投影张量推导 head_dim（q_out / num_heads）
     /// - 从权重张量 dtype 推导 dtype_size
-    fn from_safetensors_loader_tensor_driven(
+    fn from_tensor_driven(
         manifest: &ModelManifest,
         loader: &mut Loader,
     ) -> ModelConfigResult<Self> {
-        // Try to extract head_dim hint from config.json to disambiguate
-        // when q_out is divisible by multiple valid head_dims.
-        // This is NOT a fallback — tensor shapes remain the truth source;
-        // config.json only provides a hint to resolve ambiguity.
-        let hints = Self::extract_head_dim_hint_from_config(loader);
-
-        let derived = {
-            let st_loader = loader.safetensors_loader().map_err(|err| {
-                ModelConfigError::InvalidConfig(format!(
-                    "failed to access SafeTensors loader: {err}"
-                ))
-            })?;
-            derive_config_from_tensors_with_hints(st_loader, hints)?
+        // 1. Extract hints (SafeTensors: from config.json; ONNX: default)
+        let hints = match loader.weight_format() {
+            WeightFormat::SafeTensors => Self::extract_head_dim_hint_from_config(loader),
+            _ => TensorDeriveHints::default(),
         };
 
-        let base_value = loader
-            .safetensors_gllm_config()
-            .map_err(|err| {
-                ModelConfigError::InvalidConfig(format!(
-                    "failed to load safetensors gllm.config metadata: {err}"
-                ))
-            })?
-            .cloned()
-            .ok_or_else(|| {
-                ModelConfigError::InvalidConfig(
-                    "tensor-driven derivation requires gllm.config metadata for non-tensor fields"
-                        .to_string(),
-                )
-            })?;
+        // 2. Derive config from tensors via the active TensorProvider
+        let derived = match loader.weight_format() {
+            WeightFormat::SafeTensors => {
+                let st = loader.safetensors_loader().map_err(|err| {
+                    ModelConfigError::InvalidConfig(format!(
+                        "failed to access SafeTensors loader: {err}"
+                    ))
+                })?;
+                derive_config_from_tensors_with_hints(st, hints)?
+            }
+            WeightFormat::Onnx => {
+                let onnx = loader.onnx_loader().map_err(|err| {
+                    ModelConfigError::InvalidConfig(format!(
+                        "failed to access ONNX loader: {err}"
+                    ))
+                })?;
+                derive_config_from_tensors_with_hints(onnx, hints)?
+            }
+            _ => unreachable!("from_tensor_driven only called for SafeTensors/ONNX"),
+        };
 
+        // 3. Extract metadata value (SafeTensors: gllm.config; ONNX: onnx metadata)
+        let base_value = match loader.weight_format() {
+            WeightFormat::SafeTensors => loader
+                .safetensors_gllm_config()
+                .map_err(|err| {
+                    ModelConfigError::InvalidConfig(format!(
+                        "failed to load safetensors gllm.config metadata: {err}"
+                    ))
+                })?
+                .cloned()
+                .ok_or_else(|| {
+                    ModelConfigError::InvalidConfig(
+                        "tensor-driven derivation requires gllm.config metadata for non-tensor fields"
+                            .to_string(),
+                    )
+                })?,
+            WeightFormat::Onnx => {
+                let onnx = loader.onnx_loader().map_err(|err| {
+                    ModelConfigError::InvalidConfig(format!(
+                        "failed to access ONNX loader: {err}"
+                    ))
+                })?;
+                onnx_config_from_metadata(onnx)?.ok_or_else(|| {
+                    ModelConfigError::InvalidConfig(
+                        "tensor-driven ONNX derivation requires metadata attributes for non-tensor fields"
+                            .to_string(),
+                    )
+                })?
+            }
+            _ => unreachable!(),
+        };
+
+        // 4. Build config
         let base = Self::from_value(manifest, &base_value, Some(derived.dtype_size))?;
         apply_tensor_derived(base, derived)
     }
@@ -271,37 +265,6 @@ impl ModelConfig {
             },
             _ => TensorDeriveHints::default(),
         }
-    }
-
-    /// REQ-LOADER-023: ONNX 张量驱动配置推导
-    ///
-    /// 遵循 ARCH-TENSOR-DRIVEN 原则：
-    /// - 优先级：initializer 形状 > ONNX attributes
-    /// - 从 embedding initializer 推导 vocab_size（取较大维度）
-    /// - 从 Q 投影 initializer 推导 head_dim（q_out / num_heads）
-    /// - 从 initializer dtype 推导 dtype_size
-    fn from_onnx_loader_tensor_driven(
-        manifest: &ModelManifest,
-        loader: &mut Loader,
-    ) -> ModelConfigResult<Self> {
-        let (derived, onnx_metadata) = {
-            let onnx_loader = loader.onnx_loader().map_err(|err| {
-                ModelConfigError::InvalidConfig(format!("failed to access ONNX loader: {err}"))
-            })?;
-            let derived = derive_config_from_tensors(onnx_loader)?;
-            let metadata = onnx_config_from_metadata(onnx_loader)?;
-            (derived, metadata)
-        };
-
-        let base_value = onnx_metadata.ok_or_else(|| {
-            ModelConfigError::InvalidConfig(
-                "tensor-driven ONNX derivation requires metadata attributes for non-tensor fields"
-                    .to_string(),
-            )
-        })?;
-
-        let base = Self::from_value(manifest, &base_value, Some(derived.dtype_size))?;
-        apply_tensor_derived(base, derived)
     }
 
     fn from_gguf_loader(manifest: &ModelManifest, loader: &mut Loader) -> ModelConfigResult<Self> {
@@ -728,12 +691,6 @@ pub(crate) struct TensorDeriveHints {
 }
 
 const VALID_HEAD_DIMS: [usize; 6] = [32, 64, 80, 96, 128, 256];
-
-pub(crate) fn derive_config_from_tensors<P: TensorProvider>(
-    provider: &P,
-) -> ModelConfigResult<TensorDerivedConfig> {
-    derive_config_from_tensors_with_hints(provider, TensorDeriveHints::default())
-}
 
 pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
     provider: &P,
@@ -1574,7 +1531,7 @@ mod tests {
             ],
         };
 
-        let derived = derive_config_from_tensors(&provider).expect("tensor-driven derivation");
+        let derived = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default()).expect("tensor-driven derivation");
         assert_eq!(derived.hidden_size, 2816);
         assert_eq!(derived.vocab_size, 50000);
         assert_eq!(derived.head_dim, 32);
@@ -1599,7 +1556,7 @@ mod tests {
             ],
         };
 
-        let err = derive_config_from_tensors(&provider).expect_err("must reject ambiguity");
+        let err = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default()).expect_err("must reject ambiguity");
         assert!(
             err.to_string().contains("ambiguous"),
             "unexpected error: {err}"
@@ -1618,7 +1575,7 @@ mod tests {
             ],
         };
 
-        let err = derive_config_from_tensors(&provider).expect_err("must reject mismatch");
+        let err = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default()).expect_err("must reject mismatch");
         assert!(
             err.to_string().contains("cross-layer") || err.to_string().contains("ambiguous"),
             "unexpected error: {err}"

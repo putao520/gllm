@@ -17,7 +17,7 @@ use crate::graph::{
 };
 use crate::loader::onnx::OnnxGraph;
 use crate::loader::{Loader, LoaderError, WeightFormat, WeightsHandle};
-use crate::manifest::{map_architecture_token, ModelArchitecture, ModelManifest};
+use crate::manifest::{ModelArchitecture, ModelManifest};
 
 /// 统一推理管道错误
 #[derive(Debug, thiserror::Error)]
@@ -80,7 +80,8 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         loader = loader.load()?;
 
         // 1. 检测架构并获取模板
-        let arch = detect_architecture(&loader, manifest);
+        loader.set_manifest_if_missing(manifest);
+        let arch = loader.detect_architecture();
         let (template, config) = resolve_template_and_config(&loader, arch)?;
 
         // 2. 生成或获取 OnnxGraph
@@ -191,19 +192,6 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
     pub fn execution_op_count(&self) -> usize {
         self.execution_plan.op_count()
     }
-}
-
-/// 检测模型架构
-fn detect_architecture(loader: &Loader, manifest: &ModelManifest) -> ModelArchitecture {
-    // 优先从 GGUF metadata 获取
-    if let Ok(arch_str) = loader.gguf_architecture() {
-        if let Some(arch) = map_architecture_token(arch_str) {
-            return arch;
-        }
-    }
-
-    // 回退到 manifest
-    manifest.arch
 }
 
 /// 解析模板和配置

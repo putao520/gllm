@@ -14,7 +14,7 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::loader::{Loader, LoaderConfig, LoaderError, TensorProvider, WeightFormat};
+use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
     map_architecture_token, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
@@ -282,6 +282,7 @@ impl Client {
             }
             WeightFormat::SafeTensors | WeightFormat::Onnx | WeightFormat::PyTorch => {
                 // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
+                // PyTorch is auto-converted to SafeTensors by load()
                 loader = loader.load()?;
 
                 // 1. Validate Topology via ModelConfig
@@ -300,9 +301,7 @@ impl Client {
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
                 // 2. Detect Architecture from Tensor Names
-                let arch = detect_architecture(&loader).ok_or_else(|| {
-                    ClientError::UnknownModel("failed to detect model architecture from tensor names".into())
-                })?;
+                let arch = loader.detect_architecture();
 
                 // 3. Build MoE config from derived metadata
                 let moe_config = derived_config.build_moe_config(arch);
@@ -351,50 +350,6 @@ impl Client {
             .write()
             .map_err(|_| ClientError::ExecutorPoisoned)
     }
-}
-
-fn detect_architecture(loader: &Loader) -> Option<ModelArchitecture> {
-    let check_name = |name: &str| -> Option<ModelArchitecture> {
-        let lower = name.to_lowercase();
-        if lower.contains("bert") || lower.contains("roberta") {
-            return Some(ModelArchitecture::XlmR);
-        }
-        if lower.contains("gpt2") {
-            return Some(ModelArchitecture::GPT2Next);
-        }
-        if lower.contains("mistral") {
-            return Some(ModelArchitecture::Mistral3);
-        }
-        // BERT-family bare names (no "bert." prefix): encoder.layer.N.attention.self.query
-        if lower.contains("encoder.layer.") || lower.contains("attention.self.query") {
-            return Some(ModelArchitecture::XlmR);
-        }
-        None
-    };
-
-    match loader.weight_format() {
-        WeightFormat::SafeTensors | WeightFormat::PyTorch => {
-            if let Some(st) = loader.safetensors_ref() {
-                for meta in st.iter_tensors() {
-                    if let Some(arch) = check_name(&meta.name) {
-                        return Some(arch);
-                    }
-                }
-            }
-        }
-        WeightFormat::Onnx => {
-            if let Some(onnx) = loader.onnx_ref() {
-                for meta in onnx.iter_tensors() {
-                    if let Some(arch) = check_name(&meta.name) {
-                        return Some(arch);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    // Default to Llama4 for most modern LLMs (Qwen, Llama, etc share similar structure)
-    Some(ModelArchitecture::Llama4)
 }
 
 impl AsyncClient {
