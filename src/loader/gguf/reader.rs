@@ -826,4 +826,146 @@ mod tests {
         // 缺失任意 key 时 get_metadata_u64 返回 None，不 panic
         assert!(reader.get_metadata_u64("nonexistent.key").is_none());
     }
+
+    /// TEST-GGUF-001: 头部解析 — magic, version, tensor_count, kv_count
+    #[test]
+    fn test_gguf_001_header_parsing() {
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("llama"))),
+            ("llama.context_length", GgufValue::Uint64(4096)),
+        ]);
+        let reader = parse_from_bytes(bytes).expect("parse GGUF");
+        assert_eq!(reader.version(), 3);
+        assert_eq!(reader.tensor_count(), 0);
+        assert_eq!(reader.kv_count(), 2);
+    }
+
+    /// TEST-GGUF-003: Tensor info 解析 — name, dtype, shape, offset
+    #[test]
+    fn test_gguf_003_tensor_info_parsing() {
+        // Build GGUF with one F32 tensor of shape [4, 8]
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes()); // version
+        buf.extend_from_slice(&1u64.to_le_bytes()); // tensor_count = 1
+        buf.extend_from_slice(&0u64.to_le_bytes()); // kv_count = 0
+
+        // tensor info: name="weight", n_dims=2, shape=[4,8], dtype=F32(0), rel_offset=0
+        let name = "weight";
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes()); // n_dims
+        buf.extend_from_slice(&4u64.to_le_bytes()); // dim0
+        buf.extend_from_slice(&8u64.to_le_bytes()); // dim1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // dtype = F32
+        buf.extend_from_slice(&0u64.to_le_bytes()); // rel_offset = 0
+
+        // alignment padding (32)
+        let pos = buf.len();
+        let aligned = (pos + 31) & !31;
+        buf.resize(aligned, 0u8);
+
+        // tensor data: 4*8*4 = 128 bytes of F32
+        buf.extend(vec![0u8; 128]);
+
+        let reader = parse_from_bytes(buf).expect("parse GGUF with tensor");
+        assert_eq!(reader.tensor_count(), 1);
+
+        let info = reader.tensor_info("weight").expect("tensor info");
+        assert_eq!(info.dtype, GgmlDType::F32);
+        assert_eq!(info.shape, vec![4u64, 8u64]);
+        assert_eq!(info.size, 128);
+    }
+
+    /// TEST-GGUF-006: TensorSlice 零拷贝 — data() 返回原始字节，不复制
+    #[test]
+    fn test_gguf_006_tensor_slice_zero_copy() {
+        // Build GGUF with one F32 tensor, data = [1.0, 2.0, 3.0, 4.0]
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes()); // tensor_count
+        buf.extend_from_slice(&0u64.to_le_bytes()); // kv_count
+
+        let name = "vec";
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // n_dims=1
+        buf.extend_from_slice(&4u64.to_le_bytes()); // shape=[4]
+        buf.extend_from_slice(&0u32.to_le_bytes()); // dtype=F32
+        buf.extend_from_slice(&0u64.to_le_bytes()); // rel_offset=0
+
+        let pos = buf.len();
+        let aligned = (pos + 31) & !31;
+        buf.resize(aligned, 0u8);
+
+        // data: 1.0f32, 2.0f32, 3.0f32, 4.0f32
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let reader = parse_from_bytes(buf).expect("parse GGUF");
+        let slice = reader.tensor("vec").expect("tensor slice");
+        assert_eq!(slice.dtype(), GgmlDType::F32);
+        let data = slice.as_bytes();
+        assert_eq!(data.len(), 16); // 4 * 4 bytes
+        let vals: Vec<f32> = data.chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// TEST-GGUF-007: 无效 magic 检测 — 返回 InvalidMagic 错误
+    #[test]
+    fn test_gguf_007_invalid_magic() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0xDEADBEEFu32.to_le_bytes()); // wrong magic
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.resize(32, 0u8);
+
+        let result = parse_from_bytes(buf);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), GgufError::InvalidMagic(_)));
+    }
+
+    /// TEST-GGUF-008: 缺失元数据处理 — tokenizer_tokens 缺失时返回 MissingMetadata
+    #[test]
+    fn test_gguf_008_missing_metadata() {
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("llama"))),
+            // tokenizer.ggml.tokens 故意缺失
+        ]);
+        let reader = parse_from_bytes(bytes).expect("parse GGUF");
+        let result = reader.tokenizer_tokens();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), GgufError::MissingMetadata(_)));
+    }
+
+    /// TEST-GGUF-009: Tensor 边界检查 — rel_offset 超出文件大小时返回错误
+    #[test]
+    fn test_gguf_009_tensor_bounds_check() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes()); // tensor_count=1
+        buf.extend_from_slice(&0u64.to_le_bytes()); // kv_count=0
+
+        let name = "oob";
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // n_dims=1
+        buf.extend_from_slice(&4u64.to_le_bytes()); // shape=[4]
+        buf.extend_from_slice(&0u32.to_le_bytes()); // dtype=F32
+        buf.extend_from_slice(&99999u64.to_le_bytes()); // rel_offset way out of bounds
+
+        let pos = buf.len();
+        let aligned = (pos + 31) & !31;
+        buf.resize(aligned, 0u8);
+        // no actual tensor data
+
+        let result = parse_from_bytes(buf);
+        assert!(result.is_err(), "out-of-bounds tensor must fail to parse");
+    }
 }
