@@ -532,14 +532,47 @@ fn gpt2_forward_sequence<E: Element>(
         weights, backend,
         &crate::weight_names::gpt2_position_embed_aliases(),
     )?;
-    for s in 0..seq_len {
-        let pos = positions[s] as usize;
-        let pos_off = pos * hidden;
-        let h_off = s * hidden;
-        for i in 0..hidden {
-            hidden_state[h_off + i] += pos_embed[pos_off + i];
+    // Add learned position embeddings via JIT (OpKind::Add)
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        use gllm_kernels::compiler::{CompilerGraph, InferenceCompiler, OpKind};
+        use gllm_kernels::types::DType;
+        // Gather position embedding rows for this batch: [seq_len, hidden]
+        let mut pos_rows = vec![0.0f32; seq_len * hidden];
+        for s in 0..seq_len {
+            let pos = positions[s] as usize;
+            pos_rows[s * hidden..(s + 1) * hidden]
+                .copy_from_slice(&pos_embed[pos * hidden..(pos + 1) * hidden]);
         }
+        let mut g = CompilerGraph::new();
+        let a = g.add_tensor_concrete("a", &[seq_len, hidden], DType::F32);
+        let b = g.add_tensor_concrete("b", &[seq_len, hidden], DType::F32);
+        g.inputs = vec![a, b];
+        let out = g.add_tensor_concrete("out", &[seq_len, hidden], DType::F32);
+        g.add_op(OpKind::Add, vec![a, b], vec![out], "pos_add");
+        g.outputs = vec![out];
+        let mut compiler = InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&g)
+            .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
+        let weights_buf = super::jit_helpers::pack_weights(&[&pos_rows]);
+        let mut result = vec![0.0f32; seq_len * hidden];
+        let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+        unsafe {
+            compiled.execute(
+                hidden_state.as_ptr() as *const u8,
+                weights_buf.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, seq_len,
+                result.as_mut_ptr() as *mut u8,
+                scratchpad.as_mut_ptr(),
+            );
+        }
+        hidden_state.copy_from_slice(&result);
     }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("position embedding add requires JIT support (x86_64 or aarch64)");
 
     // Determine KV cache state
     let has_kv_cache = seq_idx < kv_caches.len();
