@@ -597,7 +597,9 @@ fn gpt2_forward_sequence<E: Element>(
         let store = backend.kv_store().lock().map_err(|e| {
             BE::Cpu(format!("KV store lock poisoned: {e}"))
         })?;
-        store.get(&kv_caches[seq_idx].0).map(|b| b.seq_len).unwrap_or(0)
+        store.get(&kv_caches[seq_idx].0)
+            .ok_or_else(|| BE::Cpu(format!("KV cache entry missing for handle {:?}", kv_caches[seq_idx].0)))?
+            .seq_len
     } else {
         0
     };
@@ -924,7 +926,9 @@ pub(crate) fn decoder_forward<E: Element>(
                     buf.seq_len = 0;
                 }
             }
-            store.get(&kv_caches[seq_idx].0).map(|b| b.seq_len).unwrap_or(0)
+            store.get(&kv_caches[seq_idx].0)
+                .ok_or_else(|| BE::Cpu(format!("KV cache entry missing for handle {:?}", kv_caches[seq_idx].0)))?
+                .seq_len
         } else {
             0
         };
@@ -1003,7 +1007,9 @@ pub(crate) fn decoder_forward<E: Element>(
                 let store = backend.kv_store().lock().map_err(|e| {
                     BE::Cpu(format!("KV store lock poisoned: {e}"))
                 })?;
-                store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(0)
+                store.get(&kv_caches[seq_idx].0)
+                    .ok_or_else(|| BE::Cpu(format!("KV cache entry missing for handle {:?}", kv_caches[seq_idx].0)))?
+                    .max_seq_len
             };
 
             // Pre-compile all invariant JIT graphs for this decode step (once per model instance).

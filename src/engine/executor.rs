@@ -440,7 +440,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rope_precompute: true,
             position_encoding,
             arch_family: manifest.arch.family(),
-            intermediate_size: model_config.intermediate_size.unwrap_or(0),
+            intermediate_size: model_config.intermediate_size.ok_or_else(|| {
+                ExecutorError::Config(ModelConfigError::InvalidConfig(
+                    "model config missing intermediate_size (FFN hidden dimension)".to_string(),
+                ))
+            })?,
             norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12),
             rerank_yes_token_id: None,
             rerank_no_token_id: None,

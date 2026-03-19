@@ -531,16 +531,25 @@ impl TensorProvider for GgufReader {
     }
 
     fn iter_tensors(&self) -> impl Iterator<Item = TensorMeta> {
-        self.tensors.iter().map(|info| {
+        self.tensors.iter().filter_map(|info| {
             let mut shape = Vec::with_capacity(info.shape.len());
             for &dim in &info.shape {
-                shape.push(usize::try_from(dim).unwrap_or(0));
+                match usize::try_from(dim) {
+                    Ok(d) => shape.push(d),
+                    Err(_) => {
+                        log::error!(
+                            "GGUF tensor '{}' has dimension {} that overflows usize, skipping",
+                            info.name, dim
+                        );
+                        return None;
+                    }
+                }
             }
-            TensorMeta {
+            Some(TensorMeta {
                 name: info.name.to_string(),
                 shape,
                 dtype: gguf_dtype_to_safetensors_dtype(info.dtype),
-            }
+            })
         })
     }
 

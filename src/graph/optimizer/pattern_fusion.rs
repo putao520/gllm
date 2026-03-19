@@ -292,7 +292,13 @@ impl OptimizationPass for MoERoutingFusionPass {
                 return None;
             }
 
-            let num_experts = find_num_experts(router).unwrap_or(0);
+            let num_experts = find_num_experts(router).unwrap_or_else(|| {
+                log::warn!(
+                    "MoE pattern fusion: could not determine num_experts from router node '{}', using 0 (runtime-determined)",
+                    router.name
+                );
+                0
+            });
             let top_k = find_top_k(topk).unwrap_or(2);
             let capacity_factor = find_capacity_factor(dispatch).unwrap_or(1.0);
 
