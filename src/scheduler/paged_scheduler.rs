@@ -1,10 +1,13 @@
 use super::allocator::BlockAllocator;
 use super::hgal::{HGALConfig, HGALScheduler};
+use super::memory_manager::{
+    EvictionPolicy, GlobalMemoryManager, MemoryManagerError, PrefillPlan, Tier, TierManager,
+    VirtualPageId,
+};
 use super::prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
-use super::types::{GroupState, SequenceGroup};
+use super::types::{GroupState, PageMetadata, SequenceGroup};
 use super::vllm2024::{Scheduler2024Config, Scheduler2024State};
 use super::types::{PageId, PageState, RequestId, StorageKey};
-use crate::scheduler::memory_manager::VirtualPageId;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -67,10 +70,14 @@ pub struct PagedScheduler {
     pub(crate) vllm_state: Option<Scheduler2024State>,
     /// KV cache prefix tree for prompt sharing across requests.
     pub(crate) prefix_index: KvPrefixIndex,
+    /// OS-style three-tier KV memory manager (L1 GPU / L2 CPU / L3 NVMe).
+    pub(crate) memory_manager: GlobalMemoryManager,
 }
 
 impl PagedScheduler {
     pub fn new(total_blocks: usize, block_size: usize, hgal_config: HGALConfig) -> Self {
+        // Default: all blocks in L1 (GPU), L2/L3 empty (can be reconfigured via new_with_tiers)
+        let memory_manager = GlobalMemoryManager::new_with_capacities(total_blocks, 0, 0);
         Self {
             hgal: HGALScheduler::new(hgal_config),
             allocator: BlockAllocator::new(block_size, total_blocks),
@@ -80,6 +87,33 @@ impl PagedScheduler {
             block_size,
             vllm_state: None,
             prefix_index: KvPrefixIndex::new(),
+            memory_manager,
+        }
+    }
+
+    /// Create with explicit tier capacities (L1=GPU, L2=CPU, L3=NVMe).
+    pub fn new_with_tiers(
+        total_blocks: usize,
+        block_size: usize,
+        hgal_config: HGALConfig,
+        l1_capacity: usize,
+        l2_capacity: usize,
+        l3_capacity: usize,
+    ) -> Self {
+        let memory_manager = GlobalMemoryManager::new(
+            TierManager::new(l1_capacity, l2_capacity, l3_capacity),
+            EvictionPolicy::default(),
+        );
+        Self {
+            hgal: HGALScheduler::new(hgal_config),
+            allocator: BlockAllocator::new(block_size, total_blocks),
+            block_tables: HashMap::new(),
+            swapped_storage_keys: HashMap::new(),
+            pending_swap_ins: HashMap::new(),
+            block_size,
+            vllm_state: None,
+            prefix_index: KvPrefixIndex::new(),
+            memory_manager,
         }
     }
 
@@ -128,7 +162,7 @@ impl PagedScheduler {
         }
 
         let mut allocated = Vec::new();
-        for _ in 0..needed_blocks {
+        for logical_idx in 0..needed_blocks {
             let block = self
                 .allocator
                 .allocate()
@@ -137,6 +171,11 @@ impl PagedScheduler {
                 })?;
             allocated.push(block);
             self.hgal.mark_accessed(block);
+
+            // Register in GMM page table (L1 tier)
+            let virtual_id = VirtualPageId::new(group.id, logical_idx);
+            let _ = self.memory_manager.track_page(Tier::L1, block as usize);
+            let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
         }
 
         let mut block_table = BlockTable::new();
@@ -147,6 +186,72 @@ impl PagedScheduler {
         self.hgal.upsert_group(group);
 
         Ok(())
+    }
+
+    /// Add a sequence with prefix reuse: checks the prefix tree first, reuses matched pages.
+    /// Returns the number of tokens that were reused from the prefix cache.
+    pub fn add_sequence_with_prefix_reuse(
+        &mut self,
+        mut group: SequenceGroup,
+        tokens: &[TokenId],
+    ) -> Result<usize, SchedulerError> {
+        // Check prefix tree for longest matching prefix
+        let prefix_match = self.prefix_index.find_longest_prefix(tokens);
+        let reused_tokens = prefix_match.as_ref().map(|m| m.matched_tokens).unwrap_or(0);
+        let reused_blocks = reused_tokens.div_ceil(self.block_size.max(1));
+
+        // Only allocate blocks for the non-reused portion
+        let new_blocks_needed = group.context_len.saturating_sub(reused_tokens).div_ceil(self.block_size.max(1));
+        let free_blocks = self.allocator.get_num_free_blocks();
+
+        if free_blocks < new_blocks_needed {
+            return Err(SchedulerError::OutOfMemory {
+                operation: "add_sequence_with_prefix_reuse",
+                needed_blocks: new_blocks_needed,
+                free_blocks,
+            });
+        }
+
+        let mut allocated = Vec::new();
+
+        // Reuse prefix blocks as read-only virtual mappings (copy-on-write semantics)
+        if let Some(ref prefix) = prefix_match {
+            for (logical_idx, &vpid) in prefix.matched_pages.iter().enumerate().take(reused_blocks) {
+                // Resolve the physical page from GMM
+                if let Ok((tier, physical_id)) = self.memory_manager.resolve(vpid) {
+                    let new_vpid = VirtualPageId::new(group.id, logical_idx);
+                    let _ = self.memory_manager.bind_virtual_page(new_vpid, tier, physical_id);
+                    allocated.push(physical_id as PageId);
+                    self.hgal.mark_accessed(physical_id as PageId);
+                }
+            }
+        }
+
+        // Allocate new blocks for the remaining tokens
+        let already_allocated = allocated.len();
+        for logical_idx in already_allocated..(already_allocated + new_blocks_needed) {
+            let block = self
+                .allocator
+                .allocate()
+                .ok_or(SchedulerError::AllocatorInvariant {
+                    operation: "add_sequence_with_prefix_reuse",
+                })?;
+            allocated.push(block);
+            self.hgal.mark_accessed(block);
+
+            let virtual_id = VirtualPageId::new(group.id, logical_idx);
+            let _ = self.memory_manager.track_page(Tier::L1, block as usize);
+            let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
+        }
+
+        let mut block_table = BlockTable::new();
+        block_table.blocks = allocated.clone();
+        self.block_tables.insert(group.id, block_table);
+
+        group.pages = allocated;
+        self.hgal.upsert_group(group);
+
+        Ok(reused_tokens)
     }
 
     /// Query the prefix tree for the longest matching prefix of `tokens`.
@@ -236,6 +341,7 @@ impl PagedScheduler {
             })?
             .blocks
             .push(block);
+        let logical_idx = self.block_tables[&request_id].blocks.len() - 1;
         self.hgal
             .sequence_groups
             .get_mut(&request_id)
@@ -246,6 +352,11 @@ impl PagedScheduler {
             .pages
             .push(block);
         self.hgal.mark_accessed(block);
+
+        // Register new block in GMM
+        let virtual_id = VirtualPageId::new(request_id, logical_idx);
+        let _ = self.memory_manager.track_page(Tier::L1, block as usize);
+        let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
 
         Ok(Some(block))
     }
@@ -353,10 +464,12 @@ impl PagedScheduler {
 
     pub fn free_sequence(&mut self, request_id: RequestId) {
         if let Some(block_table) = self.block_tables.remove(&request_id) {
-            for block in block_table.blocks {
-                self.allocator.free(block);
-                // Also update HGAL metadata if needed, though remove_group handles group logic
-                // But HGAL page metadata might need clearing
+            for (logical_idx, block) in block_table.blocks.iter().enumerate() {
+                self.allocator.free(*block);
+                // Unmap from GMM page table
+                let virtual_id = VirtualPageId::new(request_id, logical_idx);
+                self.memory_manager.unmap_virtual_page(virtual_id);
+                let _ = self.memory_manager.free_page(Tier::L1, *block as usize);
             }
         }
         self.swapped_storage_keys.remove(&request_id);
@@ -415,6 +528,46 @@ impl PagedScheduler {
 
     pub fn num_free_blocks(&self) -> usize {
         self.allocator.get_num_free_blocks()
+    }
+
+    /// Plan prefill page allocation strategy via GlobalMemoryManager.
+    /// Returns FullyResident if L1 has capacity, Pipelined otherwise.
+    pub fn plan_prefill(&mut self, prompt_tokens: usize, chunk_size: usize) -> PrefillPlan {
+        self.memory_manager.plan_prefill(prompt_tokens, chunk_size, self.block_size)
+    }
+
+    /// Migrate a physical page from one tier to another, updating the GMM page table.
+    /// Returns the new physical page ID in the destination tier.
+    pub fn migrate_to_tier(
+        &mut self,
+        request_id: RequestId,
+        logical_idx: usize,
+        dst_tier: Tier,
+    ) -> Result<usize, SchedulerError> {
+        let virtual_id = VirtualPageId::new(request_id, logical_idx);
+        let (src_tier, src_id) = self.memory_manager.resolve(virtual_id)
+            .map_err(|_| SchedulerError::MissingGroup { request_id, context: "gmm.resolve" })?;
+        if src_tier == dst_tier {
+            return Ok(src_id);
+        }
+        self.memory_manager.migrate_page(src_tier, dst_tier, src_id)
+            .map_err(|_| SchedulerError::AllocatorInvariant { operation: "migrate_to_tier" })
+    }
+
+    /// Select eviction victims using GMM's HGAL-aware eviction policy.
+    /// `metadata` and `semantic_priorities` come from the HGAL scheduler.
+    pub fn select_victims_gmm(
+        &self,
+        metadata: &std::collections::HashMap<PageId, PageMetadata>,
+        semantic_priorities: &std::collections::HashMap<PageId, i32>,
+        count: usize,
+    ) -> Vec<PageId> {
+        self.memory_manager.select_victims(metadata, semantic_priorities, count)
+    }
+
+    /// Expose tier usage for observability.
+    pub fn tier_usage(&self, tier: Tier) -> super::memory_manager::TierUsage {
+        self.memory_manager.tier_usage(tier)
     }
 }
 
@@ -486,5 +639,93 @@ mod tests {
             .take_pending_swap_in(request_id)
             .expect("pending swap-in expected");
         assert_eq!(mappings.len(), 2);
+    }
+
+    /// GMM 集成：add_sequence 后 GMM 页表应有正确映射
+    #[test]
+    fn gmm_page_table_tracks_allocated_blocks() {
+        let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
+        scheduler.add_sequence(make_group(1, 8)).expect("add");
+
+        // 2 blocks for 8 tokens with block_size=4
+        let usage = scheduler.tier_usage(Tier::L1);
+        assert_eq!(usage.used, 2);
+
+        // Virtual pages should resolve
+        let v0 = VirtualPageId::new(1, 0);
+        let v1 = VirtualPageId::new(1, 1);
+        assert!(scheduler.memory_manager.resolve(v0).is_ok());
+        assert!(scheduler.memory_manager.resolve(v1).is_ok());
+    }
+
+    /// GMM 集成：free_sequence 后 GMM 页表应清除映射
+    #[test]
+    fn gmm_page_table_cleared_on_free_sequence() {
+        let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
+        scheduler.add_sequence(make_group(2, 4)).expect("add");
+
+        let usage_before = scheduler.tier_usage(Tier::L1);
+        assert_eq!(usage_before.used, 1);
+
+        scheduler.free_sequence(2);
+
+        let usage_after = scheduler.tier_usage(Tier::L1);
+        assert_eq!(usage_after.used, 0);
+
+        let v0 = VirtualPageId::new(2, 0);
+        assert!(scheduler.memory_manager.resolve(v0).is_err());
+    }
+
+    /// 前缀树集成：add_sequence_with_prefix_reuse 命中前缀时复用页面
+    #[test]
+    fn prefix_reuse_reduces_new_allocations() {
+        let mut scheduler = PagedScheduler::new(16, 4, HGALConfig::default());
+
+        // 先添加一个请求并记录前缀
+        let tokens: Vec<u32> = (0..8).collect();
+        scheduler.add_sequence(make_group(1, 8)).expect("add first");
+        scheduler.insert_prefix(1, &tokens);
+
+        let free_before = scheduler.num_free_blocks();
+
+        // 第二个请求共享前 8 个 token 的前缀
+        let tokens2: Vec<u32> = (0..12).collect();
+        let reused = scheduler
+            .add_sequence_with_prefix_reuse(make_group(2, 12), &tokens2)
+            .expect("add with prefix reuse");
+
+        // 应该复用了 8 个 token
+        assert_eq!(reused, 8);
+
+        // 只需分配 1 个新 block（12-8=4 tokens = 1 block），而非 3 个
+        let free_after = scheduler.num_free_blocks();
+        assert_eq!(free_before - free_after, 1);
+    }
+
+    /// plan_prefill 代理：L1 充足时返回 FullyResident
+    #[test]
+    fn plan_prefill_delegates_to_gmm() {
+        let mut scheduler = PagedScheduler::new_with_tiers(
+            16, 4, HGALConfig::default(), 16, 8, 0,
+        );
+        let plan = scheduler.plan_prefill(16, 16);
+        assert_eq!(plan, PrefillPlan::FullyResident { pages: 4 });
+    }
+
+    /// allocate_next_token 新块注册到 GMM
+    #[test]
+    fn allocate_next_token_registers_in_gmm() {
+        let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
+        scheduler.add_sequence(make_group(3, 4)).expect("add");
+
+        let usage_before = scheduler.tier_usage(Tier::L1);
+
+        // 触发新块分配（第 5 个 token 需要第 2 个 block）
+        for _ in 0..4 {
+            scheduler.allocate_next_token(3).expect("alloc token");
+        }
+
+        let usage_after = scheduler.tier_usage(Tier::L1);
+        assert!(usage_after.used > usage_before.used);
     }
 }
