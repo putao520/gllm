@@ -556,7 +556,9 @@ fn gpt2_forward_sequence<E: Element>(
         let store = backend.kv_store().lock().map_err(|e| {
             BE::Cpu(format!("KV store lock poisoned: {e}"))
         })?;
-        store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(1024)
+        store.get(&kv_caches[seq_idx].0)
+            .map(|b| b.max_seq_len)
+            .ok_or_else(|| BE::Cpu("GPT-2: KV cache entry missing for seq_idx".into()))?
     } else {
         1024
     };
@@ -622,12 +624,15 @@ fn gpt2_forward_sequence<E: Element>(
                 arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
             ).expect("clone CompiledLayer from Arc")
         };
+        // Seed gqa_cache from L1 accumulated entries (REQ-JIT-CACHE-001 criterion 4).
+        let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
+            l1.gpt2_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
         Gpt2CachedJit {
             ln_qkv: clone_arc(l1.gpt2_ln_qkv.as_ref().unwrap()),
             o_proj: clone_arc(l1.gpt2_o_proj.as_ref().unwrap()),
             ln_mlp: clone_arc(l1.gpt2_ln_mlp.as_ref().unwrap()),
             final_ln_lm_head: clone_arc(l1.gpt2_final_ln_lm_head.as_ref().unwrap()),
-            gqa_cache: std::collections::HashMap::new(),
+            gqa_cache,
             seq_len, num_heads, head_dim,
         }
     };
@@ -731,6 +736,21 @@ fn gpt2_forward_sequence<E: Element>(
 
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         hidden_state.copy_from_slice(&resid2);
+    }
+
+    // Writeback GPT-2 gqa_cache entries to L1 (REQ-JIT-CACHE-001 criterion 4).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+        for (ts, compiled) in jit.gqa_cache.drain() {
+            l1.gpt2_gqa_cache.entry(ts).or_insert_with(|| {
+                std::sync::Arc::new(
+                    gllm_kernels::compiler::CompiledLayer::from_code(
+                        compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+                    ).expect("clone CompiledLayer for GPT-2 L1 writeback")
+                )
+            });
+        }
     }
 
     // Final LayerNorm + lm_head via JIT
@@ -1047,7 +1067,7 @@ pub(crate) fn decoder_forward<E: Element>(
             }
 
             // Build thin wrappers that borrow from L1 cache Arcs.
-            // These are cheap (Arc clone = refcount bump) and hold no compiled code themselves.
+            // Seed gqa_cache from L1 so previously compiled entries are reused (REQ-JIT-CACHE-001).
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             let mut decode_jit = {
                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
@@ -1056,10 +1076,13 @@ pub(crate) fn decoder_forward<E: Element>(
                         arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
                     ).expect("clone CompiledLayer from Arc")
                 };
+                // Seed gqa_cache from L1 accumulated entries.
+                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
+                    l1.gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
                 DecodeCachedJit {
                     q_rope: clone_arc(l1.q_rope.as_ref().unwrap()),
                     norm2: clone_arc(l1.norm2.as_ref().unwrap()),
-                    gqa_cache: std::collections::HashMap::new(),
+                    gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                 }
             };
@@ -1072,11 +1095,14 @@ pub(crate) fn decoder_forward<E: Element>(
                         arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
                     ).expect("clone CompiledLayer from Arc")
                 };
+                // Seed moe_gqa_cache from L1 accumulated entries.
+                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> =
+                    l1.moe_gqa_cache.iter().map(|(&ts, arc)| (ts, clone_arc(arc))).collect();
                 Some(MoeDecodeCachedJit {
                     pre_attn: clone_arc(l1.moe_pre_attn.as_ref().unwrap()),
                     o_gemm: clone_arc(l1.moe_o_gemm.as_ref().unwrap()),
                     norm2: clone_arc(l1.moe_norm2.as_ref().unwrap()),
-                    gqa_cache: std::collections::HashMap::new(),
+                    gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
                 })
             } else {
@@ -1259,6 +1285,28 @@ pub(crate) fn decoder_forward<E: Element>(
                 }
 
                 hidden_state.copy_from_slice(&layer_out);
+            }
+
+            // Writeback gqa_cache entries to L1 so they survive across inference calls.
+            // REQ-JIT-CACHE-001 criterion 4: gqa_cache accumulates across calls.
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            {
+                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+                let clone_arc = |layer: &gllm_kernels::compiler::CompiledLayer| {
+                    std::sync::Arc::new(
+                        gllm_kernels::compiler::CompiledLayer::from_code(
+                            layer.code_bytes(), layer.scratchpad_bytes, layer.config_hash,
+                        ).expect("clone CompiledLayer for L1 writeback")
+                    )
+                };
+                for (ts, compiled) in decode_jit.gqa_cache.drain() {
+                    l1.gqa_cache.entry(ts).or_insert_with(|| clone_arc(&compiled));
+                }
+                if let Some(ref mut mj) = moe_jit {
+                    for (ts, compiled) in mj.gqa_cache.drain() {
+                        l1.moe_gqa_cache.entry(ts).or_insert_with(|| clone_arc(&compiled));
+                    }
+                }
             }
         } else if moe_num_experts > 0 {
             // ── MoE Prefill path: scalar execution with expert routing ──

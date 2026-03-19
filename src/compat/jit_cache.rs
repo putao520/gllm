@@ -334,6 +334,15 @@ impl GlobalJitCache {
         }
     }
 
+    /// Create a cache instance with an explicit disk root (for testing).
+    #[cfg(test)]
+    fn with_disk_root(root: Option<PathBuf>) -> Self {
+        Self {
+            lru: RwLock::new(LruCache::new(512)),
+            disk_root: root,
+        }
+    }
+
     /// Look up a compiled layer: L2 memory → L3 disk.
     pub fn get(&self, key: &JitCacheKey) -> Option<Arc<gllm_kernels::compiler::CompiledLayer>> {
         // L2: memory
@@ -496,6 +505,26 @@ mod tests {
         assert_eq!(loaded.config_hash, layer.config_hash);
         assert_eq!(loaded.code_bytes().len(), layer.code_bytes().len());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TEST-JIT-CACHE-001: same key looked up twice → compile_fn called exactly once
+    #[test]
+    fn test_instance_cache_compiles_once() {
+        // Use isolated cache with no disk root to avoid cross-test pollution
+        let cache = GlobalJitCache::with_disk_root(None);
+        let key = make_key("test_once", GraphType::QRope);
+        let mut compile_count = 0usize;
+        // First lookup: compiles
+        let _r1 = cache.get_or_compile(key.clone(), || {
+            compile_count += 1;
+            Ok(compile_trivial_layer())
+        }).expect("first compile");
+        // Second lookup: must hit L2, compile_fn must NOT be called
+        let _r2 = cache.get_or_compile(key.clone(), || {
+            compile_count += 1;
+            Ok(compile_trivial_layer())
+        }).expect("second lookup");
+        assert_eq!(compile_count, 1, "compile_fn must be called exactly once");
     }
 
     fn compile_trivial_layer() -> gllm_kernels::compiler::CompiledLayer {
