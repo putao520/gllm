@@ -283,7 +283,7 @@ pub(crate) fn execute_kv_projection(
     head_dim: usize,
     eps: f32,
     dtype: DType,
-) -> (Vec<f32>, Vec<f32>) {
+) -> Result<(Vec<f32>, Vec<f32>), String> {
     let kv_dim = num_kv_heads * head_dim;
 
     // JIT graph for K projection (RmsNorm → Gemm → RoPE)
@@ -308,7 +308,7 @@ pub(crate) fn execute_kv_projection(
     let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, dtype);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
-        .expect("JIT compile v_projection failed");
+        .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
 
     let v_weights_buf = pack_weights(&[rn1_w, v_w]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
@@ -327,7 +327,7 @@ pub(crate) fn execute_kv_projection(
         );
     }
 
-    (k_rope, v_proj)
+    Ok((k_rope, v_proj))
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +573,7 @@ pub(crate) fn execute_moe_pre_attention(
     head_dim: usize,
     eps: f32,
     dtype: DType,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
@@ -599,7 +599,7 @@ pub(crate) fn execute_moe_pre_attention(
     let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0, dtype);
     let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let k_compiled = k_compiler.compile_graph(&k_graph)
-        .expect("JIT compile k_projection failed");
+        .map_err(|e| format!("JIT compile k_projection failed: {e}"))?;
     let k_weights_buf = pack_weights(&[rn1_w, k_w]);
     let mut k_proj = vec![0.0f32; seq_len * kv_dim];
     let mut k_scratch = vec![0u8; k_compiled.scratchpad_bytes];
@@ -620,7 +620,7 @@ pub(crate) fn execute_moe_pre_attention(
     let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, dtype);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
-        .expect("JIT compile v_projection failed");
+        .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
     let v_weights_buf = pack_weights(&[rn1_w, v_w]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
     let mut v_scratch = vec![0u8; v_compiled.scratchpad_bytes];
@@ -637,7 +637,7 @@ pub(crate) fn execute_moe_pre_attention(
         );
     }
 
-    (q_rope, k_proj, v_proj)
+    Ok((q_rope, k_proj, v_proj))
 }
 
 // ---------------------------------------------------------------------------
@@ -904,7 +904,8 @@ pub(crate) fn execute_moe_ffn_jit(
     for s in 0..seq_len {
         for t in 0..top_k {
             let global_idx = indices[s * top_k + t];
-            let expert_out = expert_outputs.get(&global_idx).expect("missing expert output");
+            let expert_out = expert_outputs.get(&global_idx)
+                .ok_or_else(|| BE::Other(format!("missing expert output for expert {global_idx}")))?;
             let src_base = s * hidden;
             let dst_slot = t;
             let dst_base = dst_slot * seq_len * hidden + s * hidden;
@@ -1176,7 +1177,7 @@ pub(crate) fn update_kv_cache_jit<E: Element>(
     let (k_rope, v_proj) = execute_kv_projection(
         &compiled, hidden_state, rn1_w, k_w, v_w, positions,
         seq_len, hidden, num_kv_heads, head_dim, eps, dtype,
-    );
+    ).map_err(|e| BE::Cpu(e))?;
 
     write_kv_to_cache(backend, handle, layer, &k_rope, &v_proj, seq_len, num_kv_heads, head_dim)
 }

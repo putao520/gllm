@@ -1212,7 +1212,7 @@ pub(crate) fn decoder_forward<E: Element>(
                             &hidden_state, &rn1_w, &k_w_f32, &v_w_f32,
                             &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
                             computation_dtype_from_config(config),
-                        );
+                        ).map_err(|e| BE::Other(e))?;
                         write_kv_to_cache(
                             backend, kv_caches[seq_idx],
                             layer, &k_rope, &v_proj,
@@ -1500,7 +1500,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         &kv_compiled, &hidden_state, &rn1_w, &k_w, &v_w,
                         &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
                         computation_dtype_from_config(config),
-                    );
+                    ).map_err(|e| BE::Other(e))?;
 
                     // Step 2: Prefill attention via JIT (MHA with GQA)
                     let (attn_out, layer_sparsity) = {
@@ -1711,7 +1711,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         &hidden_state, &rn1_w, &k_w, &v_w,
                         &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
                         computation_dtype_from_config(config),
-                    );
+                    ).map_err(|e| BE::Other(e))?;
                     write_kv_to_cache(
                         backend, kv_caches[seq_idx],
                         layer, &k_rope, &v_proj,
