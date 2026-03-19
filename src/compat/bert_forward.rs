@@ -23,12 +23,12 @@ pub(crate) fn build_bert_layer_graph(
     head_dim: usize,
     inter: usize,
     eps: f32,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
 
@@ -69,7 +69,7 @@ pub(crate) fn build_bert_layer_graph(
     // Q = input * W_q + b_q  [s, h] × [h, h] → [s, h]
     let q_out = g.add_tensor_concrete("q", &[s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_q, b_q],
         vec![q_out],
         "gemm_q",
@@ -78,7 +78,7 @@ pub(crate) fn build_bert_layer_graph(
     // K = input * W_k + b_k
     let k_out = g.add_tensor_concrete("k", &[s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_k, b_k],
         vec![k_out],
         "gemm_k",
@@ -87,7 +87,7 @@ pub(crate) fn build_bert_layer_graph(
     // V = input * W_v + b_v
     let v_out = g.add_tensor_concrete("v", &[s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_v, b_v],
         vec![v_out],
         "gemm_v",
@@ -105,7 +105,7 @@ pub(crate) fn build_bert_layer_graph(
     // Output projection + bias
     let o_out = g.add_tensor_concrete("o_proj", &[s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![attn_out, w_o, b_o],
         vec![o_out],
         "gemm_o",
@@ -134,7 +134,7 @@ pub(crate) fn build_bert_layer_graph(
     // Up projection + GELU: GemmBias + Gelu → EpilogueInjection candidate
     let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: inter, k: h, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: inter, k: h, dtype: dt },
         vec![normed1, w_up, b_up],
         vec![up_out],
         "gemm_ffn_up",
@@ -151,7 +151,7 @@ pub(crate) fn build_bert_layer_graph(
     // Down projection
     let down_out = g.add_tensor_concrete("ffn_down", &[s, h], dt);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: inter, dtype: DType::F32 },
+        OpKind::GemmBias { m: s, n: h, k: inter, dtype: dt },
         vec![act_out, w_down, b_down],
         vec![down_out],
         "gemm_ffn_down",
@@ -218,12 +218,12 @@ pub(crate) fn execute_jit_bert_layer(
 pub(crate) fn build_mean_pool_graph(
     seq_len: usize,
     hidden: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
     let output = g.add_tensor_concrete("output", &[hidden], dt);
@@ -269,7 +269,8 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let jit_layer: Option<std::sync::Arc<gllm_kernels::compiler::CompiledLayer>> = {
         use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-        use crate::compat::DType as CompatDType;
+        use crate::compat::jit_helpers::{computation_dtype_from_config, kernels_dtype_to_compat};
+        let dt = computation_dtype_from_config(config);
         let key = JitCacheKey {
             arch: ModelArchKey {
                 arch_name: "bert".to_string(),
@@ -277,13 +278,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 num_heads,
                 num_kv_heads: num_heads,
                 head_dim,
-                dtype: CompatDType::F32,
+                dtype: kernels_dtype_to_compat(dt),
             },
             graph: GraphType::BertLayer { inter_size: inter },
         };
         let compiled = global_jit_cache()
             .get_or_compile(key, || {
-                let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+                let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, dt);
                 let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                 compiler.compile_graph(&graph).map_err(|e| format!("BERT JIT compilation failed: {e}"))
             })
@@ -457,7 +458,8 @@ pub(crate) fn bert_encoder_forward<E: Element>(
             let mut pooled = vec![0.0f32; hidden];
             {
                 use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-                use crate::compat::DType as CompatDType;
+                use crate::compat::jit_helpers::{computation_dtype_from_config, kernels_dtype_to_compat};
+                let dt = computation_dtype_from_config(config);
                 let key = JitCacheKey {
                     arch: ModelArchKey {
                         arch_name: "bert".to_string(),
@@ -465,13 +467,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                         num_heads: 0,
                         num_kv_heads: 0,
                         head_dim: 0,
-                        dtype: CompatDType::F32,
+                        dtype: kernels_dtype_to_compat(dt),
                     },
                     graph: GraphType::BertMeanPool,
                 };
                 let compiled = global_jit_cache()
                     .get_or_compile(key, || {
-                        let pool_graph = build_mean_pool_graph(seq_len, hidden);
+                        let pool_graph = build_mean_pool_graph(seq_len, hidden, dt);
                         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         compiler.compile_graph(&pool_graph).map_err(|e| format!("MeanPool JIT compilation failed: {e}"))
                     })
@@ -520,21 +522,20 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 };
                 let x = {
                     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-                    use crate::compat::DType as GllmDType;
+                    use crate::compat::jit_helpers::{computation_dtype_from_config, kernels_dtype_to_compat};
                     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-                    use gllm_kernels::types::DType;
+                    let dt = computation_dtype_from_config(config);
                     let key = JitCacheKey {
                         arch: ModelArchKey {
                             arch_name: "bert_dense_gemm".to_string(),
                             hidden_size: hidden,
                             num_heads: 0, num_kv_heads: 0, head_dim: 0,
-                            dtype: GllmDType::F32,
+                            dtype: kernels_dtype_to_compat(dt),
                         },
                         graph: GraphType::BertLayer { inter_size: hidden },
                     };
                     let compiled = global_jit_cache().get_or_compile(key, || {
                         let mut g = CompilerGraph::new();
-                        let dt = DType::F32;
                         let x_in = g.add_tensor_concrete("x", &[1, hidden], dt);
                         let w_in = g.add_tensor_concrete("w", &[hidden, hidden], dt);
                         let b_in = g.add_tensor_concrete("b", &[hidden], dt);

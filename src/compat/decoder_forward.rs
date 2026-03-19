@@ -74,8 +74,7 @@ fn compile_moe_decode_jit(
     // O projection Gemm
     let o_gemm = {
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
-        use gllm_kernels::types::DType;
-        let dt = DType::F32;
+        let dt = computation_dtype(dtype_size);
         let mut og = CompilerGraph::new();
         let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
         let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
@@ -145,11 +144,9 @@ struct DecodeCachedJit {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn build_q_rope_graph(
     seq_len: usize, hidden: usize, q_dim: usize, head_dim: usize,
-    eps: f32, rope_theta: f64,
+    eps: f32, rope_theta: f64, dt: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-    let dt = DType::F32;
     let mut g = CompilerGraph::new();
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
     let rn1 = g.add_tensor_concrete("rn1_w", &[hidden], dt);
@@ -175,7 +172,7 @@ fn compile_decode_jit(
 ) -> Result<DecodeCachedJit, BE> {
     let q_dim = num_heads * head_dim;
 
-    let q_rope_graph = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta);
+    let q_rope_graph = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, computation_dtype(dtype_size));
     let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
     let q_rope = c1.compile_graph(&q_rope_graph).map_err(|e| {
         BE::Other(format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
@@ -467,28 +464,29 @@ fn compile_gpt2_jit(
     inter: usize,
     vocab_size: usize,
     eps: f32,
+    dtype: gllm_kernels::types::DType,
 ) -> Result<Gpt2CachedJit, BE> {
     let q_dim = num_heads * head_dim;
 
-    let ln_qkv_graph = build_gpt2_ln_qkv_graph(seq_len, hidden, eps, gllm_kernels::types::DType::F32);
+    let ln_qkv_graph = build_gpt2_ln_qkv_graph(seq_len, hidden, eps, dtype);
     let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
     let ln_qkv = c1.compile_graph(&ln_qkv_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: LN+QKV compile failed: {e}"))
     })?;
 
-    let o_proj_graph = build_gpt2_o_proj_graph(seq_len, hidden, q_dim, gllm_kernels::types::DType::F32);
+    let o_proj_graph = build_gpt2_o_proj_graph(seq_len, hidden, q_dim, dtype);
     let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
     let o_proj = c3.compile_graph(&o_proj_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: O-proj compile failed: {e}"))
     })?;
 
-    let ln_mlp_graph = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps, gllm_kernels::types::DType::F32);
+    let ln_mlp_graph = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps, dtype);
     let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
     let ln_mlp = c4.compile_graph(&ln_mlp_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: LN+MLP compile failed: {e}"))
     })?;
 
-    let final_graph = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps, gllm_kernels::types::DType::F32);
+    let final_graph = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps, dtype);
     let mut c5 = gllm_kernels::compiler::InferenceCompiler::new();
     let final_ln_lm_head = c5.compile_graph(&final_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: final LN+lm_head compile failed: {e}"))
@@ -498,7 +496,7 @@ fn compile_gpt2_jit(
         ln_qkv, o_proj, ln_mlp, final_ln_lm_head,
         gqa_cache: std::collections::HashMap::new(),
         seq_len, num_heads, head_dim,
-        dtype_size: 4, // compile_gpt2_jit is unused; default F32
+        dtype_size: match dtype { gllm_kernels::types::DType::F16 | gllm_kernels::types::DType::BF16 => 2, _ => 4 },
     })
 }
 
@@ -560,10 +558,11 @@ fn gpt2_forward_sequence<E: Element>(
                 .copy_from_slice(&pos_embed[pos * hidden..(pos + 1) * hidden]);
         }
         let mut g = CompilerGraph::new();
-        let a = g.add_tensor_concrete("a", &[seq_len, hidden], DType::F32);
-        let b = g.add_tensor_concrete("b", &[seq_len, hidden], DType::F32);
+        let dt = computation_dtype_from_config(config);
+        let a = g.add_tensor_concrete("a", &[seq_len, hidden], dt);
+        let b = g.add_tensor_concrete("b", &[seq_len, hidden], dt);
         g.inputs = vec![a, b];
-        let out = g.add_tensor_concrete("out", &[seq_len, hidden], DType::F32);
+        let out = g.add_tensor_concrete("out", &[seq_len, hidden], dt);
         g.add_op(OpKind::Add, vec![a, b], vec![out], "pos_add");
         g.outputs = vec![out];
         let mut compiler = InferenceCompiler::new();
@@ -1047,7 +1046,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     let arc = cache.get_or_compile(
                         JitCacheKey { arch: arch_key.clone(), graph: GraphType::QRope },
                         || {
-                            let g = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta);
+                            let g = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, computation_dtype_from_config(config));
                             let mut c = gllm_kernels::compiler::InferenceCompiler::new();
                             c.compile_graph(&g).map_err(|e| format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
                         },
@@ -1088,8 +1087,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         JitCacheKey { arch: arch_key.clone(), graph: GraphType::MoeOGemm },
                         || {
                             use gllm_kernels::compiler::{CompilerGraph, OpKind};
-                            use gllm_kernels::types::DType;
-                            let dt = DType::F32;
+                            let dt = computation_dtype_from_config(config);
                             let mut og = CompilerGraph::new();
                             let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
                             let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
@@ -1501,9 +1499,8 @@ pub(crate) fn decoder_forward<E: Element>(
                     // Step 2: Prefill attention via JIT (MHA with GQA)
                     let (attn_out, layer_sparsity) = {
                         use gllm_kernels::compiler::{CompilerGraph, OpKind};
-                        use gllm_kernels::types::DType;
                         let mut ag = CompilerGraph::new();
-                        let dt = DType::F32;
+                        let dt = computation_dtype_from_config(config);
                         let q_in = ag.add_tensor_concrete("q", &[seq_len, geom.q_dim], dt);
                         let k_in = ag.add_tensor_concrete("k", &[seq_len, geom.kv_dim], dt);
                         let v_in = ag.add_tensor_concrete("v", &[seq_len, geom.kv_dim], dt);
@@ -1570,14 +1567,13 @@ pub(crate) fn decoder_forward<E: Element>(
                     // O Gemm via JIT
                     {
                         use gllm_kernels::compiler::{CompilerGraph, OpKind};
-                        use gllm_kernels::types::DType;
                         let mut og = CompilerGraph::new();
-                        let dt = DType::F32;
+                        let dt = computation_dtype_from_config(config);
                         let a_in = og.add_tensor_concrete("a", &[seq_len, geom.q_dim], dt);
                         let b_in = og.add_tensor_concrete("b", &[geom.q_dim, hidden], dt);
                         og.inputs = vec![a_in, b_in];
                         let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
-                        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: DType::F32 }, vec![a_in, b_in], vec![c_out], "gemm_o");
+                        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
                         og.outputs = vec![c_out];
                         let mut oc = gllm_kernels::compiler::InferenceCompiler::new();
                         let o_compiled = oc.compile_graph(&og).map_err(|e| {
@@ -2164,7 +2160,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             };
             let compiled = global_jit_cache().get_or_compile(key, || {
                 let mut g = CompilerGraph::new();
-                let dt = DType::F32;
+                let dt = computation_dtype_from_config(config);
                 let x = g.add_tensor_concrete("x", &[1, hidden], dt);
                 let w = g.add_tensor_concrete("w", &[hidden, num_labels], dt);
                 g.inputs = vec![x, w];

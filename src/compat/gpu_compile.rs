@@ -537,7 +537,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
     // ── Compile BERT layer graph to PTX (once, reused across layers) ──
-    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
     let (_module, kernel_entries) = cuda_compile_graph(
         device, gpu_profile, sm_version, &graph,
     )?;
@@ -612,7 +612,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     }
 
     // ── Mean pooling (GPU) ──
-    let pool_graph = build_mean_pool_graph(seq_len, hidden);
+    let pool_graph = build_mean_pool_graph(seq_len, hidden, super::jit_helpers::computation_dtype_from_config(config));
     let (_pool_module, pool_entries) = cuda_compile_graph(
         device, gpu_profile, sm_version, &pool_graph,
     )?;
@@ -724,9 +724,9 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         // GPU projection (RmsNorm → Q/K/V Gemm → RoPE) + CPU cached attention + GPU post-attention
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_proj_mod, proj_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let (_post_mod, post_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &post_graph)?;
 
         let handle = kv_caches.first().unwrap();
@@ -816,6 +816,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
+                super::jit_helpers::computation_dtype_from_config(config),
             );
 
             // ── GPU: post-attention graph (O Gemm → Residual → FFN → Residual) ──
@@ -857,7 +858,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         }
     } else {
         // ── Prefill path (existing) ──
-        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
+        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_module, kernel_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &graph)?;
 
         for layer in 0..num_layers {
@@ -966,7 +967,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
     let (_lm_module, lm_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &lm_graph)?;
 
     let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
@@ -1247,7 +1248,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 
     let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
-    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
     let (_module, kernel_entries) = hip_compile_graph(
         device, gpu_profile, gfx_arch, &graph,
     )?;
@@ -1310,7 +1311,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     }
 
     // Mean pooling (GPU)
-    let pool_graph = build_mean_pool_graph(seq_len, hidden);
+    let pool_graph = build_mean_pool_graph(seq_len, hidden, super::jit_helpers::computation_dtype_from_config(config));
     let (_pool_module, pool_entries) = hip_compile_graph(
         device, gpu_profile, gfx_arch, &pool_graph,
     )?;
@@ -1515,7 +1516,7 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
 
     // Compile BERT layer graph to Metal pipelines (once)
-    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+    let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
     let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
     // Per-layer GPU execution
@@ -1571,7 +1572,7 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     }
 
     // Mean pooling
-    let pool_graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden);
+    let pool_graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden, super::jit_helpers::computation_dtype_from_config(config));
     let pool_entries = metal_compile_graph(device, gpu_profile, gpu_family, &pool_graph)?;
 
     let input_bytes = seq_len * hidden * 4;
@@ -1628,12 +1629,12 @@ pub(crate) fn build_decoder_layer_graph(
     inter: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -1802,12 +1803,12 @@ pub(crate) fn build_projection_graph(
     head_dim: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -1883,12 +1884,12 @@ pub(crate) fn build_post_attention_graph(
     head_dim: usize,
     inter: usize,
     eps: f32,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -1984,10 +1985,10 @@ fn jit_cached_attention(
     num_kv_heads: usize,
     head_dim: usize,
     max_seq_len: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> Vec<f32> {
     use super::jit_helpers::{build_cached_gqa_graph, execute_cached_gqa};
     use gllm_kernels::compiler::InferenceCompiler;
-    use gllm_kernels::types::DType;
 
     let kv_dim = num_kv_heads * head_dim;
     let layer_stride = num_kv_heads * max_seq_len * head_dim;
@@ -2009,13 +2010,13 @@ fn jit_cached_attention(
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                dtype: GllmDType::F32,
+                dtype: super::jit_helpers::kernels_dtype_to_compat(dtype),
             },
             graph: GraphType::CachedGqa { total_seq },
         };
 
         let compiled = global_jit_cache().get_or_compile(key, || {
-            let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, DType::F32);
+            let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, dtype);
             let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
             compiler.compile_graph(&graph).map_err(|e| e.to_string())
         }).unwrap_or_else(|e| panic!("jit_cached_attention: JIT compilation failed: {e}"));
@@ -2074,12 +2075,12 @@ pub(crate) fn build_lm_head_graph(
     seq_len: usize,
     hidden: usize,
     vocab_size: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let input = g.add_tensor("input", vec![seq_len, hidden], dt);
     let w_lm = g.add_tensor("w_lm", vec![hidden, vocab_size], dt);
@@ -2237,9 +2238,9 @@ pub(super) fn hip_decoder_forward<E: Element>(
         // ── Incremental decode path ──
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_proj_mod, proj_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let (_post_mod, post_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &post_graph)?;
 
         let handle = kv_caches.first().unwrap();
@@ -2329,6 +2330,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
+                super::jit_helpers::computation_dtype_from_config(config),
             );
 
             // ── GPU: post-attention graph ──
@@ -2369,7 +2371,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
         }
     } else {
         // ── Prefill path (existing) ──
-        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
+        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_module, kernel_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &graph)?;
 
         for layer in 0..num_layers {
@@ -2478,7 +2480,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
     let (_lm_module, lm_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &lm_graph)?;
 
     let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
@@ -2623,9 +2625,9 @@ pub(super) fn metal_decoder_forward<E: Element>(
         // ── Incremental decode path ──
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let proj_entries = metal_compile_graph(device, gpu_profile, gpu_family, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps);
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
         let post_entries = metal_compile_graph(device, gpu_profile, gpu_family, &post_graph)?;
 
         let handle = kv_caches.first().unwrap();
@@ -2714,6 +2716,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let attn_out = jit_cached_attention(
                 &q_f32, &kv_cache_k, &kv_cache_v, &positions,
                 layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
+                super::jit_helpers::computation_dtype_from_config(config),
             );
 
             // ── GPU: post-attention graph ──
@@ -2753,7 +2756,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
         }
     } else {
         // ── Prefill path (existing) ──
-        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta);
+        let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
         for layer in 0..num_layers {
@@ -2858,7 +2861,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size);
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
     let lm_entries = metal_compile_graph(device, gpu_profile, gpu_family, &lm_graph)?;
 
     let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,

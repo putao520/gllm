@@ -1725,7 +1725,7 @@ pub(crate) fn jit_mean_pool(
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
-        let graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden);
+        let graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden, dtype);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| format!("mean pool JIT failed: {e}"))
     })?;
