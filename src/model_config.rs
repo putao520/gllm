@@ -104,6 +104,8 @@ pub struct ModelConfig {
     pub kv_cache_block_size: usize,
     pub head_dim: usize,
     pub dtype_size: usize,
+    /// Dominant weight dtype string: "f32", "f16", "bf16", "f64", etc.
+    pub dtype: String,
     pub use_cache: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub attention_dropout: Option<f32>,
@@ -455,6 +457,7 @@ impl ModelConfig {
             kv_cache_block_size: base_derived.head_dim.max(base_derived.num_key_value_heads),
             head_dim: base_derived.head_dim,
             dtype_size: base_derived.dtype_size,
+            dtype: base_derived.dtype.clone(),
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout,
@@ -609,6 +612,21 @@ impl ModelConfig {
             )
         })?;
 
+        // Derive dtype string: prefer torch_dtype from config.json, fall back to dtype_size.
+        let dtype = find_string(value, &["torch_dtype", "dtype"])
+            .map(|s| match s.as_str() {
+                "bfloat16" => "bf16".to_string(),
+                "float16" => "f16".to_string(),
+                "float32" => "f32".to_string(),
+                "float64" => "f64".to_string(),
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| match dtype_size {
+                2 => "f16".to_string(),
+                8 => "f64".to_string(),
+                _ => "f32".to_string(),
+            });
+
         let attention_dropout = find_f32(value, &["attention_dropout", "attention.dropout"])
             .filter(|v| v.is_finite() && *v >= 0.0);
         let layer_norm_epsilon = find_f32(
@@ -640,6 +658,7 @@ impl ModelConfig {
             kv_cache_block_size,
             head_dim,
             dtype_size,
+            dtype,
             use_cache: find_bool(value, &["use_cache"]),
             tie_word_embeddings: find_bool(value, &["tie_word_embeddings"]),
             attention_dropout,
@@ -682,6 +701,7 @@ pub(crate) struct TensorDerivedConfig {
     pub vocab_size: usize,
     pub head_dim: usize,
     pub dtype_size: usize,
+    pub dtype: String,
     pub tensor_map: HashMap<TensorRole, String>,
 }
 
@@ -851,6 +871,7 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
     }
 
     let dtype_size = derive_dtype_size(&metas)?;
+    let dtype = derive_dtype_str(&metas);
 
     // 6. Build Tensor Map
     // We only need to store the pattern for each role once.
@@ -877,6 +898,7 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
         vocab_size,
         head_dim,
         dtype_size,
+        dtype,
         tensor_map,
     })
 }
@@ -944,6 +966,7 @@ fn apply_tensor_derived(
     base.vocab_size = derived.vocab_size;
     base.head_dim = derived.head_dim;
     base.dtype_size = derived.dtype_size;
+    base.dtype = derived.dtype;
     base.kv_cache_block_size = base.head_dim.max(base.num_key_value_heads);
     // Ω1: Update tensor map with derived patterns
     base.tensor_map = derived.tensor_map;
@@ -1086,6 +1109,43 @@ fn derive_dtype_size(metas: &[TensorMeta]) -> ModelConfigResult<usize> {
     Err(ModelConfigError::InvalidConfig(
         "cannot derive dtype_size from tensor dtypes".to_string(),
     ))
+}
+
+/// Derive the dominant floating-point dtype string from tensor metadata.
+/// Returns "f32" as default when no floating tensors are found.
+fn derive_dtype_str(metas: &[TensorMeta]) -> String {
+    let mut bf16_count = 0usize;
+    let mut f16_count = 0usize;
+    let mut f32_count = 0usize;
+    let mut f64_count = 0usize;
+
+    for meta in metas {
+        if !is_floating_dtype(meta.dtype) {
+            continue;
+        }
+        match meta.dtype {
+            safetensors::Dtype::BF16 => bf16_count += 1,
+            safetensors::Dtype::F16 => f16_count += 1,
+            safetensors::Dtype::F32 => f32_count += 1,
+            safetensors::Dtype::F64 => f64_count += 1,
+            _ => {}
+        }
+    }
+
+    // Pick the dominant dtype by count
+    let max = bf16_count.max(f16_count).max(f32_count).max(f64_count);
+    if max == 0 {
+        return "f32".to_string();
+    }
+    if bf16_count == max {
+        "bf16".to_string()
+    } else if f16_count == max {
+        "f16".to_string()
+    } else if f64_count == max {
+        "f64".to_string()
+    } else {
+        "f32".to_string()
+    }
 }
 
 fn dtype_size_from_dtype(dtype: safetensors::Dtype) -> Option<usize> {
@@ -1603,6 +1663,7 @@ mod tests {
             kv_cache_block_size: 128,
             head_dim: 128,
             dtype_size: 2,
+            dtype: "bf16".to_string(),
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout: None,
@@ -1640,6 +1701,7 @@ mod tests {
             kv_cache_block_size: 128,
             head_dim: 128,
             dtype_size: 2,
+            dtype: "bf16".to_string(),
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout: None,

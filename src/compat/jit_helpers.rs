@@ -10,18 +10,40 @@ use gllm_kernels::types::DType;
 
 /// Convert ModelConfig.dtype_size (bytes per element) to gllm-kernels DType.
 ///
-/// The JIT codegen currently only has F32 SIMD implementations; F16/BF16
-/// paths return `Err` at codegen time. So we always use F32 for the
-/// *computation* dtype in graph construction — the model's storage dtype
-/// is handled at the weight-loading boundary (dequant / convert to f32).
-///
-/// When F16/BF16 codegen lands (AVX-512 FP16, NEON FP16), this function
-/// will return the native dtype and the JIT pipeline will emit native
-/// half-precision instructions automatically.
+/// 2-byte storage → F16 (native half-precision JIT path).
+/// 4-byte storage → F32.
+/// All other sizes → F32 (safe default).
 #[inline]
-pub(crate) fn computation_dtype(_dtype_size: usize) -> DType {
-    // TODO: return DType::F16 when dtype_size == 2 && codegen supports it
-    DType::F32
+pub(crate) fn computation_dtype(dtype_size: usize) -> DType {
+    match dtype_size {
+        2 => DType::F16,
+        _ => DType::F32,
+    }
+}
+
+/// Derive computation DType from a `GeneratorForwardConfig`.
+///
+/// Checks the `dtype` string first (distinguishes BF16 from F16, both 2 bytes),
+/// then falls back to `dtype_size`.
+#[inline]
+pub(crate) fn computation_dtype_from_config(
+    config: &crate::engine::executor::GeneratorForwardConfig,
+) -> DType {
+    match config.dtype.as_str() {
+        "bf16" | "bfloat16" => DType::BF16,
+        "f16" | "float16" | "fp16" => DType::F16,
+        _ => computation_dtype(config.dtype_size),
+    }
+}
+
+/// Convert a `gllm_kernels::types::DType` to the `crate::compat::DType` used in `ModelArchKey`.
+#[inline]
+pub(crate) fn kernels_dtype_to_compat(dt: DType) -> crate::compat::DType {
+    match dt {
+        DType::F16 => crate::compat::DType::F16,
+        DType::BF16 => crate::compat::DType::BF16,
+        DType::F32 => crate::compat::DType::F32,
+    }
 }
 
 // ---------------------------------------------------------------------------
