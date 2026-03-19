@@ -15,6 +15,7 @@ use super::weight_helpers::{
 use super::Element;
 use crate::engine::executor::{
     BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheHandle, LogitsHandle,
+    PositionEncoding,
 };
 
 // ---------------------------------------------------------------------------
@@ -366,6 +367,280 @@ fn load_moe_weights<E: Element>(
 // Full decoder forward pass
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// GPT-2 forward pass (LayerNorm + fused QKV + GELU MLP + learned pos embed)
+// ---------------------------------------------------------------------------
+
+fn gpt2_layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output: &mut [f32], hidden: usize) {
+    let seq_len = input.len() / hidden;
+    for s in 0..seq_len {
+        let row = &input[s * hidden..(s + 1) * hidden];
+        let mean: f32 = row.iter().sum::<f32>() / hidden as f32;
+        let var: f32 = row.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / hidden as f32;
+        let inv_std = 1.0 / (var + eps).sqrt();
+        let out = &mut output[s * hidden..(s + 1) * hidden];
+        for i in 0..hidden {
+            out[i] = (row[i] - mean) * inv_std * weight[i] + bias[i];
+        }
+    }
+}
+
+fn gpt2_gelu(x: f32) -> f32 {
+    // gelu_new: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    let c = 0.7978845608028654f32; // sqrt(2/pi)
+    0.5 * x * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
+}
+
+fn gpt2_forward_sequence<E: Element>(
+    backend: &CpuBackend<E>,
+    hidden_state: &mut [f32],
+    positions: &[u32],
+    seq_len: usize,
+    hidden: usize,
+    num_heads: usize,
+    head_dim: usize,
+    num_layers: usize,
+    inter: usize,
+    eps: f32,
+    vocab_size: usize,
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    _transpose_weights: bool,
+    kv_caches: &mut [KvCacheHandle],
+    seq_idx: usize,
+    _position: usize,
+) -> Result<Vec<f32>, BE> {
+    let num_kv_heads = num_heads; // GPT-2: no GQA
+    let kv_dim = num_kv_heads * head_dim;
+    let q_dim = num_heads * head_dim;
+
+    // Add learned position embeddings
+    let pos_embed = get_f32_data(
+        weights, backend,
+        &crate::weight_names::gpt2_position_embed_aliases(),
+    )?;
+    for s in 0..seq_len {
+        let pos = positions[s] as usize;
+        let pos_off = pos * hidden;
+        let h_off = s * hidden;
+        for i in 0..hidden {
+            hidden_state[h_off + i] += pos_embed[pos_off + i];
+        }
+    }
+
+    // Determine KV cache state
+    let has_kv_cache = seq_idx < kv_caches.len();
+    let cached_seq_len = if has_kv_cache {
+        let store = backend.kv_store().lock().map_err(|e| {
+            BE::Cpu(format!("KV store lock poisoned: {e}"))
+        })?;
+        store.get(&kv_caches[seq_idx].0).map(|b| b.seq_len).unwrap_or(0)
+    } else {
+        0
+    };
+    let total_seq = cached_seq_len + seq_len;
+    let max_seq_len = if has_kv_cache {
+        let store = backend.kv_store().lock().map_err(|e| {
+            BE::Cpu(format!("KV store lock poisoned: {e}"))
+        })?;
+        store.get(&kv_caches[seq_idx].0).map(|b| b.max_seq_len).unwrap_or(1024)
+    } else {
+        1024
+    };
+
+    for layer in 0..num_layers {
+        // LayerNorm 1
+        let ln1_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln1_aliases(layer))?;
+        let ln1_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln1_bias_aliases(layer))?;
+        let mut normed = vec![0.0f32; seq_len * hidden];
+        gpt2_layer_norm(hidden_state, &ln1_w, &ln1_b, eps, &mut normed, hidden);
+
+        // Fused QKV projection: [seq_len, hidden] × [hidden, 3*hidden] + bias
+        let qkv_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_fused_qkv_aliases(layer))?;
+        let qkv_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_fused_qkv_bias_aliases(layer))?;
+        let qkv_dim = 3 * hidden;
+        let mut qkv = vec![0.0f32; seq_len * qkv_dim];
+        // GPT-2 weights are [hidden, 3*hidden] (not transposed)
+        for s in 0..seq_len {
+            for j in 0..qkv_dim {
+                let mut sum = qkv_b[j];
+                for k in 0..hidden {
+                    sum += normed[s * hidden + k] * qkv_w[k * qkv_dim + j];
+                }
+                qkv[s * qkv_dim + j] = sum;
+            }
+        }
+
+        // Split Q, K, V
+        let mut q = vec![0.0f32; seq_len * q_dim];
+        let mut k_new = vec![0.0f32; seq_len * kv_dim];
+        let mut v_new = vec![0.0f32; seq_len * kv_dim];
+        for s in 0..seq_len {
+            q[s * q_dim..(s + 1) * q_dim].copy_from_slice(&qkv[s * qkv_dim..s * qkv_dim + q_dim]);
+            k_new[s * kv_dim..(s + 1) * kv_dim].copy_from_slice(&qkv[s * qkv_dim + q_dim..s * qkv_dim + q_dim + kv_dim]);
+            v_new[s * kv_dim..(s + 1) * kv_dim].copy_from_slice(&qkv[s * qkv_dim + q_dim + kv_dim..s * qkv_dim + qkv_dim]);
+        }
+
+        // Write K, V to cache
+        if has_kv_cache {
+            super::jit_helpers::write_kv_to_cache(
+                backend, kv_caches[seq_idx],
+                layer, &k_new, &v_new,
+                seq_len, num_kv_heads, head_dim,
+            )?;
+        }
+
+        // Read full K, V from cache (or use current if no cache)
+        let (k_full, v_full) = if has_kv_cache {
+            let store = backend.kv_store().lock().map_err(|e| {
+                BE::Cpu(format!("KV store lock poisoned: {e}"))
+            })?;
+            let buffer = store.get(&kv_caches[seq_idx].0).ok_or_else(|| {
+                BE::Cpu("KV cache not found".into())
+            })?;
+            // Extract layer slice → [total_seq, kv_dim]
+            let layer_stride = num_kv_heads * max_seq_len * head_dim;
+            let layer_base = layer * layer_stride;
+            let mut ks = vec![0.0f32; total_seq * kv_dim];
+            let mut vs = vec![0.0f32; total_seq * kv_dim];
+            for t in 0..total_seq {
+                for h in 0..num_kv_heads {
+                    let cache_off = layer_base + h * max_seq_len * head_dim + t * head_dim;
+                    let slice_off = t * kv_dim + h * head_dim;
+                    ks[slice_off..slice_off + head_dim]
+                        .copy_from_slice(&buffer.k[cache_off..cache_off + head_dim]);
+                    vs[slice_off..slice_off + head_dim]
+                        .copy_from_slice(&buffer.v[cache_off..cache_off + head_dim]);
+                }
+            }
+            (ks, vs)
+        } else {
+            (k_new.clone(), v_new.clone())
+        };
+
+        let kv_seq = if has_kv_cache { total_seq } else { seq_len };
+
+        // Multi-head attention (scalar)
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut attn_out = vec![0.0f32; seq_len * q_dim];
+        for h in 0..num_heads {
+            for s in 0..seq_len {
+                // Q[s, h] dot K[t, h] for all t
+                let mut scores = vec![0.0f32; kv_seq];
+                for t in 0..kv_seq {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[s * q_dim + h * head_dim + d] * k_full[t * kv_dim + h * head_dim + d];
+                    }
+                    scores[t] = dot * scale;
+                }
+                // Causal mask: only attend to positions <= current
+                let cur_pos = positions[s] as usize;
+                for t in 0..kv_seq {
+                    if t > cur_pos {
+                        scores[t] = f32::NEG_INFINITY;
+                    }
+                }
+                // Softmax
+                let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0f32;
+                for t in 0..kv_seq {
+                    scores[t] = (scores[t] - max_score).exp();
+                    sum += scores[t];
+                }
+                if sum > 0.0 {
+                    for t in 0..kv_seq { scores[t] /= sum; }
+                }
+                // Weighted sum of V
+                for d in 0..head_dim {
+                    let mut val = 0.0f32;
+                    for t in 0..kv_seq {
+                        val += scores[t] * v_full[t * kv_dim + h * head_dim + d];
+                    }
+                    attn_out[s * q_dim + h * head_dim + d] = val;
+                }
+            }
+        }
+
+        // O projection + bias
+        let o_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_attn_proj_aliases(layer))?;
+        let o_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_attn_proj_bias_aliases(layer))?;
+        let mut o_out = vec![0.0f32; seq_len * hidden];
+        for s in 0..seq_len {
+            for j in 0..hidden {
+                let mut sum = o_b[j];
+                for k in 0..q_dim {
+                    sum += attn_out[s * q_dim + k] * o_w[k * hidden + j];
+                }
+                o_out[s * hidden + j] = sum;
+            }
+        }
+
+        // Residual 1
+        for i in 0..seq_len * hidden {
+            hidden_state[i] += o_out[i];
+        }
+
+        // LayerNorm 2
+        let ln2_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_aliases(layer))?;
+        let ln2_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_ln2_bias_aliases(layer))?;
+        let mut normed2 = vec![0.0f32; seq_len * hidden];
+        gpt2_layer_norm(hidden_state, &ln2_w, &ln2_b, eps, &mut normed2, hidden);
+
+        // MLP: c_fc (GELU) → c_proj
+        let fc_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_aliases(layer))?;
+        let fc_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_fc_bias_aliases(layer))?;
+        let mut fc_out = vec![0.0f32; seq_len * inter];
+        for s in 0..seq_len {
+            for j in 0..inter {
+                let mut sum = fc_b[j];
+                for k in 0..hidden {
+                    sum += normed2[s * hidden + k] * fc_w[k * inter + j];
+                }
+                fc_out[s * inter + j] = gpt2_gelu(sum);
+            }
+        }
+
+        let proj_w = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_proj_aliases(layer))?;
+        let proj_b = get_f32_data(weights, backend, &crate::weight_names::gpt2_mlp_proj_bias_aliases(layer))?;
+        let mut proj_out = vec![0.0f32; seq_len * hidden];
+        for s in 0..seq_len {
+            for j in 0..hidden {
+                let mut sum = proj_b[j];
+                for k in 0..inter {
+                    sum += fc_out[s * inter + k] * proj_w[k * hidden + j];
+                }
+                proj_out[s * hidden + j] = sum;
+            }
+        }
+
+        // Residual 2
+        for i in 0..seq_len * hidden {
+            hidden_state[i] += proj_out[i];
+        }
+    }
+
+    // Final LayerNorm
+    let ln_f_w = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_aliases())?;
+    let ln_f_b = get_f32_data(weights, backend, &crate::weight_names::decoder_final_norm_bias_aliases())?;
+    let mut final_normed = vec![0.0f32; seq_len * hidden];
+    gpt2_layer_norm(hidden_state, &ln_f_w, &ln_f_b, eps, &mut final_normed, hidden);
+
+    // lm_head: use tied embedding (wte.weight), shape [vocab, hidden]
+    let embed_data = get_f32_data(weights, backend, &crate::weight_names::decoder_embed_aliases())?;
+    // Only compute logits for last token
+    let last = seq_len - 1;
+    let mut logits = vec![0.0f32; vocab_size];
+    for v in 0..vocab_size {
+        let mut sum = 0.0f32;
+        for k in 0..hidden {
+            sum += final_normed[last * hidden + k] * embed_data[v * hidden + k];
+        }
+        logits[v] = sum;
+    }
+
+    Ok(logits)
+}
+
 /// Full decoder forward pass for a single sequence.
 ///
 /// Pipeline:
@@ -435,6 +710,18 @@ pub(crate) fn decoder_forward<E: Element>(
 
         // (b) Build position array
         let positions: Vec<u32> = (0..seq_len).map(|i| (position + i) as u32).collect();
+
+        // (b2) GPT-2 path: completely different architecture
+        if config.position_encoding == PositionEncoding::Learned {
+            let gpt2_inter = if inter > 0 { inter } else { 4 * hidden };
+            let logits = gpt2_forward_sequence(
+                backend, &mut hidden_state, &positions,
+                seq_len, hidden, num_heads, head_dim, num_layers, gpt2_inter, eps, vocab_size,
+                weights, transpose_weights, kv_caches, seq_idx, position,
+            )?;
+            results.push(LogitsHandle { data: logits });
+            continue;
+        }
 
         // (c) Determine if this is an incremental decode step (position > 0 with KV cache)
         let has_kv_cache = seq_idx < kv_caches.len();
