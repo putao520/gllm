@@ -718,9 +718,6 @@ impl Loader {
             if lower.contains("bert") || lower.contains("roberta") {
                 return Some(ModelArchitecture::XlmR);
             }
-            if lower.contains("gpt2") {
-                return Some(ModelArchitecture::GPT2Next);
-            }
             if lower.contains("mistral") {
                 return Some(ModelArchitecture::Mistral3);
             }

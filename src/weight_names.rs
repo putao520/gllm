@@ -128,83 +128,8 @@ pub fn decoder_layer_aliases(layer: usize, suffix: &str, gguf_suffix: Option<&st
     if let Some(gg) = gguf_suffix {
         out.push(format!("blk.{layer}.{gg}"));
     }
-    // GPT-2: h.N.suffix
     out.push(format!("h.{layer}.{suffix}"));
     out
-}
-
-// ---------------------------------------------------------------------------
-// GPT-2 specific weight name aliases
-// ---------------------------------------------------------------------------
-
-/// GPT-2 fused QKV attention weight: h.N.attn.c_attn.weight
-pub fn gpt2_fused_qkv_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.attn.c_attn.weight")]
-}
-
-/// GPT-2 fused QKV attention bias: h.N.attn.c_attn.bias
-pub fn gpt2_fused_qkv_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.attn.c_attn.bias")]
-}
-
-/// GPT-2 attention output projection: h.N.attn.c_proj.weight
-pub fn gpt2_attn_proj_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.attn.c_proj.weight")]
-}
-
-/// GPT-2 attention output projection bias: h.N.attn.c_proj.bias
-pub fn gpt2_attn_proj_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.attn.c_proj.bias")]
-}
-
-/// GPT-2 pre-attention LayerNorm weight: h.N.ln_1.weight
-pub fn gpt2_ln1_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.ln_1.weight")]
-}
-
-/// GPT-2 pre-attention LayerNorm bias: h.N.ln_1.bias
-pub fn gpt2_ln1_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.ln_1.bias")]
-}
-
-/// GPT-2 pre-FFN LayerNorm weight: h.N.ln_2.weight
-pub fn gpt2_ln2_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.ln_2.weight")]
-}
-
-/// GPT-2 pre-FFN LayerNorm bias: h.N.ln_2.bias
-pub fn gpt2_ln2_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.ln_2.bias")]
-}
-
-/// GPT-2 MLP fc weight: h.N.mlp.c_fc.weight
-pub fn gpt2_mlp_fc_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.mlp.c_fc.weight")]
-}
-
-/// GPT-2 MLP fc bias: h.N.mlp.c_fc.bias
-pub fn gpt2_mlp_fc_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.mlp.c_fc.bias")]
-}
-
-/// GPT-2 MLP projection weight: h.N.mlp.c_proj.weight
-pub fn gpt2_mlp_proj_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.mlp.c_proj.weight")]
-}
-
-/// GPT-2 MLP projection bias: h.N.mlp.c_proj.bias
-pub fn gpt2_mlp_proj_bias_aliases(layer: usize) -> Vec<String> {
-    vec![format!("h.{layer}.mlp.c_proj.bias")]
-}
-
-/// GPT-2 position embedding: wpe.weight
-pub fn gpt2_position_embed_aliases() -> Vec<String> {
-    vec!["wpe.weight".to_string()]
-}
-
-/// Detect if model uses GPT-2 weight naming convention.
-pub fn is_gpt2_naming(checker: impl Fn(&str) -> bool) -> bool {
-    checker("wte.weight") && checker("h.0.attn.c_attn.weight")
 }
 
 /// Generate alias names for the token embedding in decoder models.
@@ -218,8 +143,6 @@ pub fn decoder_embed_aliases() -> Vec<String> {
         }
     }
     out.push("token_embd.weight".to_string());
-    // GPT-2
-    out.push("wte.weight".to_string());
     out
 }
 
@@ -234,14 +157,12 @@ pub fn decoder_final_norm_aliases() -> Vec<String> {
         }
     }
     out.push("output_norm.weight".to_string());
-    // GPT-2
-    out.push("ln_f.weight".to_string());
     out
 }
 
-/// Generate alias names for the final norm bias (GPT-2 LayerNorm).
+/// Generate alias names for the final norm bias (decoder LayerNorm).
 pub fn decoder_final_norm_bias_aliases() -> Vec<String> {
-    vec!["ln_f.bias".to_string()]
+    vec![]
 }
 
 /// Generate alias names for the lm_head weight in decoder models.

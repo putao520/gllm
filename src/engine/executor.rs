@@ -16,7 +16,6 @@ use thiserror::Error;
 pub enum PositionEncoding {
     None,
     Rope,
-    Learned,
 }
 
 /// Sampling hyper-parameters for a single request.
@@ -422,8 +421,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ModelKind::Embedding | ModelKind::Reranker if model_config.rope_theta <= 0.0 => {
                 PositionEncoding::None
             }
-            // GPT-2 style: no RoPE, uses learned position embeddings
-            _ if model_config.rope_theta <= 0.0 => PositionEncoding::Learned,
             _ => PositionEncoding::Rope,
         };
         let forward_config = GeneratorForwardConfig {

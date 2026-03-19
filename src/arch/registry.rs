@@ -111,12 +111,6 @@ pub fn register_builtin_templates() {
             registry.register(gemma2);
         }
 
-        // 注册 GPT2Next
-        if let Ok(gpt2next) = ArchTemplate::from_yaml(GPT2NEXT_TEMPLATE) {
-            registry.map_arch(ModelArchitecture::GPT2Next, "gpt2next");
-            registry.register(gpt2next);
-        }
-
         // 注册 XLM-R / XLM-R Next
         if let Ok(xlmr) = ArchTemplate::from_yaml(XLMR_TEMPLATE) {
             registry.map_arch(ModelArchitecture::XlmR, "xlmr");
@@ -152,9 +146,6 @@ const PHI4_TEMPLATE: &str = include_str!("templates/phi4.yaml");
 
 /// Gemma2 架构模板
 const GEMMA2_TEMPLATE: &str = include_str!("templates/gemma2.yaml");
-
-/// GPT2Next 架构模板
-const GPT2NEXT_TEMPLATE: &str = include_str!("templates/gpt2next.yaml");
 
 /// XLM-R 架构模板
 const XLMR_TEMPLATE: &str = include_str!("templates/xlmr.yaml");
@@ -263,14 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_gpt2next_parses() {
-        let template = ArchTemplate::from_yaml(GPT2NEXT_TEMPLATE).unwrap();
-        assert_eq!(template.name, "gpt2next");
-        assert!(template.config.contains_key("num_layers"));
-        assert!(template.tensor_patterns.embedding.is_some());
-    }
-
-    #[test]
     fn builtin_xlmr_parses() {
         let template = ArchTemplate::from_yaml(XLMR_TEMPLATE).unwrap();
         assert_eq!(template.name, "xlmr");
@@ -295,7 +278,6 @@ mod tests {
         assert!(get_template("glm4").is_some());
         assert!(get_template("phi4").is_some());
         assert!(get_template("gemma2").is_some());
-        assert!(get_template("gpt2next").is_some());
         assert!(get_template("xlmr").is_some());
         assert!(get_template("deepseek").is_some());
         assert!(get_template("nonexistent").is_none());
@@ -310,7 +292,6 @@ mod tests {
         assert!(get_template_by_arch(ModelArchitecture::GLM5).is_some());
         assert!(get_template_by_arch(ModelArchitecture::Phi4).is_some());
         assert!(get_template_by_arch(ModelArchitecture::Gemma2).is_some());
-        assert!(get_template_by_arch(ModelArchitecture::GPT2Next).is_some());
         assert!(get_template_by_arch(ModelArchitecture::XlmR).is_some());
         assert!(get_template_by_arch(ModelArchitecture::XlmRNext).is_some());
         assert!(get_template_by_arch(ModelArchitecture::DeepSeek).is_some());

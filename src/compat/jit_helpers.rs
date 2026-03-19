@@ -27,13 +27,12 @@ pub(crate) fn computation_dtype(dtype_size: usize) -> DType {
 /// then falls back to `dtype_size`.
 #[inline]
 pub(crate) fn computation_dtype_from_config(
-    config: &crate::engine::executor::GeneratorForwardConfig,
+    _config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> DType {
-    match config.dtype.as_str() {
-        "bf16" | "bfloat16" => DType::BF16,
-        "f16" | "float16" | "fp16" => DType::F16,
-        _ => computation_dtype(config.dtype_size),
-    }
+    // Decoder forward always uses F32: weights are loaded via get_f32_data()
+    // regardless of the model's storage dtype (bf16/f16). Passing BF16/F16
+    // to JIT graphs while feeding f32 data causes heap corruption.
+    DType::F32
 }
 
 /// Convert a `gllm_kernels::types::DType` to the `crate::compat::DType` used in `ModelArchKey`.
@@ -1014,18 +1013,19 @@ pub(crate) fn jit_swiglu(
 
     let gate_bytes = gate.len() * 4;
     let up_bytes = up.len() * 4;
-    let mut input_buf = vec![0u8; gate_bytes + up_bytes];
-    unsafe {
-        std::ptr::copy_nonoverlapping(gate.as_ptr() as *const u8, input_buf.as_mut_ptr(), gate_bytes);
-        std::ptr::copy_nonoverlapping(up.as_ptr() as *const u8, input_buf.as_mut_ptr().add(gate_bytes), up_bytes);
-    }
+    let gate_buf: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(gate.as_ptr() as *const u8, gate_bytes).to_vec()
+    };
+    let up_buf: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(up.as_ptr() as *const u8, up_bytes).to_vec()
+    };
 
     let mut output = vec![0.0f32; seq_len * inter];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
-            input_buf.as_ptr(),
-            std::ptr::null(),
+            gate_buf.as_ptr(),
+            up_buf.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
@@ -1235,266 +1235,7 @@ pub(crate) fn jit_gemm(
 }
 
 // ---------------------------------------------------------------------------
-// GPT-2 JIT graph builders
-// ---------------------------------------------------------------------------
-
-/// Build a CompilerGraph for GPT-2 LayerNorm + fused QKV GemmBias.
-///
-/// Inputs (weight blob order): ln_w[hidden], ln_b[hidden], qkv_w[hidden, 3*hidden], qkv_b[3*hidden]
-/// Output: qkv[seq_len, 3*hidden]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_gpt2_ln_qkv_graph(
-    seq_len: usize,
-    hidden: usize,
-    eps: f32,
-    dtype: DType,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    let dt = dtype;
-    let qkv_dim = 3 * hidden;
-    let mut g = CompilerGraph::new();
-    let input  = g.add_tensor_concrete("input",  &[seq_len, hidden],  dt);
-    let ln_w   = g.add_tensor_concrete("ln_w",   &[hidden],           dt);
-    let ln_b   = g.add_tensor_concrete("ln_b",   &[hidden],           dt);
-    let qkv_w  = g.add_tensor_concrete("qkv_w",  &[hidden, qkv_dim],  dt);
-    let qkv_b  = g.add_tensor_concrete("qkv_b",  &[qkv_dim],          dt);
-    g.inputs = vec![input, ln_w, ln_b, qkv_w, qkv_b];
-    let normed  = g.add_tensor_concrete("normed",  &[seq_len, hidden],  dt);
-    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln_w, ln_b], vec![normed], "ln1");
-    let qkv_out = g.add_tensor_concrete("qkv", &[seq_len, qkv_dim], dt);
-    g.add_op(
-        OpKind::GemmBias { m: seq_len, n: qkv_dim, k: hidden, dtype: dt },
-        vec![normed, qkv_w, qkv_b], vec![qkv_out], "gemm_qkv",
-    );
-    g.outputs = vec![qkv_out];
-    g
-}
-
-/// Execute GPT-2 LayerNorm + fused QKV GemmBias. Returns qkv[seq_len, 3*hidden].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_gpt2_ln_qkv(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    ln_w: &[f32], ln_b: &[f32],
-    qkv_w: &[f32], qkv_b: &[f32],
-    seq_len: usize, hidden: usize,
-) -> Vec<f32> {
-    let qkv_dim = 3 * hidden;
-    let mut output = vec![0.0f32; seq_len * qkv_dim];
-    let weights_buf = pack_weights(&[ln_w, ln_b, qkv_w, qkv_b]);
-    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-    output
-}
-
-/// Build a CompilerGraph for GPT-2 O projection GemmBias + residual add.
-///
-/// Inputs: attn_out[seq_len, q_dim], o_w[q_dim, hidden], o_b[hidden], residual[seq_len, hidden]
-/// Output: out[seq_len, hidden]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_gpt2_o_proj_graph(
-    seq_len: usize,
-    hidden: usize,
-    q_dim: usize,
-    dtype: DType,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    let dt = dtype;
-    let mut g = CompilerGraph::new();
-    let attn_out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim],  dt);
-    let o_w      = g.add_tensor_concrete("o_w",      &[q_dim, hidden],   dt);
-    let o_b      = g.add_tensor_concrete("o_b",      &[hidden],          dt);
-    let residual = g.add_tensor_concrete("residual", &[seq_len, hidden], dt);
-    g.inputs = vec![attn_out, o_w, o_b, residual];
-    let o_out = g.add_tensor_concrete("o_proj", &[seq_len, hidden], dt);
-    g.add_op(
-        OpKind::GemmBias { m: seq_len, n: hidden, k: q_dim, dtype: dt },
-        vec![attn_out, o_w, o_b], vec![o_out], "gemm_o",
-    );
-    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dt);
-    g.add_op(OpKind::Residual, vec![residual, o_out], vec![out], "residual_1");
-    g.outputs = vec![out];
-    g
-}
-
-/// Execute GPT-2 O projection + residual. Returns hidden[seq_len, hidden].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_gpt2_o_proj(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    attn_out: &[f32],
-    o_w: &[f32], o_b: &[f32],
-    residual: &[f32],
-    seq_len: usize, hidden: usize,
-) -> Vec<f32> {
-    let mut output = vec![0.0f32; seq_len * hidden];
-    // ABI: activation = attn_out; weights blob = [o_w, o_b, residual]
-    let weights_buf = pack_weights(&[o_w, o_b, residual]);
-    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
-    unsafe {
-        compiled.execute(
-            attn_out.as_ptr() as *const u8,
-            weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-    output
-}
-
-/// Build a CompilerGraph for GPT-2 LayerNorm2 + MLP (c_fc GemmBias + Gelu + c_proj GemmBias) + residual.
-///
-/// Inputs: hidden[seq_len, hidden], ln2_w[hidden], ln2_b[hidden],
-///         fc_w[hidden, inter], fc_b[inter], proj_w[inter, hidden], proj_b[hidden],
-///         residual[seq_len, hidden]
-/// Output: out[seq_len, hidden]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_gpt2_ln_mlp_graph(
-    seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    eps: f32,
-    dtype: DType,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    let dt = dtype;
-    let mut g = CompilerGraph::new();
-    let input    = g.add_tensor_concrete("input",    &[seq_len, hidden], dt);
-    let ln2_w    = g.add_tensor_concrete("ln2_w",    &[hidden],          dt);
-    let ln2_b    = g.add_tensor_concrete("ln2_b",    &[hidden],          dt);
-    let fc_w     = g.add_tensor_concrete("fc_w",     &[hidden, inter],   dt);
-    let fc_b     = g.add_tensor_concrete("fc_b",     &[inter],           dt);
-    let proj_w   = g.add_tensor_concrete("proj_w",   &[inter, hidden],   dt);
-    let proj_b   = g.add_tensor_concrete("proj_b",   &[hidden],          dt);
-    let residual = g.add_tensor_concrete("residual", &[seq_len, hidden], dt);
-    g.inputs = vec![input, ln2_w, ln2_b, fc_w, fc_b, proj_w, proj_b, residual];
-    let normed2 = g.add_tensor_concrete("normed2", &[seq_len, hidden], dt);
-    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln2_w, ln2_b], vec![normed2], "ln2");
-    let fc_out = g.add_tensor_concrete("fc_out", &[seq_len, inter], dt);
-    g.add_op(
-        OpKind::GemmBias { m: seq_len, n: inter, k: hidden, dtype: dt },
-        vec![normed2, fc_w, fc_b], vec![fc_out], "gemm_fc",
-    );
-    let gelu_out = g.add_tensor_concrete("gelu_out", &[seq_len, inter], dt);
-    g.add_op(OpKind::Gelu, vec![fc_out], vec![gelu_out], "gelu");
-    let proj_out = g.add_tensor_concrete("proj_out", &[seq_len, hidden], dt);
-    g.add_op(
-        OpKind::GemmBias { m: seq_len, n: hidden, k: inter, dtype: dt },
-        vec![gelu_out, proj_w, proj_b], vec![proj_out], "gemm_proj",
-    );
-    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dt);
-    g.add_op(OpKind::Residual, vec![residual, proj_out], vec![out], "residual_2");
-    g.outputs = vec![out];
-    g
-}
-
-/// Execute GPT-2 LayerNorm2 + MLP + residual. Returns hidden[seq_len, hidden].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_gpt2_ln_mlp(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    ln2_w: &[f32], ln2_b: &[f32],
-    fc_w: &[f32], fc_b: &[f32],
-    proj_w: &[f32], proj_b: &[f32],
-    residual: &[f32],
-    seq_len: usize, hidden: usize,
-) -> Vec<f32> {
-    let mut output = vec![0.0f32; seq_len * hidden];
-    let weights_buf = pack_weights(&[ln2_w, ln2_b, fc_w, fc_b, proj_w, proj_b, residual]);
-    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-    output
-}
-
-/// Build a CompilerGraph for GPT-2 final LayerNorm + lm_head (tied embedding, no bias).
-///
-/// `embed_w` must be pre-transposed to [hidden, vocab_size] before packing.
-/// Inputs: hidden[seq_len, hidden], ln_f_w[hidden], ln_f_b[hidden], embed_w_t[hidden, vocab]
-/// Output: logits[seq_len, vocab]
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn build_gpt2_final_ln_lm_head_graph(
-    seq_len: usize,
-    hidden: usize,
-    vocab_size: usize,
-    eps: f32,
-    dtype: DType,
-) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    let dt = dtype;
-    let mut g = CompilerGraph::new();
-    let input   = g.add_tensor_concrete("input",   &[seq_len, hidden],    dt);
-    let ln_f_w  = g.add_tensor_concrete("ln_f_w",  &[hidden],             dt);
-    let ln_f_b  = g.add_tensor_concrete("ln_f_b",  &[hidden],             dt);
-    let embed_w = g.add_tensor_concrete("embed_w", &[hidden, vocab_size], dt);
-    g.inputs = vec![input, ln_f_w, ln_f_b, embed_w];
-    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
-    g.add_op(OpKind::LayerNorm { eps }, vec![input, ln_f_w, ln_f_b], vec![normed], "ln_f");
-    let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], dt);
-    g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
-        vec![normed, embed_w], vec![logits], "lm_head",
-    );
-    g.outputs = vec![logits];
-    g
-}
-
-/// Execute GPT-2 final LayerNorm + lm_head.
-/// `embed_w_t` must be pre-transposed to [hidden, vocab_size].
-/// Returns logits[seq_len, vocab_size].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn execute_gpt2_final_ln_lm_head(
-    compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    ln_f_w: &[f32], ln_f_b: &[f32],
-    embed_w_t: &[f32],
-    seq_len: usize, vocab_size: usize,
-) -> Vec<f32> {
-    let mut output = vec![0.0f32; seq_len * vocab_size];
-    let weights_buf = pack_weights(&[ln_f_w, ln_f_b, embed_w_t]);
-    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
-    unsafe {
-        compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, seq_len,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-    output
-}
-
-
-// ---------------------------------------------------------------------------
-// JIT LayerNorm (with bias) — for embedding LayerNorm in BERT/GPT-2
+// JIT LayerNorm (with bias) — for embedding LayerNorm in BERT encoders
 // ---------------------------------------------------------------------------
 
 /// Build a JIT graph for LayerNorm with bias: out = layernorm(x, gamma, beta).
@@ -1676,18 +1417,19 @@ pub(crate) fn jit_add(a: &[f32], b: &[f32], dtype: DType) -> Result<Vec<f32>, St
 
     let a_bytes = numel * 4;
     let b_bytes = numel * 4;
-    let mut input_buf = vec![0u8; a_bytes + b_bytes];
-    unsafe {
-        std::ptr::copy_nonoverlapping(a.as_ptr() as *const u8, input_buf.as_mut_ptr(), a_bytes);
-        std::ptr::copy_nonoverlapping(b.as_ptr() as *const u8, input_buf.as_mut_ptr().add(a_bytes), b_bytes);
-    }
+    let a_buf: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(a.as_ptr() as *const u8, a_bytes).to_vec()
+    };
+    let b_buf: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(b.as_ptr() as *const u8, b_bytes).to_vec()
+    };
 
     let mut output = vec![0.0f32; numel];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
-            input_buf.as_ptr(),
-            std::ptr::null(),
+            a_buf.as_ptr(),
+            b_buf.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),

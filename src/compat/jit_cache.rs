@@ -39,11 +39,6 @@ pub enum GraphType {
     MoeOGemm,
     MoeNorm2,
     KvProjection,
-    Gpt2LnQkv,
-    Gpt2OProj,
-    Gpt2LnMlp,
-    Gpt2FinalLnLmHead { vocab_size: usize },
-    Gpt2CachedGqa { total_seq: usize },
     /// MoE FFN: routing (MoEGate → TopK), keyed by (num_experts, top_k)
     MoeFfnRouting { num_experts: usize, top_k: usize },
     /// MoE FFN: expert FFN (SwiGLU), keyed by inter_size
@@ -90,16 +85,6 @@ pub struct ModelJitCache {
     pub moe_norm2: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
     /// MoE decoder: CachedGQA per total_seq
     pub moe_gqa_cache: HashMap<usize, Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// GPT-2: LayerNorm1 + fused QKV
-    pub gpt2_ln_qkv: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// GPT-2: O projection
-    pub gpt2_o_proj: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// GPT-2: LayerNorm2 + MLP
-    pub gpt2_ln_mlp: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// GPT-2: final LayerNorm + lm_head
-    pub gpt2_final_ln_lm_head: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// GPT-2: CachedGQA per total_seq
-    pub gpt2_gqa_cache: HashMap<usize, Arc<gllm_kernels::compiler::CompiledLayer>>,
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -114,11 +99,6 @@ impl ModelJitCache {
             moe_o_gemm: None,
             moe_norm2: None,
             moe_gqa_cache: HashMap::new(),
-            gpt2_ln_qkv: None,
-            gpt2_o_proj: None,
-            gpt2_ln_mlp: None,
-            gpt2_final_ln_lm_head: None,
-            gpt2_gqa_cache: HashMap::new(),
         }
     }
 }
@@ -135,11 +115,6 @@ impl std::fmt::Debug for ModelJitCache {
             .field("moe_o_gemm", &self.moe_o_gemm.is_some())
             .field("moe_norm2", &self.moe_norm2.is_some())
             .field("moe_gqa_cache_len", &self.moe_gqa_cache.len())
-            .field("gpt2_ln_qkv", &self.gpt2_ln_qkv.is_some())
-            .field("gpt2_o_proj", &self.gpt2_o_proj.is_some())
-            .field("gpt2_ln_mlp", &self.gpt2_ln_mlp.is_some())
-            .field("gpt2_final_ln_lm_head", &self.gpt2_final_ln_lm_head.is_some())
-            .field("gpt2_gqa_cache_len", &self.gpt2_gqa_cache.len())
             .finish()
     }
 }

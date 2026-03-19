@@ -96,7 +96,26 @@ pub(crate) fn needs_weight_transpose<E: Element>(
         return true;
     }
 
-    // Probe a non-square SafeTensors / ONNX weight.
+    // Probe decoder (Llama/Qwen/Mistral) style weights: self_attn.q_proj.weight
+    // SafeTensors shape: [out_dim, in_dim] → [num_heads*head_dim, hidden] → first < second for GQA
+    // but for q_proj with hidden=576, heads=9, head_dim=64: out=576, in=576 (square, skip)
+    // Use mlp.gate_proj.weight: [inter_dim, hidden] → inter > hidden → true for SafeTensors
+    let decoder_probes: &[&str] = &[
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "transformer.h.0.mlp.c_fc.weight",
+    ];
+    for name in decoder_probes {
+        if let Some(shape) = weights.tensor_shape(name) {
+            if shape.len() == 2 && shape[0] != shape[1] {
+                // SafeTensors: [out_dim, in_dim] → gate_proj [inter, hidden], inter > hidden → true
+                // If shape[0] > shape[1]: out_dim > in_dim → SafeTensors row-major → needs transpose
+                return shape[0] > shape[1];
+            }
+        }
+    }
+
+    // Probe a non-square SafeTensors / ONNX weight (BERT style).
     let probe_names = crate::weight_names::layer_aliases(0, "intermediate.dense.weight", None);
     for name in &probe_names {
         if let Some(shape) = weights.tensor_shape(name) {

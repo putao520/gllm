@@ -36,7 +36,6 @@ pub enum ModelArchitecture {
     Ministral,
     GLM4,
     GLM5,
-    GPT2Next,
     Phi4,
     Gemma2,
     XlmR,
@@ -176,7 +175,6 @@ pub fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
             Some(ModelArchitecture::GLM4)
         }
         "glm" | "glmforcausallm" => Some(ModelArchitecture::GLM5),
-        "gpt2" | "gpt2lmheadmodel" | "gpt_oss" | "gptoss" => Some(ModelArchitecture::GPT2Next),
         "deepseek" | "deepseekv2" | "deepseekv2forcausallm" | "deepseekv3"
         | "deepseekv3forcausallm" => Some(ModelArchitecture::DeepSeek),
         "smollm" | "smollm2" | "smollm2forcausallm" => Some(ModelArchitecture::SmolLM2),
