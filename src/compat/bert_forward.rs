@@ -457,48 +457,61 @@ pub(crate) fn bert_encoder_forward<E: Element>(
             // [CLS] token extraction + classifier head (for reranker models)
             let cls = hidden_state[..hidden].to_vec();
 
-            // Load classifier head weights
-            let dense_w = get_f32_data(weights, backend,
-                &crate::weight_names::classifier_aliases("dense.weight"))?;
-            let dense_b = get_bias_data(weights,
-                &crate::weight_names::classifier_aliases("dense.bias"), hidden);
-            let out_proj_w = get_f32_data(weights, backend,
-                &crate::weight_names::classifier_aliases("out_proj.weight"))?;
-            let out_proj_b = get_bias_data(weights,
-                &crate::weight_names::classifier_aliases("out_proj.bias"), 1);
+            // Try two-layer classifier first (dense + out_proj), e.g. bge-reranker
+            let dense_aliases = crate::weight_names::classifier_aliases("dense.weight");
+            let has_dense = dense_aliases.iter().any(|n| weights.get_tensor(n).is_some() || weights.get_quantized(n).is_some());
 
-            // dense: x = tanh(W @ cls + b)
-            // dense_w is [hidden, hidden] but may be transposed
-            let mut x = vec![0.0f32; hidden];
-            if transpose_weights {
-                // SafeTensors: stored as [out, in], need to compute W^T @ cls
-                for i in 0..hidden {
-                    let mut sum = dense_b[i];
-                    for j in 0..hidden {
-                        sum += dense_w[i * hidden + j] * cls[j];
-                    }
-                    x[i] = sum.tanh();
-                }
-            } else {
-                for i in 0..hidden {
-                    let mut sum = dense_b[i];
-                    for j in 0..hidden {
-                        sum += dense_w[j * hidden + i] * cls[j];
-                    }
-                    x[i] = sum.tanh();
-                }
-            }
+            let logit = if has_dense {
+                // Two-layer: dense → tanh → out_proj
+                let dense_w = get_f32_data(weights, backend, &dense_aliases)?;
+                let dense_b = get_bias_data(weights,
+                    &crate::weight_names::classifier_aliases("dense.bias"), hidden);
+                let out_proj_w = get_f32_data(weights, backend,
+                    &crate::weight_names::classifier_aliases("out_proj.weight"))?;
+                let out_proj_b = get_bias_data(weights,
+                    &crate::weight_names::classifier_aliases("out_proj.bias"), 1);
 
-            // out_proj: logit = W @ x + b
-            // out_proj_w shape: [num_labels, hidden] (typically [1, hidden])
-            let num_labels = out_proj_w.len() / hidden;
-            let mut logit = 0.0f32;
-            if num_labels >= 1 {
+                // dense: x = tanh(W @ cls + b)
+                let mut x = vec![0.0f32; hidden];
+                if transpose_weights {
+                    for i in 0..hidden {
+                        let mut sum = dense_b[i];
+                        for j in 0..hidden {
+                            sum += dense_w[i * hidden + j] * cls[j];
+                        }
+                        x[i] = sum.tanh();
+                    }
+                } else {
+                    for i in 0..hidden {
+                        let mut sum = dense_b[i];
+                        for j in 0..hidden {
+                            sum += dense_w[j * hidden + i] * cls[j];
+                        }
+                        x[i] = sum.tanh();
+                    }
+                }
+
+                // out_proj: logit = W @ x + b
+                let mut logit = 0.0f32;
                 for j in 0..hidden {
                     logit += out_proj_w[j] * x[j];
                 }
                 logit += out_proj_b[0];
-            }
+                logit
+            } else {
+                // Single-layer: classifier.weight [num_labels, hidden] @ cls + bias
+                // e.g. cross-encoder/ms-marco-MiniLM (BertForSequenceClassification)
+                let w = get_f32_data(weights, backend,
+                    &crate::weight_names::classifier_aliases("weight"))?;
+                let b = get_bias_data(weights,
+                    &crate::weight_names::classifier_aliases("bias"), 1);
+
+                let mut logit = b[0];
+                for j in 0..hidden {
+                    logit += w[j] * cls[j];
+                }
+                logit
+            };
 
             // sigmoid for probability
             let score = 1.0 / (1.0 + (-logit).exp());
