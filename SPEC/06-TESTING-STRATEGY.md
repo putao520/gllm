@@ -111,7 +111,7 @@ fn test_name() {
 | REQ-TEST-007 | 错误处理测试 | TEST-ERROR-001 ~ -004 | `test_error_handling.rs` |
 | REQ-TEST-008 | 性能基准测试 | TEST-PERF-001 ~ -004 | `test_performance.rs` |
 | REQ-TEST-009 | MoE 专项测试 | TEST-MOE-001 ~ -003 | `test_moe_routing.rs` |
-| REQ-TEST-010 | 后端一致性测试 | TEST-BACKEND-001 | 📋 待实现 (`test_backend_compat.rs`) |
+| REQ-TEST-010 | 后端一致性测试 | TEST-BACKEND-001 | `test_backend_compat.rs` |
 
 ---
 

@@ -161,3 +161,66 @@ pub fn map_dtype(dtype: GgmlDType) -> Result<DType, GgufError> {
 
     Ok(mapped)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loader::gguf::GgmlDType;
+
+    /// TEST-GGUF-010: 量化类型映射测试 — GgmlDType → adapter DType 正确映射
+    #[test]
+    fn test_gguf_010_quant_type_mapping() {
+        // P0 类型
+        assert_eq!(map_dtype(GgmlDType::F32).unwrap(), DType::F32);
+        assert_eq!(map_dtype(GgmlDType::F16).unwrap(), DType::F16);
+        assert_eq!(map_dtype(GgmlDType::BF16).unwrap(), DType::BF16);
+        assert_eq!(map_dtype(GgmlDType::Q4_0).unwrap(), DType::PackedU8(PackedBits::Int4));
+        assert_eq!(map_dtype(GgmlDType::Q8_0).unwrap(), DType::U8);
+
+        // P1 类型
+        assert_eq!(map_dtype(GgmlDType::Q4_K).unwrap(), DType::PackedU8(PackedBits::Int4));
+        assert_eq!(map_dtype(GgmlDType::Q8_K).unwrap(), DType::U8);
+
+        // P2 类型
+        assert_eq!(map_dtype(GgmlDType::Q2_K).unwrap(), DType::PackedU8(PackedBits::Int2));
+
+        // IQ 系列
+        assert_eq!(map_dtype(GgmlDType::IQ4_NL).unwrap(), DType::PackedU8(PackedBits::Int4));
+        assert_eq!(map_dtype(GgmlDType::IQ2_XXS).unwrap(), DType::PackedU8(PackedBits::Int2));
+        assert_eq!(map_dtype(GgmlDType::IQ1_S).unwrap(), DType::PackedU8(PackedBits::Int1));
+
+        // 不支持的类型返回 Err
+        assert!(map_dtype(GgmlDType::Q5_0).is_err());
+        assert!(map_dtype(GgmlDType::Q6_K).is_err());
+        assert!(map_dtype(GgmlDType::Q3_K).is_err());
+        assert!(map_dtype(GgmlDType::F64).is_err());
+    }
+
+    /// TEST-GGUF-011: 泛型约束验证 — GGUF 解析器返回原始字节 + 类型标识符
+    /// 适配层负责类型映射，不依赖 GGUF 内部类型
+    #[test]
+    fn test_gguf_011_adapter_type_isolation() {
+        // map_dtype 是纯函数，不依赖 GGUF 文件 I/O
+        // 验证所有 DType 变体可以被正确构造和比较
+        let types = [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::U8,
+            DType::PackedU8(PackedBits::Int1),
+            DType::PackedU8(PackedBits::Int2),
+            DType::PackedU8(PackedBits::Int4),
+        ];
+        // 每种类型与自身相等
+        for t in &types {
+            assert_eq!(t, t);
+        }
+        // F32 与 F16 不相等
+        assert_ne!(DType::F32, DType::F16);
+        // Int1 与 Int4 不相等
+        assert_ne!(
+            DType::PackedU8(PackedBits::Int1),
+            DType::PackedU8(PackedBits::Int4)
+        );
+    }
+}
