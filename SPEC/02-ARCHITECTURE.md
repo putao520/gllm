@@ -130,19 +130,10 @@ let metadata = loader.quantization_metadata()?
     ))?;
 ```
 
-#### 已知 Ω1 违规问题（待修复）
+#### 已知 Ω1 违规问题
 
 **问题1: Phi4 QKV 分割硬编码** (ARCH-QUANT-METADATA-001)
-- **位置**: `src/loader/mod.rs::split_phi4_qkv`
-- **问题**: 硬编码了 Phi-4-mini 的 Q/K/V 维度 (Q=3072, K=1024, V=1024)
-- **当前代码**:
-  ```rust
-  // Phi-4-mini: Q=3072, K=1024, V=1024
-  let q_dim = in_dim;
-  let kv_dim = (out_dim - q_dim) / 2;
-  ```
-- **正确做法**: 应该从 config.json 读取 `num_attention_heads`, `num_key_value_heads`, `head_dim` 来计算
-- **状态**: 📋 待修复（需要重构 `maybe_split_fused` 以接收 `ModelConfig`）
+- **状态**: 🟢 已修复 — `split_phi4_qkv` 函数已在架构重构中移除，Phi4 现在走 YAML 模板驱动，维度从 `ModelConfig` 动态读取
 
 ---
 

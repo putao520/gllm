@@ -241,6 +241,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     jit: &mut DecodeCachedJit,
     output: &mut [f32],
+    dtype: gllm_kernels::types::DType,
 ) -> Result<f32, BE> {
     let geom = AttentionGeometry {
         num_heads, num_kv_heads, head_dim,
@@ -305,7 +306,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut resid1 = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        resid1 = super::jit_helpers::jit_add(&hidden_state[..seq_len * hidden], &o_out)
+        resid1 = super::jit_helpers::jit_add(&hidden_state[..seq_len * hidden], &o_out, dtype)
             .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -324,7 +325,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut swiglu = vec![0.0f32; seq_len * inter];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        swiglu = super::jit_helpers::jit_swiglu(&gate_out, &up_out, seq_len, inter)
+        swiglu = super::jit_helpers::jit_swiglu(&gate_out, &up_out, seq_len, inter, dtype)
             .map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -336,7 +337,7 @@ fn quantized_incremental_decode_layer<E: Element>(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let result = super::jit_helpers::jit_add(&resid1, &down_out)
+        let result = super::jit_helpers::jit_add(&resid1, &down_out, dtype)
             .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
         output.copy_from_slice(&result);
     }
@@ -469,25 +470,25 @@ fn compile_gpt2_jit(
 ) -> Result<Gpt2CachedJit, BE> {
     let q_dim = num_heads * head_dim;
 
-    let ln_qkv_graph = build_gpt2_ln_qkv_graph(seq_len, hidden, eps);
+    let ln_qkv_graph = build_gpt2_ln_qkv_graph(seq_len, hidden, eps, gllm_kernels::types::DType::F32);
     let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
     let ln_qkv = c1.compile_graph(&ln_qkv_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: LN+QKV compile failed: {e}"))
     })?;
 
-    let o_proj_graph = build_gpt2_o_proj_graph(seq_len, hidden, q_dim);
+    let o_proj_graph = build_gpt2_o_proj_graph(seq_len, hidden, q_dim, gllm_kernels::types::DType::F32);
     let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
     let o_proj = c3.compile_graph(&o_proj_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: O-proj compile failed: {e}"))
     })?;
 
-    let ln_mlp_graph = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps);
+    let ln_mlp_graph = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps, gllm_kernels::types::DType::F32);
     let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
     let ln_mlp = c4.compile_graph(&ln_mlp_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: LN+MLP compile failed: {e}"))
     })?;
 
-    let final_graph = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps);
+    let final_graph = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps, gllm_kernels::types::DType::F32);
     let mut c5 = gllm_kernels::compiler::InferenceCompiler::new();
     let final_ln_lm_head = c5.compile_graph(&final_graph).map_err(|e| {
         BE::Other(format!("GPT-2 JIT: final LN+lm_head compile failed: {e}"))
@@ -627,7 +628,7 @@ fn gpt2_forward_sequence<E: Element>(
             let ln_qkv = cache.get_or_compile(
                 JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2LnQkv },
                 || {
-                    let g = build_gpt2_ln_qkv_graph(seq_len, hidden, eps);
+                    let g = build_gpt2_ln_qkv_graph(seq_len, hidden, eps, computation_dtype_from_config(config));
                     let mut c = gllm_kernels::compiler::InferenceCompiler::new();
                     c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: LN+QKV compile failed: {e}"))
                 },
@@ -635,7 +636,7 @@ fn gpt2_forward_sequence<E: Element>(
             let o_proj = cache.get_or_compile(
                 JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2OProj },
                 || {
-                    let g = build_gpt2_o_proj_graph(seq_len, hidden, num_heads * head_dim);
+                    let g = build_gpt2_o_proj_graph(seq_len, hidden, num_heads * head_dim, computation_dtype_from_config(config));
                     let mut c = gllm_kernels::compiler::InferenceCompiler::new();
                     c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: O-proj compile failed: {e}"))
                 },
@@ -643,7 +644,7 @@ fn gpt2_forward_sequence<E: Element>(
             let ln_mlp = cache.get_or_compile(
                 JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2LnMlp },
                 || {
-                    let g = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps);
+                    let g = build_gpt2_ln_mlp_graph(seq_len, hidden, inter, eps, computation_dtype_from_config(config));
                     let mut c = gllm_kernels::compiler::InferenceCompiler::new();
                     c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: LN+MLP compile failed: {e}"))
                 },
@@ -651,7 +652,7 @@ fn gpt2_forward_sequence<E: Element>(
             let final_ln_lm_head = cache.get_or_compile(
                 JitCacheKey { arch: arch_key.clone(), graph: GraphType::Gpt2FinalLnLmHead { vocab_size } },
                 || {
-                    let g = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps);
+                    let g = build_gpt2_final_ln_lm_head_graph(seq_len, hidden, vocab_size, eps, computation_dtype_from_config(config));
                     let mut c = gllm_kernels::compiler::InferenceCompiler::new();
                     c.compile_graph(&g).map_err(|e| format!("GPT-2 JIT: final LN+lm_head compile failed: {e}"))
                 },
@@ -1196,6 +1197,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         layer, &hidden_state, &k_w_f32, &v_w_f32,
                         &rn1_w, &positions,
                         seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                        computation_dtype_from_config(config),
                     )?;
                 } else {
                     // Dense layers: JIT KV projection
@@ -1205,6 +1207,7 @@ pub(crate) fn decoder_forward<E: Element>(
                             &kv_proj_decode,
                             &hidden_state, &rn1_w, &k_w_f32, &v_w_f32,
                             &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                            computation_dtype_from_config(config),
                         );
                         write_kv_to_cache(
                             backend, kv_caches[seq_idx],
@@ -1290,6 +1293,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         }
                         let resid1 = super::jit_helpers::jit_add(
                             &hidden_state[..seq_len * hidden], &o_out,
+                            computation_dtype_from_config(config),
                         ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
 
                         let mut normed2 = vec![0.0f32; seq_len * hidden];
@@ -1301,9 +1305,12 @@ pub(crate) fn decoder_forward<E: Element>(
                         let moe_out = super::jit_helpers::execute_moe_ffn_jit(
                             &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
                             seq_len, hidden, inter, moe_num_experts, moe_top_k,
+                            computation_dtype_from_config(config),
                         )?;
 
-                        let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out)
+                        let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out,
+                            computation_dtype_from_config(config),
+                        )
                             .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
                         layer_out.copy_from_slice(&layer_out_vec);
                         sparsity_layers += 1;
@@ -1331,6 +1338,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         &mut decode_jit,
                         &mut layer_out,
+                        computation_dtype_from_config(config),
                     )?;
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
@@ -1487,6 +1495,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     let (k_rope, v_proj) = execute_kv_projection(
                         &kv_compiled, &hidden_state, &rn1_w, &k_w, &v_w,
                         &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                        computation_dtype_from_config(config),
                     );
 
                     // Step 2: Prefill attention via JIT (MHA with GQA)
@@ -1591,15 +1600,19 @@ pub(crate) fn decoder_forward<E: Element>(
                     }
                     let resid1 = super::jit_helpers::jit_add(
                         &hidden_state[..seq_len * hidden], &o_out,
+                        computation_dtype_from_config(config),
                     ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
 
                     // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
                     let moe_out = super::jit_helpers::execute_moe_ffn_jit(
                         &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
                         seq_len, dims.hidden, dims.inter, moe_num_experts, moe_top_k,
+                        computation_dtype_from_config(config),
                     )?;
 
-                    let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out)
+                    let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out,
+                        computation_dtype_from_config(config),
+                    )
                         .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
                     layer_out.copy_from_slice(&layer_out_vec);
                     total_sparsity += layer_sparsity;
@@ -1614,6 +1627,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         layer, &hidden_state, &k_w, &v_w,
                         &rn1_w, &positions,
                         seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+                        computation_dtype_from_config(config),
                     )?;
                 }
 
@@ -1694,6 +1708,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         kv_compiled,
                         &hidden_state, &rn1_w, &k_w, &v_w,
                         &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+                        computation_dtype_from_config(config),
                     );
                     write_kv_to_cache(
                         backend, kv_caches[seq_idx],
@@ -1919,7 +1934,9 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
 
     // (f) Mean pooling: average across all token positions via JIT
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    let pooled = super::jit_helpers::jit_mean_pool(&normed, seq_len, hidden)
+    let pooled = super::jit_helpers::jit_mean_pool(&normed, seq_len, hidden,
+        computation_dtype_from_config(config),
+    )
         .map_err(|e| BE::Other(format!("mean pool JIT failed: {e}")))?;
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let pooled = { return Err(BE::Other("mean pool JIT requires x86_64 or aarch64".to_string())); };
@@ -1927,7 +1944,9 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     // (g) L2 normalize via JIT (standard for embedding models)
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let pooled = {
-        super::jit_helpers::jit_l2_normalize(&pooled, 1, hidden)
+        super::jit_helpers::jit_l2_normalize(&pooled, 1, hidden,
+            computation_dtype_from_config(config),
+        )
             .map_err(|e| BE::Other(format!("L2 normalize JIT failed: {e}")))?
     };
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -2420,6 +2439,7 @@ mod tests {
         let out = execute_moe_ffn_jit(
             &input, &router_w, &experts, None,
             seq_len, hidden, inter, num_experts, top_k,
+            gllm_kernels::types::DType::F32,
         ).expect("MoE FFN JIT execution");
         assert_eq!(out.len(), hidden);
         for &v in &out {

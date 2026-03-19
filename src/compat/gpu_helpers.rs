@@ -206,7 +206,9 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden])
+        let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden],
+            super::jit_helpers::computation_dtype_from_config(config),
+        )
             .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
         hidden_state.copy_from_slice(&added);
     }
@@ -223,7 +225,9 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast)
+            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast,
+                super::jit_helpers::computation_dtype_from_config(config),
+            )
                 .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
             hidden_state.copy_from_slice(&added);
         }
@@ -244,7 +248,9 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            hidden_state = super::jit_helpers::jit_layer_norm(&hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden)
+            hidden_state = super::jit_helpers::jit_layer_norm(&hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden,
+                super::jit_helpers::computation_dtype_from_config(config),
+            )
                 .map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

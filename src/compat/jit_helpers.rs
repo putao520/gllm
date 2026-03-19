@@ -282,6 +282,7 @@ pub(crate) fn execute_kv_projection(
     num_kv_heads: usize,
     head_dim: usize,
     eps: f32,
+    dtype: DType,
 ) -> (Vec<f32>, Vec<f32>) {
     let kv_dim = num_kv_heads * head_dim;
 
@@ -304,7 +305,7 @@ pub(crate) fn execute_kv_projection(
     }
 
     // V projection via JIT: RmsNorm → V Gemm (no RoPE on V)
-    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, DType::F32);
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, dtype);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .expect("JIT compile v_projection failed");
@@ -571,6 +572,7 @@ pub(crate) fn execute_moe_pre_attention(
     num_kv_heads: usize,
     head_dim: usize,
     eps: f32,
+    dtype: DType,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
@@ -594,7 +596,7 @@ pub(crate) fn execute_moe_pre_attention(
 
     // k_rope and v_proj via separate JIT graphs (single-output ABI limitation)
     // K: RmsNorm → K Gemm → RoPE
-    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0, DType::F32);
+    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0, dtype);
     let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let k_compiled = k_compiler.compile_graph(&k_graph)
         .expect("JIT compile k_projection failed");
@@ -615,7 +617,7 @@ pub(crate) fn execute_moe_pre_attention(
     }
 
     // V: RmsNorm → V Gemm (no RoPE)
-    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, DType::F32);
+    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, dtype);
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .expect("JIT compile v_projection failed");
@@ -782,11 +784,11 @@ pub(crate) fn execute_moe_ffn_jit(
     inter: usize,
     num_experts: usize,
     top_k: usize,
+    dtype: DType,
 ) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
     use crate::engine::executor::BackendError as BE;
 
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as CompatDType;
 
     let arch_key = ModelArchKey {
         arch_name: "moe_ffn".to_string(),
@@ -794,7 +796,7 @@ pub(crate) fn execute_moe_ffn_jit(
         num_heads: 0,
         num_kv_heads: 0,
         head_dim: 0,
-        dtype: CompatDType::F32,
+        dtype: kernels_dtype_to_compat(dtype),
     };
 
     // Step 1: MoE routing via JIT (MoEGate → TopK) — cached
@@ -804,7 +806,7 @@ pub(crate) fn execute_moe_ffn_jit(
     };
     let routing_compiled = global_jit_cache()
         .get_or_compile(routing_key, || {
-            let graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k, DType::F32);
+            let graph = build_moe_routing_graph(seq_len, hidden, num_experts, top_k, dtype);
             let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
             compiler.compile_graph(&graph).map_err(|e| format!("MoE routing JIT failed: {e}"))
         })
@@ -847,7 +849,7 @@ pub(crate) fn execute_moe_ffn_jit(
     };
     let ffn_compiled = global_jit_cache()
         .get_or_compile(ffn_key, || {
-            let graph = build_expert_ffn_graph(seq_len, hidden, inter, DType::F32);
+            let graph = build_expert_ffn_graph(seq_len, hidden, inter, dtype);
             let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
             compiler.compile_graph(&graph).map_err(|e| format!("MoE expert FFN JIT failed: {e}"))
         })
@@ -886,7 +888,7 @@ pub(crate) fn execute_moe_ffn_jit(
     };
     let combine_compiled = global_jit_cache()
         .get_or_compile(combine_key, || {
-            let graph = build_moe_combine_graph(seq_len, hidden, top_k, DType::F32);
+            let graph = build_moe_combine_graph(seq_len, hidden, top_k, dtype);
             let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
             compiler.compile_graph(&graph).map_err(|e| format!("MoE combine JIT failed: {e}"))
         })
@@ -964,12 +966,11 @@ pub(crate) fn execute_moe_ffn_jit(
 
 /// Build a CompilerGraph for SwiGLU activation only: gate * silu(gate) * up.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn build_swiglu_graph(seq_len: usize, inter: usize) -> gllm_kernels::compiler::CompilerGraph {
+fn build_swiglu_graph(seq_len: usize, inter: usize, dtype: DType) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let gate = g.add_tensor_concrete("gate", &[seq_len, inter], dt);
     let up = g.add_tensor_concrete("up", &[seq_len, inter], dt);
@@ -988,9 +989,9 @@ pub(crate) fn jit_swiglu(
     up: &[f32],
     seq_len: usize,
     inter: usize,
+    dtype: DType,
 ) -> Result<Vec<f32>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as GllmDType;
 
     let key = JitCacheKey {
         arch: ModelArchKey {
@@ -999,13 +1000,13 @@ pub(crate) fn jit_swiglu(
             num_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            dtype: GllmDType::F32,
+            dtype: kernels_dtype_to_compat(dtype),
         },
         graph: GraphType::SwiGluActivation { inter_size: inter },
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
-        let graph = build_swiglu_graph(seq_len, inter);
+        let graph = build_swiglu_graph(seq_len, inter, dtype);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| format!("SwiGLU JIT failed: {e}"))
     })?;
@@ -1165,15 +1166,16 @@ pub(crate) fn update_kv_cache_jit<E: Element>(
     head_dim: usize,
     eps: f32,
     rope_theta: f64,
+    dtype: DType,
 ) -> Result<(), BE> {
-    let kv_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, DType::F32);
+    let kv_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, dtype);
     let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let compiled = compiler.compile_graph(&kv_graph)
         .map_err(|e| BE::Cpu(format!("JIT compile kv_projection failed: {e}")))?;
 
     let (k_rope, v_proj) = execute_kv_projection(
         &compiled, hidden_state, rn1_w, k_w, v_w, positions,
-        seq_len, hidden, num_kv_heads, head_dim, eps,
+        seq_len, hidden, num_kv_heads, head_dim, eps, dtype,
     );
 
     write_kv_to_cache(backend, handle, layer, &k_rope, &v_proj, seq_len, num_kv_heads, head_dim)
@@ -1244,10 +1246,10 @@ pub(crate) fn build_gpt2_ln_qkv_graph(
     seq_len: usize,
     hidden: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-    let dt = DType::F32;
+    let dt = dtype;
     let qkv_dim = 3 * hidden;
     let mut g = CompilerGraph::new();
     let input  = g.add_tensor_concrete("input",  &[seq_len, hidden],  dt);
@@ -1304,10 +1306,10 @@ pub(crate) fn build_gpt2_o_proj_graph(
     seq_len: usize,
     hidden: usize,
     q_dim: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-    let dt = DType::F32;
+    let dt = dtype;
     let mut g = CompilerGraph::new();
     let attn_out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim],  dt);
     let o_w      = g.add_tensor_concrete("o_w",      &[q_dim, hidden],   dt);
@@ -1365,10 +1367,10 @@ pub(crate) fn build_gpt2_ln_mlp_graph(
     hidden: usize,
     inter: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-    let dt = DType::F32;
+    let dt = dtype;
     let mut g = CompilerGraph::new();
     let input    = g.add_tensor_concrete("input",    &[seq_len, hidden], dt);
     let ln2_w    = g.add_tensor_concrete("ln2_w",    &[hidden],          dt);
@@ -1439,10 +1441,10 @@ pub(crate) fn build_gpt2_final_ln_lm_head_graph(
     hidden: usize,
     vocab_size: usize,
     eps: f32,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
-    let dt = DType::F32;
+    let dt = dtype;
     let mut g = CompilerGraph::new();
     let input   = g.add_tensor_concrete("input",   &[seq_len, hidden],    dt);
     let ln_f_w  = g.add_tensor_concrete("ln_f_w",  &[hidden],             dt);
@@ -1525,10 +1527,9 @@ pub(crate) fn jit_layer_norm(
     beta: &[f32],
     seq_len: usize,
     hidden: usize,
+    dtype: DType,
 ) -> Result<Vec<f32>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as GllmDType;
-    use gllm_kernels::types::DType;
 
     let key = JitCacheKey {
         arch: ModelArchKey {
@@ -1537,13 +1538,13 @@ pub(crate) fn jit_layer_norm(
             num_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            dtype: GllmDType::F32,
+            dtype: kernels_dtype_to_compat(dtype),
         },
         graph: GraphType::Norm2, // reuse Norm2 slot for LayerNorm
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
-        let graph = build_layer_norm_graph(seq_len, hidden, DType::F32);
+        let graph = build_layer_norm_graph(seq_len, hidden, dtype);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| e.to_string())
     })?;
@@ -1597,10 +1598,9 @@ pub(crate) fn jit_l2_normalize(
     input: &[f32],
     seq_len: usize,
     hidden: usize,
+    dtype: DType,
 ) -> Result<Vec<f32>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as GllmDType;
-    use gllm_kernels::types::DType;
 
     let key = JitCacheKey {
         arch: ModelArchKey {
@@ -1609,13 +1609,13 @@ pub(crate) fn jit_l2_normalize(
             num_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            dtype: GllmDType::F32,
+            dtype: kernels_dtype_to_compat(dtype),
         },
         graph: GraphType::Norm2,
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
-        let graph = build_l2_norm_graph(seq_len, hidden, DType::F32);
+        let graph = build_l2_norm_graph(seq_len, hidden, dtype);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&graph).map_err(|e| e.to_string())
     })?;
@@ -1643,11 +1643,9 @@ pub(crate) fn jit_l2_normalize(
 
 /// Execute element-wise add via JIT (cached): output = a + b.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn jit_add(a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
+pub(crate) fn jit_add(a: &[f32], b: &[f32], dtype: DType) -> Result<Vec<f32>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as GllmDType;
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let numel = a.len();
     let key = JitCacheKey {
@@ -1657,14 +1655,14 @@ pub(crate) fn jit_add(a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
             num_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            dtype: GllmDType::F32,
+            dtype: kernels_dtype_to_compat(dtype),
         },
         graph: GraphType::ResidualAdd { numel },
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
         let mut g = CompilerGraph::new();
-        let dt = DType::F32;
+        let dt = dtype;
         let x = g.add_tensor_concrete("a", &[numel], dt);
         let y = g.add_tensor_concrete("b", &[numel], dt);
         g.inputs = vec![x, y];
@@ -1710,9 +1708,9 @@ pub(crate) fn jit_mean_pool(
     input: &[f32],
     seq_len: usize,
     hidden: usize,
+    dtype: DType,
 ) -> Result<Vec<f32>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-    use crate::compat::DType as GllmDType;
 
     let key = JitCacheKey {
         arch: ModelArchKey {
@@ -1721,7 +1719,7 @@ pub(crate) fn jit_mean_pool(
             num_heads: 0,
             num_kv_heads: 0,
             head_dim: 0,
-            dtype: GllmDType::F32,
+            dtype: kernels_dtype_to_compat(dtype),
         },
         graph: GraphType::BertMeanPool,
     };
