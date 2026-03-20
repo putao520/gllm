@@ -280,6 +280,88 @@ src/
 
 **理由**：JIT 融合算子直接驻留缓存对齐内存页，调用外部预编译库的 ROI 过低。gllm 的 JIT 可以根据 (模型结构 × 硬件能力) 生成比预编译库更优的代码。
 
+## 🚨 DType 全链路自适应 (DTYPE_ADAPTIVE — 零硬编码)
+
+**铁律：dtype 必须同时影响存储和计算，全链路自适应，禁止硬编码数据类型长度**：
+
+### 禁止规则
+
+- ❌ 禁止 `pack_weights` 总是按 f32 pack（必须按 graph dtype pack）
+- ❌ 禁止 `computation_dtype_from_config` 硬编码返回 F32
+- ❌ 禁止 JIT codegen 中硬编码 `* 4` 或 `* 2`（必须用 `dtype.size_bytes()`）
+- ❌ 禁止 `weight_layout` 和 `pack_weights` 的 dtype 不一致
+- ❌ 禁止 `concrete_bytes` 和实际数据 dtype 不一致
+- ❌ 禁止 GPU htod/dtoh 传输字节数用 `len() * 4` 计算
+- ❌ 禁止 `size_of::<f32>()` 作为通用 tensor 元素大小
+- ❌ 禁止 scratchpad/shared memory 分配硬编码 `* 4`（accumulator 空间除外）
+- ❌ 禁止 stride/offset 计算硬编码 `* 4`（必须 `cols * elem_bytes`）
+
+### 必须规则
+
+- ✅ `computation_dtype_from_config(config)` 返回 `computation_dtype(config.dtype_size)`
+- ✅ `pack_weights_typed(slices, dtype)` 按 dtype 转换并 pack
+- ✅ GEMM weight 按模型 dtype 存储（F16/BF16 省 50% 内存 + SIMD 吞吐翻倍）
+- ✅ Norm/bias weight 按 F32 存储（体积可忽略）
+- ✅ Activation/intermediate tensor 按 F32 存储（accumulator 精度）
+- ✅ JIT codegen 的每个 op 必须根据输入 tensor 的 dtype 生成对应的 load/store 指令
+- ✅ `weight_layout()` 的 offset 必须和 `pack_weights_typed()` 的实际布局一致
+- ✅ 所有 `execute_jit_*` 函数必须接受 `dtype: DType` 参数
+- ✅ GPU buffer 分配/传输/下载统一使用 `n_elements * dtype.size_bytes()`
+
+### dtype 传播链（全链路贯通）
+
+```
+模型元数据 (dtype_size) → computation_dtype_from_config() → DType
+    ├──▶ pack_weights_typed(slices, dtype)      // weight 按 dtype pack
+    ├──▶ weight_layout(dtype)                   // offset 按 dtype.size_bytes()
+    ├──▶ concrete_bytes(dtype)                  // buffer 按 dtype.size_bytes()
+    ├──▶ execute_jit_*(dtype)                   // forward 按 dtype 分配
+    ├──▶ GPU htod/dtoh(dtype)                   // 传输按 dtype.size_bytes()
+    └──▶ JIT codegen(elem_bytes)                // 指令按 dtype 选择
+```
+
+### dtype 分类规则
+
+| 类别 | dtype | 理由 |
+|------|-------|------|
+| GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype (F16/BF16/F32) | 内存节省 + SIMD 优化 |
+| Norm weight (gamma/beta) | F32 | 体积可忽略，codegen 简化 |
+| Activation input | F32 | accumulator 精度 |
+| Intermediate tensor | F32 | accumulator 精度 |
+| KV cache | 模型 dtype | 内存节省 |
+
+### JIT codegen dtype 模板化
+
+```rust
+// ❌ 禁止: 硬编码数据类型长度
+let row_bytes = cols * 4;
+let buf = vec![0u8; n * 4];
+
+// ✅ 正确: 使用 elem_bytes 参数
+let elem_bytes = dtype.size_bytes();
+let row_bytes = cols * elem_bytes;
+let buf = vec![0u8; n * elem_bytes];
+
+// ❌ 禁止: 硬编码 load/store 指令
+dynasm!(ops; vmovups [rbx + offset], ymm0);
+
+// ✅ 正确: 按 dtype 选择指令
+match elem_bytes {
+    4 => dynasm!(ops; vmovups [rbx + offset], ymm0),
+    2 => emit_f16_or_bf16_store(ops, rbx, offset, ymm0, dtype),
+    _ => return Err("unsupported dtype"),
+}
+```
+
+### 合法 `* 4` 例外（非违规）
+
+- accumulator 空间的 f32 scalar tail（`vmovss` 逐元素偏移）— accumulator 始终 F32
+- `simd_width_f32 * 4` — 变量名明确 f32 上下文
+- `partial_cmp().unwrap_or(Equal)` — NaN 比较标准模式
+- BLIS GEMM 主路径 — 已通过 `src_elem_bytes()` 动态化
+
+**理由**：dtype 硬编码为 f32 会浪费 50% 内存带宽，无法利用 F16/BF16 SIMD 指令（VDPBF16PS、F16C），违反性能极致化路线。全链路 dtype 自适应是高性能推理引擎的基本要求。详见 SPEC/02-ARCHITECTURE.md §8.8。
+
 ## Common Commands
 
 ```bash

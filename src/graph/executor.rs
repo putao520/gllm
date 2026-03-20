@@ -197,11 +197,13 @@ struct CompiledNode {
     graph_input_names: Vec<String>,
     /// Names of the FusedNode output tensors.
     graph_output_names: Vec<String>,
-    /// Number of f32 elements in the output tensor(s).
+    /// Number of elements in the output tensor(s).
     output_numel: usize,
     /// Per-output element counts for multi-output nodes.
     /// Empty for single-output nodes (use output_numel).
     per_output_numel: Vec<usize>,
+    /// DType of the output tensor(s) — used for byte-size calculations.
+    output_dtype: gllm_kernels::types::DType,
 }
 
 /// Build a CompilerGraph for FlashAttention.
@@ -229,6 +231,7 @@ fn build_flash_attention_graph(
         OpKind::MultiHeadAttention {
             seq_len,
             num_heads: config.num_heads,
+            num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
         },
         vec![q, k, v],
@@ -434,6 +437,7 @@ fn build_gqa_graph(
         OpKind::MultiHeadAttention {
             seq_len,
             num_heads: config.num_heads,
+            num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
         },
         vec![q, k, v],
@@ -604,7 +608,7 @@ struct GpuCompiledNode {
     graph_input_names: Vec<String>,
     /// Names of the FusedNode output tensors.
     graph_output_names: Vec<String>,
-    /// Number of f32 elements in the output tensor(s).
+    /// Number of elements in the output tensor(s).
     output_numel: usize,
     /// Per-output element counts for multi-output nodes.
     per_output_numel: Vec<usize>,
@@ -695,6 +699,7 @@ impl FusedGraphExecutor {
                 graph_output_names: build.output_names,
                 output_numel: build.output_numel,
                 per_output_numel: build.per_output_numel,
+                output_dtype: build.output_dtype,
             });
         }
 
@@ -717,34 +722,40 @@ impl FusedGraphExecutor {
             FusedOp::FlashAttention(config) => {
                 let g = build_flash_attention_graph(config, seq_len);
                 let h = config.num_heads * config.head_dim;
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * h,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
             FusedOp::SwiGLU(config) => {
                 let g = build_swiglu_graph(config, seq_len);
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * config.intermediate_size,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
             FusedOp::RoPE(config) => {
                 let g = build_rope_graph(config, seq_len, hidden);
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * hidden,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
@@ -758,46 +769,54 @@ impl FusedGraphExecutor {
                     seq_len * kv_dim,
                 ];
                 let total: usize = per.iter().sum();
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: total,
                     per_output_numel: per,
+                    output_dtype,
                 })
             }
 
             FusedOp::FusedRMSLinear(config) => {
                 let g = build_fused_rms_linear_graph(config, seq_len);
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * config.hidden_size,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
             FusedOp::GQA(config) => {
                 let g = build_gqa_graph(config, seq_len);
                 let q_dim = config.num_heads * config.head_dim;
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * q_dim,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
             FusedOp::MoERouting(config) => {
                 let g = build_moe_routing_graph(config, seq_len, hidden);
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * config.num_experts,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
 
@@ -817,6 +836,7 @@ impl FusedGraphExecutor {
                 let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
                 let output_numel: usize = output_shape.iter().product();
                 let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape)?;
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
 
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -824,6 +844,7 @@ impl FusedGraphExecutor {
                     output_names: node.outputs.clone(),
                     output_numel,
                     per_output_numel: vec![],
+                    output_dtype,
                 })
             }
         }
@@ -970,7 +991,7 @@ impl FusedGraphExecutor {
             for (tidx, meta) in gcn.graph.tensors.iter().enumerate() {
                 let tid = TensorId(tidx as u32);
                 let n_elements = meta.concrete_numel();
-                let size_bytes = n_elements * 4; // f32
+                let size_bytes = n_elements * meta.dtype.size_bytes();
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| ExecutionError::Backend(format!(
                         "GPU alloc failed for {}: {e}", meta.name
@@ -1013,7 +1034,8 @@ impl FusedGraphExecutor {
                     .find(|(tid, _)| *tid == output_tid)
                     .map(|(_, buf)| buf)
                     .ok_or_else(|| ExecutionError::Backend("output buffer missing".into()))?;
-                let nbytes = gcn.output_numel * std::mem::size_of::<f32>();
+                let out_dtype = gcn.graph.tensors[output_tid.0 as usize].dtype;
+                let nbytes = gcn.output_numel * out_dtype.size_bytes();
                 let mut host_buf = vec![0u8; nbytes];
                 device.dtoh(output_buf, &mut host_buf, stream)
                     .map_err(|e| ExecutionError::Backend(format!("dtoh: {e}")))?;
@@ -1029,7 +1051,8 @@ impl FusedGraphExecutor {
                             .ok_or_else(|| ExecutionError::Backend(
                                 format!("output buffer missing for {name}")
                             ))?;
-                        let nbytes = gcn.per_output_numel[i] * std::mem::size_of::<f32>();
+                        let per_out_dtype = gcn.graph.tensors[output_tid.0 as usize].dtype;
+                        let nbytes = gcn.per_output_numel[i] * per_out_dtype.size_bytes();
                         let mut host_buf = vec![0u8; nbytes];
                         device.dtoh(output_buf, &mut host_buf, stream)
                             .map_err(|e| ExecutionError::Backend(format!(
@@ -1075,7 +1098,7 @@ impl FusedGraphExecutor {
             if let Some(ptr) = wb.ptr {
                 // Runtime pointer: copy into a byte vec for the tensor map
                 let numel: usize = wb.shape.iter().product();
-                let bytes = numel * std::mem::size_of::<f32>();
+                let bytes = numel * wb.dtype.size();
                 let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                 tensors.insert(name.clone(), slice.to_vec());
             } else if let Some(ref data) = wb.data {
@@ -1105,19 +1128,19 @@ impl FusedGraphExecutor {
                 }
             }
 
-            // Allocate output buffer
-            let output_bytes = cn.output_numel * std::mem::size_of::<f32>();
+            // Allocate output buffer (dtype-aware)
+            let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
 
             // Allocate scratchpad
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes];
 
             // Compute seq_len from activation size: activation is [seq_len, hidden],
-            // stored as f32, so seq_len = num_f32_elements / hidden.
+            // stored with the node's output dtype, so seq_len = num_elements / hidden.
             // Fall back to 1 if we cannot determine it.
-            let activation_f32_elems = activation.len() / std::mem::size_of::<f32>();
-            let seq_len = if activation_f32_elems > 0 {
-                activation_f32_elems
+            let activation_elems = activation.len() / cn.output_dtype.size_bytes();
+            let seq_len = if activation_elems > 0 {
+                activation_elems
             } else {
                 1
             };
@@ -1152,7 +1175,7 @@ impl FusedGraphExecutor {
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
                     let numel = cn.per_output_numel[i];
-                    let nbytes = numel * std::mem::size_of::<f32>();
+                    let nbytes = numel * cn.output_dtype.size_bytes();
                     let chunk = output_buf[byte_offset..byte_offset + nbytes].to_vec();
                     tensors.insert(name.clone(), chunk);
                     byte_offset += nbytes;
@@ -1214,7 +1237,7 @@ impl FusedGraphExecutor {
         for (name, wb) in &self.graph.weight_bindings {
             if let Some(ptr) = wb.ptr {
                 let numel: usize = wb.shape.iter().product();
-                let bytes = numel * std::mem::size_of::<f32>();
+                let bytes = numel * wb.dtype.size();
                 let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                 tensors.insert(name.clone(), slice.to_vec());
             } else if let Some(ref data) = wb.data {
@@ -1253,13 +1276,13 @@ impl FusedGraphExecutor {
                 }
             }
 
-            let output_bytes = cn.output_numel * std::mem::size_of::<f32>();
+            let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes];
 
-            let activation_f32_elems = activation.len() / std::mem::size_of::<f32>();
-            let seq_len = if activation_f32_elems > 0 {
-                activation_f32_elems
+            let activation_elems = activation.len() / cn.output_dtype.size_bytes();
+            let seq_len = if activation_elems > 0 {
+                activation_elems
             } else {
                 1
             };
@@ -1292,7 +1315,7 @@ impl FusedGraphExecutor {
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
                     let numel = cn.per_output_numel[i];
-                    let nbytes = numel * std::mem::size_of::<f32>();
+                    let nbytes = numel * cn.output_dtype.size_bytes();
                     let chunk = output_buf[byte_offset..byte_offset + nbytes].to_vec();
                     tensors.insert(name.clone(), chunk);
                     byte_offset += nbytes;
@@ -1371,6 +1394,8 @@ struct NodeGraphBuild {
     output_numel: usize,
     /// Per-output element counts for multi-output nodes.
     per_output_numel: Vec<usize>,
+    /// DType of the output tensor(s).
+    output_dtype: gllm_kernels::types::DType,
 }
 
 // ---------------------------------------------------------------------------

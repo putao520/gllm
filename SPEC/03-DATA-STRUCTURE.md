@@ -381,6 +381,72 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 | SafeTensors | ✅ 已实现 | REQ-LOADER-022 |
 | ONNX | ✅ 已实现 | REQ-LOADER-023 |
 
+### 6.6 DType 全链路传播 (DATA-DTYPE-PROPAGATION)
+
+> **关联架构**: ARCH-DTYPE-ADAPTIVE (02-ARCHITECTURE.md §8.8)
+> **铁律**: dtype 从模型元数据贯穿到 JIT codegen，禁止在任何中间层丢失或硬编码。
+
+#### dtype 来源
+
+`ModelConfig.dtype_size` 是 dtype 的唯一来源，由各格式 loader 从模型文件检测：
+
+| 格式 | 检测方式 | 字段 |
+|------|---------|------|
+| GGUF | 权重张量实际 dtype | `dtype_size` |
+| SafeTensors | 第一个浮点张量 dtype | `dtype_size` |
+| PyTorch | 权重张量实际 dtype | `dtype_size` |
+| ONNX | initializer dtype (FLOAT/FLOAT16/BFLOAT16) | `dtype_size` |
+
+#### dtype 转换函数
+
+```rust
+/// dtype_size → DType 枚举
+pub fn computation_dtype(dtype_size: usize) -> DType {
+    match dtype_size {
+        2 => DType::F16,   // F16 或 BF16（由模型元数据区分）
+        4 => DType::F32,
+        8 => DType::F64,
+        _ => DType::F32,   // 量化模型 fallback
+    }
+}
+
+/// 从 ModelConfig 获取计算 dtype（禁止硬编码 F32）
+pub fn computation_dtype_from_config(config: &InferenceConfig) -> DType {
+    computation_dtype(config.dtype_size)  // ❌ 禁止 return DType::F32
+}
+```
+
+#### dtype 分类与传播规则
+
+Forward 管线中每个 tensor 的 dtype 由其角色决定：
+
+| tensor 角色 | dtype | `elem_bytes` | 传播路径 |
+|-------------|-------|-------------|---------|
+| GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype | `dtype.size_bytes()` | `pack_weights_typed(slices, dtype)` → `weight_layout(dtype)` → codegen `elem_bytes` |
+| Norm weight (gamma/beta) | F32 | 4 | `pack_weights(slices)` → codegen F32 load |
+| Activation / intermediate | F32 | 4 | `execute_jit_*(dtype)` 内部 buffer 按 F32 分配 |
+| KV cache | 模型 dtype | `dtype.size_bytes()` | `gpu_alloc_kv_cache(dtype)` → codegen `elem_bytes` |
+
+#### 函数签名要求
+
+所有涉及 tensor 字节数计算的函数必须接受 `dtype` 参数：
+
+```rust
+// ❌ 禁止: 无 dtype 参数，内部硬编码 * 4
+fn pack_weights(slices: &[&[f32]]) -> Vec<u8>;
+fn execute_jit_decoder_layer(...) -> Result<Vec<f32>>;
+
+// ✅ 正确: dtype 参数贯穿
+fn pack_weights_typed(slices: &[&[f32]], dtype: DType) -> Vec<u8>;
+fn execute_jit_decoder_layer(..., dtype: DType) -> Result<Vec<f32>>;
+
+// ❌ 禁止: GPU buffer 硬编码 * 4
+let size_bytes = n_elements * 4;
+
+// ✅ 正确: 使用 dtype.size_bytes()
+let size_bytes = n_elements * dtype.size_bytes();
+```
+
 ## 7. 通用张量拓扑 (DATA-TENSOR-TOPOLOGY)
 
 > **关联需求**: REQ-LOADER-022, REQ-LOADER-023
@@ -1156,3 +1222,234 @@ fn apple_amx_gemm_eligible(m: usize, n: usize, k: usize) -> bool {
 ```
 
 **维度总数**: 27 个独立分派点，分布在 4 个层级。JIT 编译的核心价值在于：预编译库无法覆盖这 27 个维度的笛卡尔积，而 JIT 管线在运行时根据实际组合动态生成最优代码。
+
+---
+
+## 10. Zero-Overhead Unified Semantics 核心数据结构 (DATA-ZOUS)
+
+> **关联架构**: `02-ARCHITECTURE.md §8 ARCH-ATTN-UNIFIED`
+> **目标**: 统一 Attention/KV/Weight/Position 的语义契约与访问协议，同时保留原始物理载荷，禁止引入新的公共 payload 格式。
+
+### 10.1 WeightView (DATA-WEIGHT-VIEW)
+
+```rust
+pub struct WeightView<'a> {
+    pub logical_shape: Vec<usize>,
+    pub storage_dtype: DType,
+    pub quant_scheme: Option<QuantScheme>,
+    pub base_ptr: *const u8,
+    pub byte_len: usize,
+    pub stride: Vec<usize>,
+    pub packing: PackingDescriptor,
+    pub backing: WeightBacking<'a>,
+}
+
+pub enum WeightBacking<'a> {
+    SafeTensorsMmap(&'a [u8]),
+    OnnxInitializer(&'a [u8]),
+    GgufBlockBytes(&'a [u8]),
+    DevicePtr(u64),
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 物理存储 dtype |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（块大小、scale/zero 规则） |
+| `base_ptr` | `*const u8` | 起始指针 |
+| `byte_len` | `usize` | 原始载荷长度 |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | packed / block-quant 描述 |
+| `backing` | `WeightBacking` | 原始载荷来源 |
+
+**铁律**:
+- ✅ GGUF block bytes 原样保留
+- ✅ SafeTensors 使用 mmap slice
+- ✅ ONNX 使用 initializer 原始 buffer
+- ❌ 禁止先转成统一 dense F32/F16 payload
+
+### 10.2 PositionContract (DATA-POSITION-CONTRACT)
+
+```rust
+pub enum PositionContract {
+    ContiguousRange { start: u32, len: usize },
+    ExplicitArray { ptr: *const u32, len: usize },
+    OffsetStride { offset: u32, stride: u32, len: usize },
+}
+```
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `ContiguousRange` | 连续位置区间 | Prefill |
+| `ExplicitArray` | 显式位置数组 | Decode / 非连续 batch |
+| `OffsetStride` | 等间距位置 | 特殊生成策略 |
+
+**铁律**:
+- ✅ JIT/codegen 必须直接消费 `PositionContract`
+- ❌ 禁止为 RoPE 先 materialize 新的 positions tensor 再读
+
+### 10.3 KvLayoutContract (DATA-KV-LAYOUT-CONTRACT)
+
+```rust
+pub struct KvLayoutContract {
+    pub storage_kind: KvStorageKind,
+    pub kv_split: KvSplitMode,
+    pub layer_stride: usize,
+    pub head_stride: usize,
+    pub token_stride: usize,
+    pub dtype: DType,
+    pub append_semantics: KvAppendSemantics,
+}
+
+pub enum KvStorageKind {
+    DenseSeqMajor,
+    HeadMajorPersistent,
+    PagedHeadMajor,
+}
+
+pub enum KvSplitMode {
+    SplitHalf,
+    Interleaved,
+}
+
+pub enum KvAppendSemantics {
+    AppendOnly,
+    Overwrite,
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `storage_kind` | dense 临时张量 / persistent cache / paged cache |
+| `kv_split` | K/V 分 half 或交错 |
+| `layer_stride` | 层间步长 |
+| `head_stride` | 头间步长 |
+| `token_stride` | token 间步长 |
+| `dtype` | 存储 dtype |
+| `append_semantics` | 追加语义 |
+
+### 10.4 KvView (DATA-KV-VIEW)
+
+```rust
+pub enum KvView {
+    DenseLocal {
+        k_ptr: *const u8,
+        v_ptr: *const u8,
+        seq_len: usize,
+        kv_dim: usize,
+        dtype: DType,
+    },
+    PersistentCache {
+        base_ptr: u64,
+        contract: KvLayoutContract,
+        layer: usize,
+        visible_range: std::ops::Range<usize>,
+    },
+    PagedCache {
+        page_table_ptr: *const u32,
+        page_data_ptr: u64,
+        contract: KvLayoutContract,
+        layer: usize,
+        visible_range: std::ops::Range<usize>,
+    },
+    CompositeView {
+        cached: Box<KvView>,
+        append: Box<KvView>,
+    },
+}
+```
+
+| 变体 | 说明 |
+|------|------|
+| `DenseLocal` | 当前层临时 K/V，prefill 直接消费 |
+| `PersistentCache` | 持久 KV cache，decode 原位访问 |
+| `PagedCache` | 分页 cache 视图 |
+| `CompositeView` | cache + append 窗口 |
+
+**铁律**:
+- ✅ Attention kernel 的 K/V 输入必须是 `KvView`
+- ❌ 禁止要求调用方先重排成 `[total_seq, kv_dim]` dense tensor
+
+### 10.5 AttentionSemantics (DATA-ATTENTION-SEMANTICS)
+
+```rust
+pub struct AttentionSemantics {
+    pub mask_mode: MaskMode,
+    pub head_mode: HeadMode,
+    pub scaling: ScalingMode,
+    pub rope: Option<RoPEConfig>,
+    pub visibility: VisibilityMode,
+}
+
+pub enum MaskMode {
+    Causal,
+    Bidirectional,
+}
+
+pub enum HeadMode {
+    MHA,
+    GQA { ratio: usize },
+    MQA,
+}
+
+pub enum ScalingMode {
+    InverseSqrtHeadDim,
+}
+
+pub enum VisibilityMode {
+    Prefill { seq_len: usize },
+    Decode { total_seq: usize },
+}
+```
+
+**设计要求**:
+- prefill 与 decode 必须共享同一 `AttentionSemantics`
+- lower 到不同执行计划（dense consume vs cache consume）
+- ❌ 禁止通过不同 op 名称（如 `MultiHeadAttention` vs `CachedGQA`）表达不同语义分支
+
+### 10.6 AttentionProjection / AttentionConsume (DATA-ATTN-OPS)
+
+```rust
+pub struct AttentionProjection<'a> {
+    pub input: TensorView<'a>,
+    pub w_q: WeightView<'a>,
+    pub w_k: WeightView<'a>,
+    pub w_v: WeightView<'a>,
+    pub positions: PositionContract,
+}
+
+pub struct AttentionConsume {
+    pub q: TensorView<'static>,
+    pub kv: KvView,
+    pub semantics: AttentionSemantics,
+}
+```
+
+**Prefill Lowering**:
+- `AttentionProjection` → `QView + KEmit + VEmit`
+- `AttentionConsume(Q, DenseLocal{K,V})`
+- 并行 `KvAppendIntent`
+
+**Decode Lowering**:
+- `AttentionProjection` → `Q + K_new + V_new`
+- `KvAppendIntent`
+- `AttentionConsume(Q, PersistentCache{...})`
+
+### 10.7 禁止的统一方式 (DATA-ZOUS-NON-GOALS)
+
+| 禁止项 | 原因 |
+|--------|------|
+| GGUF → ONNX 风格权重 payload | 额外 copy + 量化信息抹平 |
+| HeadMajor cache → SeqMajor dense K/V | 全量重排损失 |
+| BF16/F16/quant cache → F32 常驻缓存 | dtype 膨胀 |
+| Paged KV → Dense merged tensor | 破坏零拷贝 |
+
+### 10.8 允许的统一方式 (DATA-ZOUS-GOALS)
+
+| 允许项 | 说明 |
+|--------|------|
+| metadata bridge | 统一 shape/dtype/quant 语义 |
+| view abstraction | 统一访问协议，不移动 payload |
+| lowering specialization | 针对不同 `View` 生成专用 kernel |
+| on-the-fly transform | RoPE / dtype convert 在消费时寄存器内完成 |

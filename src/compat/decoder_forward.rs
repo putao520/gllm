@@ -290,6 +290,7 @@ fn quantized_incremental_decode_layer<E: Element>(
             super::jit_helpers::execute_cached_gqa(
                 gqa_compiled, &q_proj, &k_slice, &v_slice,
                 seq_len, num_heads, head_dim,
+                dtype,
             )
         }
     };
@@ -877,6 +878,7 @@ pub(crate) fn decoder_forward<E: Element>(
                             super::jit_helpers::execute_cached_gqa(
                                 gqa_compiled, &q_rope, &kv_cache_k, &kv_cache_v,
                                 seq_len, num_heads, head_dim,
+                                computation_dtype_from_config(config),
                             )
                         };
 
@@ -1117,7 +1119,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         ag.inputs = vec![q_in, k_in, v_in];
                         let a_out = ag.add_tensor_concrete("attn", &[seq_len, geom.q_dim], dt);
                         ag.add_op(
-                            OpKind::MultiHeadAttention { seq_len, num_heads, head_dim },
+                            OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads: geom.num_kv_heads, head_dim },
                             vec![q_in, k_in, v_in], vec![a_out], "mha",
                         );
                         ag.outputs = vec![a_out];
@@ -1333,8 +1335,8 @@ pub(crate) fn decoder_forward<E: Element>(
                     &positions,
                     seq_len,
                     &mut layer_out,
+                    computation_dtype_from_config(config),
                 );
-
                 hidden_state.copy_from_slice(&layer_out);
             }
         }
@@ -1370,6 +1372,7 @@ pub(crate) fn decoder_forward<E: Element>(
                 &lm_head_w,
                 seq_len,
                 &mut all_logits,
+                computation_dtype_from_config(config),
             );
 
             // Return only the last token's logits (for generation)
@@ -1510,8 +1513,8 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
             &positions,
             seq_len,
             &mut layer_out,
+            computation_dtype_from_config(config),
         );
-
         hidden_state.copy_from_slice(&layer_out);
     }
 
@@ -1679,8 +1682,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             &positions,
             seq_len,
             &mut layer_out,
+            computation_dtype_from_config(config),
         );
-
         hidden_state.copy_from_slice(&layer_out);
     }
 
@@ -1782,11 +1785,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             }).map_err(|e| BE::Other(e))?;
             // score_w is [num_labels, hidden] row-major; GEMM expects w as [hidden, num_labels]
             let w_t = super::weight_helpers::transpose_f32(&score_w, num_labels, hidden);
-            let w_bytes = w_t.len() * 4;
-            let mut weight_buf = vec![0u8; w_bytes];
-            unsafe {
-                std::ptr::copy_nonoverlapping(w_t.as_ptr() as *const u8, weight_buf.as_mut_ptr(), w_bytes);
-            }
+            let dt = computation_dtype_from_config(config);
+            let weight_buf = super::jit_helpers::pack_weights_typed(&[&w_t], dt);
             let mut logits = vec![0.0f32; num_labels];
             let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
             unsafe {

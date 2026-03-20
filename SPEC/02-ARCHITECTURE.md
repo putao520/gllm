@@ -883,3 +883,1416 @@ impl CompiledLayer {
 | `compile_decode_jit` (CachedGQA 图) | `src/compat/jit_helpers.rs` | `total_seq` |
 | `compile_decode_jit` (RmsNorm+Q+RoPE 图) | `src/compat/jit_helpers.rs` | `seq_len`（prefill 时动态） |
 | `gpt2_forward_sequence` JIT 图（REQ-JIT-GRAPH-002） | `src/compat/decoder_forward.rs` | `seq_len`、`total_seq` |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+### 8.8 DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
+
+> **状态**: P0-P2 已完成 (2026-03-21)，P3 待实施
+> **关联**: JIT 编译管线 (§5), GEMM 微内核, Zero-Copy (Layer 4)
+> **审计日期**: 2026-03-21（~255处硬编码已全部修复，1055 tests passed）
+
+**铁律**: dtype 必须同时影响存储和计算，全链路自适应，禁止硬编码 f32。
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-DTYPE-ADAPTIVE 铁律                                               │
+│                                                                         │
+│  ✅ pack_weights_typed(slices, dtype) 按 dtype 转换并 pack              │
+│  ✅ weight_layout() offset 必须和 pack_weights_typed() 布局一致         │
+│  ✅ GEMM weight 按模型 dtype 存储（F16/BF16 省 50% 内存 + SIMD 翻倍）  │
+│  ✅ JIT codegen 每个 op 根据输入 tensor dtype 生成对应 load/store 指令  │
+│  ✅ computation_dtype_from_config 返回模型原生 dtype                     │
+│  ✅ 所有 buffer 分配/传输/下载使用 dtype.size_bytes() 计算字节数        │
+│  ✅ GPU shared memory 按实际 tensor dtype 分配                          │
+│                                                                         │
+│  ❌ 禁止 pack_weights 总是按 f32 pack                                   │
+│  ❌ 禁止 computation_dtype_from_config 硬编码返回 F32                    │
+│  ❌ 禁止 JIT codegen 中硬编码 * 4 或 * 2（必须用 dtype.size_bytes()）   │
+│  ❌ 禁止 weight_layout 和 pack_weights 的 dtype 不一致                  │
+│  ❌ 禁止 htod/dtoh 传输字节数用 len() * 4 计算                         │
+│  ❌ 禁止 size_of::<f32>() 作为通用 tensor 元素大小                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.8.1 dtype 分类规则
+
+| 类别 | dtype | 理由 |
+|------|-------|------|
+| GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype (F16/BF16/F32) | 内存节省 + SIMD 优化 |
+| Norm weight (gamma/beta) | F32 | 体积可忽略（后续全部 dtype 化） |
+| Activation / intermediate tensor | F32 | accumulator 精度 |
+| KV cache | 模型 dtype | 内存节省 |
+
+#### 8.8.2 动态 dtype 传播机制
+
+dtype 信息必须从模型配置贯穿到 JIT codegen 的每一层，禁止在任何中间层丢失或硬编码。
+
+```
+模型元数据 (dtype_size)
+    │
+    ▼
+computation_dtype_from_config(config) → DType (F16/BF16/F32)
+    │
+    ├──▶ pack_weights_typed(slices, dtype)     // weight 按 dtype pack
+    ├──▶ weight_layout(dtype)                  // offset 按 dtype.size_bytes() 计算
+    ├──▶ concrete_bytes(dtype)                 // buffer 按 dtype.size_bytes() 分配
+    ├──▶ build_*_graph(dtype)                  // graph tensor 标注 dtype
+    │
+    ▼
+JIT compile(graph, device_profile)
+    │
+    ├──▶ codegen: load/store 指令按 tensor dtype 选择
+    │    - F32: vmovups/vmovss (x86), vld1q_f32 (ARM), ld.global.f32 (PTX)
+    │    - F16: vcvtph2ps+vmovups (x86 F16C), fcvt (ARM), ld.global.f16 (PTX)
+    │    - BF16: vdpbf16ps (x86 AVX-512), bfcvt (ARM), ld.global.bf16 (PTX)
+    │
+    ├──▶ stride/offset: elem_bytes = dtype.size_bytes()
+    │    - row_stride = cols * elem_bytes
+    │    - head_stride = head_dim * elem_bytes
+    │    - layer_stride = num_heads * seq_len * head_dim * elem_bytes
+    │
+    ├──▶ scratchpad: 按实际 tensor dtype 分配
+    │    - attention scores: F32 (accumulator)
+    │    - Q/K/V tile: 模型 dtype
+    │    - pack buffer: GEMM dtype
+    │
+    └──▶ GPU shared memory: 按 kernel 实际使用的 dtype 分配
+```
+
+**关键函数签名变更**:
+
+| 函数 | 旧签名 | 新签名 |
+|------|--------|--------|
+| `computation_dtype_from_config` | `fn(config) -> DType { F32 }` | `fn(config) -> DType { computation_dtype(config.dtype_size) }` |
+| `pack_weights` | `fn(slices: &[&[f32]]) -> Vec<u8>` | `fn pack_weights_typed(slices: &[&[f32]], dtype: DType) -> Vec<u8>` |
+| `execute_jit_*` | 无 dtype 参数 | 添加 `dtype: DType` 参数，buffer 用 `dtype.size_bytes()` |
+| GPU `htod`/`dtoh` | `len() * 4` | `len() * dtype.size_bytes()` |
+
+#### 8.8.3 JIT Codegen dtype 模板化规范
+
+JIT codegen 中所有涉及 tensor 数据的指令必须根据 `elem_bytes` 参数化生成：
+
+**x86_64 codegen**:
+
+| 操作 | F32 (elem_bytes=4) | F16 (elem_bytes=2) | BF16 (elem_bytes=2) |
+|------|--------------------|--------------------|---------------------|
+| SIMD load | `vmovups` | `vcvtph2ps` (F16C) | `vpmovzxwd`+`vpslld` |
+| SIMD store | `vmovups` | `vcvtps2ph` (F16C) | `vcvtneps2bf16` (AVX-512 BF16) |
+| Scalar load | `vmovss` | `movzx`+`vcvtsh2ss` | `movzx`+`vpslld`+`vmovd` |
+| Stride 计算 | `cols * 4` | `cols * 2` | `cols * 2` |
+| Pack buffer | `mr * kc * 4` | `mr * kc * 2` | `mr * kc * 2` |
+
+**GPU codegen (PTX/HIP/MSL)**:
+
+| 操作 | F32 | F16 | BF16 |
+|------|-----|-----|------|
+| Global load | `ld.global.f32` | `ld.global.f16` | `ld.global.b16` |
+| Global store | `st.global.f32` | `st.global.f16` | `st.global.b16` |
+| Shared memory | `ld.shared.f32` | `ld.shared.f16` | `ld.shared.b16` |
+| Buffer 分配 | `n * 4` | `n * 2` | `n * 2` |
+| FMA | `fma.rn.f32` | `fma.rn.f16` / cvt+fma.f32 | `fma.rn.f32` (after cvt) |
+
+**codegen 实现模式**:
+
+```rust
+// ❌ 禁止: 硬编码 * 4
+let row_bytes = cols * 4;
+
+// ✅ 正确: 使用 elem_bytes 参数
+let elem_bytes = dtype.size_bytes();  // 从 graph tensor dtype 获取
+let row_bytes = cols * elem_bytes;
+
+// ❌ 禁止: 硬编码 vmovups
+dynasm!(ops; vmovups [rbx + offset], ymm0);
+
+// ✅ 正确: 按 dtype 选择指令
+match elem_bytes {
+    4 => dynasm!(ops; vmovups [rbx + offset], ymm0),           // F32
+    2 if is_f16 => dynasm!(ops; vcvtps2ph [rbx + offset], ymm0, 0), // F16
+    2 if is_bf16 => emit_bf16_store(ops, rbx, offset, ymm0),   // BF16
+    _ => return Err("unsupported dtype"),
+}
+```
+
+#### 8.8.4 硬编码审计清单 (2026-03-21)
+
+**根因**: `computation_dtype_from_config()` 硬编码返回 `DType::F32`，整个 forward 管线通过 `get_f32_data()` 强制 f32。
+
+| 层级 | 文件 | 硬编码数 | 严重度 | 修复方式 |
+|------|------|---------|--------|---------|
+| Weight Pack | `jit_helpers.rs` pack_weights | 2 处 `* 4` | 高 | `pack_weights_typed(slices, dtype)` |
+| Forward | `jit_helpers.rs` execute_jit_* | 4 处 `* 4` | 高 | 添加 `dtype` 参数 + `dtype.size_bytes()` |
+| GPU Buffer | `gpu_compile.rs` CUDA/HIP/Metal | ~60 处 `* 4` | 高 | 提取 `let eb = dtype.size_bytes()` 替换 |
+| Graph Exec | `executor.rs` CPU/GPU | ~11 处 `size_of::<f32>()` | 高 | `tensor.dtype.size_bytes()` |
+| BERT | `bert_forward.rs` | 2 处 `* 4` | 高 | `dtype.size_bytes()` |
+| Decoder | `decoder_forward.rs` | 1 处 `* 4` | 高 | `dtype.size_bytes()` |
+| Attention | `x86_64.rs` MHA/CachedGQA/Flash | ~10 处 `* 4` | 高 | `elem_bytes` 参数化 |
+| Fusion | `x86_64.rs` TileLevel/ComputeRoot | ~5 处 `* 4` | 高 | `elem_bytes` 参数化 |
+| GPU Kernel | `kernel_builder.rs` | ~4 处 `* 4` | 中 | `dtype.size_bytes()` |
+| GPU Fusion | `trace_emitter.rs` | ~2 处 `* 4` | 中 | `dtype.size_bytes()` |
+| AMX | `apple_amx.rs` | 2 处 `* 4` | 高 | `elem_bytes` 参数化 |
+
+**合法 `* 4` (非违规)**:
+- accumulator 空间的 f32 scalar tail (`vmovss` 逐元素) — accumulator 始终 F32
+- `simd_width_f32 * 4` — 变量名明确 f32 上下文
+- `partial_cmp().unwrap_or(Equal)` — NaN 比较标准模式
+- BLIS GEMM 主路径 — 已通过 `src_elem_bytes()` 动态化
+
+#### 8.8.5 实施路线
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | `computation_dtype_from_config` 返回模型原生 dtype | ✅ 已完成 (2026-03-21) |
+| P0 | `pack_weights_typed(slices, dtype)` + `pack_weights_multi` GEMM weight 按 dtype pack | ✅ 已完成 (2026-03-21) |
+| P0 | Graph builder 区分 GEMM weight dtype (`dt`) 和 norm/activation dtype (`ft=F32`) | ✅ 已完成 (2026-03-21) |
+| P0 | `execute_jit_*` 全部添加 `dtype` 参数 (7个函数) | ✅ 已完成 (2026-03-21) |
+| P0 | `decoder_forward.rs` + `bert_forward.rs` 调用点适配 | ✅ 已完成 (2026-03-21) |
+| P1 | GPU buffer 分配/传输/下载全部 `F32_BYTES` 常量化 (77处) | ✅ 已完成 (2026-03-21) |
+| P1 | `gpu_write_kv_cache` dtype_size 参数化 | ✅ 已完成 (2026-03-21) |
+| P1 | `executor.rs` 消除 `size_of::<f32>()` — `output_dtype` 字段 + 动态计算 (11处) | ✅ 已完成 (2026-03-21) |
+| P2 | x86_64 attention/fusion/elementwise/rope/meanpool `f32_bytes` 参数化 (~114处) | ✅ 已完成 (2026-03-21) |
+| P2 | AArch64 attention/fusion/rope/meanpool `f32_bytes` 参数化 (~47处) | ✅ 已完成 (2026-03-21) |
+| P2 | GPU kernel_builder/trace_emitter `f32_bytes` 参数化 (8处) | ✅ 已完成 (2026-03-21) |
+| P2 | Apple AMX `f32_bytes` 参数化 (6处) | ✅ 已完成 (2026-03-21) |
+| P3 | 全链路半精度（activation + intermediate 也按 dtype） | 待实施 |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+---
+
+## §8 Zero-Overhead Unified Attention Architecture (ARCH-ATTN-UNIFIED)
+
+> **状态**: 设计完成，待实现
+> **关联**: Accuracy First (§0), Zero-Copy (Layer 4), JIT 编译管线 (§5)
+> **动机**: GPU prefill 与 CPU/decode attention 当前使用不同 op（`MultiHeadAttention` vs `CachedGQA`），导致数值路径分叉、KV 布局重排冗余、测试复杂度倍增。
+
+### 8.1 核心原则：统一 Contract，不统一 Payload
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-ATTN-UNIFIED 铁律                                                │
+│                                                                         │
+│  ✅ 统一语义契约（AttentionSemantics）                                  │
+│  ✅ 统一访问协议（KvView, WeightView, PositionContract）               │
+│  ✅ 保留原始物理载荷（零拷贝、零重排、零 dtype 膨胀）                   │
+│  ✅ JIT 直接面向 View/Contract codegen                                  │
+│                                                                         │
+│  ❌ 禁止为统一而引入公共物理中间格式                                    │
+│  ❌ 禁止 KV head-major ↔ seq-major 全量重排作为主路径                   │
+│  ❌ 禁止 BF16/F16/quant cache 全量膨胀为 F32 常驻格式                   │
+│  ❌ 禁止 paged KV 先拼成 dense K/V 再计算                               │
+│  ❌ 禁止 GGUF/ONNX/SafeTensors 权重转成统一 payload                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 五个核心 Contract
+
+#### 8.2.1 `AttentionSemantics`
+
+定义 attention 的数学语义，prefill 与 decode 共享。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `mask_mode` | `Causal \| Bidirectional` | 因果/双向 |
+| `head_mode` | `MHA \| GQA { ratio } \| MQA` | 头映射 |
+| `scaling` | `1/sqrt(head_dim)` | 缩放规则 |
+| `rope` | `Option<RoPEConfig>` | 旋转位置编码配置 |
+| `visibility` | `Prefill { seq_len } \| Decode { total_seq }` | 可见范围 |
+
+#### 8.2.2 `KvLayoutContract`
+
+描述 KV 的物理布局，不要求转换。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `storage_kind` | `DenseSeqMajor \| HeadMajorPersistent \| PagedHeadMajor` | 存储类型 |
+| `kv_split` | `SplitHalf \| Interleaved` | K/V 分离方式 |
+| `layer_stride` | `usize` | 层间步长 |
+| `head_stride` | `usize` | 头间步长 |
+| `token_stride` | `usize` | token 间步长 |
+| `dtype` | `DType` | 存储 dtype |
+| `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
+
+#### 8.2.3 `KvView`
+
+在 `KvLayoutContract` 之上的具体逻辑视图。
+
+| 变体 | 说明 | 使用场景 |
+|------|------|---------|
+| `DenseLocal { k_ptr, v_ptr, seq_len, kv_dim }` | 当前层临时 K/V | Prefill attention |
+| `PersistentCache { base_ptr, contract, layer, visible_range }` | 持久 KV cache | Decode attention |
+| `PagedCache { page_table, contract, layer, visible_range }` | 分页 KV cache | Paged decode |
+| `CompositeView { cached, append }` | cache + 新 token 组合 | Prefill-to-decode 过渡 |
+
+**铁律**: attention kernel 的 K/V 输入必须是 `KvView`，禁止要求调用方先 materialize 成 dense tensor。
+
+#### 8.2.4 `PositionContract`
+
+统一位置来源，支持 RoPE on-the-fly lowering。
+
+| 变体 | 说明 |
+|------|------|
+| `ContiguousRange { start, len }` | 连续位置（prefill 常见） |
+| `ExplicitArray { ptr, len }` | 显式位置数组（decode / 非连续） |
+| `OffsetStride { offset, stride }` | 等间距位置 |
+
+**目标**: RoPE 不再要求先 materialize `q_rope/k_rope` 中间张量，允许 lower 到消费时寄存器内变换。
+
+#### 8.2.5 `WeightView`
+
+统一 GGUF/ONNX/SafeTensors 权重访问，保留原始物理载荷。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `logical_shape` | `Vec<usize>` | 逻辑形状 |
+| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
+| `base_ptr` | `*const u8` | 数据指针（mmap/device） |
+| `stride` | `Vec<usize>` | 步长 |
+| `packing` | `PackingDescriptor` | 打包描述（block size, scale/zero layout） |
+
+**铁律**: JIT 直接根据 `WeightView` 生成加载逻辑，禁止要求先转成 dense F32。
+
+### 8.3 Attention 统一拆分：Projection + Consume
+
+不再使用分裂的 `MultiHeadAttention` / `CachedGQA` 两个 op。
+
+统一为两个语义操作：
+
+#### A. `AttentionProjection`
+
+```
+input[seq, hidden] + Wq/Wk/Wv + PositionContract
+    → QView[seq, q_dim]
+    → KEmit[seq, kv_dim]
+    → VEmit[seq, kv_dim]
+    → KvAppendIntent
+```
+
+- 可选融合 RmsNorm
+- 可选融合 RoPE（on-the-fly，不写回中间张量）
+- `KvAppendIntent` 是副作用声明，不是强制 materialization
+
+#### B. `AttentionConsume`
+
+```
+QView + KvView + AttentionSemantics
+    → attn_out[seq, q_dim]
+```
+
+- 输入是 `KvView`，不是 dense K/V tensor
+- JIT 根据 `KvView` 变体生成不同访存逻辑
+
+### 8.4 Prefill / Decode 双 Lowering
+
+共享同一 `AttentionSemantics`，lower 到不同执行计划：
+
+```
+                    AttentionSemantics
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      Prefill Lowering         Decode Lowering
+              │                       │
+    ┌─────────┴─────────┐   ┌────────┴────────┐
+    │ DenseLocal KvView │   │ Persistent/Paged │
+    │ Full-seq causal   │   │ KvView           │
+    │ High throughput   │   │ Cached attention  │
+    │ No cache read     │   │ Low latency      │
+    └───────────────────┘   └─────────────────┘
+```
+
+#### Prefill 路径（零额外 KV round-trip）
+
+1. `AttentionProjection` → Q, K, V（临时 buffer）
+2. `AttentionConsume(Q, DenseLocal{K,V})` → attn_out
+3. **并行副作用**: `KvAppend(K, V → persistent cache)`
+4. 后续 FFN
+
+**关键**: attention 直接消费临时 K/V，不经过 cache round-trip。
+
+#### Decode 路径（零 KV 重排）
+
+1. `AttentionProjection` → Q, K_new, V_new
+2. `KvAppend(K_new, V_new → persistent cache)`
+3. `AttentionConsume(Q, PersistentKvView{cache})` → attn_out
+4. 后续 FFN
+
+**关键**: attention 直接从 persistent cache 原位读取，不重排为 seq-major dense tensor。
+
+### 8.5 JIT + KV 融合边界
+
+#### 融合进 JIT 的（KV Access Lowering）
+
+| 融合项 | 说明 |
+|--------|------|
+| stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
+| page lookup | 根据 `PagedKvView` 生成 page table 查找 |
+| append window | 将 append region 合并进可见窗口 |
+| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
+
+#### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
+
+| 不融合项 | 归属层 |
+|----------|--------|
+| page allocation / free | MemoryManager |
+| swap / eviction | Scheduler |
+| prefix dedup | KvPrefixIndex |
+| request lifecycle | Executor |
+| scheduling policy | PolicyEngine |
+
+### 8.6 No Redundant KV Reformat (ARCH-ATTN-NO-REFORMAT)
+
+**铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
+
+当前违规路径（待修复）：
+
+| 路径 | 违规操作 | 修复方向 |
+|------|---------|---------|
+| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+
+### 8.7 实现路线
+
+| 阶段 | 内容 | 优先级 |
+|------|------|--------|
+| P0 | 定义 5 个 core contract 类型 | 立即 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
+| P3 | PagedKvView: paged attention 原位访问 | 后续 |

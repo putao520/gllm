@@ -28,36 +28,37 @@ pub(crate) fn build_bert_layer_graph(
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let dt = dtype;
+    let dt = dtype;           // GEMM weight dtype
+    let ft = gllm_kernels::types::DType::F32; // activation / norm / bias dtype
     let s = seq_len;
     let h = hidden;
 
     // ── Graph inputs ──
-    let input = g.add_tensor_concrete("input", &[s, h], dt);
+    let input = g.add_tensor_concrete("input", &[s, h], ft);
 
-    // Attention weights + biases
+    // Attention weights (GEMM dtype) + biases (F32)
     let w_q = g.add_tensor_concrete("w_q", &[h, h], dt);
-    let b_q = g.add_tensor_concrete("b_q", &[h], dt);
+    let b_q = g.add_tensor_concrete("b_q", &[h], ft);
     let w_k = g.add_tensor_concrete("w_k", &[h, h], dt);
-    let b_k = g.add_tensor_concrete("b_k", &[h], dt);
+    let b_k = g.add_tensor_concrete("b_k", &[h], ft);
     let w_v = g.add_tensor_concrete("w_v", &[h, h], dt);
-    let b_v = g.add_tensor_concrete("b_v", &[h], dt);
+    let b_v = g.add_tensor_concrete("b_v", &[h], ft);
     let w_o = g.add_tensor_concrete("w_o", &[h, h], dt);
-    let b_o = g.add_tensor_concrete("b_o", &[h], dt);
+    let b_o = g.add_tensor_concrete("b_o", &[h], ft);
 
-    // LayerNorm 1 weights
-    let ln1_w = g.add_tensor_concrete("ln1_w", &[h], dt);
-    let ln1_b = g.add_tensor_concrete("ln1_b", &[h], dt);
+    // LayerNorm 1 weights (F32)
+    let ln1_w = g.add_tensor_concrete("ln1_w", &[h], ft);
+    let ln1_b = g.add_tensor_concrete("ln1_b", &[h], ft);
 
-    // FFN weights + biases
+    // FFN weights (GEMM dtype) + biases (F32)
     let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
-    let b_up = g.add_tensor_concrete("b_up", &[inter], dt);
+    let b_up = g.add_tensor_concrete("b_up", &[inter], ft);
     let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
-    let b_down = g.add_tensor_concrete("b_down", &[h], dt);
+    let b_down = g.add_tensor_concrete("b_down", &[h], ft);
 
-    // LayerNorm 2 weights
-    let ln2_w = g.add_tensor_concrete("ln2_w", &[h], dt);
-    let ln2_b = g.add_tensor_concrete("ln2_b", &[h], dt);
+    // LayerNorm 2 weights (F32)
+    let ln2_w = g.add_tensor_concrete("ln2_w", &[h], ft);
+    let ln2_b = g.add_tensor_concrete("ln2_b", &[h], ft);
 
     g.inputs = vec![
         input, w_q, b_q, w_k, b_k, w_v, b_v, w_o, b_o,
@@ -67,7 +68,7 @@ pub(crate) fn build_bert_layer_graph(
     // ── Self-Attention ──
 
     // Q = input * W_q + b_q  [s, h] × [h, h] → [s, h]
-    let q_out = g.add_tensor_concrete("q", &[s, h], dt);
+    let q_out = g.add_tensor_concrete("q", &[s, h], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_q, b_q],
@@ -76,7 +77,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // K = input * W_k + b_k
-    let k_out = g.add_tensor_concrete("k", &[s, h], dt);
+    let k_out = g.add_tensor_concrete("k", &[s, h], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_k, b_k],
@@ -85,7 +86,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // V = input * W_v + b_v
-    let v_out = g.add_tensor_concrete("v", &[s, h], dt);
+    let v_out = g.add_tensor_concrete("v", &[s, h], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![input, w_v, b_v],
@@ -94,16 +95,16 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Multi-head attention: Q[s,h], K[s,h], V[s,h] → attn_out[s,h]
-    let attn_out = g.add_tensor_concrete("attn_out", &[s, h], dt);
+    let attn_out = g.add_tensor_concrete("attn_out", &[s, h], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, head_dim },
+        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads: num_heads, head_dim },
         vec![q_out, k_out, v_out],
         vec![attn_out],
         "mha",
     );
 
     // Output projection + bias
-    let o_out = g.add_tensor_concrete("o_proj", &[s, h], dt);
+    let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
         vec![attn_out, w_o, b_o],
@@ -112,7 +113,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Residual₁: input + o_out
-    let resid1 = g.add_tensor_concrete("residual1", &[s, h], dt);
+    let resid1 = g.add_tensor_concrete("residual1", &[s, h], ft);
     g.add_op(
         OpKind::Residual,
         vec![input, o_out],
@@ -121,7 +122,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Post-attention LayerNorm
-    let normed1 = g.add_tensor_concrete("normed1", &[s, h], dt);
+    let normed1 = g.add_tensor_concrete("normed1", &[s, h], ft);
     g.add_op(
         OpKind::LayerNorm { eps },
         vec![resid1, ln1_w, ln1_b],
@@ -132,7 +133,7 @@ pub(crate) fn build_bert_layer_graph(
     // ── FFN ──
 
     // Up projection + GELU: GemmBias + Gelu → EpilogueInjection candidate
-    let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], dt);
+    let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: inter, k: h, dtype: dt },
         vec![normed1, w_up, b_up],
@@ -140,7 +141,7 @@ pub(crate) fn build_bert_layer_graph(
         "gemm_ffn_up",
     );
 
-    let act_out = g.add_tensor_concrete("ffn_act", &[s, inter], dt);
+    let act_out = g.add_tensor_concrete("ffn_act", &[s, inter], ft);
     g.add_op(
         OpKind::Gelu,
         vec![up_out],
@@ -149,7 +150,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Down projection
-    let down_out = g.add_tensor_concrete("ffn_down", &[s, h], dt);
+    let down_out = g.add_tensor_concrete("ffn_down", &[s, h], ft);
     g.add_op(
         OpKind::GemmBias { m: s, n: h, k: inter, dtype: dt },
         vec![act_out, w_down, b_down],
@@ -158,7 +159,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Residual₂: normed1 + down_out
-    let resid2 = g.add_tensor_concrete("residual2", &[s, h], dt);
+    let resid2 = g.add_tensor_concrete("residual2", &[s, h], ft);
     g.add_op(
         OpKind::Residual,
         vec![normed1, down_out],
@@ -167,7 +168,7 @@ pub(crate) fn build_bert_layer_graph(
     );
 
     // Post-FFN LayerNorm
-    let output = g.add_tensor_concrete("output", &[s, h], dt);
+    let output = g.add_tensor_concrete("output", &[s, h], ft);
     g.add_op(
         OpKind::LayerNorm { eps },
         vec![resid2, ln2_w, ln2_b],
@@ -180,9 +181,7 @@ pub(crate) fn build_bert_layer_graph(
 }
 
 /// Execute a JIT-compiled BERT encoder layer.
-///
-/// Packs all weight tensors into a contiguous buffer matching the graph's
-/// input tensor order, then calls the compiled layer function.
+/// ARCH-DTYPE-ADAPTIVE: GEMM weights packed at model dtype, bias/norm at F32.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_jit_bert_layer(
     compiled: &gllm_kernels::compiler::CompiledLayer,
@@ -190,12 +189,15 @@ pub(crate) fn execute_jit_bert_layer(
     weights: &BertLayerWeights,
     seq_len: usize,
     output: &mut [f32],
+    dtype: gllm_kernels::types::DType,
 ) {
-    let weights_buf = pack_weights(&[
-        weights.q_w, weights.q_b, weights.k_w, weights.k_b,
-        weights.v_w, weights.v_b, weights.out_w, weights.out_b,
-        weights.ln1_w, weights.ln1_b, weights.ffn_up_w, weights.ffn_up_b,
-        weights.ffn_down_w, weights.ffn_down_b, weights.ln2_w, weights.ln2_b,
+    use crate::compat::jit_helpers::pack_weights_multi;
+    let ft = gllm_kernels::types::DType::F32;
+    let weights_buf = pack_weights_multi(&[
+        (weights.q_w, dtype), (weights.q_b, ft), (weights.k_w, dtype), (weights.k_b, ft),
+        (weights.v_w, dtype), (weights.v_b, ft), (weights.out_w, dtype), (weights.out_b, ft),
+        (weights.ln1_w, ft), (weights.ln1_b, ft), (weights.ffn_up_w, dtype), (weights.ffn_up_b, ft),
+        (weights.ffn_down_w, dtype), (weights.ffn_down_b, ft), (weights.ln2_w, ft), (weights.ln2_b, ft),
     ]);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
@@ -223,10 +225,10 @@ pub(crate) fn build_mean_pool_graph(
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let dt = dtype;
+    let ft = gllm_kernels::types::DType::F32; // activation dtype
 
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
-    let output = g.add_tensor_concrete("output", &[hidden], dt);
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], ft);
+    let output = g.add_tensor_concrete("output", &[hidden], ft);
 
     g.add_op(
         OpKind::MeanPool { seq_len, hidden },
@@ -443,6 +445,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 &bert_weights,
                 seq_len,
                 &mut layer_out,
+                super::jit_helpers::computation_dtype_from_config(config),
             );
 
             hidden_state.copy_from_slice(&layer_out);
@@ -537,21 +540,46 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     };
                     let compiled = global_jit_cache().get_or_compile(key, || {
                         let mut g = CompilerGraph::new();
-                        let x_in = g.add_tensor_concrete("x", &[1, hidden], dt);
+                        let ft = gllm_kernels::types::DType::F32;
+                        let x_in = g.add_tensor_concrete("x", &[1, hidden], ft);
                         let w_in = g.add_tensor_concrete("w", &[hidden, hidden], dt);
-                        let b_in = g.add_tensor_concrete("b", &[hidden], dt);
+                        let b_in = g.add_tensor_concrete("b", &[hidden], ft);
                         g.inputs = vec![x_in, w_in, b_in];
-                        let out = g.add_tensor_concrete("out", &[1, hidden], dt);
+                        let out = g.add_tensor_concrete("out", &[1, hidden], ft);
                         g.add_op(OpKind::GemmBias { m: 1, n: hidden, k: hidden, dtype: dt }, vec![x_in, w_in, b_in], vec![out], "dense_gemm");
                         g.outputs = vec![out];
                         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         compiler.compile_graph(&g).map_err(|e| format!("bert dense JIT failed: {e}"))
                     }).map_err(|e| BE::Other(e))?;
-                    let w_bytes = dense_w_t.len() * 4;
-                    let b_bytes = dense_b.len() * 4;
+                    // ARCH-DTYPE-ADAPTIVE: weight at model dtype, bias at F32
+                    let w_eb = dt.size_bytes();
+                    let w_bytes = dense_w_t.len() * w_eb;
+                    let b_bytes = dense_b.len() * std::mem::size_of::<f32>();
                     let mut wbuf = vec![0u8; w_bytes + b_bytes];
+                    // Pack weight at model dtype
+                    match dt {
+                        gllm_kernels::types::DType::F32 => unsafe {
+                            std::ptr::copy_nonoverlapping(dense_w_t.as_ptr() as *const u8, wbuf.as_mut_ptr(), w_bytes);
+                        },
+                        gllm_kernels::types::DType::F16 => {
+                            for (i, &val) in dense_w_t.iter().enumerate() {
+                                let h = half::f16::from_f32(val);
+                                let hb = h.to_le_bytes();
+                                wbuf[i * 2] = hb[0];
+                                wbuf[i * 2 + 1] = hb[1];
+                            }
+                        },
+                        gllm_kernels::types::DType::BF16 => {
+                            for (i, &val) in dense_w_t.iter().enumerate() {
+                                let h = half::bf16::from_f32(val);
+                                let hb = h.to_le_bytes();
+                                wbuf[i * 2] = hb[0];
+                                wbuf[i * 2 + 1] = hb[1];
+                            }
+                        },
+                    }
+                    // Pack bias at F32
                     unsafe {
-                        std::ptr::copy_nonoverlapping(dense_w_t.as_ptr() as *const u8, wbuf.as_mut_ptr(), w_bytes);
                         std::ptr::copy_nonoverlapping(dense_b.as_ptr() as *const u8, wbuf.as_mut_ptr().add(w_bytes), b_bytes);
                     }
                     let mut gemm_out = vec![0.0f32; hidden];
