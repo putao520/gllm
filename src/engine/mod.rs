@@ -1,5 +1,6 @@
 //! Layer 3: Engine (skeleton).
 
+pub mod attention_contracts;
 pub mod executor;
 pub mod pipeline;
 
@@ -16,4 +17,11 @@ pub use executor::{
     AttentionMaskType, AttentionTopology, BackendError, BatchInput, GeneratorForwardConfig,
     KvCacheConfig, KvCacheHandle, LogitsHandle, PositionEncoding, SamplingConfig, SequenceInput,
     SwapConfig,
+};
+
+// Re-export attention contract types (ARCH-ATTN-UNIFIED)
+pub use attention_contracts::{
+    AttentionSemantics, HeadMode, KvAppendSemantics, KvLayoutContract, KvSplitMode,
+    KvStorageKind, KvView, MaskMode, PackingDescriptor, PositionContract, ScalingMode,
+    VisibilityMode, WeightBacking, WeightView,
 };

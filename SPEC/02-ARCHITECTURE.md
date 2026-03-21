@@ -2296,3 +2296,37 @@ QView + KvView + AttentionSemantics
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
 | P3 | PagedKvView: paged attention 原位访问 | 后续 |
+
+### 8.8 DType-Aware JIT 性能优化 (ARCH-DTYPE-PERF)
+
+**原则**: dtype 必须贯穿 GEMM blocking、HW constraint 验证、codegen 全链路，F16/BF16 模型可利用 2× 缓存容量提升吞吐。
+
+#### 已完成优化 (P0)
+
+| # | 优化点 | 预期收益 | 实现位置 |
+|---|--------|---------|---------|
+| P0-1 | GEMM blocking dtype 感知 | KC 翻倍 → 15-30% GEMM 吞吐提升 | `device_profile.rs:gemm_blocking()` |
+| P0-2 | HW constraints dtype 感知 | L1 验证精确化，避免误拒合法融合 | `hw_constraints.rs:validate_l1_working_set()` |
+| P0-3 | AArch64 IR loop dtype 修复 | F16/BF16 pack buffer 偏移正确 | `aarch64_dynasm.rs:emit_elem_to_byte_shift()` |
+| P0-4 | x86_64 bias_add 显式 f32_bytes | 消除魔数，明确 bias 始终 F32 | `x86_64.rs:emit_bias_add()` |
+| P0-5 | WisdomDb dtype-aware 查询 | 不同 dtype 的 GEMM 获得独立调优参数 | `device_profile.rs:query_wisdom_jit_params()` |
+
+#### 性能影响分析
+
+F16/BF16 模型在 `gemm_blocking(m, n, k, dtype)` 下的 blocking 参数变化：
+
+```
+elem_size=4 (F32): KC = L1*80% / (4*(MR+NR))
+elem_size=2 (F16): KC = L1*80% / (2*(MR+NR))  → KC 翻倍
+
+KC 翻倍 → K 循环迭代次数减半 → pack 开销减半 → 15-30% 吞吐提升
+MC/NC 同比增大 → 更大 tile → 更好的数据复用
+```
+
+#### API 签名
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `gemm_blocking` | `(m, n, k, dtype: DType) -> GemmBlocking` | dtype 驱动 blocking 参数 |
+| `query_wisdom_jit_params` | `(m, n, k, dtype: DType) -> Option<JitParams>` | dtype-aware WisdomDb 查询 |
+| `gemm_blocking_heuristic` | `(m, n, k, dtype: DType) -> GemmBlocking` | 内部分析启发式 |
