@@ -225,6 +225,197 @@ fn gpu_write_kv_cache_hip(
 }
 
 // ---------------------------------------------------------------------------
+// GPU KV cache helpers for native GPU attention (zero CPU round-trip)
+// ---------------------------------------------------------------------------
+
+/// Compute device pointers to a specific layer's K and V slices within the GPU KV cache.
+///
+/// Layout: `[K_all_layers | V_all_layers]`, each sub-block `[layer][head][seq][dim]`.
+/// Returns `(k_layer_ptr, v_layer_ptr)` pointing to `[num_kv_heads * max_seq * head_dim]` for the layer.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn kv_cache_layer_ptrs(
+    handle: &KvCacheHandle,
+    layer: usize,
+    half_bytes: usize,
+    num_kv_heads: usize,
+    head_stride: usize,
+) -> (u64, u64) {
+    let layer_offset = (layer * num_kv_heads * head_stride) as u64;
+    let k_ptr = handle.0 + layer_offset;
+    let v_ptr = handle.0 + half_bytes as u64 + layer_offset;
+    (k_ptr, v_ptr)
+}
+
+/// Write k_rope/v_proj from GPU device pointers into the GPU KV cache via DtoD copy (CUDA).
+///
+/// Unlike `gpu_write_kv_cache` which takes host bytes, this operates entirely on-device.
+/// Source layout: `[seq_len, kv_dim]` (interleaved heads).
+/// Destination layout: per-head `[max_seq, head_dim]` within the KV cache.
+#[cfg(feature = "cuda")]
+fn gpu_write_kv_cache_device(
+    k_device_ptr: u64,
+    v_device_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    handle: &KvCacheHandle,
+    layer: usize,
+    half_bytes: usize,
+    write_start: usize,
+    head_stride: usize,
+    dtype_size: usize,
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+    _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+) -> Result<(), BE> {
+    // For each head, extract [seq_len, head_dim] from [seq_len, kv_dim] and DtoD copy.
+    // Since source is interleaved (head_dim stride = kv_dim), we must copy row-by-row per head.
+    for head in 0..num_kv_heads {
+        let dst_k = handle.0
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+        let dst_v = handle.0 + half_bytes as u64
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+
+        for s in 0..seq_len {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let dst_off_s = (s * head_dim * dtype_size) as u64;
+            let copy_bytes = head_dim * dtype_size;
+
+            // K: DtoD
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    dst_k + dst_off_s,
+                    k_device_ptr + src_off as u64,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD KV cache K failed: CUDA error {res}")));
+            }
+
+            // V: DtoD
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    dst_v + dst_off_s,
+                    v_device_ptr + src_off as u64,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD KV cache V failed: CUDA error {res}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write k_rope/v_proj from GPU device pointers into the GPU KV cache via DtoD copy (HIP).
+#[cfg(feature = "hip")]
+fn gpu_write_kv_cache_device_hip(
+    k_device_ptr: u64,
+    v_device_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    handle: &KvCacheHandle,
+    layer: usize,
+    half_bytes: usize,
+    write_start: usize,
+    head_stride: usize,
+    dtype_size: usize,
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    _stream: &gllm_kernels::gpu::hip::HipGpuStream,
+) -> Result<(), BE> {
+    for head in 0..num_kv_heads {
+        let dst_k = handle.0
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+        let dst_v = handle.0 + half_bytes as u64
+            + ((layer * num_kv_heads + head) * head_stride
+                + write_start * head_dim * dtype_size) as u64;
+
+        for s in 0..seq_len {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let dst_off_s = (s * head_dim * dtype_size) as u64;
+            let copy_bytes = head_dim * dtype_size;
+
+            // K: DtoD via hipMemcpyDtoD
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    (dst_k + dst_off_s) as _,
+                    (k_device_ptr + src_off as u64) as _,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD KV cache K failed: HIP error {res}")));
+            }
+
+            // V: DtoD via hipMemcpyDtoD
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    (dst_v + dst_off_s) as _,
+                    (v_device_ptr + src_off as u64) as _,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD KV cache V failed: HIP error {res}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build a CompilerGraph for GPU-native cached GQA attention.
+///
+/// Inputs: q_rope[seq_len, q_dim], k_cache[total_seq, kv_dim], v_cache[total_seq, kv_dim]
+/// Output: attn_out[seq_len, q_dim]
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn build_gpu_cached_attention_graph(
+    seq_len: usize,
+    total_seq: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    dtype: gllm_kernels::types::DType,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::graph::AttentionStrategy;
+
+    let mut g = CompilerGraph::new();
+    let q_dim = num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+
+    let q = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dtype);
+    let k = g.add_tensor_concrete("k_cache", &[total_seq, kv_dim], dtype);
+    let v = g.add_tensor_concrete("v_cache", &[total_seq, kv_dim], dtype);
+    g.inputs = vec![q, k, v];
+
+    let out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim], dtype);
+    g.add_op(
+        OpKind::CachedGQA {
+            seq_len,
+            total_seq,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            strategy: AttentionStrategy::Naive,
+            kv_dtype: dtype,
+        },
+        vec![q, k, v],
+        vec![out],
+        "gpu_cached_gqa",
+    );
+
+    g.outputs = vec![out];
+    g
+}
+
+// ---------------------------------------------------------------------------
 // GPU compilation & kernel launch helpers (CUDA)
 // ---------------------------------------------------------------------------
 
@@ -308,6 +499,15 @@ pub(crate) fn launch_config_for_op(
                 shared_mem_bytes: ((*seq_len + 2) as u32) * 4,
             }
         }
+        OpKind::CachedGQA { seq_len, total_seq, num_heads, head_dim, .. } => {
+            let block = (*head_dim as u32).next_power_of_two()
+                .min(profile.max_threads_per_block);
+            gllm_kernels::gpu::LaunchConfig {
+                grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
+                block_dim: [block, 1, 1],
+                shared_mem_bytes: ((*total_seq + 2) as u32) * 4,
+            }
+        }
         OpKind::MeanPool { hidden, .. } => {
             profile.launch_config_1d(*hidden)
         }
@@ -358,6 +558,13 @@ pub(crate) fn build_kernel_params(
             Ok(vec![
                 input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
                 *seq_len as u64, *num_heads as u64, *head_dim as u64,
+            ])
+        }
+        OpKind::CachedGQA { total_seq, num_heads, head_dim, .. } => {
+            // Same kernel ABI as MHA: (Q, K, V, output, total_seq, num_heads, head_dim)
+            Ok(vec![
+                input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
+                *total_seq as u64, *num_heads as u64, *head_dim as u64,
             ])
         }
         OpKind::LayerNorm { .. } => {
@@ -630,6 +837,15 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
         device, gpu_profile, sm_version, &graph,
     )?;
 
+    // Upload hidden_state to GPU once before layer loop
+    let hidden_bytes = seq_len * hidden * F32_BYTES;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
+        .map_err(|e| BE::Other(format!("GPU alloc gpu_hidden failed: {e}")))?;
+    {
+        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+        device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
+    }
+
     // ── Per-layer GPU execution ──
     for layer in 0..num_layers {
         // Load all weight tensors for this layer (CPU side)
@@ -637,29 +853,27 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
         )?;
 
-        // Allocate GPU buffers for all graph tensors.
-        // We keep CudaBuffer objects alive (for dtoh) and build a separate
-        // u64 pointer map for kernel launch.
         let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
         let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements = meta.concrete_numel();
-            let size_bytes = n_elements * F32_BYTES; // f32
+            let size_bytes = meta.concrete_numel() * F32_BYTES;
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Other(format!("GPU alloc failed for {}: {e}", meta.name)))?;
 
-            // Upload data for input and weight tensors
             if meta.name == "input" {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        hidden_state.as_ptr() as *const u8,
-                        hidden_state.len() * F32_BYTES,
+                // DtoD from gpu_hidden (no CPU round-trip)
+                let res = unsafe {
+                    (device.driver().cuMemcpyDtoD_v2)(
+                        buf.as_device_ptr(),
+                        gpu_hidden.as_device_ptr(),
+                        hidden_bytes,
                     )
                 };
-                device.htod(bytes, &mut buf, stream)
-                    .map_err(|e| BE::Other(format!("htod input failed: {e}")))?;
+                if res != 0 {
+                    return Err(BE::Other(format!("DtoD hidden→input failed: CUDA error {res}")));
+                }
             } else if let Some(data) = layer_weights.get(&meta.name) {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -672,31 +886,35 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
             gpu_buffers.push((tid, buf));
         }
 
-        // Launch all kernels
         cuda_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
-
-        // Synchronize
         device.sync()
             .map_err(|e| BE::Other(format!("GPU sync failed: {e}")))?;
 
-        // Find the output buffer and download
+        // Update gpu_hidden: DtoD from output (stays on GPU)
         let output_tid = graph.outputs[0];
-        let output_buf = gpu_buffers.iter()
-            .find(|(tid, _)| *tid == output_tid)
-            .map(|(_, buf)| buf)
+        let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
             .ok_or_else(|| BE::Other("output buffer not found".into()))?;
-        let output_bytes = seq_len * hidden * F32_BYTES;
-        let mut output_host = vec![0u8; output_bytes];
-        device.dtoh(output_buf, &mut output_host, stream)
-            .map_err(|e| BE::Other(format!("dtoh output failed: {e}")))?;
+        let res = unsafe {
+            (device.driver().cuMemcpyDtoD_v2)(
+                gpu_hidden.as_device_ptr(),
+                output_ptr,
+                hidden_bytes,
+            )
+        };
+        if res != 0 {
+            return Err(BE::Other(format!("DtoD output→gpu_hidden failed: CUDA error {res}")));
+        }
+    }
 
-        // Copy result back to hidden_state for next layer
+    // Download final hidden_state for mean pooling
+    {
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Other(format!("dtoh final hidden: {e}")))?;
         let output_f32: &[f32] = unsafe {
             std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
         };
         hidden_state.copy_from_slice(output_f32);
-
-        // GPU buffers freed when gpu_buffers drops
     }
 
     // ── Mean pooling (GPU) ──
@@ -818,18 +1036,20 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     } else { false };
 
     if is_incremental {
-        // ── Incremental decode path ──
-        // GPU projection (RmsNorm → Q/K/V Gemm → RoPE) + CPU cached attention + GPU post-attention
+        // ── Incremental decode path (GPU-native, zero CPU round-trip) ──
+        // Optimizations: hidden_state stays on GPU across layers, buffers pre-allocated,
+        // syncs minimized (1 per layer instead of 3).
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
+        let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, comp_dtype);
         let (_proj_mod, proj_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, comp_dtype);
         let (_post_mod, post_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &post_graph)?;
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Cuda("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
@@ -840,12 +1060,44 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
         };
         let total_seq = cached_seq_len + seq_len;
-        let positions: Vec<u32> = input.sequences.iter()
-            .flat_map(|s| {
-                let start = s.position as u32;
-                (0..s.tokens.len() as u32).map(move |i| start + i)
-            })
-            .collect();
+
+        // Compile GPU cached attention kernel (once, shared across all layers)
+        let attn_graph = build_gpu_cached_attention_graph(
+            seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
+        );
+        let (_attn_mod, attn_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &attn_graph)?;
+
+        // ── Pre-allocate GPU buffers (reused across all layers) ──
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let attn_out_bytes = seq_len * q_dim * F32_BYTES;
+
+        // hidden_state GPU buffer — stays on GPU across layers
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Cuda(format!("GPU alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Cuda(format!("htod initial hidden: {e}")))?;
+        }
+
+        // Pre-allocate proj/attn/post buffers
+        let mut proj_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
+        for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let size_bytes = tmeta.concrete_numel() * F32_BYTES;
+            let buf = device.alloc(size_bytes)
+                .map_err(|e| BE::Cuda(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
+            proj_bufs.push((tid, buf));
+        }
+        let attn_out_buf = device.alloc(attn_out_bytes)
+            .map_err(|e| BE::Cuda(format!("GPU alloc attn_out failed: {e}")))?;
+        let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
+        for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let size_bytes = tmeta.concrete_numel() * F32_BYTES;
+            let buf = device.alloc(size_bytes)
+                .map_err(|e| BE::Cuda(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
+            post_bufs.push((tid, buf));
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -853,53 +1105,41 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             )?;
 
             // ── GPU: projection graph (RmsNorm → Q/K/V → RoPE) ──
-            let mut proj_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Cuda(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
+                let (_, ref mut buf) = proj_bufs[idx];
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Cuda(format!("htod proj input: {e}")))?;
+                    // DtoD from gpu_hidden (no CPU round-trip)
+                    let res = unsafe {
+                        (device.driver().cuMemcpyDtoD_v2)(
+                            buf.as_device_ptr(),
+                            gpu_hidden.as_device_ptr(),
+                            hidden_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→proj input failed: CUDA error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Cuda(format!("htod proj {}: {e}", tmeta.name)))?;
+                    device.htod(bytes, buf, stream).map_err(|e| BE::Cuda(format!("htod proj {}: {e}", tmeta.name)))?;
                 }
                 proj_ptrs.insert(tid, buf.as_device_ptr());
-                proj_bufs.push((tid, buf));
             }
             cuda_launch_graph(device, stream, &proj_entries, &proj_ptrs, &proj_graph)?;
-            device.sync().map_err(|e| BE::Cuda(format!("GPU sync proj: {e}")))?;
+            // No sync needed here — DtoD KV write and attention launch are on same stream (ordered)
 
-            // Download q_rope, k_rope, v_proj from GPU
-            let q_tid = proj_graph.outputs[0]; // q_rope
-            let k_tid = proj_graph.outputs[1]; // k_rope
-            let v_tid = proj_graph.outputs[2]; // v_proj
-
-            let q_bytes = seq_len * q_dim * F32_BYTES;
-            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b)
-                .ok_or_else(|| BE::Cuda(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
-            let mut q_host = vec![0u8; q_bytes];
-            device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Cuda(format!("dtoh q_rope: {e}")))?;
-            let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
-
-            let kv_bytes = seq_len * kv_dim * F32_BYTES;
-            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+            // ── GPU: write k_rope/v_proj into KV cache (DtoD, zero CPU copy) ──
+            let k_tid = proj_graph.outputs[1];
+            let v_tid = proj_graph.outputs[2];
+            let k_ptr = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
-            let mut k_host = vec![0u8; kv_bytes];
-            device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Cuda(format!("dtoh k_rope: {e}")))?;
-
-            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+            let v_ptr = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
-            let mut v_host = vec![0u8; kv_bytes];
-            device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Cuda(format!("dtoh v_proj: {e}")))?;
 
-            // Write k_rope/v_proj into GPU KV cache
-            gpu_write_kv_cache(
-                &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
+            gpu_write_kv_cache_device(
+                k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                 handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
             )?;
 
@@ -911,57 +1151,102 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 }
             }
 
-            // Download full KV cache to CPU for cached attention
-            let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
+            // ── GPU: cached attention (q stays on GPU, reads KV cache directly) ──
+            let q_tid = proj_graph.outputs[0];
+            let q_ptr = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b.as_device_ptr())
+                .ok_or_else(|| BE::Cuda(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
+            let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
 
-            // CPU cached attention
-            let attn_out = jit_cached_attention(
-                &q_f32, &kv_cache_k, &kv_cache_v, &positions,
-                layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )?;
+            let mut attn_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
+            for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                let tid = TensorId(idx as u32);
+                match tmeta.name.as_str() {
+                    "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
+                    "k_cache" => { attn_ptrs.insert(tid, k_layer_ptr); }
+                    "v_cache" => { attn_ptrs.insert(tid, v_layer_ptr); }
+                    "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
+                    _ => {}
+                }
+            }
+            cuda_launch_graph(device, stream, &attn_entries, &attn_ptrs, &attn_graph)?;
+            // No sync — post graph launch is on same stream
 
             // ── GPU: post-attention graph (O Gemm → Residual → FFN → Residual) ──
-            let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
             let mut post_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Cuda(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
+                let (_, ref mut buf) = post_bufs[idx];
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Cuda(format!("htod post input: {e}")))?;
+                    // DtoD from gpu_hidden
+                    let res = unsafe {
+                        (device.driver().cuMemcpyDtoD_v2)(
+                            buf.as_device_ptr(),
+                            gpu_hidden.as_device_ptr(),
+                            hidden_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→post input failed: CUDA error {res}")));
+                    }
                 } else if tmeta.name == "attn_out" {
-                    let bytes = unsafe { std::slice::from_raw_parts(attn_out.as_ptr() as *const u8, attn_out.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Cuda(format!("htod post attn_out: {e}")))?;
+                    // attn_out already on GPU — DtoD copy from attn_out_buf
+                    let res = unsafe {
+                        (device.driver().cuMemcpyDtoD_v2)(
+                            buf.as_device_ptr(),
+                            attn_out_buf.as_device_ptr(),
+                            attn_out_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD attn_out→post failed: CUDA error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Cuda(format!("htod post {}: {e}", tmeta.name)))?;
+                    device.htod(bytes, buf, stream).map_err(|e| BE::Cuda(format!("htod post {}: {e}", tmeta.name)))?;
                 }
                 post_ptrs.insert(tid, buf.as_device_ptr());
-                post_bufs.push((tid, buf));
             }
             cuda_launch_graph(device, stream, &post_entries, &post_ptrs, &post_graph)?;
-            device.sync().map_err(|e| BE::Cuda(format!("GPU sync post: {e}")))?;
+            // Single sync per layer — ensures post graph completes before next layer reads output
+            device.sync().map_err(|e| BE::Cuda(format!("GPU sync layer {layer}: {e}")))?;
 
-            // Download output
+            // ── Update gpu_hidden: DtoD from post output (stays on GPU) ──
             let output_tid = post_graph.outputs[0];
-            let output_buf = post_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, buf)| buf)
+            let output_ptr = post_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda("post output buffer not found".into()))?;
-            let mut output_host = vec![0u8; seq_len * hidden * F32_BYTES];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Cuda(format!("dtoh post output: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    gpu_hidden.as_device_ptr(),
+                    output_ptr,
+                    hidden_bytes,
+                )
             };
-            hidden_state.copy_from_slice(output_f32);
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD post output→gpu_hidden failed: CUDA error {res}")));
+            }
         }
+
+        // ── Final: download hidden_state from GPU (once, after all layers) ──
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
+        let output_f32: &[f32] = unsafe {
+            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
+        };
+        hidden_state.copy_from_slice(output_f32);
     } else {
-        // ── Prefill path (existing) ──
+        // ── Prefill path (GPU-resident hidden_state) ──
         let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_module, kernel_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &graph)?;
+
+        // Upload hidden_state to GPU once before layer loop
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Cuda(format!("GPU alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Cuda(format!("htod initial hidden: {e}")))?;
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -979,11 +1264,17 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     .map_err(|e| BE::Cuda(format!("GPU alloc failed for {}: {e}", meta.name)))?;
 
                 if meta.name == "input" {
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
+                    // DtoD from gpu_hidden (no CPU round-trip)
+                    let res = unsafe {
+                        (device.driver().cuMemcpyDtoD_v2)(
+                            buf.as_device_ptr(),
+                            gpu_hidden.as_device_ptr(),
+                            hidden_bytes,
+                        )
                     };
-                    device.htod(bytes, &mut buf, stream)
-                        .map_err(|e| BE::Cuda(format!("htod input failed: {e}")))?;
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→input failed: CUDA error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&meta.name) {
                     let bytes = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -1012,18 +1303,10 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     .map(|(i, _)| TensorId(i as u32))
                     .ok_or_else(|| BE::Cuda("v_proj tensor not found in graph".into()))?;
 
-                let kv_bytes = seq_len * kv_dim * F32_BYTES;
-                let k_buf = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                let k_ptr = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Cuda("k_rope buffer not found".into()))?;
-                let mut k_host = vec![0u8; kv_bytes];
-                device.dtoh(k_buf, &mut k_host, stream)
-                    .map_err(|e| BE::Cuda(format!("dtoh k_rope failed: {e}")))?;
-
-                let v_buf = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                let v_ptr = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Cuda("v_proj buffer not found".into()))?;
-                let mut v_host = vec![0u8; kv_bytes];
-                device.dtoh(v_buf, &mut v_host, stream)
-                    .map_err(|e| BE::Cuda(format!("dtoh v_proj failed: {e}")))?;
 
                 let meta_store = backend.kv_meta.lock()
                     .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
@@ -1037,8 +1320,9 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
                 drop(meta_store);
 
-                gpu_write_kv_cache(
-                    &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
+                // DtoD: write K/V directly from GPU buffers to KV cache (no host bounce)
+                gpu_write_kv_cache_device(
+                    k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                     handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
                 )?;
 
@@ -1051,17 +1335,27 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 }
             }
 
-            // Download output
+            // Update gpu_hidden: DtoD from output (stays on GPU)
             let output_tid = graph.outputs[0];
-            let output_buf = gpu_buffers.iter()
-                .find(|(tid, _)| *tid == output_tid)
-                .map(|(_, buf)| buf)
+            let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda("output buffer not found".into()))?;
-            let output_bytes = seq_len * hidden * F32_BYTES;
-            let mut output_host = vec![0u8; output_bytes];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Cuda(format!("dtoh output failed: {e}")))?;
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    gpu_hidden.as_device_ptr(),
+                    output_ptr,
+                    hidden_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD output→gpu_hidden failed: CUDA error {res}")));
+            }
+        }
 
+        // Final: download hidden_state from GPU (once)
+        {
+            let mut output_host = vec![0u8; hidden_bytes];
+            device.dtoh(&gpu_hidden, &mut output_host, stream)
+                .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
             let output_f32: &[f32] = unsafe {
                 std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
             };
@@ -1361,6 +1655,14 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
         device, gpu_profile, gfx_arch, &graph,
     )?;
 
+    let hidden_bytes = seq_len * hidden * F32_BYTES;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
+        .map_err(|e| BE::Other(format!("GPU alloc gpu_hidden failed: {e}")))?;
+    {
+        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+        device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
+    }
+
     for layer in 0..num_layers {
         let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
@@ -1371,20 +1673,21 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements = meta.concrete_numel();
-            let size_bytes = n_elements * F32_BYTES;
+            let size_bytes = meta.concrete_numel() * F32_BYTES;
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Other(format!("GPU alloc failed for {}: {e}", meta.name)))?;
 
             if meta.name == "input" {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        hidden_state.as_ptr() as *const u8,
-                        hidden_state.len() * F32_BYTES,
+                let res = unsafe {
+                    (device.driver().hipMemcpyDtoD)(
+                        buf.as_device_ptr() as _,
+                        gpu_hidden.as_device_ptr() as _,
+                        hidden_bytes,
                     )
                 };
-                device.htod(bytes, &mut buf, stream)
-                    .map_err(|e| BE::Other(format!("htod input failed: {e}")))?;
+                if res != 0 {
+                    return Err(BE::Other(format!("DtoD hidden→input failed: HIP error {res}")));
+                }
             } else if let Some(data) = layer_weights.get(&meta.name) {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -1398,20 +1701,28 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
         }
 
         hip_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
-
         device.sync()
             .map_err(|e| BE::Other(format!("GPU sync failed: {e}")))?;
 
         let output_tid = graph.outputs[0];
-        let output_buf = gpu_buffers.iter()
-            .find(|(tid, _)| *tid == output_tid)
-            .map(|(_, buf)| buf)
+        let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
             .ok_or_else(|| BE::Other("output buffer not found".into()))?;
-        let output_bytes = seq_len * hidden * F32_BYTES;
-        let mut output_host = vec![0u8; output_bytes];
-        device.dtoh(output_buf, &mut output_host, stream)
-            .map_err(|e| BE::Other(format!("dtoh output failed: {e}")))?;
+        let res = unsafe {
+            (device.driver().hipMemcpyDtoD)(
+                gpu_hidden.as_device_ptr() as _,
+                output_ptr as _,
+                hidden_bytes,
+            )
+        };
+        if res != 0 {
+            return Err(BE::Other(format!("DtoD output→gpu_hidden failed: HIP error {res}")));
+        }
+    }
 
+    {
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Other(format!("dtoh final hidden: {e}")))?;
         let output_f32: &[f32] = unsafe {
             std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
         };
@@ -1629,29 +1940,32 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
     let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
+    let hidden_bytes = seq_len * hidden * F32_BYTES;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
+        .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
+    {
+        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+        device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
+    }
+
     // Per-layer GPU execution
     for layer in 0..num_layers {
         let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu(
             weights, backend, layer, seq_len, hidden, inter, transpose_w,
         )?;
 
-        // Allocate Metal buffers
         let mut gpu_buffers: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
             std::collections::HashMap::new();
 
         for (idx, meta) in graph.tensors.iter().enumerate() {
             let tid = TensorId(idx as u32);
-            let n_elements = meta.concrete_numel();
-            let size_bytes = n_elements * F32_BYTES;
+            let size_bytes = meta.concrete_numel() * F32_BYTES;
             let mut buf = device.alloc(size_bytes)
                 .map_err(|e| BE::Metal(format!("alloc failed for {}: {e}", meta.name)))?;
 
             if meta.name == "input" {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
-                };
-                device.htod(bytes, &mut buf, stream)
-                    .map_err(|e| BE::Metal(format!("htod input failed: {e}")))?;
+                device.dtod(&gpu_hidden, &mut buf, stream)
+                    .map_err(|e| BE::Metal(format!("dtod hidden→input: {e}")))?;
             } else if let Some(data) = layer_weights.get(&meta.name) {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -1666,15 +1980,17 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
         metal_launch_graph(device, stream, &kernel_entries, &gpu_buffers, &graph)?;
         device.sync().map_err(|e| BE::Metal(format!("sync failed: {e}")))?;
 
-        // Download output
         let output_tid = graph.outputs[0];
         let output_buf = gpu_buffers.get(&output_tid)
             .ok_or_else(|| BE::Metal("output buffer not found".into()))?;
-        let output_bytes = seq_len * hidden * F32_BYTES;
-        let mut output_host = vec![0u8; output_bytes];
-        device.dtoh(output_buf, &mut output_host, stream)
-            .map_err(|e| BE::Metal(format!("dtoh output failed: {e}")))?;
+        device.dtod(output_buf, &mut gpu_hidden, stream)
+            .map_err(|e| BE::Metal(format!("dtod output→gpu_hidden: {e}")))?;
+    }
 
+    {
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
         let output_f32: &[f32] = unsafe {
             std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
         };
@@ -2078,146 +2394,6 @@ pub(crate) fn build_post_attention_graph(
     g
 }
 
-/// JIT-compiled cached GQA attention for GPU backends (CPU-side execution on downloaded KV).
-///
-/// Replaces the hand-written `cpu_cached_attention` scalar loops with JIT-compiled
-/// CachedGQA kernel (AVX2/AVX-512/NEON). Extracts the current layer's K/V slice
-/// from the full flat KV cache before passing to JIT.
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-fn jit_cached_attention(
-    q_rope: &[f32],
-    kv_cache_k: &[f32],
-    kv_cache_v: &[f32],
-    positions: &[u32],
-    layer: usize,
-    total_seq: usize,
-    seq_len: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    max_seq_len: usize,
-    dtype: gllm_kernels::types::DType,
-) -> Result<Vec<f32>, BE> {
-    use super::jit_helpers::{build_cached_gqa_graph, execute_cached_gqa};
-    use gllm_kernels::compiler::InferenceCompiler;
-
-    let kv_dim = num_kv_heads * head_dim;
-    let layer_stride = num_kv_heads * max_seq_len * head_dim;
-
-    // Extract current layer's K/V slice: [total_seq, kv_dim]
-    let k_layer = &kv_cache_k[layer * layer_stride..layer * layer_stride + total_seq * kv_dim];
-    let v_layer = &kv_cache_v[layer * layer_stride..layer * layer_stride + total_seq * kv_dim];
-
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
-        use crate::compat::DType as GllmDType;
-        use gllm_kernels::types::DType;
-
-        let key = JitCacheKey {
-            arch: ModelArchKey {
-                arch_name: "gpu_cached_gqa".to_string(),
-                hidden_size: num_heads * head_dim,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                dtype: super::jit_helpers::kernels_dtype_to_compat(dtype),
-            },
-            graph: GraphType::CachedGqa { total_seq },
-        };
-
-        let compiled = global_jit_cache().get_or_compile(key, || {
-            let graph = build_cached_gqa_graph(seq_len, total_seq, num_heads, num_kv_heads, head_dim, dtype);
-            let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-            compiler.compile_graph(&graph).map_err(|e| e.to_string())
-        }).map_err(|e| BE::Other(format!("jit_cached_attention: JIT compilation failed: {e}")))?;
-
-        let (attn_out, _sparsity) = super::jit_helpers::execute_cached_gqa(
-            &compiled, q_rope, k_layer, v_layer,
-            seq_len, num_heads, head_dim,
-        );
-        return Ok(attn_out);
-    }
-
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        let _ = (positions, layer_stride);
-        compile_error!("jit_cached_attention requires x86_64 or aarch64");
-    }
-}
-
-/// CPU-side causal attention using cached K/V from GPU KV cache.
-///
-/// q_rope: [seq_len, q_dim] — RoPE'd Q for new tokens
-/// kv_cache_k: [num_layers * num_kv_heads * max_seq_len * head_dim] — full K cache (flat)
-/// kv_cache_v: same layout — full V cache
-/// Returns attn_out: [seq_len, q_dim]
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-/// Download K/V from GPU KV cache to host flat arrays (CUDA).
-/// Returns (k_cache_flat, v_cache_flat) each [num_layers * num_kv_heads * max_seq_len * head_dim].
-#[cfg(feature = "cuda")]
-fn download_kv_cache_to_host(
-    handle: &KvCacheHandle,
-    half_bytes: usize,
-    total_kv_floats: usize,
-    device: &gllm_kernels::gpu::cuda::CudaDevice,
-    _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
-) -> Result<(Vec<f32>, Vec<f32>), BE> {
-    let mut k_host_bytes = vec![0u8; half_bytes];
-    let res = unsafe {
-        (device.driver().cuMemcpyDtoH_v2)(
-            k_host_bytes.as_mut_ptr() as *mut _,
-            handle.0,
-            half_bytes,
-        )
-    };
-    if res != 0 { return Err(BE::Other(format!("dtoh KV cache K failed: CUDA error {res}"))); }
-    let k_flat: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(k_host_bytes.as_ptr() as *const f32, total_kv_floats)
-    }.to_vec();
-
-    let mut v_host_bytes = vec![0u8; half_bytes];
-    let res = unsafe {
-        (device.driver().cuMemcpyDtoH_v2)(
-            v_host_bytes.as_mut_ptr() as *mut _,
-            handle.0 + half_bytes as u64,
-            half_bytes,
-        )
-    };
-    if res != 0 { return Err(BE::Other(format!("dtoh KV cache V failed: CUDA error {res}"))); }
-    let v_flat: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(v_host_bytes.as_ptr() as *const f32, total_kv_floats)
-    }.to_vec();
-
-    Ok((k_flat, v_flat))
-}
-
-/// Download K/V from GPU KV cache to host flat arrays (HIP).
-#[cfg(feature = "hip")]
-fn download_kv_cache_to_host_hip(
-    handle: &KvCacheHandle,
-    half_bytes: usize,
-    total_kv_floats: usize,
-    device: &gllm_kernels::gpu::hip::HipDevice,
-    _stream: &gllm_kernels::gpu::hip::HipGpuStream,
-) -> Result<(Vec<f32>, Vec<f32>), BE> {
-    let mut k_host_bytes = vec![0u8; half_bytes];
-    device.dtoh_raw(handle.0, &mut k_host_bytes)
-        .map_err(|e| BE::Other(format!("dtoh KV cache K failed: {e}")))?;
-    let k_flat: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(k_host_bytes.as_ptr() as *const f32, total_kv_floats)
-    }.to_vec();
-
-    let mut v_host_bytes = vec![0u8; half_bytes];
-    device.dtoh_raw(handle.0 + half_bytes as u64, &mut v_host_bytes)
-        .map_err(|e| BE::Other(format!("dtoh KV cache V failed: {e}")))?;
-    let v_flat: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(v_host_bytes.as_ptr() as *const f32, total_kv_floats)
-    }.to_vec();
-
-    Ok((k_flat, v_flat))
-}
-
 /// Build a CompilerGraph for the final lm_head projection: hidden -> vocab logits.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn build_lm_head_graph(
@@ -2384,17 +2560,18 @@ pub(super) fn hip_decoder_forward<E: Element>(
     } else { false };
 
     if is_incremental {
-        // ── Incremental decode path ──
+        // ── Incremental decode path (GPU-native, zero CPU round-trip) ──
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
+        let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, comp_dtype);
         let (_proj_mod, proj_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, comp_dtype);
         let (_post_mod, post_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &post_graph)?;
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Hip("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
@@ -2405,12 +2582,39 @@ pub(super) fn hip_decoder_forward<E: Element>(
             (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
         };
         let total_seq = cached_seq_len + seq_len;
-        let positions: Vec<u32> = input.sequences.iter()
-            .flat_map(|s| {
-                let start = s.position as u32;
-                (0..s.tokens.len() as u32).map(move |i| start + i)
-            })
-            .collect();
+
+        let attn_graph = build_gpu_cached_attention_graph(
+            seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
+        );
+        let (_attn_mod, attn_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &attn_graph)?;
+
+        // ── Pre-allocate GPU buffers (reused across all layers) ──
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let attn_out_bytes = seq_len * q_dim * F32_BYTES;
+
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Hip(format!("GPU alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Hip(format!("htod initial hidden: {e}")))?;
+        }
+
+        let mut proj_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
+        for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let buf = device.alloc(tmeta.concrete_numel() * F32_BYTES)
+                .map_err(|e| BE::Hip(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
+            proj_bufs.push((tid, buf));
+        }
+        let attn_out_buf = device.alloc(attn_out_bytes)
+            .map_err(|e| BE::Hip(format!("GPU alloc attn_out failed: {e}")))?;
+        let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
+        for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let buf = device.alloc(tmeta.concrete_numel() * F32_BYTES)
+                .map_err(|e| BE::Hip(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
+            post_bufs.push((tid, buf));
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -2418,53 +2622,39 @@ pub(super) fn hip_decoder_forward<E: Element>(
             )?;
 
             // ── GPU: projection graph ──
-            let mut proj_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Hip(format!("GPU alloc proj {} failed: {e}", tmeta.name)))?;
+                let (_, ref mut buf) = proj_bufs[idx];
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Hip(format!("htod proj input: {e}")))?;
+                    let res = unsafe {
+                        (device.driver().hipMemcpyDtoD)(
+                            buf.as_device_ptr() as _,
+                            gpu_hidden.as_device_ptr() as _,
+                            hidden_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→proj input failed: HIP error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Hip(format!("htod proj {}: {e}", tmeta.name)))?;
+                    device.htod(bytes, buf, stream).map_err(|e| BE::Hip(format!("htod proj {}: {e}", tmeta.name)))?;
                 }
                 proj_ptrs.insert(tid, buf.as_device_ptr());
-                proj_bufs.push((tid, buf));
             }
             hip_launch_graph(device, stream, &proj_entries, &proj_ptrs, &proj_graph)?;
-            device.sync().map_err(|e| BE::Hip(format!("GPU sync proj: {e}")))?;
 
-            // Download q_rope, k_rope, v_proj
-            let q_tid = proj_graph.outputs[0];
+            // ── GPU: write k_rope/v_proj into KV cache (DtoD) ──
             let k_tid = proj_graph.outputs[1];
             let v_tid = proj_graph.outputs[2];
-
-            let q_bytes = seq_len * q_dim * F32_BYTES;
-            let q_buf = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b)
-                .ok_or_else(|| BE::Hip(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
-            let mut q_host = vec![0u8; q_bytes];
-            device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Hip(format!("dtoh q_rope: {e}")))?;
-            let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
-
-            let kv_bytes = seq_len * kv_dim * F32_BYTES;
-            let k_buf = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+            let k_ptr = proj_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
-            let mut k_host = vec![0u8; kv_bytes];
-            device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Hip(format!("dtoh k_rope: {e}")))?;
-
-            let v_buf = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+            let v_ptr = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
-            let mut v_host = vec![0u8; kv_bytes];
-            device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Hip(format!("dtoh v_proj: {e}")))?;
 
-            // Write k_rope/v_proj into GPU KV cache
-            gpu_write_kv_cache(
-                &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
+            gpu_write_kv_cache_device_hip(
+                k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                 handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
             )?;
 
@@ -2476,56 +2666,97 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 }
             }
 
-            // Download full KV cache for CPU attention
-            let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
+            // ── GPU: cached attention ──
+            let q_tid = proj_graph.outputs[0];
+            let q_ptr = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b.as_device_ptr())
+                .ok_or_else(|| BE::Hip(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
+            let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
 
-            // CPU cached attention
-            let attn_out = jit_cached_attention(
-                &q_f32, &kv_cache_k, &kv_cache_v, &positions,
-                layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )?;
+            let mut attn_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
+            for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                let tid = TensorId(idx as u32);
+                match tmeta.name.as_str() {
+                    "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
+                    "k_cache" => { attn_ptrs.insert(tid, k_layer_ptr); }
+                    "v_cache" => { attn_ptrs.insert(tid, v_layer_ptr); }
+                    "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
+                    _ => {}
+                }
+            }
+            hip_launch_graph(device, stream, &attn_entries, &attn_ptrs, &attn_graph)?;
 
             // ── GPU: post-attention graph ──
-            let mut post_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
             let mut post_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Hip(format!("GPU alloc post {} failed: {e}", tmeta.name)))?;
+                let (_, ref mut buf) = post_bufs[idx];
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Hip(format!("htod post input: {e}")))?;
+                    let res = unsafe {
+                        (device.driver().hipMemcpyDtoD)(
+                            buf.as_device_ptr() as _,
+                            gpu_hidden.as_device_ptr() as _,
+                            hidden_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→post input failed: HIP error {res}")));
+                    }
                 } else if tmeta.name == "attn_out" {
-                    let bytes = unsafe { std::slice::from_raw_parts(attn_out.as_ptr() as *const u8, attn_out.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Hip(format!("htod post attn_out: {e}")))?;
+                    let res = unsafe {
+                        (device.driver().hipMemcpyDtoD)(
+                            buf.as_device_ptr() as _,
+                            attn_out_buf.as_device_ptr() as _,
+                            attn_out_bytes,
+                        )
+                    };
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD attn_out→post failed: HIP error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Hip(format!("htod post {}: {e}", tmeta.name)))?;
+                    device.htod(bytes, buf, stream).map_err(|e| BE::Hip(format!("htod post {}: {e}", tmeta.name)))?;
                 }
                 post_ptrs.insert(tid, buf.as_device_ptr());
-                post_bufs.push((tid, buf));
             }
             hip_launch_graph(device, stream, &post_entries, &post_ptrs, &post_graph)?;
-            device.sync().map_err(|e| BE::Hip(format!("GPU sync post: {e}")))?;
+            device.sync().map_err(|e| BE::Hip(format!("GPU sync layer {layer}: {e}")))?;
 
+            // Update gpu_hidden: DtoD from post output
             let output_tid = post_graph.outputs[0];
-            let output_buf = post_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, buf)| buf)
+            let output_ptr = post_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip("post output buffer not found".into()))?;
-            let mut output_host = vec![0u8; seq_len * hidden * F32_BYTES];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Hip(format!("dtoh post output: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    gpu_hidden.as_device_ptr() as _,
+                    output_ptr as _,
+                    hidden_bytes,
+                )
             };
-            hidden_state.copy_from_slice(output_f32);
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD post output→gpu_hidden failed: HIP error {res}")));
+            }
         }
+
+        // Final: download hidden_state from GPU (once)
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
+        let output_f32: &[f32] = unsafe {
+            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
+        };
+        hidden_state.copy_from_slice(output_f32);
     } else {
-        // ── Prefill path (existing) ──
+        // ── Prefill path (GPU-resident hidden_state) ──
         let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let (_module, kernel_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &graph)?;
+
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Hip(format!("GPU alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Hip(format!("htod initial hidden: {e}")))?;
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -2537,17 +2768,21 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = meta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
+                let size_bytes = meta.concrete_numel() * F32_BYTES;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Hip(format!("GPU alloc failed for {}: {e}", meta.name)))?;
 
                 if meta.name == "input" {
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
+                    let res = unsafe {
+                        (device.driver().hipMemcpyDtoD)(
+                            buf.as_device_ptr() as _,
+                            gpu_hidden.as_device_ptr() as _,
+                            hidden_bytes,
+                        )
                     };
-                    device.htod(bytes, &mut buf, stream)
-                        .map_err(|e| BE::Hip(format!("htod input failed: {e}")))?;
+                    if res != 0 {
+                        return Err(BE::Other(format!("DtoD hidden→input failed: HIP error {res}")));
+                    }
                 } else if let Some(data) = layer_weights.get(&meta.name) {
                     let bytes = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -2576,18 +2811,10 @@ pub(super) fn hip_decoder_forward<E: Element>(
                     .map(|(i, _)| TensorId(i as u32))
                     .ok_or_else(|| BE::Hip("v_proj tensor not found in graph".into()))?;
 
-                let kv_bytes = seq_len * kv_dim * F32_BYTES;
-                let k_buf = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b)
+                let k_ptr = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Hip("k_rope buffer not found".into()))?;
-                let mut k_host = vec![0u8; kv_bytes];
-                device.dtoh(k_buf, &mut k_host, stream)
-                    .map_err(|e| BE::Hip(format!("dtoh k_rope failed: {e}")))?;
-
-                let v_buf = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b)
+                let v_ptr = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Hip("v_proj buffer not found".into()))?;
-                let mut v_host = vec![0u8; kv_bytes];
-                device.dtoh(v_buf, &mut v_host, stream)
-                    .map_err(|e| BE::Hip(format!("dtoh v_proj failed: {e}")))?;
 
                 let meta_store = backend.kv_meta.lock()
                     .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
@@ -2601,8 +2828,8 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
                 drop(meta_store);
 
-                gpu_write_kv_cache(
-                    &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
+                gpu_write_kv_cache_device_hip(
+                    k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                     handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
                 )?;
 
@@ -2615,17 +2842,27 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 }
             }
 
-            // Download output
+            // Update gpu_hidden: DtoD from output
             let output_tid = graph.outputs[0];
-            let output_buf = gpu_buffers.iter()
-                .find(|(tid, _)| *tid == output_tid)
-                .map(|(_, buf)| buf)
+            let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip("output buffer not found".into()))?;
-            let output_bytes = seq_len * hidden * F32_BYTES;
-            let mut output_host = vec![0u8; output_bytes];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Hip(format!("dtoh output failed: {e}")))?;
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    gpu_hidden.as_device_ptr() as _,
+                    output_ptr as _,
+                    hidden_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD output→gpu_hidden failed: HIP error {res}")));
+            }
+        }
 
+        // Final: download hidden_state from GPU (once)
+        {
+            let mut output_host = vec![0u8; hidden_bytes];
+            device.dtoh(&gpu_hidden, &mut output_host, stream)
+                .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
             let output_f32: &[f32] = unsafe {
                 std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
             };
@@ -2776,17 +3013,18 @@ pub(super) fn metal_decoder_forward<E: Element>(
     } else { false };
 
     if is_incremental {
-        // ── Incremental decode path ──
+        // ── Incremental decode path (GPU-native, buffer reuse, hidden stays on GPU) ──
         let kv_dim = num_kv_heads * head_dim;
         let q_dim = num_heads * head_dim;
-        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
+        let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+        let proj_graph = build_projection_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, comp_dtype);
         let proj_entries = metal_compile_graph(device, gpu_profile, gpu_family, &proj_graph)?;
-        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, super::jit_helpers::computation_dtype_from_config(config));
+        let post_graph = build_post_attention_graph(seq_len, hidden, num_heads, head_dim, inter, eps, comp_dtype);
         let post_entries = metal_compile_graph(device, gpu_profile, gpu_family, &post_graph)?;
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Metal("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
@@ -2797,12 +3035,24 @@ pub(super) fn metal_decoder_forward<E: Element>(
             (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
         };
         let total_seq = cached_seq_len + seq_len;
-        let positions: Vec<u32> = input.sequences.iter()
-            .flat_map(|s| {
-                let start = s.position as u32;
-                (0..s.tokens.len() as u32).map(move |i| start + i)
-            })
-            .collect();
+
+        let attn_graph = build_gpu_cached_attention_graph(
+            seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
+        );
+        let attn_entries = metal_compile_graph(device, gpu_profile, gpu_family, &attn_graph)?;
+
+        // ── Pre-allocate: hidden_state GPU buffer (stays on GPU across layers) ──
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let attn_out_bytes = seq_len * q_dim * F32_BYTES;
+        let kv_bytes = seq_len * kv_dim * F32_BYTES;
+        let layer_kv_bytes = num_kv_heads * head_stride;
+
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -2814,13 +3064,13 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 std::collections::HashMap::new();
             for (idx, tmeta) in proj_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
+                let size_bytes = tmeta.concrete_numel() * F32_BYTES;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc proj {} failed: {e}", tmeta.name)))?;
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Metal(format!("htod proj input: {e}")))?;
+                    // DtoD from gpu_hidden via Metal dtod
+                    device.dtod(&gpu_hidden, &mut buf, stream)
+                        .map_err(|e| BE::Metal(format!("dtod hidden→proj input: {e}")))?;
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
                     device.htod(bytes, &mut buf, stream).map_err(|e| BE::Metal(format!("htod proj {}: {e}", tmeta.name)))?;
@@ -2830,19 +3080,10 @@ pub(super) fn metal_decoder_forward<E: Element>(
             metal_launch_graph(device, stream, &proj_entries, &proj_bufs, &proj_graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync proj: {e}")))?;
 
-            // Download q_rope, k_rope, v_proj
-            let q_tid = proj_graph.outputs[0];
+            // ── Write k_rope/v_proj into KV cache (host bounce — Metal limitation) ──
             let k_tid = proj_graph.outputs[1];
             let v_tid = proj_graph.outputs[2];
 
-            let q_bytes = seq_len * q_dim * F32_BYTES;
-            let q_buf = proj_bufs.get(&q_tid)
-                .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
-            let mut q_host = vec![0u8; q_bytes];
-            device.dtoh(q_buf, &mut q_host, stream).map_err(|e| BE::Metal(format!("dtoh q_rope: {e}")))?;
-            let q_f32: Vec<f32> = unsafe { std::slice::from_raw_parts(q_host.as_ptr() as *const f32, seq_len * q_dim) }.to_vec();
-
-            let kv_bytes = seq_len * kv_dim * F32_BYTES;
             let k_buf = proj_bufs.get(&k_tid)
                 .ok_or_else(|| BE::Metal(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
             let mut k_host = vec![0u8; kv_bytes];
@@ -2853,7 +3094,6 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let mut v_host = vec![0u8; kv_bytes];
             device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Metal(format!("dtoh v_proj: {e}")))?;
 
-            // Write k_rope/v_proj into GPU KV cache
             gpu_write_kv_cache(
                 &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
                 handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
@@ -2867,31 +3107,83 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 }
             }
 
-            // Download full KV cache for CPU attention
-            let (kv_cache_k, kv_cache_v) = download_kv_cache_to_host(handle, half_bytes, total_kv_floats, device, stream)?;
+            // ── GPU: cached attention (layer K/V slice download — Metal limitation) ──
+            let q_tid = proj_graph.outputs[0];
+            let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
 
-            // CPU cached attention
-            let attn_out = jit_cached_attention(
-                &q_f32, &kv_cache_k, &kv_cache_v, &positions,
-                layer, total_seq, seq_len, num_heads, num_kv_heads, head_dim, max_seq_len,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )?;
+            // Download only this layer's K/V slice (not full cache)
+            let mut k_layer_host = vec![0u8; layer_kv_bytes];
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoH_v2)(
+                    k_layer_host.as_mut_ptr() as *mut _,
+                    k_layer_ptr,
+                    layer_kv_bytes,
+                )
+            };
+            if res != 0 { return Err(BE::Other(format!("dtoh KV cache K layer {layer} failed: CUDA error {res}"))); }
+
+            let mut v_layer_host = vec![0u8; layer_kv_bytes];
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoH_v2)(
+                    v_layer_host.as_mut_ptr() as *mut _,
+                    v_layer_ptr,
+                    layer_kv_bytes,
+                )
+            };
+            if res != 0 { return Err(BE::Other(format!("dtoh KV cache V layer {layer} failed: CUDA error {res}"))); }
+
+            // Build attention buffers
+            let mut attn_metal_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
+                std::collections::HashMap::new();
+            for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                let tid = TensorId(idx as u32);
+                let size_bytes = tmeta.concrete_numel() * F32_BYTES;
+                let mut buf = device.alloc(size_bytes)
+                    .map_err(|e| BE::Metal(format!("alloc attn {} failed: {e}", tmeta.name)))?;
+                match tmeta.name.as_str() {
+                    "q_rope" => {
+                        // DtoD from proj q_rope buffer
+                        let q_buf = proj_bufs.get(&q_tid)
+                            .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
+                        device.dtod(q_buf, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("dtod q_rope for attn: {e}")))?;
+                    }
+                    "k_cache" => {
+                        device.htod(&k_layer_host, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("htod k_cache layer: {e}")))?;
+                    }
+                    "v_cache" => {
+                        device.htod(&v_layer_host, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("htod v_cache layer: {e}")))?;
+                    }
+                    _ => {} // attn_out — output, no init needed
+                }
+                attn_metal_bufs.insert(tid, buf);
+            }
+            metal_launch_graph(device, stream, &attn_entries, &attn_metal_bufs, &attn_graph)?;
+            device.sync().map_err(|e| BE::Metal(format!("sync attn: {e}")))?;
+
+            // Get attn_out for post graph
+            let attn_out_tid = attn_graph.outputs[0];
+            let attn_out_buf = attn_metal_bufs.remove(&attn_out_tid)
+                .ok_or_else(|| BE::Metal("attn_out buffer not found".into()))?;
 
             // ── GPU: post-attention graph ──
             let mut post_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
                 std::collections::HashMap::new();
             for (idx, tmeta) in post_graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = tmeta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
+                let size_bytes = tmeta.concrete_numel() * F32_BYTES;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc post {} failed: {e}", tmeta.name)))?;
                 if tmeta.name == "input" {
-                    let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Metal(format!("htod post input: {e}")))?;
+                    // DtoD from gpu_hidden
+                    device.dtod(&gpu_hidden, &mut buf, stream)
+                        .map_err(|e| BE::Metal(format!("dtod hidden→post input: {e}")))?;
                 } else if tmeta.name == "attn_out" {
-                    let bytes = unsafe { std::slice::from_raw_parts(attn_out.as_ptr() as *const u8, attn_out.len() * F32_BYTES) };
-                    device.htod(bytes, &mut buf, stream).map_err(|e| BE::Metal(format!("htod post attn_out: {e}")))?;
+                    // DtoD from attn_out_buf
+                    device.dtod(&attn_out_buf, &mut buf, stream)
+                        .map_err(|e| BE::Metal(format!("dtod attn_out→post: {e}")))?;
                 } else if let Some(data) = layer_weights.get(&tmeta.name) {
                     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES) };
                     device.htod(bytes, &mut buf, stream).map_err(|e| BE::Metal(format!("htod post {}: {e}", tmeta.name)))?;
@@ -2899,23 +3191,36 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 post_bufs.insert(tid, buf);
             }
             metal_launch_graph(device, stream, &post_entries, &post_bufs, &post_graph)?;
-            device.sync().map_err(|e| BE::Metal(format!("sync post: {e}")))?;
+            device.sync().map_err(|e| BE::Metal(format!("sync layer {layer}: {e}")))?;
 
+            // Update gpu_hidden: DtoD from post output (stays on GPU)
             let output_tid = post_graph.outputs[0];
             let output_buf = post_bufs.get(&output_tid)
                 .ok_or_else(|| BE::Metal("post output buffer not found".into()))?;
-            let mut output_host = vec![0u8; seq_len * hidden * F32_BYTES];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Metal(format!("dtoh post output: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-            };
-            hidden_state.copy_from_slice(output_f32);
+            device.dtod(output_buf, &mut gpu_hidden, stream)
+                .map_err(|e| BE::Metal(format!("dtod post output→gpu_hidden: {e}")))?;
         }
+
+        // Final: download hidden_state from GPU (once)
+        let mut output_host = vec![0u8; hidden_bytes];
+        device.dtoh(&gpu_hidden, &mut output_host, stream)
+            .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
+        let output_f32: &[f32] = unsafe {
+            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
+        };
+        hidden_state.copy_from_slice(output_f32);
     } else {
-        // ── Prefill path (existing) ──
+        // ── Prefill path (GPU-resident hidden_state) ──
         let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, super::jit_helpers::computation_dtype_from_config(config));
         let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
+
+        let hidden_bytes = seq_len * hidden * F32_BYTES;
+        let mut gpu_hidden = device.alloc(hidden_bytes)
+            .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
+        {
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes) };
+            device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
+        }
 
         for layer in 0..num_layers {
             let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu(
@@ -2927,17 +3232,13 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let n_elements = meta.concrete_numel();
-                let size_bytes = n_elements * F32_BYTES;
+                let size_bytes = meta.concrete_numel() * F32_BYTES;
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc failed for {}: {e}", meta.name)))?;
 
                 if meta.name == "input" {
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
-                    };
-                    device.htod(bytes, &mut buf, stream)
-                        .map_err(|e| BE::Metal(format!("htod input failed: {e}")))?;
+                    device.dtod(&gpu_hidden, &mut buf, stream)
+                        .map_err(|e| BE::Metal(format!("dtod hidden→input: {e}")))?;
                 } else if let Some(data) = layer_weights.get(&meta.name) {
                     let bytes = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * F32_BYTES)
@@ -2952,7 +3253,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             metal_launch_graph(device, stream, &kernel_entries, &gpu_buffers, &graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync failed: {e}")))?;
 
-            // ── Write K/V to KV cache ──
+            // ── Write K/V to KV cache (host bounce — Metal limitation) ──
             if let Some(handle) = kv_caches.first() {
                 let kv_dim = num_kv_heads * head_dim;
 
@@ -3004,14 +3305,19 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 }
             }
 
+            // Update gpu_hidden: DtoD from output
             let output_tid = graph.outputs[0];
             let output_buf = gpu_buffers.get(&output_tid)
                 .ok_or_else(|| BE::Metal("output buffer not found".into()))?;
-            let output_bytes = seq_len * hidden * F32_BYTES;
-            let mut output_host = vec![0u8; output_bytes];
-            device.dtoh(output_buf, &mut output_host, stream)
-                .map_err(|e| BE::Metal(format!("dtoh output failed: {e}")))?;
+            device.dtod(output_buf, &mut gpu_hidden, stream)
+                .map_err(|e| BE::Metal(format!("dtod output→gpu_hidden: {e}")))?;
+        }
 
+        // Final: download hidden_state from GPU (once)
+        {
+            let mut output_host = vec![0u8; hidden_bytes];
+            device.dtoh(&gpu_hidden, &mut output_host, stream)
+                .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
             let output_f32: &[f32] = unsafe {
                 std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
             };
