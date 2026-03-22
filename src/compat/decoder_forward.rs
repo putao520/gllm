@@ -1793,7 +1793,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             )));
         }
 
-        let mut scores = vec![0.0f32; num_labels];
+        let mut scores = super::jit_helpers::TypedBuffer::zeros(num_labels, computation_dtype_from_config(config));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
@@ -1827,7 +1827,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             let w_t = super::weight_helpers::transpose_f32(&score_w, num_labels, hidden);
             let dt = computation_dtype_from_config(config);
             let weight_buf = super::jit_helpers::pack_weights_typed(&[&w_t], dt);
-            let mut logits = vec![0.0f32; num_labels];
+            let mut logits = super::jit_helpers::TypedBuffer::zeros(num_labels, computation_dtype_from_config(config));
             let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
             unsafe {
                 compiled.execute(
@@ -1837,17 +1837,19 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
                     std::ptr::null(),
                     std::ptr::null(),
                     1, 1,
-                    logits.as_mut_ptr() as *mut u8,
+                    logits.as_bytes_mut().as_mut_ptr(),
                     scratchpad.as_mut_ptr(),
                 );
             }
-            for (i, s) in scores.iter_mut().enumerate() {
-                *s = 1.0 / (1.0 + (-logits[i]).exp());
+            let logits_f32 = logits.to_f32_vec();
+            let scores_f32 = scores.as_f32_mut();
+            for (i, s) in scores_f32.iter_mut().enumerate() {
+                *s = 1.0 / (1.0 + (-logits_f32[i]).exp());
             }
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         { return Err(BE::Other("reranker score JIT requires x86_64 or aarch64".to_string())); }
-        Ok(scores)
+        Ok(scores.to_f32_vec())
     } else {
         // Generative reranker path: use tied embeddings (lm_head) to get logits,
         // then compute score from "yes"/"no" token probabilities.
