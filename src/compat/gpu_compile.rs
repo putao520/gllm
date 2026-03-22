@@ -342,8 +342,21 @@ fn gpu_write_kv_cache_device(
     device: &gllm_kernels::gpu::cuda::CudaDevice,
     _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
 ) -> Result<(), BE> {
-    // For each head, extract [seq_len, head_dim] from [seq_len, kv_dim] and DtoD copy.
-    // Since source is interleaved (head_dim stride = kv_dim), we must copy row-by-row per head.
+    // Fast path: single KV head (MQA) or contiguous layout — one DtoD per K/V
+    if num_kv_heads == 1 {
+        let copy_bytes = seq_len * head_dim * dtype_size;
+        let dst_k = handle.0
+            + (layer * num_kv_heads * head_stride + write_start * head_dim * dtype_size) as u64;
+        let dst_v = handle.0 + half_bytes as u64
+            + (layer * num_kv_heads * head_stride + write_start * head_dim * dtype_size) as u64;
+        let res = unsafe { (device.driver().cuMemcpyDtoD_v2)(dst_k, k_device_ptr, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV cache K failed: CUDA error {res}"))); }
+        let res = unsafe { (device.driver().cuMemcpyDtoD_v2)(dst_v, v_device_ptr, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV cache V failed: CUDA error {res}"))); }
+        return Ok(());
+    }
+
+    // General path: per-head row-by-row copy (source is interleaved [seq, kv_dim])
     for head in 0..num_kv_heads {
         let dst_k = handle.0
             + ((layer * num_kv_heads + head) * head_stride
@@ -403,6 +416,20 @@ fn gpu_write_kv_cache_device_hip(
     device: &gllm_kernels::gpu::hip::HipDevice,
     _stream: &gllm_kernels::gpu::hip::HipGpuStream,
 ) -> Result<(), BE> {
+    // Fast path: single KV head (MQA) — one DtoD per K/V
+    if num_kv_heads == 1 {
+        let copy_bytes = seq_len * head_dim * dtype_size;
+        let dst_k = handle.0
+            + (layer * num_kv_heads * head_stride + write_start * head_dim * dtype_size) as u64;
+        let dst_v = handle.0 + half_bytes as u64
+            + (layer * num_kv_heads * head_stride + write_start * head_dim * dtype_size) as u64;
+        let res = unsafe { (device.driver().hipMemcpyDtoD)(dst_k as _, k_device_ptr as _, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV cache K failed: HIP error {res}"))); }
+        let res = unsafe { (device.driver().hipMemcpyDtoD)(dst_v as _, v_device_ptr as _, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV cache V failed: HIP error {res}"))); }
+        return Ok(());
+    }
+
     for head in 0..num_kv_heads {
         let dst_k = handle.0
             + ((layer * num_kv_heads + head) * head_stride
