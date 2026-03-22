@@ -1360,7 +1360,7 @@ pub(crate) fn decoder_forward<E: Element>(
                 }
 
                 // Execute JIT-compiled layer
-                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                 execute_jit_decoder_layer(
                     &jit_layer,
                     &hidden_state,
@@ -1368,10 +1368,10 @@ pub(crate) fn decoder_forward<E: Element>(
                     &gate_w, &up_w, &down_w, &rn2_w,
                     &positions,
                     seq_len,
-                    &mut layer_out,
+                    layer_out.as_f32_mut(),
                     computation_dtype_from_config(config),
                 );
-                hidden_state.copy_from_slice(&layer_out);
+                hidden_state.copy_from_slice(layer_out.as_f32());
             }
         }
 
@@ -1398,20 +1398,20 @@ pub(crate) fn decoder_forward<E: Element>(
                 BE::Other(format!("lm_head JIT compilation failed: {e}"))
             })?;
 
-            let mut all_logits = vec![0.0f32; seq_len * vocab_size];
+            let mut all_logits = super::jit_helpers::TypedBuffer::zeros(seq_len * vocab_size, computation_dtype_from_config(config));
             execute_jit_lm_head(
                 &compiled_lm,
                 &hidden_state,
                 &final_norm_w,
                 &lm_head_w,
                 seq_len,
-                &mut all_logits,
+                all_logits.as_f32_mut(),
                 computation_dtype_from_config(config),
             );
 
             // Return only the last token's logits (for generation)
             let last_start = (seq_len - 1) * vocab_size;
-            all_logits[last_start..last_start + vocab_size].to_vec()
+            all_logits.as_f32()[last_start..last_start + vocab_size].to_vec()
         };
 
         results.push(LogitsHandle { data: logits });
@@ -1538,7 +1538,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
             (q_w, k_w, v_w, o_w, gate_w, up_w, down_w)
         };
 
-        let mut layer_out = vec![0.0f32; seq_len * hidden];
+        let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
         execute_jit_decoder_layer(
             &jit_layer,
             &hidden_state,
@@ -1546,10 +1546,10 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
             &gate_w, &up_w, &down_w, &rn2_w,
             &positions,
             seq_len,
-            &mut layer_out,
+            layer_out.as_f32_mut(),
             computation_dtype_from_config(config),
         );
-        hidden_state.copy_from_slice(&layer_out);
+        hidden_state.copy_from_slice(layer_out.as_f32());
     }
 
     // (e) Final RMSNorm
@@ -1564,15 +1564,15 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
             BE::Other(format!("Final norm JIT compilation failed: {e}"))
         })?;
 
-        let mut normed_out = vec![0.0f32; seq_len * hidden];
+        let mut normed_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
         execute_jit_final_norm(
             &compiled_norm,
             f32_as_bytes(&hidden_state),
             f32_as_bytes(&final_norm_w),
             seq_len,
-            f32_as_bytes_mut(&mut normed_out),
+            normed_out.as_bytes_mut(),
         );
-        normed_out
+        normed_out.to_f32_vec()
     };
 
     // (f) Mean pooling: average across all token positions via JIT
@@ -1707,7 +1707,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             (q_w, k_w, v_w, o_w, gate_w, up_w, down_w)
         };
 
-        let mut layer_out = vec![0.0f32; seq_len * hidden];
+        let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
         execute_jit_decoder_layer(
             &jit_layer,
             &hidden_state,
@@ -1715,10 +1715,10 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             &gate_w, &up_w, &down_w, &rn2_w,
             &positions,
             seq_len,
-            &mut layer_out,
+            layer_out.as_f32_mut(),
             computation_dtype_from_config(config),
         );
-        hidden_state.copy_from_slice(&layer_out);
+        hidden_state.copy_from_slice(layer_out.as_f32());
     }
 
     // (e) Final RMSNorm
@@ -1733,15 +1733,15 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             BE::Other(format!("Final norm JIT compilation failed: {e}"))
         })?;
 
-        let mut normed_out = vec![0.0f32; seq_len * hidden];
+        let mut normed_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
         execute_jit_final_norm(
             &compiled_norm,
             f32_as_bytes(&hidden_state),
             f32_as_bytes(&final_norm_w),
             seq_len,
-            f32_as_bytes_mut(&mut normed_out),
+            normed_out.as_bytes_mut(),
         );
-        normed_out
+        normed_out.to_f32_vec()
     };
 
     // (f) Extract last token's hidden state
