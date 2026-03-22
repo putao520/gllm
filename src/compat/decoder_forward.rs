@@ -237,6 +237,8 @@ fn quantized_incremental_decode_layer<E: Element>(
     jit: &mut DecodeCachedJit,
     output: &mut [f32],
     dtype: gllm_kernels::types::DType,
+    k_slice_buf: &mut [f32],
+    v_slice_buf: &mut [f32],
 ) -> Result<f32, BE> {
     let geom = AttentionGeometry {
         num_heads, num_kv_heads, head_dim,
@@ -266,19 +268,17 @@ fn quantized_incremental_decode_layer<E: Element>(
         }
     }
 
-    // Extract current layer's KV cache slice → [total_seq, kv_dim]
+    // Extract current layer's KV cache slice → [total_seq, kv_dim] (reuse caller buffer)
     let kv_dim = geom.kv_dim;
     let layer_stride = num_kv_heads * max_seq_len * head_dim;
     let layer_k_base = layer * layer_stride;
-    let mut k_slice = vec![0.0f32; total_seq * kv_dim];
-    let mut v_slice = vec![0.0f32; total_seq * kv_dim];
     for t in 0..total_seq {
         for h in 0..num_kv_heads {
             let cache_off = layer_k_base + h * max_seq_len * head_dim + t * head_dim;
             let slice_off = t * kv_dim + h * head_dim;
-            k_slice[slice_off..slice_off + head_dim]
+            k_slice_buf[slice_off..slice_off + head_dim]
                 .copy_from_slice(&kv_cache_k[cache_off..cache_off + head_dim]);
-            v_slice[slice_off..slice_off + head_dim]
+            v_slice_buf[slice_off..slice_off + head_dim]
                 .copy_from_slice(&kv_cache_v[cache_off..cache_off + head_dim]);
         }
     }
@@ -289,7 +289,7 @@ fn quantized_incremental_decode_layer<E: Element>(
         {
             let gqa_compiled = get_or_compile_gqa(jit, total_seq)?;
             super::jit_helpers::execute_cached_gqa(
-                gqa_compiled, &q_proj, &k_slice, &v_slice,
+                gqa_compiled, &q_proj, k_slice_buf, v_slice_buf,
                 seq_len, num_heads, head_dim,
                 dtype,
             )
@@ -858,6 +858,9 @@ pub(crate) fn decoder_forward<E: Element>(
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];
+                let kv_dim = num_kv_heads * head_dim;
+                let mut k_slice_buf = vec![0.0f32; total_seq * kv_dim];
+                let mut v_slice_buf = vec![0.0f32; total_seq * kv_dim];
 
                 if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
                     // MoE incremental: JIT pre-attention + cached attention + scalar MoE FFN
@@ -975,6 +978,8 @@ pub(crate) fn decoder_forward<E: Element>(
                         &mut decode_jit,
                         &mut layer_out,
                         computation_dtype_from_config(config),
+                        &mut k_slice_buf,
+                        &mut v_slice_buf,
                     )?;
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
