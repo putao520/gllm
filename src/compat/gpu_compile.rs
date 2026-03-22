@@ -1337,10 +1337,31 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         let total_seq = cached_seq_len + seq_len;
 
         // Compile GPU cached attention kernel (once, shared across all layers)
-        let attn_graph = build_gpu_cached_attention_graph(
-            seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
-        );
+        // Choose paged or dense attention based on config
+        let use_paged = config.paged_kv_page_table.is_some();
+        let page_size = config.paged_kv_page_size;
+        let attn_graph = if use_paged {
+            build_gpu_paged_attention_graph(
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim, page_size, comp_dtype,
+            )
+        } else {
+            build_gpu_cached_attention_graph(
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
+            )
+        };
         let (_attn_mod, attn_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &attn_graph)?;
+
+        // Paged KV: allocate paged cache + upload page table (once before layer loop)
+        let paged_meta = if use_paged {
+            let pt = config.paged_kv_page_table.as_ref().unwrap();
+            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+            let meta = gpu_alloc_paged_kv_cache(
+                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype_size,
+            )?;
+            Some((meta, pt.clone()))
+        } else {
+            None
+        };
 
         // ── Pre-allocate GPU buffers (reused across all layers) ──
         let elem_bytes = comp_dtype.size_bytes();
@@ -1415,10 +1436,19 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let v_ptr = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
 
-            gpu_write_kv_cache_device(
-                k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
-                handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
-            )?;
+            if let Some((ref paged_meta, ref page_table)) = paged_meta {
+                // Paged KV: scatter write into physical pages
+                gpu_write_kv_paged(
+                    k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
+                    paged_meta, layer, page_table, cached_seq_len, device,
+                )?;
+            } else {
+                // Dense KV: contiguous write
+                gpu_write_kv_cache_device(
+                    k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
+                    handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+                )?;
+            }
 
             if layer == 0 {
                 let mut ms = backend.kv_meta.lock()
@@ -1432,17 +1462,33 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let q_tid = proj_graph.outputs[0];
             let q_ptr = proj_bufs.iter().find(|(t, _)| *t == q_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
-            let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
 
             let mut attn_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
-            for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
-                let tid = TensorId(idx as u32);
-                match tmeta.name.as_str() {
-                    "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
-                    "k_cache" => { attn_ptrs.insert(tid, k_layer_ptr); }
-                    "v_cache" => { attn_ptrs.insert(tid, v_layer_ptr); }
-                    "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
-                    _ => {}
+            if let Some((ref paged_meta, ref page_table)) = paged_meta {
+                // Paged attention: upload page table, pass pool pointer
+                let pt_buf = gpu_upload_page_table(device, stream, page_table)?;
+                for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                    let tid = TensorId(idx as u32);
+                    match tmeta.name.as_str() {
+                        "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
+                        "page_table" => { attn_ptrs.insert(tid, pt_buf.as_device_ptr()); }
+                        "kv_cache" => { attn_ptrs.insert(tid, paged_meta.pool_ptr); }
+                        "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
+                        _ => {}
+                    }
+                }
+            } else {
+                // Dense attention: pass layer K/V pointers directly
+                let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
+                for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                    let tid = TensorId(idx as u32);
+                    match tmeta.name.as_str() {
+                        "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
+                        "k_cache" => { attn_ptrs.insert(tid, k_layer_ptr); }
+                        "v_cache" => { attn_ptrs.insert(tid, v_layer_ptr); }
+                        "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
+                        _ => {}
+                    }
                 }
             }
             cuda_launch_graph(device, stream, &attn_entries, &attn_ptrs, &attn_graph)?;

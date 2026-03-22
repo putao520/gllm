@@ -69,6 +69,11 @@ pub struct GeneratorForwardConfig {
     pub dtype: String,
     /// Model weight dtype size in bytes (2 for F16/BF16, 4 for F32).
     pub dtype_size: usize,
+    /// Paged attention page table (logical→physical page mapping).
+    /// When `Some`, GPU decode uses paged KV cache instead of dense.
+    pub paged_kv_page_table: Option<Vec<u32>>,
+    /// Paged attention page size (tokens per page).
+    pub paged_kv_page_size: usize,
     /// Model-instance JIT cache pointer (x86_64/aarch64 only).
     /// Points into the Executor's `jit_cache` Mutex; valid for the duration of any forward call.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -449,6 +454,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             moe_config: manifest.moe_config,
             dtype: model_config.dtype.clone(),
             dtype_size: model_config.dtype_size,
+            paged_kv_page_table: None,
+            paged_kv_page_size: model_config.kv_cache_block_size,
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             jit_cache_ptr: std::ptr::null_mut(),
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
