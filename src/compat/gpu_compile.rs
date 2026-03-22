@@ -975,7 +975,7 @@ fn gpu_upload_page_table_hip(
 ) -> Result<gllm_kernels::gpu::hip::HipBuffer, BE> {
     use gllm_kernels::gpu::GpuDevice;
     let bytes = unsafe {
-        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * std::mem::size_of::<u32>())
     };
     let mut buf = device.alloc(bytes.len())
         .map_err(|e| BE::Hip(format!("page table alloc failed: {e}")))?;
@@ -1149,7 +1149,7 @@ fn gpu_upload_page_table(
 ) -> Result<gllm_kernels::gpu::cuda::CudaBuffer, BE> {
     use gllm_kernels::gpu::GpuDevice;
     let bytes = unsafe {
-        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * std::mem::size_of::<u32>())
     };
     let mut buf = device.alloc(bytes.len())
         .map_err(|e| BE::Cuda(format!("page table alloc failed: {e}")))?;
@@ -1250,7 +1250,7 @@ pub(crate) fn launch_config_for_op(
             gllm_kernels::gpu::LaunchConfig {
                 grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
                 block_dim: [block, 1, 1],
-                shared_mem_bytes: ((*seq_len + 2) as u32) * 4,
+                shared_mem_bytes: ((*seq_len + 2) as u32) * std::mem::size_of::<f32>() as u32, // scores always f32
             }
         }
         OpKind::CachedGQA { seq_len, total_seq, num_heads, head_dim, strategy, .. } => {
@@ -1276,7 +1276,7 @@ pub(crate) fn launch_config_for_op(
                     gllm_kernels::gpu::LaunchConfig {
                         grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
                         block_dim: [block, 1, 1],
-                        shared_mem_bytes: ((*total_seq + 2) as u32) * 4,
+                        shared_mem_bytes: ((*total_seq + 2) as u32) * std::mem::size_of::<f32>() as u32, // scores always f32
                     }
                 }
             }
@@ -4198,7 +4198,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                         }
                         "page_table" => {
                             let pt_bytes = unsafe {
-                                std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+                                std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * std::mem::size_of::<u32>())
                             };
                             device.htod(pt_bytes, &mut buf, stream)
                                 .map_err(|e| BE::Metal(format!("htod page_table: {e}")))?;
