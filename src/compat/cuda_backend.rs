@@ -58,6 +58,9 @@ pub struct CudaBackend<E: Element = f32> {
     /// KV cache metadata for swap offset computation.
     #[cfg(feature = "cuda")]
     pub(super) kv_meta: super::gpu_compile::GpuKvMetaStore,
+    /// GPU 权重常驻缓存 (REQ-ARCH-005)
+    #[cfg(feature = "cuda")]
+    pub(super) weight_cache: std::sync::Arc<std::sync::Mutex<super::gpu_compile::GpuWeightCache>>,
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -100,6 +103,8 @@ impl<E: Element> Clone for CudaBackend<E> {
             swap_store: self.swap_store.clone(),
             #[cfg(feature = "cuda")]
             kv_meta: self.kv_meta.clone(),
+            #[cfg(feature = "cuda")]
+            weight_cache: std::sync::Arc::clone(&self.weight_cache),
             _marker: std::marker::PhantomData,
         }
     }
@@ -190,6 +195,7 @@ impl<E: Element> CudaBackend<E> {
             compiled_ptx: std::sync::Mutex::new(std::collections::HashMap::new()),
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            weight_cache: std::sync::Arc::new(std::sync::Mutex::new(super::gpu_compile::GpuWeightCache::new())),
             _marker: std::marker::PhantomData,
         })
     }

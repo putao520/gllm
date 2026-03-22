@@ -178,6 +178,80 @@ pub(super) type GpuKvMetaStore = std::sync::Arc<std::sync::Mutex<std::collection
 pub(super) type GpuPagedKvMetaStore = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, GpuPagedKvMeta>>>;
 
 // ---------------------------------------------------------------------------
+// GPU weight resident cache (REQ-ARCH-005)
+// ---------------------------------------------------------------------------
+
+/// GPU 权重常驻缓存。
+/// 首次 incremental forward 时一次性上传所有层权重到 GPU，后续 step DtoD 复制。
+/// ARCH-GPU-DATAPATH §8.9.3
+#[cfg(feature = "cuda")]
+pub(super) struct GpuWeightCache {
+    /// per-layer 权重 GPU buffer: layer_idx → (tensor_name → device_ptr)
+    layers: Vec<std::collections::HashMap<String, u64>>,
+    /// 总显存占用（字节）
+    pub total_bytes: usize,
+    /// 是否已初始化
+    initialized: bool,
+    /// 原始 CUDA buffer 持有（防止提前释放）
+    _buffers: Vec<Vec<gllm_kernels::gpu::cuda::CudaBuffer>>,
+}
+
+#[cfg(feature = "cuda")]
+impl GpuWeightCache {
+    pub fn new() -> Self {
+        Self {
+            layers: Vec::new(),
+            total_bytes: 0,
+            initialized: false,
+            _buffers: Vec::new(),
+        }
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// 获取某层某权重的 device_ptr（None 表示未缓存）
+    pub fn get(&self, layer: usize, name: &str) -> Option<u64> {
+        self.layers.get(layer)?.get(name).copied()
+    }
+
+    /// 初始化缓存：上传所有层权重到 GPU
+    pub fn init(
+        &mut self,
+        all_layer_weights: &[std::collections::HashMap<String, Vec<u8>>],
+        device: &gllm_kernels::gpu::cuda::CudaDevice,
+        stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+
+        self.layers = Vec::with_capacity(all_layer_weights.len());
+        self._buffers = Vec::with_capacity(all_layer_weights.len());
+
+        for layer_weights in all_layer_weights {
+            let mut layer_map = std::collections::HashMap::new();
+            let mut layer_bufs = Vec::new();
+
+            for (name, data) in layer_weights {
+                let mut buf = device.alloc(data.len())
+                    .map_err(|e| BE::Cuda(format!("weight cache alloc {name}: {e}")))?;
+                device.htod(data, &mut buf, stream)
+                    .map_err(|e| BE::Cuda(format!("weight cache htod {name}: {e}")))?;
+                layer_map.insert(name.clone(), buf.as_device_ptr());
+                self.total_bytes += data.len();
+                layer_bufs.push(buf);
+            }
+
+            self.layers.push(layer_map);
+            self._buffers.push(layer_bufs);
+        }
+
+        self.initialized = true;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared KV cache write helper (used by all GPU backends)
 // ---------------------------------------------------------------------------
 
@@ -340,9 +414,11 @@ fn gpu_write_kv_cache_device(
     head_stride: usize,
     dtype_size: usize,
     device: &gllm_kernels::gpu::cuda::CudaDevice,
-    _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+    stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+    gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
+    sm_version: u32,
 ) -> Result<(), BE> {
-    // Fast path: single KV head (MQA) or contiguous layout — one DtoD per K/V
+    // Fast path: single KV head (MQA) — one DtoD per K/V
     if num_kv_heads == 1 {
         let copy_bytes = seq_len * head_dim * dtype_size;
         let dst_k = handle.0
@@ -356,46 +432,76 @@ fn gpu_write_kv_cache_device(
         return Ok(());
     }
 
-    // General path: per-head row-by-row copy (source is interleaved [seq, kv_dim])
-    for head in 0..num_kv_heads {
-        let dst_k = handle.0
-            + ((layer * num_kv_heads + head) * head_stride
-                + write_start * head_dim * dtype_size) as u64;
-        let dst_v = handle.0 + half_bytes as u64
-            + ((layer * num_kv_heads + head) * head_stride
-                + write_start * head_dim * dtype_size) as u64;
+    // GQA multi-head path: use scatter kernel (one launch replaces O(heads×seq) DtoD calls)
+    let layer_offset = layer * num_kv_heads * head_stride;
+    let half_offset = half_bytes;
+    let scatter_graph = build_kv_scatter_graph(
+        seq_len, num_kv_heads, head_dim, kv_dim,
+        write_start, layer_offset, half_offset, head_stride, dtype_size,
+    );
+    let (_mod, entries) = cuda_compile_graph(device, gpu_profile, sm_version, &scatter_graph)?;
 
-        for s in 0..seq_len {
-            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
-            let dst_off_s = (s * head_dim * dtype_size) as u64;
-            let copy_bytes = head_dim * dtype_size;
-
-            // K: DtoD
-            let res = unsafe {
-                (device.driver().cuMemcpyDtoD_v2)(
-                    dst_k + dst_off_s,
-                    k_device_ptr + src_off as u64,
-                    copy_bytes,
-                )
-            };
-            if res != 0 {
-                return Err(BE::Other(format!("DtoD KV cache K failed: CUDA error {res}")));
-            }
-
-            // V: DtoD
-            let res = unsafe {
-                (device.driver().cuMemcpyDtoD_v2)(
-                    dst_v + dst_off_s,
-                    v_device_ptr + src_off as u64,
-                    copy_bytes,
-                )
-            };
-            if res != 0 {
-                return Err(BE::Other(format!("DtoD KV cache V failed: CUDA error {res}")));
-            }
+    // tensor map: inputs[0]=k_src, inputs[1]=v_src, inputs[2]=kv_cache
+    let mut tensor_ptrs = std::collections::HashMap::new();
+    for (idx, tmeta) in scatter_graph.tensors.iter().enumerate() {
+        let tid = gllm_kernels::compiler::TensorId(idx as u32);
+        match tmeta.name.as_str() {
+            "k_src"    => { tensor_ptrs.insert(tid, k_device_ptr); }
+            "v_src"    => { tensor_ptrs.insert(tid, v_device_ptr); }
+            "kv_cache" => { tensor_ptrs.insert(tid, handle.0); }
+            _          => {}
         }
     }
+    cuda_launch_graph(device, stream, &entries, &tensor_ptrs, &scatter_graph)?;
     Ok(())
+}
+
+/// Build a CompilerGraph containing a single KvScatterWrite op.
+///
+/// Inputs: k_src[seq_len, kv_dim], v_src[seq_len, kv_dim], kv_cache (opaque ptr)
+/// The op encodes all layout parameters; no output tensor is needed (writes in-place).
+#[cfg(feature = "cuda")]
+fn build_kv_scatter_graph(
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    kv_dim: usize,
+    write_start: usize,
+    layer_offset: usize,
+    half_offset: usize,
+    head_stride: usize,
+    dtype_size: usize,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::U8);
+    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::U8);
+    // kv_cache is an opaque byte buffer — represent as 1-element placeholder
+    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], DType::U8);
+    g.inputs = vec![k_src, v_src, kv_cache];
+
+    // dummy output (scatter writes in-place; we need at least one output for graph validity)
+    let out = g.add_tensor_concrete("scatter_out", &[1], DType::U8);
+    g.add_op(
+        OpKind::KvScatterWrite {
+            seq_len,
+            num_kv_heads,
+            head_dim,
+            kv_dim,
+            write_start,
+            layer_offset,
+            half_offset,
+            head_stride,
+            dtype_size,
+        },
+        vec![k_src, v_src, kv_cache],
+        vec![out],
+        "kv_scatter_write",
+    );
+    g.outputs = vec![out];
+    g
 }
 
 /// Write k_rope/v_proj from GPU device pointers into the GPU KV cache via DtoD copy (HIP).
@@ -804,6 +910,14 @@ pub(crate) fn launch_config_for_op(
         OpKind::Reshape { .. } | OpKind::Transpose { .. } => {
             profile.launch_config_1d(1) // metadata NOP
         }
+        OpKind::KvScatterWrite { num_kv_heads, seq_len, head_dim, dtype_size, .. } => {
+            let block = ((*head_dim * *dtype_size) as u32).min(profile.max_threads_per_block);
+            gllm_kernels::gpu::LaunchConfig {
+                grid_dim: [*num_kv_heads as u32, *seq_len as u32, 1],
+                block_dim: [block, 1, 1],
+                shared_mem_bytes: 0,
+            }
+        }
         _ => profile.launch_config_1d(profile.max_threads_per_block as usize),
     }
 }
@@ -909,6 +1023,19 @@ pub(crate) fn build_kernel_params(
         OpKind::Reshape { .. } | OpKind::Transpose { .. } => {
             // Metadata-only ops (NOP) — CLAUDE.md allows
             Ok(vec![])
+        }
+        OpKind::KvScatterWrite {
+            layer_offset, half_offset, head_stride, write_start,
+            kv_dim, head_dim, dtype_size, ..
+        } => {
+            // ABI: (k_src, v_src, kv_cache, layer_offset, half_offset, head_stride,
+            //        write_start, kv_dim, head_dim, dtype_size)
+            // inputs[0]=k_src, inputs[1]=v_src, inputs[2]=kv_cache ptr
+            Ok(vec![
+                input_ptrs[0], input_ptrs[1], input_ptrs[2],
+                *layer_offset as u64, *half_offset as u64, *head_stride as u64,
+                *write_start as u64, *kv_dim as u64, *head_dim as u64, *dtype_size as u64,
+            ])
         }
         _ => Err(BE::Other(format!(
             "build_kernel_params: unhandled OpKind {:?}", op_kind
@@ -1436,6 +1563,16 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             ))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // ── GPU 权重常驻缓存 (REQ-ARCH-005): 首次 forward 上传所有层权重 ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[GpuWeightCache] initialized: {} bytes", wc.total_bytes);
+            }
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -1456,8 +1593,25 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD hidden→proj input failed: CUDA error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, buf, stream).map_err(|e| BE::Cuda(format!("htod proj {}: {e}", tmeta.name)))?;
+                } else {
+                    // 优先从 GPU 权重缓存 DtoD 复制，避免每 step htod
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &tmeta.name) {
+                        let copy_bytes = tmeta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().cuMemcpyDtoD_v2)(
+                                buf.as_device_ptr(),
+                                cached_ptr,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Cuda(format!("DtoD weight cache proj {} failed: CUDA error {res}", tmeta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, buf, stream).map_err(|e| BE::Cuda(format!("htod proj {}: {e}", tmeta.name)))?;
+                    }
                 }
                 proj_ptrs.insert(tid, buf.as_device_ptr());
             }
@@ -1483,6 +1637,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 gpu_write_kv_cache_device(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                     handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+                    gpu_profile, sm_version,
                 )?;
             }
 
@@ -1559,8 +1714,25 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD attn_out→post failed: CUDA error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, buf, stream).map_err(|e| BE::Cuda(format!("htod post {}: {e}", tmeta.name)))?;
+                } else {
+                    // 优先从 GPU 权重缓存 DtoD 复制
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &tmeta.name) {
+                        let copy_bytes = tmeta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().cuMemcpyDtoD_v2)(
+                                buf.as_device_ptr(),
+                                cached_ptr,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Cuda(format!("DtoD weight cache post {} failed: CUDA error {res}", tmeta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, buf, stream).map_err(|e| BE::Cuda(format!("htod post {}: {e}", tmeta.name)))?;
+                    }
                 }
                 post_ptrs.insert(tid, buf.as_device_ptr());
             }
@@ -1685,6 +1857,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 gpu_write_kv_cache_device(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                     handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
+                    gpu_profile, sm_version,
                 )?;
 
                 if layer == 0 {
@@ -2144,6 +2317,63 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 // ===========================================================================
 // Metal GPU compilation & kernel launch helpers
 // ===========================================================================
+
+/// Metal KV cache 直写：利用 shared memory 直接通过指针写入，消除 dtoh→Vec→htod 三步路径。
+/// Metal buffer 的 as_device_ptr() 返回 CPU 可见指针（[buffer contents]），无需 dtoh/htod。
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn metal_write_kv_direct(
+    k_buf_ptr: u64,
+    v_buf_ptr: u64,
+    kv_cache_handle: &KvCacheHandle,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    layer: usize,
+    half_bytes: usize,
+    write_start: usize,
+    head_stride: usize,
+    dtype_size: usize,
+) -> Result<(), BE> {
+    let k_src = k_buf_ptr as *const u8;
+    let v_src = v_buf_ptr as *const u8;
+    let kv_dst = kv_cache_handle.0 as *mut u8;
+
+    for head in 0..num_kv_heads {
+        let dst_k_base = unsafe {
+            kv_dst.add(
+                (layer * num_kv_heads + head) * head_stride
+                    + write_start * head_dim * dtype_size,
+            )
+        };
+        let dst_v_base = unsafe {
+            kv_dst.add(
+                half_bytes
+                    + (layer * num_kv_heads + head) * head_stride
+                    + write_start * head_dim * dtype_size,
+            )
+        };
+
+        for s in 0..seq_len {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let dst_off = s * head_dim * dtype_size;
+            let copy_bytes = head_dim * dtype_size;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    k_src.add(src_off),
+                    dst_k_base.add(dst_off),
+                    copy_bytes,
+                );
+                std::ptr::copy_nonoverlapping(
+                    v_src.add(src_off),
+                    dst_v_base.add(dst_off),
+                    copy_bytes,
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Compile a CompilerGraph to MSL source via the full JIT pipeline.
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -3484,23 +3714,19 @@ pub(super) fn metal_decoder_forward<E: Element>(
             metal_launch_graph(device, stream, &proj_entries, &proj_bufs, &proj_graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync proj: {e}")))?;
 
-            // ── Write k_rope/v_proj into KV cache (host bounce — Metal limitation) ──
+            // ── Write k_rope/v_proj into KV cache (Metal 直写：shared memory 指针，无 dtoh/htod) ──
             let k_tid = proj_graph.outputs[1];
             let v_tid = proj_graph.outputs[2];
 
             let k_buf = proj_bufs.get(&k_tid)
                 .ok_or_else(|| BE::Metal(format!("proj buffer for k_tid {:?} not found", k_tid)))?;
-            let mut k_host = vec![0u8; kv_bytes];
-            device.dtoh(k_buf, &mut k_host, stream).map_err(|e| BE::Metal(format!("dtoh k_rope: {e}")))?;
-
             let v_buf = proj_bufs.get(&v_tid)
                 .ok_or_else(|| BE::Metal(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
-            let mut v_host = vec![0u8; kv_bytes];
-            device.dtoh(v_buf, &mut v_host, stream).map_err(|e| BE::Metal(format!("dtoh v_proj: {e}")))?;
 
-            gpu_write_kv_cache(
-                &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
-                handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+            metal_write_kv_direct(
+                k_buf.as_device_ptr(), v_buf.as_device_ptr(),
+                handle, kv_dim, seq_len, num_kv_heads, head_dim,
+                layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size,
             )?;
 
             if layer == 0 {
@@ -3647,7 +3873,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             metal_launch_graph(device, stream, &kernel_entries, &gpu_buffers, &graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync failed: {e}")))?;
 
-            // ── Write K/V to KV cache (host bounce — Metal limitation) ──
+            // ── Write K/V to KV cache (Metal 直写：shared memory 指针，无 dtoh/htod) ──
             if let Some(handle) = kv_caches.first() {
                 let kv_dim = num_kv_heads * head_dim;
 
@@ -3660,18 +3886,10 @@ pub(super) fn metal_decoder_forward<E: Element>(
                     .map(|(i, _)| TensorId(i as u32))
                     .ok_or_else(|| BE::Metal("v_proj tensor not found in graph".into()))?;
 
-                let kv_bytes = seq_len * kv_dim * elem_bytes;
                 let k_buf = gpu_buffers.get(&k_tid)
                     .ok_or_else(|| BE::Metal("k_rope buffer not found".into()))?;
-                let mut k_host = vec![0u8; kv_bytes];
-                device.dtoh(k_buf, &mut k_host, stream)
-                    .map_err(|e| BE::Metal(format!("dtoh k_rope failed: {e}")))?;
-
                 let v_buf = gpu_buffers.get(&v_tid)
                     .ok_or_else(|| BE::Metal("v_proj buffer not found".into()))?;
-                let mut v_host = vec![0u8; kv_bytes];
-                device.dtoh(v_buf, &mut v_host, stream)
-                    .map_err(|e| BE::Metal(format!("dtoh v_proj failed: {e}")))?;
 
                 let meta_store = backend.kv_meta.lock()
                     .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
@@ -3685,9 +3903,10 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
                 drop(meta_store);
 
-                gpu_write_kv_cache(
-                    &k_host, &v_host, kv_dim, seq_len, num_kv_heads, head_dim,
-                    handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
+                metal_write_kv_direct(
+                    k_buf.as_device_ptr(), v_buf.as_device_ptr(),
+                    handle, kv_dim, seq_len, num_kv_heads, head_dim,
+                    layer, half_bytes, write_start, head_stride, kv_ds,
                 )?;
 
                 if layer == 0 {
