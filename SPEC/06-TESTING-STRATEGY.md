@@ -560,3 +560,40 @@ let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 **测试步骤**:
 1. 在无 GPU 环境下调用 `detect_backend()`
 **期望结果**: 返回 `Ok(CpuBackend)` 或 `Err`，不 panic
+
+### TEST-ARCH-004: KV Cache Scatter Kernel 正确性
+**关联需求**: REQ-ARCH-004
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造 GQA 配置 (num_kv_heads=8, head_dim=64, seq_len=16)
+2. 生成随机 K/V projection 输出 [seq_len, kv_dim]
+3. 通过 KvScatterWrite kernel 写入 KV cache
+4. 通过逐 head 逐 token DtoD 写入参考 KV cache
+**期望结果**: 两种写入方式的 KV cache 内容 bit-exact 一致
+
+### TEST-ARCH-005: GPU 权重缓存命中
+**关联需求**: REQ-ARCH-005
+**测试类型**: 正向测试
+**测试步骤**:
+1. 首次 forward: 验证 GpuWeightCache 初始化（htod 上传）
+2. 第二次 forward: 验证权重从缓存 DtoD 复制（无 htod 调用）
+3. 两次 forward 输出 bit-exact 一致
+**期望结果**: 缓存命中后零 htod 调用，输出不变
+
+### TEST-ARCH-006: Metal KV 直写正确性
+**关联需求**: REQ-ARCH-006
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造 Metal shared memory KV cache
+2. 通过 metal_write_kv_direct 直接写入
+3. 通过 dtoh→repack→htod 参考路径写入
+**期望结果**: 两种写入方式的 KV cache 内容 bit-exact 一致
+
+### TEST-ARCH-007: Paged Attention 三后端一致性
+**关联需求**: REQ-ARCH-007
+**测试类型**: 正向测试
+**测试步骤**:
+1. 构造相同的 paged KV cache 配置和 page table
+2. 分别在 CUDA/HIP/Metal 后端执行 paged attention
+3. 比较三后端输出
+**期望结果**: 三后端 attention 输出数值一致（容差 < 1e-5）

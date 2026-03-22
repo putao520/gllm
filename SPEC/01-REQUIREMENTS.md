@@ -163,6 +163,10 @@
 | **REQ-ARCH-001** | 零拷贝推理 | 推理过程中 GPU 数据不回传 CPU | 符合 ARCH-GPU-001 | 🟢 已实现 |
 | **REQ-ARCH-002** | 单一后端原则 | 全程在单一后端执行 | 符合 ARCH-SINGLE-BACKEND | 🟢 已实现 |
 | **REQ-ARCH-003** | 纯 Rust 依赖原则 | 禁止引入 `candle`、`tch` 等重量级深度学习框架依赖 | 1. Cargo.toml 中无 candle/tch<br>2. 仅使用 safetensors/half 等底层工具库，GGUF 解析器完全自研<br>3. 计算核心完全自研 (gllm-kernels) | 🟢 已实现 (2026-02-05) [commit: fc36508] |
+| **REQ-ARCH-004** | KV Cache Scatter Kernel | GQA 多头 KV cache 写入通过 GPU scatter kernel 一次 launch 完成，禁止逐 token 逐 head 独立 DtoD | 1. 新增 `OpKind::KvScatterWrite` + PTX/HIP/MSL codegen<br>2. grid=(num_kv_heads, seq_len), block=(head_dim)<br>3. MQA 单头保留 2 次 DtoD 快速路径<br>4. GQA 8heads×512seq: 1 次 kernel launch 替代 4096 次 DtoD | |
+| **REQ-ARCH-005** | GPU 权重常驻缓存 | 首次 forward 一次性上传所有层权重到 GPU，后续 step DtoD 复制 | 1. `GpuWeightCache` 结构体持有 per-layer GPU buffer<br>2. 首次 forward: htod 上传 + 缓存 device_ptr<br>3. 后续 forward: DtoD 从缓存复制到 kernel input<br>4. 大模型 fallback: 可用显存不足时保持 htod 路径<br>5. Executor drop 释放所有 GPU buffer | |
+| **REQ-ARCH-006** | Metal Prefill KV 直写 | Metal prefill KV write 直接通过 shared memory 指针写入，消除中间 buffer | 1. `metal_write_kv_direct()` 直接 ptr::copy_nonoverlapping<br>2. 消除 dtoh→中间 Vec→htod 三步路径<br>3. 利用 Metal shared memory 特性（`[buffer contents]` CPU 可见） | |
+| **REQ-ARCH-007** | PagedKvView 三后端统一 | Paged attention 支持 CUDA/HIP/Metal 三后端 | 1. HIP: `gpu_write_kv_paged_hip` + `gpu_alloc_paged_kv_cache_hip` + `gpu_upload_page_table_hip`<br>2. Metal: `metal_write_kv_paged` + `metal_alloc_paged_kv_cache` + `metal_upload_page_table`<br>3. 三后端共享 `build_gpu_paged_attention_graph`<br>4. `GeneratorForwardConfig.paged_kv_page_table` 驱动三后端统一切换 | |
 
 ## 观测与调度 (REQ-OBS)
 

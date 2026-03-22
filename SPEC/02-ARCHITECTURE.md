@@ -2378,3 +2378,161 @@ MC/NC 同比增大 → 更大 tile → 更好的数据复用
 | `gemm_blocking` | `(m, n, k, dtype: DType) -> GemmBlocking` | dtype 驱动 blocking 参数 |
 | `query_wisdom_jit_params` | `(m, n, k, dtype: DType) -> Option<JitParams>` | dtype-aware WisdomDb 查询 |
 | `gemm_blocking_heuristic` | `(m, n, k, dtype: DType) -> GemmBlocking` | 内部分析启发式 |
+
+### 8.9 GPU 数据通路优化 (ARCH-GPU-DATAPATH)
+
+> **状态**: 设计完成，待实现
+> **关联**: Zero-Copy (Layer 4), ARCH-ATTN-UNIFIED (§8), ARCH-DTYPE-ADAPTIVE (§8.8)
+> **动机**: GPU 推理路径中存在冗余数据搬运（逐 token DtoD、每 step 权重 htod、Metal 中间 buffer），消除后可显著降低 kernel launch 开销和 PCIe/内存带宽占用。
+
+#### 8.9.1 核心原则
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ARCH-GPU-DATAPATH 铁律                                                │
+│                                                                         │
+│  ✅ KV cache 写入必须通过 GPU kernel scatter（一次 launch）             │
+│  ✅ 权重首次上传后常驻 GPU，后续 step 直接 DtoD 复制                   │
+│  ✅ Metal shared memory 路径直接指针写入，禁止中间 buffer               │
+│  ✅ PagedKvView 三后端（CUDA/HIP/Metal）统一支持                       │
+│                                                                         │
+│  ❌ 禁止逐 token 逐 head 发起独立 DtoD API 调用                       │
+│  ❌ 禁止每 step 重复 htod 上传不变的权重数据                           │
+│  ❌ 禁止 Metal 路径分配中间 host buffer 做 dtoh→htod 转发              │
+│  ❌ 禁止 paged attention 仅支持单一 GPU 后端                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.9.2 KV Cache Scatter Kernel (REQ-ARCH-004)
+
+**问题**: `gpu_write_kv_cache_device` 对 GQA 多头模型发起 O(num_kv_heads × seq_len) 次独立 `cuMemcpyDtoD_v2` 调用。8 heads × 512 seq = 4096 次 API 调用，kernel launch overhead 远超实际拷贝时间。
+
+**设计**: 新增 `OpKind::KvScatterWrite` JIT kernel，一次 launch 完成所有 head 的 KV 散写。
+
+```
+源布局: [seq_len, kv_dim] (interleaved heads)
+目标布局: per-head [max_seq, head_dim] within KV cache
+
+Kernel ABI:
+  inputs:  (k_src_ptr, v_src_ptr, kv_cache_ptr, scatter_meta_ptr)
+  params:  (seq_len, num_kv_heads, head_dim, kv_dim, write_start,
+            layer_offset, half_offset, head_stride, dtype_size)
+  grid:    (num_kv_heads, seq_len, 1)
+  block:   (min(head_dim, max_threads_per_block), 1, 1)
+
+每个 thread block 处理一个 (head, token) 对:
+  src_off = (blockIdx.y * kv_dim + blockIdx.x * head_dim) * dtype_size
+  dst_k = kv_cache_ptr + layer_offset + blockIdx.x * head_stride
+        + (write_start + blockIdx.y) * head_dim * dtype_size
+  dst_v = dst_k + half_offset
+  memcpy(dst_k + threadIdx.x * dtype_size,
+         k_src + src_off + threadIdx.x * dtype_size, dtype_size)
+  memcpy(dst_v + threadIdx.x * dtype_size,
+         v_src + src_off + threadIdx.x * dtype_size, dtype_size)
+```
+
+**实现路径**:
+1. gllm-kernels: 新增 `OpKind::KvScatterWrite` + PTX/HIP/MSL codegen
+2. gllm: `gpu_compile.rs` 编译 scatter kernel + 替换逐 token DtoD 调用
+3. MQA 快速路径保留（单头时 2 次 DtoD 仍优于 kernel launch）
+
+#### 8.9.3 GPU 权重常驻缓存 (REQ-ARCH-005)
+
+**问题**: 每 decode step 的层循环内，9 个权重 tensor 通过 htod 上传到 GPU（30 层 × 9 权重 = 270 次 htod/step）。权重在推理期间不变。
+
+**设计**: `GpuWeightCache` — 首次 forward 时一次性上传所有层权重到 GPU 并缓存。
+
+```
+struct GpuWeightCache {
+    /// 每层的权重 GPU buffer: layer_idx → (tensor_name → device_ptr)
+    layers: Vec<HashMap<String, u64>>,
+    /// 总显存占用（字节）
+    total_bytes: usize,
+    /// 是否已初始化
+    initialized: bool,
+}
+
+生命周期:
+  1. 首次 forward: load_all_weights → htod → 缓存 device_ptr
+  2. 后续 forward: 层循环内 DtoD 从缓存复制到 kernel input buffer
+  3. Executor drop: 释放所有 GPU buffer
+
+显存预算控制:
+  - 小模型 (< 2GB): 全量缓存
+  - 中模型 (2-8GB): 全量缓存（如果可用显存 > 模型大小 × 2）
+  - 大模型 (> 8GB): 按需加载（保持当前 htod 路径作为 fallback）
+```
+
+**实现路径**:
+1. gllm: `GpuWeightCache` 结构体 + 初始化/查询/释放 API
+2. gllm: `gpu_compile.rs` 各后端 forward 函数检测缓存 → DtoD 或 htod fallback
+3. gllm: `Executor` 持有 `GpuWeightCache`，drop 时释放
+
+#### 8.9.4 Metal Prefill KV 直写 (REQ-ARCH-006)
+
+**问题**: Metal prefill 路径 KV write 走 dtoh → 中间 buffer → `gpu_write_kv_cache`(htod)。Metal 使用 shared memory（`[buffer contents]` 返回 CPU 可见指针），dtoh/htod 实际是 memcpy，但中间 buffer 分配和拷贝仍是不必要的开销。
+
+**设计**: 直接通过 shared memory 指针写入 KV cache，消除中间 buffer。
+
+```
+当前路径 (3 步):
+  1. dtoh: GPU K/V buffer → k_host/v_host Vec<u8>
+  2. repack: k_host → per-head k_packed
+  3. htod: k_packed → KV cache
+
+优化路径 (1 步):
+  1. 直接指针写入: K/V buffer.contents() → KV cache.contents()
+     (两者都是 CPU 可见的 shared memory 指针)
+
+实现:
+  fn metal_write_kv_direct(
+      k_buf: &MetalBuffer,    // projection 输出
+      v_buf: &MetalBuffer,
+      kv_cache_handle: &KvCacheHandle,  // KV cache (shared memory)
+      ...
+  ) {
+      let k_src = k_buf.as_device_ptr() as *const u8;
+      let kv_dst = kv_cache_handle.0 as *mut u8;
+      // 直接 per-head memcpy，无中间 buffer
+      for head in 0..num_kv_heads {
+          for s in 0..seq_len {
+              ptr::copy_nonoverlapping(k_src + src_off, kv_dst + dst_off, head_dim * dtype_size);
+          }
+      }
+  }
+```
+
+#### 8.9.5 PagedKvView 三后端统一 (REQ-ARCH-007)
+
+**问题**: PagedKvView (P3) 仅接入 CUDA decode 路径。HIP/Metal decode 路径仍使用 dense KV cache。
+
+**设计**: 将 CUDA paged attention 路径复制到 HIP/Metal，适配各后端 API。
+
+```
+CUDA (已完成):
+  build_gpu_paged_attention_graph → AttentionStrategy::Paged
+  gpu_write_kv_paged → DtoD scatter into physical pages
+  gpu_alloc_paged_kv_cache → cuMemAlloc
+  gpu_upload_page_table → cuMemcpyHtoD
+
+HIP (待实现):
+  复用 build_gpu_paged_attention_graph (共享)
+  gpu_write_kv_paged_hip → hipMemcpyDtoD scatter
+  gpu_alloc_paged_kv_cache_hip → hipMalloc
+  gpu_upload_page_table_hip → hipMemcpyHtoD
+
+Metal (待实现):
+  复用 build_gpu_paged_attention_graph (共享)
+  metal_write_kv_paged → shared memory 直接写入
+  metal_alloc_paged_kv_cache → MTLDevice.newBuffer
+  metal_upload_page_table → MTLBuffer.contents() memcpy
+```
+
+#### 8.9.6 依赖关系
+
+```
+REQ-ARCH-004 (KV Scatter) ← 无依赖，可立即开始
+REQ-ARCH-005 (权重缓存)   ← 无依赖，可与 004 并行
+REQ-ARCH-006 (Metal 直写) ← 无依赖，可并行
+REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kernel）
+```
