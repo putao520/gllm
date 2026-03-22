@@ -607,6 +607,44 @@ fn gpu_write_kv_paged(
     Ok(())
 }
 
+/// Allocate a paged KV cache on GPU and return metadata.
+#[cfg(feature = "cuda")]
+fn gpu_alloc_paged_kv_cache(
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+    num_physical_pages: usize,
+    page_size: usize,
+    num_layers: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    dtype_size: usize,
+) -> Result<GpuPagedKvMeta, BE> {
+    use gllm_kernels::gpu::GpuDevice;
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let buf = device.alloc(meta.pool_bytes)
+        .map_err(|e| BE::Cuda(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
+    let ptr = buf.as_device_ptr();
+    std::mem::forget(buf);
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
+}
+
+/// Upload a page table (logical→physical mapping) to GPU as a u32 array.
+#[cfg(feature = "cuda")]
+fn gpu_upload_page_table(
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+    stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+    page_table: &[u32],
+) -> Result<gllm_kernels::gpu::cuda::CudaBuffer, BE> {
+    use gllm_kernels::gpu::GpuDevice;
+    let bytes = unsafe {
+        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+    };
+    let mut buf = device.alloc(bytes.len())
+        .map_err(|e| BE::Cuda(format!("page table alloc failed: {e}")))?;
+    device.htod(bytes, &mut buf, stream)
+        .map_err(|e| BE::Cuda(format!("page table upload failed: {e}")))?;
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // GPU compilation & kernel launch helpers (CUDA)
 // ---------------------------------------------------------------------------
