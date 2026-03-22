@@ -238,6 +238,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     k_slice_buf: &mut [f32],
     v_slice_buf: &mut [f32],
 ) -> Result<f32, BE> {
+    use super::jit_helpers::TypedBuffer;
     let geom = AttentionGeometry {
         num_heads, num_kv_heads, head_dim,
         q_dim: num_heads * head_dim,
@@ -246,7 +247,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     };
 
     // RmsNorm → Q Gemm → RoPE (pre-compiled)
-    let mut q_proj = vec![0.0f32; seq_len * geom.q_dim];
+    let mut q_proj = TypedBuffer::zeros(seq_len * geom.q_dim, dtype);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let q_w_f32 = weight_data_to_f32(q_w, backend, transpose_weights, geom.q_dim, hidden)?;
@@ -260,7 +261,7 @@ fn quantized_incremental_decode_layer<E: Element>(
                 positions.as_ptr(),
                 std::ptr::null(),
                 1, seq_len,
-                q_proj.as_mut_ptr() as *mut u8,
+                q_proj.as_bytes_mut().as_mut_ptr(),
                 scratchpad.as_mut_ptr(),
             );
         }
@@ -287,7 +288,7 @@ fn quantized_incremental_decode_layer<E: Element>(
         {
             let gqa_compiled = get_or_compile_gqa(jit, total_seq)?;
             super::jit_helpers::execute_cached_gqa(
-                gqa_compiled, &q_proj, k_slice_buf, v_slice_buf,
+                gqa_compiled, q_proj.as_f32(), k_slice_buf, v_slice_buf,
                 seq_len, num_heads, head_dim,
                 dtype,
             )
@@ -295,55 +296,56 @@ fn quantized_incremental_decode_layer<E: Element>(
     };
 
     // O projection (quantized) + residual
-    let mut o_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(backend, &attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim, transpose_weights, dtype)?;
-    let mut resid1 = vec![0.0f32; seq_len * hidden];
+    let mut o_out = TypedBuffer::zeros(seq_len * hidden, dtype);
+    quantized_linear(backend, &attn_out, o_w, o_out.as_f32_mut(), seq_len, hidden, geom.q_dim, transpose_weights, dtype)?;
+    let resid1;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
+        let result = super::jit_helpers::jit_add(
             super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
-            super::jit_helpers::f32_as_bytes(&o_out), dtype,
-        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
+            o_out.as_bytes(), dtype,
+        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+        resid1 = TypedBuffer::from_raw(result, dtype);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
-    let mut normed2 = vec![0.0f32; seq_len * hidden];
+    let mut normed2 = TypedBuffer::zeros(seq_len * hidden, dtype);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         super::jit_helpers::execute_jit_final_norm(
             &jit.norm2,
-            super::jit_helpers::f32_as_bytes(&resid1),
+            resid1.as_bytes(),
             super::jit_helpers::f32_as_bytes(rn2_w),
             seq_len,
-            super::jit_helpers::f32_as_bytes_mut(&mut normed2),
+            normed2.as_bytes_mut(),
         );
     }
-    let mut gate_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights, dtype)?;
-    let mut up_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights, dtype)?;
-    let mut swiglu_out = vec![0.0f32; seq_len * inter];
+    let mut gate_out = TypedBuffer::zeros(seq_len * inter, dtype);
+    quantized_linear(backend, normed2.as_f32(), gate_w, gate_out.as_f32_mut(), seq_len, inter, hidden, transpose_weights, dtype)?;
+    let mut up_out = TypedBuffer::zeros(seq_len * inter, dtype);
+    quantized_linear(backend, normed2.as_f32(), up_w, up_out.as_f32_mut(), seq_len, inter, hidden, transpose_weights, dtype)?;
+    let swiglu_out;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let result = super::jit_helpers::jit_swiglu(
-            super::jit_helpers::f32_as_bytes(&gate_out),
-            super::jit_helpers::f32_as_bytes(&up_out),
+            gate_out.as_bytes(),
+            up_out.as_bytes(),
             seq_len, inter, dtype,
         ).map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
-        swiglu_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
+        swiglu_out = TypedBuffer::from_raw(result, dtype);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         return Err(BE::Other("SwiGLU JIT requires x86_64 or aarch64".to_string()));
     }
-    let mut down_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(backend, &swiglu_out, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights, dtype)?;
+    let mut down_out = TypedBuffer::zeros(seq_len * hidden, dtype);
+    quantized_linear(backend, swiglu_out.as_f32(), down_w, down_out.as_f32_mut(), seq_len, hidden, inter, transpose_weights, dtype)?;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let result = super::jit_helpers::jit_add(
-            super::jit_helpers::f32_as_bytes(&resid1),
-            super::jit_helpers::f32_as_bytes(&down_out), dtype,
+            resid1.as_bytes(),
+            down_out.as_bytes(), dtype,
         ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
         output.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
     }
