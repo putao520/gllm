@@ -560,10 +560,10 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         compiler.compile_graph(&g).map_err(|e| format!("bert dense JIT failed: {e}"))
                     }).map_err(|e| BE::Other(e))?;
-                    // ARCH-DTYPE-ADAPTIVE: weight at model dtype, bias at F32
+                    // ARCH-DTYPE-FULLCHAIN-ORCH: weight and bias both at model dtype
                     let w_eb = dt.size_bytes();
                     let w_bytes = dense_w_t.len() * w_eb;
-                    let b_bytes = dense_b.len() * std::mem::size_of::<f32>();
+                    let b_bytes = dense_b.len() * w_eb;
                     let mut wbuf = vec![0u8; w_bytes + b_bytes];
                     // Pack weight at model dtype
                     match dt {
@@ -587,10 +587,9 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                             }
                         },
                     }
-                    // Pack bias at F32
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(dense_b.as_ptr() as *const u8, wbuf.as_mut_ptr().add(w_bytes), b_bytes);
-                    }
+                    // Pack bias at model dtype
+                    let bias_converted = super::weight_helpers::f32_to_typed_bytes(&dense_b, dt);
+                    wbuf[w_bytes..w_bytes + b_bytes].copy_from_slice(&bias_converted);
                     let mut gemm_out = vec![0.0f32; hidden];
                     let mut scratch = vec![0u8; compiled.scratchpad_bytes];
                     unsafe {
