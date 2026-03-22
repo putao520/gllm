@@ -196,7 +196,7 @@ pub(crate) fn build_decoder_layer_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype (model native)
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -289,7 +289,7 @@ pub(crate) fn execute_jit_decoder_layer(
     output: &mut [f32],
     dtype: DType,
 ) {
-    let ft = DType::F32; // norm weight dtype
+    let ft = dtype; // norm weight dtype
     let weights_buf = pack_weights_multi(&[
         (q_w, dtype), (k_w, dtype), (v_w, dtype), (o_w, dtype), (rn1_w, ft),
         (gate_w, dtype), (up_w, dtype), (down_w, dtype), (rn2_w, ft),
@@ -331,7 +331,7 @@ pub(crate) fn build_kv_projection_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
     let s = seq_len;
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
@@ -368,7 +368,7 @@ pub(crate) fn build_v_projection_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
     let s = seq_len;
     let h = hidden;
     let kv_dim = num_kv_heads * head_dim;
@@ -528,7 +528,7 @@ pub(crate) fn build_lm_head_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype (lm_w)
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], ft);
     let norm_w = g.add_tensor_concrete("norm_w", &[hidden], ft);
@@ -591,7 +591,7 @@ pub(crate) fn build_final_norm_graph(
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let ft = DType::F32; // norm weights and activations always F32
+    let ft = dtype; // norm weights and activations
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], ft);
     let norm_w = g.add_tensor_concrete("norm_w", &[hidden], ft);
@@ -651,7 +651,7 @@ pub(crate) fn build_moe_pre_attention_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -785,7 +785,7 @@ pub(crate) fn build_post_attention_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = DType::F32;      // activation / norm weight dtype
+    let ft = dtype;
     let s = seq_len;
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -839,7 +839,7 @@ pub(crate) fn build_cached_gqa_graph(
     );
 
     let mut g = CompilerGraph::new();
-    let ft = DType::F32;      // activation dtype (Q, K_cache, V_cache are F32 in memory)
+    let ft = dtype;
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
@@ -1176,7 +1176,7 @@ pub(crate) fn build_moe_routing_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype (router_w)
-    let ft = DType::F32;      // activation dtype
+    let ft = dtype;
     let s = seq_len;
 
     let normed2 = g.add_tensor_concrete("normed2", &[s, hidden], ft);
@@ -1215,7 +1215,7 @@ pub(crate) fn build_expert_ffn_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = DType::F32;      // activation dtype
+    let ft = dtype;
     let s = seq_len;
 
     let input = g.add_tensor_concrete("input", &[s, hidden], ft);
@@ -1252,7 +1252,7 @@ pub(crate) fn build_moe_combine_graph(
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let ft = DType::F32;      // activation dtype (all MoE combine data is F32)
+    let ft = dtype;
     let s = seq_len;
 
     let expert_outputs = g.add_tensor_concrete("expert_outputs", &[top_k, s, hidden], ft);
@@ -1452,11 +1452,11 @@ pub(crate) fn jit_layer_norm(
 pub(crate) fn build_l2_norm_graph(
     seq_len: usize,
     hidden: usize,
-    _dtype: DType,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     let mut g = CompilerGraph::new();
-    let ft = DType::F32; // activation dtype
+    let ft = dtype;
     let x = g.add_tensor_concrete("x", &[seq_len, hidden], ft);
     g.inputs = vec![x];
     let out = g.add_tensor_concrete("out", &[seq_len, hidden], ft);

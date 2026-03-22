@@ -29,7 +29,7 @@ pub(crate) fn build_bert_layer_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;           // GEMM weight dtype
-    let ft = gllm_kernels::types::DType::F32; // activation / norm / bias dtype
+    let ft = dtype;           // activation / norm / bias dtype
     let s = seq_len;
     let h = hidden;
 
@@ -192,7 +192,7 @@ pub(crate) fn execute_jit_bert_layer(
     dtype: gllm_kernels::types::DType,
 ) {
     use crate::compat::jit_helpers::pack_weights_multi;
-    let ft = gllm_kernels::types::DType::F32;
+    let ft = dtype;
     let weights_buf = pack_weights_multi(&[
         (weights.q_w, dtype), (weights.q_b, ft), (weights.k_w, dtype), (weights.k_b, ft),
         (weights.v_w, dtype), (weights.v_b, ft), (weights.out_w, dtype), (weights.out_b, ft),
@@ -225,7 +225,7 @@ pub(crate) fn build_mean_pool_graph(
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let ft = gllm_kernels::types::DType::F32; // activation dtype
+    let ft = dtype; // activation dtype
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], ft);
     let output = g.add_tensor_concrete("output", &[hidden], ft);
@@ -549,7 +549,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     };
                     let compiled = global_jit_cache().get_or_compile(key, || {
                         let mut g = CompilerGraph::new();
-                        let ft = gllm_kernels::types::DType::F32;
+                        let ft = dt;
                         let x_in = g.add_tensor_concrete("x", &[1, hidden], ft);
                         let w_in = g.add_tensor_concrete("w", &[hidden, hidden], dt);
                         let b_in = g.add_tensor_concrete("b", &[hidden], ft);
