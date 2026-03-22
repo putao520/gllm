@@ -1093,9 +1093,9 @@ QView + KvView + AttentionSemantics
 
 ### 8.8 DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
 
-> **状态**: P0-P2 已完成 (2026-03-21)，P3 待实施
+> **状态**: P0-P3 已完成 (2026-03-22)
 > **关联**: JIT 编译管线 (§5), GEMM 微内核, Zero-Copy (Layer 4)
-> **审计日期**: 2026-03-21（~255处硬编码已全部修复，1055 tests passed）
+> **审计日期**: 2026-03-22（GPU codegen 三后端 dtype 自适应完成，1059 tests passed）
 
 **铁律**: dtype 必须同时影响存储和计算，全链路自适应，禁止硬编码 f32。
 
@@ -1261,7 +1261,7 @@ match elem_bytes {
 | P2 | AArch64 attention/fusion/rope/meanpool `f32_bytes` 参数化 (~47处) | ✅ 已完成 (2026-03-21) |
 | P2 | GPU kernel_builder/trace_emitter `f32_bytes` 参数化 (8处) | ✅ 已完成 (2026-03-21) |
 | P2 | Apple AMX `f32_bytes` 参数化 (6处) | ✅ 已完成 (2026-03-21) |
-| P3 | 全链路 dtype 自适应（GPU codegen + activation + accumulator 全部按模型 dtype） | 实施中 |
+| P3 | 全链路 dtype 自适应（GPU codegen + activation + accumulator 全部按模型 dtype） | ✅ 已完成 (2026-03-22) |
 
 #### 8.8.6 P3 GPU Codegen 全链路 DType 自适应
 
