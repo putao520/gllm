@@ -859,8 +859,8 @@ pub(crate) fn decoder_forward<E: Element>(
 
                 let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                 let kv_dim = num_kv_heads * head_dim;
-                let mut k_slice_buf = vec![0.0f32; total_seq * kv_dim];
-                let mut v_slice_buf = vec![0.0f32; total_seq * kv_dim];
+                let mut k_slice_buf = super::jit_helpers::TypedBuffer::zeros(total_seq * kv_dim, computation_dtype_from_config(config));
+                let mut v_slice_buf = super::jit_helpers::TypedBuffer::zeros(total_seq * kv_dim, computation_dtype_from_config(config));
 
                 if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
                     // MoE incremental: JIT pre-attention + cached attention + scalar MoE FFN
@@ -981,8 +981,8 @@ pub(crate) fn decoder_forward<E: Element>(
                         &mut decode_jit,
                         layer_out.as_f32_mut(),
                         computation_dtype_from_config(config),
-                        &mut k_slice_buf,
-                        &mut v_slice_buf,
+                        k_slice_buf.as_f32_mut(),
+                        v_slice_buf.as_f32_mut(),
                     )?;
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
