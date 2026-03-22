@@ -14,6 +14,12 @@ pub(crate) fn f32_as_bytes(s: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<f32>()) }
 }
 
+/// Zero-copy reinterpret `&mut [f32]` as `&mut [u8]`.
+#[inline]
+pub(crate) fn f32_as_bytes_mut(s: &mut [f32]) -> &mut [u8] {
+    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut u8, s.len() * std::mem::size_of::<f32>()) }
+}
+
 /// Zero-copy reinterpret `&[u8]` as `&[f32]`.
 #[inline]
 pub(crate) fn bytes_as_f32(s: &[u8]) -> &[f32] {
@@ -602,23 +608,23 @@ pub(crate) fn build_final_norm_graph(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_jit_final_norm(
     compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    norm_w: &[f32],
+    hidden_state: &[u8],
+    norm_w: &[u8],
     seq_len: usize,
-    output: &mut [f32],
+    output: &mut [u8],
 ) {
-    let weights_buf = pack_weights(&[norm_w]);
+    let mut weights_buf = norm_w.to_vec();
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     unsafe {
         compiled.execute(
-            hidden_state.as_ptr() as *const u8,
+            hidden_state.as_ptr(),
             weights_buf.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -1090,33 +1096,33 @@ pub(crate) fn execute_moe_ffn_jit(
 // ---------------------------------------------------------------------------
 
 /// Build a CompilerGraph for SwiGLU activation only: gate * silu(gate) * up.
-/// SwiGLU operates on activation tensors (always F32).
+/// ARCH-DTYPE-ADAPTIVE: tensor dtype follows computation dtype.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn build_swiglu_graph(seq_len: usize, inter: usize, _dtype: DType) -> gllm_kernels::compiler::CompilerGraph {
+fn build_swiglu_graph(seq_len: usize, inter: usize, dtype: DType) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
     let mut g = CompilerGraph::new();
-    let ft = DType::F32; // activation dtype
 
-    let gate = g.add_tensor_concrete("gate", &[seq_len, inter], ft);
-    let up = g.add_tensor_concrete("up", &[seq_len, inter], ft);
+    let gate = g.add_tensor_concrete("gate", &[seq_len, inter], dtype);
+    let up = g.add_tensor_concrete("up", &[seq_len, inter], dtype);
     g.inputs = vec![gate, up];
 
-    let out = g.add_tensor_concrete("swiglu_out", &[seq_len, inter], ft);
+    let out = g.add_tensor_concrete("swiglu_out", &[seq_len, inter], dtype);
     g.add_op(OpKind::SwiGlu, vec![gate, up], vec![out], "swiglu");
     g.outputs = vec![out];
     g
 }
 
 /// Execute SwiGLU activation via JIT (cached).
+/// ARCH-DTYPE-ADAPTIVE: inputs/outputs are raw bytes in the given dtype.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn jit_swiglu(
-    gate: &[f32],
-    up: &[f32],
+    gate: &[u8],
+    up: &[u8],
     seq_len: usize,
     inter: usize,
     dtype: DType,
-) -> Result<Vec<f32>, String> {
+) -> Result<Vec<u8>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
 
     let key = JitCacheKey {
@@ -1137,28 +1143,19 @@ pub(crate) fn jit_swiglu(
         compiler.compile_graph(&graph).map_err(|e| format!("SwiGLU JIT failed: {e}"))
     })?;
 
-    // SwiGLU activation data is always F32 (accumulator precision)
-    let elem_bytes = std::mem::size_of::<f32>();
-    let gate_bytes = gate.len() * elem_bytes;
-    let up_bytes = up.len() * elem_bytes;
-    let gate_buf: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(gate.as_ptr() as *const u8, gate_bytes).to_vec()
-    };
-    let up_buf: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(up.as_ptr() as *const u8, up_bytes).to_vec()
-    };
-
-    let mut output = vec![0.0f32; seq_len * inter];
+    let elem_bytes = dtype.size_bytes();
+    let out_bytes = seq_len * inter * elem_bytes;
+    let mut output = vec![0u8; out_bytes];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
-            gate_buf.as_ptr(),
-            up_buf.as_ptr(),
+            gate.as_ptr(),
+            up.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }

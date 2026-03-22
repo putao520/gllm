@@ -9,6 +9,7 @@ use super::jit_helpers::{
     computation_dtype, computation_dtype_from_config, kernels_dtype_to_compat,
     execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
     execute_kv_projection, pack_weights, update_kv_cache_jit, write_kv_to_cache,
+    f32_as_bytes, f32_as_bytes_mut, bytes_as_f32,
 };
 use super::types::AttentionGeometry;
 use super::weight_helpers::{
@@ -312,25 +313,33 @@ fn quantized_incremental_decode_layer<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         super::jit_helpers::execute_jit_final_norm(
-            &jit.norm2, &resid1, rn2_w, seq_len, &mut normed2,
+            &jit.norm2,
+            super::jit_helpers::f32_as_bytes(&resid1),
+            super::jit_helpers::f32_as_bytes(rn2_w),
+            seq_len,
+            super::jit_helpers::f32_as_bytes_mut(&mut normed2),
         );
     }
     let mut gate_out = vec![0.0f32; seq_len * inter];
     quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights)?;
     let mut up_out = vec![0.0f32; seq_len * inter];
     quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights)?;
-    let mut swiglu = vec![0.0f32; seq_len * inter];
+    let mut swiglu_out = vec![0.0f32; seq_len * inter];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        swiglu = super::jit_helpers::jit_swiglu(&gate_out, &up_out, seq_len, inter, dtype)
-            .map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
+        let result = super::jit_helpers::jit_swiglu(
+            super::jit_helpers::f32_as_bytes(&gate_out),
+            super::jit_helpers::f32_as_bytes(&up_out),
+            seq_len, inter, dtype,
+        ).map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
+        swiglu_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         return Err(BE::Other("SwiGLU JIT requires x86_64 or aarch64".to_string()));
     }
     let mut down_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(backend, &swiglu, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
+    quantized_linear(backend, &swiglu_out, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -912,7 +921,11 @@ pub(crate) fn decoder_forward<E: Element>(
 
                         let mut normed2 = vec![0.0f32; seq_len * hidden];
                         super::jit_helpers::execute_jit_final_norm(
-                            &moe_c.norm2, &resid1, &rn2_w, seq_len, &mut normed2,
+                            &moe_c.norm2,
+                            super::jit_helpers::f32_as_bytes(&resid1),
+                            super::jit_helpers::f32_as_bytes(&rn2_w),
+                            seq_len,
+                            super::jit_helpers::f32_as_bytes_mut(&mut normed2),
                         );
 
                         // Step 4: MoE FFN via JIT
@@ -1541,10 +1554,10 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         let mut normed_out = vec![0.0f32; seq_len * hidden];
         execute_jit_final_norm(
             &compiled_norm,
-            &hidden_state,
-            &final_norm_w,
+            f32_as_bytes(&hidden_state),
+            f32_as_bytes(&final_norm_w),
             seq_len,
-            &mut normed_out,
+            f32_as_bytes_mut(&mut normed_out),
         );
         normed_out
     };
@@ -1710,10 +1723,10 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         let mut normed_out = vec![0.0f32; seq_len * hidden];
         execute_jit_final_norm(
             &compiled_norm,
-            &hidden_state,
-            &final_norm_w,
+            f32_as_bytes(&hidden_state),
+            f32_as_bytes(&final_norm_w),
             seq_len,
-            &mut normed_out,
+            f32_as_bytes_mut(&mut normed_out),
         );
         normed_out
     };
