@@ -1089,7 +1089,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ### 8.8 DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
 
@@ -1515,7 +1515,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ---
 
@@ -1722,7 +1722,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ---
 
@@ -1929,7 +1929,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ---
 
@@ -2136,7 +2136,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ---
 
@@ -2343,7 +2343,7 @@ QView + KvView + AttentionSemantics
 | P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
 | P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
-| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
+| P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
 ### 8.8 DType-Aware JIT 性能优化 (ARCH-DTYPE-PERF)
 
