@@ -1072,24 +1072,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ### 8.8 DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
 
@@ -1498,24 +1498,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ---
 
@@ -1705,24 +1705,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ---
 
@@ -1912,24 +1912,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ---
 
@@ -2119,24 +2119,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ---
 
@@ -2326,24 +2326,24 @@ QView + KvView + AttentionSemantics
 
 **铁律**: persistent KV cache 不得在主路径中被全量重排为 dense seq-major 形式后再做 attention。
 
-当前违规路径（待修复）：
+已修复路径 (2026-03-22)：
 
-| 路径 | 违规操作 | 修复方向 |
+| 路径 | 原违规操作 | 修复结果 |
 |------|---------|---------|
-| GPU decode `jit_cached_attention` | 下载全量 KV → head-major→seq-major 重排 → CPU CachedGQA | 改为 GPU native cached attention 或 JIT 直接消费 head-major |
-| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | 改为 GPU 上直接做 cached attention |
+| GPU decode `jit_cached_attention` | 下载全量 KV → CPU CachedGQA | ✅ 已改为 GPU native cached attention |
+| GPU decode `download_kv_cache_to_host` | 每层下载 ~180MB KV 到 CPU | ✅ 已删除，attention 直接读 GPU KV cache |
 
 ### 8.7 实现路线
 
-| 阶段 | 内容 | 优先级 |
-|------|------|--------|
-| P0 | 定义 5 个 core contract 类型 | 立即 |
-| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | 立即 |
-| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | 高 |
-| P1 | KvView lowering: JIT 直接消费 head-major cache | 高 |
-| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | 中 |
-| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | 中 |
-| P3 | PagedKvView: paged attention 原位访问 | 后续 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0 | 定义 5 个 core contract 类型 | ✅ 已完成 |
+| P0 | GPU prefill: 拆分 projection + consume，消除 QKV fusion 问题 | ✅ 已完成 |
+| P1 | GPU decode: native cached attention kernel（消除 CPU round-trip） | ✅ 已完成 |
+| P1 | KvView lowering: JIT 直接消费 head-major cache | ✅ 已完成 |
+| P2 | RoPE on-the-fly: 消除 q_rope/k_rope 中间张量 | ✅ 已完成 |
+| P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
+| P3 | PagedKvView: paged attention 原位访问 | 实施中 |
 
 ### 8.8 DType-Aware JIT 性能优化 (ARCH-DTYPE-PERF)
 
