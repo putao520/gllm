@@ -293,7 +293,7 @@ src/
 - ❌ 禁止 `concrete_bytes` 和实际数据 dtype 不一致
 - ❌ 禁止 GPU htod/dtoh 传输字节数用 `len() * 4` 计算
 - ❌ 禁止 `size_of::<f32>()` 作为通用 tensor 元素大小
-- ❌ 禁止 scratchpad/shared memory 分配硬编码 `* 4`（accumulator 空间除外）
+- ❌ 禁止 scratchpad/shared memory 分配硬编码 `* 4`（必须用 `dtype.size_bytes()`）
 - ❌ 禁止 stride/offset 计算硬编码 `* 4`（必须 `cols * elem_bytes`）
 
 ### 必须规则
@@ -301,8 +301,8 @@ src/
 - ✅ `computation_dtype_from_config(config)` 返回 `computation_dtype(config.dtype_size)`
 - ✅ `pack_weights_typed(slices, dtype)` 按 dtype 转换并 pack
 - ✅ GEMM weight 按模型 dtype 存储（F16/BF16 省 50% 内存 + SIMD 吞吐翻倍）
-- ✅ Norm/bias weight 按 F32 存储（体积可忽略）
-- ✅ Activation/intermediate tensor 按 F32 存储（accumulator 精度）
+- ✅ Norm/bias weight 按模型 dtype 存储（全链路一致）
+- ✅ Activation/intermediate tensor 按模型 dtype 存储（全链路一致）
 - ✅ JIT codegen 的每个 op 必须根据输入 tensor 的 dtype 生成对应的 load/store 指令
 - ✅ `weight_layout()` 的 offset 必须和 `pack_weights_typed()` 的实际布局一致
 - ✅ 所有 `execute_jit_*` 函数必须接受 `dtype: DType` 参数
@@ -325,9 +325,10 @@ src/
 | 类别 | dtype | 理由 |
 |------|-------|------|
 | GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype (F16/BF16/F32) | 内存节省 + SIMD 优化 |
-| Norm weight (gamma/beta) | F32 | 体积可忽略，codegen 简化 |
-| Activation input | F32 | accumulator 精度 |
-| Intermediate tensor | F32 | accumulator 精度 |
+| Norm weight (gamma/beta) | 模型 dtype | 全链路一致 |
+| Activation input | 模型 dtype | 全链路一致 |
+| Intermediate tensor | 模型 dtype | 全链路一致 |
+| Accumulator | 模型 dtype | 全链路一致 |
 | KV cache | 模型 dtype | 内存节省 |
 
 ### JIT codegen dtype 模板化
@@ -355,7 +356,6 @@ match elem_bytes {
 
 ### 合法 `* 4` 例外（非违规）
 
-- accumulator 空间的 f32 scalar tail（`vmovss` 逐元素偏移）— accumulator 始终 F32
 - `simd_width_f32 * 4` — 变量名明确 f32 上下文
 - `partial_cmp().unwrap_or(Equal)` — NaN 比较标准模式
 - BLIS GEMM 主路径 — 已通过 `src_elem_bytes()` 动态化

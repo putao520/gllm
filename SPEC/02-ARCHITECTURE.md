@@ -1125,8 +1125,9 @@ QView + KvView + AttentionSemantics
 | 类别 | dtype | 理由 |
 |------|-------|------|
 | GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype (F16/BF16/F32) | 内存节省 + SIMD 优化 |
-| Norm weight (gamma/beta) | F32 | 体积可忽略（后续全部 dtype 化） |
-| Activation / intermediate tensor | F32 | accumulator 精度 |
+| Norm weight (gamma/beta) | 模型 dtype | 全链路一致 |
+| Activation / intermediate tensor | 模型 dtype | 全链路一致 |
+| Accumulator | 模型 dtype | 全链路一致 |
 | KV cache | 模型 dtype | 内存节省 |
 
 #### 8.8.2 动态 dtype 传播机制
@@ -1260,7 +1261,54 @@ match elem_bytes {
 | P2 | AArch64 attention/fusion/rope/meanpool `f32_bytes` 参数化 (~47处) | ✅ 已完成 (2026-03-21) |
 | P2 | GPU kernel_builder/trace_emitter `f32_bytes` 参数化 (8处) | ✅ 已完成 (2026-03-21) |
 | P2 | Apple AMX `f32_bytes` 参数化 (6处) | ✅ 已完成 (2026-03-21) |
-| P3 | 全链路半精度（activation + intermediate 也按 dtype） | 待实施 |
+| P3 | 全链路 dtype 自适应（GPU codegen + activation + accumulator 全部按模型 dtype） | 实施中 |
+
+#### 8.8.6 P3 GPU Codegen 全链路 DType 自适应
+
+**目标**：GPU codegen（PTX/HIP/MSL）全部按模型 dtype 生成指令，零 F32 硬编码。
+
+**改动范围**：
+
+| 组件 | 文件 | 改动内容 |
+|------|------|---------|
+| DType GPU helpers | `gllm-kernels/src/types.rs` | `ptx_type()`/`ptx_reg_type()`/`ptx_ld_type()`/`hip_type()`/`msl_type()`/`ptx_arith_type()` |
+| GpuDialect trait | `trace_emitter.rs` | `dtype()` + `elem_bytes()` 方法 |
+| PtxDialect | `trace_emitter.rs` | `dtype` 字段 + `with_dtype()` 构造 + `emit_trace_op` 按 dtype 生成指令 |
+| HipDialect | `trace_emitter.rs` | 同上（`float` → `dtype.hip_type()`） |
+| MslDialect | `trace_emitter.rs` | 同上（`float` → `dtype.msl_type()`） |
+| kernel_builder | `kernel_builder.rs` | 12 个 `build_*` 函数使用 `dialect.elem_bytes()` 替代 `* 4` |
+| PTX GEMM | `ptx/gemm.rs` | 4 个 emitter 按 dtype 生成 `.f16`/`.bf16`/`.f32` 指令 |
+| plan_emitter | `plan_emitter.rs` | `emit_single_op_kernel` 从 OpKind 提取 dtype 传递到 dialect |
+| gllm launch_config | `gpu_compile.rs` | GEMM shared_mem `* dtype.size_bytes()` + dialect 构造传 dtype |
+
+**PTX 指令映射**：
+
+| 操作 | F32 | F16 | BF16 |
+|------|-----|-----|------|
+| 寄存器声明 | `.reg .f32` | `.reg .f16` | `.reg .b16` |
+| Global load | `ld.global.f32` | `ld.global.f16` | `ld.global.b16` |
+| Global store | `st.global.f32` | `st.global.f16` | `st.global.b16` |
+| Shared memory | `.shared .f32` | `.shared .f16` | `.shared .b16` |
+| 字节偏移 | `mul.wide.u32 %rd, %r, 4` | `mul.wide.u32 %rd, %r, 2` | `mul.wide.u32 %rd, %r, 2` |
+| 加法 | `add.f32` | `add.f16` | `add.bf16` (SM≥80) |
+| 乘法 | `mul.f32` | `mul.f16` | `mul.bf16` (SM≥80) |
+| FMA | `fma.rn.f32` | `fma.rn.f16` | `fma.rn.bf16` (SM≥80) |
+
+**HIP 类型映射**：
+
+| DType | C++ 类型 | Shared memory | sizeof |
+|-------|----------|---------------|--------|
+| F32 | `float` | `__shared__ float` | 4 |
+| F16 | `half` | `__shared__ half` | 2 |
+| BF16 | `__nv_bfloat16` | `__shared__ __nv_bfloat16` | 2 |
+
+**MSL 类型映射**：
+
+| DType | MSL 类型 | Threadgroup | sizeof |
+|-------|----------|-------------|--------|
+| F32 | `float` | `threadgroup float` | 4 |
+| F16 | `half` | `threadgroup half` | 2 |
+| BF16 | `bfloat` | `threadgroup bfloat` | 2 |
 
 ---
 

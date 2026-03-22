@@ -440,7 +440,17 @@ pub(crate) fn compile_graph_to_ptx(
     let profile = gllm_kernels::dispatch::DeviceProfile::detect();
     let plan = fusion::fuse_with_dag_prebuilt(graph, &dag, &profile);
 
-    let dialect = PtxDialect::new(sm_version);
+    // Extract dtype from graph ops (Gemm/GemmBias/CachedGQA carry dtype, default F32)
+    let graph_dtype = graph.ops.iter()
+        .find_map(|op| match &op.kind {
+            gllm_kernels::compiler::OpKind::Gemm { dtype, .. }
+            | gllm_kernels::compiler::OpKind::GemmBias { dtype, .. } => Some(*dtype),
+            gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
+            _ => None,
+        })
+        .unwrap_or(gllm_kernels::types::DType::F32);
+
+    let dialect = PtxDialect::with_dtype(sm_version, 1024, 49152, graph_dtype);
     let mut ptx = String::new();
     dialect.emit_header(&mut ptx);
     gpu_emit_plan(&dialect, &mut ptx, &plan, graph, Some(&registry), None)
@@ -478,12 +488,13 @@ pub(crate) fn launch_config_for_op(
             let block = profile.max_threads_per_block.min(256);
             profile.launch_config_row_wise(profile.max_threads_per_block as usize, block)
         }
-        OpKind::Gemm { m, n, .. } | OpKind::GemmBias { m, n, .. } => {
+        OpKind::Gemm { m, n, dtype, .. } | OpKind::GemmBias { m, n, dtype, .. } => {
             // Tile size derived from warp_size: sqrt(32)=5→8, sqrt(64)=8
             let tile = ((profile.warp_size as f32).sqrt() as u32).max(8).min(32);
             let grid_x = ((*n as u32) + tile - 1) / tile;
             let grid_y = ((*m as u32) + tile - 1) / tile;
-            let shared = (2 * tile * tile * 4).min(profile.shared_mem_per_block);
+            let elem_bytes = dtype.size_bytes() as u32;
+            let shared = (2 * tile * tile * elem_bytes).min(profile.shared_mem_per_block);
             gllm_kernels::gpu::LaunchConfig {
                 grid_dim: [grid_x * grid_y, 1, 1],
                 block_dim: [tile * tile, 1, 1],
@@ -1455,7 +1466,17 @@ pub(crate) fn compile_graph_to_hip(
     let profile = gllm_kernels::dispatch::DeviceProfile::detect();
     let plan = fusion::fuse_with_dag_prebuilt(graph, &dag, &profile);
 
-    let dialect = HipDialect { gfx_arch };
+    // Extract dtype from graph ops
+    let graph_dtype = graph.ops.iter()
+        .find_map(|op| match &op.kind {
+            gllm_kernels::compiler::OpKind::Gemm { dtype, .. }
+            | gllm_kernels::compiler::OpKind::GemmBias { dtype, .. } => Some(*dtype),
+            gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
+            _ => None,
+        })
+        .unwrap_or(gllm_kernels::types::DType::F32);
+
+    let dialect = HipDialect::with_dtype(gfx_arch, 1024, 65536, graph_dtype);
     let mut hip_src = String::new();
     dialect.emit_header(&mut hip_src);
     gpu_emit_plan(&dialect, &mut hip_src, &plan, graph, Some(&registry))
@@ -1787,7 +1808,17 @@ pub(crate) fn compile_graph_to_msl(
     let profile = gllm_kernels::dispatch::DeviceProfile::detect();
     let plan = fusion::fuse_with_dag_prebuilt(graph, &dag, &profile);
 
-    let dialect = MslDialect::new(gpu_family);
+    // Extract dtype from graph ops (same pattern as PTX)
+    let graph_dtype = graph.ops.iter()
+        .find_map(|op| match &op.kind {
+            gllm_kernels::compiler::OpKind::Gemm { dtype, .. }
+            | gllm_kernels::compiler::OpKind::GemmBias { dtype, .. } => Some(*dtype),
+            gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
+            _ => None,
+        })
+        .unwrap_or(gllm_kernels::types::DType::F32);
+
+    let dialect = MslDialect::with_dtype(gpu_family, 1024, 32768, graph_dtype);
     let mut msl = String::new();
     dialect.emit_header(&mut msl);
     gpu_emit_plan(&dialect, &mut msl, &plan, graph, Some(&registry))
