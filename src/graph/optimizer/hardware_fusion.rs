@@ -41,31 +41,47 @@ impl OptimizationPass for HardwareFusionPass {
 }
 
 fn supports_flash_attention(ctx: &OptimizationContext) -> bool {
-    if ctx.backend_type != BackendType::Cuda {
-        return false;
+    match ctx.backend_type {
+        BackendType::Cuda => {
+            // FlashAttention requires SM >= 8.0 (Ampere+)
+            // F16/BF16: SM >= 8.0 (tensor core HMMA)
+            // F32: SM >= 8.0 (TF32 path)
+            ctx.cuda_sm_version
+                .map(|(major, _)| major >= 8)
+                .unwrap_or(false)
+        }
+        BackendType::Rocm => {
+            // ROCm supports FlashAttention on CDNA2+ (gfx90a+)
+            // Approximated by SM version mapping: treat as supported
+            true
+        }
+        BackendType::Metal => {
+            // Metal supports FlashAttention via MSL threadgroup memory
+            true
+        }
+        BackendType::Cpu => false,
     }
-    ctx.cuda_sm_version
-        .map(|(major, _)| major >= 8)
-        .unwrap_or(false)
 }
 
 fn supports_qkv_rope(ctx: &OptimizationContext) -> bool {
-    if ctx.backend_type != BackendType::Cuda {
-        return true;
+    match ctx.backend_type {
+        BackendType::Cuda => ctx.cuda_sm_version
+            .map(|(major, _)| major >= 7)
+            .unwrap_or(false),
+        // All other backends support fused QKV+RoPE
+        _ => true,
     }
-    ctx.cuda_sm_version
-        .map(|(major, _)| major >= 7)
-        .unwrap_or(false)
 }
 
 fn supports_rms_linear(ctx: &OptimizationContext) -> bool {
     match ctx.backend_type {
         BackendType::Cuda => ctx
             .cuda_sm_version
-            .map(|(major, _)| major >= 8)
+            .map(|(major, _)| major >= 7)
             .unwrap_or(false),
         BackendType::Cpu => true,
-        BackendType::Rocm | BackendType::Metal => false,
+        BackendType::Rocm => true,
+        BackendType::Metal => true,
     }
 }
 
