@@ -491,7 +491,7 @@ pub(crate) fn execute_kv_projection(
 
     // JIT graph for K projection (RmsNorm → Gemm → RoPE)
     let weights_buf = pack_weights_multi(&[(rn1_w, dtype), (k_w, dtype)]);
-    let mut k_rope = vec![0.0f32; seq_len * kv_dim];
+    let mut k_rope = TypedBuffer::zeros(seq_len * kv_dim, dtype);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     unsafe {
@@ -502,7 +502,7 @@ pub(crate) fn execute_kv_projection(
             positions.as_ptr(),
             std::ptr::null(),
             1, seq_len,
-            k_rope.as_mut_ptr() as *mut u8,
+            k_rope.as_bytes_mut().as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -514,7 +514,7 @@ pub(crate) fn execute_kv_projection(
         .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
 
     let v_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (v_w, dtype)]);
-    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
+    let mut v_proj = TypedBuffer::zeros(seq_len * kv_dim, dtype);
     let mut v_scratchpad = vec![0u8; v_compiled.scratchpad_bytes];
 
     unsafe {
@@ -525,12 +525,12 @@ pub(crate) fn execute_kv_projection(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            v_proj.as_mut_ptr() as *mut u8,
+            v_proj.as_bytes_mut().as_mut_ptr(),
             v_scratchpad.as_mut_ptr(),
         );
     }
 
-    Ok((k_rope, v_proj))
+    Ok((k_rope.to_f32_vec(), v_proj.to_f32_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -923,7 +923,7 @@ pub(crate) fn execute_moe_pre_attention(
     let kv_dim = num_kv_heads * head_dim;
 
     let weights_buf = pack_weights_multi(&[(rn1_w, dtype), (q_w, dtype), (k_w, dtype), (v_w, dtype)]);
-    let mut q_rope = vec![0.0f32; seq_len * q_dim];
+    let mut q_rope = TypedBuffer::zeros(seq_len * q_dim, dtype);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     unsafe {
@@ -934,7 +934,7 @@ pub(crate) fn execute_moe_pre_attention(
             positions.as_ptr(),
             std::ptr::null(),
             1, seq_len,
-            q_rope.as_mut_ptr() as *mut u8,
+            q_rope.as_bytes_mut().as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -946,7 +946,7 @@ pub(crate) fn execute_moe_pre_attention(
     let k_compiled = k_compiler.compile_graph(&k_graph)
         .map_err(|e| format!("JIT compile k_projection failed: {e}"))?;
     let k_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (k_w, dtype)]);
-    let mut k_proj = vec![0.0f32; seq_len * kv_dim];
+    let mut k_proj = TypedBuffer::zeros(seq_len * kv_dim, dtype);
     let mut k_scratch = vec![0u8; k_compiled.scratchpad_bytes];
     unsafe {
         k_compiled.execute(
@@ -956,7 +956,7 @@ pub(crate) fn execute_moe_pre_attention(
             positions.as_ptr(),
             std::ptr::null(),
             1, seq_len,
-            k_proj.as_mut_ptr() as *mut u8,
+            k_proj.as_bytes_mut().as_mut_ptr(),
             k_scratch.as_mut_ptr(),
         );
     }
@@ -967,7 +967,7 @@ pub(crate) fn execute_moe_pre_attention(
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
     let v_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (v_w, dtype)]);
-    let mut v_proj = vec![0.0f32; seq_len * kv_dim];
+    let mut v_proj = TypedBuffer::zeros(seq_len * kv_dim, dtype);
     let mut v_scratch = vec![0u8; v_compiled.scratchpad_bytes];
     unsafe {
         v_compiled.execute(
@@ -977,12 +977,12 @@ pub(crate) fn execute_moe_pre_attention(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            v_proj.as_mut_ptr() as *mut u8,
+            v_proj.as_bytes_mut().as_mut_ptr(),
             v_scratch.as_mut_ptr(),
         );
     }
 
-    Ok((q_rope, k_proj, v_proj))
+    Ok((q_rope.to_f32_vec(), k_proj.to_f32_vec(), v_proj.to_f32_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,7 +1090,7 @@ pub(crate) fn execute_cached_gqa(
 ) -> (Vec<f32>, f32) {
     let q_dim = num_heads * head_dim;
     let out_size = seq_len * q_dim + 1; // +1 for sparsity stat
-    let mut output = vec![0.0f32; out_size];
+    let mut output = TypedBuffer::zeros(out_size, dtype);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     // KV cache is activation data — pack at computation dtype
@@ -1104,14 +1104,14 @@ pub(crate) fn execute_cached_gqa(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_bytes_mut().as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
 
-    let sparsity = output[seq_len * q_dim];
-    output.truncate(seq_len * q_dim);
-    (output, sparsity)
+    let output_f32 = output.to_f32_vec();
+    let sparsity = output_f32[seq_len * q_dim];
+    (output_f32[..seq_len * q_dim].to_vec(), sparsity)
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,7 +1212,7 @@ pub(crate) fn execute_moe_ffn_jit(
     for &expert_idx in &needed_experts {
         let (ref gate_w, ref up_w, ref down_w) = expert_weights[expert_idx];
         let expert_weight_buf = pack_weights_typed(&[gate_w, up_w, down_w], dtype);
-        let mut expert_out = vec![0.0f32; seq_len * hidden];
+        let mut expert_out = TypedBuffer::zeros(seq_len * hidden, dtype);
         let mut scratch = vec![0u8; ffn_compiled.scratchpad_bytes];
         unsafe {
             ffn_compiled.execute(
@@ -1222,11 +1222,11 @@ pub(crate) fn execute_moe_ffn_jit(
                 std::ptr::null(),
                 std::ptr::null(),
                 1, seq_len,
-                expert_out.as_mut_ptr() as *mut u8,
+                expert_out.as_bytes_mut().as_mut_ptr(),
                 scratch.as_mut_ptr(),
             );
         }
-        expert_outputs.insert(expert_idx, expert_out);
+        expert_outputs.insert(expert_idx, expert_out.to_f32_vec());
     }
 
     // Step 3: Weighted combine via JIT (WeightedSum) — cached
@@ -1268,7 +1268,7 @@ pub(crate) fn execute_moe_ffn_jit(
     // Pack: expert_outputs (input), indices + weights (weights)
     let combine_input = pack_weights_typed(&[&expert_flat], dtype);
     let combine_weights = pack_weights_typed(&[&indices_f32, &weights], dtype);
-    let mut output = vec![0.0f32; seq_len * hidden];
+    let mut output = TypedBuffer::zeros(seq_len * hidden, dtype);
     let mut combine_scratch = vec![0u8; combine_compiled.scratchpad_bytes];
 
     unsafe {
@@ -1279,7 +1279,7 @@ pub(crate) fn execute_moe_ffn_jit(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_bytes_mut().as_mut_ptr(),
             combine_scratch.as_mut_ptr(),
         );
     }
@@ -1287,7 +1287,7 @@ pub(crate) fn execute_moe_ffn_jit(
     // Shared expert (if present)
     if let Some((ref sg, ref su, ref sd)) = shared_expert {
         let shared_buf = pack_weights_typed(&[sg, su, sd], dtype);
-        let mut shared_out = vec![0.0f32; seq_len * hidden];
+        let mut shared_out = TypedBuffer::zeros(seq_len * hidden, dtype);
         let mut scratch = vec![0u8; ffn_compiled.scratchpad_bytes];
         unsafe {
             ffn_compiled.execute(
@@ -1297,16 +1297,18 @@ pub(crate) fn execute_moe_ffn_jit(
                 std::ptr::null(),
                 std::ptr::null(),
                 1, seq_len,
-                shared_out.as_mut_ptr() as *mut u8,
+                shared_out.as_bytes_mut().as_mut_ptr(),
                 scratch.as_mut_ptr(),
             );
         }
+        let out_f32 = output.as_f32_mut();
+        let shared_f32 = shared_out.as_f32();
         for i in 0..seq_len * hidden {
-            output[i] += shared_out[i];
+            out_f32[i] += shared_f32[i];
         }
     }
 
-    Ok(output)
+    Ok(output.to_f32_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -1715,7 +1717,7 @@ pub(crate) fn jit_l2_normalize(
         compiler.compile_graph(&graph).map_err(|e| e.to_string())
     })?;
 
-    let mut output = vec![0.0f32; seq_len * hidden];
+    let mut output = TypedBuffer::zeros(seq_len * hidden, dtype);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
@@ -1725,11 +1727,11 @@ pub(crate) fn jit_l2_normalize(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_bytes_mut().as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
-    Ok(output)
+    Ok(output.to_f32_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,7 +1820,7 @@ pub(crate) fn jit_mean_pool(
         compiler.compile_graph(&graph).map_err(|e| format!("mean pool JIT failed: {e}"))
     })?;
 
-    let mut output = vec![0.0f32; hidden];
+    let mut output = TypedBuffer::zeros(hidden, dtype);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
@@ -1828,9 +1830,9 @@ pub(crate) fn jit_mean_pool(
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_bytes_mut().as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
-    Ok(output)
+    Ok(output.to_f32_vec())
 }
