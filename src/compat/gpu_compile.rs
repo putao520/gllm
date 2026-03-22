@@ -3886,17 +3886,24 @@ pub(super) fn hip_decoder_forward<E: Element>(
             }
         }
 
+        // Pre-allocate all tensor buffers once outside the layer loop
+        let mut prefill_bufs: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
+        for (idx, meta) in graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let size_bytes = meta.concrete_numel() * elem_bytes;
+            let buf = device.alloc(size_bytes)
+                .map_err(|e| BE::Hip(format!("GPU prefill alloc failed for {}: {e}", meta.name)))?;
+            prefill_bufs.push((tid, buf));
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
-            let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
             let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let size_bytes = meta.concrete_numel() * elem_bytes;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Hip(format!("GPU alloc failed for {}: {e}", meta.name)))?;
+                let buf = &mut prefill_bufs[idx].1;
 
                 if meta.name == "input" {
                     let res = unsafe {
@@ -3925,13 +3932,12 @@ pub(super) fn hip_decoder_forward<E: Element>(
                             return Err(BE::Hip(format!("DtoD weight cache prefill {} failed: HIP error {res}", meta.name)));
                         }
                     } else if let Some(data) = layer_weights.get(&meta.name) {
-                        device.htod(data, &mut buf, stream)
+                        device.htod(data, buf, stream)
                             .map_err(|e| BE::Hip(format!("htod {} failed: {e}", meta.name)))?;
                     }
                 }
 
                 tensor_ptrs.insert(tid, buf.as_device_ptr());
-                gpu_buffers.push((tid, buf));
             }
 
             hip_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
@@ -3950,9 +3956,9 @@ pub(super) fn hip_decoder_forward<E: Element>(
                     .map(|(i, _)| TensorId(i as u32))
                     .ok_or_else(|| BE::Hip("v_proj tensor not found in graph".into()))?;
 
-                let k_ptr = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
+                let k_ptr = prefill_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Hip("k_rope buffer not found".into()))?;
-                let v_ptr = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
+                let v_ptr = prefill_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Hip("v_proj buffer not found".into()))?;
 
                 let meta_store = backend.kv_meta.lock()
@@ -3984,7 +3990,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
             // Update gpu_hidden: DtoD from output
             let output_tid = graph.outputs[0];
-            let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
+            let output_ptr = prefill_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip("output buffer not found".into()))?;
             let res = unsafe {
                 (device.driver().hipMemcpyDtoD)(
@@ -4014,9 +4020,17 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, lm_comp_dtype);
     let (_lm_module, lm_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &lm_graph)?;
 
-    let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
-        lm_comp_dtype)?;
+    // Ensure lm_head weight is in HipWeightCache (upload once, DtoD on reuse) — FC-010
+    {
+        let mut wc = backend.weight_cache.lock()
+            .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+        if wc.get_lm_head().is_none() {
+            let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+                &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
+                lm_comp_dtype)?;
+            wc.init_lm_head(&lm_head_w, device, stream)?;
+        }
+    }
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
     let mut lm_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -4029,11 +4043,38 @@ pub(super) fn hip_decoder_forward<E: Element>(
             .map_err(|e| BE::Hip(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
 
         if meta.name == "input" {
-            device.htod(&hidden_state, &mut buf, stream)
-                .map_err(|e| BE::Hip(format!("htod lm_head input: {e}")))?;
+            // DtoD from gpu_hidden (no CPU round-trip) — FC-010
+            if let Some(ref gh) = last_gpu_hidden {
+                let res = unsafe {
+                    (device.driver().hipMemcpyDtoD)(
+                        buf.as_device_ptr() as _,
+                        gh.as_device_ptr() as _,
+                        size_bytes,
+                    )
+                };
+                if res != 0 {
+                    return Err(BE::Other(format!("DtoD gpu_hidden→lm_head input failed: HIP error {res}")));
+                }
+            } else {
+                device.htod(&hidden_state, &mut buf, stream)
+                    .map_err(|e| BE::Hip(format!("htod lm_head input: {e}")))?;
+            }
         } else if meta.name == "w_lm" {
-            device.htod(&lm_head_w, &mut buf, stream)
-                .map_err(|e| BE::Hip(format!("htod lm_head weight: {e}")))?;
+            // DtoD from cached weight — FC-010
+            let wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+            let cached_ptr = wc.get_lm_head()
+                .ok_or_else(|| BE::Hip("lm_head weight not in cache".into()))?;
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    buf.as_device_ptr() as _,
+                    cached_ptr as _,
+                    size_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD lm_head weight cache failed: HIP error {res}")));
+            }
         }
 
         lm_ptrs.insert(tid, buf.as_device_ptr());
@@ -4148,6 +4189,9 @@ pub(super) fn metal_decoder_forward<E: Element>(
             .unwrap_or(false)
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
+
+    // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
+    let mut last_gpu_hidden: Option<gllm_kernels::gpu::metal::MetalBuffer> = None;
 
     if is_incremental {
         // ── Incremental decode path (GPU-native, buffer reuse, hidden stays on GPU) ──
@@ -4429,6 +4473,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
         hidden_state.copy_from_slice(&output_host);
+        last_gpu_hidden = Some(gpu_hidden);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -4554,6 +4599,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
             hidden_state.copy_from_slice(&output_host);
         }
+        last_gpu_hidden = Some(gpu_hidden);
     }
 
     // ── lm_head projection (GPU) ──
