@@ -2,6 +2,7 @@ use super::backend_trait::{self, Backend};
 use super::cpu_backend::CpuBackend;
 use super::Element;
 use crate::engine::executor::BackendError as BE;
+use gllm_kernels::types::DType;
 
 /// Reinterpret a slice of Element as &[f32]. Only valid when E is f32.
 pub(crate) fn as_f32_slice<E: Element>(data: &[E]) -> &[f32] {
@@ -235,6 +236,7 @@ pub(crate) fn quantized_linear<E: Element>(
     out_dim: usize,
     in_dim: usize,
     transpose_weights: bool,
+    dtype: DType,
 ) -> Result<(), BE> {
     match weight {
         WeightData::Quantized { data, quant_type, out_dim: w_out, in_dim: w_in } => {
@@ -283,7 +285,7 @@ pub(crate) fn quantized_linear<E: Element>(
             };
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
-                super::jit_helpers::jit_gemm(input, &w, output, seq_len, out_dim, in_dim, gllm_kernels::types::DType::F32)
+                super::jit_helpers::jit_gemm(input, &w, output, seq_len, out_dim, in_dim, dtype)
                     .map_err(|e| BE::Other(format!("JIT GEMM failed: {e}")))?;
             }
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -346,4 +348,99 @@ pub(crate) fn weight_data_to_f32<E: Element>(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ARCH-DTYPE-FULLCHAIN-ORCH: Typed (Vec<u8> + DType) variants
+// ---------------------------------------------------------------------------
+
+/// Convert f32 slice to typed bytes in target dtype.
+pub(crate) fn f32_to_typed_bytes(data: &[f32], dtype: DType) -> Vec<u8> {
+    let eb = dtype.size_bytes();
+    let mut out = vec![0u8; data.len() * eb];
+    match dtype {
+        DType::F32 => {
+            let n = out.len();
+            out.copy_from_slice(unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, n)
+            });
+        }
+        DType::F16 => {
+            for (i, &v) in data.iter().enumerate() {
+                let h = half::f16::from_f32(v);
+                let b = h.to_le_bytes();
+                out[i * 2] = b[0];
+                out[i * 2 + 1] = b[1];
+            }
+        }
+        DType::BF16 => {
+            for (i, &v) in data.iter().enumerate() {
+                let h = half::bf16::from_f32(v);
+                let b = h.to_le_bytes();
+                out[i * 2] = b[0];
+                out[i * 2 + 1] = b[1];
+            }
+        }
+    }
+    out
+}
+
+/// Transpose a row-major matrix stored as typed bytes [rows, cols] → [cols, rows].
+pub(crate) fn transpose_typed(data: &[u8], rows: usize, cols: usize, dtype: DType) -> Vec<u8> {
+    let eb = dtype.size_bytes();
+    assert_eq!(data.len(), rows * cols * eb);
+    let mut out = vec![0u8; data.len()];
+    for r in 0..rows {
+        for c in 0..cols {
+            let src = (r * cols + c) * eb;
+            let dst = (c * rows + r) * eb;
+            out[dst..dst + eb].copy_from_slice(&data[src..src + eb]);
+        }
+    }
+    out
+}
+
+/// Load tensor data in target dtype. Returns (bytes, actual_dtype).
+///
+/// For native f32 tensors: converts to target_dtype.
+/// For quantized tensors: dequantizes to f32, then converts to target_dtype.
+pub(crate) fn get_typed_data<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    backend: &CpuBackend<E>,
+    names: &[impl AsRef<str>],
+    target_dtype: DType,
+) -> Result<Vec<u8>, BE> {
+    let f32_data = get_f32_data(weights, backend, names)?;
+    Ok(f32_to_typed_bytes(&f32_data, target_dtype))
+}
+
+/// Convert WeightData to typed bytes in target dtype.
+///
+/// Quantized weights are dequantized then converted.
+/// F32 weights are converted directly.
+pub(crate) fn weight_data_to_typed<E: Element>(
+    weight: &WeightData,
+    backend: &CpuBackend<E>,
+    transpose_weights: bool,
+    out_dim: usize,
+    in_dim: usize,
+    dtype: DType,
+) -> Result<Vec<u8>, BE> {
+    let f32_data = weight_data_to_f32(weight, backend, transpose_weights, out_dim, in_dim)?;
+    Ok(f32_to_typed_bytes(&f32_data, dtype))
+}
+
+/// Pack typed byte slices into a contiguous buffer (no dtype conversion).
+///
+/// All slices must already be in the correct dtype. This is the typed equivalent
+/// of `pack_weights()` but operates on raw bytes instead of `&[f32]`.
+pub(crate) fn pack_typed_byte_slices(slices: &[&[u8]]) -> Vec<u8> {
+    let total: usize = slices.iter().map(|s| s.len()).sum();
+    let mut buf = vec![0u8; total];
+    let mut off = 0;
+    for s in slices {
+        buf[off..off + s.len()].copy_from_slice(s);
+        off += s.len();
+    }
+    buf
 }

@@ -8,7 +8,7 @@ use super::jit_helpers::{
     build_lm_head_graph, build_moe_pre_attention_graph, build_post_attention_graph,
     computation_dtype, computation_dtype_from_config, kernels_dtype_to_compat,
     execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
-    execute_kv_projection, pack_weights, update_kv_cache_jit, write_kv_to_cache,
+    execute_kv_projection, pack_weights, pack_weights_typed, update_kv_cache_jit, write_kv_to_cache,
     f32_as_bytes, f32_as_bytes_mut, bytes_as_f32,
 };
 use super::types::AttentionGeometry;
@@ -46,20 +46,18 @@ struct MoeDecodeCachedJit {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    dtype_size: usize,
+    dtype: gllm_kernels::types::DType,
 }
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[allow(dead_code)]
 fn compile_moe_decode_jit(
     seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
-    eps: f32, rope_theta: f64, dtype_size: usize,
+    eps: f32, rope_theta: f64, dtype: gllm_kernels::types::DType,
 ) -> Result<MoeDecodeCachedJit, BE> {
     let q_dim = num_heads * head_dim;
 
     let pre_graph = build_moe_pre_attention_graph(
-        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, computation_dtype(dtype_size),
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, dtype,
     );
     let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
     let pre_attn = c1.compile_graph(&pre_graph).map_err(|e| {
@@ -69,7 +67,7 @@ fn compile_moe_decode_jit(
     // O projection Gemm
     let o_gemm = {
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
-        let dt = computation_dtype(dtype_size);
+        let dt = dtype;
         let mut og = CompilerGraph::new();
         let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
         let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
@@ -84,7 +82,7 @@ fn compile_moe_decode_jit(
     };
 
     let norm2_graph = super::jit_helpers::build_final_norm_graph(
-        seq_len, hidden, eps, computation_dtype(dtype_size),
+        seq_len, hidden, eps, dtype,
     );
     let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
     let norm2 = c4.compile_graph(&norm2_graph).map_err(|e| {
@@ -94,7 +92,7 @@ fn compile_moe_decode_jit(
     Ok(MoeDecodeCachedJit {
         pre_attn, o_gemm, norm2,
         gqa_cache: std::collections::HashMap::new(),
-        seq_len, num_heads, num_kv_heads, head_dim, dtype_size,
+        seq_len, num_heads, num_kv_heads, head_dim, dtype,
     })
 }
 
@@ -104,7 +102,7 @@ fn get_or_compile_moe_gqa(jit: &mut MoeDecodeCachedJit, total_seq: usize) -> Res
     if !jit.gqa_cache.contains_key(&total_seq) {
         let graph = super::jit_helpers::build_cached_gqa_graph(
             jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
-            computation_dtype(jit.dtype_size),
+            jit.dtype,
         );
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled = compiler.compile_graph(&graph).map_err(|e| {
@@ -134,7 +132,7 @@ struct DecodeCachedJit {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    dtype_size: usize,
+    dtype: gllm_kernels::types::DType,
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -165,18 +163,18 @@ fn build_q_rope_graph(
 fn compile_decode_jit(
     seq_len: usize,
     hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
-    eps: f32, rope_theta: f64, dtype_size: usize,
+    eps: f32, rope_theta: f64, dtype: gllm_kernels::types::DType,
 ) -> Result<DecodeCachedJit, BE> {
     let q_dim = num_heads * head_dim;
 
-    let q_rope_graph = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, computation_dtype(dtype_size));
+    let q_rope_graph = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, dtype);
     let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
     let q_rope = c1.compile_graph(&q_rope_graph).map_err(|e| {
         BE::Other(format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
     })?;
 
     let norm2_graph = super::jit_helpers::build_final_norm_graph(
-        seq_len, hidden, eps, computation_dtype(dtype_size),
+        seq_len, hidden, eps, dtype,
     );
     let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
     let norm2 = c3.compile_graph(&norm2_graph).map_err(|e| {
@@ -186,7 +184,7 @@ fn compile_decode_jit(
     Ok(DecodeCachedJit {
         q_rope, norm2,
         gqa_cache: std::collections::HashMap::new(),
-        seq_len, num_heads, num_kv_heads, head_dim, dtype_size,
+        seq_len, num_heads, num_kv_heads, head_dim, dtype,
     })
 }
 
@@ -198,7 +196,7 @@ fn get_or_compile_gqa(jit: &mut DecodeCachedJit, total_seq: usize) -> Result<&gl
     if !jit.gqa_cache.contains_key(&total_seq) {
         let graph = super::jit_helpers::build_cached_gqa_graph(
             jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
-            computation_dtype(jit.dtype_size),
+            jit.dtype,
         );
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled = compiler.compile_graph(&graph).map_err(|e| {
@@ -252,7 +250,7 @@ fn quantized_incremental_decode_layer<E: Element>(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let q_w_f32 = weight_data_to_f32(q_w, backend, transpose_weights, geom.q_dim, hidden)?;
-        let weights_buf = pack_weights(&[rn1_w, &q_w_f32]);
+        let weights_buf = pack_weights_typed(&[rn1_w, &q_w_f32], dtype);
         let mut scratchpad = vec![0u8; jit.q_rope.scratchpad_bytes];
         unsafe {
             jit.q_rope.execute(
@@ -298,7 +296,7 @@ fn quantized_incremental_decode_layer<E: Element>(
 
     // O projection (quantized) + residual
     let mut o_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(backend, &attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim, transpose_weights)?;
+    quantized_linear(backend, &attn_out, o_w, &mut o_out, seq_len, hidden, geom.q_dim, transpose_weights, dtype)?;
     let mut resid1 = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -321,9 +319,9 @@ fn quantized_incremental_decode_layer<E: Element>(
         );
     }
     let mut gate_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights)?;
+    quantized_linear(backend, &normed2, gate_w, &mut gate_out, seq_len, inter, hidden, transpose_weights, dtype)?;
     let mut up_out = vec![0.0f32; seq_len * inter];
-    quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights)?;
+    quantized_linear(backend, &normed2, up_w, &mut up_out, seq_len, inter, hidden, transpose_weights, dtype)?;
     let mut swiglu_out = vec![0.0f32; seq_len * inter];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -339,7 +337,7 @@ fn quantized_incremental_decode_layer<E: Element>(
         return Err(BE::Other("SwiGLU JIT requires x86_64 or aarch64".to_string()));
     }
     let mut down_out = vec![0.0f32; seq_len * hidden];
-    quantized_linear(backend, &swiglu_out, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights)?;
+    quantized_linear(backend, &swiglu_out, down_w, &mut down_out, seq_len, hidden, inter, transpose_weights, dtype)?;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -751,7 +749,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     norm2: clone_arc(l1.norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: norm2".into()))?)?,
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
-                    dtype_size: config.dtype_size,
+                    dtype: computation_dtype_from_config(config),
                 }
             };
 
@@ -775,7 +773,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     norm2: clone_arc(l1.moe_norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_norm2".into()))?)?,
                     gqa_cache,
                     seq_len, num_heads, num_kv_heads, head_dim,
-                    dtype_size: config.dtype_size,
+                    dtype: computation_dtype_from_config(config),
                 })
             } else {
                 None
@@ -880,7 +878,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         };
 
                         // Step 1: Pre-attention (pre-compiled)
-                        let weights_buf = pack_weights(&[&rn1_w, &q_w_f32, &k_w_f32, &v_w_f32]);
+                        let weights_buf = pack_weights_typed(&[&rn1_w, &q_w_f32, &k_w_f32, &v_w_f32], computation_dtype_from_config(config));
                         let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
                         let mut scratchpad = vec![0u8; moe_c.pre_attn.scratchpad_bytes];
                         unsafe {
@@ -909,7 +907,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         // Step 3: O projection (pre-compiled) + residual + RmsNorm2 (pre-compiled)
                         let mut o_out = vec![0.0f32; seq_len * hidden];
                         {
-                            let o_weights = pack_weights(&[&o_w_f32]);
+                            let o_weights = pack_weights_typed(&[&o_w_f32], computation_dtype_from_config(config));
                             let mut o_scratch = vec![0u8; moe_c.o_gemm.scratchpad_bytes];
                             unsafe {
                                 moe_c.o_gemm.execute(
@@ -1110,7 +1108,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         BE::Other(format!("MoE pre-attention JIT failed: {e}"))
                     })?;
 
-                    let weights_buf = pack_weights(&[&rn1_w, &q_w, &k_w, &v_w]);
+                    let weights_buf = pack_weights_typed(&[&rn1_w, &q_w, &k_w, &v_w], computation_dtype_from_config(config));
                     let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
                     let mut scratchpad = vec![0u8; pre_compiled.scratchpad_bytes];
                     unsafe {
@@ -1159,7 +1157,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         let a_compiled = ac.compile_graph(&ag).map_err(|e| {
                             BE::Other(format!("MoE prefill MHA JIT failed: {e}"))
                         })?;
-                        let attn_weights = pack_weights(&[&k_rope, &v_proj]);
+                        let attn_weights = pack_weights_typed(&[&k_rope, &v_proj], computation_dtype_from_config(config));
                         let mut attn_result = vec![0.0f32; seq_len * geom.q_dim];
                         let mut attn_scratch = vec![0u8; a_compiled.scratchpad_bytes];
                         unsafe {
@@ -1187,7 +1185,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         BE::Other(format!("MoE post-attention JIT failed: {e}"))
                     })?;
 
-                    let post_weights = pack_weights(&[&o_w, &rn2_w]);
+                    let post_weights = pack_weights_typed(&[&o_w, &rn2_w], computation_dtype_from_config(config));
                     // Post-attention needs: attn_out as input, o_w + residual_in(hidden_state) + rn2_w as weights
                     // But the graph expects 4 inputs: attn_out, w_o, residual_in, rn2_w
                     // We pack w_o and rn2_w as weights, and pass attn_out + hidden_state via input/kv ptrs
@@ -1223,7 +1221,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         let o_compiled = oc.compile_graph(&og).map_err(|e| {
                             BE::Other(format!("MoE prefill O Gemm JIT failed: {e}"))
                         })?;
-                        let o_weights = pack_weights(&[&o_w]);
+                        let o_weights = pack_weights_typed(&[&o_w], computation_dtype_from_config(config));
                         let mut o_scratch = vec![0u8; o_compiled.scratchpad_bytes];
                         unsafe {
                             o_compiled.execute(

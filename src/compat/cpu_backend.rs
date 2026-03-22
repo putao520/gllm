@@ -38,11 +38,17 @@ pub(crate) struct KvCacheBuffer {
     pub seq_len: usize,
     /// Bytes per element (4 for F32, 2 for F16/BF16)
     pub elem_bytes: usize,
+    /// Cache dtype for F16/BF16 distinction (ARCH-DTYPE-FULLCHAIN-ORCH)
+    pub cache_dtype: gllm_kernels::types::DType,
 }
 
 impl KvCacheBuffer {
     fn new(config: &KvCacheConfig) -> Self {
         let elem_bytes = config.dtype_size.max(1);
+        let cache_dtype = match elem_bytes {
+            2 => gllm_kernels::types::DType::F16, // F16 default for 2-byte; callers can override via set_cache_dtype
+            _ => gllm_kernels::types::DType::F32,
+        };
         let total_bytes = config.num_layers * config.num_heads * config.max_seq_len * config.head_dim * elem_bytes;
         Self {
             k: vec![0u8; total_bytes],
@@ -54,6 +60,7 @@ impl KvCacheBuffer {
             page_size: config.page_size,
             seq_len: 0,
             elem_bytes,
+            cache_dtype,
         }
     }
 

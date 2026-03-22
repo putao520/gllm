@@ -8,6 +8,85 @@ use super::Element;
 use crate::engine::executor::{BackendError as BE, KvCacheHandle};
 use gllm_kernels::types::DType;
 
+// ---------------------------------------------------------------------------
+// ARCH-DTYPE-FULLCHAIN-ORCH: TypedBuffer — Vec<u8> + DType wrapper
+// ---------------------------------------------------------------------------
+
+/// A buffer of typed elements stored as raw bytes.
+/// Replaces `Vec<f32>` in forward pass for dtype-agnostic computation.
+pub(crate) struct TypedBuffer {
+    pub data: Vec<u8>,
+    pub dtype: DType,
+    /// Number of logical elements (not bytes).
+    pub len: usize,
+}
+
+impl TypedBuffer {
+    /// Allocate a zero-initialized buffer for `len` elements of `dtype`.
+    pub fn zeros(len: usize, dtype: DType) -> Self {
+        Self {
+            data: vec![0u8; len * dtype.size_bytes()],
+            dtype,
+            len,
+        }
+    }
+
+    /// Raw byte slice.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] { &self.data }
+
+    /// Mutable raw byte slice.
+    #[inline]
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] { &mut self.data }
+
+    /// Byte length.
+    #[inline]
+    pub fn byte_len(&self) -> usize { self.data.len() }
+
+    /// Reinterpret as `&[f32]`. Panics if dtype != F32.
+    pub fn as_f32(&self) -> &[f32] {
+        assert_eq!(self.dtype, DType::F32, "as_f32 called on non-F32 TypedBuffer");
+        bytes_as_f32(&self.data)
+    }
+
+    /// Reinterpret as `&mut [f32]`. Panics if dtype != F32.
+    pub fn as_f32_mut(&mut self) -> &mut [f32] {
+        assert_eq!(self.dtype, DType::F32, "as_f32_mut called on non-F32 TypedBuffer");
+        let len = self.data.len() / 4;
+        unsafe { std::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut f32, len) }
+    }
+
+    /// Convert to Vec<f32>. Zero-copy for F32, element-wise conversion for F16/BF16.
+    pub fn to_f32_vec(&self) -> Vec<f32> {
+        typed_bytes_to_f32(&self.data, self.dtype)
+    }
+
+    /// Write f32 data into this buffer, converting to the buffer's dtype.
+    pub fn copy_from_f32(&mut self, src: &[f32]) {
+        assert_eq!(src.len(), self.len, "copy_from_f32: length mismatch");
+        let converted = super::weight_helpers::f32_to_typed_bytes(src, self.dtype);
+        self.data.copy_from_slice(&converted);
+    }
+
+    /// Create from existing f32 slice, converting to target dtype.
+    pub fn from_f32_slice(src: &[f32], dtype: DType) -> Self {
+        let data = super::weight_helpers::f32_to_typed_bytes(src, dtype);
+        Self { data, dtype, len: src.len() }
+    }
+
+    /// Create from raw bytes (no conversion). Caller must ensure bytes match dtype.
+    pub fn from_raw(data: Vec<u8>, dtype: DType) -> Self {
+        let len = data.len() / dtype.size_bytes();
+        Self { data, dtype, len }
+    }
+
+    /// Copy bytes from another TypedBuffer or byte slice into this buffer.
+    pub fn copy_from_bytes(&mut self, src: &[u8]) {
+        assert_eq!(src.len(), self.data.len(), "copy_from_bytes: length mismatch");
+        self.data.copy_from_slice(src);
+    }
+}
+
 /// Zero-copy reinterpret `&[f32]` as `&[u8]`.
 #[inline]
 pub(crate) fn f32_as_bytes(s: &[f32]) -> &[u8] {
@@ -511,10 +590,21 @@ pub(crate) fn write_kv_to_cache<E: Element>(
                 for d in 0..head_dim {
                     let dst = cache_offset + d * eb;
                     if eb == 2 {
-                        let kh = half::f16::from_f32(k_src[d]).to_le_bytes();
-                        buffer.k[dst..dst + 2].copy_from_slice(&kh);
-                        let vh = half::f16::from_f32(v_src[d]).to_le_bytes();
-                        buffer.v[dst..dst + 2].copy_from_slice(&vh);
+                        // Use cache_dtype to distinguish F16 vs BF16
+                        match buffer.cache_dtype {
+                            DType::BF16 => {
+                                let kh = half::bf16::from_f32(k_src[d]).to_le_bytes();
+                                buffer.k[dst..dst + 2].copy_from_slice(&kh);
+                                let vh = half::bf16::from_f32(v_src[d]).to_le_bytes();
+                                buffer.v[dst..dst + 2].copy_from_slice(&vh);
+                            }
+                            _ => {
+                                let kh = half::f16::from_f32(k_src[d]).to_le_bytes();
+                                buffer.k[dst..dst + 2].copy_from_slice(&kh);
+                                let vh = half::f16::from_f32(v_src[d]).to_le_bytes();
+                                buffer.v[dst..dst + 2].copy_from_slice(&vh);
+                            }
+                        }
                     }
                 }
             }
@@ -527,6 +617,112 @@ pub(crate) fn write_kv_to_cache<E: Element>(
 
     log::debug!(
         "write_kv_to_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
+        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
+    );
+
+    Ok(())
+}
+
+/// Write typed KV data (any dtype) into the KV cache buffer.
+/// ARCH-DTYPE-FULLCHAIN-ORCH: accepts &[u8] + src_dtype instead of &[f32].
+pub(crate) fn write_kv_to_cache_typed<E: Element>(
+    backend: &CpuBackend<E>,
+    handle: KvCacheHandle,
+    layer: usize,
+    k_data: &[u8],
+    v_data: &[u8],
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    src_dtype: DType,
+) -> Result<(), BE> {
+    let kv_dim = num_kv_heads * head_dim;
+    let mut store = backend.kv_store().lock().map_err(|e| {
+        BE::Cpu(format!("KV store lock poisoned: {e}"))
+    })?;
+
+    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
+        BE::Cpu(format!("KV cache handle {} not found", handle.0))
+    })?;
+
+    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
+    let max_seq = buffer.max_seq_len;
+    let cache_eb = buffer.elem_bytes;
+    let src_eb = src_dtype.size_bytes();
+
+    if write_start + seq_len > max_seq {
+        return Err(BE::Cpu(format!(
+            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
+        )));
+    }
+
+    for h in 0..num_kv_heads {
+        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
+        for s in 0..seq_len {
+            let cache_offset = (layer_head_base + (write_start + s) * head_dim) * cache_eb;
+            let proj_offset = (s * kv_dim + h * head_dim) * src_eb;
+
+            if cache_eb == src_eb {
+                // Same dtype: direct byte copy
+                buffer.k[cache_offset..cache_offset + head_dim * cache_eb]
+                    .copy_from_slice(&k_data[proj_offset..proj_offset + head_dim * src_eb]);
+                buffer.v[cache_offset..cache_offset + head_dim * cache_eb]
+                    .copy_from_slice(&v_data[proj_offset..proj_offset + head_dim * src_eb]);
+            } else {
+                // Cross-dtype: convert element by element via f32 intermediate
+                for d in 0..head_dim {
+                    let s_off = proj_offset + d * src_eb;
+                    let d_off = cache_offset + d * cache_eb;
+                    // Read source element as f32
+                    let val = match src_dtype {
+                        DType::F32 => f32::from_le_bytes([
+                            k_data[s_off], k_data[s_off+1], k_data[s_off+2], k_data[s_off+3]
+                        ]),
+                        DType::F16 => half::f16::from_le_bytes([
+                            k_data[s_off], k_data[s_off+1]
+                        ]).to_f32(),
+                        DType::BF16 => half::bf16::from_le_bytes([
+                            k_data[s_off], k_data[s_off+1]
+                        ]).to_f32(),
+                    };
+                    let v_val = match src_dtype {
+                        DType::F32 => f32::from_le_bytes([
+                            v_data[s_off], v_data[s_off+1], v_data[s_off+2], v_data[s_off+3]
+                        ]),
+                        DType::F16 => half::f16::from_le_bytes([
+                            v_data[s_off], v_data[s_off+1]
+                        ]).to_f32(),
+                        DType::BF16 => half::bf16::from_le_bytes([
+                            v_data[s_off], v_data[s_off+1]
+                        ]).to_f32(),
+                    };
+                    // Write to cache in cache dtype
+                    match cache_eb {
+                        4 => {
+                            buffer.k[d_off..d_off+4].copy_from_slice(&val.to_le_bytes());
+                            buffer.v[d_off..d_off+4].copy_from_slice(&v_val.to_le_bytes());
+                        }
+                        2 => {
+                            let kh = half::f16::from_f32(val).to_le_bytes();
+                            buffer.k[d_off..d_off+2].copy_from_slice(&kh);
+                            let vh = half::f16::from_f32(v_val).to_le_bytes();
+                            buffer.v[d_off..d_off+2].copy_from_slice(&vh);
+                        }
+                        _ => {
+                            return Err(BE::Cpu(format!("unsupported cache elem_bytes: {cache_eb}")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if layer == 0 {
+        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
+    }
+
+    log::debug!(
+        "write_kv_to_cache_typed: layer={layer}, wrote {seq_len} tokens at pos {write_start}, src_dtype={src_dtype:?}, total_seq={}",
         if layer == 0 { write_start + seq_len } else { buffer.seq_len }
     );
 
@@ -897,8 +1093,8 @@ pub(crate) fn execute_cached_gqa(
     let mut output = vec![0.0f32; out_size];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
-    // KV cache is activation data (F32 in host memory)
-    let weights_buf = pack_weights(&[k_cache, v_cache]);
+    // KV cache is activation data — pack at computation dtype
+    let weights_buf = pack_weights_typed(&[k_cache, v_cache], dtype);
 
     unsafe {
         compiled.execute(
@@ -1070,8 +1266,8 @@ pub(crate) fn execute_moe_ffn_jit(
     let indices_f32: Vec<f32> = local_indices.iter().map(|&i| f32::from_bits(i as u32)).collect();
 
     // Pack: expert_outputs (input), indices + weights (weights)
-    let combine_input = pack_weights(&[&expert_flat]);
-    let combine_weights = pack_weights(&[&indices_f32, &weights]);
+    let combine_input = pack_weights_typed(&[&expert_flat], dtype);
+    let combine_weights = pack_weights_typed(&[&indices_f32, &weights], dtype);
     let mut output = vec![0.0f32; seq_len * hidden];
     let mut combine_scratch = vec![0u8; combine_compiled.scratchpad_bytes];
 

@@ -656,7 +656,7 @@ fn build_kv_scatter_graph(
     use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = match dtype_size { 2 => DType::F16, _ => DType::F32 };
+    let dt = match dtype_size { 2 => DType::F16, _ => DType::F32 }; // ARCH-DTYPE-FULLCHAIN-ORCH: BF16 distinction requires caller to pass DType directly; tracked for future migration
     let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], dt);
     let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], dt);
     // kv_cache is an opaque byte buffer — represent as 1-element placeholder
