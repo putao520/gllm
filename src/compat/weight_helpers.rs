@@ -272,10 +272,10 @@ pub(crate) fn quantized_linear<E: Element>(
             Ok(())
         }
         WeightData::F32(w_data) => {
-            let w = if transpose_weights {
-                transpose_f32(w_data, out_dim, in_dim)
+            let w: std::borrow::Cow<'_, [f32]> = if transpose_weights {
+                std::borrow::Cow::Owned(transpose_f32(w_data, out_dim, in_dim))
             } else {
-                w_data.clone()
+                std::borrow::Cow::Borrowed(w_data)
             };
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {

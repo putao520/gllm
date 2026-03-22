@@ -1621,11 +1621,10 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     let sm_version = backend.sm_version();
 
     // SM < 70: GPU kernel_builder emits C-like code for non-GEMM ops (LayerNorm, MHA, Softmax)
-    // which is invalid PTX. Fall back to CPU path via OOM error signal.
+    // which is invalid PTX. Return explicit capability error — do NOT disguise as OOM.
     if sm_version < 70 {
         return Err(BE::Cuda(format!(
-            "GPU forward requires SM >= 70 for full kernel support (got SM {}). \
-             Falling back to CPU. alloc failed",
+            "GPU BERT forward requires SM >= 70 for full kernel support (got SM {})",
             sm_version
         )));
     }
@@ -1779,11 +1778,10 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let sm_version = backend.sm_version();
 
     // SM < 70: GPU kernel_builder emits C-like code for non-GEMM ops (RmsNorm, MHA, SwiGLU)
-    // which is invalid PTX. Fall back to CPU path via OOM error signal.
+    // which is invalid PTX. Return explicit capability error — do NOT disguise as OOM.
     if sm_version < 70 {
         return Err(BE::Cuda(format!(
-            "GPU forward requires SM >= 70 for full kernel support (got SM {}). \
-             Falling back to CPU. alloc failed",
+            "GPU decoder forward requires SM >= 70 for full kernel support (got SM {})",
             sm_version
         )));
     }
@@ -1892,6 +1890,13 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         // hidden_state is f32 from embedding lookup; GPU buffers use comp_dtype
         let hidden_bytes = seq_len * hidden * elem_bytes;
         let attn_out_bytes = seq_len * q_dim * elem_bytes;
+
+        // Upload page_table once before layer loop (immutable during forward)
+        let paged_pt_buf = if let Some((_, ref page_table)) = paged_meta {
+            Some(gpu_upload_page_table(device, stream, page_table)?)
+        } else {
+            None
+        };
 
         // hidden_state GPU buffer — stays on GPU across layers
         let mut gpu_hidden = device.alloc(hidden_bytes)
@@ -2020,14 +2025,14 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 .ok_or_else(|| BE::Cuda(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
 
             let mut attn_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
-            if let Some((ref paged_meta, ref page_table)) = paged_meta {
-                // Paged attention: upload page table, pass pool pointer
-                let pt_buf = gpu_upload_page_table(device, stream, page_table)?;
+            if let Some((ref paged_meta, _)) = paged_meta {
+                // Paged attention: reuse pre-uploaded page table
+                let pt_ptr = paged_pt_buf.as_ref().unwrap().as_device_ptr();
                 for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
                     let tid = TensorId(idx as u32);
                     match tmeta.name.as_str() {
                         "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
-                        "page_table" => { attn_ptrs.insert(tid, pt_buf.as_device_ptr()); }
+                        "page_table" => { attn_ptrs.insert(tid, pt_ptr); }
                         "kv_cache" => { attn_ptrs.insert(tid, paged_meta.pool_ptr); }
                         "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
                         _ => {}
@@ -3552,6 +3557,13 @@ pub(super) fn hip_decoder_forward<E: Element>(
         let hidden_bytes = seq_len * hidden * elem_bytes;
         let attn_out_bytes = seq_len * q_dim * elem_bytes;
 
+        // Upload page_table once before layer loop (immutable during forward)
+        let paged_pt_buf_hip = if let Some((_, ref page_table)) = paged_meta {
+            Some(gpu_upload_page_table_hip(device, stream, page_table)?)
+        } else {
+            None
+        };
+
         let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Hip(format!("GPU alloc gpu_hidden failed: {e}")))?;
         {
@@ -3670,13 +3682,13 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 .ok_or_else(|| BE::Hip(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
 
             let mut attn_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
-            if let Some((ref paged_meta, ref page_table)) = paged_meta {
-                let pt_buf = gpu_upload_page_table_hip(device, stream, page_table)?;
+            if let Some((ref paged_meta, _)) = paged_meta {
+                let pt_ptr = paged_pt_buf_hip.as_ref().unwrap().as_device_ptr();
                 for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
                     let tid = TensorId(idx as u32);
                     match tmeta.name.as_str() {
                         "q_rope" => { attn_ptrs.insert(tid, q_ptr); }
-                        "page_table" => { attn_ptrs.insert(tid, pt_buf.as_device_ptr()); }
+                        "page_table" => { attn_ptrs.insert(tid, pt_ptr); }
                         "kv_cache" => { attn_ptrs.insert(tid, paged_meta.pool_ptr); }
                         "attn_out" => { attn_ptrs.insert(tid, attn_out_buf.as_device_ptr()); }
                         _ => {}
