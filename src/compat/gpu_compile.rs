@@ -19,10 +19,6 @@ use crate::engine::executor::{
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::scheduler::types::{PageId, PageState, StorageKey};
 
-/// Bytes per f32 element — used for GPU buffer sizing of activations,
-/// intermediates, and logits (which are always F32 accumulator precision).
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-const F32_BYTES: usize = std::mem::size_of::<f32>();
 
 // ---------------------------------------------------------------------------
 // GPU KV cache metadata for swap support
@@ -246,6 +242,120 @@ impl GpuWeightCache {
             self._buffers.push(layer_bufs);
         }
 
+        self.initialized = true;
+        Ok(())
+    }
+}
+
+/// GPU 权重常驻缓存 (HIP)。
+/// 首次 incremental forward 时一次性上传所有层权重到 GPU，后续 step DtoD 复制。
+#[cfg(feature = "hip")]
+pub(super) struct HipWeightCache {
+    layers: Vec<std::collections::HashMap<String, u64>>,
+    pub total_bytes: usize,
+    initialized: bool,
+    _buffers: Vec<Vec<gllm_kernels::gpu::hip::HipBuffer>>,
+}
+
+#[cfg(feature = "hip")]
+impl HipWeightCache {
+    pub fn new() -> Self {
+        Self { layers: Vec::new(), total_bytes: 0, initialized: false, _buffers: Vec::new() }
+    }
+
+    pub fn is_initialized(&self) -> bool { self.initialized }
+
+    pub fn get(&self, layer: usize, name: &str) -> Option<u64> {
+        self.layers.get(layer)?.get(name).copied()
+    }
+
+    pub fn init(
+        &mut self,
+        all_layer_weights: &[std::collections::HashMap<String, Vec<u8>>],
+        device: &gllm_kernels::gpu::hip::HipDevice,
+        stream: &gllm_kernels::gpu::hip::HipGpuStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        self.layers = Vec::with_capacity(all_layer_weights.len());
+        self._buffers = Vec::with_capacity(all_layer_weights.len());
+        for layer_weights in all_layer_weights {
+            let mut layer_map = std::collections::HashMap::new();
+            let mut layer_bufs = Vec::new();
+            for (name, data) in layer_weights {
+                let mut buf = device.alloc(data.len())
+                    .map_err(|e| BE::Hip(format!("weight cache alloc {name}: {e}")))?;
+                device.htod(data, &mut buf, stream)
+                    .map_err(|e| BE::Hip(format!("weight cache htod {name}: {e}")))?;
+                layer_map.insert(name.clone(), buf.as_device_ptr());
+                self.total_bytes += data.len();
+                layer_bufs.push(buf);
+            }
+            self.layers.push(layer_map);
+            self._buffers.push(layer_bufs);
+        }
+        self.initialized = true;
+        Ok(())
+    }
+}
+
+/// GPU 权重常驻缓存 (Metal)。
+/// 首次 incremental forward 时一次性上传所有层权重到 GPU，后续 step DtoD 复制。
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub(super) struct MetalWeightCache {
+    layers: Vec<std::collections::HashMap<String, u64>>,
+    pub total_bytes: usize,
+    initialized: bool,
+    _buffers: Vec<Vec<gllm_kernels::gpu::metal::MetalBuffer>>,
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl MetalWeightCache {
+    pub fn new() -> Self {
+        Self { layers: Vec::new(), total_bytes: 0, initialized: false, _buffers: Vec::new() }
+    }
+
+    pub fn is_initialized(&self) -> bool { self.initialized }
+
+    pub fn get(&self, layer: usize, name: &str) -> Option<u64> {
+        self.layers.get(layer)?.get(name).copied()
+    }
+
+    /// Get a reference to the cached MetalBuffer for dtod operations.
+    pub fn get_buf(&self, layer: usize, name: &str) -> Option<&gllm_kernels::gpu::metal::MetalBuffer> {
+        let ptr = self.layers.get(layer)?.get(name)?;
+        // Find the buffer in _buffers that matches this ptr
+        for buf in &self._buffers[layer] {
+            if buf.as_device_ptr() == *ptr {
+                return Some(buf);
+            }
+        }
+        None
+    }
+
+    pub fn init(
+        &mut self,
+        all_layer_weights: &[std::collections::HashMap<String, Vec<u8>>],
+        device: &gllm_kernels::gpu::metal::MetalDevice,
+        stream: &gllm_kernels::gpu::metal::MetalStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        self.layers = Vec::with_capacity(all_layer_weights.len());
+        self._buffers = Vec::with_capacity(all_layer_weights.len());
+        for layer_weights in all_layer_weights {
+            let mut layer_map = std::collections::HashMap::new();
+            let mut layer_bufs = Vec::new();
+            for (name, data) in layer_weights {
+                let mut buf = device.alloc(data.len())
+                    .map_err(|e| BE::Metal(format!("weight cache alloc {name}: {e}")))?;
+                device.htod(data, &mut buf, stream)
+                    .map_err(|e| BE::Metal(format!("weight cache htod {name}: {e}")))?;
+                layer_map.insert(name.clone(), buf.as_device_ptr());
+                self.total_bytes += data.len();
+                layer_bufs.push(buf);
+            }
+            self.layers.push(layer_map);
+            self._buffers.push(layer_bufs);
+        }
         self.initialized = true;
         Ok(())
     }
@@ -1540,11 +1650,11 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
 
     // Upload hidden_state to GPU once before layer loop
     let elem_bytes = comp_dtype.size_bytes();
-    let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
-    let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+    let hidden_bytes = seq_len * hidden * elem_bytes;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
         .map_err(|e| BE::Other(format!("GPU alloc gpu_hidden failed: {e}")))?;
     {
-        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+        let bytes = &hidden_state[..hidden_bytes];
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
     }
 
@@ -1574,7 +1684,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
                     (device.driver().cuMemcpyDtoD_v2)(
                         buf.as_device_ptr(),
                         gpu_hidden.as_device_ptr(),
-                        hidden_bytes_f32,
+                        hidden_bytes_typed,
                     )
                 };
                 if res != 0 {
@@ -1601,7 +1711,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
             (device.driver().cuMemcpyDtoD_v2)(
                 gpu_hidden.as_device_ptr(),
                 output_ptr,
-                hidden_bytes_f32,
+                hidden_bytes_typed,
             )
         };
         if res != 0 {
@@ -1609,40 +1719,20 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
         }
     }
 
-    // Download final hidden_state for mean pooling
-    {
-        let mut output_host = vec![0u8; hidden_bytes_f32];
-        device.dtoh(&gpu_hidden, &mut output_host, stream)
-            .map_err(|e| BE::Other(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
-    }
-
-    // ── Mean pooling (GPU) ──
+    // ── Mean pooling (GPU) — gpu_hidden already on device, no CPU round-trip ──
     let pool_graph = build_mean_pool_graph(seq_len, hidden, super::jit_helpers::computation_dtype_from_config(config));
     let (_pool_module, pool_entries) = cuda_compile_graph(
         device, gpu_profile, sm_version, &pool_graph,
     )?;
 
-    // Input buffer
-    let input_bytes = seq_len * hidden * F32_BYTES;
-    let mut gpu_input = device.alloc(input_bytes)
-        .map_err(|e| BE::Other(format!("GPU alloc pool input: {e}")))?;
-    let hs_bytes = unsafe {
-        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, input_bytes)
-    };
-    device.htod(hs_bytes, &mut gpu_input, stream)
-        .map_err(|e| BE::Other(format!("htod pool input: {e}")))?;
-
     // Output buffer
-    let output_bytes = hidden * F32_BYTES;
+    let elem_bytes = comp_dtype.size_bytes();
+    let output_bytes = hidden * elem_bytes;
     let gpu_output = device.alloc(output_bytes)
         .map_err(|e| BE::Other(format!("GPU alloc pool output: {e}")))?;
 
     let mut pool_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
-    pool_ptrs.insert(pool_graph.inputs[0], gpu_input.as_device_ptr());
+    pool_ptrs.insert(pool_graph.inputs[0], gpu_hidden.as_device_ptr());
     pool_ptrs.insert(pool_graph.outputs[0], gpu_output.as_device_ptr());
 
     cuda_launch_graph(device, stream, &pool_entries, &pool_ptrs, &pool_graph)?;
@@ -1652,6 +1742,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     device.dtoh(&gpu_output, &mut pooled_bytes, stream)
         .map_err(|e| BE::Other(format!("dtoh pool output: {e}")))?;
 
+    // Convert to f32 slice without unnecessary to_vec() copy
     let pooled: Vec<f32> = unsafe {
         std::slice::from_raw_parts(pooled_bytes.as_ptr() as *const f32, hidden)
     }.to_vec();
@@ -1709,11 +1800,15 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
     let seq_len = total_tokens;
 
-    // Embedding lookup (CPU)
-    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
-    let vocab = word_emb.len() / hidden;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    // Embedding lookup (CPU, dtype-adaptive)
+    let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let elem_bytes = comp_dtype.size_bytes();
+    let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
+        comp_dtype)?;
+    let hidden_bytes = hidden * elem_bytes;
+    let vocab = word_emb.len() / hidden_bytes;
+    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
     let mut pos = 0;
     for seq in &input.sequences {
         for &tok in &seq.tokens {
@@ -1721,8 +1816,8 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             if v >= vocab {
                 return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
             }
-            hidden_state[pos * hidden..(pos + 1) * hidden]
-                .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
+            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
+                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
             pos += 1;
         }
     }
@@ -1794,15 +1889,14 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         // ── Pre-allocate GPU buffers (reused across all layers) ──
         let elem_bytes = comp_dtype.size_bytes();
         // hidden_state is f32 from embedding lookup; GPU buffers use comp_dtype
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
         let hidden_bytes = seq_len * hidden * elem_bytes;
         let attn_out_bytes = seq_len * q_dim * elem_bytes;
 
         // hidden_state GPU buffer — stays on GPU across layers
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let mut gpu_hidden = device.alloc(hidden_bytes)
             .map_err(|e| BE::Cuda(format!("GPU alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = &hidden_state[..hidden_bytes];
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Cuda(format!("htod initial hidden: {e}")))?;
         }
 
@@ -1857,7 +1951,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                         (device.driver().cuMemcpyDtoD_v2)(
                             buf.as_device_ptr(),
                             gpu_hidden.as_device_ptr(),
-                            hidden_bytes_f32,
+                            hidden_bytes_typed,
                         )
                     };
                     if res != 0 {
@@ -2018,7 +2112,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 (device.driver().cuMemcpyDtoD_v2)(
                     gpu_hidden.as_device_ptr(),
                     output_ptr,
-                    hidden_bytes_f32,
+                    hidden_bytes_typed,
                 )
             };
             if res != 0 {
@@ -2027,13 +2121,10 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         }
 
         // ── Final: download hidden_state from GPU (once, after all layers) ──
-        let mut output_host = vec![0u8; hidden_bytes_f32];
+        let mut output_host = vec![0u8; hidden_bytes_typed];
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
+        hidden_state.copy_from_slice(&output_host);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -2041,12 +2132,12 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         let (_module, kernel_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &graph)?;
 
         // Upload hidden_state to GPU once before layer loop
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
+        let hidden_bytes_typed = seq_len * hidden * elem_bytes;
         let elem_bytes = comp_dtype.size_bytes();
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Cuda(format!("GPU alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr(), hidden_bytes_typed) };
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Cuda(format!("htod initial hidden: {e}")))?;
         }
 
@@ -2075,7 +2166,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                         (device.driver().cuMemcpyDtoD_v2)(
                             buf.as_device_ptr(),
                             gpu_hidden.as_device_ptr(),
-                            hidden_bytes_f32,
+                            hidden_bytes_typed,
                         )
                     };
                     if res != 0 {
@@ -2147,7 +2238,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 (device.driver().cuMemcpyDtoD_v2)(
                     gpu_hidden.as_device_ptr(),
                     output_ptr,
-                    hidden_bytes_f32,
+                    hidden_bytes_typed,
                 )
             };
             if res != 0 {
@@ -2157,22 +2248,22 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
         // Final: download hidden_state from GPU (once)
         {
-            let mut output_host = vec![0u8; hidden_bytes_f32];
+            let mut output_host = vec![0u8; hidden_bytes_typed];
             device.dtoh(&gpu_hidden, &mut output_host, stream)
                 .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-            };
-            hidden_state.copy_from_slice(output_f32);
+            hidden_state.copy_from_slice(&output_host);
         }
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
+    let lm_comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let lm_elem_bytes = lm_comp_dtype.size_bytes();
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, lm_comp_dtype);
     let (_lm_module, lm_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &lm_graph)?;
 
-    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
+    let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
+        lm_comp_dtype)?;
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
     let mut lm_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -2180,21 +2271,15 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
         let n_elements = meta.concrete_numel();
-        let size_bytes = n_elements * F32_BYTES;
+        let size_bytes = n_elements * lm_elem_bytes;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Cuda(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
 
         if meta.name == "input" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&hidden_state, &mut buf, stream)
                 .map_err(|e| BE::Cuda(format!("htod lm_head input: {e}")))?;
         } else if meta.name == "w_lm" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(lm_head_w.as_ptr() as *const u8, lm_head_w.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&lm_head_w, &mut buf, stream)
                 .map_err(|e| BE::Cuda(format!("htod lm_head weight: {e}")))?;
         }
 
@@ -2211,14 +2296,12 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         .find(|(tid, _)| *tid == logits_tid)
         .map(|(_, buf)| buf)
         .ok_or_else(|| BE::Cuda("logits buffer not found".into()))?;
-    let logits_bytes = seq_len * vocab_size * F32_BYTES;
+    let logits_bytes = seq_len * vocab_size * lm_elem_bytes;
     let mut logits_host = vec![0u8; logits_bytes];
     device.dtoh(logits_buf, &mut logits_host, stream)
         .map_err(|e| BE::Cuda(format!("dtoh logits: {e}")))?;
 
-    let logits_f32: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(logits_host.as_ptr() as *const f32, seq_len * vocab_size)
-    }.to_vec();
+    let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
     // Split logits per sequence
     let mut results = Vec::new();
@@ -2471,11 +2554,12 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
         device, gpu_profile, gfx_arch, &graph,
     )?;
 
-    let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
-    let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+    let elem_bytes = comp_dtype.size_bytes();
+    let hidden_bytes = seq_len * hidden * elem_bytes;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
         .map_err(|e| BE::Other(format!("GPU alloc gpu_hidden failed: {e}")))?;
     {
-        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+        let bytes = &hidden_state[..hidden_bytes];
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
     }
 
@@ -2503,7 +2587,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
                     (device.driver().hipMemcpyDtoD)(
                         buf.as_device_ptr() as _,
                         gpu_hidden.as_device_ptr() as _,
-                        hidden_bytes_f32,
+                        hidden_bytes_typed,
                     )
                 };
                 if res != 0 {
@@ -2529,7 +2613,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
             (device.driver().hipMemcpyDtoD)(
                 gpu_hidden.as_device_ptr() as _,
                 output_ptr as _,
-                hidden_bytes_f32,
+                hidden_bytes_typed,
             )
         };
         if res != 0 {
@@ -2537,37 +2621,18 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
         }
     }
 
-    {
-        let mut output_host = vec![0u8; hidden_bytes_f32];
-        device.dtoh(&gpu_hidden, &mut output_host, stream)
-            .map_err(|e| BE::Other(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
-    }
-
-    // Mean pooling (GPU)
+    // ── Mean pooling (GPU) — gpu_hidden already on device, no CPU round-trip ──
     let pool_graph = build_mean_pool_graph(seq_len, hidden, super::jit_helpers::computation_dtype_from_config(config));
     let (_pool_module, pool_entries) = hip_compile_graph(
         device, gpu_profile, gfx_arch, &pool_graph,
     )?;
 
-    let input_bytes = seq_len * hidden * F32_BYTES;
-    let mut gpu_input = device.alloc(input_bytes)
-        .map_err(|e| BE::Other(format!("GPU alloc pool input: {e}")))?;
-    let hs_bytes = unsafe {
-        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, input_bytes)
-    };
-    device.htod(hs_bytes, &mut gpu_input, stream)
-        .map_err(|e| BE::Other(format!("htod pool input: {e}")))?;
-
-    let output_bytes = hidden * F32_BYTES;
+    let output_bytes = hidden * elem_bytes;
     let gpu_output = device.alloc(output_bytes)
         .map_err(|e| BE::Other(format!("GPU alloc pool output: {e}")))?;
 
     let mut pool_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
-    pool_ptrs.insert(pool_graph.inputs[0], gpu_input.as_device_ptr());
+    pool_ptrs.insert(pool_graph.inputs[0], gpu_hidden.as_device_ptr());
     pool_ptrs.insert(pool_graph.outputs[0], gpu_output.as_device_ptr());
 
     hip_launch_graph(device, stream, &pool_entries, &pool_ptrs, &pool_graph)?;
@@ -2577,9 +2642,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     device.dtoh(&gpu_output, &mut pooled_bytes, stream)
         .map_err(|e| BE::Other(format!("dtoh pool output: {e}")))?;
 
-    let pooled: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(pooled_bytes.as_ptr() as *const f32, hidden)
-    }.to_vec();
+    let pooled = super::jit_helpers::typed_bytes_to_f32(&pooled_bytes, comp_dtype);
 
     Ok(pooled)
 }
@@ -2828,11 +2891,12 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     let graph = build_bert_layer_graph(seq_len, hidden, num_heads, head_dim, inter, eps, comp_dtype);
     let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
-    let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
-    let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+    let elem_bytes = comp_dtype.size_bytes();
+    let hidden_bytes = seq_len * hidden * elem_bytes;
+    let mut gpu_hidden = device.alloc(hidden_bytes)
         .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
     {
-        let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+        let bytes = &hidden_state[..hidden_bytes];
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
     }
 
@@ -2877,35 +2941,16 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
             .map_err(|e| BE::Metal(format!("dtod output→gpu_hidden: {e}")))?;
     }
 
-    {
-        let mut output_host = vec![0u8; hidden_bytes_f32];
-        device.dtoh(&gpu_hidden, &mut output_host, stream)
-            .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
-    }
-
-    // Mean pooling
+    // ── Mean pooling (GPU) — gpu_hidden already on device, no CPU round-trip ──
     let pool_graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden, comp_dtype);
     let pool_entries = metal_compile_graph(device, gpu_profile, gpu_family, &pool_graph)?;
 
-    let input_bytes = seq_len * hidden * F32_BYTES;
-    let mut gpu_input = device.alloc(input_bytes)
-        .map_err(|e| BE::Metal(format!("alloc pool input: {e}")))?;
-    let hs_bytes = unsafe {
-        std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, input_bytes)
-    };
-    device.htod(hs_bytes, &mut gpu_input, stream)
-        .map_err(|e| BE::Metal(format!("htod pool input: {e}")))?;
-
-    let gpu_output = device.alloc(hidden * F32_BYTES)
+    let gpu_output = device.alloc(hidden * elem_bytes)
         .map_err(|e| BE::Metal(format!("alloc pool output: {e}")))?;
 
     let mut pool_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
         std::collections::HashMap::new();
-    pool_bufs.insert(pool_graph.inputs[0], gpu_input);
+    pool_bufs.insert(pool_graph.inputs[0], gpu_hidden);
     pool_bufs.insert(pool_graph.outputs[0], gpu_output);
 
     metal_launch_graph(device, stream, &pool_entries, &pool_bufs, &pool_graph)?;
@@ -2913,13 +2958,11 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
     let output_buf = pool_bufs.get(&pool_graph.outputs[0])
         .ok_or_else(|| BE::Metal("pool output buffer not found".into()))?;
-    let mut pooled_bytes = vec![0u8; hidden * F32_BYTES];
+    let mut pooled_bytes = vec![0u8; hidden * elem_bytes];
     device.dtoh(output_buf, &mut pooled_bytes, stream)
         .map_err(|e| BE::Metal(format!("dtoh pool output: {e}")))?;
 
-    let pooled: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(pooled_bytes.as_ptr() as *const f32, hidden)
-    }.to_vec();
+    let pooled = super::jit_helpers::typed_bytes_to_f32(&pooled_bytes, comp_dtype);
 
     Ok(pooled)
 }
@@ -3420,11 +3463,15 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
     let seq_len = total_tokens;
 
-    // Embedding lookup (CPU)
-    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
-    let vocab = word_emb.len() / hidden;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    // Embedding lookup (CPU, dtype-adaptive)
+    let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let elem_bytes = comp_dtype.size_bytes();
+    let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
+        comp_dtype)?;
+    let hidden_bytes = hidden * elem_bytes;
+    let vocab = word_emb.len() / hidden_bytes;
+    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
     let mut pos = 0;
     for seq in &input.sequences {
         for &tok in &seq.tokens {
@@ -3432,8 +3479,8 @@ pub(super) fn hip_decoder_forward<E: Element>(
             if v >= vocab {
                 return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
             }
-            hidden_state[pos * hidden..(pos + 1) * hidden]
-                .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
+            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
+                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
             pos += 1;
         }
     }
@@ -3500,14 +3547,14 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         // ── Pre-allocate GPU buffers (reused across all layers) ──
         let elem_bytes = comp_dtype.size_bytes();
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
+        let hidden_bytes_typed = seq_len * hidden * elem_bytes;
         let hidden_bytes = seq_len * hidden * elem_bytes;
         let attn_out_bytes = seq_len * q_dim * elem_bytes;
 
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Hip(format!("GPU alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr(), hidden_bytes_typed) };
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Hip(format!("htod initial hidden: {e}")))?;
         }
 
@@ -3535,6 +3582,16 @@ pub(super) fn hip_decoder_forward<E: Element>(
             ))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // ── Init HIP weight cache (once, first incremental step) ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[HipWeightCache] initialized: {} bytes", wc.total_bytes);
+            }
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -3548,14 +3605,30 @@ pub(super) fn hip_decoder_forward<E: Element>(
                         (device.driver().hipMemcpyDtoD)(
                             buf.as_device_ptr() as _,
                             gpu_hidden.as_device_ptr() as _,
-                            hidden_bytes_f32,
+                            hidden_bytes_typed,
                         )
                     };
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD hidden→proj input failed: HIP error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, buf, stream).map_err(|e| BE::Hip(format!("htod proj {}: {e}", tmeta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &tmeta.name) {
+                        let copy_bytes = tmeta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().hipMemcpyDtoD)(
+                                buf.as_device_ptr() as _,
+                                cached_ptr as _,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Hip(format!("DtoD weight cache proj {} failed: HIP error {res}", tmeta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, buf, stream).map_err(|e| BE::Hip(format!("htod proj {}: {e}", tmeta.name)))?;
+                    }
                 }
                 proj_ptrs.insert(tid, buf.as_device_ptr());
             }
@@ -3650,8 +3723,24 @@ pub(super) fn hip_decoder_forward<E: Element>(
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD attn_out→post failed: HIP error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, buf, stream).map_err(|e| BE::Hip(format!("htod post {}: {e}", tmeta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &tmeta.name) {
+                        let copy_bytes = tmeta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().hipMemcpyDtoD)(
+                                buf.as_device_ptr() as _,
+                                cached_ptr as _,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Hip(format!("DtoD weight cache post {} failed: HIP error {res}", tmeta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, buf, stream).map_err(|e| BE::Hip(format!("htod post {}: {e}", tmeta.name)))?;
+                    }
                 }
                 post_ptrs.insert(tid, buf.as_device_ptr());
             }
@@ -3666,7 +3755,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 (device.driver().hipMemcpyDtoD)(
                     gpu_hidden.as_device_ptr() as _,
                     output_ptr as _,
-                    hidden_bytes_f32,
+                    hidden_bytes_typed,
                 )
             };
             if res != 0 {
@@ -3675,25 +3764,22 @@ pub(super) fn hip_decoder_forward<E: Element>(
         }
 
         // Final: download hidden_state from GPU (once)
-        let mut output_host = vec![0u8; hidden_bytes_f32];
+        let mut output_host = vec![0u8; hidden_bytes_typed];
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
+        hidden_state.copy_from_slice(&output_host);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
         let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, comp_dtype);
         let (_module, kernel_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &graph)?;
 
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
+        let hidden_bytes_typed = seq_len * hidden * elem_bytes;
         let elem_bytes = comp_dtype.size_bytes();
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Hip(format!("GPU alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr(), hidden_bytes_typed) };
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Hip(format!("htod initial hidden: {e}")))?;
         }
 
@@ -3721,7 +3807,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                         (device.driver().hipMemcpyDtoD)(
                             buf.as_device_ptr() as _,
                             gpu_hidden.as_device_ptr() as _,
-                            hidden_bytes_f32,
+                            hidden_bytes_typed,
                         )
                     };
                     if res != 0 {
@@ -3792,7 +3878,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 (device.driver().hipMemcpyDtoD)(
                     gpu_hidden.as_device_ptr() as _,
                     output_ptr as _,
-                    hidden_bytes_f32,
+                    hidden_bytes_typed,
                 )
             };
             if res != 0 {
@@ -3802,22 +3888,22 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         // Final: download hidden_state from GPU (once)
         {
-            let mut output_host = vec![0u8; hidden_bytes_f32];
+            let mut output_host = vec![0u8; hidden_bytes_typed];
             device.dtoh(&gpu_hidden, &mut output_host, stream)
                 .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-            };
-            hidden_state.copy_from_slice(output_f32);
+            hidden_state.copy_from_slice(&output_host);
         }
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
+    let lm_comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let lm_elem_bytes = lm_comp_dtype.size_bytes();
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, lm_comp_dtype);
     let (_lm_module, lm_entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &lm_graph)?;
 
-    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
+    let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
+        lm_comp_dtype)?;
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
     let mut lm_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -3825,21 +3911,15 @@ pub(super) fn hip_decoder_forward<E: Element>(
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
         let n_elements = meta.concrete_numel();
-        let size_bytes = n_elements * F32_BYTES;
+        let size_bytes = n_elements * lm_elem_bytes;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Hip(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
 
         if meta.name == "input" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&hidden_state, &mut buf, stream)
                 .map_err(|e| BE::Hip(format!("htod lm_head input: {e}")))?;
         } else if meta.name == "w_lm" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(lm_head_w.as_ptr() as *const u8, lm_head_w.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&lm_head_w, &mut buf, stream)
                 .map_err(|e| BE::Hip(format!("htod lm_head weight: {e}")))?;
         }
 
@@ -3856,14 +3936,12 @@ pub(super) fn hip_decoder_forward<E: Element>(
         .find(|(tid, _)| *tid == logits_tid)
         .map(|(_, buf)| buf)
         .ok_or_else(|| BE::Hip("logits buffer not found".into()))?;
-    let logits_bytes = seq_len * vocab_size * F32_BYTES;
+    let logits_bytes = seq_len * vocab_size * lm_elem_bytes;
     let mut logits_host = vec![0u8; logits_bytes];
     device.dtoh(logits_buf, &mut logits_host, stream)
         .map_err(|e| BE::Hip(format!("dtoh logits: {e}")))?;
 
-    let logits_f32: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(logits_host.as_ptr() as *const f32, seq_len * vocab_size)
-    }.to_vec();
+    let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
     // Split logits per sequence
     let mut results = Vec::new();
@@ -3925,11 +4003,15 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
     let seq_len = total_tokens;
 
-    // Embedding lookup (CPU)
-    let word_emb = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")))?;
-    let vocab = word_emb.len() / hidden;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    // Embedding lookup (CPU, dtype-adaptive)
+    let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let elem_bytes = comp_dtype.size_bytes();
+    let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
+        comp_dtype)?;
+    let hidden_bytes = hidden * elem_bytes;
+    let vocab = word_emb.len() / hidden_bytes;
+    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
     let mut pos = 0;
     for seq in &input.sequences {
         for &tok in &seq.tokens {
@@ -3937,8 +4019,8 @@ pub(super) fn metal_decoder_forward<E: Element>(
             if v >= vocab {
                 return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
             }
-            hidden_state[pos * hidden..(pos + 1) * hidden]
-                .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
+            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
+                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
             pos += 1;
         }
     }
@@ -3978,22 +4060,42 @@ pub(super) fn metal_decoder_forward<E: Element>(
         };
         let total_seq = cached_seq_len + seq_len;
 
-        let attn_graph = build_gpu_cached_attention_graph(
-            seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
-        );
+        let use_paged = config.paged_kv_page_table.is_some();
+        let page_size = config.paged_kv_page_size;
+        let attn_graph = if use_paged {
+            build_gpu_paged_attention_graph(
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim, page_size, comp_dtype,
+            )
+        } else {
+            build_gpu_cached_attention_graph(
+                seq_len, total_seq, num_heads, num_kv_heads, head_dim, comp_dtype,
+            )
+        };
         let attn_entries = metal_compile_graph(device, gpu_profile, gpu_family, &attn_graph)?;
+
+        // Paged KV: allocate paged cache (once before layer loop)
+        let paged_meta = if use_paged {
+            let pt = config.paged_kv_page_table.as_ref().unwrap();
+            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+            let meta = metal_alloc_paged_kv_cache(
+                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype_size,
+            )?;
+            Some((meta, pt.clone()))
+        } else {
+            None
+        };
 
         // ── Pre-allocate: hidden_state GPU buffer (stays on GPU across layers) ──
         let elem_bytes = comp_dtype.size_bytes();
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
+        let hidden_bytes_typed = seq_len * hidden * elem_bytes;
         let attn_out_bytes = seq_len * q_dim * elem_bytes;
         let kv_bytes = seq_len * kv_dim * elem_bytes;
         let layer_kv_bytes = num_kv_heads * head_stride;
 
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr(), hidden_bytes_typed) };
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
         }
 
@@ -4003,6 +4105,16 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
             ))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // ── Init Metal weight cache (once, first incremental step) ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Metal(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[MetalWeightCache] initialized: {} bytes", wc.total_bytes);
+            }
+        }
 
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
@@ -4016,18 +4128,24 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 let mut buf = device.alloc(size_bytes)
                     .map_err(|e| BE::Metal(format!("alloc proj {} failed: {e}", tmeta.name)))?;
                 if tmeta.name == "input" {
-                    // DtoD from gpu_hidden via Metal dtod
                     device.dtod(&gpu_hidden, &mut buf, stream)
                         .map_err(|e| BE::Metal(format!("dtod hidden→proj input: {e}")))?;
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, &mut buf, stream).map_err(|e| BE::Metal(format!("htod proj {}: {e}", tmeta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Metal(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_buf) = wc.get_buf(layer, &tmeta.name) {
+                        device.dtod(cached_buf, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("dtod weight cache proj {}: {e}", tmeta.name)))?;
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, &mut buf, stream).map_err(|e| BE::Metal(format!("htod proj {}: {e}", tmeta.name)))?;
+                    }
                 }
                 proj_bufs.insert(tid, buf);
             }
             metal_launch_graph(device, stream, &proj_entries, &proj_bufs, &proj_graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync proj: {e}")))?;
 
-            // ── Write k_rope/v_proj into KV cache (Metal 直写：shared memory 指针，无 dtoh/htod) ──
+            // ── Write k_rope/v_proj into KV cache ──
             let k_tid = proj_graph.outputs[1];
             let v_tid = proj_graph.outputs[2];
 
@@ -4036,11 +4154,19 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let v_buf = proj_bufs.get(&v_tid)
                 .ok_or_else(|| BE::Metal(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
 
-            metal_write_kv_direct(
-                k_buf.as_device_ptr(), v_buf.as_device_ptr(),
-                handle, kv_dim, seq_len, num_kv_heads, head_dim,
-                layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size,
-            )?;
+            if let Some((ref paged_meta, ref page_table)) = paged_meta {
+                metal_write_kv_paged(
+                    k_buf.as_device_ptr(), v_buf.as_device_ptr(),
+                    kv_dim, seq_len, num_kv_heads, head_dim,
+                    paged_meta, layer, page_table, cached_seq_len,
+                )?;
+            } else {
+                metal_write_kv_direct(
+                    k_buf.as_device_ptr(), v_buf.as_device_ptr(),
+                    handle, kv_dim, seq_len, num_kv_heads, head_dim,
+                    layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size,
+                )?;
+            }
 
             if layer == 0 {
                 let mut ms = backend.kv_meta.lock()
@@ -4050,45 +4176,93 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 }
             }
 
-            // ── GPU: cached attention (KV cache layer slice via shared memory) ──
+            // ── GPU: cached attention ──
             let q_tid = proj_graph.outputs[0];
-            let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
-
-            // Metal uses shared memory — read KV cache layer directly via pointer
-            let k_layer_host = unsafe {
-                std::slice::from_raw_parts(k_layer_ptr as *const u8, layer_kv_bytes)
-            }.to_vec();
-            let v_layer_host = unsafe {
-                std::slice::from_raw_parts(v_layer_ptr as *const u8, layer_kv_bytes)
-            }.to_vec();
 
             // Build attention buffers
             let mut attn_metal_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
                 std::collections::HashMap::new();
-            for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
-                let tid = TensorId(idx as u32);
-                let size_bytes = tmeta.concrete_numel() * elem_bytes;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Metal(format!("alloc attn {} failed: {e}", tmeta.name)))?;
-                match tmeta.name.as_str() {
-                    "q_rope" => {
-                        // DtoD from proj q_rope buffer
-                        let q_buf = proj_bufs.get(&q_tid)
-                            .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
-                        device.dtod(q_buf, &mut buf, stream)
-                            .map_err(|e| BE::Metal(format!("dtod q_rope for attn: {e}")))?;
+            if let Some((ref paged_meta, ref page_table)) = paged_meta {
+                // Paged attention: pass pool pointer and page table via shared memory
+                for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                    let tid = TensorId(idx as u32);
+                    let size_bytes = tmeta.concrete_numel() * elem_bytes;
+                    let mut buf = device.alloc(size_bytes)
+                        .map_err(|e| BE::Metal(format!("alloc attn {} failed: {e}", tmeta.name)))?;
+                    match tmeta.name.as_str() {
+                        "q_rope" => {
+                            let q_buf = proj_bufs.get(&q_tid)
+                                .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
+                            device.dtod(q_buf, &mut buf, stream)
+                                .map_err(|e| BE::Metal(format!("dtod q_rope for attn: {e}")))?;
+                        }
+                        "page_table" => {
+                            let pt_bytes = unsafe {
+                                std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+                            };
+                            device.htod(pt_bytes, &mut buf, stream)
+                                .map_err(|e| BE::Metal(format!("htod page_table: {e}")))?;
+                        }
+                        "kv_cache" => {
+                            // placeholder — actual pool pointer passed via raw ptr
+                            // Metal shared memory: set buf to point at pool
+                            // We pass pool_ptr directly by uploading a 1-element placeholder
+                        }
+                        _ => {}
                     }
-                    "k_cache" => {
-                        device.htod(&k_layer_host, &mut buf, stream)
-                            .map_err(|e| BE::Metal(format!("htod k_cache layer: {e}")))?;
-                    }
-                    "v_cache" => {
-                        device.htod(&v_layer_host, &mut buf, stream)
-                            .map_err(|e| BE::Metal(format!("htod v_cache layer: {e}")))?;
-                    }
-                    _ => {} // attn_out — output, no init needed
+                    attn_metal_bufs.insert(tid, buf);
                 }
-                attn_metal_bufs.insert(tid, buf);
+                // Override kv_cache tensor ptr to pool_ptr
+                for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                    if tmeta.name == "kv_cache" {
+                        let tid = TensorId(idx as u32);
+                        // Metal shared memory: pool_ptr is a CPU-accessible pointer
+                        // Replace the allocated buf with one pointing at pool
+                        let pool_bytes = unsafe {
+                            std::slice::from_raw_parts(paged_meta.pool_ptr as *const u8, paged_meta.pool_bytes)
+                        };
+                        let mut pool_buf = device.alloc(paged_meta.pool_bytes)
+                            .map_err(|e| BE::Metal(format!("alloc kv_cache pool buf failed: {e}")))?;
+                        device.htod(pool_bytes, &mut pool_buf, stream)
+                            .map_err(|e| BE::Metal(format!("htod kv_cache pool: {e}")))?;
+                        attn_metal_bufs.insert(tid, pool_buf);
+                        break;
+                    }
+                }
+            } else {
+                let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
+                // Metal uses shared memory — read KV cache layer directly via pointer
+                let k_layer_host = unsafe {
+                    std::slice::from_raw_parts(k_layer_ptr as *const u8, layer_kv_bytes)
+                }.to_vec();
+                let v_layer_host = unsafe {
+                    std::slice::from_raw_parts(v_layer_ptr as *const u8, layer_kv_bytes)
+                }.to_vec();
+
+                for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
+                    let tid = TensorId(idx as u32);
+                    let size_bytes = tmeta.concrete_numel() * elem_bytes;
+                    let mut buf = device.alloc(size_bytes)
+                        .map_err(|e| BE::Metal(format!("alloc attn {} failed: {e}", tmeta.name)))?;
+                    match tmeta.name.as_str() {
+                        "q_rope" => {
+                            let q_buf = proj_bufs.get(&q_tid)
+                                .ok_or_else(|| BE::Metal(format!("proj buffer for q_tid {:?} not found", q_tid)))?;
+                            device.dtod(q_buf, &mut buf, stream)
+                                .map_err(|e| BE::Metal(format!("dtod q_rope for attn: {e}")))?;
+                        }
+                        "k_cache" => {
+                            device.htod(&k_layer_host, &mut buf, stream)
+                                .map_err(|e| BE::Metal(format!("htod k_cache layer: {e}")))?;
+                        }
+                        "v_cache" => {
+                            device.htod(&v_layer_host, &mut buf, stream)
+                                .map_err(|e| BE::Metal(format!("htod v_cache layer: {e}")))?;
+                        }
+                        _ => {}
+                    }
+                    attn_metal_bufs.insert(tid, buf);
+                }
             }
             metal_launch_graph(device, stream, &attn_entries, &attn_metal_bufs, &attn_graph)?;
             device.sync().map_err(|e| BE::Metal(format!("sync attn: {e}")))?;
@@ -4114,8 +4288,15 @@ pub(super) fn metal_decoder_forward<E: Element>(
                     // DtoD from attn_out_buf
                     device.dtod(&attn_out_buf, &mut buf, stream)
                         .map_err(|e| BE::Metal(format!("dtod attn_out→post: {e}")))?;
-                } else if let Some(data) = layer_weights.get(&tmeta.name) {
-                    device.htod(data, &mut buf, stream).map_err(|e| BE::Metal(format!("htod post {}: {e}", tmeta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Metal(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_buf) = wc.get_buf(layer, &tmeta.name) {
+                        device.dtod(cached_buf, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("dtod weight cache post {}: {e}", tmeta.name)))?;
+                    } else if let Some(data) = layer_weights.get(&tmeta.name) {
+                        device.htod(data, &mut buf, stream).map_err(|e| BE::Metal(format!("htod post {}: {e}", tmeta.name)))?;
+                    }
                 }
                 post_bufs.insert(tid, buf);
             }
@@ -4131,13 +4312,10 @@ pub(super) fn metal_decoder_forward<E: Element>(
         }
 
         // Final: download hidden_state from GPU (once)
-        let mut output_host = vec![0u8; hidden_bytes_f32];
+        let mut output_host = vec![0u8; hidden_bytes_typed];
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
-        let output_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-        };
-        hidden_state.copy_from_slice(output_f32);
+        hidden_state.copy_from_slice(&output_host);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -4145,11 +4323,11 @@ pub(super) fn metal_decoder_forward<E: Element>(
         let graph = build_decoder_layer_graph(seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, comp_dtype);
         let kernel_entries = metal_compile_graph(device, gpu_profile, gpu_family, &graph)?;
 
-        let hidden_bytes_f32 = seq_len * hidden * F32_BYTES;
-        let mut gpu_hidden = device.alloc(hidden_bytes_f32)
+        let hidden_bytes_typed = seq_len * hidden * elem_bytes;
+        let mut gpu_hidden = device.alloc(hidden_bytes_typed)
             .map_err(|e| BE::Metal(format!("alloc gpu_hidden failed: {e}")))?;
         {
-            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_bytes_f32) };
+            let bytes = unsafe { std::slice::from_raw_parts(hidden_state.as_ptr(), hidden_bytes_typed) };
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
         }
 
@@ -4241,22 +4419,22 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
         // Final: download hidden_state from GPU (once)
         {
-            let mut output_host = vec![0u8; hidden_bytes_f32];
+            let mut output_host = vec![0u8; hidden_bytes_typed];
             device.dtoh(&gpu_hidden, &mut output_host, stream)
                 .map_err(|e| BE::Metal(format!("dtoh final hidden: {e}")))?;
-            let output_f32: &[f32] = unsafe {
-                std::slice::from_raw_parts(output_host.as_ptr() as *const f32, seq_len * hidden)
-            };
-            hidden_state.copy_from_slice(output_f32);
+            hidden_state.copy_from_slice(&output_host);
         }
     }
 
     // ── lm_head projection (GPU) ──
-    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, super::jit_helpers::computation_dtype_from_config(config));
+    let lm_comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let lm_elem_bytes = lm_comp_dtype.size_bytes();
+    let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, lm_comp_dtype);
     let lm_entries = metal_compile_graph(device, gpu_profile, gpu_family, &lm_graph)?;
 
-    let lm_head_w = super::gpu_helpers::get_f32_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")))?;
+    let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
+        lm_comp_dtype)?;
 
     let mut lm_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
         std::collections::HashMap::new();
@@ -4264,21 +4442,15 @@ pub(super) fn metal_decoder_forward<E: Element>(
     for (idx, meta) in lm_graph.tensors.iter().enumerate() {
         let tid = TensorId(idx as u32);
         let n_elements = meta.concrete_numel();
-        let size_bytes = n_elements * F32_BYTES;
+        let size_bytes = n_elements * lm_elem_bytes;
         let mut buf = device.alloc(size_bytes)
             .map_err(|e| BE::Metal(format!("alloc lm_head {} failed: {e}", meta.name)))?;
 
         if meta.name == "input" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(hidden_state.as_ptr() as *const u8, hidden_state.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&hidden_state, &mut buf, stream)
                 .map_err(|e| BE::Metal(format!("htod lm_head input: {e}")))?;
         } else if meta.name == "w_lm" {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(lm_head_w.as_ptr() as *const u8, lm_head_w.len() * F32_BYTES)
-            };
-            device.htod(bytes, &mut buf, stream)
+            device.htod(&lm_head_w, &mut buf, stream)
                 .map_err(|e| BE::Metal(format!("htod lm_head weight: {e}")))?;
         }
 
@@ -4291,14 +4463,12 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let logits_tid = lm_graph.outputs[0];
     let logits_buf = lm_bufs.get(&logits_tid)
         .ok_or_else(|| BE::Metal("logits buffer not found".into()))?;
-    let logits_bytes = seq_len * vocab_size * F32_BYTES;
+    let logits_bytes = seq_len * vocab_size * lm_elem_bytes;
     let mut logits_host = vec![0u8; logits_bytes];
     device.dtoh(logits_buf, &mut logits_host, stream)
         .map_err(|e| BE::Metal(format!("dtoh logits: {e}")))?;
 
-    let logits_f32: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(logits_host.as_ptr() as *const f32, seq_len * vocab_size)
-    }.to_vec();
+    let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
     // Split logits per sequence
     let mut results = Vec::new();

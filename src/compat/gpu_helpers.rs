@@ -363,9 +363,7 @@ pub(super) fn load_bert_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
     }
     macro_rules! load_bias {
         ($graph_name:expr, $aliases:expr, $size:expr) => {
-            // Bias: get as f32 then convert to target dtype
-            let f32_data = get_bias_data_gpu(weights, $aliases, $size);
-            m.insert($graph_name.to_string(), super::jit_helpers::pack_weights_typed(&[&f32_data], dtype));
+            m.insert($graph_name.to_string(), get_bias_data_gpu_typed(weights, $aliases, $size, dtype));
         };
     }
 
@@ -408,24 +406,34 @@ pub(super) fn load_bert_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
 /// Get bias data (zeros if not found).
 ///
 /// Replaces `get_bias_data_cuda` / `get_bias_data_hip` / `get_bias_data_metal`.
-pub(super) fn get_bias_data_gpu<E: Element, B: Backend<E>>(
+/// Get bias data as raw bytes in the target dtype.
+/// Falls back to zeros if not found.
+pub(super) fn get_bias_data_gpu_typed<E: Element, B: Backend<E>>(
     weights: &dyn backend_trait::TensorLookup<E, B>,
     aliases: &[impl AsRef<str>],
     size: usize,
-) -> Vec<f32> {
+    dtype: DType,
+) -> Vec<u8> {
     for name in aliases {
         if let Some(tensor) = weights.get_tensor(name.as_ref()) {
             let e_slice: &[E] = tensor.as_ref();
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    e_slice.as_ptr() as *const f32,
-                    std::mem::size_of_val(e_slice) / 4,
-                )
+            let storage_bytes = std::mem::size_of_val(e_slice);
+            let storage_elem_bytes = storage_bytes / e_slice.len().max(1);
+            if storage_elem_bytes == dtype.size_bytes() {
+                // Storage matches target dtype — return raw bytes
+                let raw = unsafe {
+                    std::slice::from_raw_parts(e_slice.as_ptr() as *const u8, storage_bytes)
+                };
+                return raw.to_vec();
+            }
+            // Storage differs — convert via f32
+            let f32_slice = unsafe {
+                std::slice::from_raw_parts(e_slice.as_ptr() as *const f32, storage_bytes / 4)
             };
-            return slice.to_vec();
+            return super::jit_helpers::pack_weights_typed(&[f32_slice], dtype);
         }
     }
-    vec![0.0f32; size]
+    vec![0u8; size * dtype.size_bytes()]
 }
 
 /// Check if weights need transposition (SafeTensors stores [out, in]).
@@ -438,26 +446,28 @@ pub(super) fn needs_weight_transpose_gpu<E: Element, B: Backend<E>>(
 }
 
 /// CPU-side token embedding lookup for GPU backends.
-///
-/// Replaces `embed_tokens_cpu` / `embed_tokens_cpu_hip` / `embed_tokens_cpu_metal`.
+/// ARCH-DTYPE-ADAPTIVE: returns raw bytes in comp_dtype, not always f32.
 pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     tokens: &[u32],
     weights: &dyn backend_trait::TensorLookup<E, B>,
     backend: &B,
     config: &crate::engine::executor::GeneratorForwardConfig,
-) -> Result<Vec<f32>, BE> {
+) -> Result<Vec<u8>, BE> {
     let hidden = config.hidden_size;
-    let _eps = config.norm_eps;
+    let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
+    let elem_bytes = comp_dtype.size_bytes();
 
-    // Word embeddings
-    let word_emb = get_f32_data_gpu(
+    // Word embeddings (typed)
+    let word_emb = get_typed_data_gpu(
         weights, backend,
         &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")),
+        comp_dtype,
     )?;
 
     let seq_len = tokens.len();
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
-    let vocab = word_emb.len() / hidden;
+    let hidden_bytes = hidden * elem_bytes;
+    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
+    let vocab = word_emb.len() / hidden_bytes;
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= vocab {
@@ -465,16 +475,17 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
                 "token id {} out of range for word_embeddings (vocab {})", tok, vocab
             )));
         }
-        hidden_state[s * hidden..(s + 1) * hidden]
-            .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
+        hidden_state[s * hidden_bytes..(s + 1) * hidden_bytes]
+            .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
     }
 
-    // Position embeddings
-    let pos_emb = get_f32_data_gpu(
+    // Position embeddings (typed)
+    let pos_emb = get_typed_data_gpu(
         weights, backend,
         &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")),
+        comp_dtype,
     )?;
-    let max_pos = pos_emb.len() / hidden;
+    let max_pos = pos_emb.len() / hidden_bytes;
     for s in 0..seq_len {
         if s >= max_pos {
             return Err(BE::Other(format!(
@@ -484,167 +495,58 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden],
-            super::jit_helpers::computation_dtype_from_config(config),
-        )
-            .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
+        let added = super::jit_helpers::jit_add(
+            &hidden_state, &pos_emb[..seq_len * hidden_bytes], comp_dtype,
+        ).map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
         hidden_state.copy_from_slice(&added);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
 
-    // Token type embeddings (type 0)
-    let tt_emb = get_f32_data_gpu(
+    // Token type embeddings (type 0, typed)
+    let tt_emb = get_typed_data_gpu(
         weights, backend,
         &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")),
+        comp_dtype,
     )?;
-    if tt_emb.len() >= hidden {
-        // Broadcast tt_emb[hidden] across all seq positions → [seq_len, hidden]
-        let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
+    if tt_emb.len() >= hidden_bytes {
+        // Broadcast tt_emb[hidden_bytes] across all seq positions → [seq_len, hidden_bytes]
+        let tt_broadcast: Vec<u8> = tt_emb[..hidden_bytes].iter().cloned().cycle().take(seq_len * hidden_bytes).collect();
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )
-                .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
+            let added = super::jit_helpers::jit_add(
+                &hidden_state, &tt_broadcast, comp_dtype,
+            ).map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
             hidden_state.copy_from_slice(&added);
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
     }
 
-    // Embedding LayerNorm
-    let emb_ln_w = get_f32_data_gpu(
+    // Embedding LayerNorm (typed)
+    let emb_ln_w = get_typed_data_gpu(
         weights, backend,
         &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")),
+        comp_dtype,
     )?;
-    let emb_ln_b = get_bias_data_gpu(
+    let emb_ln_b = get_bias_data_gpu_typed(
         weights,
         &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")),
         hidden,
+        comp_dtype,
     );
     {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            hidden_state = super::jit_helpers::jit_layer_norm(&hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )
-                .map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
+            hidden_state = super::jit_helpers::jit_layer_norm(
+                &hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden, comp_dtype,
+            ).map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         compile_error!("embedding LayerNorm requires JIT support (x86_64 or aarch64)");
     }
 
     Ok(hidden_state)
-}
-
-/// Load decoder layer weights into a HashMap for JIT execution.
-///
-/// Replaces `load_decoder_layer_weights_cuda` / `_hip` / `_metal`.
-pub(super) fn load_decoder_layer_weights_gpu<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    backend: &B,
-    layer: usize,
-    hidden: usize,
-    q_dim: usize,
-    kv_hidden: usize,
-    inter: usize,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_gpu(weights, backend, $aliases)?);
-        };
-    }
-
-    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
-    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
-
-    if needs_weight_transpose_gpu(weights) {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = crate::compat::weight_helpers::transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", q_dim, hidden);
-        t("w_k", kv_hidden, hidden);
-        t("w_v", kv_hidden, hidden);
-        t("w_o", hidden, q_dim);
-        t("w_gate", inter, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
-}
-
-/// Load BERT encoder layer weights into a HashMap for JIT execution.
-///
-/// Replaces `load_bert_layer_weights_cuda` / `_hip` / `_metal`.
-pub(super) fn load_bert_layer_weights_gpu<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    backend: &B,
-    layer: usize,
-    _seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    transpose: bool,
-) -> Result<std::collections::HashMap<String, Vec<f32>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_f32_data_gpu(weights, backend, $aliases)?);
-        };
-    }
-    macro_rules! load_bias {
-        ($graph_name:expr, $aliases:expr, $size:expr) => {
-            m.insert($graph_name.to_string(), get_bias_data_gpu(weights, $aliases, $size));
-        };
-    }
-
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
-    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
-    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
-    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
-    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
-    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
-    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
-    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
-    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
-    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
-    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
-
-    if transpose {
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = crate::compat::weight_helpers::transpose_f32(data, rows, cols);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", hidden, hidden);
-        t("w_k", hidden, hidden);
-        t("w_v", hidden, hidden);
-        t("w_o", hidden, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
 }
 
 // ---------------------------------------------------------------------------

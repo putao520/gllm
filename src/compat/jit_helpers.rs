@@ -8,28 +8,69 @@ use super::Element;
 use crate::engine::executor::{BackendError as BE, KvCacheHandle};
 use gllm_kernels::types::DType;
 
+/// Zero-copy reinterpret `&[f32]` as `&[u8]`.
+#[inline]
+pub(crate) fn f32_as_bytes(s: &[f32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<f32>()) }
+}
+
+/// Zero-copy reinterpret `&[u8]` as `&[f32]`.
+#[inline]
+pub(crate) fn bytes_as_f32(s: &[u8]) -> &[f32] {
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / std::mem::size_of::<f32>()) }
+}
+
+/// Convert typed bytes (F16/BF16/F32) to Vec<f32>.
+/// F32: zero-copy reinterpret. F16/BF16: element-wise conversion.
+pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
+    match dtype {
+        DType::F32 => bytes_as_f32(data).to_vec(),
+        DType::F16 => {
+            data.chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect()
+        }
+        DType::BF16 => {
+            data.chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect()
+        }
+        _ => bytes_as_f32(data).to_vec(),
+    }
+}
+
 /// Convert ModelConfig.dtype_size (bytes per element) to gllm-kernels DType.
 ///
-/// 2-byte storage → F16 (native half-precision JIT path).
+/// 2-byte storage → F16 or BF16 (based on dtype string).
 /// 4-byte storage → F32.
 /// All other sizes → F32 (safe default).
 #[inline]
 pub(crate) fn computation_dtype(dtype_size: usize) -> DType {
     match dtype_size {
-        2 => DType::F16,
+        2 => DType::F16,  // Default to F16 for 2-byte types
         _ => DType::F32,
     }
 }
 
-/// Derive computation DType from a `GeneratorForwardConfig`.
+/// Derive computation DType from a `GeneratorForwardConfig` with BF16 support.
 ///
-/// Returns the model's native dtype — F16/BF16/F32 based on dtype_size.
+/// Returns the model's native dtype — F16/BF16/F32 based on dtype_size and dtype string.
 /// ARCH-DTYPE-ADAPTIVE: 禁止硬编码返回 F32。
 #[inline]
 pub(crate) fn computation_dtype_from_config(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> DType {
-    computation_dtype(config.dtype_size)
+    match config.dtype_size {
+        2 => {
+            // Distinguish F16 vs BF16 using dtype string
+            if config.dtype.to_lowercase().contains("bf16") {
+                DType::BF16
+            } else {
+                DType::F16
+            }
+        }
+        _ => DType::F32,
+    }
 }
 
 /// Convert a `gllm_kernels::types::DType` to the `crate::compat::DType` used in `ModelArchKey`.
@@ -1333,16 +1374,15 @@ pub(crate) fn jit_gemm(
 pub(crate) fn build_layer_norm_graph(
     seq_len: usize,
     hidden: usize,
-    _dtype: DType,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     let mut g = CompilerGraph::new();
-    let ft = DType::F32; // norm tensors always F32
-    let x = g.add_tensor_concrete("x", &[seq_len, hidden], ft);
-    let gamma = g.add_tensor_concrete("gamma", &[hidden], ft);
-    let beta = g.add_tensor_concrete("beta", &[hidden], ft);
+    let x = g.add_tensor_concrete("x", &[seq_len, hidden], dtype);
+    let gamma = g.add_tensor_concrete("gamma", &[hidden], dtype);
+    let beta = g.add_tensor_concrete("beta", &[hidden], dtype);
     g.inputs = vec![x, gamma, beta];
-    let out = g.add_tensor_concrete("out", &[seq_len, hidden], ft);
+    let out = g.add_tensor_concrete("out", &[seq_len, hidden], dtype);
     g.add_op(
         OpKind::LayerNorm { eps: 1e-5 },
         vec![x, gamma, beta], vec![out], "layer_norm",
@@ -1353,15 +1393,16 @@ pub(crate) fn build_layer_norm_graph(
 
 /// Execute JIT LayerNorm with bias over [seq_len, hidden] input.
 /// Uses global_jit_cache to avoid recompilation across calls.
+/// ARCH-DTYPE-ADAPTIVE: all inputs/outputs are raw bytes in the given dtype.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn jit_layer_norm(
-    input: &[f32],
-    gamma: &[f32],
-    beta: &[f32],
+    input: &[u8],
+    gamma: &[u8],
+    beta: &[u8],
     seq_len: usize,
     hidden: usize,
     dtype: DType,
-) -> Result<Vec<f32>, String> {
+) -> Result<Vec<u8>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
 
     let key = JitCacheKey {
@@ -1373,7 +1414,7 @@ pub(crate) fn jit_layer_norm(
             head_dim: 0,
             dtype: kernels_dtype_to_compat(dtype),
         },
-        graph: GraphType::Norm2, // reuse Norm2 slot for LayerNorm
+        graph: GraphType::Norm2,
     };
 
     let compiled = global_jit_cache().get_or_compile(key, || {
@@ -1382,18 +1423,23 @@ pub(crate) fn jit_layer_norm(
         compiler.compile_graph(&graph).map_err(|e| e.to_string())
     })?;
 
-    let mut output = vec![0.0f32; seq_len * hidden];
-    let weights_buf = pack_weights(&[gamma, beta]);
+    let elem_bytes = dtype.size_bytes();
+    let out_bytes = seq_len * hidden * elem_bytes;
+    let mut output = vec![0u8; out_bytes];
+    // Pack gamma + beta as contiguous weight buffer
+    let mut weights_buf = Vec::with_capacity(gamma.len() + beta.len());
+    weights_buf.extend_from_slice(gamma);
+    weights_buf.extend_from_slice(beta);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
-            input.as_ptr() as *const u8,
+            input.as_ptr(),
             weights_buf.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -1477,11 +1523,12 @@ pub(crate) fn jit_l2_normalize(
 
 /// Execute element-wise add via JIT (cached): output = a + b.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(crate) fn jit_add(a: &[f32], b: &[f32], dtype: DType) -> Result<Vec<f32>, String> {
+pub(crate) fn jit_add(a: &[u8], b: &[u8], dtype: DType) -> Result<Vec<u8>, String> {
     use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
 
-    let numel = a.len();
+    let elem_bytes = dtype.size_bytes();
+    let numel = a.len() / elem_bytes;
     let key = JitCacheKey {
         arch: ModelArchKey {
             arch_name: "residual_add".to_string(),
@@ -1496,39 +1543,28 @@ pub(crate) fn jit_add(a: &[f32], b: &[f32], dtype: DType) -> Result<Vec<f32>, St
 
     let compiled = global_jit_cache().get_or_compile(key, || {
         let mut g = CompilerGraph::new();
-        let ft = DType::F32; // residual add operates on F32 activations
-        let x = g.add_tensor_concrete("a", &[numel], ft);
-        let y = g.add_tensor_concrete("b", &[numel], ft);
+        let x = g.add_tensor_concrete("a", &[numel], dtype);
+        let y = g.add_tensor_concrete("b", &[numel], dtype);
         g.inputs = vec![x, y];
-        let out = g.add_tensor_concrete("out", &[numel], ft);
+        let out = g.add_tensor_concrete("out", &[numel], dtype);
         g.add_op(OpKind::Add, vec![x, y], vec![out], "add");
         g.outputs = vec![out];
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         compiler.compile_graph(&g).map_err(|e| format!("residual add JIT failed: {e}"))
     })?;
 
-    // Residual add operates on F32 activation tensors
-    let elem_bytes = std::mem::size_of::<f32>();
-    let a_bytes = numel * elem_bytes;
-    let b_bytes = numel * elem_bytes;
-    let a_buf: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(a.as_ptr() as *const u8, a_bytes).to_vec()
-    };
-    let b_buf: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(b.as_ptr() as *const u8, b_bytes).to_vec()
-    };
-
-    let mut output = vec![0.0f32; numel];
+    let out_bytes = numel * elem_bytes;
+    let mut output = vec![0u8; out_bytes];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
     unsafe {
         compiled.execute(
-            a_buf.as_ptr(),
-            b_buf.as_ptr(),
+            a.as_ptr(),
+            b.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             1, numel,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }

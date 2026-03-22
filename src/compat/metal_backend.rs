@@ -26,6 +26,8 @@ pub struct MetalBackend<E: Element = f32> {
     pub(super) kv_meta: super::gpu_compile::GpuKvMetaStore,
     #[cfg(all(target_os = "macos", feature = "metal"))]
     pub(super) paged_kv_meta: super::gpu_compile::GpuPagedKvMetaStore,
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub(super) weight_cache: std::sync::Mutex<super::gpu_compile::MetalWeightCache>,
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -58,6 +60,8 @@ impl<E: Element> Clone for MetalBackend<E> {
             kv_meta: self.kv_meta.clone(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             paged_kv_meta: self.paged_kv_meta.clone(),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            weight_cache: std::sync::Mutex::new(super::gpu_compile::MetalWeightCache::new()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -106,6 +110,7 @@ impl<E: Element> MetalBackend<E> {
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             paged_kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            weight_cache: std::sync::Mutex::new(super::gpu_compile::MetalWeightCache::new()),
             _marker: std::marker::PhantomData,
         })
     }

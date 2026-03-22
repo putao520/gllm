@@ -334,11 +334,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         }
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            let added = super::jit_helpers::jit_add(&hidden_state, &pos_emb[..seq_len * hidden],
+            let added = super::jit_helpers::jit_add(
+                super::jit_helpers::f32_as_bytes(&hidden_state),
+                super::jit_helpers::f32_as_bytes(&pos_emb[..seq_len * hidden]),
                 super::jit_helpers::computation_dtype_from_config(config),
             )
                 .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(&added);
+            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&added));
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
@@ -354,11 +356,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            let added = super::jit_helpers::jit_add(&hidden_state, &tt_broadcast,
+            let added = super::jit_helpers::jit_add(
+                super::jit_helpers::f32_as_bytes(&hidden_state),
+                super::jit_helpers::f32_as_bytes(&tt_broadcast),
                 super::jit_helpers::computation_dtype_from_config(config),
             )
                 .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(&added);
+            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&added));
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
@@ -377,10 +381,15 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            hidden_state = super::jit_helpers::jit_layer_norm(&hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden,
+            let result = super::jit_helpers::jit_layer_norm(
+                super::jit_helpers::f32_as_bytes(&hidden_state),
+                super::jit_helpers::f32_as_bytes(&emb_ln_w),
+                super::jit_helpers::f32_as_bytes(&emb_ln_b),
+                seq_len, hidden,
                 super::jit_helpers::computation_dtype_from_config(config),
             )
                 .map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
+            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         compile_error!("embedding LayerNorm requires JIT support (x86_64 or aarch64)");

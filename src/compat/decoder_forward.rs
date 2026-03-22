@@ -301,8 +301,10 @@ fn quantized_incremental_decode_layer<E: Element>(
     let mut resid1 = vec![0.0f32; seq_len * hidden];
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        resid1 = super::jit_helpers::jit_add(&hidden_state[..seq_len * hidden], &o_out, dtype)
-            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+        resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
+            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+            super::jit_helpers::f32_as_bytes(&o_out), dtype,
+        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
@@ -332,9 +334,11 @@ fn quantized_incremental_decode_layer<E: Element>(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let result = super::jit_helpers::jit_add(&resid1, &down_out, dtype)
-            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
-        output.copy_from_slice(&result);
+        let result = super::jit_helpers::jit_add(
+            super::jit_helpers::f32_as_bytes(&resid1),
+            super::jit_helpers::f32_as_bytes(&down_out), dtype,
+        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+        output.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
@@ -900,10 +904,11 @@ pub(crate) fn decoder_forward<E: Element>(
                                 );
                             }
                         }
-                        let resid1 = super::jit_helpers::jit_add(
-                            &hidden_state[..seq_len * hidden], &o_out,
+                        let resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
+                            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+                            super::jit_helpers::f32_as_bytes(&o_out),
                             computation_dtype_from_config(config),
-                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
 
                         let mut normed2 = vec![0.0f32; seq_len * hidden];
                         super::jit_helpers::execute_jit_final_norm(
@@ -917,11 +922,12 @@ pub(crate) fn decoder_forward<E: Element>(
                             computation_dtype_from_config(config),
                         )?;
 
-                        let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out,
+                        let layer_out_bytes = super::jit_helpers::jit_add(
+                            super::jit_helpers::f32_as_bytes(&resid1),
+                            super::jit_helpers::f32_as_bytes(&moe_out),
                             computation_dtype_from_config(config),
-                        )
-                            .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
-                        layer_out.copy_from_slice(&layer_out_vec);
+                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                        layer_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&layer_out_bytes));
                         sparsity_layers += 1;
                     }
                 } else {
@@ -1206,10 +1212,11 @@ pub(crate) fn decoder_forward<E: Element>(
                             );
                         }
                     }
-                    let resid1 = super::jit_helpers::jit_add(
-                        &hidden_state[..seq_len * hidden], &o_out,
+                    let resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
+                        super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+                        super::jit_helpers::f32_as_bytes(&o_out),
                         computation_dtype_from_config(config),
-                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
 
                     // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
                     let moe_out = super::jit_helpers::execute_moe_ffn_jit(
@@ -1218,11 +1225,12 @@ pub(crate) fn decoder_forward<E: Element>(
                         computation_dtype_from_config(config),
                     )?;
 
-                    let layer_out_vec = super::jit_helpers::jit_add(&resid1, &moe_out,
+                    let layer_out_bytes = super::jit_helpers::jit_add(
+                        super::jit_helpers::f32_as_bytes(&resid1),
+                        super::jit_helpers::f32_as_bytes(&moe_out),
                         computation_dtype_from_config(config),
-                    )
-                        .map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
-                    layer_out.copy_from_slice(&layer_out_vec);
+                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+                    layer_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&layer_out_bytes));
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
                 }
