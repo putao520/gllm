@@ -857,7 +857,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     }
                 };
 
-                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                 let kv_dim = num_kv_heads * head_dim;
                 let mut k_slice_buf = vec![0.0f32; total_seq * kv_dim];
                 let mut v_slice_buf = vec![0.0f32; total_seq * kv_dim];
@@ -881,7 +881,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
                         // Step 1: Pre-attention (pre-compiled)
                         let weights_buf = pack_weights_typed(&[&rn1_w, &q_w_f32, &k_w_f32, &v_w_f32], computation_dtype_from_config(config));
-                        let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
+                        let mut q_rope = super::jit_helpers::TypedBuffer::zeros(seq_len * geom.q_dim, computation_dtype_from_config(config));
                         let mut scratchpad = vec![0u8; moe_c.pre_attn.scratchpad_bytes];
                         unsafe {
                             moe_c.pre_attn.execute(
@@ -891,7 +891,7 @@ pub(crate) fn decoder_forward<E: Element>(
                                 positions.as_ptr(),
                                 std::ptr::null(),
                                 1, seq_len,
-                                q_rope.as_mut_ptr() as *mut u8,
+                                q_rope.as_bytes_mut().as_mut_ptr(),
                                 scratchpad.as_mut_ptr(),
                             );
                         }
@@ -900,14 +900,14 @@ pub(crate) fn decoder_forward<E: Element>(
                         let (attn_out, _layer_sparsity) = {
                             let gqa_compiled = get_or_compile_moe_gqa(moe_c, total_seq)?;
                             super::jit_helpers::execute_cached_gqa(
-                                gqa_compiled, &q_rope, &kv_cache_k, &kv_cache_v,
+                                gqa_compiled, q_rope.as_f32(), &kv_cache_k, &kv_cache_v,
                                 seq_len, num_heads, head_dim,
                                 computation_dtype_from_config(config),
                             )
                         };
 
                         // Step 3: O projection (pre-compiled) + residual + RmsNorm2 (pre-compiled)
-                        let mut o_out = vec![0.0f32; seq_len * hidden];
+                        let mut o_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                         {
                             let o_weights = pack_weights_typed(&[&o_w_f32], computation_dtype_from_config(config));
                             let mut o_scratch = vec![0u8; moe_c.o_gemm.scratchpad_bytes];
@@ -919,39 +919,42 @@ pub(crate) fn decoder_forward<E: Element>(
                                     std::ptr::null(),
                                     std::ptr::null(),
                                     1, seq_len,
-                                    o_out.as_mut_ptr() as *mut u8,
+                                    o_out.as_bytes_mut().as_mut_ptr(),
                                     o_scratch.as_mut_ptr(),
                                 );
                             }
                         }
-                        let resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
-                            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
-                            super::jit_helpers::f32_as_bytes(&o_out),
+                        let resid1 = super::jit_helpers::TypedBuffer::from_raw(
+                            super::jit_helpers::jit_add(
+                                super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+                                o_out.as_bytes(),
+                                computation_dtype_from_config(config),
+                            ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?,
                             computation_dtype_from_config(config),
-                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
+                        );
 
-                        let mut normed2 = vec![0.0f32; seq_len * hidden];
+                        let mut normed2 = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                         super::jit_helpers::execute_jit_final_norm(
                             &moe_c.norm2,
-                            super::jit_helpers::f32_as_bytes(&resid1),
+                            resid1.as_bytes(),
                             super::jit_helpers::f32_as_bytes(&rn2_w),
                             seq_len,
-                            super::jit_helpers::f32_as_bytes_mut(&mut normed2),
+                            normed2.as_bytes_mut(),
                         );
 
                         // Step 4: MoE FFN via JIT
                         let moe_out = super::jit_helpers::execute_moe_ffn_jit(
-                            &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
+                            normed2.as_f32(), &router_w, &expert_weights, shared_expert.as_ref(),
                             seq_len, hidden, inter, moe_num_experts, moe_top_k,
                             computation_dtype_from_config(config),
                         )?;
 
                         let layer_out_bytes = super::jit_helpers::jit_add(
-                            super::jit_helpers::f32_as_bytes(&resid1),
+                            resid1.as_bytes(),
                             super::jit_helpers::f32_as_bytes(&moe_out),
                             computation_dtype_from_config(config),
                         ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
-                        layer_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&layer_out_bytes));
+                        layer_out.copy_from_bytes(&layer_out_bytes);
                         sparsity_layers += 1;
                     }
                 } else {
@@ -976,7 +979,7 @@ pub(crate) fn decoder_forward<E: Element>(
                         transpose_weights,
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         &mut decode_jit,
-                        &mut layer_out,
+                        layer_out.as_f32_mut(),
                         computation_dtype_from_config(config),
                         &mut k_slice_buf,
                         &mut v_slice_buf,
@@ -985,7 +988,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     sparsity_layers += 1;
                 }
 
-                hidden_state.copy_from_slice(&layer_out);
+                hidden_state.copy_from_slice(layer_out.as_f32());
             }
 
             // Writeback gqa_cache entries to L1 so they survive across inference calls.
