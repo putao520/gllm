@@ -411,7 +411,7 @@ pub(crate) fn execute_kv_projection(
     let kv_dim = num_kv_heads * head_dim;
 
     // JIT graph for K projection (RmsNorm → Gemm → RoPE)
-    let weights_buf = pack_weights_multi(&[(rn1_w, DType::F32), (k_w, dtype)]);
+    let weights_buf = pack_weights_multi(&[(rn1_w, dtype), (k_w, dtype)]);
     let mut k_rope = vec![0.0f32; seq_len * kv_dim];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
@@ -434,7 +434,7 @@ pub(crate) fn execute_kv_projection(
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
 
-    let v_weights_buf = pack_weights_multi(&[(rn1_w, DType::F32), (v_w, dtype)]);
+    let v_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (v_w, dtype)]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
     let mut v_scratchpad = vec![0u8; v_compiled.scratchpad_bytes];
 
@@ -559,7 +559,7 @@ pub(crate) fn execute_jit_lm_head(
     output: &mut [f32],
     dtype: DType,
 ) {
-    let weights_buf = pack_weights_multi(&[(norm_w, DType::F32), (lm_w, dtype)]);
+    let weights_buf = pack_weights_multi(&[(norm_w, dtype), (lm_w, dtype)]);
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
     unsafe {
@@ -704,7 +704,7 @@ pub(crate) fn execute_moe_pre_attention(
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
-    let weights_buf = pack_weights_multi(&[(rn1_w, DType::F32), (q_w, dtype), (k_w, dtype), (v_w, dtype)]);
+    let weights_buf = pack_weights_multi(&[(rn1_w, dtype), (q_w, dtype), (k_w, dtype), (v_w, dtype)]);
     let mut q_rope = vec![0.0f32; seq_len * q_dim];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
 
@@ -727,7 +727,7 @@ pub(crate) fn execute_moe_pre_attention(
     let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let k_compiled = k_compiler.compile_graph(&k_graph)
         .map_err(|e| format!("JIT compile k_projection failed: {e}"))?;
-    let k_weights_buf = pack_weights_multi(&[(rn1_w, DType::F32), (k_w, dtype)]);
+    let k_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (k_w, dtype)]);
     let mut k_proj = vec![0.0f32; seq_len * kv_dim];
     let mut k_scratch = vec![0u8; k_compiled.scratchpad_bytes];
     unsafe {
@@ -748,7 +748,7 @@ pub(crate) fn execute_moe_pre_attention(
     let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
     let v_compiled = v_compiler.compile_graph(&v_graph)
         .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
-    let v_weights_buf = pack_weights_multi(&[(rn1_w, DType::F32), (v_w, dtype)]);
+    let v_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (v_w, dtype)]);
     let mut v_proj = vec![0.0f32; seq_len * kv_dim];
     let mut v_scratch = vec![0u8; v_compiled.scratchpad_bytes];
     unsafe {
