@@ -4273,6 +4273,20 @@ pub(super) fn metal_decoder_forward<E: Element>(
             }
         }
 
+        // ── Pre-allocate paged pool GPU buffer (once before layer loop) ──
+        let mut paged_pool_buf = if let Some((ref pm, _)) = paged_meta {
+            let mut buf = device.alloc(pm.pool_bytes)
+                .map_err(|e| BE::Metal(format!("alloc kv_cache pool buf failed: {e}")))?;
+            let pool_bytes = unsafe {
+                std::slice::from_raw_parts(pm.pool_ptr as *const u8, pm.pool_bytes)
+            };
+            device.htod(pool_bytes, &mut buf, stream)
+                .map_err(|e| BE::Metal(format!("htod kv_cache pool: {e}")))?;
+            Some(buf)
+        } else {
+            None
+        };
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -4369,20 +4383,24 @@ pub(super) fn metal_decoder_forward<E: Element>(
                     }
                     attn_metal_bufs.insert(tid, buf);
                 }
-                // Override kv_cache tensor ptr to pool_ptr
+                // Override kv_cache tensor ptr to pool_ptr (reuse pre-allocated buffer)
                 for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
                     if tmeta.name == "kv_cache" {
                         let tid = TensorId(idx as u32);
-                        // Metal shared memory: pool_ptr is a CPU-accessible pointer
-                        // Replace the allocated buf with one pointing at pool
+                        // KV append (metal_write_kv_paged) modified CPU-side pool — re-upload data only
+                        let pool_buf = paged_pool_buf.as_mut()
+                            .ok_or_else(|| BE::Metal("paged_pool_buf missing".into()))?;
                         let pool_bytes = unsafe {
                             std::slice::from_raw_parts(paged_meta.pool_ptr as *const u8, paged_meta.pool_bytes)
                         };
-                        let mut pool_buf = device.alloc(paged_meta.pool_bytes)
-                            .map_err(|e| BE::Metal(format!("alloc kv_cache pool buf failed: {e}")))?;
-                        device.htod(pool_bytes, &mut pool_buf, stream)
-                            .map_err(|e| BE::Metal(format!("htod kv_cache pool: {e}")))?;
-                        attn_metal_bufs.insert(tid, pool_buf);
+                        device.htod(pool_bytes, pool_buf, stream)
+                            .map_err(|e| BE::Metal(format!("htod kv_cache pool update: {e}")))?;
+                        // Insert a dtod copy so attn_metal_bufs owns its own buffer
+                        let mut kv_buf = device.alloc(paged_meta.pool_bytes)
+                            .map_err(|e| BE::Metal(format!("alloc kv_cache attn buf failed: {e}")))?;
+                        device.dtod(pool_buf, &mut kv_buf, stream)
+                            .map_err(|e| BE::Metal(format!("dtod kv_cache pool→attn: {e}")))?;
+                        attn_metal_bufs.insert(tid, kv_buf);
                         break;
                     }
                 }

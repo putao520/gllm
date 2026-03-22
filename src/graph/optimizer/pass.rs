@@ -52,6 +52,14 @@ pub struct OptimizationContext {
     pub num_kv_heads: usize,
     /// 头维度
     pub head_dim: usize,
+    /// 是否支持 VNNI 指令（x86 整数点积加速）
+    pub has_vnni: bool,
+    /// 是否支持原生 BF16 指令（AVX-512 BF16 / AMX）
+    pub has_bf16: bool,
+    /// Tensor Core 代数（0=无, 1=Volta/sm70, 2=Ampere/sm80, 3=Hopper/sm90）
+    pub tensor_core_gen: u8,
+    /// Warp 大小（GPU 专用，CPU 填 0）
+    pub warp_size: u32,
 }
 
 impl Default for OptimizationContext {
@@ -67,6 +75,10 @@ impl Default for OptimizationContext {
             num_heads: 32,
             num_kv_heads: 8,
             head_dim: 128,
+            has_vnni: false,
+            has_bf16: false,
+            tensor_core_gen: 0,
+            warp_size: 0,
         }
     }
 }
@@ -98,9 +110,12 @@ impl OptimizationContext {
 
     /// 创建 CUDA 上下文
     pub fn cuda(sm_version: (u32, u32)) -> Self {
+        let tensor_core_gen = if sm_version.0 >= 9 { 3 } else if sm_version.0 >= 8 { 2 } else if sm_version.0 >= 7 { 1 } else { 0 };
         Self {
             backend_type: BackendType::Cuda,
             cuda_sm_version: Some(sm_version),
+            tensor_core_gen,
+            warp_size: 32,
             ..Default::default()
         }
     }
