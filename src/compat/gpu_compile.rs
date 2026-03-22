@@ -476,14 +476,14 @@ fn build_kv_scatter_graph(
     use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::U8);
-    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::U8);
+    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::F32);
+    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::F32);
     // kv_cache is an opaque byte buffer — represent as 1-element placeholder
-    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], DType::U8);
+    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], DType::F32);
     g.inputs = vec![k_src, v_src, kv_cache];
 
     // dummy output (scatter writes in-place; we need at least one output for graph validity)
-    let out = g.add_tensor_concrete("scatter_out", &[1], DType::U8);
+    let out = g.add_tensor_concrete("scatter_out", &[1], DType::F32);
     g.add_op(
         OpKind::KvScatterWrite {
             seq_len,
@@ -575,6 +575,108 @@ fn gpu_write_kv_cache_device_hip(
         }
     }
     Ok(())
+}
+
+/// Write k_rope/v_proj into the GPU KV cache via a single scatter kernel launch (HIP).
+///
+/// MQA fast path (num_kv_heads == 1) preserved as 2 DtoD calls.
+#[cfg(feature = "hip")]
+fn gpu_write_kv_cache_scatter_hip(
+    k_device_ptr: u64,
+    v_device_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    handle: &KvCacheHandle,
+    layer: usize,
+    half_bytes: usize,
+    write_start: usize,
+    head_stride: usize,
+    dtype_size: usize,
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    stream: &gllm_kernels::gpu::hip::HipGpuStream,
+    gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
+    gfx_arch: u32,
+) -> Result<(), BE> {
+    // MQA fast path: single head — 2 DtoD calls cheaper than kernel launch overhead
+    if num_kv_heads == 1 {
+        let copy_bytes = seq_len * head_dim * dtype_size;
+        let dst_k = handle.0
+            + (layer * head_stride + write_start * head_dim * dtype_size) as u64;
+        let dst_v = handle.0 + half_bytes as u64
+            + (layer * head_stride + write_start * head_dim * dtype_size) as u64;
+        let res = unsafe { (device.driver().hipMemcpyDtoD)(dst_k as _, k_device_ptr as _, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV scatter K (MQA) failed: HIP error {res}"))); }
+        let res = unsafe { (device.driver().hipMemcpyDtoD)(dst_v as _, v_device_ptr as _, copy_bytes) };
+        if res != 0 { return Err(BE::Other(format!("DtoD KV scatter V (MQA) failed: HIP error {res}"))); }
+        return Ok(());
+    }
+
+    // GQA path: one scatter kernel launch
+    let layer_offset = layer * num_kv_heads * head_stride;
+    let half_offset = half_bytes;
+    let scatter_graph = build_kv_scatter_graph_hip(
+        seq_len, num_kv_heads, head_dim, kv_dim,
+        write_start, layer_offset, half_offset, head_stride, dtype_size,
+    );
+    let (_mod, entries) = hip_compile_graph(device, gpu_profile, gfx_arch, &scatter_graph)?;
+
+    let mut tensor_ptrs = std::collections::HashMap::new();
+    for (idx, tmeta) in scatter_graph.tensors.iter().enumerate() {
+        let tid = gllm_kernels::compiler::TensorId(idx as u32);
+        match tmeta.name.as_str() {
+            "k_src"    => { tensor_ptrs.insert(tid, k_device_ptr); }
+            "v_src"    => { tensor_ptrs.insert(tid, v_device_ptr); }
+            "kv_cache" => { tensor_ptrs.insert(tid, handle.0); }
+            _          => {}
+        }
+    }
+    // dummy output ptr (scatter writes in-place)
+    for (idx, tmeta) in scatter_graph.tensors.iter().enumerate() {
+        let tid = gllm_kernels::compiler::TensorId(idx as u32);
+        if tmeta.name == "scatter_out" {
+            tensor_ptrs.insert(tid, handle.0);
+        }
+    }
+
+    hip_launch_graph(device, stream, &entries, &tensor_ptrs, &scatter_graph)?;
+    Ok(())
+}
+
+/// Build a CompilerGraph containing a single KvScatterWrite op (HIP variant).
+#[cfg(feature = "hip")]
+fn build_kv_scatter_graph_hip(
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    kv_dim: usize,
+    write_start: usize,
+    layer_offset: usize,
+    half_offset: usize,
+    head_stride: usize,
+    dtype_size: usize,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::types::DType;
+
+    let mut g = CompilerGraph::new();
+    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::U8);
+    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::U8);
+    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], DType::U8);
+    g.inputs = vec![k_src, v_src, kv_cache];
+    let out = g.add_tensor_concrete("scatter_out", &[1], DType::U8);
+    g.add_op(
+        OpKind::KvScatterWrite {
+            seq_len, num_kv_heads, head_dim, kv_dim,
+            write_start, layer_offset, half_offset, head_stride, dtype_size,
+        },
+        vec![k_src, v_src, kv_cache],
+        vec![out],
+        "kv_scatter_write",
+    );
+    g.outputs = vec![out];
+    g
 }
 
 /// Build a CompilerGraph for GPU-native cached GQA attention.
@@ -669,6 +771,174 @@ fn build_gpu_paged_attention_graph(
 
     g.outputs = vec![out];
     g
+}
+
+/// Write k_rope/v_proj into paged GPU KV cache via DtoD (HIP).
+#[cfg(feature = "hip")]
+fn gpu_write_kv_paged_hip(
+    k_device_ptr: u64,
+    v_device_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    meta: &GpuPagedKvMeta,
+    layer: usize,
+    page_table: &[u32],
+    write_start: usize,
+    device: &gllm_kernels::gpu::hip::HipDevice,
+) -> Result<(), BE> {
+    let dtype_size = meta.dtype_size;
+    let page_size = meta.page_size;
+
+    for s in 0..seq_len {
+        let global_token = write_start + s;
+        let logical_page = global_token / page_size;
+        let token_in_page = global_token % page_size;
+
+        if logical_page >= page_table.len() {
+            return Err(BE::Other(format!(
+                "gpu_write_kv_paged_hip: token {} maps to logical page {} but page_table has {} entries",
+                global_token, logical_page, page_table.len()
+            )));
+        }
+        let phys_page = page_table[logical_page] as usize;
+
+        for head in 0..num_kv_heads {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let copy_bytes = head_dim * dtype_size;
+
+            let dst_k = meta.ptr_at(phys_page, layer, 0, head, token_in_page);
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    dst_k as _,
+                    (k_device_ptr + src_off as u64) as _,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD paged KV K failed: HIP error {res}")));
+            }
+
+            let dst_v = meta.ptr_at(phys_page, layer, 1, head, token_in_page);
+            let res = unsafe {
+                (device.driver().hipMemcpyDtoD)(
+                    dst_v as _,
+                    (v_device_ptr + src_off as u64) as _,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD paged KV V failed: HIP error {res}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Allocate a paged KV cache on GPU and return metadata (HIP).
+#[cfg(feature = "hip")]
+fn gpu_alloc_paged_kv_cache_hip(
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    num_physical_pages: usize,
+    page_size: usize,
+    num_layers: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    dtype_size: usize,
+) -> Result<GpuPagedKvMeta, BE> {
+    use gllm_kernels::gpu::GpuDevice;
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let buf = device.alloc(meta.pool_bytes)
+        .map_err(|e| BE::Hip(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
+    let ptr = buf.as_device_ptr();
+    std::mem::forget(buf);
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
+}
+
+/// Upload a page table to GPU as a u32 array (HIP).
+#[cfg(feature = "hip")]
+fn gpu_upload_page_table_hip(
+    device: &gllm_kernels::gpu::hip::HipDevice,
+    stream: &gllm_kernels::gpu::hip::HipGpuStream,
+    page_table: &[u32],
+) -> Result<gllm_kernels::gpu::hip::HipBuffer, BE> {
+    use gllm_kernels::gpu::GpuDevice;
+    let bytes = unsafe {
+        std::slice::from_raw_parts(page_table.as_ptr() as *const u8, page_table.len() * 4)
+    };
+    let mut buf = device.alloc(bytes.len())
+        .map_err(|e| BE::Hip(format!("page table alloc failed: {e}")))?;
+    device.htod(bytes, &mut buf, stream)
+        .map_err(|e| BE::Hip(format!("page table upload failed: {e}")))?;
+    Ok(buf)
+}
+
+/// Write k_rope/v_proj into paged Metal KV cache via shared memory ptr::copy.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn metal_write_kv_paged(
+    k_buf_ptr: u64,
+    v_buf_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    meta: &GpuPagedKvMeta,
+    layer: usize,
+    page_table: &[u32],
+    write_start: usize,
+) -> Result<(), BE> {
+    let dtype_size = meta.dtype_size;
+    let page_size = meta.page_size;
+    let k_src = k_buf_ptr as *const u8;
+    let v_src = v_buf_ptr as *const u8;
+
+    for s in 0..seq_len {
+        let global_token = write_start + s;
+        let logical_page = global_token / page_size;
+        let token_in_page = global_token % page_size;
+
+        if logical_page >= page_table.len() {
+            return Err(BE::Other(format!(
+                "metal_write_kv_paged: token {} maps to logical page {} but page_table has {} entries",
+                global_token, logical_page, page_table.len()
+            )));
+        }
+        let phys_page = page_table[logical_page] as usize;
+
+        for head in 0..num_kv_heads {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let copy_bytes = head_dim * dtype_size;
+
+            let dst_k = meta.ptr_at(phys_page, layer, 0, head, token_in_page) as *mut u8;
+            let dst_v = meta.ptr_at(phys_page, layer, 1, head, token_in_page) as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(k_src.add(src_off), dst_k, copy_bytes);
+                std::ptr::copy_nonoverlapping(v_src.add(src_off), dst_v, copy_bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Allocate a paged KV cache (Metal) — shared memory, direct ptr access.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn metal_alloc_paged_kv_cache(
+    device: &gllm_kernels::gpu::metal::MetalDevice,
+    num_physical_pages: usize,
+    page_size: usize,
+    num_layers: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    dtype_size: usize,
+) -> Result<GpuPagedKvMeta, BE> {
+    use gllm_kernels::gpu::GpuDevice;
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let buf = device.alloc(meta.pool_bytes)
+        .map_err(|e| BE::Metal(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
+    let ptr = buf.as_device_ptr();
+    std::mem::forget(buf);
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
 }
 
 /// Write k_rope/v_proj into paged GPU KV cache via DtoD (CUDA).
@@ -3279,9 +3549,10 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let v_ptr = proj_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Hip(format!("proj buffer for v_tid {:?} not found", v_tid)))?;
 
-            gpu_write_kv_cache_device_hip(
+            gpu_write_kv_cache_scatter_hip(
                 k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                 handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+                gpu_profile, gfx_arch,
             )?;
 
             if layer == 0 {
@@ -3457,9 +3728,10 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
                 drop(meta_store);
 
-                gpu_write_kv_cache_device_hip(
+                gpu_write_kv_cache_scatter_hip(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
                     handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
+                    gpu_profile, gfx_arch,
                 )?;
 
                 if layer == 0 {

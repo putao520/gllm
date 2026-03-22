@@ -24,6 +24,8 @@ pub struct HipBackend<E: Element = f32> {
     pub(super) swap_store: super::gpu_compile::GpuSwapStore,
     #[cfg(feature = "hip")]
     pub(super) kv_meta: super::gpu_compile::GpuKvMetaStore,
+    #[cfg(feature = "hip")]
+    pub(super) paged_kv_meta: super::gpu_compile::GpuPagedKvMetaStore,
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -50,6 +52,8 @@ impl<E: Element> Clone for HipBackend<E> {
             swap_store: self.swap_store.clone(),
             #[cfg(feature = "hip")]
             kv_meta: self.kv_meta.clone(),
+            #[cfg(feature = "hip")]
+            paged_kv_meta: self.paged_kv_meta.clone(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -98,6 +102,7 @@ impl<E: Element> HipBackend<E> {
             compiled_hsaco: std::sync::Mutex::new(std::collections::HashMap::new()),
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            paged_kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             _marker: std::marker::PhantomData,
         })
     }
