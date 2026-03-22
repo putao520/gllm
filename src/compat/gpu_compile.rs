@@ -586,14 +586,15 @@ fn build_kv_scatter_graph(
     use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::F32);
-    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::F32);
+    let dt = match dtype_size { 2 => DType::F16, _ => DType::F32 };
+    let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], dt);
+    let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], dt);
     // kv_cache is an opaque byte buffer — represent as 1-element placeholder
-    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], DType::F32);
+    let kv_cache = g.add_tensor_concrete("kv_cache", &[1], dt);
     g.inputs = vec![k_src, v_src, kv_cache];
 
     // dummy output (scatter writes in-place; we need at least one output for graph validity)
-    let out = g.add_tensor_concrete("scatter_out", &[1], DType::F32);
+    let out = g.add_tensor_concrete("scatter_out", &[1], dt);
     g.add_op(
         OpKind::KvScatterWrite {
             seq_len,
