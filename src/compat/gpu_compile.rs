@@ -2154,6 +2154,16 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             ))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // ── Init weight cache for prefill path (shared with incremental) ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[GpuWeightCache] prefill init: {} bytes", wc.total_bytes);
+            }
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -2178,9 +2188,25 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD hidden→input failed: CUDA error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&meta.name) {
-                    device.htod(data, &mut buf, stream)
-                        .map_err(|e| BE::Cuda(format!("htod {} failed: {e}", meta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &meta.name) {
+                        let copy_bytes = meta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().cuMemcpyDtoD_v2)(
+                                buf.as_device_ptr(),
+                                cached_ptr,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Cuda(format!("DtoD weight cache prefill {} failed: CUDA error {res}", meta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&meta.name) {
+                        device.htod(data, &mut buf, stream)
+                            .map_err(|e| BE::Cuda(format!("htod {} failed: {e}", meta.name)))?;
+                    }
                 }
 
                 tensor_ptrs.insert(tid, buf.as_device_ptr());
@@ -3803,6 +3829,16 @@ pub(super) fn hip_decoder_forward<E: Element>(
             ))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // ── Init HIP weight cache for prefill path ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[HipWeightCache] prefill init: {} bytes", wc.total_bytes);
+            }
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -3826,9 +3862,25 @@ pub(super) fn hip_decoder_forward<E: Element>(
                     if res != 0 {
                         return Err(BE::Other(format!("DtoD hidden→input failed: HIP error {res}")));
                     }
-                } else if let Some(data) = layer_weights.get(&meta.name) {
-                    device.htod(data, &mut buf, stream)
-                        .map_err(|e| BE::Hip(format!("htod {} failed: {e}", meta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Hip(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_ptr) = wc.get(layer, &meta.name) {
+                        let copy_bytes = meta.concrete_numel() * elem_bytes;
+                        let res = unsafe {
+                            (device.driver().hipMemcpyDtoD)(
+                                buf.as_device_ptr() as _,
+                                cached_ptr as _,
+                                copy_bytes,
+                            )
+                        };
+                        if res != 0 {
+                            return Err(BE::Hip(format!("DtoD weight cache prefill {} failed: HIP error {res}", meta.name)));
+                        }
+                    } else if let Some(data) = layer_weights.get(&meta.name) {
+                        device.htod(data, &mut buf, stream)
+                            .map_err(|e| BE::Hip(format!("htod {} failed: {e}", meta.name)))?;
+                    }
                 }
 
                 tensor_ptrs.insert(tid, buf.as_device_ptr());
@@ -4351,6 +4403,16 @@ pub(super) fn metal_decoder_forward<E: Element>(
             ))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // ── Init Metal weight cache for prefill path ──
+        {
+            let mut wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Metal(format!("weight_cache lock: {e}")))?;
+            if !wc.is_initialized() {
+                wc.init(&all_layer_weights, device, stream)?;
+                log::debug!("[MetalWeightCache] prefill init: {} bytes", wc.total_bytes);
+            }
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
@@ -4366,9 +4428,16 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 if meta.name == "input" {
                     device.dtod(&gpu_hidden, &mut buf, stream)
                         .map_err(|e| BE::Metal(format!("dtod hidden→input: {e}")))?;
-                } else if let Some(data) = layer_weights.get(&meta.name) {
-                    device.htod(data, &mut buf, stream)
-                        .map_err(|e| BE::Metal(format!("htod {} failed: {e}", meta.name)))?;
+                } else {
+                    let wc = backend.weight_cache.lock()
+                        .map_err(|e| BE::Metal(format!("weight_cache lock: {e}")))?;
+                    if let Some(cached_buf) = wc.get_buf(layer, &meta.name) {
+                        device.dtod(cached_buf, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("dtod weight cache prefill {}: {e}", meta.name)))?;
+                    } else if let Some(data) = layer_weights.get(&meta.name) {
+                        device.htod(data, &mut buf, stream)
+                            .map_err(|e| BE::Metal(format!("htod {} failed: {e}", meta.name)))?;
+                    }
                 }
 
                 gpu_buffers.insert(tid, buf);
