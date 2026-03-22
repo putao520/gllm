@@ -1096,7 +1096,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     }
                 };
 
-                let mut layer_out = vec![0.0f32; seq_len * hidden];
+                let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
 
                 // JIT MoE prefill: pre-attention (JIT) → attention (JIT) → post-attention (JIT) → MoE FFN (scalar routing only)
                 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1114,7 +1114,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     })?;
 
                     let weights_buf = pack_weights_typed(&[&rn1_w, &q_w, &k_w, &v_w], computation_dtype_from_config(config));
-                    let mut q_rope = vec![0.0f32; seq_len * geom.q_dim];
+                    let mut q_rope = super::jit_helpers::TypedBuffer::zeros(seq_len * geom.q_dim, computation_dtype_from_config(config));
                     let mut scratchpad = vec![0u8; pre_compiled.scratchpad_bytes];
                     unsafe {
                         pre_compiled.execute(
@@ -1124,7 +1124,7 @@ pub(crate) fn decoder_forward<E: Element>(
                             positions.as_ptr(),
                             std::ptr::null(),
                             1, seq_len,
-                            q_rope.as_mut_ptr() as *mut u8,
+                            q_rope.as_bytes_mut().as_mut_ptr(),
                             scratchpad.as_mut_ptr(),
                         );
                     }
@@ -1163,22 +1163,22 @@ pub(crate) fn decoder_forward<E: Element>(
                             BE::Other(format!("MoE prefill MHA JIT failed: {e}"))
                         })?;
                         let attn_weights = pack_weights_typed(&[&k_rope, &v_proj], computation_dtype_from_config(config));
-                        let mut attn_result = vec![0.0f32; seq_len * geom.q_dim];
+                        let mut attn_result = super::jit_helpers::TypedBuffer::zeros(seq_len * geom.q_dim, computation_dtype_from_config(config));
                         let mut attn_scratch = vec![0u8; a_compiled.scratchpad_bytes];
                         unsafe {
                             a_compiled.execute(
-                                q_rope.as_ptr() as *const u8,
+                                q_rope.as_bytes().as_ptr(),
                                 attn_weights.as_ptr(),
                                 std::ptr::null_mut(),
                                 std::ptr::null(),
                                 std::ptr::null(),
                                 1, seq_len,
-                                attn_result.as_mut_ptr() as *mut u8,
+                                attn_result.as_bytes_mut().as_mut_ptr(),
                                 attn_scratch.as_mut_ptr(),
                             );
                         }
                         // Sparsity not available from MHA JIT (non-causal prefill), use 0.0
-                        (attn_result, 0.0f32)
+                        (attn_result.to_f32_vec(), 0.0f32)
                     };
 
                     // Step 3: Post-attention via JIT (O Gemm → Residual → RmsNorm2)
@@ -1194,7 +1194,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     // Post-attention needs: attn_out as input, o_w + residual_in(hidden_state) + rn2_w as weights
                     // But the graph expects 4 inputs: attn_out, w_o, residual_in, rn2_w
                     // We pack w_o and rn2_w as weights, and pass attn_out + hidden_state via input/kv ptrs
-                    let mut normed2 = vec![0.0f32; seq_len * hidden];
+                    let mut normed2 = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                     let mut post_scratch = vec![0u8; post_compiled.scratchpad_bytes];
                     unsafe {
                         post_compiled.execute(
@@ -1204,13 +1204,13 @@ pub(crate) fn decoder_forward<E: Element>(
                             std::ptr::null(),
                             std::ptr::null(),
                             1, seq_len,
-                            normed2.as_mut_ptr() as *mut u8,
+                            normed2.as_bytes_mut().as_mut_ptr(),
                             post_scratch.as_mut_ptr(),
                         );
                     }
 
                     // Compute resid1 for final residual (hidden_state + o_proj)
-                    let mut o_out = vec![0.0f32; seq_len * hidden];
+                    let mut o_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
                     // O Gemm via JIT
                     {
                         use gllm_kernels::compiler::{CompilerGraph, OpKind};
@@ -1236,30 +1236,33 @@ pub(crate) fn decoder_forward<E: Element>(
                                 std::ptr::null(),
                                 std::ptr::null(),
                                 1, seq_len,
-                                o_out.as_mut_ptr() as *mut u8,
+                                o_out.as_bytes_mut().as_mut_ptr(),
                                 o_scratch.as_mut_ptr(),
                             );
                         }
                     }
-                    let resid1 = super::jit_helpers::bytes_as_f32(&super::jit_helpers::jit_add(
-                        super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
-                        super::jit_helpers::f32_as_bytes(&o_out),
+                    let resid1 = super::jit_helpers::TypedBuffer::from_raw(
+                        super::jit_helpers::jit_add(
+                            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+                            o_out.as_bytes(),
+                            computation_dtype_from_config(config),
+                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?,
                         computation_dtype_from_config(config),
-                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?).to_vec();
+                    );
 
                     // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
                     let moe_out = super::jit_helpers::execute_moe_ffn_jit(
-                        &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
+                        normed2.as_f32(), &router_w, &expert_weights, shared_expert.as_ref(),
                         seq_len, dims.hidden, dims.inter, moe_num_experts, moe_top_k,
                         computation_dtype_from_config(config),
                     )?;
 
                     let layer_out_bytes = super::jit_helpers::jit_add(
-                        super::jit_helpers::f32_as_bytes(&resid1),
+                        resid1.as_bytes(),
                         super::jit_helpers::f32_as_bytes(&moe_out),
                         computation_dtype_from_config(config),
                     ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
-                    layer_out.copy_from_slice(super::jit_helpers::bytes_as_f32(&layer_out_bytes));
+                    layer_out.copy_from_bytes(&layer_out_bytes);
                     total_sparsity += layer_sparsity;
                     sparsity_layers += 1;
                 }
@@ -1276,7 +1279,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     )?;
                 }
 
-                hidden_state.copy_from_slice(&layer_out);
+                hidden_state.copy_from_slice(layer_out.as_f32());
             }
         } else {
             // ── Dense Prefill path: JIT-compiled full sequence ──
