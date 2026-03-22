@@ -5,6 +5,10 @@ use crate::engine::executor::BackendError as BE;
 
 /// Reinterpret a slice of Element as &[f32]. Only valid when E is f32.
 pub(crate) fn as_f32_slice<E: Element>(data: &[E]) -> &[f32] {
+    debug_assert_eq!(
+        std::mem::size_of::<E>(), std::mem::size_of::<f32>(),
+        "as_f32_slice requires E to be f32-sized (got {} bytes)", std::mem::size_of::<E>()
+    );
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len()) }
 }
 
