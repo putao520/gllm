@@ -397,11 +397,11 @@ pub(crate) fn bert_encoder_forward<E: Element>(
 
     // Step (e): Encoder layers
     #[allow(unused_mut, unused_variables)]
-    let mut buf_out = vec![0.0f32; seq_len * hidden];
+    let mut buf_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, super::jit_helpers::computation_dtype_from_config(config));
     #[allow(unused_mut, unused_variables)]
-    let mut buf_inter = vec![0.0f32; seq_len * inter];
+    let mut buf_inter = super::jit_helpers::TypedBuffer::zeros(seq_len * inter, super::jit_helpers::computation_dtype_from_config(config));
     #[allow(unused_mut, unused_variables)]
-    let mut normed = vec![0.0f32; hidden];
+    let mut normed = super::jit_helpers::TypedBuffer::zeros(hidden, super::jit_helpers::computation_dtype_from_config(config));
 
     for layer in 0..num_layers {
         // ── JIT fast path ──
@@ -439,7 +439,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 (q_w, k_w, v_w, out_w, ffn_up_w, ffn_down_w)
             };
 
-            let mut layer_out = vec![0.0f32; seq_len * hidden];
+            let mut layer_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, super::jit_helpers::computation_dtype_from_config(config));
             let bert_weights = BertLayerWeights {
                 q_w: &q_w, q_b: &q_b, k_w: &k_w, k_b: &k_b,
                 v_w: &v_w, v_b: &v_b, out_w: &out_w, out_b: &out_b,
@@ -453,11 +453,11 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 &hidden_state,
                 &bert_weights,
                 seq_len,
-                &mut layer_out,
+                layer_out.as_f32_mut(),
                 super::jit_helpers::computation_dtype_from_config(config),
             );
 
-            hidden_state.copy_from_slice(&layer_out);
+            hidden_state.copy_from_slice(layer_out.as_f32());
             continue;
         }
 
@@ -468,7 +468,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     match pooling {
         PoolingMode::MeanPool => {
             // Mean pooling over all tokens (JIT-compiled SIMD, no fallback)
-            let mut pooled = vec![0.0f32; hidden];
+            let mut pooled = super::jit_helpers::TypedBuffer::zeros(hidden, super::jit_helpers::computation_dtype_from_config(config));
             {
                 use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
                 use crate::compat::jit_helpers::{computation_dtype_from_config, kernels_dtype_to_compat};
@@ -501,13 +501,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                         std::ptr::null(),
                         1,
                         seq_len,
-                        pooled.as_mut_ptr() as *mut u8,
+                        pooled.as_bytes_mut().as_mut_ptr(),
                         scratchpad.as_mut_ptr(),
                     );
                 }
             }
 
-            Ok(pooled)
+            Ok(pooled.to_f32_vec())
         }
         PoolingMode::ClsClassifier => {
             // [CLS] token extraction + classifier head (for reranker models)
@@ -590,17 +590,17 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     // Pack bias at model dtype
                     let bias_converted = super::weight_helpers::f32_to_typed_bytes(&dense_b, dt);
                     wbuf[w_bytes..w_bytes + b_bytes].copy_from_slice(&bias_converted);
-                    let mut gemm_out = vec![0.0f32; hidden];
+                    let mut gemm_out = super::jit_helpers::TypedBuffer::zeros(hidden, super::jit_helpers::computation_dtype_from_config(config));
                     let mut scratch = vec![0u8; compiled.scratchpad_bytes];
                     unsafe {
                         compiled.execute(
                             cls.as_ptr() as *const u8, wbuf.as_ptr(),
                             std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
-                            1, 1, gemm_out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr(),
+                            1, 1, gemm_out.as_bytes_mut().as_mut_ptr(), scratch.as_mut_ptr(),
                         );
                     }
                     // tanh activation (element-wise, compiler auto-vectorizes)
-                    gemm_out.iter().map(|v| v.tanh()).collect::<Vec<f32>>()
+                    gemm_out.to_f32_vec().iter().map(|v| v.tanh()).collect::<Vec<f32>>()
                 };
 
                 // out_proj: logit = dot(out_proj_w, x) + b
