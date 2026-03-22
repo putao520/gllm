@@ -1124,12 +1124,16 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
     }
 
+    // ── Pre-load all layer weights (CPU side, once) ──
+    let all_bert_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+        .map(|layer| super::gpu_helpers::load_bert_layer_weights_gpu_typed(
+            weights, backend, layer, seq_len, hidden, inter, transpose_w, comp_dtype,
+        ))
+        .collect::<Result<Vec<_>, _>>()?;
+
     // ── Per-layer GPU execution ──
     for layer in 0..num_layers {
-        // Load all weight tensors for this layer (typed)
-        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu_typed(
-            weights, backend, layer, seq_len, hidden, inter, transpose_w, comp_dtype,
-        )?;
+        let layer_weights = &all_bert_weights[layer];
 
         let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
         let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -1398,10 +1402,15 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             post_bufs.push((tid, buf));
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             // ── GPU: projection graph (RmsNorm → Q/K/V → RoPE) ──
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -1572,10 +1581,15 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Cuda(format!("htod initial hidden: {e}")))?;
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
             let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -1995,10 +2009,15 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Other(format!("htod initial hidden: {e}")))?;
     }
 
-    for layer in 0..num_layers {
-        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu_typed(
+    // ── Pre-load all layer weights (CPU side, once) ──
+    let all_bert_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+        .map(|layer| super::gpu_helpers::load_bert_layer_weights_gpu_typed(
             weights, backend, layer, seq_len, hidden, inter, transpose_w, comp_dtype,
-        )?;
+        ))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for layer in 0..num_layers {
+        let layer_weights = &all_bert_weights[layer];
 
         let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
         let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -2290,11 +2309,16 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
         device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
     }
 
+    // ── Pre-load all layer weights (CPU side, once) ──
+    let all_bert_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+        .map(|layer| super::gpu_helpers::load_bert_layer_weights_gpu_typed(
+            weights, backend, layer, seq_len, hidden, inter, transpose_w, comp_dtype,
+        ))
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Per-layer GPU execution
     for layer in 0..num_layers {
-        let layer_weights = super::gpu_helpers::load_bert_layer_weights_gpu_typed(
-            weights, backend, layer, seq_len, hidden, inter, transpose_w, comp_dtype,
-        )?;
+        let layer_weights = &all_bert_weights[layer];
 
         let mut gpu_buffers: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
             std::collections::HashMap::new();
@@ -2957,10 +2981,15 @@ pub(super) fn hip_decoder_forward<E: Element>(
             post_bufs.push((tid, buf));
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             // ── GPU: projection graph ──
             let mut proj_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -3099,10 +3128,15 @@ pub(super) fn hip_decoder_forward<E: Element>(
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Hip(format!("htod initial hidden: {e}")))?;
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::hip::HipBuffer)> = Vec::new();
             let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -3393,10 +3427,15 @@ pub(super) fn metal_decoder_forward<E: Element>(
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             // ── GPU: projection graph ──
             let mut proj_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
@@ -3548,10 +3587,15 @@ pub(super) fn metal_decoder_forward<E: Element>(
             device.htod(bytes, &mut gpu_hidden, stream).map_err(|e| BE::Metal(format!("htod initial hidden: {e}")))?;
         }
 
-        for layer in 0..num_layers {
-            let layer_weights = super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
+        // ── Pre-load all layer weights (CPU side, once) ──
+        let all_layer_weights: Vec<std::collections::HashMap<String, Vec<u8>>> = (0..num_layers)
+            .map(|layer| super::gpu_helpers::load_decoder_layer_weights_gpu_typed(
                 weights, backend, layer, hidden, num_heads * head_dim, num_kv_heads * head_dim, inter, comp_dtype,
-            )?;
+            ))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for layer in 0..num_layers {
+            let layer_weights = &all_layer_weights[layer];
 
             let mut gpu_buffers: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
                 std::collections::HashMap::new();
