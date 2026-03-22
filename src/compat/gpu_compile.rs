@@ -3399,30 +3399,17 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 }
             }
 
-            // ── GPU: cached attention (layer K/V slice download — Metal limitation) ──
+            // ── GPU: cached attention (KV cache layer slice via shared memory) ──
             let q_tid = proj_graph.outputs[0];
             let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
 
-            // Download only this layer's K/V slice (not full cache)
-            let mut k_layer_host = vec![0u8; layer_kv_bytes];
-            let res = unsafe {
-                (device.driver().cuMemcpyDtoH_v2)(
-                    k_layer_host.as_mut_ptr() as *mut _,
-                    k_layer_ptr,
-                    layer_kv_bytes,
-                )
-            };
-            if res != 0 { return Err(BE::Other(format!("dtoh KV cache K layer {layer} failed: CUDA error {res}"))); }
-
-            let mut v_layer_host = vec![0u8; layer_kv_bytes];
-            let res = unsafe {
-                (device.driver().cuMemcpyDtoH_v2)(
-                    v_layer_host.as_mut_ptr() as *mut _,
-                    v_layer_ptr,
-                    layer_kv_bytes,
-                )
-            };
-            if res != 0 { return Err(BE::Other(format!("dtoh KV cache V layer {layer} failed: CUDA error {res}"))); }
+            // Metal uses shared memory — read KV cache layer directly via pointer
+            let k_layer_host = unsafe {
+                std::slice::from_raw_parts(k_layer_ptr as *const u8, layer_kv_bytes)
+            }.to_vec();
+            let v_layer_host = unsafe {
+                std::slice::from_raw_parts(v_layer_ptr as *const u8, layer_kv_bytes)
+            }.to_vec();
 
             // Build attention buffers
             let mut attn_metal_bufs: std::collections::HashMap<TensorId, gllm_kernels::gpu::metal::MetalBuffer> =
