@@ -96,12 +96,86 @@ impl GpuKvCacheMeta {
     }
 }
 
+/// Metadata for a GPU-resident paged KV cache buffer.
+///
+/// Layout: page pool with indirect addressing via page table.
+/// Each physical page: `[layer][K+V][head][page_size][head_dim]`
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+#[derive(Debug, Clone)]
+pub(super) struct GpuPagedKvMeta {
+    /// Device pointer to the page pool buffer.
+    pub pool_ptr: u64,
+    /// Total size of page pool in bytes.
+    pub pool_bytes: usize,
+    /// Number of physical pages in the pool.
+    pub num_physical_pages: usize,
+    /// Tokens per page.
+    pub page_size: usize,
+    /// Number of transformer layers.
+    pub num_layers: usize,
+    /// Number of KV heads.
+    pub num_kv_heads: usize,
+    /// Head dimension.
+    pub head_dim: usize,
+    /// Bytes per element.
+    pub dtype_size: usize,
+    /// Bytes per physical page (all layers, K+V, all heads).
+    pub page_stride: usize,
+}
+
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+impl GpuPagedKvMeta {
+    pub fn new(
+        pool_ptr: u64,
+        num_physical_pages: usize,
+        page_size: usize,
+        num_layers: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype_size: usize,
+    ) -> Self {
+        let page_stride = num_layers * 2 * num_kv_heads * page_size * head_dim * dtype_size;
+        let pool_bytes = num_physical_pages * page_stride;
+        Self {
+            pool_ptr,
+            pool_bytes,
+            num_physical_pages,
+            page_size,
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            dtype_size,
+            page_stride,
+        }
+    }
+
+    /// Byte offset within a physical page for a specific layer, K or V half, head, and token.
+    ///
+    /// Layout within page: `[layer][kv_half][head][token][dim]`
+    /// - kv_half: 0 = K, 1 = V
+    pub fn offset_in_page(&self, layer: usize, kv_half: usize, head: usize, token: usize) -> usize {
+        let layer_stride = 2 * self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size;
+        let half_stride = self.num_kv_heads * self.page_size * self.head_dim * self.dtype_size;
+        let head_stride = self.page_size * self.head_dim * self.dtype_size;
+        let token_stride = self.head_dim * self.dtype_size;
+        layer * layer_stride + kv_half * half_stride + head * head_stride + token * token_stride
+    }
+
+    /// Device pointer to a specific location within the page pool.
+    pub fn ptr_at(&self, phys_page: usize, layer: usize, kv_half: usize, head: usize, token: usize) -> u64 {
+        self.pool_ptr + (phys_page * self.page_stride + self.offset_in_page(layer, kv_half, head, token)) as u64
+    }
+}
+
 /// Type aliases for GPU swap stores.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) type GpuSwapStore = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<StorageKey, Vec<u8>>>>;
 
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) type GpuKvMetaStore = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, GpuKvCacheMeta>>>;
+
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) type GpuPagedKvMetaStore = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, GpuPagedKvMeta>>>;
 
 // ---------------------------------------------------------------------------
 // Shared KV cache write helper (used by all GPU backends)
@@ -415,6 +489,124 @@ fn build_gpu_cached_attention_graph(
     g
 }
 
+/// Build a CompilerGraph for GPU paged cached GQA attention.
+///
+/// Uses `AttentionStrategy::Paged` which dispatches to `build_paged_attention_kernel`.
+/// Inputs: q_rope[seq_len, q_dim], page_table (implicit via kernel params), kv_cache (page pool)
+/// Output: attn_out[seq_len, q_dim]
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+fn build_gpu_paged_attention_graph(
+    seq_len: usize,
+    total_seq: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    page_size: usize,
+    dtype: gllm_kernels::types::DType,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::graph::AttentionStrategy;
+
+    let mut g = CompilerGraph::new();
+    let q_dim = num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+
+    let q = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dtype);
+    // page_table and kv_cache are passed as raw pointers via kernel params,
+    // but we need placeholder tensors for the graph structure
+    let pt = g.add_tensor_concrete("page_table", &[total_seq / page_size.max(1) + 1], gllm_kernels::types::DType::F32);
+    let kv = g.add_tensor_concrete("kv_cache", &[1], dtype); // placeholder, actual size is page pool
+    g.inputs = vec![q, pt, kv];
+
+    let out = g.add_tensor_concrete("attn_out", &[seq_len, q_dim], dtype);
+    g.add_op(
+        OpKind::CachedGQA {
+            seq_len,
+            total_seq,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            strategy: AttentionStrategy::Paged { page_size },
+            kv_dtype: dtype,
+        },
+        vec![q, pt, kv],
+        vec![out],
+        "gpu_paged_gqa",
+    );
+
+    g.outputs = vec![out];
+    g
+}
+
+/// Write k_rope/v_proj into paged GPU KV cache via DtoD (CUDA).
+///
+/// Writes new tokens into the correct physical pages based on the page table.
+/// Source: k_device_ptr/v_device_ptr `[seq_len, kv_dim]` (interleaved heads)
+/// Destination: paged KV cache at the correct physical page + token offset
+#[cfg(feature = "cuda")]
+fn gpu_write_kv_paged(
+    k_device_ptr: u64,
+    v_device_ptr: u64,
+    kv_dim: usize,
+    seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    meta: &GpuPagedKvMeta,
+    layer: usize,
+    page_table: &[u32],
+    write_start: usize,
+    device: &gllm_kernels::gpu::cuda::CudaDevice,
+) -> Result<(), BE> {
+    let dtype_size = meta.dtype_size;
+    let page_size = meta.page_size;
+
+    for s in 0..seq_len {
+        let global_token = write_start + s;
+        let logical_page = global_token / page_size;
+        let token_in_page = global_token % page_size;
+
+        if logical_page >= page_table.len() {
+            return Err(BE::Other(format!(
+                "gpu_write_kv_paged: token {} maps to logical page {} but page_table has {} entries",
+                global_token, logical_page, page_table.len()
+            )));
+        }
+        let phys_page = page_table[logical_page] as usize;
+
+        for head in 0..num_kv_heads {
+            let src_off = (s * kv_dim + head * head_dim) * dtype_size;
+            let copy_bytes = head_dim * dtype_size;
+
+            // K: DtoD into paged cache
+            let dst_k = meta.ptr_at(phys_page, layer, 0, head, token_in_page);
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    dst_k,
+                    k_device_ptr + src_off as u64,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD paged KV K failed: CUDA error {res}")));
+            }
+
+            // V: DtoD into paged cache
+            let dst_v = meta.ptr_at(phys_page, layer, 1, head, token_in_page);
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    dst_v,
+                    v_device_ptr + src_off as u64,
+                    copy_bytes,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD paged KV V failed: CUDA error {res}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // GPU compilation & kernel launch helpers (CUDA)
 // ---------------------------------------------------------------------------
@@ -510,13 +702,32 @@ pub(crate) fn launch_config_for_op(
                 shared_mem_bytes: ((*seq_len + 2) as u32) * 4,
             }
         }
-        OpKind::CachedGQA { seq_len, total_seq, num_heads, head_dim, .. } => {
-            let block = (*head_dim as u32).next_power_of_two()
-                .min(profile.max_threads_per_block);
-            gllm_kernels::gpu::LaunchConfig {
-                grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
-                block_dim: [block, 1, 1],
-                shared_mem_bytes: ((*total_seq + 2) as u32) * 4,
+        OpKind::CachedGQA { seq_len, total_seq, num_heads, head_dim, strategy, .. } => {
+            use gllm_kernels::compiler::graph::AttentionStrategy;
+            match strategy {
+                AttentionStrategy::Paged { page_size } => {
+                    // Paged attention: one block per head, shared mem for K+V page tile
+                    let block = (*head_dim as u32).next_power_of_two()
+                        .min(profile.max_threads_per_block);
+                    let elem_bytes = 4u32; // shared mem scores always f32
+                    let smem = (2 * (*page_size as u32) * (*head_dim as u32) * elem_bytes)
+                        .min(profile.shared_mem_per_block);
+                    gllm_kernels::gpu::LaunchConfig {
+                        grid_dim: [*num_heads as u32, 1, 1],
+                        block_dim: [block, 1, 1],
+                        shared_mem_bytes: smem,
+                    }
+                }
+                _ => {
+                    // Naive/FlashV2/SlidingWindow
+                    let block = (*head_dim as u32).next_power_of_two()
+                        .min(profile.max_threads_per_block);
+                    gllm_kernels::gpu::LaunchConfig {
+                        grid_dim: [(*seq_len as u32) * (*num_heads as u32), 1, 1],
+                        block_dim: [block, 1, 1],
+                        shared_mem_bytes: ((*total_seq + 2) as u32) * 4,
+                    }
+                }
             }
         }
         OpKind::MeanPool { hidden, .. } => {
@@ -571,12 +782,28 @@ pub(crate) fn build_kernel_params(
                 *seq_len as u64, *num_heads as u64, *head_dim as u64,
             ])
         }
-        OpKind::CachedGQA { total_seq, num_heads, head_dim, .. } => {
-            // Same kernel ABI as MHA: (Q, K, V, output, total_seq, num_heads, head_dim)
-            Ok(vec![
-                input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
-                *total_seq as u64, *num_heads as u64, *head_dim as u64,
-            ])
+        OpKind::CachedGQA { total_seq, num_heads, head_dim, strategy, .. } => {
+            use gllm_kernels::compiler::graph::AttentionStrategy;
+            match strategy {
+                AttentionStrategy::Paged { .. } => {
+                    // Paged kernel ABI: (Q, page_table, kv_cache, output, num_pages, seq_len)
+                    let num_pages = if let Some(ps) = match strategy {
+                        AttentionStrategy::Paged { page_size } => Some(*page_size),
+                        _ => None,
+                    } { (*total_seq + ps - 1) / ps } else { 0 };
+                    Ok(vec![
+                        input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
+                        num_pages as u64, *total_seq as u64,
+                    ])
+                }
+                _ => {
+                    // Naive/FlashV2/SlidingWindow: (Q, K, V, output, total_seq, num_heads, head_dim)
+                    Ok(vec![
+                        input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
+                        *total_seq as u64, *num_heads as u64, *head_dim as u64,
+                    ])
+                }
+            }
         }
         OpKind::LayerNorm { .. } => {
             let mut params = vec![input_ptrs[0], output_ptr];
