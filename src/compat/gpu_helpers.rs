@@ -8,6 +8,7 @@ use super::backend_trait::{self, Backend};
 
 use super::Element;
 use crate::engine::executor::BackendError as BE;
+use gllm_kernels::types::DType;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::engine::executor::KvCacheConfig;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
@@ -185,6 +186,223 @@ pub(super) fn get_f32_data_gpu<E: Element, B: Backend<E>>(
 
     let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
     Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
+}
+
+/// Get tensor data as raw bytes in the target dtype.
+///
+/// Quantized weights: dequant to f32 then convert to target dtype.
+/// Non-quantized weights: reinterpret raw bytes (assumes storage matches dtype_size).
+/// ARCH-DTYPE-ADAPTIVE: returns bytes in model's native dtype, not always f32.
+pub(super) fn get_typed_data_gpu<E: Element, B: Backend<E>>(
+    weights: &dyn backend_trait::TensorLookup<E, B>,
+    _backend: &B,
+    aliases: &[impl AsRef<str>],
+    target_dtype: DType,
+) -> Result<Vec<u8>, BE> {
+    // Try quantized path first — dequant to f32, then convert to target dtype
+    for name in aliases {
+        if let Some(qt) = weights.get_quantized(name.as_ref()) {
+            let n_elements = qt.shape.iter().product::<usize>();
+            let mut f32_buf = vec![0.0f32; n_elements];
+            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
+            use gllm_kernels::Kernels;
+            let blk_elems = qt.quant_type.block_size();
+            let blk_bytes = qt.quant_type.block_bytes();
+            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes)
+                .zip(f32_buf.chunks_exact_mut(blk_elems))
+            {
+                match qt.quant_type {
+                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
+                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
+                    _ => {
+                        return Err(BE::Other(format!(
+                            "Unsupported quantization type {:?} for weight {:?}",
+                            qt.quant_type, name.as_ref()
+                        )));
+                    }
+                }
+            }
+            return Ok(super::jit_helpers::pack_weights_typed(&[&f32_buf], target_dtype));
+        }
+    }
+
+    // Non-quantized: return raw bytes in storage dtype
+    for name in aliases {
+        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
+            let e_slice: &[E] = tensor.as_ref();
+            let raw_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    e_slice.as_ptr() as *const u8,
+                    std::mem::size_of_val(e_slice),
+                )
+            };
+            let storage_elem_bytes = std::mem::size_of_val(e_slice) / e_slice.len().max(1);
+            if storage_elem_bytes == target_dtype.size_bytes() {
+                return Ok(raw_bytes.to_vec());
+            }
+            // Storage dtype differs from target — convert via f32
+            let f32_slice = unsafe {
+                std::slice::from_raw_parts(
+                    e_slice.as_ptr() as *const f32,
+                    std::mem::size_of_val(e_slice) / 4,
+                )
+            };
+            return Ok(super::jit_helpers::pack_weights_typed(&[f32_slice], target_dtype));
+        }
+    }
+
+    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
+    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
+}
+
+/// Transpose raw bytes in-place for a given dtype.
+///
+/// Operates on raw byte buffer where each element is `elem_bytes` wide.
+fn transpose_typed_bytes(data: &[u8], rows: usize, cols: usize, elem_bytes: usize) -> Vec<u8> {
+    assert_eq!(data.len(), rows * cols * elem_bytes);
+    let mut out = vec![0u8; data.len()];
+    for r in 0..rows {
+        for c in 0..cols {
+            let src = (r * cols + c) * elem_bytes;
+            let dst = (c * rows + r) * elem_bytes;
+            out[dst..dst + elem_bytes].copy_from_slice(&data[src..src + elem_bytes]);
+        }
+    }
+    out
+}
+
+/// Load decoder layer weights as raw bytes in the target dtype.
+///
+/// ARCH-DTYPE-ADAPTIVE: weights are loaded in model's native dtype, not always f32.
+pub(super) fn load_decoder_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
+    weights: &dyn backend_trait::TensorLookup<E, B>,
+    backend: &B,
+    layer: usize,
+    hidden: usize,
+    q_dim: usize,
+    kv_hidden: usize,
+    inter: usize,
+    dtype: DType,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, BE> {
+    let mut m = std::collections::HashMap::new();
+
+    macro_rules! load {
+        ($graph_name:expr, $aliases:expr) => {
+            m.insert($graph_name.to_string(), get_typed_data_gpu(weights, backend, $aliases, dtype)?);
+        };
+    }
+
+    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
+    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
+    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
+    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
+    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
+    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
+    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
+    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
+    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
+
+    if needs_weight_transpose_gpu(weights) {
+        let eb = dtype.size_bytes();
+        let mut t = |name: &str, rows: usize, cols: usize| {
+            if let Some(data) = m.get(name) {
+                let transposed = transpose_typed_bytes(data, rows, cols, eb);
+                m.insert(name.to_string(), transposed);
+            }
+        };
+        t("w_q", q_dim, hidden);
+        t("w_k", kv_hidden, hidden);
+        t("w_v", kv_hidden, hidden);
+        t("w_o", hidden, q_dim);
+        t("w_gate", inter, hidden);
+        t("w_up", inter, hidden);
+        t("w_down", hidden, inter);
+    }
+
+    Ok(m)
+}
+
+/// Load BERT encoder layer weights as raw bytes in the target dtype.
+///
+/// ARCH-DTYPE-ADAPTIVE: weights are loaded in model's native dtype, not always f32.
+pub(super) fn load_bert_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
+    weights: &dyn backend_trait::TensorLookup<E, B>,
+    backend: &B,
+    layer: usize,
+    _seq_len: usize,
+    hidden: usize,
+    inter: usize,
+    transpose: bool,
+    dtype: DType,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, BE> {
+    let mut m = std::collections::HashMap::new();
+
+    macro_rules! load {
+        ($graph_name:expr, $aliases:expr) => {
+            m.insert($graph_name.to_string(), get_typed_data_gpu(weights, backend, $aliases, dtype)?);
+        };
+    }
+    macro_rules! load_bias {
+        ($graph_name:expr, $aliases:expr, $size:expr) => {
+            // Bias: get as f32 then convert to target dtype
+            let f32_data = get_bias_data_gpu(weights, $aliases, $size);
+            m.insert($graph_name.to_string(), super::jit_helpers::pack_weights_typed(&[&f32_data], dtype));
+        };
+    }
+
+    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
+    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
+    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
+    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
+    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
+    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
+    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
+    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
+    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
+    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
+    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
+    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
+    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
+    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
+    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
+    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
+
+    if transpose {
+        let eb = dtype.size_bytes();
+        let mut t = |name: &str, rows: usize, cols: usize| {
+            if let Some(data) = m.get(name) {
+                let transposed = transpose_typed_bytes(data, rows, cols, eb);
+                m.insert(name.to_string(), transposed);
+            }
+        };
+        t("w_q", hidden, hidden);
+        t("w_k", hidden, hidden);
+        t("w_v", hidden, hidden);
+        t("w_o", hidden, hidden);
+        t("w_up", inter, hidden);
+        t("w_down", hidden, inter);
+    }
+
+    Ok(m)
 }
 
 /// Get bias data (zeros if not found).
