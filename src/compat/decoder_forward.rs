@@ -838,7 +838,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     }
                 }
 
-                // Read cached K/V for attention
+                // Read cached K/V for attention (convert typed bytes → f32 for CPU attention)
                 let (kv_cache_k, kv_cache_v) = {
                     let store = backend.kv_store().lock().map_err(|e| {
                         BE::Cpu(format!("KV store lock poisoned: {e}"))
@@ -846,7 +846,15 @@ pub(crate) fn decoder_forward<E: Element>(
                     let buffer = store.get(&kv_caches[seq_idx].0).ok_or_else(|| {
                         BE::Cpu(format!("KV cache handle {} not found", kv_caches[seq_idx].0))
                     })?;
-                    (buffer.k.clone(), buffer.v.clone())
+                    if buffer.elem_bytes == std::mem::size_of::<f32>() {
+                        // F32 cache: zero-copy reinterpret
+                        (bytes_as_f32(&buffer.k).to_vec(), bytes_as_f32(&buffer.v).to_vec())
+                    } else {
+                        // F16/BF16 cache: convert to f32
+                        let dt = super::jit_helpers::computation_dtype_from_config(config);
+                        (super::jit_helpers::typed_bytes_to_f32(&buffer.k, dt),
+                         super::jit_helpers::typed_bytes_to_f32(&buffer.v, dt))
+                    }
                 };
 
                 let mut layer_out = vec![0.0f32; seq_len * hidden];

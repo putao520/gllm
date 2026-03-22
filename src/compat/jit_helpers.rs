@@ -480,6 +480,7 @@ pub(crate) fn write_kv_to_cache<E: Element>(
 
     let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
     let max_seq = buffer.max_seq_len;
+    let eb = buffer.elem_bytes;
 
     if write_start + seq_len > max_seq {
         return Err(BE::Cpu(format!(
@@ -487,15 +488,36 @@ pub(crate) fn write_kv_to_cache<E: Element>(
         )));
     }
 
+    // Convert f32 source data to bytes and write into typed KV cache
+    let k_bytes = f32_as_bytes(k_data);
+    let v_bytes = f32_as_bytes(v_data);
+    let src_eb = std::mem::size_of::<f32>();
+
     for h in 0..num_kv_heads {
         let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
         for s in 0..seq_len {
-            let cache_offset = layer_head_base + (write_start + s) * head_dim;
-            let proj_offset = s * kv_dim + h * head_dim;
-            buffer.k[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&k_data[proj_offset..proj_offset + head_dim]);
-            buffer.v[cache_offset..cache_offset + head_dim]
-                .copy_from_slice(&v_data[proj_offset..proj_offset + head_dim]);
+            let cache_offset = (layer_head_base + (write_start + s) * head_dim) * eb;
+            let proj_offset = (s * kv_dim + h * head_dim) * src_eb;
+            if eb == src_eb {
+                // F32 cache: direct byte copy
+                buffer.k[cache_offset..cache_offset + head_dim * eb]
+                    .copy_from_slice(&k_bytes[proj_offset..proj_offset + head_dim * src_eb]);
+                buffer.v[cache_offset..cache_offset + head_dim * eb]
+                    .copy_from_slice(&v_bytes[proj_offset..proj_offset + head_dim * src_eb]);
+            } else {
+                // F16/BF16 cache: convert f32 → target dtype per element
+                let k_src = &k_data[s * kv_dim + h * head_dim..s * kv_dim + h * head_dim + head_dim];
+                let v_src = &v_data[s * kv_dim + h * head_dim..s * kv_dim + h * head_dim + head_dim];
+                for d in 0..head_dim {
+                    let dst = cache_offset + d * eb;
+                    if eb == 2 {
+                        let kh = half::f16::from_f32(k_src[d]).to_le_bytes();
+                        buffer.k[dst..dst + 2].copy_from_slice(&kh);
+                        let vh = half::f16::from_f32(v_src[d]).to_le_bytes();
+                        buffer.v[dst..dst + 2].copy_from_slice(&vh);
+                    }
+                }
+            }
         }
     }
 

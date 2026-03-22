@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex};
 ///   Total elements = num_layers * num_kv_heads * max_seq_len * head_dim
 #[derive(Debug, Clone)]
 pub(crate) struct KvCacheBuffer {
-    /// Key tensor: [num_layers * num_kv_heads * max_seq_len * head_dim]
-    pub k: Vec<f32>,
+    /// Key tensor: [num_layers * num_kv_heads * max_seq_len * head_dim] as raw bytes
+    pub k: Vec<u8>,
     /// Value tensor: same shape as K
-    pub v: Vec<f32>,
+    pub v: Vec<u8>,
     /// Number of layers
     pub num_layers: usize,
     /// Number of KV heads (for GQA)
@@ -36,20 +36,24 @@ pub(crate) struct KvCacheBuffer {
     pub page_size: usize,
     /// Current sequence length written (tokens stored so far)
     pub seq_len: usize,
+    /// Bytes per element (4 for F32, 2 for F16/BF16)
+    pub elem_bytes: usize,
 }
 
 impl KvCacheBuffer {
     fn new(config: &KvCacheConfig) -> Self {
-        let total_elements = config.num_layers * config.num_heads * config.max_seq_len * config.head_dim;
+        let elem_bytes = config.dtype_size.max(1);
+        let total_bytes = config.num_layers * config.num_heads * config.max_seq_len * config.head_dim * elem_bytes;
         Self {
-            k: vec![0.0f32; total_elements],
-            v: vec![0.0f32; total_elements],
+            k: vec![0u8; total_bytes],
+            v: vec![0u8; total_bytes],
             num_layers: config.num_layers,
             num_kv_heads: config.num_heads,
             max_seq_len: config.max_seq_len,
             head_dim: config.head_dim,
             page_size: config.page_size,
             seq_len: 0,
+            elem_bytes,
         }
     }
 
@@ -80,8 +84,8 @@ type SwapStore = Arc<Mutex<HashMap<StorageKey, SwapPageData>>>;
 /// Data for a single swapped-out page.
 #[derive(Debug, Clone)]
 struct SwapPageData {
-    k: Vec<f32>,
-    v: Vec<f32>,
+    k: Vec<u8>,
+    v: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +129,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let buffer = KvCacheBuffer::new(config);
-        let total_bytes = (buffer.k.len() + buffer.v.len()) * std::mem::size_of::<f32>();
+        let total_bytes = buffer.k.len() + buffer.v.len();
 
         // Check memory pressure before allocating
         let pressure = get_system_memory_pressure().map_err(|e| {
@@ -316,9 +320,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let head_dim = buffer.head_dim;
         let max_seq_len = buffer.max_seq_len;
 
-        // Elements per page per layer per head = page_size * head_dim
-        // Total elements per page = num_layers * num_kv_heads * page_size * head_dim
-        let page_elements = num_layers * num_kv_heads * page_size * head_dim;
+        let elem_bytes = buffer.elem_bytes;
+        let page_bytes = num_layers * num_kv_heads * page_size * head_dim * elem_bytes;
 
         for &(page_id, storage_key) in mappings {
             let token_start = page_id * page_size;
@@ -329,21 +332,21 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 )));
             }
 
-            let mut k_data = vec![0.0f32; page_elements];
-            let mut v_data = vec![0.0f32; page_elements];
+            let mut k_data = vec![0u8; page_bytes];
+            let mut v_data = vec![0u8; page_bytes];
 
-            // Copy page data from KV buffer
-            // Buffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim]
+            // Copy page data from KV buffer (byte-level)
+            // Buffer layout: [num_layers][num_kv_heads][max_seq_len][head_dim] * elem_bytes
             let mut dst_offset = 0;
             for layer in 0..num_layers {
                 for head in 0..num_kv_heads {
-                    let base = ((layer * num_kv_heads + head) * max_seq_len + token_start) * head_dim;
-                    let len = page_size.min(max_seq_len - token_start) * head_dim;
+                    let base = ((layer * num_kv_heads + head) * max_seq_len + token_start) * head_dim * elem_bytes;
+                    let len = page_size.min(max_seq_len - token_start) * head_dim * elem_bytes;
                     k_data[dst_offset..dst_offset + len]
                         .copy_from_slice(&buffer.k[base..base + len]);
                     v_data[dst_offset..dst_offset + len]
                         .copy_from_slice(&buffer.v[base..base + len]);
-                    dst_offset += page_size * head_dim;
+                    dst_offset += page_size * head_dim * elem_bytes;
                 }
             }
 
@@ -394,17 +397,18 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 )));
             }
 
-            // Copy page data back into KV buffer
+            // Copy page data back into KV buffer (byte-level)
+            let elem_bytes = buffer.elem_bytes;
             let mut src_offset = 0;
             for layer in 0..num_layers {
                 for head in 0..num_kv_heads {
-                    let base = ((layer * num_kv_heads + head) * max_seq_len + token_start) * head_dim;
-                    let len = page_size.min(max_seq_len - token_start) * head_dim;
+                    let base = ((layer * num_kv_heads + head) * max_seq_len + token_start) * head_dim * elem_bytes;
+                    let len = page_size.min(max_seq_len - token_start) * head_dim * elem_bytes;
                     buffer.k[base..base + len]
                         .copy_from_slice(&page_data.k[src_offset..src_offset + len]);
                     buffer.v[base..base + len]
                         .copy_from_slice(&page_data.v[src_offset..src_offset + len]);
-                    src_offset += page_size * head_dim;
+                    src_offset += page_size * head_dim * elem_bytes;
                 }
             }
         }
