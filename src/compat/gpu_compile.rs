@@ -184,12 +184,16 @@ pub(super) type GpuPagedKvMetaStore = std::sync::Arc<std::sync::Mutex<std::colle
 pub(super) struct GpuWeightCache {
     /// per-layer 权重 GPU buffer: layer_idx → (tensor_name → device_ptr)
     layers: Vec<std::collections::HashMap<String, u64>>,
+    /// lm_head weight GPU buffer (device_ptr, None if not yet uploaded)
+    lm_head_ptr: Option<u64>,
     /// 总显存占用（字节）
     pub total_bytes: usize,
     /// 是否已初始化
     initialized: bool,
     /// 原始 CUDA buffer 持有（防止提前释放）
     _buffers: Vec<Vec<gllm_kernels::gpu::cuda::CudaBuffer>>,
+    /// lm_head buffer 持有
+    _lm_head_buf: Option<gllm_kernels::gpu::cuda::CudaBuffer>,
 }
 
 #[cfg(feature = "cuda")]
@@ -197,9 +201,11 @@ impl GpuWeightCache {
     pub fn new() -> Self {
         Self {
             layers: Vec::new(),
+            lm_head_ptr: None,
             total_bytes: 0,
             initialized: false,
             _buffers: Vec::new(),
+            _lm_head_buf: None,
         }
     }
 
@@ -210,6 +216,29 @@ impl GpuWeightCache {
     /// 获取某层某权重的 device_ptr（None 表示未缓存）
     pub fn get(&self, layer: usize, name: &str) -> Option<u64> {
         self.layers.get(layer)?.get(name).copied()
+    }
+
+    /// 获取 lm_head weight 的 device_ptr
+    pub fn get_lm_head(&self) -> Option<u64> {
+        self.lm_head_ptr
+    }
+
+    /// 上传 lm_head weight 到 GPU（首次调用时）
+    pub fn init_lm_head(
+        &mut self,
+        data: &[u8],
+        device: &gllm_kernels::gpu::cuda::CudaDevice,
+        stream: &gllm_kernels::gpu::cuda::device::CudaStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        let mut buf = device.alloc(data.len())
+            .map_err(|e| BE::Cuda(format!("lm_head cache alloc: {e}")))?;
+        device.htod(data, &mut buf, stream)
+            .map_err(|e| BE::Cuda(format!("lm_head cache htod: {e}")))?;
+        self.total_bytes += data.len();
+        self.lm_head_ptr = Some(buf.as_device_ptr());
+        self._lm_head_buf = Some(buf);
+        Ok(())
     }
 
     /// 初始化缓存：上传所有层权重到 GPU
@@ -252,21 +281,42 @@ impl GpuWeightCache {
 #[cfg(feature = "hip")]
 pub(super) struct HipWeightCache {
     layers: Vec<std::collections::HashMap<String, u64>>,
+    lm_head_ptr: Option<u64>,
     pub total_bytes: usize,
     initialized: bool,
     _buffers: Vec<Vec<gllm_kernels::gpu::hip::HipBuffer>>,
+    _lm_head_buf: Option<gllm_kernels::gpu::hip::HipBuffer>,
 }
 
 #[cfg(feature = "hip")]
 impl HipWeightCache {
     pub fn new() -> Self {
-        Self { layers: Vec::new(), total_bytes: 0, initialized: false, _buffers: Vec::new() }
+        Self { layers: Vec::new(), lm_head_ptr: None, total_bytes: 0, initialized: false, _buffers: Vec::new(), _lm_head_buf: None }
     }
 
     pub fn is_initialized(&self) -> bool { self.initialized }
 
     pub fn get(&self, layer: usize, name: &str) -> Option<u64> {
         self.layers.get(layer)?.get(name).copied()
+    }
+
+    pub fn get_lm_head(&self) -> Option<u64> { self.lm_head_ptr }
+
+    pub fn init_lm_head(
+        &mut self,
+        data: &[u8],
+        device: &gllm_kernels::gpu::hip::HipDevice,
+        stream: &gllm_kernels::gpu::hip::HipGpuStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        let mut buf = device.alloc(data.len())
+            .map_err(|e| BE::Hip(format!("lm_head cache alloc: {e}")))?;
+        device.htod(data, &mut buf, stream)
+            .map_err(|e| BE::Hip(format!("lm_head cache htod: {e}")))?;
+        self.total_bytes += data.len();
+        self.lm_head_ptr = Some(buf.as_device_ptr());
+        self._lm_head_buf = Some(buf);
+        Ok(())
     }
 
     pub fn init(
@@ -303,6 +353,7 @@ impl HipWeightCache {
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(super) struct MetalWeightCache {
     layers: Vec<std::collections::HashMap<String, u64>>,
+    lm_head_buf: Option<gllm_kernels::gpu::metal::MetalBuffer>,
     pub total_bytes: usize,
     initialized: bool,
     _buffers: Vec<Vec<gllm_kernels::gpu::metal::MetalBuffer>>,
@@ -311,7 +362,7 @@ pub(super) struct MetalWeightCache {
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalWeightCache {
     pub fn new() -> Self {
-        Self { layers: Vec::new(), total_bytes: 0, initialized: false, _buffers: Vec::new() }
+        Self { layers: Vec::new(), lm_head_buf: None, total_bytes: 0, initialized: false, _buffers: Vec::new() }
     }
 
     pub fn is_initialized(&self) -> bool { self.initialized }
@@ -323,13 +374,32 @@ impl MetalWeightCache {
     /// Get a reference to the cached MetalBuffer for dtod operations.
     pub fn get_buf(&self, layer: usize, name: &str) -> Option<&gllm_kernels::gpu::metal::MetalBuffer> {
         let ptr = self.layers.get(layer)?.get(name)?;
-        // Find the buffer in _buffers that matches this ptr
         for buf in &self._buffers[layer] {
             if buf.as_device_ptr() == *ptr {
                 return Some(buf);
             }
         }
         None
+    }
+
+    pub fn get_lm_head_buf(&self) -> Option<&gllm_kernels::gpu::metal::MetalBuffer> {
+        self.lm_head_buf.as_ref()
+    }
+
+    pub fn init_lm_head(
+        &mut self,
+        data: &[u8],
+        device: &gllm_kernels::gpu::metal::MetalDevice,
+        stream: &gllm_kernels::gpu::metal::MetalStream,
+    ) -> Result<(), BE> {
+        use gllm_kernels::gpu::GpuDevice;
+        let mut buf = device.alloc(data.len())
+            .map_err(|e| BE::Metal(format!("lm_head cache alloc: {e}")))?;
+        device.htod(data, &mut buf, stream)
+            .map_err(|e| BE::Metal(format!("lm_head cache htod: {e}")))?;
+        self.total_bytes += data.len();
+        self.lm_head_buf = Some(buf);
+        Ok(())
     }
 
     pub fn init(
@@ -1111,7 +1181,7 @@ pub(crate) fn compile_graph_to_ptx(
     let profile = gllm_kernels::dispatch::DeviceProfile::detect();
     let plan = fusion::fuse_with_dag_prebuilt(graph, &dag, &profile);
 
-    // Extract dtype from graph ops (Gemm/GemmBias/CachedGQA carry dtype, default F32)
+    // Extract dtype from graph ops (Gemm/GemmBias/CachedGQA carry dtype)
     let graph_dtype = graph.ops.iter()
         .find_map(|op| match &op.kind {
             gllm_kernels::compiler::OpKind::Gemm { dtype, .. }
@@ -1119,7 +1189,7 @@ pub(crate) fn compile_graph_to_ptx(
             gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
             _ => None,
         })
-        .unwrap_or(gllm_kernels::types::DType::F32);
+        .ok_or_else(|| BE::Other("graph contains no typed op (Gemm/GemmBias/CachedGQA)".into()))?;
 
     let dialect = PtxDialect::with_dtype(sm_version, 1024, 49152, graph_dtype);
     let mut ptx = String::new();
@@ -1759,6 +1829,9 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
 
+    // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
+    let mut last_gpu_hidden: Option<gllm_kernels::gpu::cuda::CudaBuffer> = None;
+
     if is_incremental {
         // ── Incremental decode path (GPU-native, zero CPU round-trip) ──
         // Optimizations: hidden_state stays on GPU across layers, buffers pre-allocated,
@@ -2058,6 +2131,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
         hidden_state.copy_from_slice(&output_host);
+        last_gpu_hidden = Some(gpu_hidden);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -2091,17 +2165,24 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             }
         }
 
+        // Pre-allocate all tensor buffers once outside the layer loop
+        let mut prefill_bufs: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
+        for (idx, meta) in graph.tensors.iter().enumerate() {
+            let tid = TensorId(idx as u32);
+            let size_bytes = meta.concrete_numel() * elem_bytes;
+            let buf = device.alloc(size_bytes)
+                .map_err(|e| BE::Cuda(format!("GPU prefill alloc failed for {}: {e}", meta.name)))?;
+            prefill_bufs.push((tid, buf));
+        }
+
         for layer in 0..num_layers {
             let layer_weights = &all_layer_weights[layer];
 
-            let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
             let mut tensor_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
 
             for (idx, meta) in graph.tensors.iter().enumerate() {
                 let tid = TensorId(idx as u32);
-                let size_bytes = meta.concrete_numel() * elem_bytes;
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| BE::Cuda(format!("GPU alloc failed for {}: {e}", meta.name)))?;
+                let buf = &mut prefill_bufs[idx].1;
 
                 if meta.name == "input" {
                     // DtoD from gpu_hidden (no CPU round-trip)
@@ -2137,7 +2218,6 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 }
 
                 tensor_ptrs.insert(tid, buf.as_device_ptr());
-                gpu_buffers.push((tid, buf));
             }
 
             cuda_launch_graph(device, stream, &kernel_entries, &tensor_ptrs, &graph)?;
@@ -2156,9 +2236,9 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                     .map(|(i, _)| TensorId(i as u32))
                     .ok_or_else(|| BE::Cuda("v_proj tensor not found in graph".into()))?;
 
-                let k_ptr = gpu_buffers.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
+                let k_ptr = prefill_bufs.iter().find(|(t, _)| *t == k_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Cuda("k_rope buffer not found".into()))?;
-                let v_ptr = gpu_buffers.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
+                let v_ptr = prefill_bufs.iter().find(|(t, _)| *t == v_tid).map(|(_, b)| b.as_device_ptr())
                     .ok_or_else(|| BE::Cuda("v_proj buffer not found".into()))?;
 
                 let meta_store = backend.kv_meta.lock()
@@ -2191,7 +2271,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
             // Update gpu_hidden: DtoD from output (stays on GPU)
             let output_tid = graph.outputs[0];
-            let output_ptr = gpu_buffers.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
+            let output_ptr = prefill_bufs.iter().find(|(tid, _)| *tid == output_tid).map(|(_, b)| b.as_device_ptr())
                 .ok_or_else(|| BE::Cuda("output buffer not found".into()))?;
             let res = unsafe {
                 (device.driver().cuMemcpyDtoD_v2)(
@@ -2212,6 +2292,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 .map_err(|e| BE::Cuda(format!("dtoh final hidden: {e}")))?;
             hidden_state.copy_from_slice(&output_host);
         }
+        last_gpu_hidden = Some(gpu_hidden);
     }
 
     // ── lm_head projection (GPU) ──
@@ -2220,9 +2301,17 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     let lm_graph = build_lm_head_graph(seq_len, hidden, vocab_size, lm_comp_dtype);
     let (_lm_module, lm_entries) = cuda_compile_graph(device, gpu_profile, sm_version, &lm_graph)?;
 
-    let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
-        &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
-        lm_comp_dtype)?;
+    // Ensure lm_head weight is in GpuWeightCache (upload once, DtoD on reuse) — FC-010
+    {
+        let mut wc = backend.weight_cache.lock()
+            .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+        if wc.get_lm_head().is_none() {
+            let lm_head_w = super::gpu_helpers::get_typed_data_gpu(weights, backend,
+                &crate::weight_names::embedding_aliases("lm_head.weight", Some("output.weight")),
+                lm_comp_dtype)?;
+            wc.init_lm_head(&lm_head_w, device, stream)?;
+        }
+    }
 
     let mut gpu_buffers_lm: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
     let mut lm_ptrs: std::collections::HashMap<TensorId, u64> = std::collections::HashMap::new();
@@ -2235,11 +2324,38 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             .map_err(|e| BE::Cuda(format!("GPU alloc lm_head {} failed: {e}", meta.name)))?;
 
         if meta.name == "input" {
-            device.htod(&hidden_state, &mut buf, stream)
-                .map_err(|e| BE::Cuda(format!("htod lm_head input: {e}")))?;
+            // DtoD from gpu_hidden (no CPU round-trip) — FC-010
+            if let Some(ref gh) = last_gpu_hidden {
+                let res = unsafe {
+                    (device.driver().cuMemcpyDtoD_v2)(
+                        buf.as_device_ptr(),
+                        gh.as_device_ptr(),
+                        size_bytes as u64,
+                    )
+                };
+                if res != 0 {
+                    return Err(BE::Other(format!("DtoD gpu_hidden→lm_head input failed: CUDA error {res}")));
+                }
+            } else {
+                device.htod(&hidden_state, &mut buf, stream)
+                    .map_err(|e| BE::Cuda(format!("htod lm_head input: {e}")))?;
+            }
         } else if meta.name == "w_lm" {
-            device.htod(&lm_head_w, &mut buf, stream)
-                .map_err(|e| BE::Cuda(format!("htod lm_head weight: {e}")))?;
+            // DtoD from cached weight — FC-010
+            let wc = backend.weight_cache.lock()
+                .map_err(|e| BE::Cuda(format!("weight_cache lock: {e}")))?;
+            let cached_ptr = wc.get_lm_head()
+                .ok_or_else(|| BE::Cuda("lm_head weight not in cache".into()))?;
+            let res = unsafe {
+                (device.driver().cuMemcpyDtoD_v2)(
+                    buf.as_device_ptr(),
+                    cached_ptr,
+                    size_bytes as u64,
+                )
+            };
+            if res != 0 {
+                return Err(BE::Other(format!("DtoD lm_head weight cache failed: CUDA error {res}")));
+            }
         }
 
         lm_ptrs.insert(tid, buf.as_device_ptr());
@@ -2309,7 +2425,7 @@ pub(crate) fn compile_graph_to_hip(
             gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
             _ => None,
         })
-        .unwrap_or(gllm_kernels::types::DType::F32);
+        .ok_or_else(|| BE::Other("graph contains no typed op (Gemm/GemmBias/CachedGQA)".into()))?;
 
     let dialect = HipDialect::with_dtype(gfx_arch, 1024, 65536, graph_dtype);
     let mut hip_src = String::new();
@@ -2692,7 +2808,7 @@ pub(crate) fn compile_graph_to_msl(
             gllm_kernels::compiler::OpKind::CachedGQA { kv_dtype, .. } => Some(*kv_dtype),
             _ => None,
         })
-        .unwrap_or(gllm_kernels::types::DType::F32);
+        .ok_or_else(|| BE::Other("graph contains no typed op (Gemm/GemmBias/CachedGQA)".into()))?;
 
     let dialect = MslDialect::with_dtype(gpu_family, 1024, 32768, graph_dtype);
     let mut msl = String::new();
@@ -3455,6 +3571,9 @@ pub(super) fn hip_decoder_forward<E: Element>(
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
 
+    // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
+    let mut last_gpu_hidden: Option<gllm_kernels::gpu::hip::HipBuffer> = None;
+
     if is_incremental {
         // ── Incremental decode path (GPU-native, zero CPU round-trip) ──
         let kv_dim = num_kv_heads * head_dim;
@@ -3734,6 +3853,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
         device.dtoh(&gpu_hidden, &mut output_host, stream)
             .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
         hidden_state.copy_from_slice(&output_host);
+        last_gpu_hidden = Some(gpu_hidden);
     } else {
         // ── Prefill path (GPU-resident hidden_state) ──
         let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -3885,6 +4005,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 .map_err(|e| BE::Hip(format!("dtoh final hidden: {e}")))?;
             hidden_state.copy_from_slice(&output_host);
         }
+        last_gpu_hidden = Some(gpu_hidden);
     }
 
     // ── lm_head projection (GPU) ──
@@ -4223,13 +4344,13 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 }
             } else {
                 let (k_layer_ptr, v_layer_ptr) = kv_cache_layer_ptrs(handle, layer, half_bytes, num_kv_heads, head_stride);
-                // Metal uses shared memory — read KV cache layer directly via pointer
-                let k_layer_host = unsafe {
+                // Metal uses shared memory — pass KV cache layer pointers directly (no to_vec + htod)
+                let k_layer_slice = unsafe {
                     std::slice::from_raw_parts(k_layer_ptr as *const u8, layer_kv_bytes)
-                }.to_vec();
-                let v_layer_host = unsafe {
+                };
+                let v_layer_slice = unsafe {
                     std::slice::from_raw_parts(v_layer_ptr as *const u8, layer_kv_bytes)
-                }.to_vec();
+                };
 
                 for (idx, tmeta) in attn_graph.tensors.iter().enumerate() {
                     let tid = TensorId(idx as u32);
@@ -4244,11 +4365,11 @@ pub(super) fn metal_decoder_forward<E: Element>(
                                 .map_err(|e| BE::Metal(format!("dtod q_rope for attn: {e}")))?;
                         }
                         "k_cache" => {
-                            device.htod(&k_layer_host, &mut buf, stream)
+                            device.htod(k_layer_slice, &mut buf, stream)
                                 .map_err(|e| BE::Metal(format!("htod k_cache layer: {e}")))?;
                         }
                         "v_cache" => {
-                            device.htod(&v_layer_host, &mut buf, stream)
+                            device.htod(v_layer_slice, &mut buf, stream)
                                 .map_err(|e| BE::Metal(format!("htod v_cache layer: {e}")))?;
                         }
                         _ => {}

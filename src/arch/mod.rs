@@ -39,6 +39,7 @@ pub fn build_executor_from_yaml(
     config: &ResolvedConfig,
     seq_len: usize,
     hidden: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
     register_builtin_templates();
 
@@ -54,5 +55,5 @@ pub fn build_executor_from_yaml(
         ))
     })?;
 
-    crate::graph::executor::FusedGraphExecutor::from_graph(onnx_graph, seq_len, hidden)
+    crate::graph::executor::FusedGraphExecutor::from_graph(onnx_graph, seq_len, hidden, dtype)
 }

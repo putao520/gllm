@@ -85,8 +85,8 @@ impl OptimizationContext {
                     false
                 }
             }
-            BackendType::Rocm => false,
-            BackendType::Metal => false,
+            BackendType::Rocm => true,
+            BackendType::Metal => true,
             BackendType::Cpu => false,
         }
     }

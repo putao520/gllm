@@ -119,16 +119,16 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
     /// different parameters to recompile for a new shape.
     ///
     /// On architectures without JIT support (not x86_64/aarch64), returns an error.
-    pub fn compile(&mut self, seq_len: usize, hidden: usize) -> Result<(), PipelineError> {
+    pub fn compile(&mut self, seq_len: usize, hidden: usize, dtype: gllm_kernels::types::DType) -> Result<(), PipelineError> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
-            self.executor.compile(seq_len, hidden)?;
+            self.executor.compile(seq_len, hidden, dtype)?;
             Ok(())
         }
 
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
-            let _ = (seq_len, hidden);
+            let _ = (seq_len, hidden, dtype);
             Err(PipelineError::Execution(ExecutionError::Compilation(
                 "JIT compilation not supported on this architecture".to_string(),
             )))
@@ -161,9 +161,10 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         inputs: &HashMap<String, Vec<u8>>,
         seq_len: usize,
         hidden: usize,
+        dtype: gllm_kernels::types::DType,
     ) -> Result<HashMap<String, Vec<u8>>, PipelineError> {
         if !self.is_compiled() {
-            self.compile(seq_len, hidden)?;
+            self.compile(seq_len, hidden, dtype)?;
         }
         self.forward(inputs)
     }

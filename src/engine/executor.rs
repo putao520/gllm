@@ -536,7 +536,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             get_template_by_arch(manifest.arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
-                    build_executor_from_yaml(&arch_name, &resolved, 1, hidden).ok()
+                    build_executor_from_yaml(&arch_name, &resolved, 1, hidden, crate::compat::jit_helpers::computation_dtype(model_config.dtype_size)).ok()
                 })
         };
 

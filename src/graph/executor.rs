@@ -213,12 +213,12 @@ struct CompiledNode {
 fn build_flash_attention_graph(
     config: &FlashAttentionConfig,
     seq_len: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let h = config.num_heads * config.head_dim;
 
     let q = g.add_tensor_concrete("q", &[seq_len, h], dt);
@@ -250,12 +250,12 @@ fn build_flash_attention_graph(
 fn build_swiglu_graph(
     config: &SwiGLUConfig,
     seq_len: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let inter = config.intermediate_size;
 
     let gate = g.add_tensor_concrete("gate", &[seq_len, inter], dt);
@@ -277,12 +277,12 @@ fn build_rope_graph(
     config: &RoPEConfig,
     seq_len: usize,
     hidden: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
     let cos_sin = g.add_tensor_concrete("cos_sin", &[config.head_dim / 2], dt);
@@ -311,12 +311,12 @@ fn build_fused_qkv_rope_graph(
     config: &FusedQkvRopeConfig,
     seq_len: usize,
     hidden: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let q_dim = config.num_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
@@ -329,7 +329,7 @@ fn build_fused_qkv_rope_graph(
 
     let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype },
         vec![input, w_q],
         vec![q_out],
         "gemm_q",
@@ -337,7 +337,7 @@ fn build_fused_qkv_rope_graph(
 
     let k_out = g.add_tensor_concrete("k", &[seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
         vec![input, w_k],
         vec![k_out],
         "gemm_k",
@@ -345,7 +345,7 @@ fn build_fused_qkv_rope_graph(
 
     let v_out = g.add_tensor_concrete("v", &[seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
         vec![input, w_v],
         vec![v_out],
         "gemm_v",
@@ -378,12 +378,12 @@ fn build_fused_qkv_rope_graph(
 fn build_fused_rms_linear_graph(
     config: &FusedRMSLinearConfig,
     seq_len: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let h = config.hidden_size;
 
     let input = g.add_tensor_concrete("input", &[seq_len, h], dt);
@@ -401,7 +401,7 @@ fn build_fused_rms_linear_graph(
 
     let out = g.add_tensor_concrete("rms_linear_out", &[seq_len, h], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: h, k: h, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n: h, k: h, dtype },
         vec![normed, linear_w],
         vec![out],
         "linear",
@@ -418,12 +418,12 @@ fn build_fused_rms_linear_graph(
 fn build_gqa_graph(
     config: &GQAConfig,
     seq_len: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let q_dim = config.num_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
@@ -457,12 +457,12 @@ fn build_moe_routing_graph(
     config: &MoERoutingConfig,
     seq_len: usize,
     hidden: usize,
+    dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::types::DType;
 
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
     let n = config.num_experts;
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
@@ -471,7 +471,7 @@ fn build_moe_routing_graph(
 
     let gate_logits = g.add_tensor_concrete("gate_logits", &[seq_len, n], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n, k: hidden, dtype: DType::F32 },
+        OpKind::Gemm { m: seq_len, n, k: hidden, dtype },
         vec![input, gate_w],
         vec![gate_logits],
         "gate_gemm",
@@ -496,9 +496,9 @@ fn build_moe_routing_graph(
 fn atomic_op_to_kind(
     op_type: &str,
     input_shapes: &[Vec<usize>],
+    dtype: gllm_kernels::types::DType,
 ) -> Result<gllm_kernels::compiler::OpKind, ExecutionError> {
     use gllm_kernels::compiler::OpKind;
-    use gllm_kernels::types::DType;
 
     match op_type {
         "Add" => Ok(OpKind::Add),
@@ -522,7 +522,7 @@ fn atomic_op_to_kind(
             let m = a[a.len() - 2];
             let k = a[a.len() - 1];
             let n = b[b.len() - 1];
-            Ok(OpKind::Gemm { m, n, k, dtype: DType::F32 })
+            Ok(OpKind::Gemm { m, n, k, dtype })
         }
         "LayerNorm" | "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
@@ -540,13 +540,13 @@ fn build_atomic_graph(
     op_type: &str,
     input_shapes: &[Vec<usize>],
     output_shape: &[usize],
+    dtype: gllm_kernels::types::DType,
 ) -> Result<gllm_kernels::compiler::CompilerGraph, ExecutionError> {
     use gllm_kernels::compiler::CompilerGraph;
-    use gllm_kernels::types::DType;
 
-    let kind = atomic_op_to_kind(op_type, input_shapes)?;
+    let kind = atomic_op_to_kind(op_type, input_shapes, dtype)?;
     let mut g = CompilerGraph::new();
-    let dt = DType::F32;
+    let dt = dtype;
 
     let mut input_ids = Vec::new();
     for (i, shape) in input_shapes.iter().enumerate() {
@@ -675,12 +675,13 @@ impl FusedGraphExecutor {
         &mut self,
         seq_len: usize,
         hidden: usize,
+        dtype: gllm_kernels::types::DType,
     ) -> Result<(), ExecutionError> {
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let mut compiled_nodes = Vec::with_capacity(self.graph.nodes.len());
 
         for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let build = self.build_node_graph(idx, seq_len, hidden)?;
+            let build = self.build_node_graph(idx, seq_len, hidden, dtype)?;
 
             let compiled = compiler
                 .compile_graph(&build.graph)
@@ -715,12 +716,13 @@ impl FusedGraphExecutor {
         node_idx: usize,
         seq_len: usize,
         hidden: usize,
+        dtype: gllm_kernels::types::DType,
     ) -> Result<NodeGraphBuild, ExecutionError> {
         let node = &self.graph.nodes[node_idx];
 
         match &node.op {
             FusedOp::FlashAttention(config) => {
-                let g = build_flash_attention_graph(config, seq_len);
+                let g = build_flash_attention_graph(config, seq_len, dtype);
                 let h = config.num_heads * config.head_dim;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
@@ -734,7 +736,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::SwiGLU(config) => {
-                let g = build_swiglu_graph(config, seq_len);
+                let g = build_swiglu_graph(config, seq_len, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -747,7 +749,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::RoPE(config) => {
-                let g = build_rope_graph(config, seq_len, hidden);
+                let g = build_rope_graph(config, seq_len, hidden, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -760,7 +762,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::FusedQkvRope(config) => {
-                let g = build_fused_qkv_rope_graph(config, seq_len, hidden);
+                let g = build_fused_qkv_rope_graph(config, seq_len, hidden, dtype);
                 let q_dim = config.num_heads * config.head_dim;
                 let kv_dim = config.num_kv_heads * config.head_dim;
                 let per = vec![
@@ -781,7 +783,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::FusedRMSLinear(config) => {
-                let g = build_fused_rms_linear_graph(config, seq_len);
+                let g = build_fused_rms_linear_graph(config, seq_len, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -794,7 +796,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::GQA(config) => {
-                let g = build_gqa_graph(config, seq_len);
+                let g = build_gqa_graph(config, seq_len, dtype);
                 let q_dim = config.num_heads * config.head_dim;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
@@ -808,7 +810,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::MoERouting(config) => {
-                let g = build_moe_routing_graph(config, seq_len, hidden);
+                let g = build_moe_routing_graph(config, seq_len, hidden, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -835,7 +837,7 @@ impl FusedGraphExecutor {
 
                 let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
                 let output_numel: usize = output_shape.iter().product();
-                let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape)?;
+                let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape, dtype)?;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
 
                 Ok(NodeGraphBuild {
@@ -864,6 +866,7 @@ impl FusedGraphExecutor {
         &mut self,
         seq_len: usize,
         hidden: usize,
+        dtype: gllm_kernels::types::DType,
         device: &gllm_kernels::gpu::cuda::CudaDevice,
         gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
         sm_version: u32,
@@ -871,7 +874,7 @@ impl FusedGraphExecutor {
         let mut gpu_nodes = Vec::with_capacity(self.graph.nodes.len());
 
         for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let build = self.build_node_graph(idx, seq_len, hidden)?;
+            let build = self.build_node_graph(idx, seq_len, hidden, dtype)?;
 
             let (module, kernel_entries) =
                 crate::compat::cuda_compile_graph(device, gpu_profile, sm_version, &build.graph)
@@ -1367,6 +1370,7 @@ impl FusedGraphExecutor {
         graph: crate::loader::onnx::OnnxGraph,
         seq_len: usize,
         hidden: usize,
+        dtype: gllm_kernels::types::DType,
     ) -> Result<Self, ExecutorError> {
         use crate::graph::optimizer::{GraphOptimizer, OptimizationContext};
 
@@ -1378,7 +1382,7 @@ impl FusedGraphExecutor {
 
         let mut executor = Self::new(fused);
         executor
-            .compile(seq_len, hidden)
+            .compile(seq_len, hidden, dtype)
             .map_err(|e| ExecutorError::CompilationFailed(format!("JIT compile: {e}")))?;
 
         Ok(executor)
@@ -1595,7 +1599,7 @@ mod tests {
             scale: None,
             causal: true,
         };
-        let g = build_flash_attention_graph(&config, 4);
+        let g = build_flash_attention_graph(&config, 4, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // Q, K, V
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 1); // MHA
@@ -1608,7 +1612,7 @@ mod tests {
             hidden_size: 512,
             intermediate_size: 1024,
         };
-        let g = build_swiglu_graph(&config, 4);
+        let g = build_swiglu_graph(&config, 4, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 2); // gate, up
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 1); // SwiGlu
@@ -1623,7 +1627,7 @@ mod tests {
             head_dim: 64,
             rope_theta: 10000.0,
         };
-        let g = build_fused_qkv_rope_graph(&config, 4, 512);
+        let g = build_fused_qkv_rope_graph(&config, 4, 512, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 5); // input, w_q, w_k, w_v, cos_sin
         assert_eq!(g.outputs.len(), 3); // q_rope, k_rope, v
         assert_eq!(g.ops.len(), 5); // 3 Gemms + 2 RoPEs
@@ -1636,7 +1640,7 @@ mod tests {
             hidden_size: 512,
             eps: 1e-5,
         };
-        let g = build_fused_rms_linear_graph(&config, 4);
+        let g = build_fused_rms_linear_graph(&config, 4, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // input, norm_w, linear_w
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 2); // RmsNorm + Gemm
@@ -1651,7 +1655,7 @@ mod tests {
             num_groups: 4,
             head_dim: 128,
         };
-        let g = build_gqa_graph(&config, 4);
+        let g = build_gqa_graph(&config, 4, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // Q, K, V
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 1); // MHA
@@ -1665,7 +1669,7 @@ mod tests {
             top_k: 2,
             capacity_factor: 1.0,
         };
-        let g = build_moe_routing_graph(&config, 4, 512);
+        let g = build_moe_routing_graph(&config, 4, 512, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 2); // input, gate_w
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 2); // Gemm + Softmax
@@ -1689,18 +1693,18 @@ mod tests {
     #[test]
     fn atomic_op_to_kind_known_ops() {
         let shapes = vec![vec![4, 512], vec![512, 1024]];
-        assert!(atomic_op_to_kind("Add", &shapes).is_ok());
-        assert!(atomic_op_to_kind("Mul", &shapes).is_ok());
-        assert!(atomic_op_to_kind("Silu", &shapes).is_ok());
-        assert!(atomic_op_to_kind("Gelu", &shapes).is_ok());
-        assert!(atomic_op_to_kind("MatMul", &shapes).is_ok());
+        assert!(atomic_op_to_kind("Add", &shapes, gllm_kernels::types::DType::F32).is_ok());
+        assert!(atomic_op_to_kind("Mul", &shapes, gllm_kernels::types::DType::F32).is_ok());
+        assert!(atomic_op_to_kind("Silu", &shapes, gllm_kernels::types::DType::F32).is_ok());
+        assert!(atomic_op_to_kind("Gelu", &shapes, gllm_kernels::types::DType::F32).is_ok());
+        assert!(atomic_op_to_kind("MatMul", &shapes, gllm_kernels::types::DType::F32).is_ok());
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     #[test]
     fn atomic_op_to_kind_unknown_returns_err() {
         let shapes = vec![vec![4, 512]];
-        let result = atomic_op_to_kind("UnknownOp", &shapes);
+        let result = atomic_op_to_kind("UnknownOp", &shapes, gllm_kernels::types::DType::F32);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -1791,7 +1795,7 @@ mod tests {
         };
 
         let mut executor = FusedGraphExecutor::new(graph);
-        let result = executor.compile(4, 512);
+        let result = executor.compile(4, 512, gllm_kernels::types::DType::F32);
         assert!(result.is_err(), "compile() must fail for unsupported op");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -1966,7 +1970,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
 
-        let executor = FusedGraphExecutor::from_graph(graph, 4, 64)
+        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32)
             .expect("from_graph must succeed for a simple Add graph");
 
         assert!(executor.is_compiled(), "executor must be compiled after from_graph");
@@ -2056,7 +2060,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
 
-        let executor = FusedGraphExecutor::from_graph(graph, 4, 64)
+        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32)
             .expect("from_graph must succeed");
 
         // Provide two f32 inputs: x = [1.0; 4*64], y = [2.0; 4*64]
