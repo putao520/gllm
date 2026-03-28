@@ -58,6 +58,7 @@ rayon = "1.10"
 sha2 = "0.10"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 serde_yaml = "0.9.34"
+bincode = "1.3.3"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 gllm-kernels = { path = "../gllm-kernels", default-features = false, features = ["jit-x86"] }

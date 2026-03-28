@@ -135,6 +135,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         std::ptr::null_mut(),
         0,
         seq_len,
+        seq_len,
         positions.as_ptr(),
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 

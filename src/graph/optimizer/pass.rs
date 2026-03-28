@@ -60,6 +60,8 @@ pub struct OptimizationContext {
     pub tensor_core_gen: u8,
     /// Warp 大小（GPU 专用，CPU 填 0）
     pub warp_size: u32,
+    /// 隐藏层维度
+    pub hidden_size: usize,
 }
 
 impl Default for OptimizationContext {
@@ -79,6 +81,7 @@ impl Default for OptimizationContext {
             has_bf16: false,
             tensor_core_gen: 0,
             warp_size: 0,
+            hidden_size: 4096,
         }
     }
 }

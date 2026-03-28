@@ -51,6 +51,7 @@ impl GraphOptimizer {
     /// 注册内置 Pass
     fn register_builtin_passes(&mut self) {
         self.register_pass(Box::new(constant_folding::ConstantFoldingPass));
+        self.register_pass(Box::new(pattern_fusion::CanonicalizeAttentionPass));
         self.register_pass(Box::new(pattern_fusion::FlashAttentionFusionPass));
         self.register_pass(Box::new(pattern_fusion::GQAFusionPass));
         self.register_pass(Box::new(pattern_fusion::FusedQkvRopeFusionPass));

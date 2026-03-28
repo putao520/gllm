@@ -20,8 +20,7 @@
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
 | `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议: 模型级缓存键, 全层融合粒度, SymDim 动态绑定, 四档自适应 Tiling |
-| `DOCS/scheduling/p4-p5-next-gen-optimizations.md` | P4/P5 下一代优化: 稀疏注意力, 动态精度, PGSLE, MoE 冷热, 大一统基建 |
-| `DOCS/scheduling/optimization_strategy_master.md` | 全链路优化总策略: 5 层优化体系, FLOPs -60%, 吞吐 3.8× |
+| `DOCS/scheduling/unified-jit-architecture-master.md` | 大一统 JIT 架构终极蓝图: Mega-Kernel块级路由, TurboQuant双轨显存池, 全局热修补, 残差总线插管 API |
 
 ## Technology Stack
 

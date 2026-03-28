@@ -40,6 +40,9 @@ pub fn build_executor_from_yaml(
     seq_len: usize,
     hidden: usize,
     dtype: gllm_kernels::types::DType,
+    model_id: &str,
+    hardware_fingerprint: &str,
+    cache: &crate::compat::artifact_cache::ArtifactCache,
 ) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
     register_builtin_templates();
 
@@ -55,5 +58,13 @@ pub fn build_executor_from_yaml(
         ))
     })?;
 
-    crate::graph::executor::FusedGraphExecutor::from_graph(onnx_graph, seq_len, hidden, dtype)
+    let mut ctx = crate::graph::optimizer::OptimizationContext::default();
+    ctx.hidden_size = config.hidden_size;
+    ctx.num_heads = config.num_attention_heads;
+    ctx.num_kv_heads = config.num_key_value_heads;
+    ctx.head_dim = config.head_dim;
+
+    crate::graph::executor::FusedGraphExecutor::from_graph_with_cache(
+        onnx_graph, seq_len, hidden, dtype, model_id, hardware_fingerprint, cache, ctx
+    )
 }

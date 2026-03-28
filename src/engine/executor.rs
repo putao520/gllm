@@ -484,7 +484,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             page_size,
             swap_config: None,
         };
-        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader)?;
+        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -525,16 +525,66 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 extra: std::collections::HashMap::new(),
             };
             let hidden = model_config.hidden_size;
+            let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
+            let fingerprint = crate::compat::jit_helpers::cpu_fingerprint();
+            let model_id = &manifest.model_id;
             // Look up template name via arch mapping, then build executor
             get_template_by_arch(manifest.arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
-                    build_executor_from_yaml(&arch_name, &resolved, 1, hidden, crate::compat::jit_helpers::computation_dtype(model_config.dtype_size)).ok()
+                    build_executor_from_yaml(
+                        &arch_name, 
+                        &resolved, 
+                        1, 
+                        hidden, 
+                        crate::compat::jit_helpers::computation_dtype(model_config.dtype_size),
+                        model_id,
+                        &fingerprint.to_string(),
+                        &cache
+                    ).map_err(|e| {
+                        eprintln!("Failed to build executor from yaml: {}", e);
+                        e
+                    }).ok()
                 })
         };
 
-
-
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        let graph_executor = {
+            use crate::compat::backend_trait::TensorLookup;
+            let mut bound_executor = graph_executor;
+            if let Some(mut ge) = bound_executor.take() {
+                // Collect all weight names: from weight_bindings AND from node inputs.
+                // YAML-template graphs only have weight names in node inputs (not in weight_bindings),
+                // while ONNX-originated graphs may have them in weight_bindings.
+                let mut expected_names = std::collections::HashSet::new();
+                for key in ge.graph().weight_bindings.keys() {
+                    expected_names.insert(key.clone());
+                }
+                // Also scan node inputs — any input that looks like a model weight name
+                // (contains '.' indicating a hierarchical path like "model.layers.0.self_attn.q_proj.weight")
+                // should be bound from the loaded weights.
+                let graph_inputs: std::collections::HashSet<String> = ge.graph().inputs.iter().cloned().collect();
+                for node in &ge.graph().nodes {
+                    for input_name in &node.inputs {
+                        // Skip graph-level activation inputs (they come from upstream nodes)
+                        if !graph_inputs.contains(input_name) && input_name.contains('.') {
+                            expected_names.insert(input_name.clone());
+                        }
+                    }
+                }
+                for canonical_name in expected_names {
+                    if let Some(tensor) = TensorLookup::get_tensor(&weights, &canonical_name) {
+                        let ptr = tensor.as_ref().as_ptr() as *const f32;
+                        ge = ge.bind(canonical_name.clone(), ptr);
+                    } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
+                        let ptr = q_tensor.data.as_ptr() as *const f32;
+                        ge = ge.bind(canonical_name.clone(), ptr);
+                    }
+                }
+                bound_executor = Some(ge);
+            }
+            bound_executor
+        };
         Ok(Self {
             backend,
             scheduler,
@@ -562,6 +612,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     fn build_onnx_generator_plan(
         manifest: &ModelManifest,
         loader: &mut Loader,
+        model_config: &ModelConfig,
     ) -> ExecutorResult<Option<OnnxGeneratorPlan>> {
         if manifest.kind != ModelKind::Chat || loader.weight_format() != WeightFormat::Onnx {
             return Ok(None);
@@ -571,7 +622,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let onnx_graph = onnx.graph();
 
         // Use the new GraphOptimizer to generate FusedGraph
-        let ctx = OptimizationContext::default();
+        let mut ctx = OptimizationContext::default();
+        ctx.hidden_size = model_config.hidden_size;
+        ctx.num_heads = model_config.num_attention_heads;
+        ctx.num_kv_heads = model_config.num_key_value_heads;
+        ctx.head_dim = model_config.head_dim;
         let optimizer = GraphOptimizer::new(ctx);
         let fused_graph = optimizer
             .optimize(onnx_graph)

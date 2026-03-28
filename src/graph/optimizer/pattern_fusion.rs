@@ -146,18 +146,34 @@ impl OptimizationPass for FusedQkvRopeFusionPass {
                 return None;
             }
 
+            let rope_theta = rope.attributes.get("theta").and_then(|val| match val {
+                crate::graph::types::AttrValue::Float(f) => Some(*f as f64),
+                crate::graph::types::AttrValue::Int(i) => Some(*i as f64),
+                _ => None,
+            }).unwrap_or(10000.0);
+
+            let config = FusedQkvRopeConfig {
+                num_heads: _ctx.num_heads,
+                num_kv_heads: _ctx.num_kv_heads,
+                head_dim: _ctx.head_dim,
+                rope_theta,
+            };
+
             let mut fused = FusedNode::new(
                 format!("{}_fused_qkv_rope", q.name),
-                FusedOp::FusedQkvRope(FusedQkvRopeConfig::default()),
+                FusedOp::FusedQkvRope(config),
             );
-            fused.inputs = q
-                .inputs
-                .iter()
-                .chain(k.inputs.iter())
-                .chain(v.inputs.iter())
-                .cloned()
-                .collect();
-            fused.outputs = rope.outputs.clone();
+            fused.inputs = vec![
+                q.inputs[0].clone(), // activation input
+                q.inputs[1].clone(), // w_q
+                k.inputs[1].clone(), // w_k
+                v.inputs[1].clone(), // w_v
+            ];
+            // Outputs: Q_rope, K_rope, V_proj
+            let mut fused_outputs = rope.outputs.clone();
+            // Append V projection output (it's not part of the RoPE node's outputs)
+            fused_outputs.extend(v.outputs.iter().cloned());
+            fused.outputs = fused_outputs;
             Some(fused)
         });
 
@@ -192,11 +208,25 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
             if !is_rms_norm(rms) || !is_linear(linear) {
                 return None;
             }
+            let eps = rms.attributes.get("eps").and_then(|val| match val {
+                crate::graph::types::AttrValue::Float(f) => Some(*f),
+                crate::graph::types::AttrValue::Int(i) => Some(*i as f32),
+                _ => None,
+            }).unwrap_or(1e-5);
+
             let mut fused = FusedNode::new(
                 format!("{}_fused_rms_linear", rms.name),
-                FusedOp::FusedRMSLinear(FusedRMSLinearConfig::default()),
+                FusedOp::FusedRMSLinear(FusedRMSLinearConfig {
+                    hidden_size: _ctx.hidden_size,
+                    eps,
+                }),
             );
-            fused.inputs = rms.inputs.clone();
+            fused.inputs = rms
+                .inputs
+                .iter()
+                .chain(linear.inputs.iter().skip(1))
+                .cloned()
+                .collect();
             fused.outputs = linear.outputs.clone();
             Some(fused)
         });
@@ -237,11 +267,10 @@ impl OptimizationPass for GQAFusionPass {
                 return None;
             }
 
-            let num_groups = ctx.num_heads / ctx.num_kv_heads;
             let config = GQAConfig {
                 num_heads: ctx.num_heads,
                 num_kv_heads: ctx.num_kv_heads,
-                num_groups,
+                num_groups: ctx.num_heads / ctx.num_kv_heads,
                 head_dim: ctx.head_dim,
             };
             let mut fused = FusedNode::new(format!("{}_gqa", q.name), FusedOp::GQA(config));
@@ -263,6 +292,57 @@ impl OptimizationPass for GQAFusionPass {
 
     fn priority(&self) -> i32 {
         14
+    }
+}
+
+#[derive(Debug)]
+pub struct CanonicalizeAttentionPass;
+
+impl OptimizationPass for CanonicalizeAttentionPass {
+    fn name(&self) -> &'static str {
+        "CanonicalizeAttention"
+    }
+
+    fn run(
+        &self,
+        graph: FusedGraph,
+        ctx: &OptimizationContext,
+    ) -> Result<FusedGraph, OptimizeError> {
+        let mut out = graph;
+        let mut canonicalized = 0;
+
+        for node in &mut out.nodes {
+            if is_attention(node) {
+                // Determine whether to use FlashAttention or GQA
+                if ctx.supports_flash_attention() {
+                    let config = FlashAttentionConfig {
+                        num_heads: ctx.num_heads,
+                        num_kv_heads: ctx.num_kv_heads,
+                        head_dim: ctx.head_dim,
+                        scale: Some(1.0 / (ctx.head_dim as f32).sqrt()),
+                        causal: true,
+                    };
+                    node.op = FusedOp::FlashAttention(config);
+                } else {
+                    let config = GQAConfig {
+                        num_heads: ctx.num_heads,
+                        num_kv_heads: ctx.num_kv_heads,
+                        num_groups: ctx.num_heads / ctx.num_kv_heads,
+                        head_dim: ctx.head_dim,
+                    };
+                    node.op = FusedOp::GQA(config);
+                }
+                canonicalized += 1;
+            }
+        }
+
+        // We overload gqa_fusions stat to count canonicalized attention ops too
+        out.stats.gqa_fusions += canonicalized;
+        Ok(out)
+    }
+
+    fn priority(&self) -> i32 {
+        5 // High priority to run before window-based fusions
     }
 }
 

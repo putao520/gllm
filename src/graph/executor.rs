@@ -285,8 +285,7 @@ fn build_rope_graph(
     let dt = dtype;
 
     let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
-    let cos_sin = g.add_tensor_concrete("cos_sin", &[config.head_dim / 2], dt);
-    g.inputs = vec![input, cos_sin];
+    g.inputs = vec![input];
 
     let out = g.add_tensor_concrete("rope_out", &[seq_len, hidden], dt);
     g.add_op(
@@ -294,7 +293,7 @@ fn build_rope_graph(
             head_dim: config.head_dim,
             theta: config.rope_theta,
         },
-        vec![input, cos_sin],
+        vec![input],
         vec![out],
         "rope",
     );
@@ -324,8 +323,7 @@ fn build_fused_qkv_rope_graph(
     let w_q = g.add_tensor_concrete("w_q", &[hidden, q_dim], dt);
     let w_k = g.add_tensor_concrete("w_k", &[hidden, kv_dim], dt);
     let w_v = g.add_tensor_concrete("w_v", &[hidden, kv_dim], dt);
-    let cos_sin = g.add_tensor_concrete("cos_sin", &[config.head_dim / 2], dt);
-    g.inputs = vec![input, w_q, w_k, w_v, cos_sin];
+    g.inputs = vec![input, w_q, w_k, w_v];
 
     let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
     g.add_op(
@@ -351,23 +349,30 @@ fn build_fused_qkv_rope_graph(
         "gemm_v",
     );
 
-    let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
-        vec![q_out, cos_sin],
-        vec![q_rope],
-        "rope_q",
-    );
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
+    {
+        let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
+        g.add_op(
+            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
+            vec![q_out],
+            vec![q_rope],
+            "rope_q",
+        );
 
-    let k_rope = g.add_tensor_concrete("k_rope", &[seq_len, kv_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
-        vec![k_out, cos_sin],
-        vec![k_rope],
-        "rope_k",
-    );
+        let k_rope = g.add_tensor_concrete("k_rope", &[seq_len, kv_dim], dt);
+        g.add_op(
+            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
+            vec![k_out],
+            vec![k_rope],
+            "rope_k",
+        );
 
-    g.outputs = vec![q_rope, k_rope, v_out];
+        g.outputs = vec![q_rope, k_rope, v_out];
+    }
+    #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+    {
+        g.outputs = vec![q_out, k_out, v_out];
+    }
     g
 }
 
@@ -505,6 +510,8 @@ fn atomic_op_to_kind(
         "Mul" => Ok(OpKind::Mul),
         "Silu" | "Swish" => Ok(OpKind::Silu),
         "Gelu" => Ok(OpKind::Gelu),
+        "SimplifiedLayerNormalization" => Ok(OpKind::RmsNorm { eps: 1e-6 }),
+        "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "Softmax" => {
             let vocab_size = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
                 input_shapes[0][input_shapes[0].len() - 1]
@@ -662,6 +669,26 @@ pub struct FusedGraphExecutor {
     is_gpu_compiled: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NodePayload {
+    code_bytes: Vec<u8>,
+    scratchpad_bytes: usize,
+    config_hash: u64,
+    weight_layout_offsets: Option<Vec<(u32, usize)>>,
+    weight_layout_total_bytes: Option<usize>,
+    
+    graph_input_names: Vec<String>,
+    graph_output_names: Vec<String>,
+    output_numel: usize,
+    per_output_numel: Vec<usize>,
+    output_dtype_id: u8,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GraphExecutorPayload {
+    nodes: Vec<NodePayload>,
+}
+
 // Manual Debug impl because CompiledLayer does not derive Debug.
 impl std::fmt::Debug for FusedGraphExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -684,6 +711,29 @@ impl FusedGraphExecutor {
             #[cfg(feature = "cuda")]
             is_gpu_compiled: false,
         }
+    }
+
+    /// Bind a named weight to a raw pointer.
+    ///
+    /// If a WeightBinding entry already exists for `name`, updates its `ptr`.
+    /// Otherwise creates a new entry with the given pointer (shape/dtype
+    /// will be inferred during compilation from the CompilerGraph).
+    pub fn bind(mut self, name: String, ptr: *const f32) -> Self {
+        if let Some(mut meta) = self.graph.weight_bindings.remove(&name) {
+            meta.ptr = Some(ptr);
+            self.graph.weight_bindings.insert(name, meta);
+        } else {
+            // Create a new binding with just the pointer — shape will be
+            // resolved from the CompiledNode's graph input tensor metadata.
+            self.graph.weight_bindings.insert(name, crate::graph::types::WeightBinding {
+                source_name: String::new(),
+                shape: vec![],
+                dtype: safetensors::Dtype::F32,
+                data: None,
+                ptr: Some(ptr),
+            });
+        }
+        self
     }
 
     /// Compile every FusedNode into a JIT kernel.
@@ -733,6 +783,123 @@ impl FusedGraphExecutor {
         self.compiled_nodes = compiled_nodes;
         self.is_compiled = true;
         Ok(())
+    }
+
+    /// Extends `compile` to check `ArtifactCache` first. If cache miss, falls back to `compile`
+    /// and writes the serialized payload back to `ArtifactCache` using `save_blob`.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn compile_with_cache(
+        &mut self,
+        seq_len: usize,
+        hidden: usize,
+        dtype: gllm_kernels::types::DType,
+        model_id: &str,
+        hardware_fingerprint: &str,
+        cache: &crate::compat::artifact_cache::ArtifactCache,
+    ) -> Result<(), ExecutionError> {
+        let hash = cache.get_blueprint_hash(model_id, &self.graph, hardware_fingerprint);
+        
+        // 1. Try L3 Cache bypass
+        if let Some(blob) = cache.load_blob(&hash) {
+            if let Ok(payload) = bincode::deserialize::<GraphExecutorPayload>(&blob) {
+                if let Ok(nodes) = self.restore_payload(payload) {
+                    self.compiled_nodes = nodes;
+                    self.is_compiled = true;
+                    // Skip inference compiler
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Compilation Miss - Fallback to full trace-codegen
+        self.compile(seq_len, hidden, dtype)?;
+
+        // 3. Serialize and commit to ArtifactCache
+        if let Ok(payload) = self.build_payload() {
+            if let Ok(blob) = bincode::serialize(&payload) {
+                let _ = cache.save_blob(&hash, &blob);
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn restore_payload(&self, payload: GraphExecutorPayload) -> Result<Vec<CompiledNode>, ExecutionError> {
+        use gllm_kernels::compiler::graph::{WeightLayout, TensorId};
+        use gllm_kernels::types::DType;
+        
+        let mut nodes = Vec::with_capacity(payload.nodes.len());
+        for (i, p) in payload.nodes.into_iter().enumerate() {
+            let mut layer = gllm_kernels::compiler::CompiledLayer::from_code(
+                &p.code_bytes,
+                p.scratchpad_bytes,
+                p.config_hash,
+            ).map_err(|e| ExecutionError::Compilation(e.to_string()))?;
+            
+            if let (Some(offsets), Some(total_bytes)) = (p.weight_layout_offsets, p.weight_layout_total_bytes) {
+                let weight_layout = WeightLayout {
+                    offsets: offsets.into_iter().map(|(id, off)| (TensorId(id), off)).collect(),
+                    total_bytes,
+                };
+                layer.weight_layout = Some(weight_layout);
+            }
+
+            let output_dtype = match p.output_dtype_id {
+                0 => DType::F32,
+                1 => DType::F16,
+                2 => DType::BF16,
+                3 => DType::U8,
+                _ => return Err(ExecutionError::Backend(format!("Unknown dtype ID: {}", p.output_dtype_id))),
+            };
+
+            nodes.push(CompiledNode {
+                compiled: layer,
+                graph_input_names: p.graph_input_names,
+                graph_output_names: p.graph_output_names,
+                output_numel: p.output_numel,
+                per_output_numel: p.per_output_numel,
+                output_dtype,
+            });
+        }
+        
+        if nodes.len() != self.graph.nodes.len() {
+            return Err(ExecutionError::Backend("Cache node length mismatch".into()));
+        }
+
+        Ok(nodes)
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn build_payload(&self) -> Result<GraphExecutorPayload, ExecutionError> {
+        let mut nodes = Vec::with_capacity(self.compiled_nodes.len());
+        
+        for node in &self.compiled_nodes {
+            let code_bytes = node.compiled.code_bytes().to_vec();
+            
+            let (offsets, total_bytes) = if let Some(ref wl) = node.compiled.weight_layout {
+                let off = wl.offsets.iter().map(|(t, o)| (t.0, *o)).collect();
+                (Some(off), Some(wl.total_bytes))
+            } else {
+                (None, None)
+            };
+
+            nodes.push(NodePayload {
+                code_bytes,
+                scratchpad_bytes: node.compiled.scratchpad_bytes,
+                config_hash: node.compiled.config_hash,
+                weight_layout_offsets: offsets,
+                weight_layout_total_bytes: total_bytes,
+                
+                graph_input_names: node.graph_input_names.clone(),
+                graph_output_names: node.graph_output_names.clone(),
+                output_numel: node.output_numel,
+                per_output_numel: node.per_output_numel.clone(),
+                output_dtype_id: node.output_dtype.elem_id(),
+            });
+        }
+        
+        Ok(GraphExecutorPayload { nodes })
     }
 
     /// Result of building a CompilerGraph for one FusedNode.
@@ -849,6 +1016,17 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::Atomic(atomic) => {
+                if atomic.op_type == "Gather" || atomic.op_type == "Slice" || atomic.op_type == "Shape" {
+                    // Skip ops handled natively by standard CPU graph pipelines beforehand.
+                    return Ok(NodeGraphBuild {
+                        graph: gllm_kernels::compiler::CompilerGraph::new(),
+                        input_names: node.inputs.clone(),
+                        output_names: node.outputs.clone(),
+                        output_numel: 0,
+                        per_output_numel: vec![],
+                        output_dtype: dtype,
+                    });
+                }
                 let input_shapes: Vec<Vec<usize>> = node
                     .inputs
                     .iter()
@@ -944,6 +1122,11 @@ impl FusedGraphExecutor {
         }
 
         for node in &self.graph.nodes {
+            // Check if outputs are already provided externally (e.g. Gather bypassed via CPU input)
+            if !node.outputs.is_empty() && node.outputs.iter().all(|out| available.contains(out)) {
+                continue;
+            }
+
             for input in &node.inputs {
                 if input.is_empty() || available.contains(input) {
                     continue;
@@ -1013,6 +1196,10 @@ impl FusedGraphExecutor {
 
         // Execute each node on GPU
         for (_node_idx, gcn) in self.gpu_compiled_nodes.iter().enumerate() {
+            if !gcn.graph_output_names.is_empty() && gcn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
+                continue;
+            }
+
             // Allocate GPU buffers for all graph tensors
             let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
             let mut tensor_ptrs: HashMap<TensorId, u64> = HashMap::new();
@@ -1123,13 +1310,16 @@ impl FusedGraphExecutor {
         }
 
         // Seed with weight binding data — prefer runtime ptr over embedded bytes
+        let mut weight_ptrs: HashMap<String, *const u8> = HashMap::new();
         for (name, wb) in &self.graph.weight_bindings {
             if let Some(ptr) = wb.ptr {
-                // Runtime pointer: copy into a byte vec for the tensor map
-                let numel: usize = wb.shape.iter().product();
-                let bytes = numel * wb.dtype.size();
-                let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
-                tensors.insert(name.clone(), slice.to_vec());
+                if !wb.shape.is_empty() {
+                    let numel: usize = wb.shape.iter().product();
+                    let bytes = numel * wb.dtype.size();
+                    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
+                    tensors.insert(name.clone(), slice.to_vec());
+                }
+                weight_ptrs.insert(name.clone(), ptr as *const u8);
             } else if let Some(ref data) = wb.data {
                 tensors.insert(name.clone(), data.clone());
             }
@@ -1138,6 +1328,10 @@ impl FusedGraphExecutor {
         // Execute each node
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
+
+            if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
+                continue;
+            }
 
             // Activation input = first graph input tensor
             let activation = if !cn.graph_input_names.is_empty() {
@@ -1149,11 +1343,28 @@ impl FusedGraphExecutor {
                 Vec::new()
             };
 
-            // Pack remaining inputs as weight blob
+            // Pack weight blob using weight_layout if available
             let mut weight_blob = Vec::new();
-            for name in cn.graph_input_names.iter().skip(1) {
-                if let Some(data) = tensors.get(name) {
-                    weight_blob.extend_from_slice(data);
+            if let Some(ref wl) = cn.compiled.weight_layout {
+                weight_blob.resize(wl.total_bytes, 0u8);
+                for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
+                    let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
+                    let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
+                    let size = next_offset - offset;
+                    if size == 0 { continue; }
+                    if let Some(data) = tensors.get(name) {
+                        let copy_len = size.min(data.len());
+                        weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+                    } else if let Some(&ptr) = weight_ptrs.get(name) {
+                        let src = unsafe { std::slice::from_raw_parts(ptr, size) };
+                        weight_blob[offset..offset + size].copy_from_slice(src);
+                    }
+                }
+            } else {
+                for name in cn.graph_input_names.iter().skip(1) {
+                    if let Some(data) = tensors.get(name) {
+                        weight_blob.extend_from_slice(data);
+                    }
                 }
             }
 
@@ -1162,7 +1373,7 @@ impl FusedGraphExecutor {
             let mut output_buf = vec![0u8; output_bytes];
 
             // Allocate scratchpad
-            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes];
+            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
             // Compute seq_len from activation size: activation is [seq_len, hidden],
             // stored with the node's output dtype, so seq_len = num_elements / hidden.
@@ -1249,6 +1460,7 @@ impl FusedGraphExecutor {
         kv_cache_v: *mut f32,
         layer: usize,
         total_seq: usize,
+        seq_len: usize,
         positions: *const u32,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         if !self.is_compiled {
@@ -1262,13 +1474,19 @@ impl FusedGraphExecutor {
             tensors.insert(name.clone(), data.clone());
         }
 
-        // Seed with weight bindings — prefer runtime ptr over embedded bytes
+        // Seed with weight bindings — prefer runtime ptr over embedded bytes.
+        // Also build a raw-pointer map for direct-ptr weights (where we may not know shape).
+        let mut weight_ptrs: HashMap<String, *const u8> = HashMap::new();
         for (name, wb) in &self.graph.weight_bindings {
             if let Some(ptr) = wb.ptr {
-                let numel: usize = wb.shape.iter().product();
-                let bytes = numel * wb.dtype.size();
-                let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
-                tensors.insert(name.clone(), slice.to_vec());
+                if !wb.shape.is_empty() {
+                    let numel: usize = wb.shape.iter().product();
+                    let bytes = numel * wb.dtype.size();
+                    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
+                    tensors.insert(name.clone(), slice.to_vec());
+                }
+                // Always store the raw pointer for direct-ptr weight packing
+                weight_ptrs.insert(name.clone(), ptr as *const u8);
             } else if let Some(ref data) = wb.data {
                 tensors.insert(name.clone(), data.clone());
             }
@@ -1286,8 +1504,12 @@ impl FusedGraphExecutor {
         let kv_cache_v_ptr = kv_cache_v as *mut u8;
         let _ = (layer, total_seq); // used by caller for layout; kernel uses internal strides
 
-        for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
+        for (node_idx, node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
+
+            if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
+                continue;
+            }
 
             let activation = if !cn.graph_input_names.is_empty() {
                 tensors
@@ -1298,44 +1520,105 @@ impl FusedGraphExecutor {
                 Vec::new()
             };
 
+            // Pack weight blob using the compiled weight_layout for size info.
+            // The weight_layout maps tensor IDs to byte offsets within the blob.
+            // graph_input_names[1..] are the weight tensors in order.
             let mut weight_blob = Vec::new();
-            for name in cn.graph_input_names.iter().skip(1) {
-                if let Some(data) = tensors.get(name) {
-                    weight_blob.extend_from_slice(data);
+            if let Some(ref wl) = cn.compiled.weight_layout {
+                weight_blob.resize(wl.total_bytes, 0u8);
+                for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
+                    // Compute the byte size for this input from the weight layout offset gaps
+                    let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
+                    let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
+                    let size = next_offset - offset;
+                    if size == 0 { continue; }
+
+                    if let Some(data) = tensors.get(name) {
+                        let copy_len = size.min(data.len());
+                        weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+                    } else if let Some(&ptr) = weight_ptrs.get(name) {
+                        let src = unsafe { std::slice::from_raw_parts(ptr, size) };
+                        weight_blob[offset..offset + size].copy_from_slice(src);
+                    }
+                }
+            } else {
+                // Fallback: pack sequentially (original behavior)
+                for name in cn.graph_input_names.iter().skip(1) {
+                    if let Some(data) = tensors.get(name) {
+                        weight_blob.extend_from_slice(data);
+                    }
                 }
             }
 
             let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
-            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes];
+            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
-            let activation_elems = activation.len() / cn.output_dtype.size_bytes();
-            let seq_len = if activation_elems > 0 {
-                activation_elems
-            } else {
-                1
-            };
+            // seq_len is provided explicitly by the caller
 
-            unsafe {
-                cn.compiled.execute(
-                    if activation.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        activation.as_ptr()
-                    },
-                    if weight_blob.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        weight_blob.as_ptr()
-                    },
-                    kv_cache_ptr,
-                    positions,
-                    kv_cache_v_ptr as *const usize,
-                    1,
-                    seq_len,
-                    output_buf.as_mut_ptr(),
-                    scratchpad.as_mut_ptr(),
-                );
+            // Check if we need to execute the JIT kernel, or fallback unconditionally
+            // On CPU, RoPE generation is mathematically incomplete for seq_len > 1, so we evaluate RoPE in pure Rust.
+            let mut skip_jit = false;
+            #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+            if let crate::graph::types::FusedOp::RoPE(ref config) = node.op {
+                skip_jit = true;
+                let out_f32 = unsafe { std::slice::from_raw_parts_mut(output_buf.as_mut_ptr() as *mut f32, output_buf.len() / 4) };
+                let in_f32 = unsafe { std::slice::from_raw_parts(activation.as_ptr() as *const f32, activation.len() / 4) };
+                out_f32.copy_from_slice(in_f32);
+                let pos_u32 = unsafe { std::slice::from_raw_parts(positions, seq_len) };
+                crate::compat::scalar_ops::scalar_rope(out_f32, pos_u32, config.head_dim, config.rope_theta);
+            }
+
+            if !skip_jit {
+                unsafe {
+                    cn.compiled.execute(
+                        if activation.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            activation.as_ptr()
+                        },
+                        if weight_blob.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            weight_blob.as_ptr()
+                        },
+                        kv_cache_ptr,
+                        positions,
+                        kv_cache_v_ptr as *const usize,
+                        1,
+                        seq_len,
+                        output_buf.as_mut_ptr(),
+                        scratchpad.as_mut_ptr(),
+                    );
+                }
+            }
+
+            // CPU Fallback for RoPE if part of FusedQkvRope
+            #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+            {
+                if let crate::graph::types::FusedOp::FusedQkvRope(ref config) = node.op {
+                    let q_dim = config.num_heads * config.head_dim;
+                    let kv_dim = config.num_kv_heads * config.head_dim;
+                    let q_elems = seq_len * q_dim;
+                    let kv_elems = seq_len * kv_dim;
+                    
+                    let out_f32 = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            output_buf.as_mut_ptr() as *mut f32,
+                            output_buf.len() / 4,
+                        )
+                    };
+                    
+                    eprintln!("[ROPE-DBG] output_buf_len={} out_f32_len={} q_elems={} kv_elems={} seq_len={} q_dim={} kv_dim={} num_heads={} num_kv_heads={} head_dim={}",
+                        output_buf.len(), out_f32.len(), q_elems, kv_elems, seq_len,
+                        q_dim, kv_dim, config.num_heads, config.num_kv_heads, config.head_dim);
+                    let (q_slice, rest) = out_f32.split_at_mut(q_elems);
+                    let (k_slice, _) = rest.split_at_mut(kv_elems);
+                    
+                    let pos_u32 = unsafe { std::slice::from_raw_parts(positions, seq_len) };
+                    crate::compat::scalar_ops::scalar_rope(q_slice, pos_u32, config.head_dim, config.rope_theta);
+                    crate::compat::scalar_ops::scalar_rope(k_slice, pos_u32, config.head_dim, config.rope_theta);
+                }
             }
 
             if cn.graph_output_names.len() == 1 {
@@ -1397,10 +1680,10 @@ impl FusedGraphExecutor {
         seq_len: usize,
         hidden: usize,
         dtype: gllm_kernels::types::DType,
+        ctx: crate::graph::optimizer::OptimizationContext,
     ) -> Result<Self, ExecutorError> {
-        use crate::graph::optimizer::{GraphOptimizer, OptimizationContext};
+        use crate::graph::optimizer::GraphOptimizer;
 
-        let ctx = OptimizationContext::default();
         let optimizer = GraphOptimizer::new(ctx);
         let fused = optimizer
             .optimize(&graph)
@@ -1410,6 +1693,33 @@ impl FusedGraphExecutor {
         executor
             .compile(seq_len, hidden, dtype)
             .map_err(|e| ExecutorError::CompilationFailed(format!("JIT compile: {e}")))?;
+
+        Ok(executor)
+    }
+
+    /// Creates an executor leveraging L3 binary cache fingerprinting to bypass compilation.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn from_graph_with_cache(
+        graph: crate::loader::onnx::OnnxGraph,
+        seq_len: usize,
+        hidden: usize,
+        dtype: gllm_kernels::types::DType,
+        model_id: &str,
+        hardware_fingerprint: &str,
+        cache: &crate::compat::artifact_cache::ArtifactCache,
+        ctx: crate::graph::optimizer::OptimizationContext,
+    ) -> Result<Self, ExecutorError> {
+        use crate::graph::optimizer::GraphOptimizer;
+
+        let optimizer = GraphOptimizer::new(ctx);
+        let fused = optimizer
+            .optimize(&graph)
+            .map_err(|e| ExecutorError::CompilationFailed(format!("graph optimization: {e}")))?;
+
+        let mut executor = Self::new(fused);
+        executor
+            .compile_with_cache(seq_len, hidden, dtype, model_id, hardware_fingerprint, cache)
+            .map_err(|e| ExecutorError::CompilationFailed(format!("JIT cache compile: {e}")))?;
 
         Ok(executor)
     }
@@ -1654,9 +1964,17 @@ mod tests {
             rope_theta: 10000.0,
         };
         let g = build_fused_qkv_rope_graph(&config, 4, 512, gllm_kernels::types::DType::F32);
-        assert_eq!(g.inputs.len(), 5); // input, w_q, w_k, w_v, cos_sin
-        assert_eq!(g.outputs.len(), 3); // q_rope, k_rope, v
-        assert_eq!(g.ops.len(), 5); // 3 Gemms + 2 RoPEs
+        assert_eq!(g.inputs.len(), 4); // input, w_q, w_k, w_v
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
+        {
+            assert_eq!(g.outputs.len(), 3); // q_rope, k_rope, v
+            assert_eq!(g.ops.len(), 5); // 3 Gemms + 2 RoPEs
+        }
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+        {
+            assert_eq!(g.outputs.len(), 3); // q_out, k_out, v
+            assert_eq!(g.ops.len(), 3); // 3 Gemms
+        }
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]

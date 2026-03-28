@@ -110,7 +110,16 @@ pub(crate) fn decoder_forward<E: Element>(
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
-        inputs.insert("hidden_state".to_string(), hs_bytes);
+        let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+            if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+                first_node.outputs.first().unwrap().clone()
+            } else {
+                ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+            }
+        } else {
+            "hidden_state".to_string()
+        };
+        inputs.insert(input_name, hs_bytes);
 
         // Get KV cache pointers for this sequence
         let (kv_cache_k_ptr, kv_cache_v_ptr) = if has_kv_cache && seq_idx < kv_caches.len() {
@@ -137,6 +146,7 @@ pub(crate) fn decoder_forward<E: Element>(
             kv_cache_v_ptr,
             0, // layer 0; graph executor handles all layers internally
             total_seq,
+            seq_len,
             positions.as_ptr(),
         ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
@@ -236,7 +246,16 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         .iter()
         .flat_map(|f| f.to_le_bytes())
         .collect();
-    inputs.insert("hidden_state".to_string(), hs_bytes);
+    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+            first_node.outputs.first().unwrap().clone()
+        } else {
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+        }
+    } else {
+        "hidden_state".to_string()
+    };
+    inputs.insert(input_name, hs_bytes);
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -245,6 +264,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         0,
+        seq_len,
         seq_len,
         positions.as_ptr(),
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
@@ -326,7 +346,16 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         .iter()
         .flat_map(|f| f.to_le_bytes())
         .collect();
-    inputs.insert("hidden_state".to_string(), hs_bytes);
+    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+            first_node.outputs.first().unwrap().clone()
+        } else {
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+        }
+    } else {
+        "hidden_state".to_string()
+    };
+    inputs.insert(input_name, hs_bytes);
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
@@ -335,6 +364,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         0,
+        seq_len,
         seq_len,
         positions.as_ptr(),
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
