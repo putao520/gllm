@@ -1370,21 +1370,24 @@ Chunked 调度（交织）:
 > **关联**: unified-jit-architecture-master.md §2, §6.1, ai-development-guideline.md §1
 > **核心哲学**: 用数学预处理在加载期消灭所有运行时多态分支，使得整条管线只走唯一一条定点算法流 —— 这就是"单一算法凌驾多态"。
 
-### 11.1 PolarQuant 正交旋转预融合 (Zero-Overhead PolarQuant)
+### 11.1 TurboQuant 2.0: Hessian-Polar 块级量化防御 (Zero-Overhead Batched Pre-Conditioning)
 
-在模型加载（Load-Time）阶段执行不可逆的数学突变：
+传统的纯正交旋转（Random Hadamard）在处理百亿参数非线性大模型时，会使极个别通道的绝对大方差“污染摊平”至所有通道，导致 4-bit 量化底噪激增、精度爆炸。为了在 **Continuous Batching** 环境下既消除运行时条件分支，又绝对保全物理级精度，引入 TurboQuant 2.0 三段式防御：
 
-1. 生成随机正交矩阵 $R$
-2. 将权重 $W_k, W_q, W_v$ 进行预乘融合：$W_{k}^{new} = W_{k} \times R$
-3. 由于 $R R^T = I$，在 JIT 注意力乘加阶段内积自然解隐，前向网络**彻底免算（0 FLOPs 消耗）**
-4. 特征分布在数学层面被**绝对强制拉平**（呈现标准的正态/Beta 分布），**不存在任何离群点（Outliers）**
+1. **通道锁喉与幅度平滑 (Amplitude Migration)**: 在 Load-Time，利用微缩校准集的对角缩放矩阵 $S$，将 Activation 中方差极大的那 1% 通道的放大系数拉向权重 $W' = W \cdot S^{-1}$。在旋转前剥夺极端大点的能量级。
+2. **Hessian 迹导向特征庇护 (Hessian-Weighted K-RHT)**: 废除全随机翻转。通过 Hessian 的二阶偏导寻优，生成 Kronecker-factored Randomized Hadamard Transform 矩阵。只对 Loss 极不敏感的方向执行强行正交摊平，死死护住关键特征（如注意力尖峰）不被随机矩阵稀释。
+3. **最后防线物理圈禁 (Load-Time Outlier Permutation)**: 面对不可抹平的 0.1% 超级离群通道，生成静态置换矩阵 $P$。在 Load-Time 将这些敏感通道**物理挪动并拼接至权重矩阵末尾的特定 Block（如最后的 128x128 Tile）**。由于 $X \cdot P^T$ 只是内存寻址重排，在运行时：
+    - 前 99% 的 Mega-Kernel 循环，Warp 全力开火发射 W4A4（FP4/INT4）的 `WGMMA` 指令。
+    - 最后 1% 计算到特定的“圈禁 Block”时，JIT 强制这唯一的循环步态切换为 W8A8 高精度指令。
+    - **Batch 无损**: 由于是块级物理隔离，即便承载 128 个请求，GPU/CPU 阵列此时也是整齐划一地更换一次微指令。零线程分歧 (Zero SIMT Divergence)！
 
-### 11.2 运行时多态湮灭宣言
+### 11.2 Epilogue 发动机：跨层全异步缩放快递 (Zero-Sync Scale Forwarding)
 
-因为分布在进内存前就被全部强行极化至无 Outlier 的状态：
-- **全盘删除 `Amax`**: 所有运行时精度检测代码被彻底湮灭。再也不需要在 RmsNorm 尾端拼命计算极值来判断是否需要回退 FP16。
-- **管线静态锁定**: 整个执行管线（KV 和 Activation）被静态强制锁定为 **W4A4（甚至更低位宽）与 VNNI/SVE2 指定流**。
-- **零运行时分支**: 系统内核在唯一的一条定点算法路线上爆发出无可匹敌的高效，消灭了所有关于解包、截断、精度选型的 if-else 判断。
+在 Batch 环境下对 128 个请求实时计算激活的最大缩放系数 $s$ 是严重的同步瓶颈。
+在 TurboQuant 2.0 中：
+- **白嫖尾段算力计算 Group Scale**: 在计算 Layer $(N-1)$ 的 RmsNorm 尾段（Epilogue）时，尚未丢弃的寄存器数据顺手在此刻规约出 Layer $N$ 输入所需要的 128 个请求的块级缩放尺度（Group Scales，尺寸强对齐 L2 Cache Line 或 Tensor Core 吞吐宽带）。
+- **零开销前向直塞**: 这些 Scales 借道 TMA/RDMA 直接投递至下一层的极速只读连续显存区。当 Layer $N$ 的 Mega-Kernel 启动时，只需一根 `LDG.128` 向量总线，将这 128 个请求刚才算出锅的微调常数瞬间拉进寄存器。
+- **全域免同步 (Global Sync-Free)**: 利用上一层的计算掩盖了全规约瓶颈，本批次在核内不再需要任何 `__syncthreads()` 或跨 Warp 缩放。
 
 ### 11.3 双轨显存池 (The Dual-Track Memory Pool)
 
@@ -1392,7 +1395,7 @@ Chunked 调度（交织）:
 
 | 轨道 | 位宽 | 职能 |
 |------|------|------|
-| **主池 (Main Pool)** | 3-bit / 4-bit | 无缩放因子（Scale-Free）连续压缩流 |
+| **主池 (Main Pool)** | 3-bit / 4-bit | 无缩放因子（Scale-Free）连续压缩流，组级缩放由 Epilogue 快递 |
 | **校验池 (QJL Pool)** | 1-bit | XNOR 残差掩码阵列 |
 
 **多卡同步红利**: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 **25%**（4x 压缩），突破总线墙。
