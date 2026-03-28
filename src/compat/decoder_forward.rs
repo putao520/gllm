@@ -218,7 +218,49 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
             .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
     }
 
-    Err(BE::Other("CPU embedding forward requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). Legacy operator-level JIT has been removed.".into()))
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "CPU embedding forward requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). \
+            Legacy operator-level JIT has been removed. Please ensure YAML graph template exists for this architecture."
+            .into()
+        ));
+    }
+
+    let ge = unsafe { &mut *config.graph_executor_ptr };
+    if ge.graph().nodes.is_empty() {
+        return Err(BE::Other("GraphExecutor has empty nodes. Stub architecture templates are not runnable.".into()));
+    }
+
+    let mut inputs = std::collections::HashMap::new();
+    let hs_bytes: Vec<u8> = hidden_state
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    inputs.insert("hidden_state".to_string(), hs_bytes);
+
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    let output = ge.run_with_kv_cache(
+        &inputs,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+        seq_len,
+        positions.as_ptr(),
+    ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
+
+    if let Some(out_bytes) = output.get("embedding").or_else(|| output.get("pool_out")).or_else(|| output.values().next()) {
+        let emb: Vec<f32> = out_bytes
+            .chunks_exact(4)
+            .map(|c| {
+                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
+                f32::from_le_bytes(arr)
+            })
+            .collect();
+        Ok(emb)
+    } else {
+        Err(BE::Other("GraphExecutor produced no embedding output".into()))
+    }
 }
 
 /// Decoder-based reranker forward pass (for models like Qwen3-Reranker that
@@ -266,6 +308,47 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
             .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
     }
 
-    Err(BE::Other("CPU rerank forward requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). Legacy operator-level JIT has been removed.".into()))
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "CPU rerank forward requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). \
+            Legacy operator-level JIT has been removed. Please ensure YAML graph template exists for this architecture."
+            .into()
+        ));
+    }
+
+    let ge = unsafe { &mut *config.graph_executor_ptr };
+    if ge.graph().nodes.is_empty() {
+        return Err(BE::Other("GraphExecutor has empty nodes. Stub architecture templates are not runnable.".into()));
+    }
+
+    let mut inputs = std::collections::HashMap::new();
+    let hs_bytes: Vec<u8> = hidden_state
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    inputs.insert("hidden_state".to_string(), hs_bytes);
+
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    let output = ge.run_with_kv_cache(
+        &inputs,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+        seq_len,
+        positions.as_ptr(),
+    ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
+
+    if let Some(out_bytes) = output.get("score").or_else(|| output.values().next()) {
+        if out_bytes.len() < 4 {
+            return Err(BE::Other("Invalid score bytes length from GraphExecutor".into()));
+        }
+        let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]);
+        let logit = f32::from_le_bytes(arr);
+        let score = 1.0 / (1.0 + (-logit).exp());
+        Ok(vec![score])
+    } else {
+        Err(BE::Other("GraphExecutor produced no score output".into()))
+    }
 }
 

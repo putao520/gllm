@@ -10,16 +10,17 @@ mod weight_helpers;
 mod bert_forward;
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod decoder_forward;
-pub(crate) mod jit_cache;
-pub(crate) mod embed_cache;
+pub(crate) mod artifact_cache;
+
 mod gpu_compile;
 #[allow(dead_code)]
 pub(crate) mod types;
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub(crate) mod scalar_ops;
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) mod jit_helpers;
+#[allow(dead_code)]
 pub(crate) mod graph_builders;
 #[allow(dead_code)]
 pub(crate) mod gpu_helpers;

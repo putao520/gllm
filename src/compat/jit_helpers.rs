@@ -1131,3 +1131,19 @@ pub(crate) fn jit_gemm(
     }
     Ok(())
 }
+
+pub fn cpu_fingerprint() -> u64 {
+    let mut bits: u64 = 0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2")       { bits |= 1 << 0; }
+        if std::is_x86_feature_detected!("avx512f")    { bits |= 1 << 1; }
+        if std::is_x86_feature_detected!("avx512bf16") { bits |= 1 << 2; }
+        if std::is_x86_feature_detected!("fma")        { bits |= 1 << 4; }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        bits |= 1 << 8;
+    }
+    bits
+}
