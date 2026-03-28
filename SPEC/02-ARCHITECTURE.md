@@ -1271,6 +1271,7 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 - **取消主机条件网**: 禁止在主机侧 (CPU Host) 为 `Gate-First-Skip` 等建立多线程路调度。
 - **块内联路**: SM 核心内的 Thread Block 直接读取 `Request_State_Table`。条件不满足时，不破坏控制流掩码，直接在 `Shared Memory` / 寄存器堆通过向量外设掩码（AVX512 `vcompress` / GPU `Prefix Sum`）执行**物理挤压聚拢 (Ragged Tensor Compaction)**。
 - **Compact→Execute→Scatter 三段式循环**: 挤压聚拢仅仅是第一步（Compact）。在没有 Padding 气泡的连续稠密矩阵中执行完核函数运算后（Execute），必须**按原始 Request 偏移进行原位散射回写（Scatter）**，还原到初始 Batch 位置。整个 Compact→Execute→Scatter 流程在单次 Kernel Launch 内闭环。
+- **值域隔离的分组防线 (Range-Aware Compact Grouping)**: 针对极低位宽（如 W4A4）下的跨请求数值污染风险，Compact 过程**严禁单纯按 Batch 顺序挤压**。必须利用 §9.5 尾段观测白嫖到的 `Entropy` 和 `Residual Delta` 指标，在挤压时将激活值域（Activation Range）相近的请求聚集在同一 GEMM Tile 内。值域悬殊的请求互相物理隔离，防止小信号被大信号的量化噪声静默吞噬，确保 4-bit 有效精度刃尽其用。
 
 ### 9.2 全域热修补 (Global Consensus Hot JMP Patching)
 
@@ -1318,6 +1319,8 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 - Decode 请求必须等待长文本 Prefill 完成（Tail Latency 恶化至 ~200ms P99）
 
 **Gllm 的破局法则**：将无限大的 Prefill 长文强制切成固定大小的物理切片（Chunk），与 Decode Token 交织塞进同一个 Batch，**解码请求永远零等待**。
+
+- **精度的物理隔离壁 (Attention Phase Isolation)**：Prefill Chunk 的 Softmax 分布相对平坦，而 Decode Token 的 Softmax 高度尖锐。在极低位宽下，这两种注意力分布模式在同一 Shared Memory 中计算会发生严重的精度交叉污染。因此，**在 Attention 阶段，Prefill Chunk 和 Decode Token 必须被物理分轨调度到不同的 Thread Block 组和 SMEM 分区执行**（复用 §12.7 的 Fat-Binary 跳表实现零开销切换）。FFN 阶段因无分布敏感性允许合流。
 
 ```
 Chunked 调度（交织）:
@@ -1436,6 +1439,9 @@ Chunked 调度（交织）:
 - **零退化原则 (Zero-Padding Degradation)**：
     当实际请求长度与“黄金尺寸”产生部分空隙时，**坚决禁止**使用低效的 Padding 补零机制（如为了对齐 128 强行补零，废算无效 FLOPs）。
     必须依靠 §12.2 定义的张量物理挤压（Ragged Compaction，如 `vcompress` 或 Warp Prefix Sum）以及硬件控制流谓词（Predicate K-mask），实现完全 0 周期浪费的“真填满”，确保生成的 Kernel 永远呈现 100% 寄存器命中率与管线吞吐率。
+
+- **运行时装筒热演化 (Runtime Bucket Evolution)**：
+    黄金装筒绝非 Load-Time 的静态死水。JIT Director Daemon 必须持续观测流量的 SEQ 分布直方图。如果负载发生时段性偏移，大量请求密集落在现有 Bucket 的缝隙中（导致挤压也无法挽回物理层面的微观浪费），JIT Director 允许在后台沙盒中**即时编译新的中间态 Bucket 变体（如 Bucket-96）**。编译完成后利用 §9.2 的原子覆写机制热插入跳表，并在 L1i 缓存重排中淘汰命中率 < 0.1% 的僵尸 Bucket。实现运行时无停机演化。
 
 ### 12.5 JIT 硅晶指令深层映射原则 (Silicon-Level Instruction Mapping)
 
