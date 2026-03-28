@@ -1270,15 +1270,16 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 - **仅发射单一内核**: 每一轮 Decode 或 Chunked Prefill，全系统 **仅 Launch 唯一一个 Mega-Kernel**。
 - **取消主机条件网**: 禁止在主机侧 (CPU Host) 为 `Gate-First-Skip` 等建立多线程路调度。
 - **块内联路**: SM 核心内的 Thread Block 直接读取 `Request_State_Table`。条件不满足时，不破坏控制流掩码，直接在 `Shared Memory` / 寄存器堆通过向量外设掩码（AVX512 `vcompress` / GPU `Prefix Sum`）执行**物理挤压聚拢 (Ragged Tensor Compaction)**。
+- **Compact→Execute→Scatter 三段式循环**: 挤压聚拢仅仅是第一步（Compact）。在没有 Padding 气泡的连续稠密矩阵中执行完核函数运算后（Execute），必须**按原始 Request 偏移进行原位散射回写（Scatter）**，还原到初始 Batch 位置。整个 Compact→Execute→Scatter 流程在单次 Kernel Launch 内闭环。
 
 ### 9.2 全域热修补 (Global Consensus Hot JMP Patching)
 
 **问题**: 针对无法通过掩码消除的系统级静滞期（如死寂的冷板凳 MoE 专家，极长的系统前缀树）。
 
 **铁律约束**:
-- **JIT Director 沙盒**: 允许后台沙盒微线程持续进行指标观测积分。
-- **Trampolines 占位符**: 运行期代码块固定留有 `NOP Slide` / `jmp` 占位，消除直接的分支预测开销。
-- **原子覆盖**: 捕获全域共识不可逆突变后，仅利用 5-bytes 原子覆写极速更新执行内存，瞬时重构拓扑图（Graph Collapsing/DCE）。
+- **JIT Director Daemon（后台长臂监控器）**: 后台常驻纯 Rust `JIT Director Daemon` 线程。定期无损挂载扫描全体 KV Page Headers（被 §9.5 Epilogue 白嫖写入的 telemetry 数据）。利用**半衰期积分池（Decaying Reservoir）**平滑指标变异，配合**卡尔曼平滑器（Kalman Limiters）**在数十万 Token 级别的长尾维度上判定是否达成全局共识不可逆突变（如注意力持续数百个 Batch 趋近静默态、冷专家百万 Token 零命中等）。
+- **Trampolines 占位符**: 运行期代码块固定留有 `NOP Slide` / `jmp` 占位，分支预测开销为 0。
+- **原子覆盖**: 捕获全域共识不可逆突变后，后台在沙盒完成验证并计算新指令绝对偏移量。主系统调用原子写操作（Atomic Overwrite），将 `.text` 执行内存段上的 5-bytes 长 `jmp` 立刻热覆盖到新入口，瞬时重构拓扑图（Graph Collapsing/DCE）。整个推理流水线在毫无波澜的一瞬间完成全局拓扑坍缩重构。
 
 ### 9.3 残差数据总线物理结构 (The Residual Bus Injection)
 
@@ -1450,6 +1451,42 @@ Chunked 调度（交织）:
 
 - **AMD GPU 脉络 (CDNA)**
   - 利用 CDNA3 管线的 XCD/GCD 拓扑屏障，确立本地物理隔离。配合内置的 `WMMA` 指令进行张量吞吐提速。
+
+### 12.6 硬件探测→IR 强约束变量体系 (MicroArch-to-IR Constraints)
+
+> **关联**: unified-jit-architecture-master.md §1.1-§1.2, resolved.10 §2.2
+> **核心法则**: 废弃散乱的指令集条件判断。所有加载期的硬件探测结果必须严格坍缩为对底层 JIT 编译器的 **强数学约束变量组（Compiler Constraints）**，确保 JIT 逻辑与物理实体芯片解耦。
+
+#### 物理传感器指标
+
+| 传感器类目 | 探测项 | 说明 |
+|-----------|--------|------|
+| **缓存与拓扑** | `L1i` (指令缓存大小) | 防止大 Bucket (如 `seq=1024`) 的指令平铺导致 L1i 缓存颠簸。触达 `l1i_size * 0.8` 时 JIT 退化为 `jmp` |
+| | `L2_Cache` | GPU 分级驻留锚点 |
+| | `CCX/NUMA` 边界 | AMD CCD 的 L3 分区嗅探，规避跨片通信 |
+| | `TLB Entries` | 防止大显存映射的 TLB Thrashing |
+| **x86 极化阵列** | `AMX`, `APX` (31 GPR), `VNNI/AVX_VNNI_INT8` | 见 §12.5 |
+| **ARM 极化阵列** | `SVE2`, `SME/SME2` (`ZA_Array_Size`) | 及 Streaming SVE 模式阈值 |
+| **总线协议** | GPU `TMA` (Hopper 异步内存张量加速) | 见 §12.5 |
+| **RDMA/Scale-Out** | `nic_bandwidth_gbs`, `rdma_latency_us` | 跨机 NUMA 拓扑必须包含网卡带宽和 RDMA 延迟 |
+
+#### IR 约束变量输出 (Target Execution Topology)
+
+传感器数据转化为 CompilerGraph 直接可消费的环境变量：
+
+| 约束变量 | 说明 | 典型值 |
+|----------|------|--------|
+| `max_gpr_count` | 控制寄存器溢写（Spill）阈值 | 普通 CPU=15, APX=31 |
+| `optimal_tile_bits` | 决定 JIT 平铺展开的二维尺寸 | 启用 AMX/SME 阵列时极速扩大 |
+| `native_int4_dot` | 标定是否可通过 VNNI/SVE2 直接下发硬件解包 | true/false |
+
+#### RDMA Pipelining 融合约束
+
+当引擎跨越单机时，Chunk 的切分块大小必须满足：
+
+$$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chunk})$$
+
+即单卡对该 Chunk 的计算时间 ≥ 跨节点 RDMA 参数投递时间，从而实现 Pipelining 掩盖网络延迟。此约束由 `rdma_latency_us` 和 `nic_bandwidth_gbs` 共同确定。
 
 ---
 

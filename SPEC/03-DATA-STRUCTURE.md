@@ -1201,6 +1201,56 @@ pub enum HardwareIR {
 }
 ```
 
+### 9.7 编译器约束变量数据结构 (DATA-COMPILER-CONSTRAINTS)
+
+> **关联架构**: 02-ARCHITECTURE.md §12.6 (MicroArch-to-IR Constraints)
+> **设计思想**: 将物理传感器探测结果坍缩为 JIT 编译器的强类型约束。
+
+```rust
+/// 探测器会在 Load-Time 阶段填充此结构，供 CompilerGraph 直接消费
+pub struct CompilerConstraints {
+    /// 可用通用寄存器数量阈值 (普通 CPU=15, APX=31)
+    pub max_gpr_count: usize,
+    
+    /// JIT 平铺展开的最优二维尺寸 (AMX/SME 阵列启用时扩大)
+    pub optimal_tile_bits: usize,
+    
+    /// 是否可通过 VNNI/SVE2 直接下发 INT4 硬件解包
+    pub native_int4_dot: bool,
+    
+    /// L1i 指令缓存哨兵: 防止大 Bucket 指令平铺颠簸
+    /// 当生成代码量触达此值时 JIT 退化为 jmp
+    pub l1i_budget_bytes: usize,
+}
+```
+
+### 9.8 存储/网络级感知传感器结构 (DATA-MEMORY-NETWORK-SENSORS)
+
+> **关联架构**: 02-ARCHITECTURE.md §12.6 (RDMA Pipelining 融合约束)
+
+```rust
+/// 跨机/跨片物理拓扑的传感器读数
+pub struct MemoryNetworkSensors {
+    /// GPU L2 Cache 驻留容量 (级别锚点)
+    pub l2_cache_bytes: usize,
+    
+    /// AMD CCD / CCX 的 L3 分区边界探测
+    pub ccx_numa_topology: Option<NumaTopology>,
+    
+    /// TLB 条目数上限
+    pub tlb_entries: usize,
+    
+    /// 跨机网卡带宽 (GB/s), 用于 Pipelining 约束
+    pub nic_bandwidth_gbs: Option<f32>,
+    
+    /// 跨机 RDMA 往返延迟 (μs), 用于 Chunk 切分下限
+    pub rdma_latency_us: Option<f32>,
+    
+    /// ARM SVE/SME 向量宽度与 ZA 阵列尺寸
+    pub arm_sme_za_size: Option<usize>,
+}
+```
+
 ---
 
 ## 10. Zero-Overhead Unified Semantics 核心数据结构 (DATA-ZOUS)
