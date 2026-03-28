@@ -1,6 +1,6 @@
 # HGAL 调度算法详细设计
 
-> **关联需求**: REQ-SCHED-001, REQ-SCHED-002, REQ-SCHED-003, REQ-SCHED-007, REQ-SCHED-008, REQ-SCHED-009
+> **关联需求**: REQ-SCHED-001, REQ-SCHED-002, REQ-SCHED-003, REQ-SCHED-007, REQ-SCHED-009
 > **版本**: 2.0
 > **状态**: 已实现 (v1.0), 扩展设计中 (v2.0 - 2024 优化)
 
@@ -429,154 +429,14 @@ SplitFuse 方式:
 
 ---
 
-### 8.2 SwiftKV 算法
+### 8.2 (已废弃) SwiftKV 算法
 
-> **论文**: SwiftKV: Efficient KV Cache Compression for LLM (arXiv:2410.03960)
-
-#### 8.2.1 问题定义
-
-**传统 PagedAttention 的 KV Cache 增长**：
-
-```
-KV Cache 内存占用 = Num_Layers × Num_Tokens × Hidden_Dim × 2 (K+V) × Sizeof(f16)
-
-示例 (Qwen3-7B, 32k 上下文):
-  - Layers: 28
-  - Tokens: 32,768
-  - Hidden: 4096
-  - 内存: 28 × 32768 × 4096 × 2 × 2 = 15 GB
-
-问题: 内存随序列长度线性增长
-```
-
-**关键观察**：后续 Token 的 KV 贡献度递减
-
-```
-Attention Weight 分布:
-  Token 0:    ████████████████ 0.25  (早的 Token)
-  Token 100:  ██████░░░░░░░░░░ 0.12
-  Token 500:  ███░░░░░░░░░░░░░ 0.05
-  Token 1000: ██░░░░░░░░░░░░░░ 0.03
-  Token 5000: █░░░░░░░░░░░░░░░ 0.01  (晚的 Token，贡献低)
-
-→ 大量 KV Cache 用于低 Attention Score 的 Token
-```
-
-#### 8.2.2 SingleInputKV (SIKV) 蒸馏
-
-**核心思想**：将连续的 N 个 KV 向量蒸馏为 1 个
-
-```
-算法流程:
-  1. 将序列按窗口大小 W 分组 (W=2/4/8)
-  2. 每组内: [K0, K1, K2, K3] → Attention 加权 → [K_merged]
-  3. 只保留 merged KV
-
-蒸馏公式:
-  K_merged = Σ(Attention_Weight_i × K_i) / Σ(Attention_Weight_i)
-  V_merged = Σ(Attention_Weight_i × V_i) / Σ(Attention_Weight_i)
-
-其中 Attention_Weight_i 基于:
-  - 该 Token 在历史中的平均 Attention Score
-  - 或使用简单平均 (1/W)
-```
-
-**效果量化**：
-
-| 窗口大小 W | KV Cache 减少 | 精度损失 (PPL) | 适用场景 |
-|-----------|---------------|----------------|----------|
-| 2 | 50% | <0.01% | 高精度要求 |
-| 4 | 75% | <0.05% | 平衡 |
-| 8 | 87.5% | <0.2% | 极限压缩 |
-
-#### 8.2.3 AcrossKV (AKV) 跨层共享
-
-**核心思想**：相邻层的 KV Cache 高度相关
-
-```
-相似度分析 (Qwen3-7B):
-  Layer 0 & Layer 1:  cosine_similarity = 0.94
-  Layer 1 & Layer 2:  cosine_similarity = 0.91
-  Layer 5 & Layer 6:  cosine_similarity = 0.87
-  ...
-
-→ 相邻层 KV Cache 可共享
-```
-
-**共享策略**：
-
-| 配置项 | 说明 |
-|--------|------|
-| `similarity_threshold` | 相似度阈值 (默认 0.9) |
-| `check_interval` | 每隔 N 层检查一次 |
-
-**决策流程**：
-
-| 步骤 | 操作 | 条件 |
-|------|------|------|
-| 1 | 计算相邻层 KV 相似度 | cosine_similarity |
-| 2 | 高相似度决策 | 相似度 > 阈值 → 共享前一层的 KV |
-| 3 | 低相似度决策 | 相似度 ≤ 阈值 → 保留当前层 KV |
-
-**收益**：
-
-| 指标 | 无 AKV | 有 AKV |
-|------|--------|--------|
-| KV Cache 总量 | 100% | 50% |
-| 精度损失 (PPL) | - | <0.1% |
-
-#### 8.2.4 集成到 SwapManager
-
-**SwapManager 扩展方法**：
-
-| 方法 | 说明 |
-|------|------|
-| `swap_out_with_distillation(pages, swift_config)` | Swap-out 时执行蒸馏 |
-| `distill_kv_pages(pages, window_size)` | SIKV 蒸馏（合并连续页面） |
-| `share_across_layers(pages, config)` | AKV 跨层共享 |
-
-**蒸馏流程**：
-
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | 检查 SwiftKV 是否启用 | 未启用则直接普通 swap_out |
-| 2 | SIKV 蒸馏 | 按 window_size 合并页面 |
-| 3 | AKV 跨层共享（可选） | 计算相似度决定是否共享 |
-| 4 | 实际 Swap-out | 使用压缩后的页面数 |
-
-**跨层共享流程**：
-
-| 步骤 | 操作 | 条件 |
-|------|------|------|
-| 1 | 遍历所有页面 | - |
-| 2 | 计算与前一层的相似度 | cosine_similarity |
-| 3 | 高相似度时跳过 | 相似度 > 阈值 |
-| 4 | 低相似度时保留 | 添加到共享列表 |
-
-#### 8.2.5 精度保障机制
-
-**配置扩展**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `precision_guard` | 浮点数 | 精度损失阈值 (PPL 差值，默认 0.1) |
-| `validation_interval` | 数值 | 定期验证（每 N 个请求） |
-
-**验证流程**：
-
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | 计算 PPL 差值 | 对比原始输出和蒸馏输出 |
-| 2 | 阈值检查 | 差值 > precision_guard 则失败 |
-| 3 | 自动禁用 | 精度损失超阈值时禁用蒸馏 |
-
-#### 8.2.6 验收标准
-
-| 标准 | 测试方法 | 目标值 |
-|------|----------|--------|
-| KV Cache 减少 | 长序列测试 (32k) | >50% |
-| 精度损失 (PPL) | 对比完整 KV Cache | <0.1% |
-| 蒸馏开销 | CPU 时间监控 | <5% Swap 时间 |
+> 🚨 **架构合规性警报 (Architect Veto)**:
+> 原始的 `SwiftKV 算法`（通过 `cosine_similarity` 做跨层共享和通过 Attention 权重做合并蒸馏）已被判定为 **违宪**，并将在此架构下永久失效。原因如下：
+> 1. 原算法要求对连续时间步的 KV 缓存进行浮点强度的插值合并（Interpolation）。但在 `Mega-Kernel` 架构下，所有的 KV Cache 已被 **TurboQuant 静态锁定在 3-bit / 4-bit 的双轨分布**中，强行插值合并不仅需要巨大的反量化/重量化流水线开销，还会造成严重的重分配时戳延迟。
+> 2. 原算法要求主机去测算 $\Delta$ 层距离矩阵（cosine_similarity 等）。这使得 CPU 端重新拿回了观测控制权，严重抵触了“消灭 CPU 控制台”与“In-Kernel Routing”法则。
+>
+> 故，HGAL 系统只能做**拓扑级的完整页框交换（Complete Page Swapping）**，禁止在调度中侵入修改数据的压缩或数值形式！
 
 ---
 
@@ -743,8 +603,8 @@ Tokenized: [101, 102, ..., 612]  (512 tokens)
               │                               │
               ▼                               ▼
         ┌─────────────┐              ┌────────────────┐
-        │ Decode      │              │ SwiftKV 蒸馏   │
-        │ Loop        │              │ (Swap-out 时)  │
+        │ Decode      │              │ PageSwap       │
+        │ Loop        │              │ (拓扑级页框交换)│
         └─────────────┘              └────────┬───────┘
                                              │
                                              ▼
@@ -765,14 +625,14 @@ Tokenized: [101, 102, ..., 612]  (512 tokens)
 | `enable_splitfuse` | bool | true | 启用 SplitFuse |
 | `max_chunks_per_batch` | usize | 4 | 每批最大 Chunk 数 |
 
-#### 8.5.2 SwiftKV 配置
+#### 8.5.2 SwiftKV 配置 (⛔ 违宪/已废弃)
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `window_size` | usize | 4 | SIKV 窗口大小 |
 | `enable_across_kv` | bool | true | 启用 AKV |
-| `similarity_threshold` | f32 | 0.9 | AKV 相似度阈值 |
-| `precision_guard` | f32 | 0.1 | 精度损失阈值 (PPL) |
+| `similarity_threshold` | f32 | 0.9 | AKV 相似度标量阈值 |
+| `precision_guard` | f32 | 0.1 | 精度损失阈值标量 (PPL) |
 
 #### 8.5.3 LMCache 配置
 

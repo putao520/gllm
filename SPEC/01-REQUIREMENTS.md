@@ -32,7 +32,7 @@
 | **REQ-LOADER-012** | ONNX 格式支持 | 原生支持加载 .onnx 模型文件 (纯 Rust 实现) | 1. 集成官方完整 ONNX Proto 定义 (Enterprise Grade)<br>2. **禁止引入第三方推理引擎** (tract/ort)<br>3. 完整解析 Model/Graph/Node/Tensor 结构<br>4. 支持零拷贝/内存映射加载<br>5. **必须实现 Graph Pattern Matching**<br>6. **必须将子图映射为 Fused Kernels** | 🟢 已实现 (2026-02-05) [commit: 088b9a8] |
 | **REQ-LOADER-013** | 自动格式探测 | 自动探测模型文件格式 (safetensors/GGUF/ONNX) | 1. 根据文件扩展名自动识别格式<br>2. 支持从 HF/MS 自动选择对应加载器<br>3. 无需用户手动指定格式 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-014** | GGUF 量化元数据读取 | 从 GGUF 文件读取量化类型信息 | 1. 从 GGUF 元数据读取 `general.quantization_version`<br>2. 从 GGUF tensor 信息读取实际量化类型 (Q4_0, Q8_0, Q5_K, etc.)<br>3. **禁止基于文件名推断** (Ω1: 真实性原则) | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
-| **REQ-LOADER-015** | ONNX 精度元数据读取 | 从 ONNX 文件读取精度信息 | 1. 从 ONNX tensor dtype 读取实际精度 (fp32/fp16/int8/uint8)<br>2. **禁止基于文件名推断** (Ω1: 真实性原则) | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
+| **REQ-LOADER-015** | ONNX 精度元数据读取 | 从 ONNX 文件读取精度信息 | 1. 从 ONNX tensor dtype 读取实际精度 (F32/F16/INT8)<br>2. **禁止基于文件名推断** (Ω1: 真实性原则) | 🟢 已实现 (2026-02-07) [commit: 95c30d9] |
 | **REQ-LOADER-016** | 智能源选择 | HF 不可用时自动切换到 ModelScope | 1. HF 下载失败时自动尝试 ModelScope<br>2. 支持配置优先级 (HF→MS 或 MS→HF)<br>3. 记录源切换日志 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-017** | 统一加载入口 | 单一 API 支持所有格式和源 | `Loader::auto("repo/model")` 自动探测格式+源 | 🟢 已实现 (2026-02-05) [commit: d16d3ea] |
 | **REQ-LOADER-018** | 迻除时模型热切换 | 支持在不重启进程的情况下切换模型 | 1. `client.swap_model(new_model)` API<br>2. 自动释放旧模型显存 (KV Cache & Weights)<br>3. 重新初始化新模型环境<br>4. 线程安全（阻塞新请求直到切换完成） | 🟢 已实现 (2026-02-07) [commit: HEAD] |
@@ -40,7 +40,7 @@
 | **REQ-LOADER-020** | DeepSeek 架构支持 | 支持 DeepSeek V2/V3/R1 系列 MoE 模型 | 1. 实现 DeepSeekAdapter<br>2. 支持 MoE 架构 (671B 总参数, 37B 激活)<br>3. 从 config.json 识别 `model_type: "deepseek"`<br>4. 支持模型: DeepSeek-V3, DeepSeek-V2-Lite, DeepSeek-R1, **Kimi-K2** (使用 DeepSeek 架构)<br>5. 兼容 SafeTensors/GGUF/ONNX 格式 | 🟢 已实现 (2026-03-15) |
 | **REQ-LOADER-021** | 融合权重元数据驱动分割 | 融合权重 (如 QKV) 分割完全基于 config.json，禁止硬编码 | 1. `split_phi4_qkv` 等函数接收 `ModelConfig` 参数<br>2. Q 维度 = `config.hidden_size`<br>3. KV 维度 = `config.num_key_value_heads * config.head_dim`<br>4. **禁止**硬编码任何维度值 (如 3072, 1024)<br>5. 支持同一架构的不同变体 (不同 hidden_size / num_kv_heads)<br>6. **关联**: ARCH-QUANT-METADATA-001, ARCH-LOADER-FUSED-METADATA | 🟢 已实现 (2026-02-07) [commit: HEAD] |
 | **REQ-LOADER-022** | 张量驱动配置推导 (Tensor-Driven) | 基于 Tensor Role Matching (Regex) 和张量形状推导配置，优先于硬编码逻辑 | 1. **核心**: 定义 `TensorRole` (Embedding/Attention/FFN)<br>2. **推导**: 纯张量形状推导 `hidden_size`, `num_heads`, `head_dim`<br>3. **禁止**: `if model == "llama"` 硬编码逻辑<br>4. **优先级**: 张量形状 > config.json | 🟢 已实现 (2026-02-08) |
-| **REQ-LOADER-023** | 通用权重加载适配器 (Universal) | Loader 作为通用适配器，透明处理格式差异与精度转换 | 1. **F16->F32**: 后端需要时自动转换<br>2. **Universal**: 统一处理 SafeTensors/ONNX/GGUF<br>3. **Zero-Copy**: 仅在必要时转换，否则保持零拷贝<br>4. **关联**: ARCH-LOADER-003<br>5. **GGUF 量化分流**: 量化 tensor 存入 QuantizedTensor，native float 走 upload_native_tensor_with_convert | 🟢 已实现 (2026-02-08) |
+| **REQ-LOADER-023** | 通用权重加载适配器 ⛔ (Arch Vetoed) | Loader 层统一量化处理，必须封杀任何 F16->F32 运行时隐式升格策略。 | 1. **Zero-Copy**: 强行根据 `TurboQuantBits` 将权重对齐至 JIT 内核接受的极化格式<br>2. **Universal**: 统一处理 SafeTensors/ONNX/GGUF<br>3. **Float Annihilation**: 所有 Native Float 权重必须在装载期一并压缩至静态位宽，无浮点驻留缓冲 | 🔴 架构接管重构中 |
 
 ### 2.1 GGUF 量化加载 (REQ-QUANT)
 
@@ -49,18 +49,18 @@
 | **REQ-QUANT-001** | GgmlDType→QuantType 桥接 | 映射 GGUF 量化类型到 gllm-kernels QuantType | `ggml_dtype_to_quant_type()` 覆盖 K-Quant/Classic/IQ 共 21 种类型 | 🟢 已实现 |
 | **REQ-QUANT-002** | TensorProvider 量化元数据 | TensorProvider 暴露原始 GGML dtype | `ggml_dtype()` default method，GgufReader 实现返回实际 dtype | 🟢 已实现 |
 | **REQ-QUANT-003** | QuantizedTensor 双存储 | WeightsHandle 支持量化/native 双存储 | `quantized` HashMap + `new_with_quantized()`/`quantized_tensor()`/`is_quantized()` | 🟢 已实现 |
-| **REQ-QUANT-004** | upload_provider 量化分流 | 量化 tensor 跳过 GPU upload | 量化→QuantizedTensor，native float→upload_native_tensor_with_convert (F16/BF16→f32) | 🟢 已实现 |
+| **REQ-QUANT-004** | upload_provider 量化分流 | 量化 tensor 跳过 GPU upload | 量化→QuantizedTensor，非量化强制位宽压缩→upload_compressed_tensor_with_alignment () | 🟢 已实现 |
 | **REQ-QUANT-005** | TensorLookup 量化访问 | TensorLookup trait 支持量化 tensor 查询 | `get_quantized()` default method，WeightsHandle 实现 | 🟢 已实现 |
-| **REQ-QUANT-006** | Backend quantized_matmul | Backend trait 量化矩阵乘法 | 按 QuantType 分发 kquant_matmul/classic_matmul/iq_matmul，CpuBackend 实现 | 🟢 已实现 |
-| **REQ-QUANT-007** | Backend dequantize | Backend trait 反量化 | 24 种量化类型→f32，CpuBackend 实现 | 🟢 已实现 |
+| **REQ-QUANT-006** | Backend quantized_matmul | Backend trait 量化矩阵乘法 | JIT 编译静态位宽向量操作，完全抹除运行时 dispatch | 🟢 已实现 |
+| **REQ-QUANT-007** | Backend dequantize | (已废除) Backend trait 反量化 | 严禁运行时逆向量化至 f32，强制使用 TurboQuant 静态整型/定点累加器 | 🚫 架构否决 |
 
 ## 3. 核心功能 (REQ-CORE)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-CORE-001** | 自动后端检测 | 自动选择 CUDA/CPU (ROCm/Metal 计划中) | 1. `detect_backend()` 检测逻辑完整<br>2. 优先级: CUDA > ROCm > Metal > CPU<br>3. 未实现后端返回 `Unimplemented` | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
-| **REQ-CORE-002** | 自动降级 | GPU OOM 时自动降级到 CPU | `FallbackEmbedder` 正常工作 | 🟢 已实现 |
-| **REQ-CORE-003** | 量化支持 | 支持 Int4/Int8/AWQ/GPTQ/GGUF 加载 | 1. 能够加载并推理量化模型<br>2. GGUF Per-Tensor 混合精度加载 (QuantizedTensor)<br>3. Backend quantized_matmul/dequantize 分发 | 🟢 已实现 |
+| **REQ-CORE-002** | 任务级 OOM 降级 | GPU OOM 时整个任务自动退回 CPU (禁止引发精度截断的妥协) | `FallbackEmbedder` 正常工作 | 🟢 已实现 |
+| **REQ-CORE-003** | 静态极化量化支持 (TurboQuant) | 支持统一强转极化格式 (INT4/FP8) | 1. 能够加载量化模型权重<br>2. 运行时消除多态混合精度分派，全网强制统一至 TurboQuant 固定块规格<br>3. 废除反量化，只提供定点/微浮点硬派算子 | 🟢 已实现 |
 | **REQ-CORE-004** | 精度优先架构 | 系统强制运行在"精度优先"模式 | 1. 强制启用 Deterministic Scheduling<br>2. 强制启用 Phase Isolation<br>3. **移除** 任何吞吐量优先的妥协配置 | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 
 ## 4. 高级调度与内存管理 (REQ-SCHED)
@@ -74,7 +74,7 @@
 | **REQ-SCHED-013** | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. 允许 Prefill 内 ChunkedConfig 分块，不允许 Prefill/Decode 混批<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
 | **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 🟢 已实现 (2026-02-07) [commit: 3a0957d] |
-| **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配<br>4. 与 SwiftKV 蒸馏兼容 | 🟢 已实现 (2026-03-15) |
+| **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配 | 🟢 已实现 (2026-03-15) |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-002** | 双缓冲 KV Cache | 支持 GPU 双缓冲调度 (Swap 功能) | 1. Swap-in/Swap-out 已实现<br>2. **Warm-up 保护期机制**<br>3. **页面状态机 (Active/Standby/Swapped/Warm/Protected)** | 🟢 已实现 (2026-02-06) [commit: external-kernels] |
 | **REQ-SCHED-003** | 动态批处理 | 支持 Continuous Batching | 1. 吞吐量优于 Static Batching<br>2. **序列完成自动移除**<br>3. **新序列动态加入**<br>4. **BatchAction 决策** (Continue/Complete/Pause)<br>5. **企业级死锁防护** (admit_waiting 无限循环修复) | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
@@ -82,10 +82,10 @@
 | **REQ-SCHED-005** | Cache Thrashing 防护 | 防止刚换入的页面立即被换出 | 1. **Warm-up 保护期** (默认 100ms)<br>2. **Thrash 率 < 1%**<br>3. 新换入页面不被选中为受害者 | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-006** | Working Set 检测 | 自动识别高频访问页面并锁定保护 | 1. **自动热页检测** (默认阈值 3 次访问)<br>2. **Protected 状态**<br>3. **保护解除机制** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
 | **REQ-SCHED-007** | Chunked Prefill / SplitFuse | vLLM 2024 交织式混批优化 | **(已废弃)** 仅废弃 SplitFuse 混批路径；ChunkedConfig 以页面调度能力保留 | 🔴 已废弃 (由 REQ-SCHED-016 替代) |
-| **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | 1. **SingleInputKV**: 连续 N 个 KV 蒸馏为 1 个 (减少 50-75%)<br>2. **AcrossKV**: 跨层 KV 共享 (进一步减少 50%)<br>3. 精度损失 < 0.1% PPL<br>4. **JIT 兼容** (蒸馏在 CPU/Swap 时执行) | 🟢 已实现 (2026-02-02) [commit: 085bbf8] |
+| **REQ-SCHED-008** | SwiftKV 算法 | vLLM 2024 优化：KV Cache 压缩 | **(已废弃)** 违宪：禁止 CPU 端或生成循环中修改 KV 数据（详见 ARCH 约束） | 🔴 违宪 (Vetoed 2026) |
 | **REQ-SCHED-009** | LMCache 跨请求共享 | 旧版 vLLM2024 LMCache 能力 | **(已废弃)** 由 `REQ-KV-001/002` 的 PrefixIndex + SessionKvCache 重构路径替代 | 🔴 已废弃 (Refactor 2026) |
 | **REQ-SCHED-010** | LMCache 完全跳过前向计算 | 旧版 LMCache 命中跳过前向路径 | **(已废弃)** 由 `GlobalMemoryManager` 统一复用入口替代 | 🔴 已废弃 (Refactor 2026) |
-| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | 1. SingleInputKV: 滑动窗口内聚合 KV<br>2. AcrossKV: 跨层余弦相似度计算<br>3. 精度验证: 蒸馏前后 PPL 差异 < 0.1%<br>4. 保持 CPU 端执行，兼容 JIT 统一路径 | 🟢 已实现 (2026-02-02) [commit: 0772fb1] |
+| **REQ-SCHED-011** | SwiftKV CPU 蒸馏实现 | CPU 端真实 KV 蒸馏算法 | **(已废弃)** 违宪：禁止在 CPU 端处理浮点张量及其相似度计算 | 🔴 违宪 (Vetoed 2026) |
 | **REQ-SCHED-014** | 自适应 JIT 调度策略 | 引入底层 JIT 决策层，基于实时观测动态调整策略 | 1. **微秒级决策** (<10μs)<br>2. **策略热切换** (Accuracy/Throughput)<br>3. **参数自整定** (动态 Batch/Swap)<br>4. **零运行时开销** (Enum Dispatch) | ✅ 已实现 (2026-02-06) [commit: a7e761b] |
 | **REQ-SCHED-015** | 调度器重构基线 | 调度器重构以 `GlobalMemoryManager` 为唯一 KV 管理核心，移除 `vllm2024.rs` 冗余 LMCache 结构 | 1. 删除 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel` 作为核心路径<br>2. `GlobalMemoryManager` 承担跨请求复用入口<br>3. 架构与 `ARCH-SCHED-REFACTOR-2026` 一致 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 | **REQ-SCHED-016** | ChunkedConfig 融合页面调度 | 保留 ChunkedConfig，用于 Prefill 分块时间片规划 | 1. 支持 `plan_prefill(prompt_tokens, chunk_size)`<br>2. 仅允许 Prefill 阶段分块，禁止与 Decode 混批<br>3. 与 PagedAttention 页面状态机一致更新 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
@@ -101,14 +101,14 @@
 | **REQ-KV-001** | KvPrefixIndex 前缀复用 | 无 Session 场景下按最长前缀复用 KV 页面 | 1. `find_longest_prefix(tokens)` 支持 O(n) 前缀匹配<br>2. 支持 append 场景复用（非 hash 全等）<br>3. 命中页面必须校验有效性后复用 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 | **REQ-KV-002** | SessionKvCache 确定性复用 | 会话内基于 finalized position 做确定性 prefix claim | 1. `register_session`/`claim_session_prefix`/`finalize_session_tokens` API 完整<br>2. `finalized_position` 单调递增<br>3. 禁止 claim 超过已确认边界 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
 | **REQ-KV-003** | KvPipeline 双管线隔离 | Thinking/Reasoning 不污染会话主缓存 | 1. `KvPipeline::{Conversation,Working}` 定义完整<br>2. `prepare_next_turn` 释放 Working，保留 Conversation<br>3. 管线维度参与虚拟页标识 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
-| **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | 1. `distill_cpu<E: Element>` 泛型接口<br>2. 相关相似度/评估接口同步泛型化<br>3. 禁止出现 `Vec<f32>` 固定签名作为核心实现 | 🟢 已实现 (2026-02-11) [commit: 8c41031] |
+| **REQ-KV-004** | KV 蒸馏泛型化 | SwiftKV distill 逻辑不得硬编码 `f32` | **(已废弃)** 违宪：任何形式的 KV 蒸馏重算均已禁止 | 🔴 违宪 (Vetoed 2026) |
 
 ### 4.2 自适应 Chunk 与 KV 增量更新 (REQ-KV-EXT)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-KV-EXT-001** | 自适应 Chunk 大小 | 根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len | 1. `AdaptiveChunkPolicy` 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size<br>2. Executor 调用 `plan_prefill()` 时使用自适应 chunk_size 而非 `max_seq_len`<br>3. chunk_size 范围 `[ChunkedConfig::chunk_size, max_seq_len]`，下界为 ChunkedConfig 默认值 64<br>4. 高负载（L1 可用 < 25%）时 chunk_size 缩小至下界<br>5. 低负载（L1 可用 > 75%）时 chunk_size 扩大至 max_seq_len<br>6. 单元测试覆盖高/低/中三种负载场景 | 🟢 已实现 (2026-03-15) |
-| **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 🟢 已实现 (2026-03-15) |
+| **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 🔴 违宪 (Vetoed 2026) |
 
 ### 4.3 JIT 缓存协议规范 (REQ-JIT-CACHE)
 
@@ -179,28 +179,22 @@
 
 ## 观测与调度 (REQ-OBS)
 
-### REQ-OBS-001: SystemState 实时采集
-- `BasicObserver::capture()` 必须从 scheduler/memory_manager/backend 实时采集所有指标
-- `memory_pressure` 采集失败必须返回 `Err`，禁止 `unwrap_or(0.0)`
-- `kv_fragmentation` 从 PagedScheduler 计算
-- `waiting_queue_len` / `current_running_len` 从 ContinuousBatcher 读取
-- **验收标准**: 构造已知状态，capture() 返回值与预期一致
+### REQ-OBS-001: Epilogue 物理写入 (In-Place Logging)
+- 彻底废除 CPU 侧的 `BasicObserver::capture()` 异步轮询。
+- 采用 GPU Kernel 尾部 (Epilogue) 的掩码计算直接通过 `STG` 指令写入 `KvPageHeader`。
+- `kv_fragmentation` 和 `logits_entropy` 等指标由 GPU 自主物理内存覆盖，不进入 CPU 主内存通信。
+- **验收标准**: 单步 GPU Kernel 执行完毕后，直接抽取 Device 内存对应 PageHeader 取得精确同步特征，零流切换。
 
-### REQ-OBS-002: SchedulingPolicy 完整实现
-- `AccuracyFirstPolicy` 使用 `memory_pressure` + `kv_fragmentation` + `waiting_queue_len` 三指标决策
-- 新增 `BalancedPolicy` 变体
-- `PolicyVariant` 枚举包含 Accuracy/Throughput/Balanced 三个变体
-- **验收标准**: 各策略在不同 SystemState 输入下返回符合决策矩阵的 SchedulerDecision
+### REQ-OBS-002: 单轨 AbsolutePolicy 强制约束
+- 剥夺原设计中由 CPU 切换精度模式的权力（移除 AccuracyFirst, Balanced, ThroughputFirst）。
+- 系统被设定为对所有有效指令强制锁定 **TurboQuant (W4A4/W8A8)** 运行。
+- Scheduler 只能执行护栏级的吞吐保护 `AbsolutePolicy`，只改变 `admit_new_prefill` 等外围流水线压弹，绝不更改核心 `kernel_strategy`。
+- **验收标准**: 核心系统中不存在 `kernel_strategy` 传参，任何批次的硬件执行路线拥有绝对的静态等价性。
 
-### REQ-OBS-003: KernelStrategy 端到端传递
-- `SchedulerDecision.kernel_strategy` 存入 `GeneratorForwardConfig`
-- compat 层 forward 函数接收并记录 strategy
-- **验收标准**: 设置 ThroughputFirst 策略后，forward_config 中 kernel_strategy 正确
-
-### REQ-OBS-004: 策略热切换
-- `Executor::set_policy(PolicyVariant)` 方法
-- 下一个 `step()` 生效，不中断当前批次
-- **验收标准**: 调用 set_policy 后下一次 step 使用新策略
+### REQ-OBS-003: 跨步熔断零介入
+- 移除所有基于 CPU 延时反馈的“热切换（set_policy）”。
+- Kernel 内部依靠硬编码门控实现条件跳过（Ragged Tensor Compaction）。
+- **验收标准**: OOM 或 Veto 直接由硬件指令流阻断（Trap），交由崩溃链或 GC 兜底。
 
 ## KV Cache 持久化 (REQ-KV)
 
@@ -233,24 +227,26 @@
 > **仓库**: `/home/putao/code/rust/gllm-kernels/`
 > **关联**: 以下需求在 gllm-kernels 仓库实现，gllm 侧仅记录需求定义和验收标准
 
-### 8.1 IQ Codebook 嵌入 (REQ-KERNELS-IQ)
+### 8.1 IQ Codebook 与 TurboQuant 映射 (REQ-KERNELS-IQ)
+
+> 🚨 **架构合规性警报 (Architect Veto)**: 严禁在 Kernel 运行时进行动态的 `dequant -> f32` 反量化。所有 IQ 权重的解码均被静态化至 Mega-Kernel 内联的整型/定点逻辑中。所有的 `dequant` 后缀将被废除或视为零开销的指令级特征投影。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-KERNELS-IQ-001** | IQ1_S dequant 实现 | 替换 `dequant_iq1_s` stub，使用 `IQ1S_GRID`（2048×u64 E8-lattice）实现真实反量化 | 1. 输出非全零<br>2. 与 llama.cpp IQ1_S 参考实现数值一致（容差 < 1e-4）<br>3. block_bytes=50, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-002** | IQ1_M dequant 实现 | 替换 `dequant_iq1_m` stub，使用 `IQ1S_GRID` + 额外 scale 字段 | 1. 输出非全零<br>2. 与 llama.cpp IQ1_M 参考实现数值一致<br>3. block_bytes=56, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-003** | IQ2_XXS dequant 实现 | 替换 `dequant_iq2_xxs` stub，使用 D4-lattice codebook（256×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_XXS 参考实现数值一致<br>3. block_bytes=66, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-004** | IQ2_XS dequant 实现 | 替换 `dequant_iq2_xs` stub，使用 `KSIGNS_IQ2XS`/`KMASK_IQ2XS` + D4-lattice（512×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_XS 参考实现数值一致<br>3. block_bytes=74, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-005** | IQ2_S dequant 实现 | 替换 `dequant_iq2_s` stub，使用 D4-lattice（1024×u64） | 1. 输出非全零<br>2. 与 llama.cpp IQ2_S 参考实现数值一致<br>3. block_bytes=82, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-006** | IQ3_XXS dequant 实现 | 替换 `dequant_iq3_xxs` stub，使用 D4-lattice（256×u32） | 1. 输出非全零<br>2. 与 llama.cpp IQ3_XXS 参考实现数值一致<br>3. block_bytes=98, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-007** | IQ3_S dequant 实现 | 替换 `dequant_iq3_s` stub，使用 D4-lattice（512×u32） | 1. 输出非全零<br>2. 与 llama.cpp IQ3_S 参考实现数值一致<br>3. block_bytes=110, QK_K=256 | 🟢 已实现 |
-| **REQ-KERNELS-IQ-008** | IQ matmul 集成 | `iq_matmul()` 调用真实 dequant 而非 stub，支持所有 7 种 IQ 格式 | 1. IQ 格式权重的 matmul 输出非全零<br>2. 与逐元素 dequant→f32 matmul 结果一致 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-001** | IQ1_S 静态映射 | 使用 `IQ1S_GRID`（2048×u64 E8-lattice）实现纯整型查表，禁止升格 f32 | 1. 寄存器内保持量化定点态<br>2. block_bytes=50, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-002** | IQ1_M 静态映射 | 使用 `IQ1S_GRID` 内联定点乘法，禁止运行时解包 f32 浮点 | 1. 寄存器内保持量化定点态<br>2. block_bytes=56, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-003** | IQ2_XXS 静态映射 | 使用 D4-lattice codebook（256×u64） | 1. 寄存器内保持量化定点态<br>2. block_bytes=66, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-004** | IQ2_XS 静态映射 | 使用 `KSIGNS_IQ2XS`/`KMASK_IQ2XS` + D4-lattice | 1. 寄存器内保持量化定点态<br>2. block_bytes=74, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-005** | IQ2_S 静态映射 | 使用 D4-lattice（1024×u64） | 1. 寄存器内保持量化定点态<br>2. block_bytes=82, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-006** | IQ3_XXS 静态映射 | 使用 D4-lattice（256×u32） | 1. 寄存器内保持量化定点态<br>2. block_bytes=98, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-007** | IQ3_S 静态映射 | 使用 D4-lattice（512×u32） | 1. 寄存器内保持量化定点态<br>2. block_bytes=110, QK_K=256 | 🟢 已实现 |
+| **REQ-KERNELS-IQ-008** | IQ matmul TurboQuant 集成 | `iq_matmul()` 结合 VNNI/SVE2 指令做直接微字节整数乘加 | 1. 禁止 `dequant→f32` 路径<br>2. 定点产出结果 | 🟢 已实现 |
 
 ### 8.2 GPU TileLevelFusion / ComputeRoot (REQ-KERNELS-GPU)
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × dtype_size`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
+| **REQ-KERNELS-GPU-001** | GPU TileLevelFusion | `plan_emitter.rs` 支持 `FusionMode::TileLevelFusion`，使用 shared memory 替代 CPU L1 tiling | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. shared memory 分配 = `tile_rows × k × byte_width`<br>3. Norm 输出写入 shared memory，GEMM 从 shared memory 读取<br>4. 与 CPU TileLevelFusion 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
 | **REQ-KERNELS-GPU-002** | GPU ComputeRoot | `plan_emitter.rs` 支持 `FusionMode::ComputeRoot`，全量 Norm 输出写入 shared/global memory 后执行 GEMM | 1. PTX/HIP/MSL codegen 不再返回 error<br>2. Norm 全量输出缓冲区分配正确<br>3. 与 CPU ComputeRoot 数值一致（容差 < 1e-5） | 🟢 已实现 (HIP/PTX/MSL 三后端) |
 | **REQ-KERNELS-GPU-003** | GPU 融合模式决策复用 | GPU codegen 复用 `detect_tile_vs_compute_root()` 的 75% L1 阈值决策逻辑，GPU 侧用 shared memory 容量替代 L1 | 1. `DeviceProfile` 提供 `shared_memory_per_block()` 方法<br>2. 阈值决策对 GPU 使用 shared memory 容量而非 L1 cache | 🟢 已实现 |
 
@@ -296,10 +292,9 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-JIT-CACHE-001** | 模型级 L1 缓存 | 编译产物与模型实例绑定，模型加载时编译一次 | 1. `ModelJitCache` 持有全层融合图编译产物<br>2. decode step 中零 `InferenceCompiler::new()` 调用<br>3. 模型卸载时随模型 drop | 🔄 待重建 |
-| **REQ-JIT-CACHE-002** | 进程全局 L2 LRU 缓存 | 以 `ModelArchKey` 为键（不含 seq_len），同架构模型共享编译结果 | 1. 同架构模型加载/卸载多次共享同一编译产物<br>2. LRU 淘汰策略<br>3. 线程安全 | 🔄 待重建 |
-| **REQ-JIT-CACHE-003** | 磁盘 L3 持久化缓存 | `~/.gllm/jit_cache/{model_hash}/{graph_type}.bin` 进程重启后免编译 | 1. 版本校验（gllm 版本 + CPU/GPU 特性指纹）<br>2. 磁盘 I/O 失败静默降级<br>3. 命中时跳过编译 | 🔄 待重建 |
-| **REQ-JIT-CACHE-004** | 热路径零编译 | 推理 decode step 层循环中禁止任何编译行为 | `grep -rn "InferenceCompiler::new()\|compile_graph" src/compat/decoder_forward.rs` 返回 0 | 🔄 待重建 |
-| **REQ-JIT-CACHE-005** | SymDim::Symbolic 动态绑定 | seq_len/total_seq 通过 ShapeBinding 运行时绑定，不触发重编译 | 1. 融合图使用 `Symbolic("seq_len")`<br>2. launch 时绑定具体值<br>3. 不同 seq_len 复用同一编译产物 | 🔄 待重建 |
-| **REQ-JIT-CACHE-006** | 四档自适应 Tiling | Decode/Short/Standard/Flash 通过运行时分支路由 | 单一编译产物内 4 个代码路径，seq_len 条件分支 | 🔄 待重建 |
-| **REQ-JIT-CACHE-007** | 全模型统一执行 | 缓存粒度为全模型级 `GraphExecutor`，彻底废弃层级缓存 | 1. 废弃 `GraphType` 及分块缓存策略<br>2. 整个模型只有 1 个跨层共享的 JIT 缓存入口 | 🔄 待重建 |
+| **REQ-JIT-CACHE-001** | 全核心态级预编译 | 所有算子必须在模型加载阶段完成全网计算图预编译 | 1. 禁用独立算子的 JIT 缓存支持<br>2. `GraphExecutor` 为唯一的全模级别入口<br>3. 推理热路径中无任何单层或单算子重编译 | 🟢 已设定 |
+| **REQ-JIT-CACHE-002** | CPU/GPU 算子与流程统一 | CPU 后端与 GPU 后端的图执行行为必须 100% 对齐 | 1. 消除 CPU 特有算子节点分支<br>2. 共同使用 `OpKind` 泛型拓扑与符号化绑定绑定(`SymDim`)<br>3. 完全消除 `GraphType` 的概念 | 🟢 已设定 |
+| **REQ-JIT-CACHE-003** | 磁盘级持久化重构 | 依据版本信息缓存整图的二进制编译形态 | 1. L3 保存全模二进制 Kernel (以 Hash 为签名)<br>2. 跳过应用级调度管线编译<br>3. `Fallback` 防护机制健壮 | 🟢 已设定 |
+| **REQ-JIT-CACHE-004** | 热路径零编译 | 推理 Decode Step 层循环中严禁用例 | `compile_graph` 调用频次必须恒为 0 | 🟢 已设定 |
+| **REQ-JIT-CACHE-005** | SymDim::Symbolic 动态绑定 | SeqLen 通过 ShapeBinding 运行时绑定 | 1. 结合 JIT 的 变量发射寄存器 (Param Registers) 不触发内核重编译<br>2. 直接于执行队列替换 `total_seq_len` | 🟢 已设定 |
+| **REQ-JIT-CACHE-006** | 零层级执行器 | 彻底废除按 Layer、按 Attention/FFN 进行调度的入口 | `ModelJitCache`、`FusedAttentionLayer` 这类概念不得出现任何一行存留 | 🟢 已设定 |

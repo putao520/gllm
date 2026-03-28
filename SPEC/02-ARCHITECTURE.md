@@ -22,7 +22,7 @@
   - 基于 **Model ID** 推断架构类型
   - 基于 **文件名** 推测量化类型 (GGUF) 或精度 (ONNX)
   - 使用 `contains()` 模糊匹配进行架构推测
-  - 使用硬编码默认值代替模型元数据（如 rope_theta 默认 10000.0，dtype_size 默认 2）
+  - 使用硬编码默认值代替模型元数据（如 rope_theta 默认 10000.0，head_dim 默认 128）
 - **目的**：避免错误的推测导致模型加载失败，确保系统行为可预测。
 - **关联需求**: REQ-LOADER-014, REQ-LOADER-015, REQ-LOADER-019
 
@@ -37,8 +37,8 @@ let precision = tensor.data_type;
 // ✅ 正确: 从 config.json 读取
 let arch = config.get("model_type");
 
-// ✅ 正确: 从实际权重张量读取 dtype
-let dtype_size = loader.detect_weight_dtype_size()
+// ✅ 正确: 从实际权重张量形状推导 head_dim
+let head_dim = loader.detect_head_dim_from_tensor()
     .ok_or_else(|| Error::MissingMetadata)?;
 ```
 
@@ -55,7 +55,7 @@ if token.contains("mistral") { return MistralArchitecture; }
 
 // ❌ 错误: 使用硬编码默认值
 let rope_theta = config.get("rope_theta").unwrap_or(10000.0);
-let dtype_size = config.get("dtype").unwrap_or(2);  // f16
+let head_dim = config.get("head_dim").unwrap_or(128);
 ```
 
 ### 3. 量化元数据格式 (ARCH-QUANT-METADATA)
@@ -412,16 +412,13 @@ Client::new_chat("Qwen/Qwen3-0.6B")
         - `vocab_size` = `Embedding` 张量的较大维度
         - `head_dim` = `AttentionQuery` 张量维度 / `num_heads`
         - `num_layers` = 匹配到的最大 `layer_idx` + 1
-    - **DType Adapter**: Loader 层根据后端能力决定数据类型处理策略。当 `has_bf16 && use_avx512` 时，BF16 张量保持原格式走原生 VDPBF16PS 路径；否则在 pack 阶段转换为 F32。F16 同理（依赖 `has_avx512fp16`）。对上层 Engine 透明。
+    - **DType Adapter**: **(已弃用)** Loader 层不再根据硬件进行动态类型分发。所有输入类型的张量统一在 Load-time 转换为目标的静态 TurboQuant 位宽，抹平原始格式差异。
 
-6.  **量化 Per-Tensor 混合精度加载 (ARCH-LOADER-QUANT)**
-    - **目的**: GGUF 量化模型的 tensor 按原始精度分流加载，量化 tensor 不经 GPU upload。
-    - **QuantizedTensor**: 量化 tensor 以原始 block bytes + QuantType 元数据存储在 `WeightsHandle.quantized` HashMap。
-    - **Native Float 处理**: F16/BF16 tensor 根据硬件 ISA 能力动态决策：支持原生指令时保持原格式（BF16→VDPBF16PS, F16→AVX-512 FP16），否则在 pack 阶段转换为 F32。
-    - **TensorProvider::ggml_dtype()**: 新增 default method，GGUF 实现返回原始 GgmlDType。
-    - **adapter::ggml_dtype_to_quant_type()**: 桥接 GgmlDType → QuantType，覆盖 21 种量化类型。
-    - **Backend::quantized_matmul()**: 按 QuantType 分发到 kquant_matmul/classic_matmul/iq_matmul。
-    - **Backend::dequantize()**: 24 种量化类型反量化到 f32，用于 embedding lookup 等场景。
+6.  **量化与降维处理 (ARCH-LOADER-TURBO-QUANT)**
+    - **目的**: 彻底消灭推理期的多态执行。所有张量在装载时经过极化转换，统一成 JIT 内核接受的固定底层位宽（如 INT4）。
+    - **Load-time Annihilation**: 装载时不再保留原始浮点类型，强行根据 `turbo_quant_bits` 执行 `PolarQuant` 映射。
+    - **Native Float 摒除**: 不再有 Native Float 分流。即使原文件是 F16/BF16，统一并入静态编译位宽处理管线，将精度差异化在加载期全部抹平。
+    - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核生成的汇编直接读取压扁的量子网格点，数学运算纯基于整数/微字节累加器进行，实现零分支执行。
 
 #### ONNX Adapter Architecture (ARCH-ONNX)
 
@@ -716,22 +713,19 @@ pub struct PipelinedVirtualPageId {
 pub enum BatchOrderPolicy {
     StrictRequestIdOrder,
     FifoOrder,
-    #[deprecated = "Breaks determinism"]
-    ThroughputFirst,
 }
 ```
 
 **集成约束**:
 1. 默认策略必须为 `StrictRequestIdOrder`。
 2. `Executor::run_batch_forward` 需校验输入序列严格单调递增。
-3. 禁止将 `ThroughputFirst` 作为默认路径或推荐配置。
 
 ### 5. GlobalMemoryManager 融合策略 (ARCH-SCHED-GLOBAL-MEM-REFACTOR)
 
 **核心决策**:
 1. 删除 `vllm2024.rs` 中冗余 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel`。
 2. 保留 `ChunkedConfig`，并融合为 Prefill 阶段的页面规划能力（非 Prefill/Decode 混批）。
-3. SwiftKV 蒸馏接口保持泛型化方向：`distill_cpu<E: Element>(...)`，禁止硬编码 `f32`。
+3. 严格禁止建立任何 `SwiftKV` 或 CPU 端的 KV Cache 泛型蒸馏接口。KV 数据受限于 GPU 端 TurboQuant 双轨位宽压缩锁定，不再允许 CPU 染指任何反量化或浮点重新计算的行为。
 
 **统一能力入口**:
 - `plan_prefill(prompt_tokens, chunk_size) -> PrefillPlan`
@@ -860,7 +854,7 @@ pub struct ShapeBinding {
 }
 
 impl CompiledLayer {
-    pub fn execute(&self, inputs: &[*const f32], outputs: &[*mut f32],
+    pub fn execute(&self, inputs: &[*const u8], outputs: &[*mut u8],
                    binding: &ShapeBinding) -> Result<(), KernelError>;
 }
 ```
@@ -879,7 +873,7 @@ impl CompiledLayer {
 |------|------|----------------|
 | `compile_decode_jit` (CachedGQA 图) | `src/compat/jit_helpers.rs` | `total_seq` |
 | `compile_decode_jit` (RmsNorm+Q+RoPE 图) | `src/compat/jit_helpers.rs` | `seq_len`（prefill 时动态） |
-| `gpt2_forward_sequence` JIT 图（REQ-JIT-GRAPH-002） | `src/compat/decoder_forward.rs` | `seq_len`、`total_seq` |
+
 
 ---
 
@@ -933,7 +927,7 @@ impl CompiledLayer {
 | `layer_stride` | `usize` | 层间步长 |
 | `head_stride` | `usize` | 头间步长 |
 | `token_stride` | `usize` | token 间步长 |
-| `dtype` | `DType` | 存储 dtype |
+| `turbo_quant` | `TurboQuantBits` | 位宽约束 |
 | `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
 
 #### 8.2.3 `KvView`
@@ -968,7 +962,7 @@ impl CompiledLayer {
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `logical_shape` | `Vec<usize>` | 逻辑形状 |
-| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `turbo_quant` | `TurboQuantBits` | 极化压缩位宽 |
 | `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
 | `base_ptr` | `*const u8` | 数据指针（mmap/device） |
 | `stride` | `Vec<usize>` | 步长 |
@@ -1052,7 +1046,7 @@ QView + KvView + AttentionSemantics
 | stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
 | page lookup | 根据 `PagedKvView` 生成 page table 查找 |
 | append window | 将 append region 合并进可见窗口 |
-| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| static layout dispatch | 根据 TurboQuantBits 生成载入指令 |
 | RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
 
 #### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
@@ -1088,224 +1082,16 @@ QView + KvView + AttentionSemantics
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
 | P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
-### 8.8 DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
+### 8.8 (架构级物理废弃) DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
 
-> **状态**: P0-P3 已完成 (2026-03-22)
-> **关联**: JIT 编译管线 (§5), GEMM 微内核, Zero-Copy (Layer 4)
-> **审计日期**: 2026-03-22（GPU codegen 三后端 dtype 自适应完成，1059 tests passed）
-
-**铁律**: dtype 必须同时影响存储和计算，全链路自适应，禁止硬编码 f32。
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  ARCH-DTYPE-ADAPTIVE 铁律                                               │
-│                                                                         │
-│  ✅ pack_weights_typed(slices, dtype) 按 dtype 转换并 pack              │
-│  ✅ weight_layout() offset 必须和 pack_weights_typed() 布局一致         │
-│  ✅ GEMM weight 按模型 dtype 存储（F16/BF16 省 50% 内存 + SIMD 翻倍）  │
-│  ✅ JIT codegen 每个 op 根据输入 tensor dtype 生成对应 load/store 指令  │
-│  ✅ computation_dtype_from_config 返回模型原生 dtype                     │
-│  ✅ 所有 buffer 分配/传输/下载使用 dtype.size_bytes() 计算字节数        │
-│  ✅ GPU shared memory 按实际 tensor dtype 分配                          │
-│                                                                         │
-│  ❌ 禁止 pack_weights 总是按 f32 pack                                   │
-│  ❌ 禁止 computation_dtype_from_config 硬编码返回 F32                    │
-│  ❌ 禁止 JIT codegen 中硬编码 * 4 或 * 2（必须用 dtype.size_bytes()）   │
-│  ❌ 禁止 weight_layout 和 pack_weights 的 dtype 不一致                  │
-│  ❌ 禁止 htod/dtoh 传输字节数用 len() * 4 计算                         │
-│  ❌ 禁止 size_of::<f32>() 作为通用 tensor 元素大小                     │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### 8.8.1 dtype 分类规则
-
-| 类别 | dtype | 理由 |
-|------|-------|------|
-| GEMM weight (W_q/W_k/W_v/W_o/W_gate/W_up/W_down/lm_w) | 模型 dtype (F16/BF16/F32) | 内存节省 + SIMD 优化 |
-| Norm weight (gamma/beta) | 模型 dtype | 全链路一致 |
-| Activation / intermediate tensor | 模型 dtype | 全链路一致 |
-| Accumulator | 模型 dtype | 全链路一致 |
-| KV cache | 模型 dtype | 内存节省 |
-
-#### 8.8.2 动态 dtype 传播机制
-
-dtype 信息必须从模型配置贯穿到 JIT codegen 的每一层，禁止在任何中间层丢失或硬编码。
-
-```
-模型元数据 (dtype_size)
-    │
-    ▼
-computation_dtype_from_config(config) → DType (F16/BF16/F32)
-    │
-    ├──▶ pack_weights_typed(slices, dtype)     // weight 按 dtype pack
-    ├──▶ weight_layout(dtype)                  // offset 按 dtype.size_bytes() 计算
-    ├──▶ concrete_bytes(dtype)                 // buffer 按 dtype.size_bytes() 分配
-    ├──▶ build_*_graph(dtype)                  // graph tensor 标注 dtype
-    │
-    ▼
-JIT compile(graph, device_profile)
-    │
-    ├──▶ codegen: load/store 指令按 tensor dtype 选择
-    │    - F32: vmovups/vmovss (x86), vld1q_f32 (ARM), ld.global.f32 (PTX)
-    │    - F16: vcvtph2ps+vmovups (x86 F16C), fcvt (ARM), ld.global.f16 (PTX)
-    │    - BF16: vdpbf16ps (x86 AVX-512), bfcvt (ARM), ld.global.bf16 (PTX)
-    │
-    ├──▶ stride/offset: elem_bytes = dtype.size_bytes()
-    │    - row_stride = cols * elem_bytes
-    │    - head_stride = head_dim * elem_bytes
-    │    - layer_stride = num_heads * seq_len * head_dim * elem_bytes
-    │
-    ├──▶ scratchpad: 按实际 tensor dtype 分配
-    │    - attention scores: F32 (accumulator)
-    │    - Q/K/V tile: 模型 dtype
-    │    - pack buffer: GEMM dtype
-    │
-    └──▶ GPU shared memory: 按 kernel 实际使用的 dtype 分配
-```
-
-**关键函数签名变更**:
-
-| 函数 | 旧签名 | 新签名 |
-|------|--------|--------|
-| `computation_dtype_from_config` | `fn(config) -> DType { F32 }` | `fn(config) -> DType { computation_dtype(config.dtype_size) }` |
-| `pack_weights` | `fn(slices: &[&[f32]]) -> Vec<u8>` | `fn pack_weights_typed(slices: &[&[f32]], dtype: DType) -> Vec<u8>` |
-| `execute_jit_*` | 无 dtype 参数 | 添加 `dtype: DType` 参数，buffer 用 `dtype.size_bytes()` |
-| GPU `htod`/`dtoh` | `len() * 4` | `len() * dtype.size_bytes()` |
-
-#### 8.8.3 JIT Codegen dtype 模板化规范
-
-JIT codegen 中所有涉及 tensor 数据的指令必须根据 `elem_bytes` 参数化生成：
-
-**x86_64 codegen**:
-
-| 操作 | F32 (elem_bytes=4) | F16 (elem_bytes=2) | BF16 (elem_bytes=2) |
-|------|--------------------|--------------------|---------------------|
-| SIMD load | `vmovups` | `vcvtph2ps` (F16C) | `vpmovzxwd`+`vpslld` |
-| SIMD store | `vmovups` | `vcvtps2ph` (F16C) | `vcvtneps2bf16` (AVX-512 BF16) |
-| Scalar load | `vmovss` | `movzx`+`vcvtsh2ss` | `movzx`+`vpslld`+`vmovd` |
-| Stride 计算 | `cols * 4` | `cols * 2` | `cols * 2` |
-| Pack buffer | `mr * kc * 4` | `mr * kc * 2` | `mr * kc * 2` |
-
-**GPU codegen (PTX/HIP/MSL)**:
-
-| 操作 | F32 | F16 | BF16 |
-|------|-----|-----|------|
-| Global load | `ld.global.f32` | `ld.global.f16` | `ld.global.b16` |
-| Global store | `st.global.f32` | `st.global.f16` | `st.global.b16` |
-| Shared memory | `ld.shared.f32` | `ld.shared.f16` | `ld.shared.b16` |
-| Buffer 分配 | `n * 4` | `n * 2` | `n * 2` |
-| FMA | `fma.rn.f32` | `fma.rn.f16` / cvt+fma.f32 | `fma.rn.f32` (after cvt) |
-
-**codegen 实现模式**:
-
-```rust
-// ❌ 禁止: 硬编码 * 4
-let row_bytes = cols * 4;
-
-// ✅ 正确: 使用 elem_bytes 参数
-let elem_bytes = dtype.size_bytes();  // 从 graph tensor dtype 获取
-let row_bytes = cols * elem_bytes;
-
-// ❌ 禁止: 硬编码 vmovups
-dynasm!(ops; vmovups [rbx + offset], ymm0);
-
-// ✅ 正确: 按 dtype 选择指令
-match elem_bytes {
-    4 => dynasm!(ops; vmovups [rbx + offset], ymm0),           // F32
-    2 if is_f16 => dynasm!(ops; vcvtps2ph [rbx + offset], ymm0, 0), // F16
-    2 if is_bf16 => emit_bf16_store(ops, rbx, offset, ymm0),   // BF16
-    _ => return Err("unsupported dtype"),
-}
-```
-
-#### 8.8.4 硬编码审计清单 (2026-03-21)
-
-**根因**: `computation_dtype_from_config()` 硬编码返回 `DType::F32`，整个 forward 管线通过 `get_f32_data()` 强制 f32。
-
-| 层级 | 文件 | 硬编码数 | 严重度 | 修复方式 |
-|------|------|---------|--------|---------|
-| Weight Pack | `jit_helpers.rs` pack_weights | 2 处 `* 4` | 高 | `pack_weights_typed(slices, dtype)` |
-| Forward | `jit_helpers.rs` execute_jit_* | 4 处 `* 4` | 高 | 添加 `dtype` 参数 + `dtype.size_bytes()` |
-| GPU Buffer | `gpu_compile.rs` CUDA/HIP/Metal | ~60 处 `* 4` | 高 | 提取 `let eb = dtype.size_bytes()` 替换 |
-| Graph Exec | `executor.rs` CPU/GPU | ~11 处 `size_of::<f32>()` | 高 | `tensor.dtype.size_bytes()` |
-| BERT | `bert_forward.rs` | 2 处 `* 4` | 高 | `dtype.size_bytes()` |
-| Decoder | `decoder_forward.rs` | 1 处 `* 4` | 高 | `dtype.size_bytes()` |
-| Attention | `x86_64.rs` MHA/CachedGQA/Flash | ~10 处 `* 4` | 高 | `elem_bytes` 参数化 |
-| Fusion | `x86_64.rs` TileLevel/ComputeRoot | ~5 处 `* 4` | 高 | `elem_bytes` 参数化 |
-| GPU Kernel | `kernel_builder.rs` | ~4 处 `* 4` | 中 | `dtype.size_bytes()` |
-| GPU Fusion | `trace_emitter.rs` | ~2 处 `* 4` | 中 | `dtype.size_bytes()` |
-| AMX | `apple_amx.rs` | 2 处 `* 4` | 高 | `elem_bytes` 参数化 |
-
-**合法 `* 4` (非违规)**:
-- accumulator 空间的 f32 scalar tail (`vmovss` 逐元素) — accumulator 始终 F32
-- `simd_width_f32 * 4` — 变量名明确 f32 上下文
-- `partial_cmp().unwrap_or(Equal)` — NaN 比较标准模式
-- BLIS GEMM 主路径 — 已通过 `src_elem_bytes()` 动态化
-
-#### 8.8.5 实施路线
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| P0 | `computation_dtype_from_config` 返回模型原生 dtype | ✅ 已完成 (2026-03-21) |
-| P0 | `pack_weights_typed(slices, dtype)` + `pack_weights_multi` GEMM weight 按 dtype pack | ✅ 已完成 (2026-03-21) |
-| P0 | Graph builder 区分 GEMM weight dtype (`dt`) 和 norm/activation dtype (`ft=F32`) | ✅ 已完成 (2026-03-21) |
-| P0 | `execute_jit_*` 全部添加 `dtype` 参数 (7个函数) | ✅ 已完成 (2026-03-21) |
-| P0 | `decoder_forward.rs` + `bert_forward.rs` 调用点适配 | ✅ 已完成 (2026-03-21) |
-| P1 | GPU buffer 分配/传输/下载全部 `F32_BYTES` 常量化 (77处) | ✅ 已完成 (2026-03-21) |
-| P1 | `gpu_write_kv_cache` dtype_size 参数化 | ✅ 已完成 (2026-03-21) |
-| P1 | `executor.rs` 消除 `size_of::<f32>()` — `output_dtype` 字段 + 动态计算 (11处) | ✅ 已完成 (2026-03-21) |
-| P2 | x86_64 attention/fusion/elementwise/rope/meanpool `f32_bytes` 参数化 (~114处) | ✅ 已完成 (2026-03-21) |
-| P2 | AArch64 attention/fusion/rope/meanpool `f32_bytes` 参数化 (~47处) | ✅ 已完成 (2026-03-21) |
-| P2 | GPU kernel_builder/trace_emitter `f32_bytes` 参数化 (8处) | ✅ 已完成 (2026-03-21) |
-| P2 | Apple AMX `f32_bytes` 参数化 (6处) | ✅ 已完成 (2026-03-21) |
-| P3 | 全链路 dtype 自适应（GPU codegen + activation + accumulator 全部按模型 dtype） | ✅ 已完成 (2026-03-22) |
-
-#### 8.8.6 P3 GPU Codegen 全链路 DType 自适应
-
-**目标**：GPU codegen（PTX/HIP/MSL）全部按模型 dtype 生成指令，零 F32 硬编码。
-
-**改动范围**：
-
-| 组件 | 文件 | 改动内容 |
-|------|------|---------|
-| DType GPU helpers | `gllm-kernels/src/types.rs` | `ptx_type()`/`ptx_reg_type()`/`ptx_ld_type()`/`hip_type()`/`msl_type()`/`ptx_arith_type()` |
-| GpuDialect trait | `trace_emitter.rs` | `dtype()` + `elem_bytes()` 方法 |
-| PtxDialect | `trace_emitter.rs` | `dtype` 字段 + `with_dtype()` 构造 + `emit_trace_op` 按 dtype 生成指令 |
-| HipDialect | `trace_emitter.rs` | 同上（`float` → `dtype.hip_type()`） |
-| MslDialect | `trace_emitter.rs` | 同上（`float` → `dtype.msl_type()`） |
-| kernel_builder | `kernel_builder.rs` | 12 个 `build_*` 函数使用 `dialect.elem_bytes()` 替代 `* 4` |
-| PTX GEMM | `ptx/gemm.rs` | 4 个 emitter 按 dtype 生成 `.f16`/`.bf16`/`.f32` 指令 |
-| plan_emitter | `plan_emitter.rs` | `emit_single_op_kernel` 从 OpKind 提取 dtype 传递到 dialect |
-| gllm launch_config | `gpu_compile.rs` | GEMM shared_mem `* dtype.size_bytes()` + dialect 构造传 dtype |
-
-**PTX 指令映射**：
-
-| 操作 | F32 | F16 | BF16 |
-|------|-----|-----|------|
-| 寄存器声明 | `.reg .f32` | `.reg .f16` | `.reg .b16` |
-| Global load | `ld.global.f32` | `ld.global.f16` | `ld.global.b16` |
-| Global store | `st.global.f32` | `st.global.f16` | `st.global.b16` |
-| Shared memory | `.shared .f32` | `.shared .f16` | `.shared .b16` |
-| 字节偏移 | `mul.wide.u32 %rd, %r, 4` | `mul.wide.u32 %rd, %r, 2` | `mul.wide.u32 %rd, %r, 2` |
-| 加法 | `add.f32` | `add.f16` | `add.bf16` (SM≥80) |
-| 乘法 | `mul.f32` | `mul.f16` | `mul.bf16` (SM≥80) |
-| FMA | `fma.rn.f32` | `fma.rn.f16` | `fma.rn.bf16` (SM≥80) |
-
-**HIP 类型映射**：
-
-| DType | C++ 类型 | Shared memory | sizeof |
-|-------|----------|---------------|--------|
-| F32 | `float` | `__shared__ float` | 4 |
-| F16 | `half` | `__shared__ half` | 2 |
-| BF16 | `__nv_bfloat16` | `__shared__ __nv_bfloat16` | 2 |
-
-**MSL 类型映射**：
-
-| DType | MSL 类型 | Threadgroup | sizeof |
-|-------|----------|-------------|--------|
-| F32 | `float` | `threadgroup float` | 4 |
-| F16 | `half` | `threadgroup half` | 2 |
-| BF16 | `bfloat` | `threadgroup bfloat` | 2 |
+> 🚨 **架构合规性警报 (Architect Veto)**:
+> 曾经规划的 `DType全链路自适应` 以及动态计算 `dtype_size` 以支持在 JIT 管线中随意游走 F16/BF16/F32 的架构，现已被**全盘否决并物理销毁**。
+>
+> 1. 原方案寄望于在运行时通过 `computation_dtype_from_config` 等函数获取浮点类型的字节宽度，并据此分派汇编宏。
+> 2. 在全系统的底盘升构为 **TurboQuant** 之后，系统进入了“静态装配期强行降阶（Load-Time Annihilation）”。
+> 3. Mega-Kernel 强制消除多态加载，所有张量强转至极化后的定点/微浮点硬派算子规格。不再存在动态检测 `F16`、`BF16` 并相应生成不同载入指令的软路由。
+>
+> **因此，原本长达两百行的关于 `dtype.size_bytes()` 动态寻址的复杂映射表与实现方案被永久废除。禁止后继 Agent 实现此模块中的硬编码探测或多态汇编下发逻辑！**
 
 ---
 
@@ -1363,7 +1149,7 @@ match elem_bytes {
 | `layer_stride` | `usize` | 层间步长 |
 | `head_stride` | `usize` | 头间步长 |
 | `token_stride` | `usize` | token 间步长 |
-| `dtype` | `DType` | 存储 dtype |
+| `turbo_quant` | `TurboQuantBits` | 位宽约束 |
 | `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
 
 #### 8.2.3 `KvView`
@@ -1398,7 +1184,7 @@ match elem_bytes {
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `logical_shape` | `Vec<usize>` | 逻辑形状 |
-| `storage_dtype` | `DType` | 存储 dtype（F32/F16/BF16） |
+| `turbo_quant` | `TurboQuantBits` | 极化压缩位宽 |
 | `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
 | `base_ptr` | `*const u8` | 数据指针（mmap/device） |
 | `stride` | `Vec<usize>` | 步长 |
@@ -1482,7 +1268,7 @@ QView + KvView + AttentionSemantics
 | stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
 | page lookup | 根据 `PagedKvView` 生成 page table 查找 |
 | append window | 将 append region 合并进可见窗口 |
-| dtype dispatch | 根据 KV storage dtype 生成 load/convert 指令 |
+| static layout dispatch | 根据 TurboQuantBits 生成载入指令 |
 | RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
 
 #### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
@@ -1518,39 +1304,18 @@ QView + KvView + AttentionSemantics
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
 | P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
-### 8.8 DType-Aware JIT 性能优化 (ARCH-DTYPE-PERF)
+### 8.9 (架构变迁) TurboQuant 静态阻塞规约 (ARCH-TQ-BLOCKING)
 
-**原则**: dtype 必须贯穿 GEMM blocking、HW constraint 验证、codegen 全链路，F16/BF16 模型可利用 2× 缓存容量提升吞吐。
+> **关联**: TurboQuant 架构, Zero-Overhead Memory Pool
+> **状态**: 已替代旧有的 DType-Aware 性能优化。
 
-#### 已完成优化 (P0)
+由于系统全面废除了多态的 `DType` 运行时分支，所有的 GEMM 阻塞 (Blocking) 逻辑（KC/MC/NC 计算）现在完全基于 **硬件检测 (hw_constraints.rs)** 和 **TurboQuant 固定位宽**。
 
-| # | 优化点 | 预期收益 | 实现位置 |
-|---|--------|---------|---------|
-| P0-1 | GEMM blocking dtype 感知 | KC 翻倍 → 15-30% GEMM 吞吐提升 | `device_profile.rs:gemm_blocking()` |
-| P0-2 | HW constraints dtype 感知 | L1 验证精确化，避免误拒合法融合 | `hw_constraints.rs:validate_l1_working_set()` |
-| P0-3 | AArch64 IR loop dtype 修复 | F16/BF16 pack buffer 偏移正确 | `aarch64_dynasm.rs:emit_elem_to_byte_shift()` |
-| P0-4 | x86_64 bias_add 显式 f32_bytes | 消除魔数，明确 bias 始终 F32 | `x86_64.rs:emit_bias_add()` |
-| P0-5 | WisdomDb dtype-aware 查询 | 不同 dtype 的 GEMM 获得独立调优参数 | `device_profile.rs:query_wisdom_jit_params()` |
+`device_profile.rs:gemm_blocking()` 函数已退役。取而代之的是 `TurboQuant` 为 W4A4 和 W8A8 场景直接提供的硬连线 (hardwired) 最佳参数：
+- 不再包含关于 F16/BF16/F32 的 `elem_bytes` 动态除法
+- 启发式缓存调优 (WisdomDb) 仅使用 `QuantConstraint` 作为主键查询
 
-#### 性能影响分析
-
-F16/BF16 模型在 `gemm_blocking(m, n, k, dtype)` 下的 blocking 参数变化：
-
-```
-elem_size=4 (F32): KC = L1*80% / (4*(MR+NR))
-elem_size=2 (F16): KC = L1*80% / (2*(MR+NR))  → KC 翻倍
-
-KC 翻倍 → K 循环迭代次数减半 → pack 开销减半 → 15-30% 吞吐提升
-MC/NC 同比增大 → 更大 tile → 更好的数据复用
-```
-
-#### API 签名
-
-| 函数 | 签名 | 说明 |
-|------|------|------|
-| `gemm_blocking` | `(m, n, k, dtype: DType) -> GemmBlocking` | dtype 驱动 blocking 参数 |
-| `query_wisdom_jit_params` | `(m, n, k, dtype: DType) -> Option<JitParams>` | dtype-aware WisdomDb 查询 |
-| `gemm_blocking_heuristic` | `(m, n, k, dtype: DType) -> GemmBlocking` | 内部分析启发式 |
+---
 
 ### 8.9 GPU 数据通路优化 (ARCH-GPU-DATAPATH)
 
@@ -1589,19 +1354,19 @@ MC/NC 同比增大 → 更大 tile → 更好的数据复用
 Kernel ABI:
   inputs:  (k_src_ptr, v_src_ptr, kv_cache_ptr, scatter_meta_ptr)
   params:  (seq_len, num_kv_heads, head_dim, kv_dim, write_start,
-            layer_offset, half_offset, head_stride, dtype_size)
+            layer_offset, half_offset, head_stride, byte_width)
   grid:    (num_kv_heads, seq_len, 1)
   block:   (min(head_dim, max_threads_per_block), 1, 1)
 
 每个 thread block 处理一个 (head, token) 对:
-  src_off = (blockIdx.y * kv_dim + blockIdx.x * head_dim) * dtype_size
+  src_off = (blockIdx.y * kv_dim + blockIdx.x * head_dim) * byte_width
   dst_k = kv_cache_ptr + layer_offset + blockIdx.x * head_stride
-        + (write_start + blockIdx.y) * head_dim * dtype_size
+        + (write_start + blockIdx.y) * head_dim * byte_width
   dst_v = dst_k + half_offset
-  memcpy(dst_k + threadIdx.x * dtype_size,
-         k_src + src_off + threadIdx.x * dtype_size, dtype_size)
-  memcpy(dst_v + threadIdx.x * dtype_size,
-         v_src + src_off + threadIdx.x * dtype_size, dtype_size)
+  memcpy(dst_k + threadIdx.x * byte_width,
+         k_src + src_off + threadIdx.x * byte_width, byte_width)
+  memcpy(dst_v + threadIdx.x * byte_width,
+         v_src + src_off + threadIdx.x * byte_width, byte_width)
 ```
 
 **实现路径**:
@@ -1669,7 +1434,7 @@ struct GpuWeightCache {
       // 直接 per-head memcpy，无中间 buffer
       for head in 0..num_kv_heads {
           for s in 0..seq_len {
-              ptr::copy_nonoverlapping(k_src + src_off, kv_dst + dst_off, head_dim * dtype_size);
+              ptr::copy_nonoverlapping(k_src + src_off, kv_dst + dst_off, head_dim * byte_width);
           }
       }
   }
