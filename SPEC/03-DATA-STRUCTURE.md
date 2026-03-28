@@ -1175,6 +1175,32 @@ fn apple_amx_gemm_eligible(m: usize, n: usize, k: usize) -> bool {
 
 **维度总数**: 27 个独立分派点，分布在 4 个层级。JIT 编译的核心价值在于：预编译库无法覆盖这 27 个维度的笛卡尔积，而 JIT 管线在运行时根据实际组合动态生成最优代码。
 
+### 9.6 `HardwareIR` 物理能力抽象 (DATA-HARDWARE-IR)
+
+> **关联架构**: 02-ARCHITECTURE.md §12.5 (Silicon-Level Instruction Mapping)
+> **设计思想**: 除了描述逻辑形状的 `SymDim` 之外，编译器在生成硅晶映射所需的底层汇编时，必须依赖明确的硬件能力 IR。
+
+```rust
+/// JIT 编译器在执行 Code-Generation 时强制读取的硬件物理探测结构
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HardwareIR {
+    /// Intel AMX: 指定最多可用的矩阵寄存器横纵宽限
+    AmxTile { max_rows: usize, max_cols: usize },
+    
+    /// AVX10 混合收敛向量: 强制将物理切片降解匹配 E-Core 的 256位
+    Avx10Converged { vector_width: usize }, 
+    
+    /// Hopper TMA: 张量内存加速器特化的描述，直接生成异步 LDG 块
+    Sm90Tma { block_width: usize, block_height: usize },
+    
+    /// Blackwell FP4/FP6 Native Tension
+    Sm100NativeMma { precision_enum: TurboQuantBits },
+    
+    /// AMD CDNA3 的 XCD 屏障边界
+    Cdna3XcdBarrier { max_workgroup_size: usize },
+}
+```
+
 ---
 
 ## 10. Zero-Overhead Unified Semantics 核心数据结构 (DATA-ZOUS)
@@ -1592,3 +1618,50 @@ priority(group) = time_penalty + recency_penalty - freq_bonus - pin_bonus
 | 工作集 | 无 | 自动检测 |
 | Cache Thrashing | 可能 | 避免 |
 
+---
+
+## 14. CPU-GPU 协同 MoE 调度结构 (DATA-HETEROGENEOUS-MOE)
+
+> **关联架构**: 02-ARCHITECTURE.md §15.3 (CPU/GPU 真正并行)
+> **设计思想**: 将原本只能在 GPU 端排队拥塞的温/冷专家，在 JIT 时就硬切分出一条物理软路由，交由 CPU 端的 `AMX/AVX512` 矩阵引擎异步接管。
+
+```rust
+/// 针对被驱逐至主机端的温专家，在 CPU 侧构建的异步独立计算流栈
+pub struct CpuExpertScheduler {
+    /// 强制利用 NUMA 探针将该线程流 Pin 在具有最大 L3 缓存与 AMX 指令的 P-Core 上
+    pub core_affinity: NumaAffinity,
+    
+    /// 当落入该流的 Token 触发以下 Expert ID 时，直接唤起本地计算无需回迁 GPU
+    pub active_experts: Vec<ExpertId>,
+    
+    /// 异步计算流，与 GPU 端的 cuStream 并发推进，在 Layer 结算时统一做残差 ADD
+    pub async_stream: CpuComputeStream,
+}
+```
+
+---
+
+## 15. 跨机/跨卡 RDMA KV 同步协议 (DATA-RDMA-KV-SYNC)
+
+> **关联架构**: 02-ARCHITECTURE.md §14.5 (RDMA/PCIe 流水线预取)
+> **设计思想**: 将 "注意力预瞄" 的减法运算，化身为指导底层进行 "RDMA 跨界多播" 的乘法预测，突破单机显存墙。
+
+```rust
+/// 多卡 / 多机 (Pipeline Parallelism) 下的零拷贝 KV 穿透管理器
+pub struct RdmaSyncManager {
+    /// 指向双轨极化显存池的主指针，用于直接跨机 DMA
+    base_pool_ptr: *const DualTrackMemoryPool,
+}
+
+impl RdmaSyncManager {
+    /// 由上游 Softmax 的 Epilogue 算出质心坐标后，直接触发跨机的块级抓取
+    /// 此处的 `KvSideloadManager` 将在本机建立逻辑页表的占位符 (Standby)
+    pub async fn issue_rdma_prefetch(
+        &self,
+        predicted_centroids: &[BlockIndex],
+        sideload_mgr: &mut KvSideloadManager
+    ) -> Result<AsyncPrefetchToken> {
+        // ... 直接发起 InfiniBand/NVLink 级别的块传输
+    }
+}
+```

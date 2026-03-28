@@ -406,3 +406,57 @@ pub enum LayerTarget {
 - 属于 Request B 的线程块在同一个时钟周期内进行空转（NOP）或旁路跳过
 - 完美兼容 Batching 与个性化知识挂载
 
+### 8.6 多模态 RAG 注入调度策略 (`InjectionScheduler`)
+
+规范多轮对话中挂载对象的生命周期：
+
+```rust
+pub struct InjectionScheduler {
+    /// 测算当前 RAG 注入对象的存活率，长时间不被访问进行异步卸载
+    pub ttl_policy: Duration,
+    /// 当请求到来时，快速探测是否存在需要被唤醒的休眠特征
+    pub hit_rate_monitor: HitRateTracker,
+}
+```
+
+---
+
+## §9 全局引擎 API 配置 (API-GLOBAL-CONFIG)
+
+### 9.1 TurboQuant 位宽压制配置 (`QuantConfig`)
+
+尽管底层 JIT 锁定静态位宽，但对外允许在启动期显式声明量化级别。引擎将依此执行不可逆的 `PolarQuant` 变换：
+
+```rust
+pub struct QuantConfig {
+    /// 全局锁定的主干权重量化位宽 (如 W4A4)
+    pub compute_precision: TurboQuantBits,
+    /// 对于极少部分不可量化层的 fallback 选择（如果有）
+    pub fallback_policy: FallbackPolicy, // 通常为 None
+}
+
+// 在 Engine 构建时注入
+let engine = Engine::builder()
+    .with_quant_config(QuantConfig {
+        compute_precision: TurboQuantBits::W4A4,
+        fallback_policy: FallbackPolicy::PanicIfUnsupported,
+    })
+    .build().await?;
+```
+
+### 9.2 飞行安全护栏全局守护 (`SafetyPolicyConfig`)
+
+在应用级统一管理跨请求的安全阈值：
+
+```rust
+pub struct SafetyPolicyConfig {
+    /// 是否在运行时为所有请求挂载护栏探针
+    pub global_guardrail_enabled: bool,
+    
+    /// 当探针发现毒性特征概率 > 该阈值时，硬件级物理阻断当前请求
+    pub halt_and_veto_threshold: f32, // 默认 0.95
+    
+    /// 指定探针挂载的锚点深度
+    pub target_layer: LayerTarget,
+}
+```

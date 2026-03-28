@@ -1436,6 +1436,21 @@ Chunked 调度（交织）:
     当实际请求长度与“黄金尺寸”产生部分空隙时，**坚决禁止**使用低效的 Padding 补零机制（如为了对齐 128 强行补零，废算无效 FLOPs）。
     必须依靠 §12.2 定义的张量物理挤压（Ragged Compaction，如 `vcompress` 或 Warp Prefix Sum）以及硬件控制流谓词（Predicate K-mask），实现完全 0 周期浪费的“真填满”，确保生成的 Kernel 永远呈现 100% 寄存器命中率与管线吞吐率。
 
+### 12.5 JIT 硅晶指令深层映射原则 (Silicon-Level Instruction Mapping)
+
+全世代硬件能力（REQ-HARDWARE-SENSORS）不仅仅是调度约束，更必须下沉入 JIT Mega-Kernel 的汇编强映射：
+
+- **x86/ARM 脉络 (Vectors & Converged Cores)**
+  - **AVX10 P/E 收敛映射**: 面对 AVX10.1/10.2 混合大小核架构，JIT 必须探明 `256-bit Converged Vector` 屏障。在调度 E-Core 时，物理寄存器切片图自动塌缩至 256 宽，同时利用 `vp2intersect` 指令无缝下发稀疏张量的交叉表。
+  - **AVX512 极限物理挤压**: 上述文的张量挤压（Ragged Compaction）在 x86 必须翻译为 `vcompress` 系列指令；利用全量的 31 个通用寄存器 (APX) 彻底消灭内循环的 Spilling 行为。
+
+- **NVIDIA GPU 脉络 (Hopper/Blackwell Evolution)**
+  - **Hopper (SM90) 内存墙突围**: 绝对禁止使用传统 `LDG` 执行 KV Cache 离散读取！JIT 代码必须生成 `TMA (Tensor Memory Accelerator)` 配置包，并结合 `WGMMA` 与 `cuda::barrier` 实现生产者-消费者（Thread Block Cluster）内存直接多播传输（L2 mcast）。
+  - **Blackwell (SM100) 精度原生力**: 针对 W4A4 / W4A8 TurboQuant 压制，编译器直写针对 `FP4 / FP6 Native Tension` 优化的 MMA 汇编指令，抛弃任何高精度的模拟或溢出防范开销，发挥 Block Scale 底层机制的最大吞吐。
+
+- **AMD GPU 脉络 (CDNA)**
+  - 利用 CDNA3 管线的 XCD/GCD 拓扑屏障，确立本地物理隔离。配合内置的 `WMMA` 指令进行张量吞吐提速。
+
 ---
 
 ## §13 Epilogue 白嫖网络的三大物理融合 (ARCH-EPILOGUE-FUSIONS)
