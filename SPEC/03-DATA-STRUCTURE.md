@@ -649,8 +649,7 @@ pub struct IsaFeatures {
 
 ### 9.4 TurboQuant 静态位宽维度 (DATA-TURBOQUANT-DIMENSION)
 
-> 🚨 **架构合规性警报 (Architect Veto)**:
-> 纯浮点动态调度 (`F32/F16/BF16`) 及原 `DType` 维度已被彻底废除。JIT 核心生成器严格且唯一绑定物理位宽常量 `TurboQuantBits`。由于消弭了基于浮点的混合精度控制流，系统实现真正的零代价极速矩阵运算。
+> 纯浮点动态调度已被彻底移除，系统基于 `TurboQuantBits` 静态位宽维度执行零代价极速矩阵运算。
 
 ```rust
 pub enum TurboQuantBits {
@@ -994,7 +993,7 @@ pub enum OpKind {
 | WeightedSum | ✅ | ✅ | ✅ (trace) | MoE expert 加权合并 |
 | MeanPool | ✅ | ✅ | ✅ | Encoder 平均池化 |
 | L2Normalize | ✅ | ✅ | ✅ | Embedding 归一化 |
-| Dequantize | (已废弃) | (已废弃) | (已废弃) | 已彻底废弃，统一融合进 QuantGemm (见 L1027 声明) |
+
 | Reshape / Transpose | NOP | NOP | NOP | 纯元数据操作，不生成指令 |
 
 ### 9.11.2 算子融合关系 (DATA-OP-FUSION-MAP)
@@ -1406,3 +1405,190 @@ pub struct AttentionConsume {
 | view abstraction | 统一访问协议，不移动 payload |
 | lowering specialization | 针对不同 `View` 生成专用 kernel |
 | on-the-fly transform | RoPE / 定点映射在消费时寄存器内完成 |
+
+## 11. 物理结构一统：Unified Virtual Page 与 Dual-Track Pool (DATA-UNIFIED-PAGE)
+
+> **关联架构**: unified-jit-architecture-master.md
+> **目标**: 结束显存中按“功能”划分的隔阂，把所有驻留内存碎片归并入基于极化位宽的底层物理页框中。
+
+### 11.1 互联通信墙极化拓扑 (SystemTopology)
+
+编译器在生成 `DeviceProfile` 时不仅持有 `NumaTopology`，更持有整机的 `SystemTopology`：
+
+```rust
+pub struct SystemTopology {
+    pub numa: NumaTopology,
+    pub pcie: PcieTopology,       // PCIe 世代与 P2P Switch 树
+    pub rdma: RdmaCapabilities,   // IB/RoCE网络延迟常数 (RDMA_Latency)
+}
+```
+
+这些参数将转化为 `DeviceProfile` 内的恒定基准，直接切断跨 NUMA/跨 PCIe Switch 的重度聚合图，将它们打散为在物理节点内自循环的局部子图。
+
+### 11.2 大一统物理页 (Unified Virtual Page)
+
+废弃原先按层级和作用域孤立编写的 `KvCacheConfig` 和 `MoESharedWeight`，引入系统唯一的物理原子级驻留容器：
+
+```rust
+pub struct UnifiedVirtualPage {
+    pub page_id: VirtualPageId,
+    pub payload_kind: PagePayloadKind,
+    pub residency: MemoryResidency,
+    pub turbo_quant_bits: TurboQuantBits,
+}
+
+pub enum PagePayloadKind {
+    KvContext,        // K/V 张量流
+    ExpertWeight,     // MoE 被唤入的冷板凳专家
+    PromptSystem,     // 重度复用的只读系统提示缓存
+    KnowledgeRAG,     // 通过 RAG 预插槽注入的高维特征向量
+}
+```
+
+无论里面装的是上下文记忆、模型权重，还是外挂 RAG 知识，对底层 `GlobalMemoryManager` 而言，它仅仅是一个占用 1MB (或设定尺寸) 的极化数组，使用同一套基于 IRR 的 LIRS 页面置换与锁定状态机。
+
+### 11.3 双轨极化显存池 (Dual-Track Memory Pool)
+
+显存不再以 `dtype_size` 杂乱混居，而是被硬划分为物理隔离的双轨通道（完美兼容 FP4 Blackwell 或 4-bit INT）：
+
+```rust
+pub struct DualTrackMemoryPool {
+    /// 3-bit / 4-bit / FP4 的无缩放 (Scale-Free) 主数据流连续块
+    pub main_pool: BlockAllocator,
+    
+    /// 当需要并行的 1-bit 二值化修正或二阶残差标志位时的掩码阵列
+    pub _xnor_pool: BitsetAllocator,
+}
+```
+
+这种双轨切割在执行跨卡 PCIe 交换 或 RDMA 多机并行 时，仅仅依靠 `RDMA_Latency` 探针触发直接传输 `main_pool` 的裸指针 (Raw Pointers)，以最小物理宽度洞穿显存带宽墙。
+
+---
+
+## 12. Chunked Prefill 调度数据结构 (DATA-CHUNKED-PREFILL)
+
+> **关联架构**: 02-ARCHITECTURE.md §10 (ARCH-CHUNKED-PREFILL), hgal-scheduler-algorithm.md §8.1
+> **核心职责**: 定义支撑无限大上下文交织调度的完整数据结构。
+
+### 12.1 ChunkedScheduler 主体
+
+| 结构 | 字段 | 说明 |
+|------|------|------|
+| `ChunkedScheduler` | config, prefill_queue, decode_queue | 调度器主体 |
+| `PrefillRequest` | id, total_tokens, completed_tokens, pending_chunks | Prefill 请求状态 |
+| `ChunkedBatch` | decode_slots, prefill_chunks | 返回的混合批次 |
+
+### 12.2 ChunkedConfig 配置
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `chunk_size` | usize | 64 | Chunk 大小 (tokens) |
+| `decode_slots` | usize | 8 | 每批保留的 Decode 插槽 |
+| `enable_splitfuse` | bool | ~~true~~ | ⛔ 已废弃 (REQ-SCHED-007) |
+| `max_chunks_per_batch` | usize | 4 | 每批最大 Chunk 数 |
+
+---
+
+## 13. HGAL 调度算法完整体系 (DATA-HGAL-SCHEDULING)
+
+> **关联架构**: hgal-scheduler-algorithm.md §1-§7
+> **核心职责**: 定义 Hybrid-Granularity Adaptive LRU 的全部数据结构、优先级算法、页面状态机和配置参数。
+
+### 13.1 Gang-Aware Eviction 原则
+
+所有的 Eviction 对象不能是单一离散 `Page`，**必须是 `SequenceGroup`**（序列组整体换出）。禁止破坏同一序列组中不同序列的 KV 数据完整性。
+
+### 13.2 优先级计算公式
+
+```
+priority(group) = time_penalty + recency_penalty - freq_bonus - pin_bonus
+```
+
+- `time_penalty`: 基于等待时间的惩罚分（越久优先级越低）
+- `recency_penalty`: 最近访问距今时长（IRR 近似）
+- `freq_bonus`: 单位时间内访问频率的加分
+- `pin_bonus`: 针对 Working Set 中被标记为 Protected/Pinned 的高频页予以大加分
+
+### 13.3 页面状态机 (Page State Machine)
+
+| 状态 | 说明 | 转换条件 |
+|------|------|----------|
+| **Warm** | 新分配页面的保护期 | 分配后 100ms 且访问次数 ≥ 2 后转 Protected |
+| **Protected** | 热页面（类似 LIR 状态） | 超过 `working_set_window` 未访问则降级 |
+| **Standby** | 候选换出页面（类似 HIR 状态） | 被选中换出 → Evicted |
+
+**Warm-up 防护盾**: 新分配的页面在 `warmup_duration = 100ms` 且被访问 ≥ 2 次之前，**绝对不可被换出**，防止 Cache Thrashing。
+
+### 13.4 热页自动检测 (Working Set Detection)
+
+检测周期: 每 N 个 generation tick。
+
+| 条件 | 说明 | 阈值 |
+|------|------|------|
+| 访问频率 | 单位时间内访问次数 | `access_count >= hot_threshold` |
+| 最近访问 | 最后访问时间距离现在 | `now - last_access < working_set_window` |
+
+保护解除: 热页在 `working_set_window` 时间内未被访问则解除保护。
+
+### 13.5 CLOCK-Pro 近似实现
+
+低成本的 LIRS 近似实现数据结构：
+
+| 结构 | 说明 |
+|------|------|
+| `clock_hand` | 扫描指针位置 |
+| `cold_pages` | 冷页面候选集合 |
+| `hot_pages` | 热页面集合（类似 LIR） |
+| `test_pages` | 测试页面（检测访问模式变化） |
+
+**扫描算法**:
+1. 从 `clock_hand` 开始扫描
+2. 页面被访问: cold → hot 或保持 hot
+3. 页面未被访问: hot → cold 或保持 cold
+4. `clock_hand` 前进
+
+### 13.6 完整配置参数表 (SchedulerConfig)
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `page_size` | usize | 128 | 每页 token 数 |
+| `total_pages` | usize | 2048 | 总页面数 |
+| `max_batch` | usize | 8 | 最大批大小 |
+| `max_tokens` | usize | 4096 | 最大 token 数 |
+| `warmup_duration` | Duration | 100ms | Warm-up 保护期 |
+| `working_set_window` | Duration | 1s | 工作集时间窗 |
+| `hot_threshold` | usize | 3 | 热页访问阈值 |
+| `lir_ratio` | f32 | 0.3 | LIR 页面比例 |
+| `enable_clock_pro` | bool | true | 启用 CLOCK-Pro 近似 |
+
+### 13.7 性能调优建议
+
+| 场景 | 建议配置 | 说明 |
+|------|----------|------|
+| 高并发短请求 | `warmup_duration = 50ms` | 缩短保护期 |
+| 长上下文推理 | `hot_threshold = 5` | 提高热页阈值 |
+| 内存受限 | `lir_ratio = 0.2` | 减少 LIR 页面 |
+
+### 13.8 验收标准
+
+| 标准 | 目标值 | 测量方法 |
+|------|--------|----------|
+| 序列组整体换出 | 通过 | 测试验证 `select_victim_groups` 返回序列组 ID |
+| 新页不被立即换出 | 通过 | 验证 Warm 状态页面不被选中 |
+| 热页自动锁定 | 通过 | 高频访问页面变为 Protected |
+| 显存碎片率 | < 5% | 性能测试验证 |
+| Thrashing 率 | < 1% | 统计 swap-in 后立即 swap-out 比例 |
+| 平均换出延迟 | < 10ms | 基准测试 |
+| Working Set 命中率 | > 90% | 热页访问命中率 |
+
+### 13.9 与 VLLM 的对比
+
+| 特性 | VLLM V1 (RECOMPUTE) | HGAL 方案 |
+|------|---------------------|-----------|
+| 换出粒度 | 序列级 (gang) | 序列组级 (gang) |
+| 抢占模式 | Recompute (重算) | Swap (换出) + Warm-up 保护 |
+| 优先级 | FCFS | IRR + 频率 + 状态 |
+| 新页保护 | 无 | Warm-up 期 |
+| 工作集 | 无 | 自动检测 |
+| Cache Thrashing | 可能 | 避免 |
+

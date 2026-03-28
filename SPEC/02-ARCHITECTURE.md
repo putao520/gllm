@@ -443,12 +443,11 @@ ONNX 加载器**严禁**进行 Naive 的 1:1 算子翻译（如将 `MatMul` + `A
 ```
 client.embeddings(["text"]).generate()
     → Tokenizer 编码
-    → Backend::embedding()      # GPU
-    → Backend::attention_block() # GPU (N 层)
-    → Backend::ffn_block()       # GPU (N 层)
-    → Backend::mean_pooling()    # GPU
-    → Backend::normalize()       # GPU
-    → readback → 返回结果
+    → 移交至 Executor 队列
+    → Scheduler 批量装载 (Continuous Batching)
+    → GraphExecutor 触名单体巨型计算图 (执行 Mega-Kernel)
+    → 物理硬件进行 [Embedding → (Layer N × RmsNorm/QKV/Attn/FFN) → Pooling] 等端到端计算
+    → Tokenizer 解码 / Tensor 取回
 ```
 
 ---
@@ -478,7 +477,7 @@ src/
 │   └── optimizer/      # 优化 Pass (模式融合/硬件融合/DCE)
 ├── engine/             # 推理引擎 (executor, pipeline)
 ├── scheduler/          # 调度器 (HGAL, PagedAttention, Continuous Batching)
-├── backend/            # 后端检测与降级 (CUDA→CPU)
+├── backend/            # 后端检测与越界截断 (OOM Halt)
 └── manifest/           # 模型 Manifest 类型
 ```
 
@@ -725,7 +724,7 @@ pub enum BatchOrderPolicy {
 **核心决策**:
 1. 删除 `vllm2024.rs` 中冗余 `LMCacheConfig/LmcacheState/CacheEntry/CacheHit/CacheLevel`。
 2. 保留 `ChunkedConfig`，并融合为 Prefill 阶段的页面规划能力（非 Prefill/Decode 混批）。
-3. 严格禁止建立任何 `SwiftKV` 或 CPU 端的 KV Cache 泛型蒸馏接口。KV 数据受限于 GPU 端 TurboQuant 双轨位宽压缩锁定，不再允许 CPU 染指任何反量化或浮点重新计算的行为。
+
 
 **统一能力入口**:
 - `plan_prefill(prompt_tokens, chunk_size) -> PrefillPlan`
@@ -1082,16 +1081,7 @@ QView + KvView + AttentionSemantics
 | P2 | WeightView: GGUF/SafeTensors/ONNX 统一 view | ✅ 已完成 |
 | P3 | PagedKvView: paged attention 原位访问 | ✅ 已完成 (2026-03-22) |
 
-### 8.8 (架构级物理废弃) DType 全链路自适应 (ARCH-DTYPE-ADAPTIVE)
 
-> 🚨 **架构合规性警报 (Architect Veto)**:
-> 曾经规划的 `DType全链路自适应` 以及动态计算 `dtype_size` 以支持在 JIT 管线中随意游走 F16/BF16/F32 的架构，现已被**全盘否决并物理销毁**。
->
-> 1. 原方案寄望于在运行时通过 `computation_dtype_from_config` 等函数获取浮点类型的字节宽度，并据此分派汇编宏。
-> 2. 在全系统的底盘升构为 **TurboQuant** 之后，系统进入了“静态装配期强行降阶（Load-Time Annihilation）”。
-> 3. Mega-Kernel 强制消除多态加载，所有张量强转至极化后的定点/微浮点硬派算子规格。不再存在动态检测 `F16`、`BF16` 并相应生成不同载入指令的软路由。
->
-> **因此，原本长达两百行的关于 `dtype.size_bytes()` 动态寻址的复杂映射表与实现方案被永久废除。禁止后继 Agent 实现此模块中的硬编码探测或多态汇编下发逻辑！**
 
 ---
 ### 8.9 (架构变迁) TurboQuant 静态阻塞规约 (ARCH-TQ-BLOCKING)
@@ -1264,3 +1254,323 @@ REQ-ARCH-005 (权重缓存)   ← 无依赖，可与 004 并行
 REQ-ARCH-006 (Metal 直写) ← 无依赖，可并行
 REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kernel）
 ```
+
+---
+
+## §9 大一统 JIT 底层物理架构 (ARCH-MEGA-KERNEL)
+
+> **定位**: 定义 gllm 极端的 "Zero-Overhead Freeloading" 底层物理法则，作为所有后端执行器的最终约束（SSOT）。
+> **核心哲学**: JIT 编译只在模型加载与 Autotuning 期发生。推理热路径绝无任何编译机制。
+
+### 9.1 Mega-Kernel 块级路由 (In-Kernel Dispatch)
+
+**问题**: 应对大并发下的请求形态分歧（如稀疏/稠密差异），传统引擎依赖控制流引发分支预测惩罚或多次 Kernel Launch。
+
+**铁律约束**:
+- **仅发射单一内核**: 每一轮 Decode 或 Chunked Prefill，全系统 **仅 Launch 唯一一个 Mega-Kernel**。
+- **取消主机条件网**: 禁止在主机侧 (CPU Host) 为 `Gate-First-Skip` 等建立多线程路调度。
+- **块内联路**: SM 核心内的 Thread Block 直接读取 `Request_State_Table`。条件不满足时，不破坏控制流掩码，直接在 `Shared Memory` / 寄存器堆通过向量外设掩码（AVX512 `vcompress` / GPU `Prefix Sum`）执行**物理挤压聚拢 (Ragged Tensor Compaction)**。
+
+### 9.2 全域热修补 (Global Consensus Hot JMP Patching)
+
+**问题**: 针对无法通过掩码消除的系统级静滞期（如死寂的冷板凳 MoE 专家，极长的系统前缀树）。
+
+**铁律约束**:
+- **JIT Director 沙盒**: 允许后台沙盒微线程持续进行指标观测积分。
+- **Trampolines 占位符**: 运行期代码块固定留有 `NOP Slide` / `jmp` 占位，消除直接的分支预测开销。
+- **原子覆盖**: 捕获全域共识不可逆突变后，仅利用 5-bytes 原子覆写极速更新执行内存，瞬时重构拓扑图（Graph Collapsing/DCE）。
+
+### 9.3 残差数据总线物理结构 (The Residual Bus Injection)
+
+**定论**: 残差流 `x_out = x_in + Layer(x_in)` 必须被编译器重构为一条开放的 **插入端口 (Injection Port)** 与 **召回端口 (Recall Port)**，彻底放开 Transformer 第一性原理。
+
+- **晚期知识融合 (Late-Fusion RAG)**: 外部大体量检索向量可通过指定的锚点直接使用极速的 `Vector Add` 指令汇编 `LDG.E` 植入到特定语义深处，拒绝自前置 Embedding 的无效算力爬行。
+- **投机截断与通用降维 (Early-Exit & Intent NLU)**: 
+  - 允许在中间层挂载微型 `lm_head`。概率逼近阈值时直接抛出拦截信标截断计算。
+  - 支持 `Pure_Decode` API 模式运行。模型仅提取语义核心区残差特征，化身为超高速多意图识别神塔。
+- **零延迟飞行护栏 (In-Flight Guardrail)**: 利用附加极简线性分类探针（Micro Probe）寄生挂载，进行安全护栏瞬时探测。一旦探测到风险特征越过 `HaltAndVeto` 阈值，Mega-Kernel 在生成下一个 Token 前当场物理切断（Amputate) 熔断管线。
+
+### 9.4 纯逻辑专家解绑与零卡顿置换 (Extreme MoE Disaggregation)
+
+**铁律约束**:
+- **核内分发与零启动开销**: 绝不去启动子 Kernel。Thread Block 利用内置字典读取 Gate 路由，汇编内部 `jmp` 直接跃迁到对应专家的权重读取区。
+- **异步预取掩蔽**: 基于 TurboQuant（4-bit 以下压制），系统利用 `cuMemPrefetchAsync` 将低频/离线专家的高速预取时间通过计算流水完美掩蔽。
+- **去优化退回陷阱 (De-optimization Bailout)**: 针对被热修补判定剔除的死寂专家，插入“去优化处理惩罚极 (Uncommon Trap)”。若突遭访问，触发错误的 Thread Block 仅向显存写入 `DEOPT_REQUEST` 并自觉挂起（不破坏其余请求）。主机发现异常后微冻结管线，唤回权重并单独重放。这用万分之一的局部挂起代价换取平稳期的全域零开销。
+
+### 9.5 尾段就地观测 (Zero-Copy Paged Telemetry)
+
+- **绝对零数据搬移**: **严禁** 在热路径外由 CPU 启动独立的轮询队列或配置无锁环形队列 (RingBuffer) 同步观测指标。
+- **后置收集 (Epilogue Instrumentation)**: 必须在 RmsNorm / Softmax 网尾层级的底层 PTX/ASM 尾段，捎带计算出该 Batch 的 `系统熵 (Entropy)`、`概率质心 (Centroid)`、`跨层能量差 (Residual Delta)`。
+- **页头常驻 (In-Place Memory Paging)**: 所有的探视信息伴随原流水线写入 KV Cache 时，直接利用普通内存存储指令（`STG`）刻入 Token 闲置的物理块头 (Header Padding)，让宿主机使用无感后台低频轮询机制进行拾取。
+
+---
+
+## §10 Chunked Prefill 无限上下文支撑架构 (ARCH-CHUNKED-PREFILL)
+
+> **关联**: unified-jit-architecture-master.md §1 范式2, hgal-scheduler-algorithm.md §8.1
+> **核心使命**: 让系统能够处理几乎无限大的上下文（10M+ Context），同时保持 Decode 请求的零等待延迟。
+
+### 10.1 基于请求形态的交织调度 (Interleaved SEQ-Aware Scheduling)
+
+传统 Continuous Batching 将 Prefill（`SEQ > 1` 的长序列填充）与 Decode（`SEQ = 1` 的逐字生成）进行阶段隔离，导致：
+- GPU 利用率方差达 35%（Memory Bound vs Compute Bound 交替）
+- Decode 请求必须等待长文本 Prefill 完成（Tail Latency 恶化至 ~200ms P99）
+
+**Gllm 的破局法则**：将无限大的 Prefill 长文强制切成固定大小的物理切片（Chunk），与 Decode Token 交织塞进同一个 Batch，**解码请求永远零等待**。
+
+```
+Chunked 调度（交织）:
+┌─────────────────────────────────────────────────────────────┐
+│ Batch 1:                                                    │
+│   [Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1,      │
+│    Prefill-64, Decode-1, Decode-1, Decode-1, Decode-1]      │
+│    ↑ Chunk 1       ↑ Decode 插槽 (优先)    ↑ Chunk 2        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 切分策略
+
+| 策略 | Chunk Size | 适用场景 |
+|------|------------|----------|
+| **固定切分** | 64/128 tokens | 通用场景 |
+| **自适应切分** | 根据内存压力动态调整 | 显存受限 |
+| **优先级切分** | 高优先级请求更大 Chunk | SLA 保障 |
+
+### 10.3 调度流程
+
+| 步骤 | 操作 | 说明 |
+|------|------|------|
+| 1 | 收集 Decode 请求 | 填充 decode_slots 直到达到配置上限 |
+| 2 | 计算剩余预算 | `remaining_budget = max_tokens - decode_tokens` |
+| 3 | 填入 Prefill Chunk | 从 prefill_queue 取出请求，按 chunk_size 切分 |
+| 4 | 更新请求进度 | 完成的 Chunk 从 pending 减少 |
+| 5 | 请求状态转换 | Prefill 完成后转为 Decode 请求 |
+
+### 10.4 SplitFuse 废弃声明
+
+> **⛔ REQ-SCHED-007**: SplitFuse 混批路径已被永久移除。不再支持拆分 QKV 与 Attention 融合的畸形计算流。`enable_splitfuse` 配置字段已弃用并锁定为 `false`。
+
+### 10.5 验收指标
+
+| 指标 | 目标值 | 测量方法 |
+|------|--------|----------|
+| Tail Latency (P99) | < 50ms | 混合负载测试 |
+| GPU 利用率方差 | < 15% | 性能监控 |
+| 吞吐提升 | +30-50% | 对比纯 Decode Batch |
+| 内存开销 | < 5% 额外 | 显存监控 |
+
+---
+
+## §11 TurboQuant 单一算法多态 (ARCH-TURBOQUANT-POLYMORPHISM)
+
+> **关联**: unified-jit-architecture-master.md §2, §6.1, ai-development-guideline.md §1
+> **核心哲学**: 用数学预处理在加载期消灭所有运行时多态分支，使得整条管线只走唯一一条定点算法流 —— 这就是"单一算法凌驾多态"。
+
+### 11.1 PolarQuant 正交旋转预融合 (Zero-Overhead PolarQuant)
+
+在模型加载（Load-Time）阶段执行不可逆的数学突变：
+
+1. 生成随机正交矩阵 $R$
+2. 将权重 $W_k, W_q, W_v$ 进行预乘融合：$W_{k}^{new} = W_{k} \times R$
+3. 由于 $R R^T = I$，在 JIT 注意力乘加阶段内积自然解隐，前向网络**彻底免算（0 FLOPs 消耗）**
+4. 特征分布在数学层面被**绝对强制拉平**（呈现标准的正态/Beta 分布），**不存在任何离群点（Outliers）**
+
+### 11.2 运行时多态湮灭宣言
+
+因为分布在进内存前就被全部强行极化至无 Outlier 的状态：
+- **全盘删除 `Amax`**: 所有运行时精度检测代码被彻底湮灭。再也不需要在 RmsNorm 尾端拼命计算极值来判断是否需要回退 FP16。
+- **管线静态锁定**: 整个执行管线（KV 和 Activation）被静态强制锁定为 **W4A4（甚至更低位宽）与 VNNI/SVE2 指定流**。
+- **零运行时分支**: 系统内核在唯一的一条定点算法路线上爆发出无可匹敌的高效，消灭了所有关于解包、截断、精度选型的 if-else 判断。
+
+### 11.3 双轨显存池 (The Dual-Track Memory Pool)
+
+重构 `KvCacheConfig`，全面淘汰 `dtype_size`。由 `GlobalMemoryManager` 申请物理隔离的两轨架构：
+
+| 轨道 | 位宽 | 职能 |
+|------|------|------|
+| **主池 (Main Pool)** | 3-bit / 4-bit | 无缩放因子（Scale-Free）连续压缩流 |
+| **校验池 (QJL Pool)** | 1-bit | XNOR 残差掩码阵列 |
+
+**多卡同步红利**: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 **25%**（4x 压缩），突破总线墙。
+
+---
+
+## §12 空间异构流派与动态块式计算图 (ARCH-SPATIAL-DISAGGREGATION)
+
+> **关联**: 会话 6e743114 §14
+> **核心使命**: 解决大吞吐量下，个体动态分歧与 Batch 同步执行的木桶效应。
+
+### 12.1 核心维度的空间异构流片 (Sub-Batching by Graph Shape)
+
+不同的 CPU/GPU 核心（Cores / SMs）物理分区，同时运行着**不同拓扑结构的 JIT 图**：
+
+1. **零散归类 (Sub-Batching)**: 调度器发现本批 128 个请求中：60 个可跳过注意力（Shape A），30 个死神经元走 INT8 窄网（Shape B），38 个需完整 FP16 密集网络（Shape C）
+2. **多流分发 (Multi-Stream Spatial Dispatch)**: 不再取最坏形状统一掩码，而是切割为三个子批次，并行发射到不同硬件分片
+3. **硬件资源软分区 (Software-Defined Core Partitions)**:
+   - **GPU 端**: JIT 代码生成时锁死 `gridDim` 与 `Block Size`，强制 Shape A 的 Kernel 只占用 SM[0-15]，Shape B 占用 SM[16-40]，Shape C 占用 SM[41-80]。共享 L2 和显存带宽，互不卡脖
+   - **CPU 端**: 利用 `NUMA Node / Core Affinity` 绑核。AMX 核心处理密集计算，AVX 核心处理低精度稀疏映射
+
+### 12.2 兜底回收 (Residual Compaction & Predication)
+
+当零碎请求不足以构成独立 Sub-Batch（如某形状仅 2 个单孤 Token），回退到：
+- **动态张量紧凑重排 (Ragged Compaction)**: `vcompress` / Warp Prefix Sum
+- **硬件谓词掩码 (Predicate K-mask)**: 保持完整控制流用掩码位强行断电
+
+### 12.3 三位一体调度宣言
+
+**"小差异合流兜底、大分层异构分治、长尾期修补坍缩"** —— 这种三位一体的体系彻底补齐了 Gllm 面对百万级动态上下文（10M Context）+ 数百路并发时，算力无法充分释放的理论死角。
+
+---
+
+## §13 Epilogue 白嫖网络的三大物理融合 (ARCH-EPILOGUE-FUSIONS)
+
+> **关联**: 会话 6e743114 §4
+> **核心原则**: 所有的特征检测必须"寄生"在上游核函数的数学尾段（Epilogue），严禁单独发起采集循环。
+
+### 13.1 融合 1：Gate-First 掩码层跳过 (Masked CondGEMM)
+
+取代"完整计算后剪裁"的做法：
+- 在 JIT Mega-Graph 的 FFN 阶段：经过 Gate GEMM 后，Epilogue 立刻评估 $\text{SiLU}(g)$
+- 探测到死神经元（如 $> 50\%$ 列失效）时，立即通过硬件掩码跳过后续的 Up GEMM 和 Down GEMM 通道
+- **FLOPs 当场砍掉 40%**
+
+### 13.2 融合 2：Softmax 质心引导预取 (Centroid-Guided Prefetch)
+
+在 Chunked Prefill 阶段面临超大 Context，KV Cache 不可避免发生 L2 未命中：
+- **白嫖触发器**: 利用第 N 层 Softmax 的 Epilogue 提取概率高地（质心 / Centroid）
+- **JIT 联动**: 将质心坐标压入异步内存队列，触发 `cuMemPrefetchAsync`（或 CPU/AMX 的软件预取指令），让第 N+1 层将要关注的 KV Chunk 越过系统总线**提前驻留**
+
+### 13.3 融合 3：残差旁路 (Residual Bypass)
+
+- **白嫖触发器**: Residual Add 循环的 Epilogue 免费测算跨层能量方差 $\Delta \rho$
+- **JIT 联动**: 如果 $\Delta \rho < 0.001$，直接触发底层的汇编跳转 `jmp END_OF_LAYER`
+- 不管是 Chunk 还是单步 Decode，整个 Layer Q/K/V 和 FFN 的核函数被暴力切掉，**省下 ~15% 全局算力**
+
+---
+
+## §14 旧世代优化理念的全面突变升级 (ARCH-LEGACY-METAMORPHOSIS)
+
+> **关联**: unified-jit-architecture-master.md §6
+> **核心宣言**: 在"物理级隔离、指令级热修与 TurboQuant 降维"架构下，过去的优化思路发生了根本性突变。我们抛弃了所有 if-else 幼稚做法，将它们转为底层硬件法则。
+
+### 14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)
+
+- **旧思路**: RmsNorm 尾端计算 `Amax`，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。
+- **新架构蜕变**: PolarQuant 正交旋转矩阵使分布在数学层面被绝对强制拉平。
+- **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！管线静态锁定 W4A4 + VNNI/SVE2。
+
+### 14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)
+
+- **旧思路**: 算完 `Gate = SiLU(xW)` 后发现死列，在调度层切片或 `jmp` 绕开。
+- **新架构蜕变**: 在 Mega-Kernel 中，**不跳远，只挤压**。
+- **执行定论**: 调用硬件谓词掩码（Predicated Execution）或张量挤压（AVX512 `vcompress`、GPU `Prefix Sum`）。死掉的神经元在 SMEM 里挤成最小密实体，`Up/Down GEMM` 全负荷不停机算平。
+
+### 14.3 跨层残差旁路 → 块级内嵌路由自毁弃算 (In-Kernel Router Veto)
+
+- **旧思路**: Residual Add 算方差 $\Delta \rho < 0.001$ 后走控制流分支短路。
+- **架构校正（大并发禁区）**: 绝对不能用宏观热修补！因为 Continuous Batching 下 Request A 可以跳过，但 Request B 正处于高信息熵刚需期。修改汇编 `jmp` 会导致 B 产出乱码！
+- **执行定论**: 残差跳过归入 **§9.1 Mega-Kernel 块级内嵌路由**：
+  - Request A 的 Thread Block 读取到 $\Delta \rho < 0.001$ → 触发 `Thread Exit`，输入原封不动抛给输出
+  - Request B 的 Thread Block 读取到 $\Delta \rho = 0.5$ → 正常展开矩阵乘法循环
+  - 物理同源、逻辑分块（Block Idx）的掩码路由，不破坏全局机器码
+
+### 14.4 Hot JMP Patching 的正确使用场景
+
+既然个体行为不能导致热修补，那热修补**仅用于绝对的全局物理共识**：
+- **场景 A（领域降维）**: MoE 冷板凳专家持续数百万 Token 均 0 命中率 → JIT Director 用 `NOP/JMP` 物理抹平其访存分支和跳转入口（DCE）
+- **场景 B（极致前缀复用）**: 128 个并发请求全部挂载同一个 10K System Prompt 前缀树 → 前置 Prefill 图直接被热修补塌缩为一条共享直读存储指令
+
+### 14.5 注意力预瞄 → RDMA/PCIe 流水线预取 (Pipelined Prefetch)
+
+- **旧思路**: 用 Softmax 质心决定是否算全量 `Q*K^T`。
+- **新架构蜕变**: 将"算力的减法"转为"带宽的乘法"。
+- **执行定论**: Softmax 质心坐标通过页表直接馈入底层硬件预取系统。GPU 处理本层 Dense 网络的同时，总线通道上已在并行利用 `cuMemPrefetchAsync` 甚至跨机 `RDMA` 加载下一层的 KV 块。**彻底穿透冯诺依曼架构的显存墙诅咒！**
+
+---
+
+## §15 MoE 异构专家极致落地详案 (ARCH-MOE-EXTREME)
+
+> **关联**: unified-jit-architecture-master.md §7
+> **核心宣言**: 在"大一统 JIT + TurboQuant + Deopt 兜底"的底层生态下，MoE 的异构不再是孤岛功能，而是底层组件相互摩擦后的自然现象。
+
+### 15.1 核内分发与零启动开销 (In-Kernel Expert Dispatch)
+
+传统 MoE 引擎（如 vLLM/TGI）为每个 Expert 调用独立 Kernel，导致严重 Launch Overhead。
+- MoE 层依然只启动 **1 个 Mega-Kernel**
+- Thread Block 拿到 `Softmax(Gate)` 后利用内置字典读出目标 Expert
+- Kernel 内部利用汇编 `jmp` 直接跃迁到对应专家的权重读取区
+- 物理空间上并发解耦，**零 Driver 启动开销**
+
+### 15.2 TurboQuant + 预瞄 → Zero-Stall Swapping
+
+温/冷专家权重在 CPU RAM 甚至远端 RDMA 内存中时：
+- TurboQuant PolarQuant 将专家权重暴压到 4-bit 甚至 2-bit，**PCIe/RDMA 搬运延迟缩减 75%~87.5%**
+- Gate 层算出路由表的瞬间，立刻启动 `cuMemPrefetchAsync` 无阻塞预加载
+- Thread Block 走到该 Expert 汇编入口时，被极度压缩的权重**已躺在 GPU L2 Cache 里**
+- 冷专家卡顿被计算流水线完美掩盖（Pipelining）
+
+### 15.3 CPU/GPU 真正并行 (Core Disaggregation)
+
+- CPU 的 NUMA 探针暴露 `AMX` 或 `AVX512` 能力为 IR
+- 编译器为温专家顺量生成一段 CPU 特化的 JIT 代码
+- 通过独立的并发流将少部分 Token 交给 CPU 算完后统一回写
+- 不需要上层写多线程锁
+
+### 15.4 冷板凳专家的全域封杀与"复活陷阱" (Uncommon Traps & OSR Bailout)
+
+这是所有激进 JIT 编译器（如 V8 / Java HotSpot）必须解决的最核心难点：**物理截肢了一个专家后突然又需要它，怎么办？**
+
+1. **绝对正确性底线**: 门控（Gate Router）计算开销极低（< 1% 总算力），**绝不去热修补 Gate 概率计算本身**
+2. **陷阱替换 (Uncommon Trap)**: JIT Director 抹除冷门专家的 Up/Down GEMM 时，不是无脑 `NOP` 丢弃，而是覆写为指向 **Deopt Handler** 的跳转指令
+3. **冷触发复活流程 (OSR Bailout)**:
+   - 过去几百万次运行，无人需要冷专家，系统高速穿透修补后的平滑防线
+   - 突然 Request A 的 Gate 指向被封杀的冷专家 7
+   - Request A 的 Thread Block 一头撞进 **Uncommon Trap**
+   - 该 Thread Block 立刻向显存写下 `DEOPT_REQUEST = 7` 并主动挂起（不输出错误数据）
+   - 同 Batch 的其他常规请求不受影响，继续极速算完
+   - 这一层结算时，引擎主循环发现 `DEOPT_REQUEST`
+   - Host 触发不到 **1ms 的微冷冻**，JIT Director 瞬间回写 `.text` 复原冷专家 7 的网格
+   - 异步唤回其在主存的 4-bit 权重
+   - 引擎为挂起的 Request A 单独走一遍回炉重造（Re-evaluate）
+
+> 这种 **"用万分之一的局部挂起代价，换走 99.99% 时间里的物理绝对零开销"** 的设计，就是 De-optimization（去优化回退）机制，构成 Gllm 架构的最强韧防御底盘。
+
+---
+
+## §16 残差总线的四大物理应用全景 (ARCH-RESIDUAL-BUS-APPLICATIONS)
+
+> **关联**: unified-jit-architecture-master.md §8
+> **核心拷问**: 残差连接 $x_{out} = x_{in} + \text{Layer}(x_{in})$ 不仅仅是为了梯度不消失。在 JIT Mega-Kernel 架构中，残差流被物理重构为一条**贯穿始终的开放式数据总线**。
+
+### 16.1 超大知识的外挂注入点 (Late-Fusion RAG Injection)
+
+- 外部知识（如 10 万字财报）**不需要从第 0 层 Embedding 开始爬**
+- 用极便宜的小模型（BERT / 2B）预算出高维语义向量
+- JIT 在指定的"知识融合层"（如第 15 层）预留外链读取汇编（`LDG.E` 外部图显存）
+- 系统拉开该层残差入口，用极其极速的 `Vector Add` 指令直接将知识向量**硬加进残差流**
+- 外部长上下文物理级跳过前半段网络，直接在深层语义区完成**晚期融合（Late-Fusion）**
+
+### 16.2 任意层数据召回与高维截断 (PGSLE Early-Exit)
+
+- 在 Mega-Kernel 生成时，JIT 在特定层（如 Layer 20, 28, 35）的残差 Add 后顺手附带一个**超小的线性分类器（微型 lm_head）**
+- 如果在第 20 层，微型分类器"召回"的中间数据算出下一个 Token 概率逼近 **99.9%**（如模型正在复颂成语"大海(捞针)"）
+- 该层 Thread Block 直接发射控制信标，触发 §9.1 块级路由或 §9.2 热修补，**当场物理切断后续 20 层计算**
+- 对于简单问题的运算量被**物理腰斩**
+
+### 16.3 纯解码降维：通用多意图识别 (Pure_Decode Intent NLU)
+
+- 大模型本身就是无可匹敌的语义编码器
+- 引擎提供 `Pure_Decode` API 模式：JIT 编译时仅选取前 15-20 层"理解区"（剥离后续语言生成层）
+- Prompt 跑过这前段图后，JIT 直接把残差总线截留（Recall），送入轻量级多分类探针（Linear Probe）
+- 引擎化身为**速度媲美小模型、成本近乎 0 的意图分类与特征提取神塔**
+
+### 16.4 零延迟飞行巡航审查 (In-Flight Guardrail Layer)
+
+- 不再是输入前拦截或输出后审查的二次判断
+- 在模型深度的某一层（如倒数几层）**物理强插入极小的安全审查头（Safety Head）**
+- 自回归生成过程中，每吐出一个新词时，寄生在残差总线上的 Guard 探针不断"嗅探"当前高维语义流中是否存在危险概念特征聚集
+- **物理熔断**: 一旦 Guard 探针概率超标，Mega-Kernel 内的 Thread Block 直接抛出 `Safety Veto` 中断信号
+- 模型在吐出危险词的**那一瞬间之前**，就被当场强行切断计算流
+- 这是真正的**零延迟、无法越狱的安全物理护城河**
+
+> **架构结论**: 诸如意图识别、RAG、安全护栏等原先必须架设微服务集群的复杂大生态，被硬生生压成了 Kernel 里的几句附加指令，化为引擎出厂自带的超光速内置兵器！

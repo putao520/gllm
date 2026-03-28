@@ -335,3 +335,74 @@ client.attach_guardrail(
     SafetyPolicy::HaltAndVeto { threshold: 0.95 }
 ).await?;
 ```
+
+---
+
+## §8 知识注入 SDK 工程化内部架构 (API-INJECTION-SDK)
+
+> **关联**: unified-jit-architecture-master.md §9
+> **核心使命**: 底层的汇编 Hack 再狂野，如果不能作为一套优雅、结构化的 Library 被外部业务调用，那它就是死代码。以下定义将三大物理注入形态（侧载 KV、残差硬插、多路 LoRA）在工程代码结构上抽象化。
+
+### 8.1 `KnowledgeDataSource` Trait — 数据源的多态抽象
+
+开发者不需要理解底层什么是 `LDG.E` 或虚拟页表，只需和纯粹的数据接口打交道：
+
+```rust
+/// 知识数据源的单一多态抽象
+pub trait KnowledgeDataSource {
+    /// 返回注入类型标识，供编译器分流
+    fn injection_kind(&self) -> InjectionKind;
+    
+    /// 将数据物理化至引擎可感知的格式
+    fn materialize(&self, engine: &EngineContext) -> Result<MaterializedPayload>;
+}
+
+pub enum InjectionKind {
+    /// 侧载 KV：业务端传入 SSD 文件柄或网络地址（预存的 4-bit 财报）
+    FrozenKvChunk,
+    /// 晚期插入：上游小模型（如 BERT）算好的密实特征向量列
+    LateFusionVector,
+    /// 领域特征挂载：带有特定领域特征缩放因子的极小权重片
+    DynamicLoRA,
+}
+```
+
+### 8.2 `Semantic Anchors` — 智能语义锚点推断
+
+抛弃硬编码层号的做法。引擎根据加载的模型拓扑，通过"熵分布曲线"自动标定锚点：
+
+```rust
+pub enum LayerTarget {
+    /// 浅层词法区 (模型前 10-15% 层)
+    ShallowSyntax,
+    /// 中层语义区 (模型 40-60% 层) — 多数 RAG/NLU 任务的最佳注入点
+    MidSemantic,
+    /// 深层逻辑区 (模型后 80-95% 层) — 安全护栏的最佳嗅探点
+    DeepLogic,
+}
+```
+
+### 8.3 编译器 IR 级标准拓扑扩展 (`InjectionHook` Nodes)
+
+当 JIT 编译器（`CompilerGraph`）遇到 `Op::InjectKnowledge` 这个特殊的 IR 节点时：
+1. 自动展开成符合当前硬件设备的汇编代码（如生成 `Vector Add` 微指令）
+2. 将 `source` 指针硬编码进 Mega-Kernel 的 Launch Parameters 中
+3. 开发者对硬件多态**绝对无感**
+
+### 8.4 零拷贝页表管理器 (`KvSideloadManager`)
+
+实现超大财报 0 算力注入的核心支撑库：
+- 与主系统的 `GlobalMemoryManager` 紧密咬合
+- 当用户传入含有 10 万字 KV 数据的 `FrozenKvChunk` 时，**不开辟任何新显存、不执行任何 `memcpy`**
+- 只负责做一件事：拦截当前 Request 的**逻辑地址页表（Logical Page Table）**，并将预存的物理页（Physical Block IDs）原样插入
+- 对 LLM 后续的 Attention 算子来说，这跟自己前一秒算出来的数据存在那一模一样
+
+### 8.5 跨并发上下文分流器 (`Injection_Routing_Table`)
+
+在大吞吐 Continuous Batching 时，同时有 128 个请求。Request A 需要注入知识，Request B 不注入：
+- Mega-Kernel 启动参数携挂 `Injection_Routing_Table`（类似 MoE 路由结构）
+- Kernel 内部的 `ThreadIdx` / `BlockIdx` 走到注入节点时先查表确认身份
+- 属于 Request A 的线程块加载外部张量进行累加
+- 属于 Request B 的线程块在同一个时钟周期内进行空转（NOP）或旁路跳过
+- 完美兼容 Batching 与个性化知识挂载
+
