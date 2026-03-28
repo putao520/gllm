@@ -61,6 +61,7 @@ pub struct CudaBackend<E: Element = f32> {
     /// GPU 权重常驻缓存 (REQ-ARCH-005)
     #[cfg(feature = "cuda")]
     pub(super) weight_cache: std::sync::Arc<std::sync::Mutex<super::gpu_compile::GpuWeightCache>>,
+
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -105,6 +106,7 @@ impl<E: Element> Clone for CudaBackend<E> {
             kv_meta: self.kv_meta.clone(),
             #[cfg(feature = "cuda")]
             weight_cache: std::sync::Arc::clone(&self.weight_cache),
+
             _marker: std::marker::PhantomData,
         }
     }
@@ -196,6 +198,7 @@ impl<E: Element> CudaBackend<E> {
             swap_store: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             weight_cache: std::sync::Arc::new(std::sync::Mutex::new(super::gpu_compile::GpuWeightCache::new())),
+
             _marker: std::marker::PhantomData,
         })
     }
@@ -254,11 +257,13 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
-    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
         #[cfg(feature = "cuda")]
         {
             super::gpu_compile::cuda_decoder_forward(self, input, topology, weights, kv_caches, config)
-                .map(|logits| (logits, 0.0))
+                .map(|(logits, telemetry)| {
+                    (logits, 0.0, telemetry)
+                })
         }
         #[cfg(not(feature = "cuda"))]
         {
@@ -399,6 +404,8 @@ impl<E: Element> Backend<E> for CudaBackend<E> {
             Err(BE::Unimplemented("cuda feature not enabled"))
         }
     }
+
+
 
     fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BE> {
         #[cfg(feature = "cuda")]

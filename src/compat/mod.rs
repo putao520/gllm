@@ -11,13 +11,16 @@ mod bert_forward;
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod decoder_forward;
 pub(crate) mod jit_cache;
+pub(crate) mod embed_cache;
 mod gpu_compile;
 #[allow(dead_code)]
 pub(crate) mod types;
 #[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
 pub(crate) mod scalar_ops;
 #[allow(clippy::too_many_arguments)]
 pub(crate) mod jit_helpers;
+pub(crate) mod graph_builders;
 #[allow(dead_code)]
 pub(crate) mod gpu_helpers;
 pub mod cpu_backend;
@@ -59,7 +62,7 @@ pub mod backend_trait {
             weights: &dyn TensorLookup<E, Self>,
             kv_caches: &mut [KvCacheHandle],
             config: &GeneratorForwardConfig,
-        ) -> Result<(Vec<LogitsHandle>, f32), BackendError>
+        ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BackendError>
         where
             Self: Sized;
 
@@ -109,6 +112,7 @@ pub mod backend_trait {
             &self,
             handle: &KvCacheHandle,
         ) -> Result<Vec<(PageId, PageState)>, BackendError>;
+
 
         fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BackendError>;
 

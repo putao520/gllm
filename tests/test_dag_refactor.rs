@@ -119,7 +119,7 @@ fn dag_refactor_bind_weights_and_execute() {
 
     let mut executor = FusedGraphExecutor::new(graph);
     // Verify JIT compilation succeeds
-    executor.compile(1, 4).unwrap();
+    executor.compile(1, 4, gllm_kernels::types::DType::F32).unwrap();
     // NOTE: JIT execution of standalone Add has a known SIGSEGV in gllm-kernels codegen.
     // The run() call is deferred until the gllm-kernels bug is fixed.
 }

@@ -21,6 +21,7 @@ pub mod rerank;
 pub mod tokenizer;
 pub mod weight_loader;
 pub mod weight_names;
+pub mod static_compression;
 
 pub mod ffi;
 

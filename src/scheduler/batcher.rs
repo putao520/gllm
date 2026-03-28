@@ -5,10 +5,13 @@ use super::types::RequestId;
 use super::paged_scheduler::{PagedScheduler, SchedulerError};
 use super::sequence::{Sequence, SequenceState};
 use super::types::BatchOrderPolicy;
+use super::vllm2024::{ChunkedConfig, ChunkedState};
 
 #[derive(Debug, Clone)]
 pub struct ScheduledBatch {
     pub requests: Vec<RequestId>,
+    pub seq_offsets: Vec<usize>,
+    pub draft_steps: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,27 +22,30 @@ pub enum BatchAction {
     Fail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BatchResult {
     pub request_id: RequestId,
     pub action: BatchAction,
     pub generated_token: Option<u32>,
+    pub telemetry: crate::scheduler::telemetry::SequenceTelemetry,
 }
 
 impl BatchResult {
-    pub fn continue_with_token(request_id: RequestId, generated_token: u32) -> Self {
+    pub fn continue_with_token(request_id: RequestId, generated_token: u32, telemetry: crate::scheduler::telemetry::SequenceTelemetry) -> Self {
         Self {
             request_id,
             action: BatchAction::Continue,
             generated_token: Some(generated_token),
+            telemetry,
         }
     }
 
-    pub fn complete(request_id: RequestId, generated_token: Option<u32>) -> Self {
+    pub fn complete(request_id: RequestId, generated_token: Option<u32>, telemetry: crate::scheduler::telemetry::SequenceTelemetry) -> Self {
         Self {
             request_id,
             action: BatchAction::Complete,
             generated_token,
+            telemetry,
         }
     }
 
@@ -48,6 +54,7 @@ impl BatchResult {
             request_id,
             action: BatchAction::Pause,
             generated_token: None,
+            telemetry: Default::default(),
         }
     }
 
@@ -56,6 +63,7 @@ impl BatchResult {
             request_id,
             action: BatchAction::Fail,
             generated_token: None,
+            telemetry: Default::default(),
         }
     }
 }
@@ -68,6 +76,7 @@ pub struct ContinuousBatcher {
     waiting: VecDeque<Sequence>,
     running: BTreeMap<RequestId, Sequence>,
     next_enqueue_order: u64,
+    pub chunked_state: Option<ChunkedState>,
 }
 
 impl Default for ContinuousBatcher {
@@ -82,7 +91,13 @@ impl ContinuousBatcher {
             waiting: VecDeque::new(),
             running: BTreeMap::new(),
             next_enqueue_order: 0,
+            chunked_state: None,
         }
+    }
+
+    pub fn with_chunked(mut self, config: ChunkedConfig) -> Self {
+        self.chunked_state = Some(ChunkedState::new(config));
+        self
     }
 
     pub fn enqueue(&mut self, mut sequence: Sequence) {
@@ -103,7 +118,7 @@ impl ContinuousBatcher {
     pub fn build_batch(
         &mut self,
         scheduler: &mut PagedScheduler,
-        max_batch_size: usize,
+        token_budget: usize,
         admit_new_prefill: bool,
         policy: BatchOrderPolicy,
     ) -> ScheduledBatch {
@@ -114,37 +129,47 @@ impl ContinuousBatcher {
         let mut requests = Vec::new();
         let mut failed = Vec::new();
         let ordered_ids = self.ordered_running_ids(policy);
+        
+        let mut consumed_budget = 0;
+        let mut seq_offsets = vec![0];
+        let mut draft_steps = Vec::new();
+        let mut current_offset = 0;
 
-        for request_id in ordered_ids {
-            if requests.len() >= max_batch_size {
-                break;
-            }
-            let Some(sequence) = self.running.get_mut(&request_id) else {
-                continue;
-            };
-
+        // 1. Decode Priority
+        for request_id in &ordered_ids {
+            let Some(sequence) = self.running.get_mut(request_id) else { continue; };
             if sequence.state == SequenceState::Paused {
                 sequence.state = SequenceState::Running;
             }
-            if sequence.state != SequenceState::Running {
-                continue;
-            }
+            if sequence.state != SequenceState::Running { continue; }
+            if sequence.needs_prefill() { continue; }
 
-            if sequence.needs_prefill() {
-                requests.push(sequence.id);
-                continue;
-            }
+            if consumed_budget >= token_budget { break; }
+
+            // --- Tier II: PGSLE Speculative Admission ---
+            let is_draft_eligible = sequence.telemetry.output_entropy < 1.0 
+                && sequence.telemetry.l2_delta < 0.05 
+                && ordered_ids.len() <= 8;
+            sequence.draft_budget = if is_draft_eligible { 8 } else { 0 };
 
             match scheduler.allocate_next_token(sequence.id) {
                 Ok(Some(new_page)) => {
                     sequence.kv_pages.push(new_page);
                     requests.push(sequence.id);
+                    consumed_budget += 1;
+                    current_offset += 1;
+                    seq_offsets.push(current_offset);
+                    draft_steps.push(sequence.draft_budget);
                 }
-                Ok(None) => requests.push(sequence.id),
+                Ok(None) => {
+                    requests.push(sequence.id);
+                    consumed_budget += 1;
+                    current_offset += 1;
+                    seq_offsets.push(current_offset);
+                    draft_steps.push(sequence.draft_budget);
+                }
                 Err(SchedulerError::OutOfMemory { .. }) => {
-                    // 内存不足：标记为暂停，让其他序列有机会
                     sequence.state = SequenceState::Paused;
-                    continue;
                 }
                 Err(e) => {
                     log::warn!("scheduler: sequence {} failed: {e}", sequence.id);
@@ -154,12 +179,46 @@ impl ContinuousBatcher {
             }
         }
 
+        // 2. Prefill Backfill
+        let l1_available_ratio = scheduler.num_free_blocks() as f32 / scheduler.num_total_blocks().max(1) as f32;
+        let concurrent_reqs = ordered_ids.len();
+
+        for request_id in &ordered_ids {
+            let Some(sequence) = self.running.get_mut(request_id) else { continue; };
+            if sequence.state != SequenceState::Running { continue; }
+            if !sequence.needs_prefill() { continue; }
+
+            if consumed_budget >= token_budget { break; }
+
+            let prompt_len = sequence.prompt_tokens.len();
+            let mut extracted_tokens = 0;
+
+            if let Some(chunked) = &mut self.chunked_state {
+                chunked.enqueue(sequence.id, prompt_len);
+                let remaining_budget = token_budget.saturating_sub(consumed_budget);
+                if let Some(chunk) = chunked.pop_adaptive_chunk(sequence.id, l1_available_ratio, concurrent_reqs, remaining_budget) {
+                    extracted_tokens = chunk.tokens;
+                }
+            } else {
+                extracted_tokens = prompt_len;
+            }
+
+            if extracted_tokens > 0 {
+                // Approximate budget check. We allow a slight overflow for the last chunk to avoid starvation.
+                requests.push(sequence.id);
+                consumed_budget += extracted_tokens;
+                current_offset += extracted_tokens;
+                seq_offsets.push(current_offset);
+                draft_steps.push(0); // Prefills never specularly decode
+            }
+        }
+
         for request_id in failed {
             self.running.remove(&request_id);
             scheduler.free_sequence(request_id);
         }
 
-        ScheduledBatch { requests }
+        ScheduledBatch { requests, seq_offsets, draft_steps }
     }
 
     pub fn update_batch(&mut self, scheduler: &mut PagedScheduler, results: &[BatchResult]) {
@@ -170,16 +229,23 @@ impl ContinuousBatcher {
                 continue;
             };
 
+            if sequence.needs_prefill() {
+                if let Some(chunked) = &mut self.chunked_state {
+                    chunked.on_chunk_finished(result.request_id);
+                }
+            }
+
             match result.action {
                 BatchAction::Continue => {
-                    // Insert prompt tokens into prefix tree on first decode step
-                    // (prefill just completed: generated_tokens is still empty before push)
-                    if sequence.generated_tokens.is_empty() && !sequence.prompt_tokens.is_empty() {
+                    let prefill_done = self.chunked_state.as_ref().map_or(true, |c| c.is_request_complete(&sequence.id));
+                    
+                    if sequence.generated_tokens.is_empty() && !sequence.prompt_tokens.is_empty() && prefill_done {
                         scheduler.insert_prefix(sequence.id, &sequence.prompt_tokens);
                     }
                     if let Some(token) = result.generated_token {
                         sequence.push_generated_token(token);
                     }
+                    sequence.telemetry = result.telemetry;
                     sequence.state = SequenceState::Running;
                 }
                 BatchAction::Pause => {
@@ -189,11 +255,18 @@ impl ContinuousBatcher {
                     if let Some(token) = result.generated_token {
                         sequence.push_generated_token(token);
                     }
+                    sequence.telemetry = result.telemetry;
                     sequence.state = SequenceState::Completed;
+                    if let Some(chunked) = &mut self.chunked_state {
+                        chunked.remove_tracker(&result.request_id);
+                    }
                     finished.push(result.request_id);
                 }
                 BatchAction::Fail => {
                     sequence.state = SequenceState::Failed;
+                    if let Some(chunked) = &mut self.chunked_state {
+                        chunked.remove_tracker(&result.request_id);
+                    }
                     finished.push(result.request_id);
                 }
             }
@@ -340,7 +413,7 @@ mod tests {
             BatchOrderPolicy::StrictRequestIdOrder,
         );
         assert_eq!(first.requests, vec![10]);
-        batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(10, 100)]);
+        batcher.update_batch(&mut scheduler, &[BatchResult::continue_with_token(10, 100, Default::default())]);
 
         batcher.enqueue(make_sequence(2, 2));
         let second = batcher.build_batch(
@@ -349,7 +422,7 @@ mod tests {
             true,
             BatchOrderPolicy::StrictRequestIdOrder,
         );
-        assert_eq!(second.requests, vec![2, 10]);
+        assert_eq!(second.requests, vec![10, 2]);
     }
 
     #[test]
@@ -366,7 +439,7 @@ mod tests {
         );
         assert_eq!(first.requests, vec![1]);
 
-        batcher.update_batch(&mut scheduler, &[BatchResult::complete(1, Some(7))]);
+        batcher.update_batch(&mut scheduler, &[BatchResult::complete(1, Some(7), Default::default())]);
         assert!(!batcher.has_pending_work());
         assert_eq!(scheduler.num_free_blocks(), 8);
     }
@@ -390,9 +463,9 @@ mod tests {
         batcher.update_batch(
             &mut scheduler,
             &[
-                BatchResult::continue_with_token(3, 1),
-                BatchResult::continue_with_token(5, 1),
-                BatchResult::continue_with_token(7, 1),
+                BatchResult::continue_with_token(3, 1, Default::default()),
+                BatchResult::continue_with_token(5, 1, Default::default()),
+                BatchResult::continue_with_token(7, 1, Default::default()),
             ],
         );
 

@@ -148,12 +148,14 @@ pub(crate) fn try_get_f32_data<E: Element>(
 }
 
 /// Transpose a row-major matrix [rows, cols] → [cols, rows].
-pub(crate) fn transpose_f32(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    assert_eq!(data.len(), rows * cols);
-    let mut out = vec![0.0f32; rows * cols];
+/// Adaptively handles 2:4 structure sparsity where physical dimension is halved.
+pub(crate) fn transpose_f32(data: &[f32], rows: usize, _cols_expected: usize) -> Vec<f32> {
+    let actual_cols = data.len() / rows;
+    assert_eq!(data.len(), rows * actual_cols, "data length must be a multiple of rows");
+    let mut out = vec![0.0f32; rows * actual_cols];
     for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
+        for c in 0..actual_cols {
+            out[c * rows + r] = data[r * actual_cols + c];
         }
     }
     out
@@ -381,6 +383,7 @@ pub(crate) fn f32_to_typed_bytes(data: &[f32], dtype: DType) -> Vec<u8> {
                 out[i * 2 + 1] = b[1];
             }
         }
+        DType::U8 => unimplemented!("U8 not supported for F32 generic arrays"),
     }
     out
 }

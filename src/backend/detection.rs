@@ -2,7 +2,7 @@ use crate::compat::backend_trait::Element;
 use crate::engine::executor::BackendError;
 use crate::compat::{CpuBackend, CudaBackend, HipBackend, MetalBackend};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendType {
     Cuda,
     Rocm,

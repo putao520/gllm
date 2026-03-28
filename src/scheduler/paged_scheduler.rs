@@ -174,8 +174,8 @@ impl PagedScheduler {
 
             // Register in GMM page table (L1 tier)
             let virtual_id = VirtualPageId::new(group.id, logical_idx);
-            let _ = self.memory_manager.track_page(Tier::L1, block as usize);
-            let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
+            if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
         }
 
         let mut block_table = BlockTable::new();
@@ -220,7 +220,7 @@ impl PagedScheduler {
                 // Resolve the physical page from GMM
                 if let Ok((tier, physical_id)) = self.memory_manager.resolve(vpid) {
                     let new_vpid = VirtualPageId::new(group.id, logical_idx);
-                    let _ = self.memory_manager.bind_virtual_page(new_vpid, tier, physical_id);
+                    if let Err(e) = self.memory_manager.bind_virtual_page(new_vpid, tier, physical_id) { log::warn!("GMM bind_virtual_page failed: {}", e); }
                     allocated.push(physical_id as PageId);
                     self.hgal.mark_accessed(physical_id as PageId);
                 }
@@ -240,8 +240,8 @@ impl PagedScheduler {
             self.hgal.mark_accessed(block);
 
             let virtual_id = VirtualPageId::new(group.id, logical_idx);
-            let _ = self.memory_manager.track_page(Tier::L1, block as usize);
-            let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
+            if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
         }
 
         let mut block_table = BlockTable::new();
@@ -355,8 +355,8 @@ impl PagedScheduler {
 
         // Register new block in GMM
         let virtual_id = VirtualPageId::new(request_id, logical_idx);
-        let _ = self.memory_manager.track_page(Tier::L1, block as usize);
-        let _ = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize);
+        if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
+        if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
 
         Ok(Some(block))
     }
@@ -528,6 +528,10 @@ impl PagedScheduler {
 
     pub fn num_free_blocks(&self) -> usize {
         self.allocator.get_num_free_blocks()
+    }
+
+    pub fn num_total_blocks(&self) -> usize {
+        self.allocator.get_total_blocks()
     }
 
     /// Plan prefill page allocation strategy via GlobalMemoryManager.

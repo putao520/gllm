@@ -74,21 +74,14 @@ pub struct GeneratorForwardConfig {
     pub paged_kv_page_table: Option<Vec<u32>>,
     /// Paged attention page size (tokens per page).
     pub paged_kv_page_size: usize,
-    /// Model-instance JIT cache pointer (x86_64/aarch64 only).
-    /// Points into the Executor's `jit_cache` Mutex; valid for the duration of any forward call.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    pub jit_cache_ptr: *mut crate::compat::jit_cache::ModelJitCache,
-    /// YAML→JIT graph executor pointer (x86_64/aarch64/cuda only).
+    /// YAML→JIT graph executor pointer.
     /// Points into the Executor's `graph_executor` Option; null when not available.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub graph_executor_ptr: *mut crate::graph::executor::FusedGraphExecutor,
 }
 
-// SAFETY: jit_cache_ptr is only written/read while the Executor's Mutex is held,
+// SAFETY: graph_executor_ptr is only written/read while the Executor's Mutex is held,
 // and the Executor itself is not Send across threads without synchronization.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 unsafe impl Send for GeneratorForwardConfig {}
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 unsafe impl Sync for GeneratorForwardConfig {}
 
 impl GeneratorForwardConfig {
@@ -245,6 +238,7 @@ impl AttentionTopology {
 pub struct SequenceInput {
     pub tokens: Vec<u32>,
     pub position: usize,
+    pub draft_steps: usize,
 }
 
 /// Batched input for the forward pass.
@@ -393,13 +387,13 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     memory_manager: GlobalMemoryManager,
     onnx_generator_plan: Option<OnnxGeneratorPlan>,
     topology: AttentionTopology,
-    /// Model-instance JIT cache: lives with this Executor, released when model is dropped.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    jit_cache: std::sync::Mutex<crate::compat::jit_cache::ModelJitCache>,
+
     /// YAML→JIT graph executor (built at load time, used preferentially in forward pass).
     /// None when the architecture template is not registered or JIT compilation fails.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     graph_executor: Option<crate::graph::executor::FusedGraphExecutor>,
+    /// Tracks stability telemetries to trigger Re-Fusion (Tier V.3)
+    pub profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -428,7 +422,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             _ => PositionEncoding::Rope,
         };
-        let forward_config = GeneratorForwardConfig {
+        let mut forward_config = GeneratorForwardConfig {
             hidden_size: model_config.hidden_size,
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_attention_heads,
@@ -456,8 +450,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             dtype_size: model_config.dtype_size,
             paged_kv_page_table: None,
             paged_kv_page_size: model_config.kv_cache_block_size,
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            jit_cache_ptr: std::ptr::null_mut(),
+
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             graph_executor_ptr: std::ptr::null_mut(),
         };
@@ -540,6 +533,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 })
         };
 
+
+
         Ok(Self {
             backend,
             scheduler,
@@ -559,10 +554,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
             topology,
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            jit_cache: std::sync::Mutex::new(crate::compat::jit_cache::ModelJitCache::new()),
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             graph_executor,
+            profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator::new(),
         })
     }
 
@@ -768,13 +761,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if !self.batcher.has_pending_work() {
             return None;
         }
-        Some(self.batcher.build_batch(
+        let batch = self.batcher.build_batch(
             &mut self.scheduler,
             usize::MAX,
             true,
             BatchOrderPolicy::StrictRequestIdOrder,
-        ))
+        );
+
+        Some(batch)
     }
+
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
         let add_special_tokens = self.add_special_tokens;
@@ -799,7 +795,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         tokens.into_iter().next().ok_or(ExecutorError::EmptySample)
     }
 
-    fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<(Vec<LogitsHandle>, f32)> {
+    fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>)> {
         if let Some(plan) = self.onnx_generator_plan.as_ref() {
             if plan.execution_order.is_empty() {
                 return Err(ExecutorError::OnnxPlan(
@@ -843,21 +839,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let kv_handle = self.active_kv_handle()?;
         let mut kv_caches = vec![kv_handle; batch_input.sequences.len()];
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let mut guard = self.jit_cache.lock().map_err(|e| {
-                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
-            })?;
-            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
-        }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        {
-            self.forward_config.graph_executor_ptr = self
-                .graph_executor
-                .as_mut()
-                .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut());
-        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
         Ok(self.backend.batch_forward_gpu_pure(
             batch_input,
             &self.topology,
@@ -930,7 +916,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // instead of the static max_seq_len.
         let adaptive = AdaptiveChunkPolicy::new(
             &Scheduler2024Config::default().chunked,
-            self.kv_cache_config.max_seq_len,
         );
         let l1_usage = self.memory_manager.tier_usage(Tier::L1);
         let l1_ratio = if l1_usage.capacity > 0 {
@@ -987,7 +972,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         // 4. Prepare Batch
-        for req_id in batch.requests {
+        for (idx, req_id) in batch.requests.into_iter().enumerate() {
+            let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0);
             self.ensure_pages_resident(req_id)?;
 
             let (tokens, position) = {
@@ -1024,7 +1010,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 continue;
             }
 
-            sequences.push(SequenceInput { tokens, position });
+            sequences.push(SequenceInput { tokens, position, draft_steps: current_draft_steps });
             request_indices.push(req_id);
         }
 
@@ -1035,14 +1021,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let batch_input = BatchInput { sequences };
 
         // 4. Run Backend Forward
-        let (logits_list, batch_sparsity) = self.run_batch_forward(&batch_input)?;
+        let (logits_list, batch_sparsity, batch_telemetry) = self.run_batch_forward(&batch_input)?;
 
         // 5. Process Results
         // Note: batch_forward_gpu_pure must return results in the same order as input sequences
-        if logits_list.len() != request_indices.len() {
-            return Err(ExecutorError::Backend(BackendError::Cuda(
-                "Backend returned mismatched number of logits".to_string(),
-            )));
+        if logits_list.len() != request_indices.len() || batch_telemetry.len() != request_indices.len() {
+            return Err(ExecutorError::Backend(BackendError::Other(format!("Backend returned {} logits and {} telemetries for {} requests", logits_list.len(), batch_telemetry.len(), request_indices.len()))));
         }
 
         let mut total_tokens = 0;
@@ -1065,9 +1049,29 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.observer.update_logits_entropy(batch_entropy);
         self.observer.update_attention_sparsity(batch_sparsity);
 
+        let page_size = self.scheduler.page_size().max(1);
+        let mut page_entropies = std::collections::HashMap::new();
+
         // Processing results loop
         for (i, logits) in logits_list.iter().enumerate() {
             let req_id = request_indices[i];
+            let req_telemetry = batch_telemetry[i];
+            
+            // Tier V.3 Profile-Guided Re-Fusion
+            if self.profile_accumulator.record_and_check(0, req_telemetry.transform_ratio) {
+                log::info!("executor: ProfileAccumulator triggered Re-Fusion due to high stability.");
+
+            }
+            
+            // SPEC §12.9.1: Tie telemetry entropy to the current physical page
+            let logical_index = batch_input.sequences[i].position / page_size;
+            let vpid = crate::scheduler::VirtualPageId::new(req_id, logical_index);
+            if let Ok((tier, physical_id)) = self.memory_manager.resolve(vpid) {
+                if tier == crate::scheduler::Tier::L1 {
+                    page_entropies.insert(physical_id, req_telemetry.output_entropy);
+                }
+            }
+
             let sampling_config = self
                 .requests
                 .get(&req_id)
@@ -1094,9 +1098,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
 
             if request_finished {
-                batch_results.push(BatchResult::complete(req_id, Some(next_token)));
+                batch_results.push(BatchResult::complete(req_id, Some(next_token), req_telemetry));
             } else {
-                batch_results.push(BatchResult::continue_with_token(req_id, next_token));
+                batch_results.push(BatchResult::continue_with_token(req_id, next_token, req_telemetry));
             }
         }
 
@@ -1127,6 +1131,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         self.batcher
             .update_batch(&mut self.scheduler, batch_results.as_slice());
+
+        // SPEC §12.9.1: CPU-side KV page eviction after each step.
+        // page_entropies populated by telemetry pipeline; evict pages with output_entropy < threshold
+        let evicted = self.memory_manager.entropy_evict(&page_entropies, 0.1, crate::scheduler::Tier::L1);
+        if evicted > 0 {
+            log::debug!("entropy_evict: freed {evicted} low-entropy KV pages synchronously after batch step");
+        }
+
         Ok(())
     }
 
@@ -1136,6 +1148,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let seq = SequenceInput {
             tokens: tokens.to_vec(),
             position: 0,
+            draft_steps: 0,
         };
 
         let batch_input = BatchInput {
@@ -1144,22 +1157,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mut kv_cache = self.active_kv_handle()?;
 
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let mut guard = self.jit_cache.lock().map_err(|e| {
-                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
-            })?;
-            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
-        }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        {
-            self.forward_config.graph_executor_ptr = self
-                .graph_executor
-                .as_mut()
-                .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut());
-        }
-        let (logits_list, _sparsity) = self.backend.batch_forward_gpu_pure(
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        // Profiling/test execution (run pure forward manually without inserting into metrics stream)
+        let (logits_list, _sparsity, _telemetries) = self.backend.batch_forward_gpu_pure(
             &batch_input,
             &self.topology,
             &self.weights,
@@ -1281,13 +1285,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Err(ExecutorError::EmptyPrompt);
         }
         let embedding = {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            {
-                let mut guard = self.jit_cache.lock().map_err(|e| {
-                    ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
-                })?;
-                self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
-            }
+            self.forward_config.graph_executor_ptr = self
+                .graph_executor
+                .as_mut()
+                .map(|ge| ge as *mut _)
+                .unwrap_or(std::ptr::null_mut());
             self.backend.embedding_forward_gpu_pure(
                 &tokens,
                 &self.topology,
@@ -1303,21 +1305,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let mut guard = self.jit_cache.lock().map_err(|e| {
-                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
-            })?;
-            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
-        }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        {
-            self.forward_config.graph_executor_ptr = self
-                .graph_executor
-                .as_mut()
-                .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut());
-        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,
@@ -1358,21 +1350,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
         }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let mut guard = self.jit_cache.lock().map_err(|e| {
-                ExecutorError::Scheduler(format!("jit_cache lock poisoned: {e}"))
-            })?;
-            self.forward_config.jit_cache_ptr = &mut *guard as *mut _;
-        }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        {
-            self.forward_config.graph_executor_ptr = self
-                .graph_executor
-                .as_mut()
-                .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut());
-        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,

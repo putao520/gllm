@@ -110,6 +110,15 @@
 | **REQ-KV-EXT-001** | 自适应 Chunk 大小 | 根据运行时负载（L1 可用页数、并发请求数、prompt 长度）动态调整 prefill chunk_size，替代当前硬编码 max_seq_len | 1. `AdaptiveChunkPolicy` 结构体，输入 L1 可用页数/并发请求数/prompt 长度，输出 chunk_size<br>2. Executor 调用 `plan_prefill()` 时使用自适应 chunk_size 而非 `max_seq_len`<br>3. chunk_size 范围 `[ChunkedConfig::chunk_size, max_seq_len]`，下界为 ChunkedConfig 默认值 64<br>4. 高负载（L1 可用 < 25%）时 chunk_size 缩小至下界<br>5. 低负载（L1 可用 > 75%）时 chunk_size 扩大至 max_seq_len<br>6. 单元测试覆盖高/低/中三种负载场景 | 🟢 已实现 (2026-03-15) |
 | **REQ-KV-EXT-002** | KV 增量蒸馏 | SwiftKV distill 仅处理自上次蒸馏以来变化的 KV 页面，避免全量重算 | 1. `SwiftKvState` 新增 `last_distilled_page: usize` 追踪上次蒸馏边界<br>2. `distill_cpu_incremental()` 仅处理 `[last_distilled_page..]` 范围的页面<br>3. 增量蒸馏结果与全量蒸馏数值一致（容差 < 1e-6）<br>4. 跨轮次 session 复用时正确维护蒸馏边界<br>5. `prepare_next_turn()` 重置 Working 管线蒸馏边界，保留 Conversation 管线<br>6. 单元测试验证增量 vs 全量一致性 | 🟢 已实现 (2026-03-15) |
 
+### 4.3 JIT 缓存协议规范 (REQ-JIT-CACHE)
+
+> **关联规范**: [SPEC/DOCS/scheduling/jit-cache-protocol.md](./DOCS/scheduling/jit-cache-protocol.md)
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-JIT-CACHE-001** | 全核心态级预编译 | 所有算子必须在模型加载阶段完成全网计算图预编译 | 1. 禁用独立算子的 JIT 支持<br>2. 仅允许全模型作为一个整体计算图被缓存 (`GraphExecutor`)<br>3. 推理热路径中无任何单层或单算子重编译 | 🟢 已设定 |
+| **REQ-JIT-CACHE-002** | CPU/GPU 算子与流程统一 | CPU 后端与 GPU 后端的 JIT 缓存行为必须 100% 对齐 | 1. **ARCH-CPU-GPU-UNIFIED**: 删除 CPU 特有算子图节点和变体<br>2. 共同使用 `build_fused_attention_layer_graph_symbolic`<br>3. 动态 seq_len 使用 `SymDim::Symbolic` | 🟢 已设定 |
+
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
 |------|------|------|
@@ -282,10 +291,15 @@
 
 ### 8.6 JIT 编译缓存 (REQ-JIT-CACHE)
 
-> **背景**: 当前 `DecodeCachedJit` / `MoeDecodeCachedJit` 在 `decoder_forward()` 函数栈上创建，每次推理调用都重新 JIT 编译所有固定图（`q_rope`、`norm2` 等），`gqa_cache` 也随函数返回销毁。同一进程中加载多个模型时编译结果完全不共享，进程重启后所有编译结果丢失。
+> **SSOT**: [SPEC/DOCS/scheduling/jit-cache-protocol.md](./DOCS/scheduling/jit-cache-protocol.md)
+> **⚠️ 2026-03-27 架构演进**: 原始 REQ-JIT-CACHE-001~003（基于 `DecodeCachedJit` 函数栈 + `GraphKey{QRope|Norm2, seq_len}` 算子级缓存）已被推翻，由 REQ-JIT-CACHE-001~007 全面替代。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-JIT-CACHE-001** | 模型实例级 JIT 缓存 | `DecodeCachedJit` / `MoeDecodeCachedJit` / `Gpt2CachedJit` 必须从函数栈提升到模型实例生命周期（与模型权重共存亡） | 1. JIT 图在模型加载时编译一次，存储在模型实例中<br>2. 同一模型实例的所有推理调用共享同一套编译结果<br>3. 模型卸载时 JIT 缓存随之释放<br>4. `gqa_cache` 在整个模型实例生命周期内累积，不在每次推理调用时重置 | 🟢 已实现 |
-| **REQ-JIT-CACHE-002** | 进程级全局 JIT 缓存 | 新增进程级全局 JIT 缓存，以 `(ModelArchKey, GraphKey)` 为键，`Arc<CompiledLayer>` 为值，同架构模型共享编译结果 | 1. 同一进程中相同架构参数的模型（无论加载/卸载多少次）共享 JIT 编译结果<br>2. 缓存使用 `Arc<CompiledLayer>` 避免重复内存占用<br>3. 缓存容量上限可配置（默认 512 个条目），超出时按 LRU 淘汰<br>4. 线程安全：`RwLock<HashMap<...>>` 保护全局缓存 | 🟢 已实现 |
-| **REQ-JIT-CACHE-003** | 磁盘持久化 JIT 缓存 | 将编译后的机器码序列化到磁盘（`~/.gllm/jit_cache/{arch_key}/{graph_key}.bin`），进程重启后直接加载，跳过重新编译 | 1. 首次编译后自动序列化到磁盘<br>2. 进程启动时优先从磁盘加载，命中则跳过 JIT 编译<br>3. 缓存文件包含版本校验（gllm 版本 + CPU 特性指纹），不匹配时重新编译<br>4. 磁盘缓存失效条件：gllm 版本变更、CPU 特性变更、手动清除<br>5. 磁盘 I/O 失败时静默降级到内存编译（不报错） | 🟢 已实现 |
+| **REQ-JIT-CACHE-001** | 模型级 L1 缓存 | 编译产物与模型实例绑定，模型加载时编译一次 | 1. `ModelJitCache` 持有全层融合图编译产物<br>2. decode step 中零 `InferenceCompiler::new()` 调用<br>3. 模型卸载时随模型 drop | 🔄 待重建 |
+| **REQ-JIT-CACHE-002** | 进程全局 L2 LRU 缓存 | 以 `ModelArchKey` 为键（不含 seq_len），同架构模型共享编译结果 | 1. 同架构模型加载/卸载多次共享同一编译产物<br>2. LRU 淘汰策略<br>3. 线程安全 | 🔄 待重建 |
+| **REQ-JIT-CACHE-003** | 磁盘 L3 持久化缓存 | `~/.gllm/jit_cache/{model_hash}/{graph_type}.bin` 进程重启后免编译 | 1. 版本校验（gllm 版本 + CPU/GPU 特性指纹）<br>2. 磁盘 I/O 失败静默降级<br>3. 命中时跳过编译 | 🔄 待重建 |
+| **REQ-JIT-CACHE-004** | 热路径零编译 | 推理 decode step 层循环中禁止任何编译行为 | `grep -rn "InferenceCompiler::new()\|compile_graph" src/compat/decoder_forward.rs` 返回 0 | 🔄 待重建 |
+| **REQ-JIT-CACHE-005** | SymDim::Symbolic 动态绑定 | seq_len/total_seq 通过 ShapeBinding 运行时绑定，不触发重编译 | 1. 融合图使用 `Symbolic("seq_len")`<br>2. launch 时绑定具体值<br>3. 不同 seq_len 复用同一编译产物 | 🔄 待重建 |
+| **REQ-JIT-CACHE-006** | 四档自适应 Tiling | Decode/Short/Standard/Flash 通过运行时分支路由 | 单一编译产物内 4 个代码路径，seq_len 条件分支 | 🔄 待重建 |
+| **REQ-JIT-CACHE-007** | 全模型统一执行 | 缓存粒度为全模型级 `GraphExecutor`，彻底废弃层级缓存 | 1. 废弃 `GraphType` 及分块缓存策略<br>2. 整个模型只有 1 个跨层共享的 JIT 缓存入口 | 🔄 待重建 |

@@ -4,8 +4,8 @@ use super::backend_trait;
 use super::cuda_backend::CudaBackend;
 #[cfg(feature = "hip")]
 use super::hip_backend::HipBackend;
-#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
-use super::weight_helpers::transpose_f32;
+#[cfg(any(feature = "cuda", feature = "hip"))]
+use gllm_kernels::gpu::GpuBuffer;
 #[cfg(any(feature = "cuda", feature = "hip"))]
 use super::bert_forward::build_mean_pool_graph;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]

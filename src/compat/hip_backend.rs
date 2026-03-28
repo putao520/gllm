@@ -58,6 +58,7 @@ impl<E: Element> Clone for HipBackend<E> {
             paged_kv_meta: self.paged_kv_meta.clone(),
             #[cfg(feature = "hip")]
             weight_cache: std::sync::Mutex::new(super::gpu_compile::HipWeightCache::new()),
+
             _marker: std::marker::PhantomData,
         }
     }
@@ -108,6 +109,7 @@ impl<E: Element> HipBackend<E> {
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             paged_kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             weight_cache: std::sync::Mutex::new(super::gpu_compile::HipWeightCache::new()),
+
             _marker: std::marker::PhantomData,
         })
     }
@@ -157,11 +159,13 @@ impl<E: Element> Backend<E> for HipBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
-    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
         #[cfg(feature = "hip")]
         {
             super::gpu_compile::hip_decoder_forward(self, input, topology, weights, kv_caches, config)
-                .map(|logits| (logits, 0.0))
+                .map(|(logits, telemetry)| {
+                    (logits, 0.0, telemetry)
+                })
         }
         #[cfg(not(feature = "hip"))]
         {
@@ -284,7 +288,9 @@ impl<E: Element> Backend<E> for HipBackend<E> {
         }
     }
 
-    fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BE> {
+
+
+    fn upload_weights(&self, _data: &[E]) -> Result<Self::Tensor, BE> {
         #[cfg(feature = "hip")]
         {
             use gllm_kernels::gpu::GpuDevice;
@@ -305,7 +311,7 @@ impl<E: Element> Backend<E> for HipBackend<E> {
         }
         #[cfg(not(feature = "hip"))]
         {
-            Ok(data.to_vec())
+            Err(BE::Unimplemented("hip feature not enabled"))
         }
     }
 }

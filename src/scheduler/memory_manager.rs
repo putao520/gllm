@@ -655,6 +655,48 @@ impl GlobalMemoryManager {
         }
     }
 
+    /// Chain C: KV Cache 熵策略驱逐 (optimization_strategy_master.md §Chain C)
+    ///
+    /// Frees all physical KV cache pages whose `per_block_entropy` is below `threshold`.
+    /// Called at the tail of each `step()` cycle to reclaim frames occupied by low-information
+    /// content (filler words, deterministic tokens) for future high-entropy token allocations.
+    ///
+    /// `page_entropies`: map of PhysicalId → measured entropy (nat units, from Softmax epilogue).
+    /// `threshold`: entropy level below which a block is considered purgeable (default 0.1 nat).
+    ///
+    /// Returns the number of freed pages.
+    pub fn entropy_evict(
+        &mut self,
+        page_entropies: &std::collections::HashMap<PhysicalId, f32>,
+        threshold: f32,
+        tier: Tier,
+    ) -> usize {
+        let low_entropy_pages: Vec<PhysicalId> = page_entropies
+            .iter()
+            .filter(|(_, &entropy)| entropy < threshold)
+            .map(|(&pid, _)| pid)
+            .collect();
+
+        let mut freed = 0usize;
+        for pid in low_entropy_pages {
+            if self.tier_manager.is_allocated(tier, pid) {
+                match self.free_page(tier, pid) {
+                    Ok(()) => {
+                        freed += 1;
+                        log::debug!(
+                            "entropy_evict: freed page {pid} (entropy {:.4} < {threshold:.4})",
+                            page_entropies.get(&pid).copied().unwrap_or(0.0)
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("entropy_evict: failed to free page {pid}: {e}");
+                    }
+                }
+            }
+        }
+        freed
+    }
+
     fn remove_reverse_index(&mut self, location: PageLocation, virtual_id: VirtualPageId) {
         let key = (location.tier, location.physical_id);
         let mut should_remove = false;

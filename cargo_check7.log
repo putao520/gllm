@@ -1,0 +1,876 @@
+warning: unused import: `std::fmt::Write`
+  --> /home/putao/code/rust/gllm-kernels/src/compiler/codegen/gpu_ir/kernel_builder.rs:11:5
+   |
+11 | use std::fmt::Write;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> /home/putao/code/rust/gllm-kernels/src/cache_params.rs:41:20
+   |
+41 |         let info = unsafe { std::arch::x86_64::__cpuid_count(4, sub) };
+   |                    ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:183:17
+    |
+183 |     let leaf0 = unsafe { __cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:191:17
+    |
+191 |     let leaf1 = unsafe { __cpuid(1) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:109:16
+    |
+109 |     let info = unsafe { core::arch::x86_64::__cpuid(0x15) };
+    |                ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:120:18
+    |
+120 |     let info16 = unsafe { core::arch::x86_64::__cpuid(0x16) };
+    |                  ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:166:17
+    |
+166 |         let r = unsafe { std::arch::x86_64::__cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:177:21
+    |
+177 |             let r = unsafe { std::arch::x86_64::__cpuid(leaf) };
+    |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:262:20
+    |
+262 |         let info = unsafe { std::arch::x86_64::__cpuid(1) };
+    |                    ^^^^^^ unnecessary `unsafe` block
+
+warning: `gllm-kernels` (lib) generated 9 warnings (run `cargo fix --lib -p gllm-kernels` to apply 1 suggestion)
+    Checking gllm v0.11.0 (/home/putao/code/rust/gllm)
+warning: unused imports: `bytes_as_f32`, `execute_jit_decoder_layer`, `f32_as_bytes`, and `update_kv_cache_jit`
+ --> src/compat/bert_forward.rs:4:5
+  |
+4 |     bytes_as_f32, execute_jit_decoder_layer, f32_as_bytes, update_kv_cache_jit,
+  |     ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `GraphType`, `JitCacheKey`, `ModelArchKey`, and `global_jit_cache`
+ --> src/compat/decoder_forward.rs:5:24
+  |
+5 | use super::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+  |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `computation_dtype`, `f32_as_bytes_mut`, `kernels_dtype_to_compat`, and `pack_weights`
+  --> src/compat/decoder_forward.rs:9:5
+   |
+ 9 |     computation_dtype, computation_dtype_from_config, kernels_dtype_to_compat,
+   |     ^^^^^^^^^^^^^^^^^                                 ^^^^^^^^^^^^^^^^^^^^^^^
+10 |     execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+11 |     execute_kv_projection, pack_weights, pack_weights_typed, update_kv_cache_jit, write_kv_to_cache,
+   |                            ^^^^^^^^^^^^
+12 |     f32_as_bytes, f32_as_bytes_mut, bytes_as_f32,
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `quantized_linear`
+  --> src/compat/decoder_forward.rs:16:60
+   |
+16 |     get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear, transpose_f32,
+   |                                                            ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GpuBuffer` and `GpuDevice`
+ --> src/compat/gpu_compile.rs:1:25
+  |
+1 | use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
+  |                         ^^^^^^^^^  ^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/compat/decoder_forward.rs:660:87
+    |
+660 | ...   kern.vec_add(&resid1, &super::jit_helpers::typed_bytes_to_f32(&moe_out, gllm_kernels::types::DType::F32), layer_out.as_f32_mu...
+    |                              -------------------------------------- ^^^^^^^^ expected `&[u8]`, found `&Vec<f32>`
+    |                              |
+    |                              arguments to this function are incorrect
+    |
+    = note: expected reference `&[u8]`
+               found reference `&Vec<f32>`
+note: function defined here
+   --> src/compat/jit_helpers.rs:110:15
+    |
+110 | pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
+    |               ^^^^^^^^^^^^^^^^^^ -----------
+
+error[E0308]: arguments to this function are incorrect
+   --> src/compat/decoder_forward.rs:672:42
+    |
+672 |                     let layer_sparsity = quantized_incremental_decode_layer(
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+685 |                         layer_out.as_f32_mut(),
+    |                         ---------------------- argument #26 of type `&mut DecodeCachedJit` is missing
+686 |                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+687 |                         &mut decode_jit,
+    |                         --------------- unexpected argument #27 of type `&mut std::option::Option<DecodeCachedJit>`
+    |
+note: function defined here
+   --> src/compat/decoder_forward.rs:50:4
+    |
+ 50 |   fn quantized_incremental_decode_layer<E: Element>(
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 76 | /     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+ 77 | |     jit: &mut DecodeCachedJit,
+    | |_____________________________-
+help: did you mean
+    |
+672 ~                     let layer_sparsity = quantized_incremental_decode_layer(
+673 +                         config,
+674 +                         backend,
+675 +                         &hidden_state,
+676 +                         &q_w,
+677 +                         &o_w,
+678 +                         &rn1_w,
+679 +                         &gate_w,
+680 +                         &up_w,
+681 +                         &down_w,
+682 +                         &rn2_w,
+683 +                         &positions,
+684 +                         &kv_cache_k,
+685 +                         &kv_cache_v,
+686 +                         layer,
+687 +                         total_seq,
+688 +                         seq_len,
+689 +                         hidden,
+690 +                         inter,
+691 +                         num_heads,
+692 +                         num_kv_heads,
+693 +                         head_dim,
+694 +                         eps,
+695 +                         rope_theta,
+696 +                         max_seq_len,
+697 +                         transpose_weights,
+698 +                         /* &mut DecodeCachedJit */,
+699 +                         layer_out.as_f32_mut(),
+700 +                         gllm_kernels::types::DType::F32,
+701 +                         k_slice_buf.as_f32_mut(),
+702 +                         v_slice_buf.as_f32_mut(),
+703 ~                     )?;
+    |
+
+error[E0308]: mismatched types
+   --> src/compat/decoder_forward.rs:843:58
+    |
+843 | ...                   OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads: geom.num_kv_heads, head_dim },
+    |                                                    ^^^^^^^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+843 |                             OpKind::MultiHeadAttention { seq_len: gllm_kernels::compiler::SymDim::Concrete(seq_len), num_heads, num_kv_heads: geom.num_kv_heads, head_dim },
+    |                                                          ++++++++++++++++++++++++++++++++++++++++++++++++++       +
+
+error[E0308]: mismatched types
+   --> src/compat/decoder_forward.rs:909:53
+    |
+909 | ...   og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: geom.q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
+    |                                   ^^^^^^^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+909 |                         og.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(seq_len), n: hidden, k: geom.q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
+    |                                                     +++++++++++++++++++++++++++++++++++++++++       +
+
+error[E0599]: no method named `vec_add` found for struct `gllm_kernels::backend::CpuKernels<E>` in the current scope
+   --> src/compat/decoder_forward.rs:932:27
+    |
+932 |                     _kern.vec_add(&hidden_state[..seq_len * hidden], o_out.as_f32(), &mut resid1_f32);
+    |                           ^^^^^^^ method not found in `gllm_kernels::backend::CpuKernels<f32>`
+    |
+   ::: /home/putao/code/rust/gllm-kernels/src/traits.rs:204:8
+    |
+204 |     fn vec_add(&self, a: &[E], b: &[E], out: &mut [E]);  // required
+    |        ------- the method is available for `gllm_kernels::backend::CpuKernels<f32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Kernels` which provides `vec_add` is implemented but not in scope; perhaps you want to import it
+    |
+  2 + use gllm_kernels::Kernels;
+    |
+
+error[E0599]: no function or associated item named `from_f32` found for struct `TypedBuffer` in the current scope
+   --> src/compat/decoder_forward.rs:933:67
+    |
+933 |                     let resid1 = super::jit_helpers::TypedBuffer::from_f32(&resid1_f32, computation_dtype_from_config(config));
+    |                                                                   ^^^^^^^^ function or associated item not found in `TypedBuffer`
+    |
+   ::: src/compat/jit_helpers.rs:17:1
+    |
+ 17 | pub(crate) struct TypedBuffer {
+    | ----------------------------- function or associated item `from_f32` not found for this struct
+    |
+note: if you're trying to build a new `TypedBuffer` consider using one of the following associated functions:
+      TypedBuffer::zeros
+      TypedBuffer::from_f32_slice
+      TypedBuffer::from_raw
+   --> src/compat/jit_helpers.rs:26:5
+    |
+ 26 |     pub fn zeros(len: usize, dtype: DType) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 72 |     pub fn from_f32_slice(src: &[f32], dtype: DType) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 78 |     pub fn from_raw(data: Vec<u8>, dtype: DType) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `from_f32`, perhaps you need to implement it:
+            candidate #1: `gllm_kernels::Element`
+help: there is an associated function `from` with a similar name
+   --> /home/putao/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/convert/mod.rs:592:5
+    |
+592 |     fn from(value: T) -> Self;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `vec_add` found for struct `gllm_kernels::backend::CpuKernels<E>` in the current scope
+   --> src/compat/decoder_forward.rs:943:27
+    |
+943 |                     _kern.vec_add(&resid1_f32, &moe_out, &mut layer_out_f32);
+    |                           ^^^^^^^ method not found in `gllm_kernels::backend::CpuKernels<f32>`
+    |
+   ::: /home/putao/code/rust/gllm-kernels/src/traits.rs:204:8
+    |
+204 |     fn vec_add(&self, a: &[E], b: &[E], out: &mut [E]);  // required
+    |        ------- the method is available for `gllm_kernels::backend::CpuKernels<f32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Kernels` which provides `vec_add` is implemented but not in scope; perhaps you want to import it
+    |
+  2 + use gllm_kernels::Kernels;
+    |
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:312:58
+    |
+312 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: q_dim, k: Concrete(h), dtype: dt }, vec![normed1, w_q], vec![q_out], "gemm_q");
+    |                                                          ^^^^^^^^^^^ expected `usize`, found `SymDim`
+    |
+help: call `Into::into` on this expression to convert `SymDim` into `usize`
+    |
+312 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: q_dim, k: Concrete(h).into(), dtype: dt }, vec![normed1, w_q], vec![q_out], "gemm_q");
+    |                                                                     +++++++
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:314:59
+    |
+314 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: kv_dim, k: Concrete(h), dtype: dt }, vec![normed1, w_k], vec![k_out], "gemm_k");
+    |                                                           ^^^^^^^^^^^ expected `usize`, found `SymDim`
+    |
+help: call `Into::into` on this expression to convert `SymDim` into `usize`
+    |
+314 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: kv_dim, k: Concrete(h).into(), dtype: dt }, vec![normed1, w_k], vec![k_out], "gemm_k");
+    |                                                                      +++++++
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:316:59
+    |
+316 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: kv_dim, k: Concrete(h), dtype: dt }, vec![normed1, w_v], vec![v_out], "gemm_v");
+    |                                                           ^^^^^^^^^^^ expected `usize`, found `SymDim`
+    |
+help: call `Into::into` on this expression to convert `SymDim` into `usize`
+    |
+316 |     g.add_op(OpKind::Gemm { m: Concrete(s), n: kv_dim, k: Concrete(h).into(), dtype: dt }, vec![normed1, w_v], vec![v_out], "gemm_v");
+    |                                                                      +++++++
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:327:47
+    |
+327 |         OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim },
+    |                                               ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+327 |         OpKind::MultiHeadAttention { seq_len: gllm_kernels::compiler::SymDim::Concrete(s), num_heads, num_kv_heads, head_dim },
+    |                                               +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:333:32
+    |
+333 |     g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+333 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:343:32
+    |
+343 |     g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+343 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:345:32
+    |
+345 |     g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_up], vec![up_out], "gemm_up");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+345 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: inter, k: h, dtype: dt }, vec![normed2, w_up], vec![up_out], "gemm_up");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:349:32
+    |
+349 |     g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+349 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:428:32
+    |
+428 |     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+428 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:465:32
+    |
+465 |     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+465 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:764:27
+    |
+764 |         OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
+    |                           ^^^^^^^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+764 |         OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(seq_len), n: vocab_size, k: hidden, dtype: dt },
+    |                           +++++++++++++++++++++++++++++++++++++++++       +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:892:32
+    |
+892 |     g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+892 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: q_dim, k: h, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:894:32
+    |
+894 |     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+894 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+   --> src/compat/jit_helpers.rs:896:32
+    |
+896 |     g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
+    |                                ^ expected `SymDim`, found `usize`
+    |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+    |
+896 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
+    |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1021:32
+     |
+1021 |     g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+     |                                ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1021 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+     |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1074:29
+     |
+1074 |         OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dtype },
+     |                             ^^^^^^^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1074 |         OpKind::CachedGQA { seq_len: gllm_kernels::compiler::SymDim::Concrete(seq_len), total_seq, num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dtype },
+     |                             ++++++++++++++++++++++++++++++++++++++++++++++++++       +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1074:38
+     |
+1074 |         OpKind::CachedGQA { seq_len, total_seq, num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dtype },
+     |                                      ^^^^^^^^^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1074 |         OpKind::CachedGQA { seq_len, total_seq: gllm_kernels::compiler::SymDim::Concrete(total_seq), num_heads, num_kv_heads, head_dim, strategy, kv_dtype: dtype },
+     |                                      ++++++++++++++++++++++++++++++++++++++++++++++++++++         +
+
+error[E0283]: type annotations needed
+    --> src/compat/jit_helpers.rs:1104:30
+     |
+1104 |     binding.bind("total_seq".into(), total_seq);
+     |             ----             ^^^^
+     |             |
+     |             required by a bound introduced by this call
+     |
+     = note: cannot satisfy `_: Into<std::string::String>`
+note: required by a bound in `ShapeBinding::bind`
+    --> /home/putao/code/rust/gllm-kernels/src/compiler/graph.rs:85:38
+     |
+  85 |     pub fn bind(mut self, name: impl Into<String>, value: usize) -> Self {
+     |                                      ^^^^^^^^^^^^ required by this bound in `ShapeBinding::bind`
+help: try using a fully qualified path to specify the expected types
+     |
+1104 -     binding.bind("total_seq".into(), total_seq);
+1104 +     binding.bind(<&str as Into<T>>::into("total_seq"), total_seq);
+     |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<std::string::String>` trivially holds
+     |
+1104 -     binding.bind("total_seq".into(), total_seq);
+1104 +     binding.bind("total_seq", total_seq);
+     |
+
+error[E0283]: type annotations needed
+    --> src/compat/jit_helpers.rs:1104:30
+     |
+1104 |     binding.bind("total_seq".into(), total_seq);
+     |                              ^^^^
+     |
+     = note: multiple `impl`s satisfying `_: From<&str>` found in the following crates: `bytes`, `derive_builder`:
+             - impl From<&'static str> for derive_builder::error::UninitializedFieldError;
+             - impl From<&'static str> for prost::bytes::Bytes;
+     = note: required for `&str` to implement `Into<_>`
+help: try using a fully qualified path to specify the expected types
+     |
+1104 -     binding.bind("total_seq".into(), total_seq);
+1104 +     binding.bind(<&str as Into<T>>::into("total_seq"), total_seq);
+     |
+
+error[E0560]: struct `ModelArchKey` has no field named `arch_name`
+    --> src/compat/jit_helpers.rs:1257:9
+     |
+1257 |         arch_name: "moe_ffn".to_string(),
+     |         ^^^^^^^^^ `ModelArchKey` does not have this field
+     |
+     = note: available fields are: `model_id`, `inter_size`, `num_layers`, `compute_dtype`, `backend`, `isa_version`
+
+error[E0599]: no variant named `MoeFfnRouting` found for enum `GraphType`
+    --> src/compat/jit_helpers.rs:1268:27
+     |
+1268 |         graph: GraphType::MoeFfnRouting { num_experts, top_k },
+     |                           ^^^^^^^^^^^^^ variant not found in `GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnRouting` not found here
+
+error[E0599]: no variant named `MoeFfnExpert` found for enum `GraphType`
+    --> src/compat/jit_helpers.rs:1311:27
+     |
+1311 |         graph: GraphType::MoeFfnExpert { inter_size: inter },
+     |                           ^^^^^^^^^^^^ variant not found in `GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnExpert` not found here
+
+error[E0599]: no variant named `MoeFfnCombine` found for enum `GraphType`
+    --> src/compat/jit_helpers.rs:1350:27
+     |
+1350 |         graph: GraphType::MoeFfnCombine { top_k },
+     |                           ^^^^^^^^^^^^^ variant not found in `GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnCombine` not found here
+
+error[E0560]: struct `ModelArchKey` has no field named `arch_name`
+    --> src/compat/jit_helpers.rs:1465:13
+     |
+1465 |             arch_name: "swiglu".to_string(),
+     |             ^^^^^^^^^ `ModelArchKey` does not have this field
+     |
+     = note: available fields are: `model_id`, `inter_size`, `num_layers`, `compute_dtype`, `backend`, `isa_version`
+
+error[E0599]: no variant named `SwiGluActivation` found for enum `GraphType`
+    --> src/compat/jit_helpers.rs:1472:27
+     |
+1472 |         graph: GraphType::SwiGluActivation { inter_size: inter },
+     |                           ^^^^^^^^^^^^^^^^ variant not found in `GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `SwiGluActivation` not found here
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1523:36
+     |
+1523 |         OpKind::MoEGate { seq_len: s, num_experts, hidden },
+     |                                    ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1523 |         OpKind::MoEGate { seq_len: gllm_kernels::compiler::SymDim::Concrete(s), num_experts, hidden },
+     |                                    +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1529:33
+     |
+1529 |         OpKind::TopK { seq_len: s, num_experts, top_k },
+     |                                 ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1529 |         OpKind::TopK { seq_len: gllm_kernels::compiler::SymDim::Concrete(s), num_experts, top_k },
+     |                                 +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1563:32
+     |
+1563 |     g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_gate], vec![gate_out], "gemm_gate");
+     |                                ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1563 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: inter, k: hidden, dtype: dt }, vec![input, w_gate], vec![gate_out], "gemm_gate");
+     |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1565:32
+     |
+1565 |     g.add_op(OpKind::Gemm { m: s, n: inter, k: hidden, dtype: dt }, vec![input, w_up], vec![up_out], "gemm_up");
+     |                                ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1565 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: inter, k: hidden, dtype: dt }, vec![input, w_up], vec![up_out], "gemm_up");
+     |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1569:32
+     |
+1569 |     g.add_op(OpKind::Gemm { m: s, n: hidden, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+     |                                ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1569 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: hidden, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+     |                                +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1600:40
+     |
+1600 |         OpKind::WeightedSum { seq_len: s, hidden, top_k },
+     |                                        ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1600 |         OpKind::WeightedSum { seq_len: gllm_kernels::compiler::SymDim::Concrete(s), hidden, top_k },
+     |                                        +++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0308]: mismatched types
+    --> src/compat/jit_helpers.rs:1675:29
+     |
+1675 |     g.add_op(OpKind::Gemm { m, n, k, dtype }, vec![a, b], vec![c], "gemm");
+     |                             ^ expected `SymDim`, found `usize`
+     |
+help: try wrapping the expression in `gllm_kernels::compiler::SymDim::Concrete`
+     |
+1675 |     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(m), n, k, dtype }, vec![a, b], vec![c], "gemm");
+     |                             ++++++++++++++++++++++++++++++++++++++++++++ +
+
+error[E0599]: no method named `vec_add` found for struct `gllm_kernels::backend::CpuKernels<E>` in the current scope
+   --> src/compat/gpu_helpers.rs:601:15
+    |
+601 |         _kern.vec_add(&hidden_f32, &pos_f32, &mut added);
+    |               ^^^^^^^ method not found in `gllm_kernels::backend::CpuKernels<f32>`
+    |
+   ::: /home/putao/code/rust/gllm-kernels/src/traits.rs:204:8
+    |
+204 |     fn vec_add(&self, a: &[E], b: &[E], out: &mut [E]);  // required
+    |        ------- the method is available for `gllm_kernels::backend::CpuKernels<f32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Kernels` which provides `vec_add` is implemented but not in scope; perhaps you want to import it
+    |
+  7 + use gllm_kernels::Kernels;
+    |
+
+error[E0599]: no method named `vec_add` found for struct `gllm_kernels::backend::CpuKernels<E>` in the current scope
+   --> src/compat/gpu_helpers.rs:616:15
+    |
+616 |         _kern.vec_add(&hidden_f32, &tt_f32, &mut added);
+    |               ^^^^^^^ method not found in `gllm_kernels::backend::CpuKernels<f32>`
+    |
+   ::: /home/putao/code/rust/gllm-kernels/src/traits.rs:204:8
+    |
+204 |     fn vec_add(&self, a: &[E], b: &[E], out: &mut [E]);  // required
+    |        ------- the method is available for `gllm_kernels::backend::CpuKernels<f32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Kernels` which provides `vec_add` is implemented but not in scope; perhaps you want to import it
+    |
+  7 + use gllm_kernels::Kernels;
+    |
+
+error[E0599]: no method named `layer_norm` found for struct `gllm_kernels::backend::CpuKernels<E>` in the current scope
+   --> src/compat/gpu_helpers.rs:637:19
+    |
+637 |             _kern.layer_norm(
+    |             ------^^^^^^^^^^ method not found in `gllm_kernels::backend::CpuKernels<f32>`
+    |
+   ::: /home/putao/code/rust/gllm-kernels/src/traits.rs:276:8
+    |
+276 |     fn layer_norm(&self, _x: &[E], _gamma: &[E], _beta: &[E], _out: &mut [E], _eps: f32) {
+    |        ---------- the method is available for `gllm_kernels::backend::CpuKernels<f32>` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Kernels` which provides `layer_norm` is implemented but not in scope; perhaps you want to import it
+    |
+  7 + use gllm_kernels::Kernels;
+    |
+
+warning: unused variable: `cols_expected`
+   --> src/compat/weight_helpers.rs:152:56
+    |
+152 | pub(crate) fn transpose_f32(data: &[f32], rows: usize, cols_expected: usize) -> Vec<f32> {
+    |                                                        ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cols_expected`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rope_theta`
+  --> src/compat/decoder_forward.rs:73:5
+   |
+73 |     rope_theta: f64,
+   |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rope_theta`
+
+error[E0560]: struct `jit_cache::ModelArchKey` has no field named `arch_name`
+    --> src/compat/jit_helpers.rs:1257:9
+     |
+1257 |         arch_name: "moe_ffn".to_string(),
+     |         ^^^^^^^^^ `jit_cache::ModelArchKey` does not have this field
+     |
+     = note: available fields are: `model_id`, `inter_size`, `num_layers`, `compute_dtype`, `backend`, `isa_version`
+
+error[E0599]: no variant named `MoeFfnRouting` found for enum `jit_cache::GraphType`
+    --> src/compat/jit_helpers.rs:1268:27
+     |
+1268 |         graph: GraphType::MoeFfnRouting { num_experts, top_k },
+     |                           ^^^^^^^^^^^^^ variant not found in `jit_cache::GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnRouting` not found here
+
+error[E0599]: no variant named `MoeFfnExpert` found for enum `jit_cache::GraphType`
+    --> src/compat/jit_helpers.rs:1311:27
+     |
+1311 |         graph: GraphType::MoeFfnExpert { inter_size: inter },
+     |                           ^^^^^^^^^^^^ variant not found in `jit_cache::GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnExpert` not found here
+
+error[E0599]: no variant named `MoeFfnCombine` found for enum `jit_cache::GraphType`
+    --> src/compat/jit_helpers.rs:1350:27
+     |
+1350 |         graph: GraphType::MoeFfnCombine { top_k },
+     |                           ^^^^^^^^^^^^^ variant not found in `jit_cache::GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `MoeFfnCombine` not found here
+
+error[E0560]: struct `jit_cache::ModelArchKey` has no field named `arch_name`
+    --> src/compat/jit_helpers.rs:1465:13
+     |
+1465 |             arch_name: "swiglu".to_string(),
+     |             ^^^^^^^^^ `jit_cache::ModelArchKey` does not have this field
+     |
+     = note: available fields are: `model_id`, `inter_size`, `num_layers`, `compute_dtype`, `backend`, `isa_version`
+
+error[E0599]: no variant named `SwiGluActivation` found for enum `jit_cache::GraphType`
+    --> src/compat/jit_helpers.rs:1472:27
+     |
+1472 |         graph: GraphType::SwiGluActivation { inter_size: inter },
+     |                           ^^^^^^^^^^^^^^^^ variant not found in `jit_cache::GraphType`
+     |
+    ::: src/compat/jit_cache.rs:61:1
+     |
+  61 | pub enum GraphType {
+     | ------------------ variant `SwiGluActivation` not found here
+
+error[E0004]: non-exhaustive patterns: `gllm_kernels::types::DType::U8` not covered
+   --> src/compat/jit_helpers.rs:164:11
+    |
+164 |     match dt {
+    |           ^^ pattern `gllm_kernels::types::DType::U8` not covered
+    |
+note: `gllm_kernels::types::DType` defined here
+   --> /home/putao/code/rust/gllm-kernels/src/types.rs:12:1
+    |
+ 12 | pub enum DType {
+    | ^^^^^^^^^^^^^^
+...
+ 16 |     U8,
+    |     -- not covered
+    = note: the matched value is of type `gllm_kernels::types::DType`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+167 ~         DType::F32 => crate::compat::DType::F32,
+168 ~         gllm_kernels::types::DType::U8 => todo!(),
+    |
+
+error[E0004]: non-exhaustive patterns: `gllm_kernels::types::DType::U8` not covered
+   --> src/compat/jit_helpers.rs:189:15
+    |
+189 |         match dtype {
+    |               ^^^^^ pattern `gllm_kernels::types::DType::U8` not covered
+    |
+note: `gllm_kernels::types::DType` defined here
+   --> /home/putao/code/rust/gllm-kernels/src/types.rs:12:1
+    |
+ 12 | pub enum DType {
+    | ^^^^^^^^^^^^^^
+...
+ 16 |     U8,
+    |     -- not covered
+    = note: the matched value is of type `gllm_kernels::types::DType`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+210 ~             },
+211 +             gllm_kernels::types::DType::U8 => todo!()
+    |
+
+error[E0004]: non-exhaustive patterns: `gllm_kernels::types::DType::U8` not covered
+   --> src/compat/jit_helpers.rs:227:15
+    |
+227 |         match dtype {
+    |               ^^^^^ pattern `gllm_kernels::types::DType::U8` not covered
+    |
+note: `gllm_kernels::types::DType` defined here
+   --> /home/putao/code/rust/gllm-kernels/src/types.rs:12:1
+    |
+ 12 | pub enum DType {
+    | ^^^^^^^^^^^^^^
+...
+ 16 |     U8,
+    |     -- not covered
+    = note: the matched value is of type `gllm_kernels::types::DType`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+248 ~             },
+249 +             gllm_kernels::types::DType::U8 => todo!()
+    |
+
+warning: variable does not need to be mutable
+   --> src/compat/jit_helpers.rs:837:9
+    |
+837 |     let mut weights_buf = norm_w.to_vec();
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/compat/cpu_backend.rs:160:17
+    |
+160 | ...   let mut compile = |gt: GraphType, graph: gllm_kernels::compiler::CompilerGraph| -> Result<std::sync::Arc<gllm_kernels::compil...
+    |           ----^^^^^^^
+    |           |
+    |           help: remove this `mut`
+
+warning: unused variable: `config`
+   --> src/compat/cuda_backend.rs:413:9
+    |
+413 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/hip_backend.rs:297:9
+    |
+297 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/metal_backend.rs:286:9
+    |
+286 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+Some errors have detailed explanations: E0004, E0283, E0308, E0560, E0599.
+For more information about an error, try `rustc --explain E0004`.
+warning: `gllm` (lib) generated 12 warnings
+error: could not compile `gllm` (lib) due to 45 previous errors; 12 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused import: `super`
+    --> src/compat/decoder_forward.rs:1508:9
+     |
+1508 |     use super::*;
+     |         ^^^^^
+
+warning: unused variable: `yaml`
+   --> src/arch/template.rs:439:13
+    |
+439 |         let yaml = r#"
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_yaml`
+
+warning: unnecessary `unsafe` block
+   --> src/loader/gguf/reader.rs:767:20
+    |
+767 |         let mmap = unsafe {
+    |                    ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gllm` (lib test) generated 15 warnings (12 duplicates)
+error: could not compile `gllm` (lib test) due to 45 previous errors; 15 warnings emitted

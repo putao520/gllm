@@ -81,8 +81,8 @@ fn paged_attention_dynamic_batching_respects_limits() {
     batcher.update_batch(
         &mut scheduler,
         &[
-            BatchResult::complete(1, None),
-            BatchResult::complete(2, None),
+            BatchResult::complete(1, None, Default::default()),
+            BatchResult::complete(2, None, Default::default()),
         ],
     );
 
@@ -93,7 +93,7 @@ fn paged_attention_dynamic_batching_respects_limits() {
         BatchOrderPolicy::StrictRequestIdOrder,
     );
     assert_eq!(second.requests, vec![3]);
-    batcher.update_batch(&mut scheduler, &[BatchResult::complete(3, None)]);
+    batcher.update_batch(&mut scheduler, &[BatchResult::complete(3, None, Default::default())]);
     assert!(!batcher.has_pending_work());
 }
 
@@ -177,7 +177,7 @@ fn continuous_batching_improves_utilization_over_static() {
     let results: Vec<BatchResult> = batch
         .requests
         .iter()
-        .map(|id| BatchResult::complete(*id, None))
+        .map(|id| BatchResult::complete(*id, None, Default::default()))
         .collect();
     batcher.update_batch(&mut scheduler, &results);
 

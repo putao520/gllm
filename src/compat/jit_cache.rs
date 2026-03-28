@@ -1,11 +1,26 @@
-//! Three-level JIT compilation cache (REQ-JIT-CACHE-001/002/003).
+//! JIT Compilation Cache Protocol (REQ-JIT-CACHE-001~007).
 //!
-//! Level 1: Model-instance cache — `ModelJitCache` held by the caller, lives with the model.
-//! Level 2: Process-global LRU cache — `GLOBAL_JIT_CACHE` singleton, capacity 512.
-//! Level 3: Disk persistence — `~/.gllm/jit_cache/` binary files with magic + version header.
+//! **Iron Law**: Compilation only occurs at model load time.
+//! The inference hot path (decode step layer loop) MUST NOT contain any
+//! `InferenceCompiler::new()`, `compile_graph()`, or `build_*_graph()` calls.
 //!
-//! Lookup order: L2 global → L3 disk → JIT compile → write L2 + L3.
-//! L1 is managed by the caller (decoder_forward receives &mut ModelJitCache).
+//! # Three-Level Cache Hierarchy
+//!
+//! | Level | Lifetime             | Hit Scenario                    | Latency       |
+//! |:-----:|:---------------------|:--------------------------------|:-------------:|
+//! | L1    | Model instance       | Same model, multiple requests   | 0 (ptr deref) |
+//! | L2    | Process global (LRU) | Model hot-swap then reload      | ~1μs          |
+//! | L3    | Disk persistent      | Process restart, same model     | ~1ms          |
+//!
+//! # Cache Key = ModelArchKey + GraphType
+//!
+//! Dynamic dimensions (`seq_len`, `total_seq`) are NOT part of the key — they bind
+//! at launch time via `SymDim::Symbolic` + `ShapeBinding`.
+//!
+//! # Cache Granularity = Full-Layer Fused Graphs
+//!
+//! Each model compiles a small number of `GraphType` variants (≤5).
+//! NO per-operator graph types. NO per-seq_len recompilation.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -14,47 +29,43 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::compat::DType;
 
 // ---------------------------------------------------------------------------
-// Keys
+// Cache Keys (REQ-JIT-CACHE-002, REQ-JIT-CACHE-007)
 // ---------------------------------------------------------------------------
 
-/// Uniquely identifies a model architecture configuration.
+/// Model architecture signature — cache key for L2/L3.
+///
+/// Dynamic dimensions (seq_len, total_seq) are NOT included.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelArchKey {
-    pub arch_name: String,
+    pub model_id: String,
     pub hidden_size: usize,
     pub num_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
+    pub inter_size: usize,
+    pub num_layers: usize,
     pub dtype: DType,
+    pub compute_dtype: DType,
+    /// Backend kind (Cuda/Rocm/Metal/Cpu) — prevents cross-backend cache poisoning.
+    pub backend: crate::backend::BackendType,
+    /// ISA version — sm_version (CUDA), gfx_arch (ROCm), gpu_family (Metal),
+    /// or cpu_fingerprint() (CPU). Prevents cross-ISA cache poisoning.
+    pub isa_version: u32,
 }
 
-/// Identifies a specific compiled graph within an architecture.
+/// Full-layer fused graph type — the ONLY granularity of cache entries.
+///
+/// NO per-operator variants (QRope, Norm2, CachedGqa are GONE).
+/// Each variant = one complete layer-level fused computation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum GraphType {
-    QRope,
-    Norm2,
-    CachedGqa { total_seq: usize },
-    MoePreAttn,
-    MoeOGemm,
-    MoeNorm2,
-    KvProjection,
-    /// MoE FFN: routing (MoEGate → TopK), keyed by (num_experts, top_k)
-    MoeFfnRouting { num_experts: usize, top_k: usize },
-    /// MoE FFN: expert FFN (SwiGLU), keyed by inter_size
-    MoeFfnExpert { inter_size: usize },
-    /// MoE FFN: weighted combine (WeightedSum), keyed by top_k
-    MoeFfnCombine { top_k: usize },
-    /// BERT encoder layer (Attention + FFN), keyed by inter_size
-    BertLayer { inter_size: usize },
+    /// BERT encoder layer (fused)
+    BertLayer,
     /// BERT mean pooling
     BertMeanPool,
-    /// SwiGLU activation only (gate * silu(gate) * up), keyed by inter_size
-    SwiGluActivation { inter_size: usize },
-    /// Element-wise add (residual connection), keyed by numel
-    ResidualAdd { numel: usize },
 }
 
+/// Cache key = architecture + graph type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JitCacheKey {
     pub arch: ModelArchKey,
@@ -62,65 +73,16 @@ pub struct JitCacheKey {
 }
 
 // ---------------------------------------------------------------------------
-// Level 1: Model-instance cache
+// Level 1: Model-instance cache (REQ-JIT-CACHE-001)
 // ---------------------------------------------------------------------------
 
-/// Holds pre-compiled JIT graphs for one model instance.
-/// Lives as long as the model is loaded; all inference calls share these graphs.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub struct ModelJitCache {
-    /// Standard decoder: RmsNorm + Q + RoPE
-    pub q_rope: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// Standard decoder: pre-FFN RmsNorm
-    pub norm2: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// Standard decoder: KV projection
-    pub kv_proj: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// Standard decoder: CachedGQA per total_seq
-    pub gqa_cache: HashMap<usize, Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// MoE decoder: pre-attention graph
-    pub moe_pre_attn: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// MoE decoder: O projection GEMM
-    pub moe_o_gemm: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// MoE decoder: pre-FFN RmsNorm
-    pub moe_norm2: Option<Arc<gllm_kernels::compiler::CompiledLayer>>,
-    /// MoE decoder: CachedGQA per total_seq
-    pub moe_gqa_cache: HashMap<usize, Arc<gllm_kernels::compiler::CompiledLayer>>,
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-impl ModelJitCache {
-    pub fn new() -> Self {
-        Self {
-            q_rope: None,
-            norm2: None,
-            kv_proj: None,
-            gqa_cache: HashMap::new(),
-            moe_pre_attn: None,
-            moe_o_gemm: None,
-            moe_norm2: None,
-            moe_gqa_cache: HashMap::new(),
-        }
-    }
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-impl std::fmt::Debug for ModelJitCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModelJitCache")
-            .field("q_rope", &self.q_rope.is_some())
-            .field("norm2", &self.norm2.is_some())
-            .field("kv_proj", &self.kv_proj.is_some())
-            .field("gqa_cache_len", &self.gqa_cache.len())
-            .field("moe_pre_attn", &self.moe_pre_attn.is_some())
-            .field("moe_o_gemm", &self.moe_o_gemm.is_some())
-            .field("moe_norm2", &self.moe_norm2.is_some())
-            .field("moe_gqa_cache_len", &self.moe_gqa_cache.len())
-            .finish()
-    }
-}
-
+/// Pre-compiled full-layer fused graphs for one model instance.
+///
+/// Compiled at model load time. Zero compilation in the hot path.
+/// Dynamic dimensions handled via ShapeBinding at launch time.
+// Model-local cache entirely removed in favor of whole-model GraphExecutor
 // ---------------------------------------------------------------------------
-// Level 2: Process-global LRU cache
+// Level 2: Process-global LRU cache (REQ-JIT-CACHE-002)
 // ---------------------------------------------------------------------------
 
 struct LruCache {
@@ -140,7 +102,6 @@ impl LruCache {
 
     fn get(&mut self, key: &JitCacheKey) -> Option<Arc<gllm_kernels::compiler::CompiledLayer>> {
         if self.map.contains_key(key) {
-            // Move to back (most recently used)
             if let Some(pos) = self.order.iter().position(|k| k == key) {
                 self.order.remove(pos);
                 self.order.push_back(key.clone());
@@ -153,7 +114,6 @@ impl LruCache {
 
     fn insert(&mut self, key: JitCacheKey, value: Arc<gllm_kernels::compiler::CompiledLayer>) {
         if self.map.contains_key(&key) {
-            // Update existing — move to back
             if let Some(pos) = self.order.iter().position(|k| k == &key) {
                 self.order.remove(pos);
             }
@@ -161,7 +121,6 @@ impl LruCache {
             self.map.insert(key, value);
             return;
         }
-        // Evict LRU if at capacity
         if self.map.len() >= self.capacity {
             if let Some(oldest) = self.order.pop_front() {
                 self.map.remove(&oldest);
@@ -178,13 +137,12 @@ impl LruCache {
 }
 
 // ---------------------------------------------------------------------------
-// Level 3: Disk cache
+// Level 3: Disk cache (REQ-JIT-CACHE-003)
 // ---------------------------------------------------------------------------
 
 const DISK_MAGIC: &[u8; 8] = b"GLLMJITC";
 const GLLM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Simple FNV-1a hash for key → directory name (no external deps).
 fn fnv1a_hash(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -194,8 +152,7 @@ fn fnv1a_hash(data: &[u8]) -> u64 {
     hash
 }
 
-fn cpu_fingerprint() -> u64 {
-    // Encode detected CPU features as a bitmask for cache invalidation.
+pub fn cpu_fingerprint() -> u64 {
     let mut bits: u64 = 0;
     #[cfg(target_arch = "x86_64")]
     {
@@ -206,7 +163,7 @@ fn cpu_fingerprint() -> u64 {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        bits |= 1 << 8; // aarch64 baseline
+        bits |= 1 << 8;
     }
     bits
 }
@@ -219,7 +176,6 @@ fn cache_root() -> Option<PathBuf> {
                 .join(".gllm")
                 .join("models")
         });
-    // jit_cache lives next to models/
     let root = base.parent()?.join("jit_cache");
     Some(root)
 }
@@ -239,11 +195,10 @@ fn check_or_init_version(root: &std::path::Path) -> bool {
         if existing.trim() == expected.trim() {
             return true;
         }
-        // Version mismatch — wipe cache
-        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root).map_err(|e| log::debug!("JIT cache version mismatch, root removal failed: {}", e));
     }
-    let _ = std::fs::create_dir_all(root);
-    let _ = std::fs::write(&ver_path, &expected);
+    let _ = std::fs::create_dir_all(root).map_err(|e| log::debug!("JIT cache root creation failed: {}", e));
+    let _ = std::fs::write(&ver_path, &expected).map_err(|e| log::debug!("JIT cache version write failed: {}", e));
     true
 }
 
@@ -256,8 +211,6 @@ fn disk_path(root: &std::path::Path, key: &JitCacheKey) -> PathBuf {
         .join(format!("{:016x}.bin", graph_hash))
 }
 
-/// Write a CompiledLayer to disk.
-/// Format: [magic 8B][version_len 4B][version bytes][scratchpad 8B][config_hash 8B][code_len 8B][code bytes]
 fn disk_write(path: &std::path::Path, layer: &gllm_kernels::compiler::CompiledLayer) {
     let do_write = || -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -276,10 +229,9 @@ fn disk_write(path: &std::path::Path, layer: &gllm_kernels::compiler::CompiledLa
         buf.extend_from_slice(code);
         std::fs::write(path, &buf)
     };
-    let _ = do_write();
+    let _ = do_write().map_err(|e| log::debug!("JIT cache disk write failed for {:?}: {}", path, e));
 }
 
-/// Read a CompiledLayer from disk. Returns None on any error or version mismatch.
 fn disk_read(path: &std::path::Path) -> Option<gllm_kernels::compiler::CompiledLayer> {
     let data = std::fs::read(path).ok()?;
     if data.len() < 8 { return None; }
@@ -305,7 +257,55 @@ fn disk_read(path: &std::path::Path) -> Option<gllm_kernels::compiler::CompiledL
 }
 
 // ---------------------------------------------------------------------------
-// Global cache singleton
+// L3 Disk Cache TTL Cleanup
+// ---------------------------------------------------------------------------
+
+/// Remove stale L3 disk cache entries older than `max_age_secs` seconds.
+///
+/// Scans `root` for `.bin` files, deleting those with mtime exceeding the TTL.
+/// Empty parent directories are cleaned up after deletion.
+/// All I/O errors are silently ignored — cache cleanup must never block startup.
+fn cleanup_stale_entries(root: &std::path::Path, max_age_secs: u64) {
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs(max_age_secs);
+
+    let walk = || -> std::io::Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                // Arch-hash subdirectory: scan for .bin files inside
+                if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        let bin_path = sub.path();
+                        if bin_path.extension().map_or(false, |e| e == "bin") {
+                            if let Ok(meta) = std::fs::metadata(&bin_path) {
+                                if let Ok(modified) = meta.modified() {
+                                    if let Ok(age) = now.duration_since(modified) {
+                                        if age > max_age {
+                                            let _ = std::fs::remove_file(&bin_path).map_err(|e| log::debug!("JIT cache stale entry deletion failed for {:?}: {}", bin_path, e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Remove arch-hash dir if now empty
+                let _ = std::fs::remove_dir(&path).map_err(|e| {
+                    if e.kind() != std::io::ErrorKind::DirectoryNotEmpty {
+                        log::debug!("JIT cache clean dir removal failed for {:?}: {}", path, e);
+                    }
+                });
+            }
+        }
+        Ok(())
+    };
+    let _ = walk().map_err(|e| log::debug!("JIT cache stale cleanup scan failed: {}", e));
+}
+
+// ---------------------------------------------------------------------------
+// Global cache singleton (REQ-JIT-CACHE-002)
 // ---------------------------------------------------------------------------
 
 pub struct GlobalJitCache {
@@ -315,17 +315,26 @@ pub struct GlobalJitCache {
 
 impl GlobalJitCache {
     fn new() -> Self {
+        // Debug builds (cargo test / cargo build): disable L3 disk cache entirely.
+        // This ensures JIT codegen changes take effect immediately without
+        // stale disk-cached binaries masking modifications.
+        #[cfg(debug_assertions)]
+        let disk_root: Option<PathBuf> = None;
+
+        #[cfg(not(debug_assertions))]
         let disk_root = cache_root().and_then(|root| {
             check_or_init_version(&root);
+            // Purge entries older than 7 days on startup
+            cleanup_stale_entries(&root, 7 * 24 * 3600);
             Some(root)
         });
+
         Self {
             lru: RwLock::new(LruCache::new(512)),
             disk_root,
         }
     }
 
-    /// Create a cache instance with an explicit disk root (for testing).
     #[cfg(test)]
     fn with_disk_root(root: Option<PathBuf>) -> Self {
         Self {
@@ -334,16 +343,14 @@ impl GlobalJitCache {
         }
     }
 
-    /// Look up a compiled layer: L2 memory → L3 disk.
+    /// Look up: L2 memory → L3 disk.
     pub fn get(&self, key: &JitCacheKey) -> Option<Arc<gllm_kernels::compiler::CompiledLayer>> {
-        // L2: memory
         {
             let mut lru = self.lru.write().ok()?;
             if let Some(layer) = lru.get(key) {
                 return Some(layer);
             }
         }
-        // L3: disk
         if let Some(root) = &self.disk_root {
             let path = disk_path(root, key);
             if let Some(layer) = disk_read(&path) {
@@ -357,26 +364,24 @@ impl GlobalJitCache {
         None
     }
 
-    /// Insert a compiled layer into L2 and asynchronously write to L3.
+    /// Insert into L2 + L3.
     pub fn insert(
         &self,
         key: JitCacheKey,
         layer: gllm_kernels::compiler::CompiledLayer,
     ) -> Arc<gllm_kernels::compiler::CompiledLayer> {
         let arc = Arc::new(layer);
-        // Write to disk (synchronous but errors are silenced)
         if let Some(root) = &self.disk_root {
             let path = disk_path(root, &key);
             disk_write(&path, &arc);
         }
-        // Insert into L2
         if let Ok(mut lru) = self.lru.write() {
             lru.insert(key, arc.clone());
         }
         arc
     }
 
-    /// Get from cache or compile. Errors from compile_fn propagate; disk/memory errors are silent.
+    /// Get or compile. Compile errors propagate; cache errors are silent.
     pub fn get_or_compile(
         &self,
         key: JitCacheKey,
@@ -389,7 +394,6 @@ impl GlobalJitCache {
         Ok(self.insert(key, layer))
     }
 
-    /// Number of entries currently in the L2 memory cache.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.lru.read().map(|l| l.len()).unwrap_or(0)
@@ -413,79 +417,72 @@ mod tests {
     fn make_key(name: &str, graph: GraphType) -> JitCacheKey {
         JitCacheKey {
             arch: ModelArchKey {
-                arch_name: name.into(),
+                model_id: name.into(),
                 hidden_size: 256,
                 num_heads: 4,
                 num_kv_heads: 4,
                 head_dim: 64,
+                inter_size: 512,
+                num_layers: 4,
                 dtype: DType::F32,
+                compute_dtype: DType::F32,
+                backend: crate::backend::BackendType::Cpu,
+                isa_version: crate::compat::jit_cache::cpu_fingerprint() as u32,
             },
             graph,
         }
     }
 
-    /// TEST-JIT-CACHE-002: same key inserted twice → cache len stays 1
     #[test]
     fn test_global_cache_dedup() {
         let cache = GlobalJitCache::new();
-        let key = make_key("test_dedup", GraphType::Norm2);
-        // Compile a trivial graph to get a real CompiledLayer
-        let layer1 = compile_trivial_layer();
-        let layer2 = compile_trivial_layer();
-        cache.insert(key.clone(), layer1);
-        cache.insert(key.clone(), layer2);
+        let key = make_key("test_dedup", GraphType::FusedAttentionLayer);
+        cache.insert(key.clone(), compile_trivial_layer());
+        cache.insert(key.clone(), compile_trivial_layer());
         assert_eq!(cache.len(), 1);
     }
 
-    /// TEST-JIT-CACHE-003: LRU eviction at capacity
     #[test]
     fn test_lru_eviction() {
         let mut lru = LruCache::new(3);
         for i in 0..4usize {
-            let key = make_key(&format!("arch{i}"), GraphType::Norm2);
-            let layer = compile_trivial_layer();
-            lru.insert(key, Arc::new(layer));
+            let key = make_key(&format!("arch{i}"), GraphType::FusedFfnLayer);
+            lru.insert(key, Arc::new(compile_trivial_layer()));
         }
         assert_eq!(lru.len(), 3);
     }
 
-    /// TEST-JIT-CACHE-007: disk I/O failure → silent degradation, no error
     #[test]
     fn test_disk_failure_silent() {
-        // Point disk root at an unwritable path; get_or_compile must still succeed
         let cache = GlobalJitCache {
             lru: RwLock::new(LruCache::new(512)),
             disk_root: Some(PathBuf::from("/proc/nonexistent_gllm_test")),
         };
-        let key = make_key("test_disk_fail", GraphType::QRope);
+        let key = make_key("test_disk_fail", GraphType::FusedAttentionLayer);
         let result = cache.get_or_compile(key, || Ok(compile_trivial_layer()));
         assert!(result.is_ok());
     }
 
-    /// TEST-JIT-CACHE-006: version mismatch invalidates disk cache
     #[test]
     fn test_version_mismatch_invalidates() {
-        let dir = std::env::temp_dir().join("gllm_jit_test_ver");
+        let dir = std::env::temp_dir().join("gllm_jit_test_ver2");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Write wrong version
         std::fs::write(dir.join("version"), "0.0.0:0").unwrap();
-        // check_or_init_version should wipe and reinit
         check_or_init_version(&dir);
         let ver = std::fs::read_to_string(dir.join("version")).unwrap();
         assert_eq!(ver.trim(), version_string().trim());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// TEST-JIT-CACHE-004/005: disk round-trip preserves code bytes
     #[test]
     fn test_disk_roundtrip() {
-        let dir = std::env::temp_dir().join("gllm_jit_test_rt");
+        let dir = std::env::temp_dir().join("gllm_jit_test_rt2");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         check_or_init_version(&dir);
 
-        let key = make_key("test_rt", GraphType::Norm2);
+        let key = make_key("test_rt", GraphType::FusedFfnLayer);
         let layer = compile_trivial_layer();
         let path = disk_path(&dir, &key);
         disk_write(&path, &layer);
@@ -498,19 +495,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// TEST-JIT-CACHE-001: same key looked up twice → compile_fn called exactly once
     #[test]
-    fn test_instance_cache_compiles_once() {
-        // Use isolated cache with no disk root to avoid cross-test pollution
+    fn test_compiles_once() {
         let cache = GlobalJitCache::with_disk_root(None);
-        let key = make_key("test_once", GraphType::QRope);
+        let key = make_key("test_once", GraphType::FusedAttentionLayer);
         let mut compile_count = 0usize;
-        // First lookup: compiles
         let _r1 = cache.get_or_compile(key.clone(), || {
             compile_count += 1;
             Ok(compile_trivial_layer())
         }).expect("first compile");
-        // Second lookup: must hit L2, compile_fn must NOT be called
         let _r2 = cache.get_or_compile(key.clone(), || {
             compile_count += 1;
             Ok(compile_trivial_layer())
@@ -526,9 +519,48 @@ mod tests {
         let b = g.add_tensor_concrete("b", &[4, 4], DType::F32);
         g.inputs = vec![a, b];
         let c = g.add_tensor_concrete("c", &[1, 4], DType::F32);
-        g.add_op(OpKind::Gemm { m: 1, n: 4, k: 4, dtype: DType::F32 }, vec![a, b], vec![c], "g");
+        g.add_op(OpKind::Gemm { m: 1.into(), n: 4, k: 4, dtype: DType::F32 }, vec![a, b], vec![c], "g");
         g.outputs = vec![c];
         let mut compiler = InferenceCompiler::new();
         compiler.compile_graph(&g).expect("trivial compile")
+    }
+
+    #[test]
+    fn test_cleanup_stale_entries() {
+        let dir = std::env::temp_dir().join("gllm_jit_test_cleanup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create a fake arch-hash subdirectory with a .bin file
+        let arch_dir = dir.join("deadbeef01234567");
+        std::fs::create_dir_all(&arch_dir).unwrap();
+        let bin_file = arch_dir.join("cafebabe.bin");
+        std::fs::write(&bin_file, b"fake_jit_code").unwrap();
+
+        // Set mtime to 8 days ago using filetime crate equivalent
+        // We can't easily set mtime in pure std, so test with max_age_secs=0
+        // which should delete ANY file regardless of age.
+        assert!(bin_file.exists());
+        cleanup_stale_entries(&dir, 0); // 0 seconds = delete everything
+        assert!(!bin_file.exists(), "stale .bin file should be deleted");
+        // arch_dir should also be removed since it's now empty
+        assert!(!arch_dir.exists(), "empty arch dir should be removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_debug_mode_disables_disk() {
+        // In debug builds (cargo test), GlobalJitCache::new() sets disk_root = None
+        let cache = GlobalJitCache::new();
+        #[cfg(debug_assertions)]
+        assert!(cache.disk_root.is_none(), "debug mode must disable L3 disk cache");
+        #[cfg(not(debug_assertions))]
+        {
+            // In release mode, disk_root should be Some (if HOME is set)
+            if std::env::var("HOME").is_ok() {
+                assert!(cache.disk_root.is_some(), "release mode should enable L3 disk cache");
+            }
+        }
     }
 }

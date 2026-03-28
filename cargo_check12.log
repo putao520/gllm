@@ -1,0 +1,188 @@
+warning: unused import: `std::fmt::Write`
+  --> /home/putao/code/rust/gllm-kernels/src/compiler/codegen/gpu_ir/kernel_builder.rs:11:5
+   |
+11 | use std::fmt::Write;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> /home/putao/code/rust/gllm-kernels/src/cache_params.rs:41:20
+   |
+41 |         let info = unsafe { std::arch::x86_64::__cpuid_count(4, sub) };
+   |                    ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:183:17
+    |
+183 |     let leaf0 = unsafe { __cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:191:17
+    |
+191 |     let leaf1 = unsafe { __cpuid(1) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:109:16
+    |
+109 |     let info = unsafe { core::arch::x86_64::__cpuid(0x15) };
+    |                ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:120:18
+    |
+120 |     let info16 = unsafe { core::arch::x86_64::__cpuid(0x16) };
+    |                  ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:166:17
+    |
+166 |         let r = unsafe { std::arch::x86_64::__cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:177:21
+    |
+177 |             let r = unsafe { std::arch::x86_64::__cpuid(leaf) };
+    |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:262:20
+    |
+262 |         let info = unsafe { std::arch::x86_64::__cpuid(1) };
+    |                    ^^^^^^ unnecessary `unsafe` block
+
+warning: `gllm-kernels` (lib) generated 9 warnings (run `cargo fix --lib -p gllm-kernels` to apply 1 suggestion)
+    Checking gllm v0.11.0 (/home/putao/code/rust/gllm)
+warning: unused imports: `bytes_as_f32`, `execute_jit_decoder_layer`, `f32_as_bytes`, and `update_kv_cache_jit`
+ --> src/compat/bert_forward.rs:4:5
+  |
+4 |     bytes_as_f32, execute_jit_decoder_layer, f32_as_bytes, update_kv_cache_jit,
+  |     ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `GraphType`, `JitCacheKey`, `ModelArchKey`, and `global_jit_cache`
+ --> src/compat/decoder_forward.rs:5:24
+  |
+5 | use super::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+  |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `computation_dtype`, `f32_as_bytes_mut`, `kernels_dtype_to_compat`, and `pack_weights`
+  --> src/compat/decoder_forward.rs:9:5
+   |
+ 9 |     computation_dtype, computation_dtype_from_config, kernels_dtype_to_compat,
+   |     ^^^^^^^^^^^^^^^^^                                 ^^^^^^^^^^^^^^^^^^^^^^^
+10 |     execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+11 |     execute_kv_projection, pack_weights, pack_weights_typed, update_kv_cache_jit, write_kv_to_cache,
+   |                            ^^^^^^^^^^^^
+12 |     f32_as_bytes, f32_as_bytes_mut, bytes_as_f32,
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `quantized_linear`
+  --> src/compat/decoder_forward.rs:16:60
+   |
+16 |     get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear, transpose_f32,
+   |                                                            ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GpuBuffer` and `GpuDevice`
+ --> src/compat/gpu_compile.rs:1:25
+  |
+1 | use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
+  |                         ^^^^^^^^^  ^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/compat/decoder_forward.rs:686:25
+    |
+672 |                     let layer_sparsity = quantized_incremental_decode_layer(
+    |                                          ---------------------------------- arguments to this function are incorrect
+...
+686 |                         &mut decode_jit,
+    |                         ^^^^^^^^^^^^^^^ expected `&mut DecodeCachedJit`, found `&mut Option<DecodeCachedJit>`
+    |
+    = note: expected mutable reference `&mut DecodeCachedJit`
+               found mutable reference `&mut std::option::Option<DecodeCachedJit>`
+note: function defined here
+   --> src/compat/decoder_forward.rs:50:4
+    |
+ 50 |   fn quantized_incremental_decode_layer<E: Element>(
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 76 | /     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+ 77 | |     jit: &mut DecodeCachedJit,
+    | |_____________________________-
+
+warning: unused variable: `rope_theta`
+  --> src/compat/decoder_forward.rs:73:5
+   |
+73 |     rope_theta: f64,
+   |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rope_theta`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/compat/jit_helpers.rs:842:9
+    |
+842 |     let mut weights_buf = norm_w.to_vec();
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/compat/cpu_backend.rs:160:17
+    |
+160 | ...   let mut compile = |gt: GraphType, graph: gllm_kernels::compiler::CompilerGraph| -> Result<std::sync::Arc<gllm_kernels::compil...
+    |           ----^^^^^^^
+    |           |
+    |           help: remove this `mut`
+
+warning: unused variable: `config`
+   --> src/compat/cuda_backend.rs:413:9
+    |
+413 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/hip_backend.rs:297:9
+    |
+297 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/metal_backend.rs:286:9
+    |
+286 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused import: `super`
+    --> src/compat/decoder_forward.rs:1510:9
+     |
+1510 |     use super::*;
+     |         ^^^^^
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `gllm` (lib) generated 11 warnings
+error: could not compile `gllm` (lib) due to 1 previous error; 11 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused variable: `yaml`
+   --> src/arch/template.rs:439:13
+    |
+439 |         let yaml = r#"
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_yaml`
+
+warning: unnecessary `unsafe` block
+   --> src/loader/gguf/reader.rs:767:20
+    |
+767 |         let mmap = unsafe {
+    |                    ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gllm` (lib test) generated 14 warnings (11 duplicates)
+error: could not compile `gllm` (lib test) due to 1 previous error; 14 warnings emitted

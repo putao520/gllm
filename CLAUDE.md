@@ -19,6 +19,9 @@
 | `ARCH-4-FEATURES.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
+| `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议: 模型级缓存键, 全层融合粒度, SymDim 动态绑定, 四档自适应 Tiling |
+| `DOCS/scheduling/p4-p5-next-gen-optimizations.md` | P4/P5 下一代优化: 稀疏注意力, 动态精度, PGSLE, MoE 冷热, 大一统基建 |
+| `DOCS/scheduling/optimization_strategy_master.md` | 全链路优化总策略: 5 层优化体系, FLOPs -60%, 吞吐 3.8× |
 
 ## Technology Stack
 
@@ -96,6 +99,21 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 - PTX 多版本调度: `PtxKernelRegistry` 按 SM 版本选择最优内核（sm_70/80/90/100+），禁止 Fallback
 
 **铁律**：所有算子必须走完整管线（Scalar → SymExec → IR → ISA Lowering），禁止跳过任何阶段。详见下方「JIT 编译管线（铁律）」章节。
+
+**铁律（JIT 缓存协议）**：
+- **推理热路径（decode step 层循环）中禁止任何编译行为**（`InferenceCompiler::new()` / `compile_graph()` / `build_*_graph()`）。
+- **编译只发生在模型加载时**。编译产物缓存于 `ModelJitCache`（三级: L1 模型级 → L2 全局 LRU → L3 磁盘）。
+- **动态维度（seq_len, total_seq）通过 `SymDim::Symbolic` + `ShapeBinding` 运行时绑定**，不触发重编译。
+- **缓存粒度 = 全层融合图**（`FusedAttentionLayer` / `FusedFfnLayer`），不是单算子。
+- 详见 `SPEC/DOCS/scheduling/jit-cache-protocol.md`（REQ-JIT-CACHE-001~007）。
+
+**铁律（CPU/GPU 算子与流程统一 — ARCH-CPU-GPU-UNIFIED）**：
+- **CPU 和 GPU 后端共享完全一致的 `CompilerGraph` IR 和 `GraphType`**。同一个全层融合图通过 `DeviceProfile` 驱动 Phase 3 codegen 生成不同 ISA 机器码。
+- **禁止出现任何以 `Cpu` / `Gpu` / 后端名称为前缀的 `GraphType` 变体**（如 ❌ `CpuDecoderLayer`、❌ `CpuKvProjection`）。后端差异由 `ModelArchKey.backend` 字段和 `DeviceProfile` 处理。
+- **禁止出现 CPU 专用的图构建器**（如 ❌ `build_decoder_layer_graph()`）。CPU 的 `compile_model_graphs()` 必须调用与 GPU 相同的 `build_fused_*_symbolic()` 图构建器。
+- **禁止出现子算子级 `GraphType`**（如 ❌ `KvProjection`、❌ `QRope`、❌ `Norm2`、❌ `SwiGluActivation`）。缓存粒度始终为全层融合图。
+- **CPU 和 GPU 给定相同输入和权重，输出必须在浮点精度范围内一致**。P4/P5 算子（`EntropyGate`、`VRangeQuant` 等）在 CPU codegen 中可以使用简化标量实现，但必须语义正确。
+- 详见 `SPEC/DOCS/scheduling/jit-cache-protocol.md`（ARCH-CPU-GPU-UNIFIED, §2.2, §2.3）。
 
 ### 5.1 JIT 编译管线实现完成度（审计 2026-03-17）
 
@@ -244,6 +262,12 @@ src/
 - `HF_TOKEN`: HuggingFace 认证 token
 
 > **自动回退**: HuggingFace 下载失败时会自动切换到 ModelScope，无需手动指定来源。
+
+**JIT Cache**: `~/.gllm/jit_cache/`
+
+JIT 编译的全层融合图二进制缓存（L3 磁盘层）。7 天 TTL 自动清理。
+- **Debug 模式** (`cargo test` / `cargo build`)：L3 磁盘缓存完全禁用（不生产、不使用），确保每次编译产出最新代码
+- **Release 模式** (`cargo build --release`)：L3 磁盘缓存正常工作，启动时自动清理超过 7 天的缓存
 
 ## 🚨 环境变量铁律
 

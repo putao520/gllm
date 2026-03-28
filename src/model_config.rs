@@ -488,7 +488,10 @@ impl ModelConfig {
                 "attention.num_key_value_heads",
             ],
         )
-        .unwrap_or(num_attention_heads);
+        .unwrap_or_else(|| {
+            log::debug!("num_key_value_heads not found: defaulting to num_attention_heads = {}", num_attention_heads);
+            num_attention_heads
+        });
         let num_hidden_layers =
             require_usize(value, &["num_hidden_layers", "n_layer", "num_layers"])?;
         let intermediate_size = find_usize(
@@ -527,9 +530,12 @@ impl ModelConfig {
                 "seq_length",
                 "n_positions",
                 "rope_scaling.original_max_position_embeddings",
-            ],
+            ]
         )
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            log::debug!("max_position_embeddings not found: defaulting to 0 prior to manifest override");
+            0
+        });
 
         let max_position_embeddings = manifest
             .max_context_override
@@ -560,7 +566,10 @@ impl ModelConfig {
                     .as_ref()
                     .and_then(RopeScalingConfig::runtime_factor)
             })
-            .unwrap_or(1.0);
+            .unwrap_or_else(|| {
+                log::debug!("rope_scale not found: defaulting to 1.0");
+                1.0
+            });
         if !rope_scale.is_finite() || rope_scale <= 0.0 {
             return Err(ModelConfigError::InvalidConfig(
                 "rope_scale must be positive".to_string(),
@@ -574,15 +583,22 @@ impl ModelConfig {
                 "rotary_interleaved",
                 "interleaved_rotary",
                 "rope_scaling.interleaved",
-            ],
+            ]
         )
-        .unwrap_or(false);
+        .unwrap_or_else(|| {
+            log::debug!("rope_interleaved not found: defaulting to false");
+            false
+        });
 
         // Ω1: head_dim 从元数据读取，或使用标准公式计算
         // 注意：Embedding 模型可能没有 num_attention_heads，此时 head_dim = 0
         let head_dim = if num_attention_heads > 0 {
             find_usize(value, &["attention.head_dim", "head_dim", "kv_channels"])
-                .unwrap_or(hidden_size / num_attention_heads)
+                .unwrap_or_else(|| {
+                    let derived = hidden_size / num_attention_heads;
+                    log::debug!("head_dim not found: deriving from hidden_size/num_heads => {}", derived);
+                    derived
+                })
         } else {
             // Embedding 模型没有 attention heads
             0
@@ -598,7 +614,11 @@ impl ModelConfig {
             value,
             &["kv_cache_block_size", "kv_block_size", "page_size"],
         )
-        .unwrap_or_else(|| head_dim.max(num_key_value_heads));
+        .unwrap_or_else(|| {
+            let derived = head_dim.max(num_key_value_heads);
+            log::debug!("kv_cache_block_size not found: deriving from head_dim.max(num_key_value_heads) => {}", derived);
+            derived
+        });
         if kv_cache_block_size == 0 {
             return Err(ModelConfigError::InvalidConfig(
                 "invalid kv_cache_block_size".to_string(),

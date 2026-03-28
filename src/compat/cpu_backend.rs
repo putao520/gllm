@@ -131,6 +131,7 @@ impl<E: Element> Default for CpuBackend<E> {
 impl<E: Element> Backend<E> for CpuBackend<E> {
     type Tensor = Vec<E>;
 
+
     fn alloc_kv_cache(&self, config: &KvCacheConfig) -> Result<KvCacheHandle, BE> {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -165,7 +166,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
-    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
         if config.kernel_strategy != crate::scheduler::jit_types::KernelStrategy::AccuracyFirst {
             log::info!("cpu_backend: executing with {:?} strategy", config.kernel_strategy);
         }
@@ -173,6 +174,10 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         match topology.mask_type {
             AttentionMaskType::Causal => {
                 super::decoder_forward::decoder_forward(self, input, weights, kv_caches, config)
+                    .map(|(logits, sparsity)| {
+                        let telemetry = vec![crate::scheduler::SequenceTelemetry::default(); logits.len()];
+                        (logits, sparsity, telemetry)
+                    })
             }
             AttentionMaskType::Bidirectional => {
                 // BERT-style encoder: handled by embedding/rerank paths, not batch_forward

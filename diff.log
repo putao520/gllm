@@ -1,0 +1,968 @@
+diff --git a/src/compat/decoder_forward.rs b/src/compat/decoder_forward.rs
+index 99ac23a..6cc6432 100644
+--- a/src/compat/decoder_forward.rs
++++ b/src/compat/decoder_forward.rs
+@@ -31,103 +31,13 @@ use crate::engine::executor::{
+ /// through `quantized_linear` which uses `quantized_matmul` for quantized weights,
+ /// avoiding the expensive dequantize + transpose path.
+ /// Pre-compiled JIT graphs for MoE incremental decode (invariant across layers).
+-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-struct MoeDecodeCachedJit {
+-    /// RmsNorm → Q/K/V Gemm → RoPE (pre-attention)
+-    pre_attn: gllm_kernels::compiler::CompiledLayer,
+-    /// CachedGQA attention — compiled per unique total_seq, cached thereafter (same as DecodeCachedJit)
+-    gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer>,
+-    /// O projection Gemm
+-    o_gemm: gllm_kernels::compiler::CompiledLayer,
+-    /// Pre-FFN RmsNorm
+-    norm2: gllm_kernels::compiler::CompiledLayer,
+-    /// Parameters for lazy GQA compilation
+-    seq_len: usize,
+-    num_heads: usize,
+-    num_kv_heads: usize,
+-    head_dim: usize,
+-    dtype: gllm_kernels::types::DType,
+-}
+-#[allow(dead_code)]
+-fn compile_moe_decode_jit(
+-    seq_len: usize,
+-    hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
+-    eps: f32, rope_theta: f64, dtype: gllm_kernels::types::DType,
+-) -> Result<MoeDecodeCachedJit, BE> {
+-    let q_dim = num_heads * head_dim;
+-
+-    let pre_graph = build_moe_pre_attention_graph(
+-        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, dtype,
+-    );
+-    let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
+-    let pre_attn = c1.compile_graph(&pre_graph).map_err(|e| {
+-        BE::Other(format!("MoE decode JIT: pre-attention compile failed: {e}"))
+-    })?;
+-
+-    // O projection Gemm
+-    let o_gemm = {
+-        use gllm_kernels::compiler::{CompilerGraph, OpKind};
+-        let dt = dtype;
+-        let mut og = CompilerGraph::new();
+-        let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
+-        let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
+-        og.inputs = vec![a_in, b_in];
+-        let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
+-        og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
+-        og.outputs = vec![c_out];
+-        let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
+-        c3.compile_graph(&og).map_err(|e| {
+-            BE::Other(format!("MoE decode JIT: O Gemm compile failed: {e}"))
+-        })?
+-    };
+ 
+-    let norm2_graph = super::jit_helpers::build_final_norm_graph(
+-        seq_len, hidden, eps, dtype,
+-    );
+-    let mut c4 = gllm_kernels::compiler::InferenceCompiler::new();
+-    let norm2 = c4.compile_graph(&norm2_graph).map_err(|e| {
+-        BE::Other(format!("MoE decode JIT: RmsNorm2 compile failed: {e}"))
+-    })?;
+-
+-    Ok(MoeDecodeCachedJit {
+-        pre_attn, o_gemm, norm2,
+-        gqa_cache: std::collections::HashMap::new(),
+-        seq_len, num_heads, num_kv_heads, head_dim, dtype,
+-    })
+-}
+ 
+-/// Get or compile a CachedGQA CompiledLayer for MoE path.
+-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-fn get_or_compile_moe_gqa(jit: &mut MoeDecodeCachedJit, total_seq: usize) -> Result<&gllm_kernels::compiler::CompiledLayer, BE> {
+-    if !jit.gqa_cache.contains_key(&total_seq) {
+-        let graph = super::jit_helpers::build_cached_gqa_graph(
+-            jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
+-            jit.dtype,
+-        );
+-        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+-        let compiled = compiler.compile_graph(&graph).map_err(|e| {
+-            BE::Other(format!("MoE decode JIT: CachedGQA(total_seq={total_seq}) compile failed: {e}"))
+-        })?;
+-        jit.gqa_cache.insert(total_seq, compiled);
+-    }
+-    jit.gqa_cache.get(&total_seq)
+-        .ok_or_else(|| BE::Other("MoE GQA cache entry missing after insert".into()))
+-}
+ 
+ /// Pre-compiled JIT graphs for incremental decode (invariant across layers).
+ #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+ struct DecodeCachedJit {
+-    /// RmsNorm → Q Gemm → RoPE (fused)
+-    q_rope: gllm_kernels::compiler::CompiledLayer,
+-    /// CachedGQA attention — compiled per unique total_seq value, cached thereafter.
+-    /// Key = total_seq. First call with a new total_seq triggers one-time JIT compilation;
+-    /// subsequent calls with the same value reuse the cached CompiledLayer.
+-    /// This preserves full JIT loop-unrolling/tiling optimizations (Concrete dims)
+-    /// while eliminating redundant recompilation for repeated total_seq values.
+-    gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer>,
+-    /// Pre-FFN RmsNorm
+-    norm2: gllm_kernels::compiler::CompiledLayer,
+-    /// Parameters needed to compile new GQA entries on demand
++    gqa_layer: std::sync::Arc<gllm_kernels::compiler::CompiledLayer>,
+     seq_len: usize,
+     num_heads: usize,
+     num_kv_heads: usize,
+@@ -135,80 +45,10 @@ struct DecodeCachedJit {
+     dtype: gllm_kernels::types::DType,
+ }
+ 
+-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-fn build_q_rope_graph(
+-    seq_len: usize, hidden: usize, q_dim: usize, head_dim: usize,
+-    eps: f32, rope_theta: f64, dt: gllm_kernels::types::DType,
+-) -> gllm_kernels::compiler::CompilerGraph {
+-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+-    let mut g = CompilerGraph::new();
+-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+-    let rn1 = g.add_tensor_concrete("rn1_w", &[hidden], dt);
+-    let w_q = g.add_tensor_concrete("w_q", &[hidden, q_dim], dt);
+-    g.inputs = vec![input, rn1, w_q];
+-    let normed = g.add_tensor_concrete("normed", &[seq_len, hidden], dt);
+-    g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1], vec![normed], "rms_norm");
+-    let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
+-    g.add_op(OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
+-    let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
+-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
+-    g.outputs = vec![q_rope];
+-    g
+-}
+-
+-/// Pre-compile invariant JIT graphs for incremental decode.
+-/// GQA is NOT compiled here — it is lazily compiled on first use per unique total_seq value.
+-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-#[allow(dead_code)]
+-fn compile_decode_jit(
+-    seq_len: usize,
+-    hidden: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize,
+-    eps: f32, rope_theta: f64, dtype: gllm_kernels::types::DType,
+-) -> Result<DecodeCachedJit, BE> {
+-    let q_dim = num_heads * head_dim;
+-
+-    let q_rope_graph = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, dtype);
+-    let mut c1 = gllm_kernels::compiler::InferenceCompiler::new();
+-    let q_rope = c1.compile_graph(&q_rope_graph).map_err(|e| {
+-        BE::Other(format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
+-    })?;
+-
+-    let norm2_graph = super::jit_helpers::build_final_norm_graph(
+-        seq_len, hidden, eps, dtype,
+-    );
+-    let mut c3 = gllm_kernels::compiler::InferenceCompiler::new();
+-    let norm2 = c3.compile_graph(&norm2_graph).map_err(|e| {
+-        BE::Other(format!("decode JIT: RmsNorm2 compile failed: {e}"))
+-    })?;
+-
+-    Ok(DecodeCachedJit {
+-        q_rope, norm2,
+-        gqa_cache: std::collections::HashMap::new(),
+-        seq_len, num_heads, num_kv_heads, head_dim, dtype,
+-    })
+-}
+ 
+-/// Get or compile a CachedGQA CompiledLayer for the given total_seq.
+-/// Uses Concrete dims → full JIT loop-unrolling/tiling optimizations.
+-/// Compiles once per unique total_seq value, then caches indefinitely.
+-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-fn get_or_compile_gqa(jit: &mut DecodeCachedJit, total_seq: usize) -> Result<&gllm_kernels::compiler::CompiledLayer, BE> {
+-    if !jit.gqa_cache.contains_key(&total_seq) {
+-        let graph = super::jit_helpers::build_cached_gqa_graph(
+-            jit.seq_len, total_seq, jit.num_heads, jit.num_kv_heads, jit.head_dim,
+-            jit.dtype,
+-        );
+-        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+-        let compiled = compiler.compile_graph(&graph).map_err(|e| {
+-            BE::Other(format!("decode JIT: CachedGQA(total_seq={total_seq}) compile failed: {e}"))
+-        })?;
+-        jit.gqa_cache.insert(total_seq, compiled);
+-    }
+-    jit.gqa_cache.get(&total_seq)
+-        .ok_or_else(|| BE::Other("decode GQA cache entry missing after insert".into()))
+-}
+ 
+ fn quantized_incremental_decode_layer<E: Element>(
++    config: &crate::engine::executor::GeneratorForwardConfig,
+     backend: &CpuBackend<E>,
+     hidden_state: &[f32],
+     q_w: &WeightData,
+@@ -229,6 +69,8 @@ fn quantized_incremental_decode_layer<E: Element>(
+     num_kv_heads: usize,
+     head_dim: usize,
+     inter: usize,
++    eps: f32,
++    rope_theta: f64,
+     max_seq_len: usize,
+     transpose_weights: bool,
+     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+@@ -246,23 +88,31 @@ fn quantized_incremental_decode_layer<E: Element>(
+         heads_per_group: num_heads / num_kv_heads,
+     };
+ 
+-    // RmsNorm → Q Gemm → RoPE (pre-compiled)
++    use gllm_kernels::Kernels;
++    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
++
++    // RmsNorm -> Q Gemm -> RoPE natively
++    let mut normed1 = vec![0.0f32; seq_len * hidden];
++    for s in 0..seq_len {
++        kern.rms_norm(
++            &hidden_state[s * hidden..(s + 1) * hidden],
++            rn1_w,
++            &mut normed1[s * hidden..(s + 1) * hidden],
++            eps,
++        );
++    }
++
+     let mut q_proj = TypedBuffer::zeros(seq_len * geom.q_dim, dtype);
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    {
+-        let q_w_f32 = weight_data_to_f32(q_w, backend, transpose_weights, geom.q_dim, hidden)?;
+-        let weights_buf = pack_weights_typed(&[rn1_w, &q_w_f32], dtype);
+-        let mut scratchpad = vec![0u8; jit.q_rope.scratchpad_bytes];
+-        unsafe {
+-            jit.q_rope.execute(
+-                hidden_state.as_ptr() as *const u8,
+-                weights_buf.as_ptr(),
+-                std::ptr::null_mut(),
+-                positions.as_ptr(),
+-                std::ptr::null(),
+-                1, seq_len,
+-                q_proj.as_bytes_mut().as_mut_ptr(),
+-                scratchpad.as_mut_ptr(),
++    super::weight_helpers::quantized_linear(backend, &normed1, q_w, q_proj.as_f32_mut(), seq_len, geom.q_dim, hidden, transpose_weights, dtype)?;
++    
++    let (cos, sin) = (super::jit_helpers::bytes_as_f32(&config.rope_cos), super::jit_helpers::bytes_as_f32(&config.rope_sin));
++    for s in 0..seq_len {
++        let pos = positions[s] as usize;
++        let q_slice = &mut q_proj.as_f32_mut()[s * geom.q_dim..(s + 1) * geom.q_dim];
++        for h in 0..num_heads {
++            kern.rope_with_pos(
++                &mut q_slice[h * head_dim..(h + 1) * head_dim],
++                cos, sin, head_dim, pos, false,
+             );
+         }
+     }
+@@ -282,75 +132,46 @@ fn quantized_incremental_decode_layer<E: Element>(
+         }
+     }
+ 
+-    // CachedGQA attention — get cached CompiledLayer for this total_seq (compile once on first use)
++    // CachedGQA attention — execute symbolic GQA directly
+     let (attn_out, sparsity) = {
+         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+         {
+-            let gqa_compiled = get_or_compile_gqa(jit, total_seq)?;
+             super::jit_helpers::execute_cached_gqa(
+-                gqa_compiled, q_proj.as_f32(), k_slice_buf, v_slice_buf,
+-                seq_len, num_heads, head_dim,
++                &jit.gqa_layer, q_proj.as_f32(), k_slice_buf, v_slice_buf,
++                seq_len, total_seq, num_heads, head_dim,
+                 dtype,
+-            )
++            ).map_err(|e| BE::Other(format!("GQA execute failed: {e}")))?
+         }
+     };
+ 
+-    // O projection (quantized) + residual
+     let mut o_out = TypedBuffer::zeros(seq_len * hidden, dtype);
+-    quantized_linear(backend, &attn_out, o_w, o_out.as_f32_mut(), seq_len, hidden, geom.q_dim, transpose_weights, dtype)?;
+-    let resid1;
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    {
+-        let result = super::jit_helpers::jit_add(
+-            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+-            o_out.as_bytes(), dtype,
+-        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+-        resid1 = TypedBuffer::from_raw(result, dtype);
+-    }
+-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-    { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
+-    let mut normed2 = TypedBuffer::zeros(seq_len * hidden, dtype);
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    {
+-        super::jit_helpers::execute_jit_final_norm(
+-            &jit.norm2,
+-            resid1.as_bytes(),
+-            super::jit_helpers::f32_as_bytes(rn2_w),
+-            seq_len,
+-            normed2.as_bytes_mut(),
++    super::weight_helpers::quantized_linear(backend, &attn_out, o_w, o_out.as_f32_mut(), seq_len, hidden, geom.q_dim, transpose_weights, dtype)?;
++
++    let mut resid1 = vec![0.0f32; seq_len * hidden];
++    kern.vec_add(hidden_state, o_out.as_f32(), &mut resid1);
++
++    let mut normed2 = vec![0.0f32; seq_len * hidden];
++    for s in 0..seq_len {
++        kern.rms_norm(
++            &resid1[s * hidden..(s + 1) * hidden],
++            rn2_w,
++            &mut normed2[s * hidden..(s + 1) * hidden],
++            eps,
+         );
+     }
+-    let mut gate_out = TypedBuffer::zeros(seq_len * inter, dtype);
+-    quantized_linear(backend, normed2.as_f32(), gate_w, gate_out.as_f32_mut(), seq_len, inter, hidden, transpose_weights, dtype)?;
+-    let mut up_out = TypedBuffer::zeros(seq_len * inter, dtype);
+-    quantized_linear(backend, normed2.as_f32(), up_w, up_out.as_f32_mut(), seq_len, inter, hidden, transpose_weights, dtype)?;
+-    let swiglu_out;
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    {
+-        let result = super::jit_helpers::jit_swiglu(
+-            gate_out.as_bytes(),
+-            up_out.as_bytes(),
+-            seq_len, inter, dtype,
+-        ).map_err(|e| BE::Other(format!("SwiGLU JIT failed: {e}")))?;
+-        swiglu_out = TypedBuffer::from_raw(result, dtype);
+-    }
+-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-    {
+-        return Err(BE::Other("SwiGLU JIT requires x86_64 or aarch64".to_string()));
+-    }
+-    let mut down_out = TypedBuffer::zeros(seq_len * hidden, dtype);
+-    quantized_linear(backend, swiglu_out.as_f32(), down_w, down_out.as_f32_mut(), seq_len, hidden, inter, transpose_weights, dtype)?;
+ 
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    {
+-        let result = super::jit_helpers::jit_add(
+-            resid1.as_bytes(),
+-            down_out.as_bytes(), dtype,
+-        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+-        output.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
+-    }
+-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-    { return Err(BE::Other("residual add JIT requires x86_64 or aarch64".to_string())); }
++    let mut gate_up = vec![0.0f32; seq_len * inter * 2];
++    let (gate_out, up_out) = gate_up.split_at_mut(seq_len * inter);
++    super::weight_helpers::quantized_linear(backend, &normed2, gate_w, gate_out, seq_len, inter, hidden, transpose_weights, dtype)?;
++    super::weight_helpers::quantized_linear(backend, &normed2, up_w, up_out, seq_len, inter, hidden, transpose_weights, dtype)?;
++    
++    let mut swiglu_out = vec![0.0f32; seq_len * inter];
++    kern.swiglu(gate_out, up_out, &mut swiglu_out);
++    
++    let mut ffn_out = TypedBuffer::zeros(seq_len * hidden, dtype);
++    super::weight_helpers::quantized_linear(backend, &swiglu_out, down_w, ffn_out.as_f32_mut(), seq_len, hidden, inter, transpose_weights, dtype)?;
++    
++    kern.vec_add(&resid1, ffn_out.as_f32(), output);
+     Ok(sparsity)
+ }
+ 
+@@ -617,163 +438,24 @@ pub(crate) fn decoder_forward<E: Element>(
+             // Pre-compile all invariant JIT graphs for this decode step (once per model instance).
+             let total_seq = cached_seq_len + seq_len;
+ 
+-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-            let kv_proj_decode: std::sync::Arc<gllm_kernels::compiler::CompiledLayer> = {
+-                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+-                if l1.kv_proj.is_none() {
+-                    let arch_key = ModelArchKey {
+-                        arch_name: "decoder".into(),
+-                        hidden_size: hidden,
+-                        num_heads,
+-                        num_kv_heads,
+-                        head_dim,
+-                        dtype: kernels_dtype_to_compat(computation_dtype_from_config(config)),
+-                    };
+-                    let arc = global_jit_cache().get_or_compile(
+-                        JitCacheKey { arch: arch_key, graph: GraphType::KvProjection },
+-                        || {
+-                            let kv_graph = build_kv_projection_graph(
+-                                seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta, computation_dtype_from_config(config),
+-                            );
+-                            let mut kv_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+-                            kv_compiler.compile_graph(&kv_graph)
+-                                .map_err(|e| format!("KV projection (decode) JIT compilation failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    l1.kv_proj = Some(arc);
+-                }
+-                l1.kv_proj.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: kv_proj".into()))?.clone()
+-            };
+-
+-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-            {
+-                // Ensure q_rope and norm2 are compiled and stored in L1 cache.
+-                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+-                if l1.q_rope.is_none() {
+-                    let arch_key = ModelArchKey {
+-                        arch_name: "decoder".into(),
+-                        hidden_size: hidden,
+-                        num_heads,
+-                        num_kv_heads,
+-                        head_dim,
+-                        dtype: kernels_dtype_to_compat(computation_dtype_from_config(config)),
+-                    };
+-                    let cache = global_jit_cache();
+-                    let q_dim = num_heads * head_dim;
+-                    let arc = cache.get_or_compile(
+-                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::QRope },
+-                        || {
+-                            let g = build_q_rope_graph(seq_len, hidden, q_dim, head_dim, eps, rope_theta, computation_dtype_from_config(config));
+-                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+-                            c.compile_graph(&g).map_err(|e| format!("decode JIT: RmsNorm+Q+RoPE compile failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    l1.q_rope = Some(arc);
+-                    let arc2 = cache.get_or_compile(
+-                        JitCacheKey { arch: arch_key, graph: GraphType::Norm2 },
+-                        || {
+-                            let g = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype_from_config(config));
+-                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+-                            c.compile_graph(&g).map_err(|e| format!("decode JIT: RmsNorm2 compile failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    l1.norm2 = Some(arc2);
+-                }
+-                if moe_num_experts > 0 && l1.moe_pre_attn.is_none() {
+-                    let arch_key = ModelArchKey {
+-                        arch_name: "moe_decoder".into(),
+-                        hidden_size: hidden,
+-                        num_heads,
+-                        num_kv_heads,
+-                        head_dim,
+-                        dtype: kernels_dtype_to_compat(computation_dtype_from_config(config)),
+-                    };
+-                    let cache = global_jit_cache();
+-                    let q_dim = num_heads * head_dim;
+-                    let pre_attn = cache.get_or_compile(
+-                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::MoePreAttn },
+-                        || {
+-                            let g = build_moe_pre_attention_graph(
+-                                seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, computation_dtype_from_config(config),
+-                            );
+-                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+-                            c.compile_graph(&g).map_err(|e| format!("MoE decode JIT: pre-attention compile failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    let o_gemm = cache.get_or_compile(
+-                        JitCacheKey { arch: arch_key.clone(), graph: GraphType::MoeOGemm },
+-                        || {
+-                            use gllm_kernels::compiler::{CompilerGraph, OpKind};
+-                            let dt = computation_dtype_from_config(config);
+-                            let mut og = CompilerGraph::new();
+-                            let a_in = og.add_tensor_concrete("a", &[seq_len, q_dim], dt);
+-                            let b_in = og.add_tensor_concrete("b", &[q_dim, hidden], dt);
+-                            og.inputs = vec![a_in, b_in];
+-                            let c_out = og.add_tensor_concrete("c", &[seq_len, hidden], dt);
+-                            og.add_op(OpKind::Gemm { m: seq_len, n: hidden, k: q_dim, dtype: dt }, vec![a_in, b_in], vec![c_out], "gemm_o");
+-                            og.outputs = vec![c_out];
+-                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+-                            c.compile_graph(&og).map_err(|e| format!("MoE decode JIT: O Gemm compile failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    let norm2 = cache.get_or_compile(
+-                        JitCacheKey { arch: arch_key, graph: GraphType::MoeNorm2 },
+-                        || {
+-                            let g = super::jit_helpers::build_final_norm_graph(seq_len, hidden, eps, computation_dtype_from_config(config));
+-                            let mut c = gllm_kernels::compiler::InferenceCompiler::new();
+-                            c.compile_graph(&g).map_err(|e| format!("MoE decode JIT: RmsNorm2 compile failed: {e}"))
+-                        },
+-                    ).map_err(BE::Other)?;
+-                    l1.moe_pre_attn = Some(pre_attn);
+-                    l1.moe_o_gemm = Some(o_gemm);
+-                    l1.moe_norm2 = Some(norm2);
+-                }
+-            }
+-
+             // Build thin wrappers that borrow from L1 cache Arcs.
+-            // Seed gqa_cache from L1 so previously compiled entries are reused (REQ-JIT-CACHE-001).
+             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+             let mut decode_jit = {
+                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+-                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| -> Result<gllm_kernels::compiler::CompiledLayer, BE> {
+-                    gllm_kernels::compiler::CompiledLayer::from_code(
+-                        arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
+-                    ).map_err(|e| BE::Other(format!("clone CompiledLayer from Arc failed: {e}")))
+-                };
+-                // Seed gqa_cache from L1 accumulated entries.
+-                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> = {
+-                    let mut m = std::collections::HashMap::new();
+-                    for (&ts, arc) in l1.gqa_cache.iter() { m.insert(ts, clone_arc(arc)?); }
+-                    m
+-                };
+-                DecodeCachedJit {
+-                    q_rope: clone_arc(l1.q_rope.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: q_rope".into()))?)?,
+-                    norm2: clone_arc(l1.norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: norm2".into()))?)?,
+-                    gqa_cache,
++                let gqa_layer = l1.cached_gqa.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: cached_gqa".into()))?.clone();
++                Some(DecodeCachedJit {
++                    gqa_layer,
+                     seq_len, num_heads, num_kv_heads, head_dim,
+                     dtype: computation_dtype_from_config(config),
+-                }
++                })
+             };
+ 
+             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+             let mut moe_jit = if moe_num_experts > 0 {
+                 let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+-                let clone_arc = |arc: &std::sync::Arc<gllm_kernels::compiler::CompiledLayer>| -> Result<gllm_kernels::compiler::CompiledLayer, BE> {
+-                    gllm_kernels::compiler::CompiledLayer::from_code(
+-                        arc.code_bytes(), arc.scratchpad_bytes, arc.config_hash,
+-                    ).map_err(|e| BE::Other(format!("clone CompiledLayer from Arc failed: {e}")))
+-                };
+-                // Seed moe_gqa_cache from L1 accumulated entries.
+-                let gqa_cache: std::collections::HashMap<usize, gllm_kernels::compiler::CompiledLayer> = {
+-                    let mut m = std::collections::HashMap::new();
+-                    for (&ts, arc) in l1.moe_gqa_cache.iter() { m.insert(ts, clone_arc(arc)?); }
+-                    m
+-                };
+-                Some(MoeDecodeCachedJit {
+-                    pre_attn: clone_arc(l1.moe_pre_attn.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_pre_attn".into()))?)?,
+-                    o_gemm: clone_arc(l1.moe_o_gemm.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_o_gemm".into()))?)?,
+-                    norm2: clone_arc(l1.moe_norm2.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: moe_norm2".into()))?)?,
+-                    gqa_cache,
++                let gqa_layer = l1.cached_gqa.as_ref().ok_or_else(|| BE::Other("JIT cache entry missing: cached_gqa (MoE)".into()))?.clone();
++                Some(DecodeCachedJit {
++                    gqa_layer,
+                     seq_len, num_heads, num_kv_heads, head_dim,
+                     dtype: computation_dtype_from_config(config),
+                 })
+@@ -810,34 +492,42 @@ pub(crate) fn decoder_forward<E: Element>(
+                     None
+                 };
+ 
+-                if moe_weights.is_some() {
+-                    // MoE layers: JIT KV projection (replaces scalar update_kv_cache)
+-                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-                    update_kv_cache_jit(
+-                        backend, kv_caches[seq_idx],
+-                        layer, &hidden_state, &k_w_f32, &v_w_f32,
+-                        &rn1_w, &positions,
+-                        seq_len, hidden, num_kv_heads, head_dim, eps, rope_theta,
+-                        computation_dtype_from_config(config),
+-                    )?;
+-                } else {
+-                    // Dense layers: JIT KV projection
+-                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-                    {
+-                        let (k_rope, v_proj) = execute_kv_projection(
+-                            &kv_proj_decode,
+-                            &hidden_state, &rn1_w, &k_w_f32, &v_w_f32,
+-                            &positions, seq_len, hidden, num_kv_heads, head_dim, eps,
+-                            computation_dtype_from_config(config),
+-                        ).map_err(|e| BE::Other(e))?;
+-                        write_kv_to_cache(
+-                            backend, kv_caches[seq_idx],
+-                            layer, &k_rope, &v_proj,
+-                            seq_len, num_kv_heads, head_dim,
+-                        )?;
++                let mut normed1 = vec![0.0f32; seq_len * hidden];
++                use gllm_kernels::Kernels;
++                let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
++                for s in 0..seq_len {
++                    kern.rms_norm(
++                        &hidden_state[s * hidden..(s + 1) * hidden],
++                        &rn1_w,
++                        &mut normed1[s * hidden..(s + 1) * hidden],
++                        eps,
++                    );
++                }
++
++                let kv_dim = num_kv_heads * head_dim;
++                let mut k_rope = super::jit_helpers::TypedBuffer::zeros(seq_len * kv_dim, gllm_kernels::types::DType::F32);
++                let mut v_proj = super::jit_helpers::TypedBuffer::zeros(seq_len * kv_dim, gllm_kernels::types::DType::F32);
++                super::weight_helpers::quantized_linear(backend, &normed1, &WeightData::F32(k_w_f32), k_rope.as_f32_mut(), seq_len, kv_dim, hidden, transpose_weights, gllm_kernels::types::DType::F32)?;
++                super::weight_helpers::quantized_linear(backend, &normed1, &WeightData::F32(v_w_f32), v_proj.as_f32_mut(), seq_len, kv_dim, hidden, transpose_weights, gllm_kernels::types::DType::F32)?;
++                
++                let (cos, sin) = (super::jit_helpers::bytes_as_f32(&config.rope_cos), super::jit_helpers::bytes_as_f32(&config.rope_sin));
++                for s in 0..seq_len {
++                    let pos = positions[s] as usize;
++                    let k_slice = &mut k_rope.as_f32_mut()[s * kv_dim..(s + 1) * kv_dim];
++                    for h in 0..num_kv_heads {
++                        kern.rope_with_pos(
++                            &mut k_slice[h * head_dim..(h + 1) * head_dim],
++                            cos, sin, head_dim, pos, false,
++                        );
+                     }
+                 }
+ 
++                write_kv_to_cache(
++                    backend, kv_caches[seq_idx],
++                    layer, k_rope.as_f32(), v_proj.as_f32(),
++                    seq_len, num_kv_heads, head_dim,
++                )?;
++
+                 // Read cached K/V for attention (convert typed bytes → f32 for CPU attention)
+                 let (kv_cache_k, kv_cache_v) = {
+                     let store = backend.kv_store().lock().map_err(|e| {
+@@ -863,7 +553,7 @@ pub(crate) fn decoder_forward<E: Element>(
+                 let mut v_slice_buf = super::jit_helpers::TypedBuffer::zeros(total_seq * kv_dim, computation_dtype_from_config(config));
+ 
+                 if let Some((router_w, expert_weights, shared_expert)) = moe_weights {
+-                    // MoE incremental: JIT pre-attention + cached attention + scalar MoE FFN
++                    // MoE incremental: Native operations exclusively + Cached GQA + scalar MoE FFN
+                     let q_w_f32 = weight_data_to_f32(
+                         &q_w, backend, transpose_weights, num_heads * head_dim, hidden)?;
+                     let o_w_f32 = weight_data_to_f32(
+@@ -871,6 +561,8 @@ pub(crate) fn decoder_forward<E: Element>(
+ 
+                     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                     {
++                        use gllm_kernels::Kernels;
++                        let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
+                         let moe_c = moe_jit.as_mut().ok_or_else(|| BE::Other("JIT cache entry missing: moe_jit".into()))?;
+                         let geom = AttentionGeometry {
+                             num_heads, num_kv_heads, head_dim,
+@@ -879,82 +571,66 @@ pub(crate) fn decoder_forward<E: Element>(
+                             heads_per_group: num_heads / num_kv_heads,
+                         };
+ 
+-                        // Step 1: Pre-attention (pre-compiled)
+-                        let weights_buf = pack_weights_typed(&[&rn1_w, &q_w_f32, &k_w_f32, &v_w_f32], computation_dtype_from_config(config));
+-                        let mut q_rope = super::jit_helpers::TypedBuffer::zeros(seq_len * geom.q_dim, computation_dtype_from_config(config));
+-                        let mut scratchpad = vec![0u8; moe_c.pre_attn.scratchpad_bytes];
+-                        unsafe {
+-                            moe_c.pre_attn.execute(
+-                                hidden_state.as_ptr() as *const u8,
+-                                weights_buf.as_ptr(),
+-                                std::ptr::null_mut(),
+-                                positions.as_ptr(),
+-                                std::ptr::null(),
+-                                1, seq_len,
+-                                q_rope.as_bytes_mut().as_mut_ptr(),
+-                                scratchpad.as_mut_ptr(),
++                        // Step 1: Pre-attention (RmsNorm -> QKV -> RoPE) native
++                        let mut normed1 = vec![0.0f32; seq_len * hidden];
++                        for s in 0..seq_len {
++                            kern.rms_norm(
++                                &hidden_state[s * hidden..(s + 1) * hidden],
++                                &rn1_w,
++                                &mut normed1[s * hidden..(s + 1) * hidden],
++                                eps,
+                             );
+                         }
+ 
+-                        // Step 2: Cached GQA attention — get cached CompiledLayer for this total_seq
++                        let mut q_rope = super::jit_helpers::TypedBuffer::zeros(seq_len * geom.q_dim, gllm_kernels::types::DType::F32);
++                        super::weight_helpers::quantized_linear(backend, &normed1, &WeightData::F32(q_w_f32), q_rope.as_f32_mut(), seq_len, geom.q_dim, hidden, transpose_weights, gllm_kernels::types::DType::F32)?;
++                        
++                        let (cos, sin) = (super::jit_helpers::bytes_as_f32(&config.rope_cos), super::jit_helpers::bytes_as_f32(&config.rope_sin));
++                        for s in 0..seq_len {
++                            let pos = positions[s] as usize;
++                            let q_slice = &mut q_rope.as_f32_mut()[s * geom.q_dim..(s + 1) * geom.q_dim];
++                            for h in 0..num_heads {
++                                kern.rope_with_pos(
++                                    &mut q_slice[h * head_dim..(h + 1) * head_dim],
++                                    cos, sin, head_dim, pos, false,
++                                );
++                            }
++                        }
++
++                        // Step 2: Cached GQA attention
+                         let (attn_out, _layer_sparsity) = {
+-                            let gqa_compiled = get_or_compile_moe_gqa(moe_c, total_seq)?;
+                             super::jit_helpers::execute_cached_gqa(
+-                                gqa_compiled, q_rope.as_f32(), &kv_cache_k, &kv_cache_v,
+-                                seq_len, num_heads, head_dim,
+-                                computation_dtype_from_config(config),
+-                            )
++                                &moe_c.gqa_layer, q_rope.as_f32(), &kv_cache_k, &kv_cache_v,
++                                seq_len, total_seq, num_heads, head_dim,
++                                gllm_kernels::types::DType::F32,
++                            ).map_err(|e| BE::Other(format!("GQA execute failed: {e}")))?
+                         };
+ 
+-                        // Step 3: O projection (pre-compiled) + residual + RmsNorm2 (pre-compiled)
+-                        let mut o_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
+-                        {
+-                            let o_weights = pack_weights_typed(&[&o_w_f32], computation_dtype_from_config(config));
+-                            let mut o_scratch = vec![0u8; moe_c.o_gemm.scratchpad_bytes];
+-                            unsafe {
+-                                moe_c.o_gemm.execute(
+-                                    attn_out.as_ptr() as *const u8,
+-                                    o_weights.as_ptr(),
+-                                    std::ptr::null_mut(),
+-                                    std::ptr::null(),
+-                                    std::ptr::null(),
+-                                    1, seq_len,
+-                                    o_out.as_bytes_mut().as_mut_ptr(),
+-                                    o_scratch.as_mut_ptr(),
+-                                );
+-                            }
++                        // Step 3: O projection (native) + residual + RmsNorm2 (native)
++                        let mut o_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
++                        super::weight_helpers::quantized_linear(backend, &attn_out, &WeightData::F32(o_w_f32), o_out.as_f32_mut(), seq_len, hidden, geom.q_dim, transpose_weights, gllm_kernels::types::DType::F32)?;
++                        
++                        let mut resid1 = vec![0.0f32; seq_len * hidden];
++                        kern.vec_add(&hidden_state, o_out.as_f32(), &mut resid1);
++
++                        let mut normed2 = vec![0.0f32; seq_len * hidden];
++                        for s in 0..seq_len {
++                            kern.rms_norm(
++                                &resid1[s * hidden..(s + 1) * hidden],
++                                &rn2_w,
++                                &mut normed2[s * hidden..(s + 1) * hidden],
++                                eps,
++                            );
+                         }
+-                        let resid1 = super::jit_helpers::TypedBuffer::from_raw(
+-                            super::jit_helpers::jit_add(
+-                                super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+-                                o_out.as_bytes(),
+-                                computation_dtype_from_config(config),
+-                            ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?,
+-                            computation_dtype_from_config(config),
+-                        );
+-
+-                        let mut normed2 = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
+-                        super::jit_helpers::execute_jit_final_norm(
+-                            &moe_c.norm2,
+-                            resid1.as_bytes(),
+-                            super::jit_helpers::f32_as_bytes(&rn2_w),
+-                            seq_len,
+-                            normed2.as_bytes_mut(),
+-                        );
+ 
+-                        // Step 4: MoE FFN via JIT
++                        // Step 4: MoE FFN natively via scalar routines
+                         let moe_out = super::jit_helpers::execute_moe_ffn_jit(
+-                            normed2.as_f32(), &router_w, &expert_weights, shared_expert.as_ref(),
++                            &normed2, &router_w, &expert_weights, shared_expert.as_ref(),
+                             seq_len, hidden, inter, moe_num_experts, moe_top_k,
+-                            computation_dtype_from_config(config),
++                            gllm_kernels::types::DType::F32,
+                         )?;
+ 
+-                        let layer_out_bytes = super::jit_helpers::jit_add(
+-                            resid1.as_bytes(),
+-                            super::jit_helpers::f32_as_bytes(&moe_out),
+-                            computation_dtype_from_config(config),
+-                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+-                        layer_out.copy_from_bytes(&layer_out_bytes);
++                        kern.vec_add(&resid1, &super::jit_helpers::typed_bytes_to_f32(&moe_out, gllm_kernels::types::DType::F32), layer_out.as_f32_mut());
+                         sparsity_layers += 1;
+                     }
+                 } else {
+@@ -967,6 +643,7 @@ pub(crate) fn decoder_forward<E: Element>(
+                         &crate::weight_names::decoder_layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")))?;
+ 
+                     let layer_sparsity = quantized_incremental_decode_layer(
++                        config,
+                         backend,
+                         &hidden_state,
+                         &q_w, &o_w, &rn1_w,
+@@ -974,13 +651,14 @@ pub(crate) fn decoder_forward<E: Element>(
+                         &positions,
+                         &kv_cache_k, &kv_cache_v,
+                         layer, total_seq, seq_len,
+-                        hidden, num_heads, num_kv_heads, head_dim, inter,
++                        hidden, inter, num_heads, num_kv_heads, head_dim,
++                        eps, rope_theta,
+                         max_seq_len,
+                         transpose_weights,
++                        layer_out.as_f32_mut(),
+                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                         &mut decode_jit,
+-                        layer_out.as_f32_mut(),
+-                        computation_dtype_from_config(config),
++                        gllm_kernels::types::DType::F32,
+                         k_slice_buf.as_f32_mut(),
+                         v_slice_buf.as_f32_mut(),
+                     )?;
+@@ -993,26 +671,7 @@ pub(crate) fn decoder_forward<E: Element>(
+ 
+             // Writeback gqa_cache entries to L1 so they survive across inference calls.
+             // REQ-JIT-CACHE-001 criterion 4: gqa_cache accumulates across calls.
+-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-            {
+-                let l1: &mut super::jit_cache::ModelJitCache = unsafe { &mut *config.jit_cache_ptr };
+-                for (ts, compiled) in decode_jit.gqa_cache.drain() {
+-                    if let Ok(layer) = gllm_kernels::compiler::CompiledLayer::from_code(
+-                        compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+-                    ) {
+-                        l1.gqa_cache.entry(ts).or_insert_with(|| std::sync::Arc::new(layer));
+-                    }
+-                }
+-                if let Some(ref mut mj) = moe_jit {
+-                    for (ts, compiled) in mj.gqa_cache.drain() {
+-                        if let Ok(layer) = gllm_kernels::compiler::CompiledLayer::from_code(
+-                            compiled.code_bytes(), compiled.scratchpad_bytes, compiled.config_hash,
+-                        ) {
+-                            l1.moe_gqa_cache.entry(ts).or_insert_with(|| std::sync::Arc::new(layer));
+-                        }
+-                    }
+-                }
+-            }
++
+         } else if moe_num_experts > 0 {
+             // ── MoE Prefill path: scalar execution with expert routing ──
+ 
+@@ -1241,14 +900,10 @@ pub(crate) fn decoder_forward<E: Element>(
+                             );
+                         }
+                     }
+-                    let resid1 = super::jit_helpers::TypedBuffer::from_raw(
+-                        super::jit_helpers::jit_add(
+-                            super::jit_helpers::f32_as_bytes(&hidden_state[..seq_len * hidden]),
+-                            o_out.as_bytes(),
+-                            computation_dtype_from_config(config),
+-                        ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?,
+-                        computation_dtype_from_config(config),
+-                    );
++                    let _kern = gllm_kernels::backend::CpuKernels::<f32>::new();
++                    let mut resid1_f32 = vec![0.0f32; seq_len * hidden];
++                    _kern.vec_add(&hidden_state[..seq_len * hidden], o_out.as_f32(), &mut resid1_f32);
++                    let resid1 = super::jit_helpers::TypedBuffer::from_f32(&resid1_f32, computation_dtype_from_config(config));
+ 
+                     // Step 4: MoE FFN via JIT (expert FFN is JIT, routing is scalar)
+                     let moe_out = super::jit_helpers::execute_moe_ffn_jit(
+@@ -1257,12 +912,9 @@ pub(crate) fn decoder_forward<E: Element>(
+                         computation_dtype_from_config(config),
+                     )?;
+ 
+-                    let layer_out_bytes = super::jit_helpers::jit_add(
+-                        resid1.as_bytes(),
+-                        super::jit_helpers::f32_as_bytes(&moe_out),
+-                        computation_dtype_from_config(config),
+-                    ).map_err(|e| BE::Other(format!("residual add JIT failed: {e}")))?;
+-                    layer_out.copy_from_bytes(&layer_out_bytes);
++                    let mut layer_out_f32 = vec![0.0f32; seq_len * hidden];
++                    _kern.vec_add(&resid1_f32, &moe_out, &mut layer_out_f32);
++                    layer_out.copy_from_f32(&layer_out_f32);
+                     total_sparsity += layer_sparsity;
+                     sparsity_layers += 1;
+                 }
+@@ -1562,44 +1214,32 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
+     let final_norm_w = get_f32_data(weights, backend,
+         &crate::weight_names::decoder_final_norm_aliases())?;
+ 
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    let normed = {
+-        let norm_graph = build_final_norm_graph(seq_len, hidden, eps, computation_dtype_from_config(config));
+-        let mut norm_compiler = gllm_kernels::compiler::InferenceCompiler::new();
+-        let compiled_norm = norm_compiler.compile_graph(&norm_graph).map_err(|e| {
+-            BE::Other(format!("Final norm JIT compilation failed: {e}"))
+-        })?;
+-
+-        let mut normed_out = super::jit_helpers::TypedBuffer::zeros(seq_len * hidden, computation_dtype_from_config(config));
+-        execute_jit_final_norm(
+-            &compiled_norm,
+-            f32_as_bytes(&hidden_state),
+-            f32_as_bytes(&final_norm_w),
+-            seq_len,
+-            normed_out.as_bytes_mut(),
++    let mut normed_out = vec![0.0f32; seq_len * hidden];
++    use gllm_kernels::Kernels;
++    let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
++    for s in 0..seq_len {
++        kern.rms_norm(
++            &hidden_state[s * hidden..(s + 1) * hidden],
++            &final_norm_w,
++            &mut normed_out[s * hidden..(s + 1) * hidden],
++            eps,
+         );
+-        normed_out.to_f32_vec()
+-    };
++    }
+ 
+-    // (f) Mean pooling: average across all token positions via JIT
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    let pooled = super::jit_helpers::jit_mean_pool(&normed, seq_len, hidden,
+-        computation_dtype_from_config(config),
+-    )
+-        .map_err(|e| BE::Other(format!("mean pool JIT failed: {e}")))?;
+-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-    let pooled = { return Err(BE::Other("mean pool JIT requires x86_64 or aarch64".to_string())); };
++    // (f) Mean pooling: average across all token positions
++    let mut pooled = vec![0.0f32; hidden];
++    for s in 0..seq_len {
++        for i in 0..hidden {
++            pooled[i] += normed_out[s * hidden + i] / (seq_len as f32);
++        }
++    }
+ 
+-    // (g) L2 normalize via JIT (standard for embedding models)
+-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-    let pooled = {
+-        super::jit_helpers::jit_l2_normalize(&pooled, 1, hidden,
+-            computation_dtype_from_config(config),
+-        )
+-            .map_err(|e| BE::Other(format!("L2 normalize JIT failed: {e}")))?
+-    };
+-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-    compile_error!("L2 normalize requires JIT support (x86_64 or aarch64)");
++    // (g) L2 normalize (standard for embedding models)
++    let sum_sq = pooled.iter().map(|&x| x * x).sum::<f32>();
++    let l2 = sum_sq.sqrt().max(1e-12);
++    for x in pooled.iter_mut() {
++        *x /= l2;
++    }
+ 
+     Ok(pooled)
+ }
+@@ -1793,63 +1433,15 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
+             )));
+         }
+ 
+-        let mut scores = super::jit_helpers::TypedBuffer::zeros(num_labels, computation_dtype_from_config(config));
+-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+-        {
+-            use crate::compat::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+-            
+-            use gllm_kernels::compiler::{CompilerGraph, OpKind};
+-            
+-            let key = JitCacheKey {
+-                arch: ModelArchKey {
+-                    arch_name: "reranker_score".to_string(),
+-                    hidden_size: hidden,
+-                    num_heads: num_labels,
+-                    num_kv_heads: 0,
+-                    head_dim: 0,
+-                    dtype: kernels_dtype_to_compat(computation_dtype_from_config(config)),
+-                },
+-                graph: GraphType::ResidualAdd { numel: num_labels * hidden },
+-            };
+-            let compiled = global_jit_cache().get_or_compile(key, || {
+-                let mut g = CompilerGraph::new();
+-                let dt = computation_dtype_from_config(config);
+-                let x = g.add_tensor_concrete("x", &[1, hidden], dt);
+-                let w = g.add_tensor_concrete("w", &[hidden, num_labels], dt);
+-                g.inputs = vec![x, w];
+-                let out = g.add_tensor_concrete("logits", &[1, num_labels], dt);
+-                g.add_op(OpKind::Gemm { m: 1, n: num_labels, k: hidden, dtype: dt }, vec![x, w], vec![out], "score_gemm");
+-                g.outputs = vec![out];
+-                let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+-                compiler.compile_graph(&g).map_err(|e| format!("reranker score JIT failed: {e}"))
+-            }).map_err(|e| BE::Other(e))?;
+-            // score_w is [num_labels, hidden] row-major; GEMM expects w as [hidden, num_labels]
+-            let w_t = super::weight_helpers::transpose_f32(&score_w, num_labels, hidden);
+-            let dt = computation_dtype_from_config(config);
+-            let weight_buf = super::jit_helpers::pack_weights_typed(&[&w_t], dt);
+-            let mut logits = super::jit_helpers::TypedBuffer::zeros(num_labels, computation_dtype_from_config(config));
+-            let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
+-            unsafe {
+-                compiled.execute(
+-                    last_hidden.as_ptr() as *const u8,
+-                    weight_buf.as_ptr(),
+-                    std::ptr::null_mut(),
+-                    std::ptr::null(),
+-                    std::ptr::null(),
+-                    1, 1,
+-                    logits.as_bytes_mut().as_mut_ptr(),
+-                    scratchpad.as_mut_ptr(),
+-                );
+-            }
+-            let logits_f32 = logits.to_f32_vec();
+-            let scores_f32 = scores.as_f32_mut();
+-            for (i, s) in scores_f32.iter_mut().enumerate() {
+-                *s = 1.0 / (1.0 + (-logits_f32[i]).exp());
+-            }
++        let mut scores = vec![0.0f32; num_labels];
++        use gllm_kernels::Kernels;
++        let kern = gllm_kernels::backend::CpuKernels::<f32>::new();
++        for i in 0..num_labels {
++            let col = &score_w[i * hidden..(i + 1) * hidden];
++            let dot = kern.vec_dot(&last_hidden, col);
++            scores[i] = 1.0 / (1.0 + (-dot).exp());
+         }
+-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+-        { return Err(BE::Other("reranker score JIT requires x86_64 or aarch64".to_string())); }
+-        Ok(scores.to_f32_vec())
++        Ok(scores)
+     } else {
+         // Generative reranker path: use tied embeddings (lm_head) to get logits,
+         // then compute score from "yes"/"no" token probabilities.

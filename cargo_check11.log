@@ -1,0 +1,266 @@
+warning: unused import: `std::fmt::Write`
+  --> /home/putao/code/rust/gllm-kernels/src/compiler/codegen/gpu_ir/kernel_builder.rs:11:5
+   |
+11 | use std::fmt::Write;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> /home/putao/code/rust/gllm-kernels/src/cache_params.rs:41:20
+   |
+41 |         let info = unsafe { std::arch::x86_64::__cpuid_count(4, sub) };
+   |                    ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:183:17
+    |
+183 |     let leaf0 = unsafe { __cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/microarch.rs:191:17
+    |
+191 |     let leaf1 = unsafe { __cpuid(1) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:109:16
+    |
+109 |     let info = unsafe { core::arch::x86_64::__cpuid(0x15) };
+    |                ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/profiling/timer.rs:120:18
+    |
+120 |     let info16 = unsafe { core::arch::x86_64::__cpuid(0x16) };
+    |                  ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:166:17
+    |
+166 |         let r = unsafe { std::arch::x86_64::__cpuid(0) };
+    |                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:177:21
+    |
+177 |             let r = unsafe { std::arch::x86_64::__cpuid(leaf) };
+    |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> /home/putao/code/rust/gllm-kernels/src/autotuning/hw_info.rs:262:20
+    |
+262 |         let info = unsafe { std::arch::x86_64::__cpuid(1) };
+    |                    ^^^^^^ unnecessary `unsafe` block
+
+warning: `gllm-kernels` (lib) generated 9 warnings (run `cargo fix --lib -p gllm-kernels` to apply 1 suggestion)
+    Checking gllm v0.11.0 (/home/putao/code/rust/gllm)
+warning: unused imports: `bytes_as_f32`, `execute_jit_decoder_layer`, `f32_as_bytes`, and `update_kv_cache_jit`
+ --> src/compat/bert_forward.rs:4:5
+  |
+4 |     bytes_as_f32, execute_jit_decoder_layer, f32_as_bytes, update_kv_cache_jit,
+  |     ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `GraphType`, `JitCacheKey`, `ModelArchKey`, and `global_jit_cache`
+ --> src/compat/decoder_forward.rs:5:24
+  |
+5 | use super::jit_cache::{global_jit_cache, GraphType, JitCacheKey, ModelArchKey};
+  |                        ^^^^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `computation_dtype`, `f32_as_bytes_mut`, `kernels_dtype_to_compat`, and `pack_weights`
+  --> src/compat/decoder_forward.rs:9:5
+   |
+ 9 |     computation_dtype, computation_dtype_from_config, kernels_dtype_to_compat,
+   |     ^^^^^^^^^^^^^^^^^                                 ^^^^^^^^^^^^^^^^^^^^^^^
+10 |     execute_jit_decoder_layer, execute_jit_final_norm, execute_jit_lm_head,
+11 |     execute_kv_projection, pack_weights, pack_weights_typed, update_kv_cache_jit, write_kv_to_cache,
+   |                            ^^^^^^^^^^^^
+12 |     f32_as_bytes, f32_as_bytes_mut, bytes_as_f32,
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: unused import: `quantized_linear`
+  --> src/compat/decoder_forward.rs:16:60
+   |
+16 |     get_f32_data, get_weight_data, needs_weight_transpose, quantized_linear, transpose_f32,
+   |                                                            ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `GpuBuffer` and `GpuDevice`
+ --> src/compat/gpu_compile.rs:1:25
+  |
+1 | use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
+  |                         ^^^^^^^^^  ^^^^^^^^^
+
+error[E0308]: arguments to this function are incorrect
+   --> src/compat/decoder_forward.rs:672:42
+    |
+672 |                     let layer_sparsity = quantized_incremental_decode_layer(
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+685 |                         layer_out.as_f32_mut(),
+    |                         ---------------------- argument #26 of type `&mut DecodeCachedJit` is missing
+686 |                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+687 |                         &mut decode_jit,
+    |                         --------------- unexpected argument #27 of type `&mut std::option::Option<DecodeCachedJit>`
+    |
+note: function defined here
+   --> src/compat/decoder_forward.rs:50:4
+    |
+ 50 |   fn quantized_incremental_decode_layer<E: Element>(
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 76 | /     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+ 77 | |     jit: &mut DecodeCachedJit,
+    | |_____________________________-
+help: did you mean
+    |
+672 ~                     let layer_sparsity = quantized_incremental_decode_layer(
+673 +                         config,
+674 +                         backend,
+675 +                         &hidden_state,
+676 +                         &q_w,
+677 +                         &o_w,
+678 +                         &rn1_w,
+679 +                         &gate_w,
+680 +                         &up_w,
+681 +                         &down_w,
+682 +                         &rn2_w,
+683 +                         &positions,
+684 +                         &kv_cache_k,
+685 +                         &kv_cache_v,
+686 +                         layer,
+687 +                         total_seq,
+688 +                         seq_len,
+689 +                         hidden,
+690 +                         inter,
+691 +                         num_heads,
+692 +                         num_kv_heads,
+693 +                         head_dim,
+694 +                         eps,
+695 +                         rope_theta,
+696 +                         max_seq_len,
+697 +                         transpose_weights,
+698 +                         /* &mut DecodeCachedJit */,
+699 +                         layer_out.as_f32_mut(),
+700 +                         gllm_kernels::types::DType::F32,
+701 +                         k_slice_buf.as_f32_mut(),
+702 +                         v_slice_buf.as_f32_mut(),
+703 ~                     )?;
+    |
+
+error[E0599]: no method named `as_f32` found for struct `Vec<f32>` in the current scope
+   --> src/compat/decoder_forward.rs:933:48
+    |
+933 |                     _kern.vec_add(hidden_state.as_f32(), o_out.as_f32(), &mut resid1_f32);
+    |                                                ^^^^^^ method not found in `Vec<f32>`
+
+warning: unused variable: `cols_expected`
+   --> src/compat/weight_helpers.rs:152:56
+    |
+152 | pub(crate) fn transpose_f32(data: &[f32], rows: usize, cols_expected: usize) -> Vec<f32> {
+    |                                                        ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cols_expected`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rope_theta`
+  --> src/compat/decoder_forward.rs:73:5
+   |
+73 |     rope_theta: f64,
+   |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rope_theta`
+
+warning: variable does not need to be mutable
+   --> src/compat/jit_helpers.rs:842:9
+    |
+842 |     let mut weights_buf = norm_w.to_vec();
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/compat/jit_helpers.rs:1110:9
+     |
+1110 |     let mut binding = gllm_kernels::compiler::graph::ShapeBinding::new();
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+error[E0382]: borrow of moved value: `binding`
+    --> src/compat/jit_helpers.rs:1115:13
+     |
+1110 |     let mut binding = gllm_kernels::compiler::graph::ShapeBinding::new();
+     |         ----------- move occurs because `binding` has type `ShapeBinding`, which does not implement the `Copy` trait
+1111 |     binding.bind("total_seq", total_seq);
+     |             ---------------------------- `binding` moved due to this method call
+...
+1115 |             &binding,
+     |             ^^^^^^^^ value borrowed here after move
+     |
+note: `ShapeBinding::bind` takes ownership of the receiver `self`, which moves `binding`
+    --> /home/putao/code/rust/gllm-kernels/src/compiler/graph.rs:85:21
+     |
+  85 |     pub fn bind(mut self, name: impl Into<String>, value: usize) -> Self {
+     |                     ^^^^
+help: you can `clone` the value and consume it, but this might not be your desired behavior
+     |
+1111 |     binding.clone().bind("total_seq", total_seq);
+     |            ++++++++
+
+warning: variable does not need to be mutable
+   --> src/compat/cpu_backend.rs:160:17
+    |
+160 | ...   let mut compile = |gt: GraphType, graph: gllm_kernels::compiler::CompilerGraph| -> Result<std::sync::Arc<gllm_kernels::compil...
+    |           ----^^^^^^^
+    |           |
+    |           help: remove this `mut`
+
+warning: unused import: `super`
+    --> src/compat/decoder_forward.rs:1510:9
+     |
+1510 |     use super::*;
+     |         ^^^^^
+
+warning: unused variable: `config`
+   --> src/compat/cuda_backend.rs:413:9
+    |
+413 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/hip_backend.rs:297:9
+    |
+297 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config`
+   --> src/compat/metal_backend.rs:286:9
+    |
+286 |         config: &GeneratorForwardConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+Some errors have detailed explanations: E0308, E0382, E0599.
+For more information about an error, try `rustc --explain E0308`.
+warning: `gllm` (lib) generated 13 warnings
+error: could not compile `gllm` (lib) due to 3 previous errors; 13 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: unused variable: `yaml`
+   --> src/arch/template.rs:439:13
+    |
+439 |         let yaml = r#"
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_yaml`
+
+warning: unnecessary `unsafe` block
+   --> src/loader/gguf/reader.rs:767:20
+    |
+767 |         let mmap = unsafe {
+    |                    ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gllm` (lib test) generated 16 warnings (13 duplicates)
+error: could not compile `gllm` (lib test) due to 3 previous errors; 16 warnings emitted

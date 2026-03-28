@@ -22,6 +22,8 @@ pub struct Sequence {
     pub state: SequenceState,
     pub kv_pages: Vec<PageId>,
     pub position: usize,
+    pub telemetry: crate::scheduler::telemetry::SequenceTelemetry,
+    pub draft_budget: usize,
 }
 
 impl Sequence {
@@ -35,6 +37,8 @@ impl Sequence {
             state: SequenceState::Waiting,
             kv_pages: Vec::new(),
             position,
+            telemetry: crate::scheduler::telemetry::SequenceTelemetry::new(),
+            draft_budget: 0,
         }
     }
 

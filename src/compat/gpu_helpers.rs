@@ -83,7 +83,7 @@ impl GpuBackendOps for super::hip_backend::HipBackend<f32> {
             .map_err(|e| BE::Hip(format!("htod_raw failed: {e}")))
     }
     fn raw_alloc(&self, bytes: usize) -> Result<u64, BE> {
-        use gllm_kernels::gpu::GpuBuffer;
+        use gllm_kernels::gpu::{GpuBuffer, GpuDevice};
         let buf = self.device.alloc(bytes).map_err(|e| BE::Hip(format!("alloc failed: {e}")))?;
         let ptr = buf.as_device_ptr();
         std::mem::forget(buf);
@@ -274,6 +274,34 @@ pub(super) fn get_typed_data_gpu<E: Element, B: Backend<E>>(
     Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
 }
 
+// ── Phase 27: RmsNorm GEMM Pre-folding ───────────────────────────────────────
+
+/// Fold RmsNorm scale (gamma) directly into the downstream GEMM weights.
+///
+/// This eliminates redundant GMEM roundtrips for RmsNorm computation on the device,
+/// shifting the math to the host-side load phase.
+/// W'_{r,c} = W_{r,c} * \gamma_c
+fn fold_rms_norm_into_weights(
+    w_bytes: &mut [u8],
+    gamma_bytes: &[u8],
+    rows: usize, // e.g. out_dim
+    cols: usize, // e.g. in_dim (hidden)
+    dtype: DType,
+) {
+    let w_f32 = super::jit_helpers::typed_bytes_to_f32(w_bytes, dtype);
+    let g_f32 = super::jit_helpers::typed_bytes_to_f32(gamma_bytes, dtype);
+    let mut folded = vec![0.0_f32; w_f32.len()];
+
+    for r in 0..rows {
+        for c in 0..cols {
+            folded[r * cols + c] = w_f32[r * cols + c] * g_f32[c];
+        }
+    }
+
+    let packed = super::jit_helpers::pack_weights_typed(&[&folded], dtype);
+    w_bytes.copy_from_slice(&packed);
+}
+
 /// Transpose raw bytes in-place for a given dtype.
 ///
 /// Operates on raw byte buffer where each element is `elem_bytes` wide.
@@ -302,6 +330,7 @@ pub(super) fn load_decoder_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
     kv_hidden: usize,
     inter: usize,
     dtype: DType,
+    num_experts: Option<usize>,
 ) -> Result<std::collections::HashMap<String, Vec<u8>>, BE> {
     let mut m = std::collections::HashMap::new();
 
@@ -317,9 +346,56 @@ pub(super) fn load_decoder_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
     load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
     load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
     load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
+    if let Some(n_exp) = num_experts {
+        load!("w_router", &crate::weight_names::layer_aliases(layer, "mlp.gate.weight", Some("ffn_gate_inp.weight")));
+        
+        // Qwen/DeepSeek MoE Shared Expert weights
+        load!("w_gate_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.gate_proj.weight", Some("mlp.gate_proj.weight")));
+        load!("w_up_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.up_proj.weight", Some("mlp.up_proj.weight")));
+        load!("w_down_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.down_proj.weight", Some("mlp.down_proj.weight")));
+        
+        for i in 0..n_exp {
+            load!(&format!("w_gate_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "gate_proj.weight"));
+            load!(&format!("w_up_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "up_proj.weight"));
+            load!(&format!("w_down_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "down_proj.weight"));
+        }
+    } else {
+        load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
+        load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
+        load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
+    }
+
+    // Phase 27: RmsNorm GEMM Pre-folding
+    if let Some(attn_norm) = m.get("attn_norm_w").cloned() {
+        let mut fold = |name: &str, rows: usize, cols: usize| {
+            if let Some(w) = m.get_mut(name) {
+                fold_rms_norm_into_weights(w, &attn_norm, rows, cols, dtype);
+            }
+        };
+        fold("w_q", q_dim, hidden);
+        fold("w_k", kv_hidden, hidden);
+        fold("w_v", kv_hidden, hidden);
+    }
+
+    if let Some(ffn_norm) = m.get("ffn_norm_w").cloned() {
+        let mut fold = |name: &str, rows: usize, cols: usize| {
+            if let Some(w) = m.get_mut(name) {
+                fold_rms_norm_into_weights(w, &ffn_norm, rows, cols, dtype);
+            }
+        };
+        if let Some(n_exp) = num_experts {
+            fold("w_router", n_exp, hidden);
+            fold("w_gate_shared", inter, hidden);
+            fold("w_up_shared", inter, hidden);
+            for i in 0..n_exp {
+                fold(&format!("w_gate_exp{i}"), inter, hidden);
+                fold(&format!("w_up_exp{i}"), inter, hidden);
+            }
+        } else {
+            fold("w_gate", inter, hidden);
+            fold("w_up", inter, hidden);
+        }
+    }
 
     if needs_weight_transpose_gpu(weights) {
         let eb = dtype.size_bytes();
@@ -333,9 +409,21 @@ pub(super) fn load_decoder_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
         t("w_k", kv_hidden, hidden);
         t("w_v", kv_hidden, hidden);
         t("w_o", hidden, q_dim);
-        t("w_gate", inter, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
+        if let Some(n_exp) = num_experts {
+            t("w_router", n_exp, hidden);
+            t("w_gate_shared", inter, hidden);
+            t("w_up_shared", inter, hidden);
+            t("w_down_shared", hidden, inter);
+            for i in 0..n_exp {
+                t(&format!("w_gate_exp{i}"), inter, hidden);
+                t(&format!("w_up_exp{i}"), inter, hidden);
+                t(&format!("w_down_exp{i}"), hidden, inter);
+            }
+        } else {
+            t("w_gate", inter, hidden);
+            t("w_up", inter, hidden);
+            t("w_down", hidden, inter);
+        }
     }
 
     Ok(m)
@@ -457,6 +545,10 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
     let elem_bytes = comp_dtype.size_bytes();
 
+    let seq_len = tokens.len();
+    
+
+
     // Word embeddings (typed)
     let word_emb = get_typed_data_gpu(
         weights, backend,
@@ -493,15 +585,16 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
             )));
         }
     }
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    let mut hidden_f32 = super::jit_helpers::typed_bytes_to_f32(&hidden_state, comp_dtype);
+    let _kern = gllm_kernels::backend::CpuKernels::<f32>::new();
+    use gllm_kernels::Kernels;
+
     {
-        let added = super::jit_helpers::jit_add(
-            &hidden_state, &pos_emb[..seq_len * hidden_bytes], comp_dtype,
-        ).map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
-        hidden_state.copy_from_slice(&added);
+        let pos_f32 = super::jit_helpers::typed_bytes_to_f32(&pos_emb[..seq_len * hidden_bytes], comp_dtype);
+        let mut added = vec![0.0f32; seq_len * hidden];
+        _kern.vec_add(&hidden_f32, &pos_f32, &mut added);
+        hidden_f32.copy_from_slice(&added);
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
 
     // Token type embeddings (type 0, typed)
     let tt_emb = get_typed_data_gpu(
@@ -510,17 +603,12 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         comp_dtype,
     )?;
     if tt_emb.len() >= hidden_bytes {
-        // Broadcast tt_emb[hidden_bytes] across all seq positions → [seq_len, hidden_bytes]
+        // Broadcast tt_emb[hidden_bytes] across all seq positions
         let tt_broadcast: Vec<u8> = tt_emb[..hidden_bytes].iter().cloned().cycle().take(seq_len * hidden_bytes).collect();
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let added = super::jit_helpers::jit_add(
-                &hidden_state, &tt_broadcast, comp_dtype,
-            ).map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(&added);
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
+        let tt_f32 = super::jit_helpers::typed_bytes_to_f32(&tt_broadcast, comp_dtype);
+        let mut added = vec![0.0f32; seq_len * hidden];
+        _kern.vec_add(&hidden_f32, &tt_f32, &mut added);
+        hidden_f32.copy_from_slice(&added);
     }
 
     // Embedding LayerNorm (typed)
@@ -536,15 +624,24 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         comp_dtype,
     );
     {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            hidden_state = super::jit_helpers::jit_layer_norm(
-                &hidden_state, &emb_ln_w, &emb_ln_b, seq_len, hidden, comp_dtype,
-            ).map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
+        let ln_w = super::jit_helpers::typed_bytes_to_f32(&emb_ln_w, comp_dtype);
+        let ln_b = super::jit_helpers::typed_bytes_to_f32(&emb_ln_b, comp_dtype);
+        let mut ln_out = vec![0.0f32; seq_len * hidden];
+        for s in 0..seq_len {
+            _kern.layer_norm(
+                &hidden_f32[s * hidden..(s + 1) * hidden],
+                &ln_w,
+                &ln_b,
+                &mut ln_out[s * hidden..(s + 1) * hidden],
+                1e-5,
+            );
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        compile_error!("embedding LayerNorm requires JIT support (x86_64 or aarch64)");
+        hidden_f32.copy_from_slice(&ln_out);
     }
+    
+    hidden_state = super::jit_helpers::pack_weights_typed(&[&hidden_f32], comp_dtype);
+
+
 
     Ok(hidden_state)
 }

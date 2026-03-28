@@ -260,7 +260,7 @@ use gllm::scheduler::vllm2024::{AdaptiveChunkPolicy, ChunkedConfig};
 #[test]
 fn adaptive_chunk_high_load_returns_min() {
     let cfg = ChunkedConfig::default(); // chunk_size = 64
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     let result = policy.compute(0.10, 1, 2048);
     assert_eq!(result, 64);
 }
@@ -272,7 +272,7 @@ fn adaptive_chunk_high_load_returns_min() {
 #[test]
 fn adaptive_chunk_low_load_returns_max() {
     let cfg = ChunkedConfig::default();
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     // prompt_len = 2048 < max_chunk = 4096, so clamped to prompt_len
     let result = policy.compute(0.90, 1, 2048);
     assert_eq!(result, 2048);
@@ -288,7 +288,7 @@ fn adaptive_chunk_low_load_returns_max() {
 #[test]
 fn adaptive_chunk_mid_load_interpolates() {
     let cfg = ChunkedConfig::default(); // min = 64
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     // l1_ratio = 0.50 → t = (0.50 - 0.25) / 0.50 = 0.50
     // base = 64 + (4032 * 0.50) = 64 + 2016 = 2080
     let result = policy.compute(0.50, 1, 4096);
@@ -302,7 +302,7 @@ fn adaptive_chunk_mid_load_interpolates() {
 #[test]
 fn adaptive_chunk_short_prompt() {
     let cfg = ChunkedConfig::default();
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     let result = policy.compute(0.10, 5, 32);
     assert_eq!(result, 32);
 }
@@ -314,7 +314,7 @@ fn adaptive_chunk_short_prompt() {
 #[test]
 fn adaptive_chunk_concurrency_penalty() {
     let cfg = ChunkedConfig::default();
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     // Low load but 10 concurrent requests → penalty = max(0.2, 1.0 - 0.9) = 0.2
     // base = 4096, adjusted = 4096 * 0.2 = 819, clamped to [64, 2048]
     let result = policy.compute(0.90, 10, 2048);
@@ -332,7 +332,7 @@ fn adaptive_chunk_concurrency_penalty() {
 #[test]
 fn adaptive_chunk_zero_prompt() {
     let cfg = ChunkedConfig::default();
-    let policy = AdaptiveChunkPolicy::new(&cfg, 4096);
+    let policy = AdaptiveChunkPolicy::new(&cfg);
     let result = policy.compute(0.50, 1, 0);
     assert_eq!(result, 1);
 }

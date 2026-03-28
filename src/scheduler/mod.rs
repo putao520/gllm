@@ -16,6 +16,7 @@ pub mod prefix_index;
 pub mod sequence;
 pub mod types;
 pub mod vllm2024;
+pub mod telemetry;
 
 pub use allocator::BlockAllocator;
 pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};
@@ -34,3 +35,4 @@ pub use types::{
     BatchOrderPolicy, GroupState, KvPipeline, PageId, PageMetadata, PageState, PhysicalId,
     PipelinedVirtualPageId, RequestId, RequestKind, SequenceGroup, StorageKey,
 };
+pub use telemetry::{SequenceTelemetry};

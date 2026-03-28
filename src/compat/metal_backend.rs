@@ -28,6 +28,7 @@ pub struct MetalBackend<E: Element = f32> {
     pub(super) paged_kv_meta: super::gpu_compile::GpuPagedKvMetaStore,
     #[cfg(all(target_os = "macos", feature = "metal"))]
     pub(super) weight_cache: std::sync::Mutex<super::gpu_compile::MetalWeightCache>,
+
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -62,6 +63,7 @@ impl<E: Element> Clone for MetalBackend<E> {
             paged_kv_meta: self.paged_kv_meta.clone(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             weight_cache: std::sync::Mutex::new(super::gpu_compile::MetalWeightCache::new()),
+
             _marker: std::marker::PhantomData,
         }
     }
@@ -111,6 +113,7 @@ impl<E: Element> MetalBackend<E> {
             kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             paged_kv_meta: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             weight_cache: std::sync::Mutex::new(super::gpu_compile::MetalWeightCache::new()),
+
             _marker: std::marker::PhantomData,
         })
     }
@@ -153,11 +156,13 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
         &self, input: &BatchInput, topology: &AttentionTopology,
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle], config: &GeneratorForwardConfig,
-    ) -> Result<(Vec<LogitsHandle>, f32), BE> {
+    ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             super::gpu_compile::metal_decoder_forward(self, input, topology, weights, kv_caches, config)
-                .map(|logits| (logits, 0.0))
+                .map(|(logits, telemetry)| {
+                    (logits, 0.0, telemetry)
+                })
         }
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
         {
@@ -273,7 +278,9 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
         }
     }
 
-    fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BE> {
+
+
+    fn upload_weights(&self, _data: &[E]) -> Result<Self::Tensor, BE> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             use gllm_kernels::gpu::GpuDevice;
@@ -294,7 +301,7 @@ impl<E: Element> Backend<E> for MetalBackend<E> {
         }
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
         {
-            Ok(data.to_vec())
+            Err(BE::Unimplemented("metal feature not enabled"))
         }
     }
 }

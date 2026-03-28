@@ -1,6 +1,5 @@
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
-use super::jit_helpers::pack_weights;
 use super::types::BertLayerWeights;
 use super::weight_helpers::{get_f32_data, get_bias_data, needs_weight_transpose, transpose_f32};
 use super::{Element, PoolingMode};
@@ -70,7 +69,7 @@ pub(crate) fn build_bert_layer_graph(
     // Q = input * W_q + b_q  [s, h] × [h, h] → [s, h]
     let q_out = g.add_tensor_concrete("q", &[s, h], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: h, k: h, dtype: dt },
         vec![input, w_q, b_q],
         vec![q_out],
         "gemm_q",
@@ -79,7 +78,7 @@ pub(crate) fn build_bert_layer_graph(
     // K = input * W_k + b_k
     let k_out = g.add_tensor_concrete("k", &[s, h], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: h, k: h, dtype: dt },
         vec![input, w_k, b_k],
         vec![k_out],
         "gemm_k",
@@ -88,7 +87,7 @@ pub(crate) fn build_bert_layer_graph(
     // V = input * W_v + b_v
     let v_out = g.add_tensor_concrete("v", &[s, h], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: h, k: h, dtype: dt },
         vec![input, w_v, b_v],
         vec![v_out],
         "gemm_v",
@@ -97,7 +96,7 @@ pub(crate) fn build_bert_layer_graph(
     // Multi-head attention: Q[s,h], K[s,h], V[s,h] → attn_out[s,h]
     let attn_out = g.add_tensor_concrete("attn_out", &[s, h], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads: num_heads, head_dim },
+        OpKind::MultiHeadAttention { seq_len: s.into(), num_heads, num_kv_heads: num_heads, head_dim },
         vec![q_out, k_out, v_out],
         vec![attn_out],
         "mha",
@@ -106,7 +105,7 @@ pub(crate) fn build_bert_layer_graph(
     // Output projection + bias
     let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: h, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: h, k: h, dtype: dt },
         vec![attn_out, w_o, b_o],
         vec![o_out],
         "gemm_o",
@@ -135,7 +134,7 @@ pub(crate) fn build_bert_layer_graph(
     // Up projection + GELU: GemmBias + Gelu → EpilogueInjection candidate
     let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: inter, k: h, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: inter, k: h, dtype: dt },
         vec![normed1, w_up, b_up],
         vec![up_out],
         "gemm_ffn_up",
@@ -152,7 +151,7 @@ pub(crate) fn build_bert_layer_graph(
     // Down projection
     let down_out = g.add_tensor_concrete("ffn_down", &[s, h], ft);
     g.add_op(
-        OpKind::GemmBias { m: s, n: h, k: inter, dtype: dt },
+        OpKind::GemmBias { m: s.into(), n: h, k: inter, dtype: dt },
         vec![act_out, w_down, b_down],
         vec![down_out],
         "gemm_ffn_down",
@@ -231,7 +230,7 @@ pub(crate) fn build_mean_pool_graph(
     let output = g.add_tensor_concrete("output", &[hidden], ft);
 
     g.add_op(
-        OpKind::MeanPool { seq_len, hidden },
+        OpKind::MeanPool { seq_len: seq_len.into(), hidden },
         vec![input],
         vec![output],
         "mean_pool",
@@ -276,14 +275,19 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         let dt = computation_dtype_from_config(config);
         let key = JitCacheKey {
             arch: ModelArchKey {
-                arch_name: "bert".to_string(),
+                model_id: "bert".to_string(),
                 hidden_size: hidden,
                 num_heads,
                 num_kv_heads: num_heads,
                 head_dim,
                 dtype: kernels_dtype_to_compat(dt),
+                inter_size: 0,
+                num_layers: 0,
+                compute_dtype: crate::compat::DType::F32,
+                backend: crate::backend::BackendType::Cpu,
+                isa_version: crate::compat::jit_cache::cpu_fingerprint() as u32,
             },
-            graph: GraphType::BertLayer { inter_size: inter },
+            graph: GraphType::BertLayer,
         };
         let compiled = global_jit_cache()
             .get_or_compile(key, || {
@@ -332,18 +336,9 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 )));
             }
         }
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let added = super::jit_helpers::jit_add(
-                super::jit_helpers::f32_as_bytes(&hidden_state),
-                super::jit_helpers::f32_as_bytes(&pos_emb[..seq_len * hidden]),
-                super::jit_helpers::computation_dtype_from_config(config),
-            )
-                .map_err(|e| BE::Other(format!("pos embed add JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&added));
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        { return Err(BE::Other("pos embed add JIT requires x86_64 or aarch64".to_string())); }
+        let mut added = vec![0.0f32; seq_len * hidden];
+        _kern.vec_add(&hidden_state, &pos_emb[..seq_len * hidden], &mut added);
+        hidden_state.copy_from_slice(&added);
     }
 
     // Step (c): Add token_type embeddings (all type 0)
@@ -354,18 +349,9 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     // All formats: [num_types, hidden] row-major. Type 0 is the first row.
     if tt_emb.len() >= hidden {
         let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let added = super::jit_helpers::jit_add(
-                super::jit_helpers::f32_as_bytes(&hidden_state),
-                super::jit_helpers::f32_as_bytes(&tt_broadcast),
-                super::jit_helpers::computation_dtype_from_config(config),
-            )
-                .map_err(|e| BE::Other(format!("token type embed add JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&added));
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        { return Err(BE::Other("token type embed add JIT requires x86_64 or aarch64".to_string())); }
+        let mut added = vec![0.0f32; seq_len * hidden];
+        _kern.vec_add(&hidden_state, &tt_broadcast, &mut added);
+        hidden_state.copy_from_slice(&added);
     }
 
     // Step (d): Embedding LayerNorm
@@ -379,20 +365,17 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         hidden,
     );
     {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            let result = super::jit_helpers::jit_layer_norm(
-                super::jit_helpers::f32_as_bytes(&hidden_state),
-                super::jit_helpers::f32_as_bytes(&emb_ln_w),
-                super::jit_helpers::f32_as_bytes(&emb_ln_b),
-                seq_len, hidden,
-                super::jit_helpers::computation_dtype_from_config(config),
-            )
-                .map_err(|e| BE::Other(format!("embedding LayerNorm JIT failed: {e}")))?;
-            hidden_state.copy_from_slice(super::jit_helpers::bytes_as_f32(&result));
+        let mut ln_out = vec![0.0f32; seq_len * hidden];
+        for s in 0..seq_len {
+            _kern.layer_norm(
+                &hidden_state[s * hidden..(s + 1) * hidden],
+                &emb_ln_w,
+                &emb_ln_b,
+                &mut ln_out[s * hidden..(s + 1) * hidden],
+                eps,
+            );
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        compile_error!("embedding LayerNorm requires JIT support (x86_64 or aarch64)");
+        hidden_state.copy_from_slice(&ln_out);
     }
 
     // Step (e): Encoder layers
@@ -475,12 +458,17 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 let dt = computation_dtype_from_config(config);
                 let key = JitCacheKey {
                     arch: ModelArchKey {
-                        arch_name: "bert".to_string(),
+                        model_id: "bert".to_string(),
                         hidden_size: hidden,
                         num_heads: 0,
                         num_kv_heads: 0,
                         head_dim: 0,
                         dtype: kernels_dtype_to_compat(dt),
+                        inter_size: 0,
+                        num_layers: 0,
+                        compute_dtype: crate::compat::DType::F32,
+                        backend: crate::backend::BackendType::Cpu,
+                        isa_version: crate::compat::jit_cache::cpu_fingerprint() as u32,
                     },
                     graph: GraphType::BertMeanPool,
                 };
@@ -540,12 +528,17 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     let dt = computation_dtype_from_config(config);
                     let key = JitCacheKey {
                         arch: ModelArchKey {
-                            arch_name: "bert_dense_gemm".to_string(),
+                            model_id: "bert_dense_gemm".to_string(),
                             hidden_size: hidden,
                             num_heads: 0, num_kv_heads: 0, head_dim: 0,
                             dtype: kernels_dtype_to_compat(dt),
+                            inter_size: 0,
+                            num_layers: 0,
+                            compute_dtype: crate::compat::DType::F32,
+                            backend: crate::backend::BackendType::Cpu,
+                            isa_version: crate::compat::jit_cache::cpu_fingerprint() as u32,
                         },
-                        graph: GraphType::BertLayer { inter_size: hidden },
+                        graph: GraphType::BertLayer,
                     };
                     let compiled = global_jit_cache().get_or_compile(key, || {
                         let mut g = CompilerGraph::new();
@@ -555,7 +548,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                         let b_in = g.add_tensor_concrete("b", &[hidden], ft);
                         g.inputs = vec![x_in, w_in, b_in];
                         let out = g.add_tensor_concrete("out", &[1, hidden], ft);
-                        g.add_op(OpKind::GemmBias { m: 1, n: hidden, k: hidden, dtype: dt }, vec![x_in, w_in, b_in], vec![out], "dense_gemm");
+                        g.add_op(OpKind::GemmBias { m: 1.into(), n: hidden, k: hidden, dtype: dt }, vec![x_in, w_in, b_in], vec![out], "dense_gemm");
                         g.outputs = vec![out];
                         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
                         compiler.compile_graph(&g).map_err(|e| format!("bert dense JIT failed: {e}"))
@@ -586,6 +579,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                                 wbuf[i * 2 + 1] = hb[1];
                             }
                         },
+                        gllm_kernels::types::DType::U8 => unimplemented!("U8 not supported"),
                     }
                     // Pack bias at model dtype
                     let bias_converted = super::weight_helpers::f32_to_typed_bytes(&dense_b, dt);
