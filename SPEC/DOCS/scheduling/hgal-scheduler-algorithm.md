@@ -491,7 +491,7 @@ SplitFuse 方式:
 |--------|------|--------|------|
 | `chunk_size` | usize | 64 | Chunk 大小 (tokens) |
 | `decode_slots` | usize | 8 | 每批保留的 Decode 插槽 |
-| `enable_splitfuse` | bool | true | 启用 SplitFuse |
+| `enable_splitfuse` | bool | ~~true~~ | ⛔ 已废弃 (REQ-SCHED-007) — SplitFuse 混批路径已移除 |
 | `max_chunks_per_batch` | usize | 4 | 每批最大 Chunk 数 |
 
 #### 8.5.2 SwiftKV 配置 (⛔ 违宪/已废弃)

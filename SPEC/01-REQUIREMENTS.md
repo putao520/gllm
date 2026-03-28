@@ -113,11 +113,7 @@
 ### 4.3 JIT 缓存协议规范 (REQ-JIT-CACHE)
 
 > **关联规范**: [SPEC/DOCS/scheduling/jit-cache-protocol.md](./DOCS/scheduling/jit-cache-protocol.md)
-
-| ID | 需求标题 | 描述 | 验收标准 | 状态 |
-|----|----------|------|----------|------|
-| **REQ-JIT-CACHE-001** | 全核心态级预编译 | 所有算子必须在模型加载阶段完成全网计算图预编译 | 1. 禁用独立算子的 JIT 支持<br>2. 仅允许全模型作为一个整体计算图被缓存 (`GraphExecutor`)<br>3. 推理热路径中无任何单层或单算子重编译 | 🟢 已设定 |
-| **REQ-JIT-CACHE-002** | CPU/GPU 算子与流程统一 | CPU 后端与 GPU 后端的 JIT 缓存行为必须 100% 对齐 | 1. **ARCH-CPU-GPU-UNIFIED**: 删除 CPU 特有算子图节点和变体<br>2. 共同使用 `build_fused_attention_layer_graph_symbolic`<br>3. 动态 seq_len 使用 `SymDim::Symbolic` | 🟢 已设定 |
+> **SSOT**: 完整的 REQ-JIT-CACHE-001~006 定义见本文 §8.6。
 
 ### 后续增强计划（未来版本）
 | 优化 | 说明 | 状态 |
