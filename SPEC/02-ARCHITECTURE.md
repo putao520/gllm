@@ -1416,9 +1416,25 @@ Chunked 调度（交织）:
 - **动态张量紧凑重排 (Ragged Compaction)**: `vcompress` / Warp Prefix Sum
 - **硬件谓词掩码 (Predicate K-mask)**: 保持完整控制流用掩码位强行断电
 
-### 12.3 三位一体调度宣言
-
 **"小差异合流兜底、大分层异构分治、长尾期修补坍缩"** —— 这种三位一体的体系彻底补齐了 Gllm 面对百万级动态上下文（10M Context）+ 数百路并发时，算力无法充分释放的理论死角。
+
+### 12.4 硬件感知型黄金装筒规则 (Hardware-Aware Shape Bucketing)
+
+这是动态图形状隔离的“第一起因（First Cause）”，定义了系统如何根据不同的 **SEQ（上下文长度）** 或者 **异构请求状态** 生成**最佳集中性能状态图**：
+
+- **底层时滞与拓扑探测 (Hardware Telemetry Probing)**：
+    在 Load-Time（模型加载阶段）与 Autotuning 期间，**严禁**预设死板的数组（如 `[128, 512, 1024, 2048]`）作为 JIT 的静态 Bucket。
+    系统必须依靠真实的“底层时滞探测器（Latency Probes）”测定在当前微架构（如 Ada Lovelace 或 Zen4）上：
+  - 寄存器堆何时开始溢出 (Spilling out points)
+  - 共享内存 (SMEM) 的满载率与占用悬崖 (Occupancy Cliffs)
+  - L2 缓存 Thrashing 阈值
+
+- **物理资源的离散塌缩 (State Graph Concentrating)**：
+    由探测器探出的物理拐点圈定出仅有的几档“黄金尺寸”（Golden Sizes，例如针对某模型/显卡，探测出的最佳分桶刚好是 112、463 和 1011）。对于推理期任意连续离散的 SEQ 长度，系统不再在运行期进行软路由判断或全尺寸 JIT 编译，而是将这些差异化请求**全部强行映射/塌缩**到这几张 **只针对该硬件表现为“满血最佳集中性能”的静态 JIT 状态图** 上。
+
+- **零退化原则 (Zero-Padding Degradation)**：
+    当实际请求长度与“黄金尺寸”产生部分空隙时，**坚决禁止**使用低效的 Padding 补零机制（如为了对齐 128 强行补零，废算无效 FLOPs）。
+    必须依靠 §12.2 定义的张量物理挤压（Ragged Compaction，如 `vcompress` 或 Warp Prefix Sum）以及硬件控制流谓词（Predicate K-mask），实现完全 0 周期浪费的“真填满”，确保生成的 Kernel 永远呈现 100% 寄存器命中率与管线吞吐率。
 
 ---
 
