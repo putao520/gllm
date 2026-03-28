@@ -440,142 +440,11 @@ SplitFuse 方式:
 
 ---
 
-### 8.3 LMCache 跨请求 KV Cache
+### 8.3 (已废弃) LMCache 跨请求 KV Cache
 
-> **项目**: [LMCache](https://github.com/LMCache/LMCache) - Distributed KV Cache for LLM Serving
-
-#### 8.3.1 问题定义
-
-**多用户场景的重复计算**：
-
-```
-场景: 100 个用户使用相同的 System Prompt
-
-System Prompt:
-  "You are a helpful assistant. Please answer the following questions..."
-
-Tokenized: [101, 102, ..., 612]  (512 tokens)
-
-传统方式:
-  请求 1: Prefill 512 tokens → 生成 KV Cache
-  请求 2: Prefill 512 tokens → 生成 KV Cache  (重复！)
-  请求 3: Prefill 512 tokens → 生成 KV Cache  (重复！)
-  ...
-  请求 100: Prefill 512 tokens → 生成 KV Cache  (重复！)
-
-浪费: 51,200 tokens 的 Prefill 计算被重复 100 次
-```
-
-#### 8.3.2 三层缓存架构
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  L1: GPU In-Memory Cache (最快，最小)                              │
-│  ────────────────────────────────────────────────────────────────  │
-│  存储: 当前活跃请求的 KV Cache                                     │
-│  命中率: ~5% (仅当前 Batch 重复)                                   │
-│  容量: ~100MB (显存限制)                                           │
-│  延迟: <1ms (GPU 内存复制)                                        │
-├─────────────────────────────────────────────────────────────────────┤
-│  L2: CPU Offload Cache (中等，中量)                               │
-│  ────────────────────────────────────────────────────────────────  │
-│  存储: 最近使用的 KV Cache (LRU 淘汰)                              │
-│  命中率: ~30% (跨 Batch 重复)                                      │
-│  容量: ~10GB (系统内存)                                            │
-│  延迟: ~10ms (PCIe DMA 复制)                                      │
-├─────────────────────────────────────────────────────────────────────┤
-│  L3: Distributed Cache (慢，无限)                                  │
-│  ────────────────────────────────────────────────────────────────  │
-│  存储: Redis/S3/本地磁盘                                           │
-│  命中率: ~65% (跨会话/跨实例重复)                                  │
-│  容量: 无限                                                        │
-│  延迟: ~50ms (网络/磁盘 I/O)                                       │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-#### 8.3.3 Cache Key 设计
-
-**CacheKey 结构**：
-
-| 字段 | 说明 |
-|------|------|
-| `model_id` | 模型标识 |
-| `prompt_hash` | Prompt 前缀哈希 |
-| `layer_indices` | 缓存哪些层 |
-| `quantization` | 量化类型 |
-
-**计算流程**：
-
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | 截取前缀 | 只缓存前 N tokens (默认 512) |
-| 2 | 组合哈希输入 | `model_id + prefix_tokens` |
-| 3 | SHA256 哈希 | 生成唯一缓存键 |
-
-#### 8.3.4 缓存查找流程
-
-**LMCache 管理器结构**：
-
-| 组件 | 说明 |
-|------|------|
-| `l1` | GPU L1 缓存 (LRU) |
-| `l2` | CPU L2 缓存 (LRU) |
-| `l3` | 分布式后端 (L3Backend) |
-
-**三层查找流程**：
-
-| 层级 | 操作 | 延迟 |
-|------|------|------|
-| **L1 查询** | 检查 GPU 缓存 | <1ms |
-| **L2 查询** | Miss 时 DMA 复制到 GPU，回填 L1 | ~10ms |
-| **L3 查询** | Miss 时加载到 L2，DMA 复制到 GPU，回填 L1/L2 | ~50ms |
-
-**写入流程**：
-
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | 写入 L1 | 直接存储到 GPU 缓存 |
-| 2 | 异步写入 L2 | DMA 复制到 CPU，不阻塞 |
-| 3 | 异步写入 L3 | 序列化后写入后端，不阻塞 |
-
-#### 8.3.5 L3 Backend 接口
-
-**L3Backend 接口**：
-
-| 方法 | 说明 |
-|------|------|
-| `get(key)` | 从后端获取缓存条目 |
-| `put(key, data)` | 写入数据到后端 |
-| `invalidate(model_id)` | 失效指定模型的所有缓存 |
-
-**后端实现类型**：
-
-| 类型 | 说明 | 用途 |
-|------|------|------|
-| `RedisBackend` | Redis 连接 + TTL 配置 | 分布式缓存 |
-| `LocalDiskBackend` | 本地磁盘路径 | 单机缓存 |
-| `DisabledBackend` | 禁用 L3 | 仅 L1+L2 模式 |
-
-#### 8.3.6 调度器集成
-
-**调度方法**：`schedule_with_cache(request, lmcache)`
-
-| 步骤 | 操作 | 说明 |
-|------|------|------|
-| 1 | 计算缓存键 | 基于 model_id + prompt_tokens |
-| 2 | 查询缓存 | 调用 `lmcache.get(key, backend)` |
-| 3a | 命中处理 | 返回 `SchedulingResult::CacheHit` |
-| 3b | 未命中处理 | 正常 Prefill，完成后写入缓存 |
-| 4 | 错误降级 | 缓存错误时降级为普通 Prefill |
-
-#### 8.3.7 验收标准
-
-| 标准 | 测试方法 | 目标值 |
-|------|----------|--------|
-| 缓存命中率 | 相同 Prompt 多请求 | >70% |
-| 吞吐提升 | 对比无缓存 | 10×+ |
-| 端到端延迟 | 缓存命中场景 | <10ms (跳过 Prefill) |
-| 内存开销 | L2+L3 存储 | <20GB |
+> 🚨 **架构合规性警报 (Architect Veto)**:
+> 旧版通过引入第三方 LMCache 组件及复杂的 L1/L2/L3 分布式哈希缓存机制已被 **废弃并从 vllm2024.rs 中物理删除**。
+> 本项目已转向使用 `GlobalMemoryManager` 配合 `PrefixIndex` 和 `SessionKvCache` 的双管线本地内存管理机制 (REQ-KV-001/002)。此处的旧规范不再具有 SSOT 效应，留作历史封存。
 
 ---
 
@@ -588,16 +457,16 @@ Tokenized: [101, 102, ..., 612]  (512 tokens)
                               │
                               ▼
                     ┌─────────────────────┐
-                    │  LMCache 查询       │
-                    │  (L1 → L2 → L3)     │
+                    │  SessionKvCache     │
+                    │  前缀缓存查询       │
                     └─────────┬───────────┘
                               │
               ┌───────────────┴───────────────┐
               │ 命中                         │ 未命中
               ▼                               ▼
         ┌───────────┐                 ┌──────────────┐
-        │ Cache Hit │                 │ Chunked      │
-        │ (跳过     │                 │ Prefill      │
+        │ Prefix Hit│                 │ Chunked      │
+        │ (部分跳过)│                 │ Prefill      │
         │  Prefix)  │                 │ (交织调度)   │
         └─────┬─────┘                 └──────┬───────┘
               │                               │
@@ -634,14 +503,9 @@ Tokenized: [101, 102, ..., 612]  (512 tokens)
 | `similarity_threshold` | f32 | 0.9 | AKV 相似度标量阈值 |
 | `precision_guard` | f32 | 0.1 | 精度损失阈值标量 (PPL) |
 
-#### 8.5.3 LMCache 配置
+#### 8.5.3 LMCache 配置 (⛔ 违宪/已废弃物理删除)
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `l1_capacity_mb` | usize | 100 | L1 容量 (MB) |
-| `l2_capacity_mb` | usize | 10000 | L2 容量 (MB) |
-| `l3_backend` | L3Backend | Redis | L3 后端 |
-| `cache_prefix_len` | usize | 512 | 缓存前缀长度 |
+> 已被删除。请使用 SessionKvCache 机制，不再支持 LMCache。
 
 ---
 

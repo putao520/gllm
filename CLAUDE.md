@@ -10,17 +10,19 @@
 
 | Document | Content |
 |----------|---------|
-| `01-REQUIREMENTS.md` | 104+ functional requirements (REQ-MODEL/LOADER/QUANT/CORE/SCHED/KV/TEST/ARCH/OBS/ERR) |
-| `02-ARCHITECTURE.md` | 4-layer architecture (Manifest→Adapter→Engine→Driver), Ω1 truth principle |
-| `03-DATA-STRUCTURE.md` | Core data structures and type definitions |
-| `04-API-DESIGN.md` | Public API surface (Client builder, generate/embed/rerank) |
+| `01-REQUIREMENTS.md` | 104+ 功能需求，包含 TurboQuant 静态位宽约束 |
+| `02-ARCHITECTURE.md` | 4层架构, 废弃 Native Float 分流，全量拥抱极化物理内核 |
+| `03-DATA-STRUCTURE.md` | 数据格式定义，含 DualTrackPool 存储与静态位宽定义 |
+| `04-API-DESIGN.md` | 客户端公共 API (包含新加入的 Knowledge Injection & Intent SDK) |
 | `06-TESTING-STRATEGY.md` | Test matrix and coverage requirements |
-| `07-OBSERVABILITY.md` | SystemState, RuntimeObserver, scheduling policies |
+| `07-OBSERVABILITY.md` | Zero-Overhead Epilogue Logging, STG 物理页头遥测架构 |
 | `ARCH-4-FEATURES.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
-| `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议: 模型级缓存键, 全层融合粒度, SymDim 动态绑定, 四档自适应 Tiling |
-| `DOCS/scheduling/unified-jit-architecture-master.md` | 大一统 JIT 架构终极蓝图: Mega-Kernel块级路由, TurboQuant双轨显存池, 全局热修补, 残差总线插管 API |
+| `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议: 模型级缓存键, 全层融合粒度, 自适应 Tiling |
+| `DOCS/scheduling/unified-jit-architecture-master.md` | (SSOT 终极蓝图) Mega-Kernel 路由, TurboQuant 双轨内存池, 知识插管 API |
+| `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 |
+| `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 |
 
 ## Technology Stack
 

@@ -465,7 +465,7 @@ assert_eq!(token_embd.dtype, GgmlDType::Q4_0);
 
 // 验证类型映射到 gllm-kernels
 let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
-assert!(matches!(kernel_tensor.dtype, gllm_kernels::DType::Q4_0));
+assert!(matches!(kernel_tensor.storage_format, gllm_kernels::StorageFormat::Q4_0));
 ```
 
 **覆盖类型**:
@@ -502,39 +502,29 @@ let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 
 ## 观测与调度测试 (TEST-OBS)
 
-### TEST-OBS-001: SystemState 采集完整性
+### TEST-OBS-001: Epilogue 物理页头写入完整性
 **关联需求**: REQ-OBS-001
 **测试类型**: 正向测试
 **测试步骤**:
-1. 构造 PagedScheduler 和 ContinuousBatcher 的已知状态
-2. 调用 `observer.capture()`
-3. 验证 6 个指标值与预期一致
-**期望结果**: 所有指标正确反映系统状态
+1. 构造小语言模型的单次 Forward
+2. 执行 Mega-Kernel
+3. 抽出刚刚写入完成的尾部 KV Physical Page
+**期望结果**: `KvPageHeader` 中的 `fragmentation_metric` 与 `logits_entropy` = 正确计算出的正浮点数
 
-### TEST-OBS-002: AccuracyFirstPolicy 高压决策
+### TEST-OBS-002: AbsolutePolicy 极限压力直通决策
 **关联需求**: REQ-OBS-002
 **测试类型**: 正向测试
 **测试步骤**:
 1. 构造 `SystemState { memory_pressure: 0.95, .. }`
-2. 调用 `AccuracyFirstPolicy.decide()`
+2. 调用 `AbsolutePolicy.decide()`
 **期望结果**: `admit_new_prefill == false`, `force_swap_out_count > 0`
 
-### TEST-OBS-003: BalancedPolicy 中等压力决策
-**关联需求**: REQ-OBS-002
-**测试类型**: 正向测试
-**测试步骤**:
-1. 构造 `SystemState { memory_pressure: 0.86, .. }`
-2. 调用 `BalancedPolicy.decide()`
-**期望结果**: `admit_new_prefill == false`, `force_swap_out_count == 1`
-
-### TEST-OBS-004: KernelStrategy 端到端传递
+### TEST-OBS-003: 静态内核路径不可更改性
 **关联需求**: REQ-OBS-003
-**测试类型**: 正向测试
+**测试类型**: 反向测试 (结构验证)
 **测试步骤**:
-1. 设置 `PolicyVariant::Throughput`
-2. 执行 `step()`
-3. 检查 `forward_config.kernel_strategy`
-**期望结果**: `kernel_strategy == KernelStrategy::ThroughputFirst`
+1. 拦截调度器送入 Executor 的 Config
+**期望结果**: 配置中严格不存在类似旧时代的 `kernel_strategy` 字段，确保只下发拓扑属性。
 
 ## 错误处理测试 (TEST-ERR)
 

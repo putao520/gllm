@@ -149,7 +149,7 @@
 > **关联需求**: REQ-QUANT-001 ~ REQ-QUANT-007
 > **实现位置**: `src/loader/mod.rs::QuantizedTensor`
 
-量化 tensor 不经过 `Backend::upload_weights()` 上传，而是以原始 block bytes 存储在 `WeightsHandle.quantized` HashMap 中，在推理时直接传递给量化 matmul/dequantize kernel。
+量化 tensor 不经过 `Backend::upload_weights()` 上传，而是以原始 block bytes 存储在 `WeightsHandle.quantized` HashMap 中，在推理时直接传递给 TurboQuant 定点矩阵乘法 (quantized_matmul) 内核，禁止独立解包。
 
 ```rust
 pub struct QuantizedTensor {

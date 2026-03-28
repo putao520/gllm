@@ -198,7 +198,7 @@ let metadata = loader.quantization_metadata()?
 │    2. GpuBackend (JIT 编译器: 同一管线, Phase 3 生成 PTX/AMDGPU/AIR).   │
 │  特性: 零拷贝 (Zero-Copy), 物理阻断数据回流, Driver API Only。          │
 │  桥接: `src/compat.rs` 提供类型兼容层，统一 gllm-kernels 导出路径。     │
-│  量化: Backend trait 提供 quantized_matmul/dequantize 默认方法，          │
+│  量化: Backend trait 仅提供 quantized_matmul (极化相乘) 默认约束，取消孤立解包 │
 │        CpuBackend 实现分发到 gllm-kernels K-Quant/Classic/IQ 三族。      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
