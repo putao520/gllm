@@ -11,7 +11,7 @@
 | Document | Content |
 |----------|---------|
 | `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) |
-| `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补 |
+| `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补, §13.12 硬件感知融合拓扑 (12 Profile: SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) |
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) |
 | `04-API-DESIGN.md` | 客户端公共 API (包含 Knowledge Injection & Intent SDK) |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) |
