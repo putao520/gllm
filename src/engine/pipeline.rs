@@ -152,11 +152,27 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         Ok(outputs)
     }
 
-    /// Convenience method: compile if needed, then run forward.
+    /// Run a forward pass.
     ///
-    /// If the pipeline is not yet compiled, calls `compile(seq_len, hidden)`
-    /// first, then executes the forward pass.
+    /// **REQ-JIT-CACHE-001**: This method does NOT perform lazy compilation.
+    /// The pipeline must be compiled via `compile()` before calling `run()`.
+    /// If the pipeline is not compiled, this returns `PipelineError::NotCompiled`.
+    ///
+    /// For the old lazy-compile behavior, use `compile_and_run()` instead,
+    /// but note that lazy compilation in the hot path is prohibited by REQ-JIT-CACHE-001.
     pub fn run(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+    ) -> Result<HashMap<String, Vec<u8>>, PipelineError> {
+        self.forward(inputs)
+    }
+
+    /// Compile then run a forward pass.
+    ///
+    /// **WARNING**: This method performs lazy compilation. Per REQ-JIT-CACHE-001,
+    /// compilation must only occur at model load time. Use this method ONLY during
+    /// initialization, never in the inference hot path.
+    pub fn compile_and_run(
         &mut self,
         inputs: &HashMap<String, Vec<u8>>,
         seq_len: usize,

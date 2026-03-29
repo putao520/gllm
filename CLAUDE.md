@@ -373,6 +373,28 @@ cargo test --lib
 
 **理由**：测试的目的是验证真实实现的正确性。Fallback 会掩盖真实问题，导致功能永远无法完成。
 
+## 🚨 硬件静态分派禁止降级 (NO_HW_DEGRADATION)
+
+**铁律：硬件参数在 `DeviceProfile::detect()` 时一次性探测、运行时固定。JIT codegen 必须为当前硬件生成最优路径代码，禁止任何形式的硬件降级/退化**：
+
+- ❌ `HardwareFusionPass` 将融合算子降级为原子算子（如 `FlashAttention → Atomic("Attention")`）
+- ❌ `FusedOp::SwiGLU → FusedOp::Atomic("SwiGLU")` 因为 CPU 没有 AVX2
+- ❌ `FusedOp::MoERouting → Atomic` 因为 GPU SM < 8.0
+- ❌ `supports_*()` 函数返回 false → 拆分融合图为独立子操作
+- ❌ "硬件能力不足所以降级" 作为拆分融合算子的理由
+- ✅ CPU 没有 FlashAttention 硬件 → codegen 生成 cache-friendly tiled attention（仍然是融合的）
+- ✅ SM70 没有 tensor core gating → codegen 生成 wmma 路径的 MoERouting（仍然融合）
+- ✅ 标量 CPU → codegen 生成标量循环的 SwiGLU（仍然融合，不是拆成 3 个独立 op）
+- ✅ 硬件差异体现在 **codegen 层的指令选择**（SIMD 宽度、寄存器分配、分块策略），不是在 **fusion 层的算子拆分**
+
+**架构原则**：
+```
+错误: FusionRule 看到硬件能力不足 → 降级为 Atomic → executor 拆分执行
+正确: FusionRule 生成融合图 → JIT codegen 根据 DeviceProfile 为每种硬件生成最优机器码
+```
+
+**理由**：硬件参数是编译时常量。降级意味着放弃优化，而正确做法是在 codegen 层实现该硬件的最优路径。降级是偷懒——"我不会写 SM70 的 MoERouting，所以把它拆开"——这违反了"功能缺失必须补全实现"的铁律。
+
 ## 🚨 禁止 JIT Codegen 静默降级 (NO_SILENT_FALLBACK)
 
 **铁律：JIT codegen 遇到无法生成代码的 OpKind 必须返回 `Err`，禁止静默 NOP**：

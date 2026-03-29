@@ -940,50 +940,15 @@ pub(crate) fn execute_moe_pre_attention(
         );
     }
 
-    // k_rope and v_proj via separate JIT graphs (single-output ABI limitation)
-    // K: RmsNorm → K Gemm → RoPE
-    let k_graph = build_kv_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, 10000.0, dtype);
-    let mut k_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-    let k_compiled = k_compiler.compile_graph(&k_graph)
-        .map_err(|e| format!("JIT compile k_projection failed: {e}"))?;
-    let k_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (k_w, dtype)]);
-    let mut k_proj = TypedBuffer::zeros(seq_len * kv_dim, dtype);
-    let mut k_scratch = vec![0u8; k_compiled.scratchpad_bytes];
-    unsafe {
-        k_compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            k_weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            positions.as_ptr(),
-            std::ptr::null(),
-            1, seq_len,
-            k_proj.as_bytes_mut().as_mut_ptr(),
-            k_scratch.as_mut_ptr(),
-        );
-    }
+    // NOTE: The original implementation used runtime JIT compilation (InferenceCompiler::new())
+// for K/V projections, which violates REQ-JIT-CACHE-001 (all compilation must happen at
+// model load time). Since this function is unused (dead code), the runtime compilation
+// paths have been removed. If this function is needed in the future, it must be refactored
+// to use pre-compiled graphs from the model load phase.
 
-    // V: RmsNorm → V Gemm (no RoPE)
-    let v_graph = build_v_projection_graph(seq_len, hidden, num_kv_heads, head_dim, eps, dtype);
-    let mut v_compiler = gllm_kernels::compiler::InferenceCompiler::new();
-    let v_compiled = v_compiler.compile_graph(&v_graph)
-        .map_err(|e| format!("JIT compile v_projection failed: {e}"))?;
-    let v_weights_buf = pack_weights_multi(&[(rn1_w, dtype), (v_w, dtype)]);
-    let mut v_proj = TypedBuffer::zeros(seq_len * kv_dim, dtype);
-    let mut v_scratch = vec![0u8; v_compiled.scratchpad_bytes];
-    unsafe {
-        v_compiled.execute(
-            hidden_state.as_ptr() as *const u8,
-            v_weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, seq_len,
-            v_proj.as_bytes_mut().as_mut_ptr(),
-            v_scratch.as_mut_ptr(),
-        );
-    }
-
-    Ok((q_rope.to_f32_vec(), k_proj.to_f32_vec(), v_proj.to_f32_vec()))
+    // Return an error to prevent accidental use of the old runtime-JIT pattern
+    Err("execute_moe_pre_attention: runtime JIT compilation removed (REQ-JIT-CACHE-001). \
+         Use pre-compiled graphs from the GraphExecutor instead.".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,50 +1051,22 @@ pub(crate) fn build_cached_gqa_graph(
 
 /// Perform F32 GEMM via JIT compilation: output[m, n] = input[m, k] @ weight[k, n].
 ///
-/// Builds a single-op CompilerGraph with `OpKind::Gemm`, compiles to native SIMD
-/// (AVX2/AVX-512/NEON/SVE based on DeviceProfile), and executes.
-/// DType is passed through to the JIT compiler for future F16/BF16 support.
+/// **DEPRECATED**: This function used runtime JIT compilation (InferenceCompiler::new()),
+/// which violates REQ-JIT-CACHE-001. All compilation must happen at model load time.
+///
+/// Use the GraphExecutor's pre-compiled GEMM kernels instead.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn jit_gemm(
-    input: &[f32],
-    weight: &[f32],
-    output: &mut [f32],
-    m: usize,
-    n: usize,
-    k: usize,
-    dtype: gllm_kernels::types::DType,
+    _input: &[f32],
+    _weight: &[f32],
+    _output: &mut [f32],
+    _m: usize,
+    _n: usize,
+    _k: usize,
+    _dtype: gllm_kernels::types::DType,
 ) -> Result<(), String> {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind, InferenceCompiler};
-
-    let mut g = CompilerGraph::new();
-
-    let a = g.add_tensor_concrete("input", &[m, k], dtype);
-    let b = g.add_tensor_concrete("weight", &[k, n], dtype);
-    g.inputs = vec![a, b];
-
-    let c = g.add_tensor_concrete("output", &[m, n], dtype);
-    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(m), n, k, dtype }, vec![a, b], vec![c], "gemm");
-    g.outputs = vec![c];
-
-    let mut compiler = InferenceCompiler::new();
-    let compiled = compiler.compile_graph(&g).map_err(|e| format!("{e:?}"))?;
-
-    let weights_buf = pack_weights_typed(&[weight], dtype);
-    let mut scratchpad = vec![0u8; compiled.scratchpad_bytes];
-
-    unsafe {
-        compiled.execute(
-            input.as_ptr() as *const u8,
-            weights_buf.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1, m,
-            output.as_mut_ptr() as *mut u8,
-            scratchpad.as_mut_ptr(),
-        );
-    }
-    Ok(())
+    Err("jit_gemm: runtime JIT compilation removed (REQ-JIT-CACHE-001). \
+         Use pre-compiled GEMM kernels from the GraphExecutor.".to_string())
 }
 
 pub fn cpu_fingerprint() -> u64 {
