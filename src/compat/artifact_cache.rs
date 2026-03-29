@@ -34,12 +34,32 @@ impl ArtifactCache {
         ac
     }
 
-    /// Calculate MAC fingerprintf for the macro-graph + hardware signature
+    /// Calculate model hash (excluding backend) for the L3 cache filename.
+    ///
+    /// Returns a short hash (first 16 chars of SHA256) for the model structure.
+    pub fn get_model_hash(&self, model_id: &str, graph: &FusedGraph) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(model_id.as_bytes());
+        hasher.update(b"|");
+
+        // Use Debug print of the graph structure as structural unique key
+        // This inherently binds to all node connections and parameters mapped in FusedOps.
+        let graph_content = format!("{:?}", graph);
+        hasher.update(graph_content.as_bytes());
+
+        let full_hash = format!("{:x}", hasher.finalize());
+        // Return first 16 characters for filename (128 bits of entropy is sufficient)
+        full_hash.chars().take(16).collect()
+    }
+
+    /// Calculate the full blueprint hash (including hardware fingerprint) for cache validation.
+    ///
+    /// This is used internally to verify that a cached binary matches the current hardware.
     pub fn get_blueprint_hash(&self, model_id: &str, graph: &FusedGraph, hardware_fingerprint: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(model_id.as_bytes());
         hasher.update(b"|");
-        
+
         // Use Debug print of the graph structure as structural unique key
         // This inherently binds to all node connections and parameters mapped in FusedOps.
         let graph_content = format!("{:?}", graph);
@@ -49,19 +69,32 @@ impl ArtifactCache {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Load pure binary artifacts using the hashed blueprint key.
-    pub fn load_blob(&self, hash: &str) -> Option<Vec<u8>> {
+    /// Generate the L3 cache filename for a given model and backend.
+    ///
+    /// Format: {model_hash}_{backend}.bin
+    /// This implements REQ-JIT-CACHE-003.
+    pub fn cache_filename(&self, model_hash: &str, backend: &str) -> String {
+        format!("{}_{}.bin", model_hash, backend)
+    }
+
+    /// Load pure binary artifacts using the model hash and backend.
+    ///
+    /// Filename format: {model_hash}_{backend}.bin (REQ-JIT-CACHE-003)
+    pub fn load_blob(&self, model_hash: &str, backend: &str) -> Option<Vec<u8>> {
         if cfg!(debug_assertions) {
             return None; // Disable cache hits in debug mode to force recompile
         }
-        
+
         let mut path = self.cache_dir.clone();
-        path.push(format!("{}.bin", hash));
+        let filename = self.cache_filename(model_hash, backend);
+        path.push(&filename);
         fs::read(&path).ok()
     }
 
-    /// Atomically save pure binary artifacts to disk using the hashed blueprint key.
-    pub fn save_blob(&self, hash: &str, blob: &[u8]) -> std::io::Result<()> {
+    /// Atomically save pure binary artifacts to disk using the model hash and backend.
+    ///
+    /// Filename format: {model_hash}_{backend}.bin (REQ-JIT-CACHE-003)
+    pub fn save_blob(&self, model_hash: &str, backend: &str, blob: &[u8]) -> std::io::Result<()> {
         if cfg!(debug_assertions) {
             return Ok(()); // Disable cache writes in debug mode
         }
@@ -69,13 +102,14 @@ impl ArtifactCache {
             eprintln!("[ArtifactCache] Failed to create cache dir: {}", e);
             return Err(e);
         }
-        
+
         let mut path = self.cache_dir.clone();
-        path.push(format!("{}.bin", hash));
-        
+        let filename = self.cache_filename(model_hash, backend);
+        path.push(&filename);
+
         let mut temp_path = path.clone();
         temp_path.set_extension("tmp");
-        
+
         {
             let mut file = fs::File::create(&temp_path)?;
             file.write_all(blob)?;

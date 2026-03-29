@@ -526,20 +526,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             };
             let hidden = model_config.hidden_size;
             let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
-            let fingerprint = crate::compat::jit_helpers::cpu_fingerprint();
+            // Use "cpu" as backend identifier (REQ-JIT-CACHE-003)
+            let backend = "cpu";
             let model_id = &manifest.model_id;
             // Look up template name via arch mapping, then build executor
             get_template_by_arch(manifest.arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
                     build_executor_from_yaml(
-                        &arch_name, 
-                        &resolved, 
-                        1, 
-                        hidden, 
+                        &arch_name,
+                        &resolved,
+                        1,
+                        hidden,
                         crate::compat::jit_helpers::computation_dtype(model_config.dtype_size),
                         model_id,
-                        &fingerprint.to_string(),
+                        backend,
                         &cache
                     ).map_err(|e| {
                         eprintln!("Failed to build executor from yaml: {}", e);

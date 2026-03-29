@@ -41,7 +41,7 @@ pub fn build_executor_from_yaml(
     hidden: usize,
     dtype: gllm_kernels::types::DType,
     model_id: &str,
-    hardware_fingerprint: &str,
+    backend: &str,
     cache: &crate::compat::artifact_cache::ArtifactCache,
 ) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
     register_builtin_templates();
@@ -65,6 +65,6 @@ pub fn build_executor_from_yaml(
     ctx.head_dim = config.head_dim;
 
     crate::graph::executor::FusedGraphExecutor::from_graph_with_cache(
-        onnx_graph, seq_len, hidden, dtype, model_id, hardware_fingerprint, cache, ctx
+        onnx_graph, seq_len, hidden, dtype, model_id, backend, cache, ctx
     )
 }

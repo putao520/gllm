@@ -787,6 +787,8 @@ impl FusedGraphExecutor {
 
     /// Extends `compile` to check `ArtifactCache` first. If cache miss, falls back to `compile`
     /// and writes the serialized payload back to `ArtifactCache` using `save_blob`.
+    ///
+    /// Implements REQ-JIT-CACHE-003: L3 disk persistence with format {model_hash}_{backend}.bin.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn compile_with_cache(
         &mut self,
@@ -794,13 +796,14 @@ impl FusedGraphExecutor {
         hidden: usize,
         dtype: gllm_kernels::types::DType,
         model_id: &str,
-        hardware_fingerprint: &str,
+        backend: &str,
         cache: &crate::compat::artifact_cache::ArtifactCache,
     ) -> Result<(), ExecutionError> {
-        let hash = cache.get_blueprint_hash(model_id, &self.graph, hardware_fingerprint);
-        
-        // 1. Try L3 Cache bypass
-        if let Some(blob) = cache.load_blob(&hash) {
+        // Generate model hash for filename (REQ-JIT-CACHE-003 format)
+        let model_hash = cache.get_model_hash(model_id, &self.graph);
+
+        // 1. Try L3 Cache bypass (load by model_hash + backend)
+        if let Some(blob) = cache.load_blob(&model_hash, backend) {
             if let Ok(payload) = bincode::deserialize::<GraphExecutorPayload>(&blob) {
                 if let Ok(nodes) = self.restore_payload(payload) {
                     self.compiled_nodes = nodes;
@@ -814,15 +817,15 @@ impl FusedGraphExecutor {
         // 2. Compilation Miss - Fallback to full trace-codegen
         self.compile(seq_len, hidden, dtype)?;
 
-        // 3. Serialize and commit to ArtifactCache
+        // 3. Serialize and commit to ArtifactCache (save by modelHash + backend)
         if let Ok(payload) = self.build_payload() {
             if let Ok(blob) = bincode::serialize(&payload) {
-                if let Err(e) = cache.save_blob(&hash, &blob) {
+                if let Err(e) = cache.save_blob(&model_hash, backend, &blob) {
                     log::debug!("JIT L3 cache save failed (non-fatal): {}", e);
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -1700,6 +1703,8 @@ impl FusedGraphExecutor {
     }
 
     /// Creates an executor leveraging L3 binary cache fingerprinting to bypass compilation.
+    ///
+    /// Implements REQ-JIT-CACHE-003: L3 disk persistence with format {model_hash}_{backend}.bin.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn from_graph_with_cache(
         graph: crate::loader::onnx::OnnxGraph,
@@ -1707,7 +1712,7 @@ impl FusedGraphExecutor {
         hidden: usize,
         dtype: gllm_kernels::types::DType,
         model_id: &str,
-        hardware_fingerprint: &str,
+        backend: &str,
         cache: &crate::compat::artifact_cache::ArtifactCache,
         ctx: crate::graph::optimizer::OptimizationContext,
     ) -> Result<Self, ExecutorError> {
@@ -1720,7 +1725,7 @@ impl FusedGraphExecutor {
 
         let mut executor = Self::new(fused);
         executor
-            .compile_with_cache(seq_len, hidden, dtype, model_id, hardware_fingerprint, cache)
+            .compile_with_cache(seq_len, hidden, dtype, model_id, backend, cache)
             .map_err(|e| ExecutorError::CompilationFailed(format!("JIT cache compile: {e}")))?;
 
         Ok(executor)
