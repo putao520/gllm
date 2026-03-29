@@ -233,7 +233,7 @@ pub struct QuantizedTensor {
 
 ### 5.1 通用配置字段 (Static TurboQuant Bounds)
 
-在 Mega-Kernel 架构下，所有的张量都已通过 Load-Time 进行 PolarQuant 旋转补偿。这导致任何层级的中间计算已被**静态强制**为固定宽度的低比特规格。
+在 Mega-Kernel 架构下，所有的张量都已通过 Load-Time 进行 TurboQuant 2.0 数学变换（如 SmoothQuant/Cayley等）补偿。这导致任何层级的中间计算已被**静态强制**为固定宽度的低比特规格。
 因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译位宽约束！
 
 | 字段 | 类型 | 说明 |
@@ -277,7 +277,7 @@ impl ModelConfig {
                 .ok_or_else(|| GgufError::MissingMetadata("vocab_size"))?,
             hidden_size: reader.get_metadata_u64(&format!("{}.embedding_length", arch))
                 .ok_or_else(|| GgufError::MissingMetadata("embedding_length"))?,
-            turbo_quant_bits: 4, // 静态约束为 4-bit PolarQuant
+            turbo_quant_bits: 4, // 静态约束为 4-bit TurboQuant 2.0
             // ... 其他字段类似
         })
     }
@@ -408,7 +408,7 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 
 #### OOM 极高危行为禁止 (OOM Fallback 禁止)
 
-由于我们已通过 `PolarQuant` 排除了所有异常位宽和 `Amax` 后备模式。如果仍然触发内存或尺寸不匹配错误，引擎不再进行 `GPU → CPU` 或者 `FP16 → FP32` 的动态降级保护！
+由于我们已通过 `TurboQuant 2.0` 预处理排除了所有异常位宽和 `Amax` 后备模式。如果仍然触发内存或尺寸不匹配错误，引擎不再进行 `GPU → CPU` 或者 `FP16 → FP32` 的动态降级保护！
 如果物理内存超过了 Dual-Track 的块总容量，或者编译参数和静态张量形状不匹配，必须**当场崩溃 (Halt)** 并报硬件越界错误。
 
 ## 7. 通用张量拓扑 (DATA-TENSOR-TOPOLOGY)

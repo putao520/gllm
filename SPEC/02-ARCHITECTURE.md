@@ -416,7 +416,7 @@ Client::new_chat("Qwen/Qwen3-0.6B")
 
 6.  **量化与降维处理 (ARCH-LOADER-TURBO-QUANT)**
     - **目的**: 彻底消灭推理期的多态执行。所有张量在装载时经过极化转换，统一成 JIT 内核接受的固定底层位宽（如 INT4）。
-    - **Load-time Annihilation**: 装载时不再保留原始浮点类型，强行根据 `turbo_quant_bits` 执行 `PolarQuant` 映射。
+    - **Load-time Annihilation**: 装载时不再保留原始浮点类型，强行根据 `turbo_quant_bits` 执行 `TurboQuant 2.0` (三阶段离线管线) 映射。
     - **Native Float 摒除**: 不再有 Native Float 分流。即使原文件是 F16/BF16，统一并入静态编译位宽处理管线，将精度差异化在加载期全部抹平。
     - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核生成的汇编直接读取压扁的量子网格点，数学运算纯基于整数/微字节累加器进行，实现零分支执行。
 
@@ -1615,7 +1615,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)
 
 - **旧思路**: RmsNorm 尾端计算 `Amax`，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。
-- **新架构蜕变**: PolarQuant 正交旋转矩阵使分布在数学层面被绝对强制拉平。
+- **新架构蜕变**: TurboQuant 2.0 (Cayley学习旋转+GPTQ等) 离线预处理，使量化后内积与全精度期望一致。
 - **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！管线静态锁定 W4A4 + VNNI/SVE2。
 
 ### 14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)
@@ -1663,7 +1663,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 15.2 TurboQuant + 预瞄 → Zero-Stall Swapping
 
 温/冷专家权重在 CPU RAM 甚至远端 RDMA 内存中时：
-- TurboQuant PolarQuant 将专家权重暴压到 4-bit 甚至 2-bit，**PCIe/RDMA 搬运延迟缩减 75%~87.5%**
+- TurboQuant 2.0 将专家权重暴压到 4-bit 甚至 2-bit，**PCIe/RDMA 搬运延迟缩减 75%~87.5%**
 - Gate 层算出路由表的瞬间，立刻启动 `cuMemPrefetchAsync` 无阻塞预加载
 - Thread Block 走到该 Expert 汇编入口时，被极度压缩的权重**已躺在 GPU L2 Cache 里**
 - 冷专家卡顿被计算流水线完美掩盖（Pipelining）

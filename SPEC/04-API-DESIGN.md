@@ -425,7 +425,7 @@ pub struct InjectionScheduler {
 
 ### 9.1 TurboQuant 位宽压制配置 (`QuantConfig`)
 
-尽管底层 JIT 锁定静态位宽，但对外允许在启动期显式声明量化级别。引擎将依此执行不可逆的 `PolarQuant` 变换：
+尽管底层 JIT 锁定静态位宽，但对外允许在启动期显式声明量化级别。引擎将依此执行不可逆的 `TurboQuant 2.0` 变换：
 
 ```rust
 pub struct QuantConfig {
