@@ -238,10 +238,10 @@ src/
 │   ├── policy.rs       # JIT scheduling policies (hot-switchable)
 │   ├── jit_types.rs    # JIT type definitions
 │   └── vllm2024.rs     # SwiftKV / Scheduler2024Config / AdaptiveChunkPolicy
-├── backend/            # Backend detection & fallback
+├── backend/            # Backend detection (ARCH-ZERO-FALLBACK: no OOM fallback)
 │   ├── mod.rs
 │   ├── detection.rs    # Auto-detect CUDA→ROCm→Metal→CPU
-│   └── fallback.rs     # OOM fallback (GPU→CPU)
+│   └── (fallback.rs deleted — ARCH-ZERO-FALLBACK)
 ├── manifest/           # Model manifest types
 │   ├── mod.rs
 │   └── types.rs
@@ -477,7 +477,7 @@ gllm 的核心定位是 JIT 编译融合算子推理引擎。所有计算必须�
 
 | # | 文件 | 修复内容 | 提交 |
 |---|------|---------|------|
-| C1 | `src/backend/fallback.rs` | rerank `unwrap_or(0.0)` → 返回错误 | gllm `654642b` |
+| C1 | `src/backend/fallback.rs` | rerank `unwrap_or(0.0)` → 返回错误; **文件已物理删除 (ARCH-ZERO-FALLBACK)** | gllm `654642b` |
 | C2 | `src/compat/gpu_compile.rs` | tensor ptr `unwrap_or(0)` NULL 指针 → 返回错误（4 处） | gllm `654642b` |
 | C3 | `src/compat/memory.rs` | page_size `unwrap_or(4096)` → 传播解析错误 | gllm `654642b` |
 

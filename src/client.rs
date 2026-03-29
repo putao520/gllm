@@ -8,8 +8,7 @@ use crate::engine::executor::BackendError;
 use thiserror::Error;
 
 use crate::backend::{
-    detect_backend, BackendContext, BackendContextError, FallbackEmbedder, FallbackGenerator,
-    FallbackReranker,
+    detect_backend, BackendContext, BackendContextError,
 };
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
@@ -32,6 +31,8 @@ pub enum ClientError {
     NoModelLoaded,
     #[error("not implemented: {kind} (queued request {request_id})")]
     NotImplementedQueued { kind: &'static str, request_id: u64 },
+    #[error("OOM halt: {message} (fatal={fatal})")]
+    OomHalt { message: String, fatal: bool },
     #[error(transparent)]
     Loader(#[from] LoaderError),
 
@@ -168,13 +169,15 @@ impl Client {
     ) -> Result<GenerationResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        let mut generator = FallbackGenerator::new(&loaded.backend);
+        // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
+        // OOM errors propagate as-is via ExecutorError -> ClientError.
+        let mut executor = loaded.backend.executor_mut();
         let result = if let Some(sid) = session_id {
-            generator.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
+            executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
         } else {
-            generator.generate(&prompt, max_tokens, temperature, top_k, top_p)?
+            executor.generate(&prompt, max_tokens, temperature, top_k, top_p)?
         };
-        let (text, thinking_content) = crate::generation::split_thinking_content(&result.value);
+        let (text, thinking_content) = crate::generation::split_thinking_content(&result);
         Ok(GenerationResponse {
             text,
             thinking_content,
@@ -188,12 +191,12 @@ impl Client {
     ) -> Result<EmbeddingsResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        let mut embedder = FallbackEmbedder::new(&loaded.backend);
-        let result = embedder.embed_batch(&inputs)?;
-        let embeddings = result.value
-            .into_iter()
-            .map(|embedding| Embedding { embedding })
-            .collect();
+        // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
+        let mut executor = loaded.backend.executor_mut();
+        let mut embeddings = Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            embeddings.push(Embedding { embedding: executor.embed(input)? });
+        }
         Ok(EmbeddingsResponse {
             embeddings,
             request_id: None,
@@ -208,9 +211,20 @@ impl Client {
     ) -> Result<RerankResponse, ClientError> {
         let state = self.read_state()?;
         let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
-        let mut reranker = FallbackReranker::new(&loaded.backend);
-        let result = reranker.rerank_batch(&query, &documents)?;
-        let mut results = result.value
+        // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
+        let mut executor = loaded.backend.executor_mut();
+        let mut scores = Vec::with_capacity(documents.len());
+        for doc in documents.iter() {
+            let score = executor.rerank_pair(&query, doc)?;
+            let val = score.first().copied().ok_or_else(|| {
+                ClientError::Backend(BackendError::Cpu(
+                    "rerank_pair returned empty scores for query/doc pair".into(),
+                ))
+            })?;
+            scores.push(val);
+        }
+
+        let mut results = scores
             .into_iter()
             .enumerate()
             .map(|(index, score)| RerankResult { index, score })

@@ -31,10 +31,9 @@
 
 **完成状态**: `unwrap_or(0.0)` 在 `fallback.rs` (亟待被销毁) 中依旧残留。需随 P0-3 并发移除。
 
-### P0-3: OOM Halt 强制截断 (REQ-ERR-002, ARCH-ZERO-FALLBACK) ❌ 亟待执行
+### P0-3: OOM Halt 强制截断 (REQ-ERR-002, ARCH-ZERO-FALLBACK) ✅ 已完成
 
-**完成状态**: **严重的代码债务警报！**先前的 `✅ 已完成` 记录被审计推翻。目前 `src/backend/fallback.rs` 仍然存活，`src/client.rs` 仍在调用带重试降级属性的 `FallbackGenerator` / `FallbackEmbedder` / `FallbackReranker`，`BackendContext::new` 仍在发生 `GPU->CPU` 的幽灵降级。
-**修复计划**: 必须在后续的（代码开发环）中**物理删除 `src/backend/fallback.rs`**，并在 `src/client.rs` 中直接穿透调用 `executor_mut().generate(...)`，强制将底层执行器的 `OomHalt` 暴露给 CLI 客户端。
+**完成状态**: `src/backend/fallback.rs` 已物理删除。`FallbackGenerator`/`FallbackEmbedder`/`FallbackReranker`/`OomFallback`/`FallbackResult` 全部销毁。`Client` 直接调用 `executor_mut().generate()`/`embed()`/`rerank_pair()`，OOM 错误以 `ExecutorError` -> `ClientError` 直通传递，无降级。`BackendContext::new()` 移除 GPU->CPU OOM fallback 分支，编译失败直接传播。`rebuild_cpu()` 和 `build_cpu_executor()` 已删除。`ClientError::OomHalt` 变体已添加。
 
 ### P0-4: Backend Detection 错误传播 (REQ-ERR-003) ✅ 已完成
 
