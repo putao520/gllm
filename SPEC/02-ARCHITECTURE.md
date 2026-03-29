@@ -412,13 +412,12 @@ Client::new_chat("Qwen/Qwen3-0.6B")
         - `vocab_size` = `Embedding` 张量的较大维度
         - `head_dim` = `AttentionQuery` 张量维度 / `num_heads`
         - `num_layers` = 匹配到的最大 `layer_idx` + 1
-    - **DType Adapter**: **(已弃用)** Loader 层不再根据硬件进行动态类型分发。所有输入类型的张量统一在 Load-time 转换为目标的静态 TurboQuant 位宽，抹平原始格式差异。
+    - **DType Adapter**: **(已弃用)** Loader 层不再根据硬件进行动态类型分发。
 
-6.  **量化与降维处理 (ARCH-LOADER-TURBO-QUANT)**
-    - **目的**: 彻底消灭推理期的多态执行。所有张量在装载时经过极化转换，统一成 JIT 内核接受的固定底层位宽（如 INT4）。
-    - **Load-time Annihilation**: 装载时不再保留原始浮点类型，强行根据 `turbo_quant_bits` 执行 `TurboQuant 2.0` (三阶段离线管线) 映射。
-    - **Native Float 摒除**: 不再有 Native Float 分流。即使原文件是 F16/BF16，统一并入静态编译位宽处理管线，将精度差异化在加载期全部抹平。
-    - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核生成的汇编直接读取压扁的量子网格点，数学运算纯基于整数/微字节累加器进行，实现零分支执行。
+6.  **预量化权重加载与格式对齐 (ARCH-LOADER-TURBO-QUANT)**
+    - **职责边界**: gllm 是纯推理引擎，**不执行量化、不执行训练**。Loader 只负责读取外部量化工具（如 AutoGPTQ、llama.cpp quantize 等）已经产出的预量化权重文件，并执行静态格式对齐（解包、内存布局重排、元数据提取）。
+    - **Load-time Format Alignment**: 装载时将预量化权重文件中的张量解包为 JIT 内核接受的固定底层位宽格式（如 INT4），并提取附随的在线旋转矩阵等元数据注入 GraphExecutor。
+    - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核生成的汇编直接读取预量化权重的定点网格点，数学运算纯基于整数/微字节累加器进行，实现零分支执行。
 
 #### ONNX Adapter Architecture (ARCH-ONNX)
 
@@ -1369,11 +1368,12 @@ Chunked 调度（交织）:
 
 > **关联**: unified-jit-architecture-master.md §2, §4, §6.1, ai-development-guideline.md §1, hgal-scheduler-algorithm.md §3.3
 > **学术依据**: SpinQuant (ICLR 2025), KurTail (2025), GPTQ, SmoothQuant (MIT/NVIDIA), QuIP# (ICML 2024), RaBitQ (SIGMOD 2024), KIVI
-> **核心哲学**: 无损的正确定义不是量化后权重逼近原值，而是量化后内积/输出的期望与全精度一致。通过离线三阶段数学预处理 + 在线三点 FWHT 旋转 + KV 非对称量化，在整条管线只走唯一一条定点算法流的前提下，逼近数学无损。
+> **核心哲学**: 无损的正确定义不是量化后权重逼近原值，而是量化后内积/输出的期望与全精度一致。通过外部量化工具的离线三阶段数学预处理 + 推理引擎的在线三点 FWHT 旋转 + KV 非对称量化，在整条管线只走唯一一条定点算法流的前提下，逼近数学无损。
+> **职责边界**: gllm 是纯推理引擎，不执行量化、不执行训练。本章节描述的是 gllm 所消费的预量化权重文件必须满足的数学契约，以及推理引擎在前向传播中需要执行的在线旋转。
 
-### 11.1 离线三阶段预处理管线 (AOT Three-Stage Pipeline)
+### 11.1 预量化权重的数学契约 (Pre-Quantized Weight Mathematical Contract)
 
-所有重型数学计算在量化工具中离线完成，推理引擎只消费预处理好的权重。
+以下三阶段数学处理由外部量化工具（如 AutoGPTQ、llama.cpp quantize 等）在离线环境中完成。gllm 的 Loader 只负责读取产出的预量化权重文件并执行静态格式对齐（解包、内存布局重排）。
 
 #### 阶段 1: SmoothQuant 激活-权重难度迁移
 
@@ -1615,7 +1615,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)
 
 - **旧思路**: RmsNorm 尾端计算 `Amax`，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。
-- **新架构蜕变**: TurboQuant 2.0 (Cayley学习旋转+GPTQ等) 离线预处理，使量化后内积与全精度期望一致。
+- **新架构蜕变**: 外部量化工具通过 TurboQuant 2.0 数学契约（Cayley 学习旋转+GPTQ 等）离线预处理权重，使量化后内积与全精度期望一致。gllm 只消费预量化权重文件。
 - **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！管线静态锁定 W4A4 + VNNI/SVE2。
 
 ### 14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)

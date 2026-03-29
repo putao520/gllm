@@ -174,7 +174,7 @@ pub struct QuantizedTensor {
 | K-Quant | Q2_K ~ Q8_K | Q2K ~ Q8K | `kquant_matmul` |
 | Classic | Q4_0 ~ Q8_1 | Q4_0 ~ Q8_1 | `classic_matmul` |
 | IQ | IQ1_S ~ IQ4_XS | IQ1S ~ IQ4XS | `iq_matmul` |
-| Native | F32/F16/BF16/F64/I* | (None) | `upload_weights` 常规路径 (经 Load-time 极化转换为 TurboQuant 静态位宽) |
+| Native | F32/F16/BF16/F64/I* | (None) | `upload_weights` 常规路径 (需使用外部量化工具预量化为 TurboQuant 静态位宽后再加载) |
 
 ---
 
@@ -233,7 +233,7 @@ pub struct QuantizedTensor {
 
 ### 5.1 通用配置字段 (Static TurboQuant Bounds)
 
-在 Mega-Kernel 架构下，所有的张量都已通过 Load-Time 进行 TurboQuant 2.0 数学变换（如 SmoothQuant/Cayley等）补偿。这导致任何层级的中间计算已被**静态强制**为固定宽度的低比特规格。
+在 Mega-Kernel 架构下，所有的张量都已由外部量化工具完成 TurboQuant 2.0 数学变换（如 SmoothQuant/Cayley 等）。gllm Loader 只读取预量化权重文件并执行静态格式对齐。这导致任何层级的中间计算已被**静态强制**为固定宽度的低比特规格。
 因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译位宽约束！
 
 | 字段 | 类型 | 说明 |
@@ -389,7 +389,7 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 ### 6.6 TurboQuant 静态位宽约定 (DATA-STATIC-BITWIDTH)
 
 > **关联架构**: unified-jit-architecture-master.md §2 (TurboQuant)
-> **铁律**: 在载入模型阶段 (Load-time) 完成基于极化旋转的量化转换后，系统严禁保留任何多态执行类型。
+> **铁律**: gllm 只加载外部量化工具产出的预量化权重文件，系统严禁保留任何多态执行类型。
 
 #### 位宽统一归宿
 
