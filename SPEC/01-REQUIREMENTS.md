@@ -300,24 +300,6 @@
 | **REQ-COMM-SENSORS** | 跨域通信墙侦测 | 识别系统级别的异步传输障碍及延迟 | 1. 探明跨 NUMA 核心及缓存 (L1/L2/L3/TLB) 深度，生成 `Core Pinning` 强约束。<br>2. 识别主板 PCIe P2P 与 NVLink/XGMI 跳板限制。<br>3. 探测网卡 `RoCE v2/InfiniBand` 大吞吐 DMA 单向 `RDMA_Latency`。 | 🟢 架构约束生效 |
 | **REQ-LOAD-TIME-MATH** | 全格式权重加载 + TurboQuant 运行时优化 | gllm 加载 SafeTensors/GGUF/ONNX 全格式权重，推理过程中执行 TurboQuant 数学精度优化 | 1. 加载任意格式权重文件（解包、内存布局重排、元数据提取）。<br>2. QuantType 直接驱动 JIT 生成硬件原生内核。<br>3. 前向传播中执行 3 个在线 FWHT 旋转（内联 Mega-Kernel Epilogue）。<br>4. KV Cache 非对称量化（K per-channel, V per-token）+ RaBitQ 无偏修正。 | 🟢 架构约束生效 |
 
-## 9.1 环境感知多版本算子 (REQ-ENV-VARIANT)
-
-> **架构定义**: 02-ARCHITECTURE.md §17 (ARCH-ENV-VARIANT)
-> **数据结构 SSOT**: 03-DATA-STRUCTURE.md §16 (DATA-ENV-VARIANT)
-> **信号采集**: 07-OBSERVABILITY.md §8 (ARCH-EPILOGUE-ENV-ROUTING)
-> **缓存协议**: DOCS/scheduling/jit-cache-protocol.md §5 (ARCH-ENV-VARIANT-CACHE)
-> **核心原则**: 同一标量算子根据 (硬件 × 负载 × 白嫖信号) 笛卡尔积编译为多种物理实现，运行时通过完美哈希跳表零开销选择。
-
-| ID | 需求标题 | 描述 | 验收标准 | 状态 |
-|----|----------|------|----------|------|
-| **REQ-ENV-VARIANT-001** | EnvVector 离散化环境向量 | 5 维离散枚举 (sharpness/dead_neuron/residual_energy/phase/batch_shape) bit-packed 为 u32，寄生于 Epilogue 白嫖信号 | 1. 每个 Epilogue 追加 ≤3 条 SIMD 指令完成量化<br>2. 总开销 ≤10 cycles，消耗 ≤3 个空闲寄存器<br>3. 写入 Request_State_Table.env_vector 字段<br>4. 禁止运行时浮点比较驱动变体选择 | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-002** | EnvSchema 环境维度模板 | 描述模型需要编译哪些环境维度，驱动笛卡尔积剪枝 | 1. 稠密模型: phase + sharpness + dead_neuron + energy + batch_shape (~6 变体/OpKind)<br>2. MoE 模型: + moe_load_balance (~8 变体/OpKind)<br>3. Embedding 模型: phase=Prefill 固定 + batch_shape (~2 变体)<br>4. 每个 OpKind 有效变体 ≤ 16 个 | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-003** | 变体编译协议 | 模型加载时枚举 (OpKind × EnvVector) 笛卡尔积编译物理变体 | 1. 编译发生在模型加载时 + Autotuning 窗口期<br>2. 推理热路径中零编译行为<br>3. 每个变体走完整 Phase 0-3 JIT 管线<br>4. SpecializationHint 驱动变体内联优化 (SinkProtection/KIVI/FWHT/GateCompaction/EarlyExit/CentroidPrefetch/RabitQCorrection) | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-004** | 完美哈希跳表选路 | Mega-Kernel 内 Thread Block 通过 O(1) 跳表选择变体 | 1. Thread Block 读取 env_vector → bfe.u32 提取字段<br>2. 查找完美哈希表获得 VariantId<br>3. `jmp [jump_table + VariantId * 8]` 零分支<br>4. 禁止 `if threshold > value` 类浮点比较 | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-005** | EnvVariantRegistry 注册表 | 编译时填充的 (OpKind × EnvVector) → VariantId 静态映射 | 1. 完美哈希表，运行时只读<br>2. O(1) 查询 + O(1) 机器码偏移查询<br>3. 默认变体支持热修补 (JIT Director set_default)<br>4. 未命中时降级到默认变体（非编译期 fallback） | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-006** | 变体冷热生命周期管理 | JIT Director Daemon 管理变体的冷热分级与演化 | 1. 热 (hit_rate > 10%): 默认跳表入口<br>2. 温 (1%-10%): LRU 缓存<br>3. 冷 (≤ 1%): Uncommon Trap → §15.4 Deopt 恢复<br>4. 僵尸 (100K step 零命中): 物理剔除<br>5. 环境漂移检测: 卡尔曼平滑器检测分布变化 → 后台沙盒编译新变体 → 热插入跳表 | 🟢 架构约束生效 |
-| **REQ-ENV-VARIANT-007** | 变体缓存键扩展 | ModelArchKey 扩展 EnvSchema 维度 | 1. `ModelArchKey { model_id, backend, env_schema }` 完整定义<br>2. L3 文件名: `{model_hash}_{backend}_{env_schema_hash}.bin`<br>3. 变体机器码按热/温/冷分级存储 (L1 注册表 + L2 共享代码页 + L3 磁盘)<br>4. 磁盘缓存 TTL 7 天 | 🟢 架构约束生效 |
-
 ## 10. AI 大一统运行时图策略 (REQ-UNIFIED-JIT)
 
 > **极化机制**: "纯 Rust，无软路由退避 (No Fallback)，异构块级调度与热覆写"。

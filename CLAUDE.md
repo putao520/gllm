@@ -3,24 +3,24 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 9 documents, 111+ REQs)
+- `./SPEC/` (Single Source of Truth, 9 documents, 104+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## SPEC Index
 
 | Document | Content |
 |----------|---------|
-| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束, REQ-ENV-VARIANT-001~007 环境感知多版本算子) |
-| `02-ARCHITECTURE.md` | 4层物理架构, §17 ARCH-ENV-VARIANT 环境感知多版本算子 (同一标量算子多物理实现, 完美哈希跳表零开销选路) |
-| `03-DATA-STRUCTURE.md` | §16 DATA-ENV-VARIANT (EnvVector/EnvSchema/VariantId/EnvVariantRegistry/SignalRouter/SpecializationHint) |
-| `04-API-DESIGN.md` | 客户端公共 API (包含新加入的 Knowledge Injection & Intent SDK) |
-| `06-TESTING-STRATEGY.md` | §12 TEST-ENV-VARIANT (信号量化/跳表选路/缓存键/冷热生命周期/变体数值正确性 8 项测试) |
-| `07-OBSERVABILITY.md` | §8 Epilogue 白嫖信号 → 环境感知变体路由 (信号量化管道/EnvVector 写入协议/64B KvPageHeader 最终设计) |
+| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) |
+| `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补 |
+| `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) |
+| `04-API-DESIGN.md` | 客户端公共 API (包含 Knowledge Injection & Intent SDK) |
+| `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) |
+| `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
-| `DOCS/scheduling/jit-cache-protocol.md` | §5 ARCH-ENV-VARIANT-CACHE (变体编译协议/笛卡尔积剪枝/三级缓存/冷热分级) |
-| `DOCS/scheduling/unified-jit-architecture-master.md` | §10 ARCH-ENV-VARIANT (Epilogue→编译期变体→运行时零开销选路, §1-§9 全景闭环) |
+| `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议 (三级缓存, SymDim 动态维度, CPU/GPU 统一) |
+| `DOCS/scheduling/unified-jit-architecture-master.md` | 大一统推理引擎蓝图 (§1-§9: 硬件探测/TurboQuant/Mega-Kernel/白嫖/热修补/MoE/残差总线/知识注入) |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 |
 

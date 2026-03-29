@@ -29,25 +29,19 @@
 
 ### 2.1 缓存键 (Cache Key)
 
-缓存键 = **模型结构签名** × **环境维度模板**，不包含任何运行时动态维度：
+缓存键 = **模型结构签名**，不包含任何运行时动态维度：
 
 ```rust
 ModelArchKey {
     model_id: String,       // "meta-llama/Llama-3-70B" 或模型路径 hash
     backend: BackendKind,   // Cuda / Hip / Metal / Cpu
-    // 环境感知扩展 (ARCH-ENV-VARIANT):
-    // 描述该模型需要编译哪些环境维度及其合法枚举值
-    env_schema: EnvSchema,
     // ... 其他全模型级静态参数
 }
 ```
 
-**EnvSchema** 定义见 03-DATA-STRUCTURE.md §16.2。它不包含运行时值，仅描述"该模型支持哪些环境维度"。
-例如，MoE 模型比稠密模型多一个 `moe_load_balance` 维度。
-
 **L3 磁盘缓存文件名格式**:
 ```
-{model_hash}_{backend}_{env_schema_hash}.bin
+{model_hash}_{backend}.bin
 ```
 
 ### 2.2 缓存粒度 (Graph Executor)
@@ -86,59 +80,12 @@ ModelArchKey {
 ```text
 Client::load_model(model_id)
     → Loader 加载权重 + config.json
-    → 构造模型级的 ModelArchKey (含 EnvSchema)
+    → 构造模型级的 ModelArchKey
     → 查询磁盘/内存级缓存
     → 没有命中时: 解析 YAML 模板 (如 llama.yaml) 构造全网结构图
     → GraphExecutor 接管进行全局统一编译（仅在加载时发生一次）
-    → 【新增】枚举 EnvSchema 的合法 EnvVector 笛卡尔积
-    → 【新增】对每个 (OpKind, EnvVector) 组合编译物理变体
-    → 【新增】构建 EnvVariantRegistry 完美哈希跳表
-    → 将执行器本身 (含变体注册表) 作为唯一缓存实体写回
+    → 将执行器本身作为唯一缓存实体写回
     → 推理阶段全程由持有的单体缓存环境接管前向传播
 ```
 
 ---
-
-## 5. 环境感知变体编译协议 (ARCH-ENV-VARIANT-CACHE)
-
-> **关联**: 02-ARCHITECTURE.md §17, 03-DATA-STRUCTURE.md §16
-
-### 5.1 变体编译时机
-
-变体编译发生在**模型加载时**，与主图编译同批次。不违反"推理热路径零编译"铁律。
-
-### 5.2 变体笛卡尔积剪枝
-
-EnvVector 的理论组合数为 `3 × 3 × 3 × 2 × 3 = 162`，但经过以下剪枝后每个 OpKind 仅 4-8 个有效变体：
-
-| 剪枝规则 | 示例 |
-|---------|------|
-| 互斥约束 | Phase=Prefill 时 Sharpness 不适用 (固定为 Flat) |
-| 架构约束 | 非 MoE 模型不编译 dead_neuron 维度 |
-| 性能约束 | 某些变体性能在最优 80% 以内，合并为一个通用变体 |
-| Autotuning 剔除 | 首次运行微基准测试后，剔除冷变体 |
-
-### 5.3 变体缓存结构
-
-```text
-L1 (内存): EnvVariantRegistry (完美哈希表 + 机器码偏移)
-    └── 每个 (OpKind, EnvVector) → VariantId → code_offset
-
-L2 (全局 LRU): 跨模型共享的变体机器码页 (4KB 对齐)
-    └── key: (OpKind, EnvVector, IsaLevel, QuantType)
-    └── value: 编译后的机器码字节
-
-L3 (磁盘): 模型级二进制
-    └── 文件: {model_hash}_{backend}_{env_schema_hash}.bin
-    └── 内含: 所有变体机器码 + 注册表序列化
-    └── TTL: 7 天自动清理
-```
-
-### 5.4 变体冷热分级
-
-| 级别 | 条件 | 存储 | 恢复机制 |
-|------|------|------|---------|
-| **热** | hit_rate > 10% | L1 + L2 + L3 | 直接跳表命中 |
-| **温** | 1% < hit_rate <= 10% | L2 + L3 | LRU 缓存命中 |
-| **冷** | hit_rate <= 1% | L3 磁盘 | Deopt → 沙盒编译 → 热插入 |
-| **僵尸** | 0 hit in 100K steps | L3 或剔除 | Uncommon Trap → §15.4 恢复 |
