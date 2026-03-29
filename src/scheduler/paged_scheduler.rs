@@ -469,7 +469,9 @@ impl PagedScheduler {
                 // Unmap from GMM page table
                 let virtual_id = VirtualPageId::new(request_id, logical_idx);
                 self.memory_manager.unmap_virtual_page(virtual_id);
-                let _ = self.memory_manager.free_page(Tier::L1, *block as usize);
+                if let Err(e) = self.memory_manager.free_page(Tier::L1, *block as usize) {
+                    log::warn!("free_page L1 block {} failed during sequence cleanup: {}", *block, e);
+                }
             }
         }
         self.swapped_storage_keys.remove(&request_id);

@@ -761,23 +761,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(id)
     }
 
-    // Deprecated/Modified: enqueue_with_tokens is used by tests, so we adapt it.
-    pub fn enqueue_with_tokens(
-        &mut self,
-        kind: RequestKind,
-        prompt: impl Into<String>,
-        tokens: usize,
-    ) -> RequestId {
-        // Adapt for tests that manually specify token count but don't care about actual encoding
-        // intentional: test helper, callers don't check enqueue result
-        let _ = self.enqueue_with_config(
-            kind,
-            prompt,
-            tokens, // Interpret tokens as max_new_tokens for tests
-            SamplingConfig::default(),
-        );
-        self.requests.len() as RequestId
-    }
 
     /// Register a new session for multi-turn KV cache reuse.
     pub fn register_session(&mut self, session_id: SessionId) {

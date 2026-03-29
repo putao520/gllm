@@ -247,11 +247,17 @@ impl ModelConfig {
         };
         let data = match std::fs::read_to_string(config_path) {
             Ok(d) => d,
-            Err(_) => return TensorDeriveHints::default(),
+            Err(e) => {
+                log::debug!("config.json read failed, using default tensor hints: {}", e);
+                return TensorDeriveHints::default();
+            }
         };
         let json: Value = match serde_json::from_str(&data) {
             Ok(v) => v,
-            Err(_) => return TensorDeriveHints::default(),
+            Err(e) => {
+                log::debug!("config.json parse failed, using default tensor hints: {}", e);
+                return TensorDeriveHints::default();
+            }
         };
         let num_heads = json
             .get("num_attention_heads")

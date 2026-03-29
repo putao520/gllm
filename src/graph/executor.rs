@@ -817,7 +817,9 @@ impl FusedGraphExecutor {
         // 3. Serialize and commit to ArtifactCache
         if let Ok(payload) = self.build_payload() {
             if let Ok(blob) = bincode::serialize(&payload) {
-                let _ = cache.save_blob(&hash, &blob);
+                if let Err(e) = cache.save_blob(&hash, &blob) {
+                    log::debug!("JIT L3 cache save failed (non-fatal): {}", e);
+                }
             }
         }
         
@@ -2314,7 +2316,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
 
-        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32)
+        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32, crate::graph::optimizer::OptimizationContext::default())
             .expect("from_graph must succeed for a simple Add graph");
 
         assert!(executor.is_compiled(), "executor must be compiled after from_graph");
@@ -2404,7 +2406,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
 
-        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32)
+        let executor = FusedGraphExecutor::from_graph(graph, 4, 64, gllm_kernels::types::DType::F32, crate::graph::optimizer::OptimizationContext::default())
             .expect("from_graph must succeed");
 
         // Provide two f32 inputs: x = [1.0; 4*64], y = [2.0; 4*64]
@@ -2421,6 +2423,7 @@ mod tests {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             0,
+            4,
             4,
             std::ptr::null(),
         );
