@@ -549,7 +549,7 @@ pub enum PrefillPlan {
 
 用于表达 `ChunkedConfig` 融合后的预分配与预取策略，约束如下：
 1. `FullyResident` 表示 prefill 页面可全部驻留 L1。
-2. `Pipelined` 表示需要分批装载/预取，不改变 Phase Isolation。
+2. `Pipelined` 表示需要分批装载/预取，不改变 Chunked Prefill 交织调度语义。
 3. `chunk_schedule` 仅在 Prefill 阶段生效，不参与 Decode 混批。
 
 ---
