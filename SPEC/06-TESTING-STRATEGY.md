@@ -536,13 +536,13 @@ let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 2. 调用 `observer.capture()`
 **期望结果**: 返回 `Err(ObserverError::BackendUnavailable)`，不返回 `memory_pressure = 0.0`
 
-### TEST-ERR-002: OOM Fallback 标记
+### TEST-ERR-002: OOM Halt 验证 (ARCH-ZERO-FALLBACK)
 **关联需求**: REQ-ERR-002
 **测试类型**: 正向测试
 **测试步骤**:
-1. 触发 GPU OOM（模拟）
-2. 检查 fallback 返回值
-**期望结果**: `fallback_used == true`
+1. 触发 GPU OOM（模拟超过 Dual-Track 块容量）
+2. 检查系统行为
+**期望结果**: 当场崩溃 (Halt) 并返回硬件越界错误，禁止任何降级或 `fallback` 发生
 
 ### TEST-ERR-003: Backend Detection 不 panic
 **关联需求**: REQ-ERR-003
@@ -587,3 +587,34 @@ let kernel_tensor = adapter.tensor_for_kernel("token_embd.weight")?;
 2. 分别在 CUDA/HIP/Metal 后端执行 paged attention
 3. 比较三后端输出
 **期望结果**: 三后端 attention 输出数值一致（容差 < 1e-5）
+
+## 12. 极致物理调度的系统级大考 (TEST-PHYSICAL-JIT)
+
+> **关联架构**: unified-jit-architecture-master.md
+> **要求**: 在极高硬件并发下验证核内路由与热修复的铁律。严禁 Mock 底层物理信号。
+
+### TEST-JIT-DISPATCH-001: 图异构块调度并行对抗测试
+**关联需求**: REQ-DYNA-BLOCK-GRAPHS
+**测试类型**: 负向/系统测试
+**测试步骤**:
+1. 锁定一组 GPU SM 块，故意喂入极不均匀的负载（Batch 内含极致稀疏与全密请求）。
+2. `Request_State_Table` 同时向不同的 Thread Block 发送计算块。
+3. 验证没有因为同步屏障挂起整个 `__syncthreads()`。
+**期望结果**: JIT 在编译期成功切分并解耦了高频/低频处理段，各个 SM 中的流完全去耦，不发生死锁或显著长尾（执行时差 < 5%）。
+
+### TEST-JIT-HOTPATCH-001: 5-Byte 原子指令擦写断点生存挑战
+**关联需求**: REQ-JIT-HOT-REPAIR
+**测试类型**: 边界/安全测试
+**测试步骤**:
+1. 设置一个具有长前缀共享且长时间无人访问的冷门 MoE 专家状态节点。
+2. JIT Director 发起坍缩，使用 5-byte `.text` 热覆写强行置入 `jmp`。
+3. 在同一微秒内，产生一个从该专家取数据的竞争请求。
+**期望结果**: 并发指令不会引发 SIGILL（非法指令），硬件以原子级完成覆盖，竞争请求被平滑流转 (Uncommon Trap Bailout) 或通过 OSR 回退 (On-Stack Replacement) 转推重建。
+
+### TEST-HGAL-THRASH-002: HGAL 高并发抗抖测试
+**关联需求**: REQ-SCHED-001, REQ-SCHED-005
+**测试类型**: 压力测试
+**测试步骤**:
+1. 创造极端显存过载（并发 150 个超长上下文连接，强迫换入换出率超 80%）。
+2. 在同一时间发射带有 Chunked Prefill 分片的乱序批次。
+**期望结果**: 必须触发由 `LIRS 队列` 驱动的 Thrasing 熔断保护。换页率应立刻呈现衰减收敛，绝不能无限制双边颠簸导致 GPU <-> CPU PCIe 拥堵（验证点：PCIe 实际吞吐不得封顶）。

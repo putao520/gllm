@@ -5,12 +5,14 @@
 ## 1. 核心理念 (Zero-Overhead Telemetry)
 
 在极致的 Mega-Kernel 架构下，任何传统的**“旁路探测、CPU 定时轮询、无锁环形队列 (RingBuffer)”**都会引发致命的 PCIe 延迟与缓存击穿。
-因此，gllm 的可观测性彻底抛弃外挂式的 `RuntimeObserver` 伴随线程，转而采用 **就地硬核写入（In-Place Logging）**。
+因此，gllm 的可观测性彻底抛弃外挂式的 `RuntimeObserver` 伴随线程，转而采用 **就地核心寄生（In-Place Piggybacking Logging）**。
+
+> **🌋 物理灭顶禁令**：禁止使用任何形式的单生产者/单消费者 `RingBuffer` (如 `crossbeam_channel`, `flume`) 向主机侧汇报遥测状态。状态传递仅允许寄生于算力管道残存带宽。
 
 其闭环构成为：
 1.  **Epilogue 嗅探器 (In-Kernel Sniffer)**: 在 Mega-Kernel 算子执行的最后一条指令（Epilogue），将熵值等数据顺手算出。
-2.  **物理页头烙印 (Page Header STG)**: 将由于计算衍生出的遥测数据，直接使用 `STG` (Store Global) 等写合并汇编，**硬贴**在当前 Request 正在写入的 KV Page 的前置字节（Header）里。
-3.  **零编解码回调 (Zero-Cost Readback)**: 下次调度器回收/轮询页表状态时，顺便就将这些监控值读回，绝不发生二次通信。
+2.  **物理页头烙印 (Page Header STG)**: 将由于计算衍生出的遥测数据，直接使用 `STG` (Store Global) 等写合并汇编，**硬贴机制 (Piggybacking)** 在当前 Request 正在写入的 KV Page 前置空白区 (`Header Padding`) 里，利用 DMA 写回数据段的顺风车带回主机。
+3.  **零编解码回调 (Zero-Cost Readback)**: 下次调度器回收/轮询页表状态时，按固定偏移 (`Header Offset`) 零反序列化读回，绝不发生二次 PCIe 通信。
 
 ## 2. 架构设计
 
@@ -65,16 +67,12 @@ pub trait SchedulingPolicy {
 通过 `STG` 采集到的熵数据，系统唯一常态执行的是具有全局护栏保障的 `AbsolutePolicy`，去掉了原本复杂的 CPU 均衡博弈：
 
 ```rust
-enum PolicyVariant {
-    Absolute(AbsolutePolicy),
-}
+pub struct AbsolutePolicy;
 
-impl PolicyVariant {
+impl SchedulingPolicy for AbsolutePolicy {
     #[inline(always)]
     fn decide(&self, state: &SystemState) -> SchedulerDecision {
-        match self {
-            Self::Absolute(p) => p.decide(state),
-        }
+        // ... 基于 STG 矩阵直接输出唯一决策 ...
     }
 }
 ```
@@ -94,7 +92,7 @@ impl PolicyVariant {
 ## 4. Phase 4: 热熔断切换 (Global DCE Handover)
 
 如果捕获到长期静滞（长尾共识），JIT 直接在图编译上进行全局 DCE，调度层：
-- Host 层仅用最简单的 `PolicyVariant::Absolute`。
+- Host 层仅用最简单的 `AbsolutePolicy`。
 - 将动态路由放权到底层 `jmp`！
 
 ## 5. 错误处理铁律 (ARCH-ERR)
@@ -109,19 +107,19 @@ impl PolicyVariant {
 | `let _ = fallible_op()` | **禁止** | `fallible_op()?` 传播，或 `if let Err(e) = op() { log::warn!("{e}") }` |
 | `unwrap_or(default)` 掩盖错误 | **禁止** | `?` 传播，或显式 `match` 处理 |
 | `expect()` 在非初始化代码 | **禁止** | 返回 `Result`，让调用方处理 |
-| GPU→CPU 静默 fallback | **禁止** | `log::warn!("OOM fallback: GPU→CPU")` + 返回标记 |
+| OOM Out of Memory 处理 | **核心铁律** | 必须当场 Panic (Halt) 抛出越界错误，绝对禁止任何形式的隐式重试或内存扩展 |
 
-### 5.2 OOM Fallback 显式化
+### 5.2 OOM Halt 强制截断 (ARCH-ZERO-FALLBACK)
 
 ```rust
-pub struct FallbackResult<T> {
-    pub value: T,
-    pub fallback_used: bool,  // true = GPU OOM, fell back to CPU
+pub struct OomHaltError {
+    pub message: String,
+    pub fatal: bool,  // true = Hardware OOM, process must halt
 }
 ```
 
-- OOM fallback 发生时必须 `log::warn!("OOM fallback triggered: GPU→CPU for {operation}")`
-- 返回 `FallbackResult` 让调用方感知降级
+- OOM 发生时必须 `log::error!("OOM Halt triggered: Physical memory limit exceeded for {operation}")`
+- 架构底线：一旦触发硬件内存越界，系统必须当场截断 (Halt) 抛出严重错误，禁止框架层面自行容错。
 
 ### 5.3 Backend Detection 错误传播
 

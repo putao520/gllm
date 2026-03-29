@@ -124,6 +124,8 @@
 | `warm_until` | Option<Instant> | 保护期结束 | 换出保护 |
 | `access_count` | usize | 访问计数 | 频率检测 |
 | `last_access` | Instant | 最后访问 | LRU 计算 |
+| `kv_quant_strategy` | KvQuantStrategy | Key: PerChannel / Value: PerToken | 非对称量化 (KIVI) |
+| `is_attention_sink` | bool | 是否为 Sink Token（保留 FP16） | Attention Sink 保护 |
 
 ---
 
@@ -427,26 +429,7 @@ SplitFuse 方式:
 | 吞吐提升 | 对比纯 Decode Batch | +30-50% |
 | 内存开销 | 显存监控 | <5% 额外 |
 
----
 
-### 8.2 (已废弃) SwiftKV 算法
-
-> 🚨 **架构合规性警报 (Architect Veto)**:
-> 原始的 `SwiftKV 算法`（通过 `cosine_similarity` 做跨层共享和通过 Attention 权重做合并蒸馏）已被判定为 **违宪**，并将在此架构下永久失效。原因如下：
-> 1. 原算法要求对连续时间步的 KV 缓存进行浮点强度的插值合并（Interpolation）。但在 `Mega-Kernel` 架构下，所有的 KV Cache 已被 **TurboQuant 静态锁定在 3-bit / 4-bit 的双轨分布**中，强行插值合并不仅需要巨大的反量化/重量化流水线开销，还会造成严重的重分配时戳延迟。
-> 2. 原算法要求主机去测算 $\Delta$ 层距离矩阵（cosine_similarity 等）。这使得 CPU 端重新拿回了观测控制权，严重抵触了“消灭 CPU 控制台”与“In-Kernel Routing”法则。
->
-> 故，HGAL 系统只能做**拓扑级的完整页框交换（Complete Page Swapping）**，禁止在调度中侵入修改数据的压缩或数值形式！
-
----
-
-### 8.3 (已废弃) LMCache 跨请求 KV Cache
-
-> 🚨 **架构合规性警报 (Architect Veto)**:
-> 旧版通过引入第三方 LMCache 组件及复杂的 L1/L2/L3 分布式哈希缓存机制已被 **废弃并从 vllm2024.rs 中物理删除**。
-> 本项目已转向使用 `GlobalMemoryManager` 配合 `PrefixIndex` 和 `SessionKvCache` 的双管线本地内存管理机制 (REQ-KV-001/002)。此处的旧规范不再具有 SSOT 效应，留作历史封存。
-
----
 
 ### 8.4 三项优化集成数据流
 
@@ -494,18 +477,7 @@ SplitFuse 方式:
 | `enable_splitfuse` | bool | ~~true~~ | ⛔ 已废弃 (REQ-SCHED-007) — SplitFuse 混批路径已移除 |
 | `max_chunks_per_batch` | usize | 4 | 每批最大 Chunk 数 |
 
-#### 8.5.2 SwiftKV 配置 (⛔ 违宪/已废弃)
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `window_size` | usize | 4 | SIKV 窗口大小 |
-| `enable_across_kv` | bool | true | 启用 AKV |
-| `similarity_threshold` | f32 | 0.9 | AKV 相似度标量阈值 |
-| `precision_guard` | f32 | 0.1 | 精度损失阈值标量 (PPL) |
-
-#### 8.5.3 LMCache 配置 (⛔ 违宪/已废弃物理删除)
-
-> 已被删除。请使用 SessionKvCache 机制，不再支持 LMCache。
 
 ---
 

@@ -1365,40 +1365,96 @@ Chunked 调度（交织）:
 
 ---
 
-## §11 TurboQuant 单一算法多态 (ARCH-TURBOQUANT-POLYMORPHISM)
+## §11 TurboQuant 2.0 无损量化体系 (ARCH-TURBOQUANT-LOSSLESS)
 
-> **关联**: unified-jit-architecture-master.md §2, §6.1, ai-development-guideline.md §1
-> **核心哲学**: 用数学预处理在加载期消灭所有运行时多态分支，使得整条管线只走唯一一条定点算法流 —— 这就是"单一算法凌驾多态"。
+> **关联**: unified-jit-architecture-master.md §2, §4, §6.1, ai-development-guideline.md §1, hgal-scheduler-algorithm.md §3.3
+> **学术依据**: SpinQuant (ICLR 2025), KurTail (2025), GPTQ, SmoothQuant (MIT/NVIDIA), QuIP# (ICML 2024), RaBitQ (SIGMOD 2024), KIVI
+> **核心哲学**: 无损的正确定义不是量化后权重逼近原值，而是量化后内积/输出的期望与全精度一致。通过离线三阶段数学预处理 + 在线三点 FWHT 旋转 + KV 非对称量化，在整条管线只走唯一一条定点算法流的前提下，逼近数学无损。
 
-### 11.1 TurboQuant 2.0: Hessian-Polar 块级量化防御 (Zero-Overhead Batched Pre-Conditioning)
+### 11.1 离线三阶段预处理管线 (AOT Three-Stage Pipeline)
 
-传统的纯正交旋转（Random Hadamard）在处理百亿参数非线性大模型时，会使极个别通道的绝对大方差“污染摊平”至所有通道，导致 4-bit 量化底噪激增、精度爆炸。为了在 **Continuous Batching** 环境下既消除运行时条件分支，又绝对保全物理级精度，引入 TurboQuant 2.0 三段式防御：
+所有重型数学计算在量化工具中离线完成，推理引擎只消费预处理好的权重。
 
-1. **通道锁喉与幅度平滑 (Amplitude Migration)**: 在 Load-Time，利用微缩校准集的对角缩放矩阵 $S$，将 Activation 中方差极大的那 1% 通道的放大系数拉向权重 $W' = W \cdot S^{-1}$。在旋转前剥夺极端大点的能量级。
-2. **Hessian 迹导向特征庇护 (Hessian-Weighted K-RHT)**: 废除全随机翻转。通过 Hessian 的二阶偏导寻优，生成 Kronecker-factored Randomized Hadamard Transform 矩阵。只对 Loss 极不敏感的方向执行强行正交摊平，死死护住关键特征（如注意力尖峰）不被随机矩阵稀释。
-3. **最后防线物理圈禁 (Load-Time Outlier Permutation)**: 面对不可抹平的 0.1% 超级离群通道，生成静态置换矩阵 $P$。在 Load-Time 将这些敏感通道**物理挪动并拼接至权重矩阵末尾的特定 Block（如最后的 128x128 Tile）**。由于 $X \cdot P^T$ 只是内存寻址重排，在运行时：
-    - 前 99% 的 Mega-Kernel 循环，Warp 全力开火发射 W4A4（FP4/INT4）的 `WGMMA` 指令。
-    - 最后 1% 计算到特定的“圈禁 Block”时，JIT 强制这唯一的循环步态切换为 W8A8 高精度指令。
-    - **Batch 无损**: 由于是块级物理隔离，即便承载 128 个请求，GPU/CPU 阵列此时也是整齐划一地更换一次微指令。零线程分歧 (Zero SIMT Divergence)！
+#### 阶段 1: SmoothQuant 激活-权重难度迁移
 
-### 11.2 Epilogue 发动机：跨层全异步缩放快递 (Zero-Sync Scale Forwarding)
+对于线性层 $Y = XW$，引入对角缩放矩阵 $S$: $Y = (X \cdot S^{-1})(S \cdot W) = \hat{X} \cdot \hat{W}$。缩放因子按通道 $j$ 计算: $s_j = \max(|X_j|)^\alpha / \max(|W_j|)^{1-\alpha}$, $\alpha \in [0, 1]$。
 
-在 Batch 环境下对 128 个请求实时计算激活的最大缩放系数 $s$ 是严重的同步瓶颈。
-在 TurboQuant 2.0 中：
-- **白嫖尾段算力计算 Group Scale**: 在计算 Layer $(N-1)$ 的 RmsNorm 尾段（Epilogue）时，尚未丢弃的寄存器数据顺手在此刻规约出 Layer $N$ 输入所需要的 128 个请求的块级缩放尺度（Group Scales，尺寸强对齐 L2 Cache Line 或 Tensor Core 吞吐宽带）。
-- **零开销前向直塞**: 这些 Scales 借道 TMA/RDMA 直接投递至下一层的极速只读连续显存区。当 Layer $N$ 的 Mega-Kernel 启动时，只需一根 `LDG.128` 向量总线，将这 128 个请求刚才算出锅的微调常数瞬间拉进寄存器。
-- **全域免同步 (Global Sync-Free)**: 利用上一层的计算掩盖了全规约瓶颈，本批次在核内不再需要任何 `__syncthreads()` 或跨 Warp 缩放。
+**零运行时开销白嫖**: $S^{-1}$ 直接吸收进前一层 RMSNorm 的可学习缩放参数 $\gamma$（$\gamma'_j = \gamma_j / s_j$）。运行时 RMSNorm 代码零修改，激活出来就已经被 Smooth 过了。
 
-### 11.3 双轨显存池 (The Dual-Track Memory Pool)
+#### 阶段 2: Cayley 学习旋转 / KurTail 峰度最优化
 
-重构 `KvCacheConfig`，全面淘汰 `dtype_size`。由 `GlobalMemoryManager` 申请物理隔离的两轨架构：
+废除 PolarQuant 的盲目随机正交旋转（SpinQuant 已证明随机种子选择可导致零样本推理精度浮动 13 个百分点）。
+
+**方案 A: Cayley SGD** 将旋转矩阵 $R$ 参数化为 Cayley 变换: $R(\tau) = (I - \frac{\tau}{2}A)(I + \frac{\tau}{2}A)^{-1}$, $A = -A^T$。在小规模校准集上最小化量化后输出误差，$R$ 始终满足正交约束 $R^T R = I$。
+
+**方案 B: KurTail 峰度最小化** 以峰度 $\kappa$ 为优化目标，学习每层旋转矩阵使激活分布逼近均匀分布: $L_\kappa = \sum_{l=1}^{L} | \kappa(a^{(l)}) - \kappa_U |$, $\kappa_U = 1.8$。均匀分布对量化最鲁棒。可在单 GPU 上逐层独立完成。
+
+**旋转吸收规则**:
+
+| 旋转位置 | 能否离线吸收 | 吸收方式 |
+|---------|------------|---------|
+| RMSNorm 之后、QKV/Gate/Up 投影之前 | 可以 | $R^T$ 预乘进投影权重 $W' = R^T W$ |
+| Attention Output 到 $W_o$ | 可以 | $R^T$ 预乘进 $W_o$ |
+| SwiGLU 乘积到 $W_{down}$ | 可以 | $R^T$ 预乘进 $W_{down}$ |
+| **Softmax V 之后**（非线性不可穿越） | 需在线 FWHT | 见 11.2 |
+| **SwiGLU(Gate) Up 之后**（门控乘法非线性） | 需在线 FWHT | 见 11.2 |
+| **RoPE 后 K 存入 KV Cache** | 需在线 FWHT | 见 11.2 |
+
+#### 阶段 3: GPTQ Hessian 补偿逐列量化
+
+当第 $q$ 列权重量化为 $\hat{w}_q = \text{quant}(w_q)$ 时，剩余未量化权重做补偿性更新: $\delta_F = -(w_q - \hat{w}_q)/[H^{-1}]_{qq} \cdot (H^{-1})_{:,q}$。其中 $H = X^T X$ 是该层的 Proxy Hessian。每量化一个权重引入的误差，通过 Hessian 逆矩阵精确分配给剩余权重吸收。输出为最终的 4-bit 量化权重文件。
+
+### 11.2 在线旋转插入点 (Online FWHT Insertion Points)
+
+前向传播中存在 3 个不可被离线吸收的非线性边界，必须在运行时执行 Fast Walsh-Hadamard Transform (FWHT)。与 Mega-Kernel 铁律完全兼容: 不增加新的 Kernel Launch（内联在 Mega-Kernel 指令流中），不引入 if-else 分支（FWHT 是固定指令序列），复杂度 $O(d \log d)$ 远低于 GEMM 的 $O(d^2)$。
+
+| 位置 | Mega-Kernel 阶段 | 白嫖路径 |
+|------|-----------------|---------|
+| Softmax(QK^T) V 输出之后 | Attention Epilogue 尾段内联 | 数据在寄存器/SMEM，无额外全局内存读写。$R^T$ 已离线吸收进 $W_o$ |
+| SwiGLU(Gate) Up 输出之后 | FFN 中间态 Epilogue 内联 | 数据在寄存器。$R^T$ 已离线吸收进 $W_{down}$ |
+| RoPE(K) 存入 KV Cache 之前 | KV Write 阶段内联 | 与 Epilogue Zero-Copy Paged Header Write 共享同一条 STG 指令流 |
+
+### 11.3 KV Cache 非对称量化 (Asymmetric KV Quantization)
+
+基于 KIVI/KVQuant 研究: Key 和 Value 的离群点分布特性截然不同。
+
+| 维度 | 离群点特征 | 量化粒度 | Scale 来源 |
+|------|-----------|---------|-----------|
+| **Key Cache** | 集中在特定通道（跨 Token 稳定） | Per-Channel | 离线校准常数（零运行时开销）|
+| **Value Cache** | 集中在特定 Token（跨通道稳定） | Per-Token | KV 写入时寄存器内 reduce_max |
+
+**Attention Sink 保护**: 前 $N$ 个 Token（默认 $N=4$）保留 FP16 全精度。Sink 判定从 Epilogue Telemetry 的 Entropy/Centroid 数据推导，无需新增探测代码。
+
+### 11.4 无偏性保证 (Unbiased Inner Product Estimation)
+
+受 RaBitQ (SIGMOD 2024) 启发，在 Attention $QK^T$ 计算中引入修正因子: $\widehat{QK^T} = QK^T_{quant} \cdot C_1 + C_0$。
+
+- $\|v\|$（修正因子输入）: 从 RMSNorm 免费白嫖，$\|v\| = \text{RMS} \cdot \sqrt{d}$
+- 量化前后内积: 在量化循环中追加 1 条 FMA 指令
+- 理论误差界: $O(1/\sqrt{D})$。$D=4096$ 时约 $1.5\%$，$D=8192$ 时约 $1.1\%$
+
+### 11.5 白嫖全景与运行时净开销 (Freeloading Summary)
+
+| 新增计算 | 白嫖来源 | 净开销 |
+|---------|---------|--------|
+| SmoothQuant $S^{-1}$ | 吸收进 RMSNorm $\gamma$ | **零** |
+| Group Scale | RMSNorm 规约尾段追加 max | **2-4 条指令/层** |
+| Attention 后 FWHT | Attention Epilogue + $R^T$ 吸收 $W_o$ | **$O(d\log d)$ 算术** |
+| SwiGLU 后 FWHT | FFN Epilogue + $R^T$ 吸收 $W_{down}$ | **$O(d\log d)$ 算术** |
+| KV 量化 | KV 写入流 + K scale 离线固化 | **极低** |
+| RaBitQ 修正因子 | RMSNorm 范数 + 量化 FMA | **1 条 FMA** |
+| Sink 检测 | Epilogue Entropy/Centroid | **零** |
+
+### 11.6 双轨显存池 (The Dual-Track Memory Pool)
+
+重构 `KvCacheConfig`，全面淘汰 `dtype_size`。由 `GlobalMemoryManager` 申请物理隔离的两轨架构:
 
 | 轨道 | 位宽 | 职能 |
 |------|------|------|
-| **主池 (Main Pool)** | 3-bit / 4-bit | 无缩放因子（Scale-Free）连续压缩流，组级缩放由 Epilogue 快递 |
-| **校验池 (QJL Pool)** | 1-bit | XNOR 残差掩码阵列 |
+| **主池** | 3-bit / 4-bit | 组级缩放由 Epilogue 快递，KV 按 11.3 非对称量化 |
+| **校验池 (QJL)** | 1-bit | XNOR 残差掩码阵列 |
 
-**多卡同步红利**: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 **25%**（4x 压缩），突破总线墙。
+**多卡同步红利**: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 25%（4x 压缩），突破总线墙。
 
 ---
 

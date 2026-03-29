@@ -27,13 +27,14 @@
 
 **完成状态**: CPU 路径 — `build_kv_projection_graph` / `execute_kv_projection` / `write_kv_to_cache` 实现 JIT KV projection。GPU 路径 — CUDA/HIP/Metal 三后端均支持 `is_incremental` 分支（GPU proj → dtoh → KV write → CPU attn → GPU post-attn）。`gpu_write_kv_cache()` 共享函数消除三后端重复代码。
 
-### P0-2: 消除静默失败 (REQ-ERR-001) ✅ 已完成
+### P0-2: 消除静默失败 (REQ-ERR-001) 🚧 待修复
 
-**完成状态**: `Err(_)` catch-all 为 0 匹配。`let _ =` 全部为合法参数抑制或有意忽略（已审计）。`unwrap_or(0.0)` 在 fallback.rs rerank_pair 处已添加 `log::warn!`。
+**完成状态**: `unwrap_or(0.0)` 在 `fallback.rs` (亟待被销毁) 中依旧残留。需随 P0-3 并发移除。
 
-### P0-3: OOM Fallback 显式化 (REQ-ERR-002) ✅ 已完成
+### P0-3: OOM Halt 强制截断 (REQ-ERR-002, ARCH-ZERO-FALLBACK) ❌ 亟待执行
 
-**完成状态**: `FallbackResult<T>` 携带 `fallback_used: bool` 已实现。所有 fallback 触发点（OomFallback::run, FallbackGenerator, FallbackEmbedder, FallbackReranker）均有 `log::warn!`。
+**完成状态**: **严重的代码债务警报！**先前的 `✅ 已完成` 记录被审计推翻。目前 `src/backend/fallback.rs` 仍然存活，`src/client.rs` 仍在调用带重试降级属性的 `FallbackGenerator` / `FallbackEmbedder` / `FallbackReranker`，`BackendContext::new` 仍在发生 `GPU->CPU` 的幽灵降级。
+**修复计划**: 必须在后续的（代码开发环）中**物理删除 `src/backend/fallback.rs`**，并在 `src/client.rs` 中直接穿透调用 `executor_mut().generate(...)`，强制将底层执行器的 `OomHalt` 暴露给 CLI 客户端。
 
 ### P0-4: Backend Detection 错误传播 (REQ-ERR-003) ✅ 已完成
 
@@ -70,13 +71,7 @@
 
 **完成状态**: `logits_entropy` 采集已实现（Shannon 熵计算 + batch 平均）。`attention_sparsity` 设为 0.0（MHA op 当前仅输出 attn_out，需扩展才能采集注意力权重）。3 个单元测试覆盖。
 
-### P1-3: 单轨护栏级路由推演 (替代原 KernelStrategy) ⛔ 架构级废弃
 
-**完成状态**: 纯旧时代糟粕！原设计的 `KernelStrategy` (AccuracyFirst/ThroughputFirst/Balanced) 已违反 TurboQuant 的双轨显存池静态常量化设计。该功能在第三轮审计中被直接**物理删除**。一切图内分支放权给 Kernel 内部的 Epilogue 掩码吞吐。改用为全新的 **单轨 AbsolutePolicy (护栏直通)**。
-
-### P1-4: 预编译图静态融合 (替代原策略热切换) ⛔ 架构级废弃
-
- **完成状态**: 原设计中 `Executor::set_policy(PolicyVariant)` 被判定为严重的 CPU 热切换干预，严重拖慢 PCIe 带宽并脱离 MegaKernel 控制论。已在第三次全量审计中全盘清除。当前采用硬件执行层的 `jmp` 和掩码指令自我消化。
 
 ### P1-5: 量化推理加速路径 ✅ 已完成
 
@@ -114,9 +109,7 @@
 
 **完成状态**: `AdaptiveChunkPolicy` 结构体已实现，支持基于 L1 可用页数/并发请求数/prompt 长度动态调整 chunk_size。6 个单元测试覆盖高/低/中负载场景。
 
-### P1-EXT-2: KV 动态插值蒸馏 (SwiftKV) ⛔ 架构级废弃
 
-**完成状态**: 原 `distill_cpu_incremental()` 设计强制要求对时间步步长上的浮点作平滑化 CPU 插值。目前已被宣判**违宪**。Mega-Kernel 下基于 `TurboQuant` (压缩 4-bit) 不再支持任何打破静态位宽的蒸馏操纵，物理隔离的 `Page Swap` 取代了它。
 
 ---
 
@@ -156,12 +149,11 @@
 P0 (性能关键 + 正确性)     P1 (功能完善)              P2 (质量)              P3 (未来)
 ─────────────────────     ──────────────────────    ──────────────────     ──────────────
 P0-1 KV Cache 增量化 ✅    P1-1 架构模板 ×11 ✅      P2-1 后端一致性测试 ✅  P3-1 MoE 路由 ✅
-P0-2 消除静默失败 ✅       P1-2 Observer Phase2 ✅    P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
-P0-3 OOM Fallback ✅       P1-3 KernelStrategy ✅     P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
-P0-4 Backend Detection ✅  P1-4 策略热切换 ✅         P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合 ✅
-                           P1-5 量化推理加速 ✅       P2-5 IQ Codebook ✅    P3-5 GLLM_CACHE_DIR ✅
-                           P1-EXT-1 自适应 Chunk ✅                         P3-6 分布式 KV Cache
-                           P1-EXT-2 KV 增量蒸馏 ⛔
+P0-2 消除静默失败 🚧       P1-2 Observer Phase2 ✅    P2-2 调度器重构测试 ✅  P3-2 Thinking Head ✅
+P0-3 OOM Halt ❌       P1-5 量化推理加速 ✅       P2-3 跨语言对齐测试 ✅  P3-3 PyTorch 格式 ✅
+P0-4 Backend Detection ✅  P1-EXT-1 自适应 Chunk ✅   P2-4 TEST-XXX 注释 ✅  P3-4 GPU 融合 ✅
+                                                    P2-5 IQ Codebook ✅    P3-5 GLLM_CACHE_DIR ✅
+                                                                           P3-6 分布式 KV Cache
 ```
 
 ## 依赖关系
@@ -171,38 +163,12 @@ P0-1 (KV Cache 增量化) ← 无外部依赖，可立即开始
 P0-2/3/4 (错误处理) ← 无依赖，可并行
 P1-1 (架构模板) ← 无依赖，可并行
 P1-2 (Observer Phase2) ← 依赖 P0-1（需要 forward 路径中的 logits/attention 数据）
-P1-3 (KernelStrategy) ← 无依赖
-P1-4 (策略热切换) ← 依赖 P1-3
 P1-5 (量化加速) ← 依赖 P0-1（需要 KV cache 正确工作）
 P1-EXT-1 (自适应 Chunk) ← 无依赖，可立即开始
-P1-EXT-2 (KV 增量蒸馏) ← (废弃) 违宪，已从架构中移除
 P2-1 (后端一致性) ← 依赖 P0-1
 P2-5 (IQ Codebook) ← gllm-kernels 侧修改，无 gllm 依赖
 P3-1 (MoE) ← 依赖 P1-1g (DeepSeek 模板) + gllm-kernels MoE kernel
 P3-4 (GPU 融合) ← gllm-kernels 侧修改，无 gllm 依赖，可与 P2-5 并行
 ```
 
-## 修改文件清单
 
-| 优先级 | 文件 | 修改内容 |
-|--------|------|---------|
-| P0-1 | `src/compat/decoder_forward.rs` | KV cache 增量持久化 |
-| P0-1 | `src/compat/gpu_compile.rs` | GPU 路径 KV cache 同步 |
-| P0-2 | `src/` 全局 | 消除 `let _ =` / `Err(_)` / `unwrap_or` |
-| P0-3 | `src/backend/fallback.rs` | FallbackResult + log::warn |
-| P0-4 | `src/backend/detection.rs` | expect → Result |
-| P1-1 | `src/arch/templates/*.yaml` + `registry.rs` | 11 个架构模板 |
-| P1-2 | `src/engine/executor.rs` | logits_entropy / attention_sparsity 采集 |
-| P1-3 | `(Deleted)` | (Arch Veto: kernel_strategy 彻底废弃) |
-| P1-4 | `(Deleted)` | (Arch Veto: set_policy() 必须物理摧毁) |
-| P1-5 | `src/compat/decoder_forward.rs` | quantized_matmul 接入 |
-| P1-EXT-1 | `src/scheduler/vllm2024.rs` | AdaptiveChunkPolicy 结构体 |
-| P1-EXT-1 | `src/engine/executor.rs` | plan_prefill() 自适应 chunk_size |
-| P1-EXT-2 | `(Deleted)` | (Arch Veto: SwiftKvState 动态路由破坏已被清理) |
-| P2-1 | `tests/test_backend_compat.rs` | 新增 |
-| P2-2 | `tests/test_scheduler_refactor.rs` | 新增 |
-| P2-3 | `tests/e2e_alignment/` | 新增目录 |
-| P2-5 | `gllm-kernels/src/backend/mod.rs` | 7 个 IQ polar decode 实现 |
-| P2-5 | `gllm-kernels/src/codebooks.rs` | codebook 表验证/补全 |
-| P3-4 | `gllm-kernels/src/compiler/codegen/gpu_ir/plan_emitter.rs` | TileLevelFusion/ComputeRoot GPU codegen |
-| P3-4 | `gllm-kernels/src/dispatch/mod.rs` | DeviceProfile shared_memory_per_block() |
