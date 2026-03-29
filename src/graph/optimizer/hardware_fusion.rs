@@ -1,9 +1,12 @@
 //! 硬件感知融合 Pass (REQ-OPT-003)
+//!
+//! ⚠️ NO_HW_DEGRADATION 铁律：此 Pass 不再执行降级操作。
+//! 硬件差异由 codegen 层处理（x86_64/AArch64/GPU 各自生成最优路径）。
+//! 融合算子在所有硬件上保持融合形态，仅 JIT 指令选择不同。
 
 use super::pass::{OptimizationContext, OptimizationPass};
 use super::OptimizeError;
-use crate::backend::BackendType;
-use crate::graph::types::{AtomicOp, FusedGraph, FusedOp};
+use crate::graph::types::FusedGraph;
 
 #[derive(Debug)]
 pub struct HardwareFusionPass;
@@ -15,23 +18,11 @@ impl OptimizationPass for HardwareFusionPass {
 
     fn run(
         &self,
-        mut graph: FusedGraph,
-        ctx: &OptimizationContext,
+        graph: FusedGraph,
+        _ctx: &OptimizationContext,
     ) -> Result<FusedGraph, OptimizeError> {
-        for node in &mut graph.nodes {
-            match &node.op {
-                FusedOp::FlashAttention(_) if !supports_flash_attention(ctx) => {
-                    node.op = FusedOp::Atomic(AtomicOp::new("Attention"));
-                }
-                FusedOp::FusedQkvRope(_) if !supports_qkv_rope(ctx) => {
-                    node.op = FusedOp::Atomic(AtomicOp::new("QkvRope"));
-                }
-                FusedOp::FusedRMSLinear(_) if !supports_rms_linear(ctx) => {
-                    node.op = FusedOp::Atomic(AtomicOp::new("RmsNormLinear"));
-                }
-                _ => {}
-            }
-        }
+        // NO_HW_DEGRADATION: 不降级融合算子。
+        // codegen 层根据 DeviceProfile 为每种硬件生成最优代码。
         Ok(graph)
     }
 
@@ -40,58 +31,14 @@ impl OptimizationPass for HardwareFusionPass {
     }
 }
 
-fn supports_flash_attention(ctx: &OptimizationContext) -> bool {
-    match ctx.backend_type {
-        BackendType::Cuda => {
-            // FlashAttention requires SM >= 8.0 (Ampere+)
-            // F16/BF16: SM >= 8.0 (tensor core HMMA)
-            // F32: SM >= 8.0 (TF32 path)
-            ctx.cuda_sm_version
-                .map(|(major, _)| major >= 8)
-                .unwrap_or(false)
-        }
-        BackendType::Rocm => {
-            // ROCm supports FlashAttention on CDNA2+ (gfx90a+)
-            // Approximated by SM version mapping: treat as supported
-            true
-        }
-        BackendType::Metal => {
-            // Metal supports FlashAttention via MSL threadgroup memory
-            true
-        }
-        BackendType::Cpu => false,
-    }
-}
-
-fn supports_qkv_rope(ctx: &OptimizationContext) -> bool {
-    match ctx.backend_type {
-        BackendType::Cuda => ctx.cuda_sm_version
-            .map(|(major, _)| major >= 7)
-            .unwrap_or(false),
-        // All other backends support fused QKV+RoPE
-        _ => true,
-    }
-}
-
-fn supports_rms_linear(ctx: &OptimizationContext) -> bool {
-    match ctx.backend_type {
-        BackendType::Cuda => ctx
-            .cuda_sm_version
-            .map(|(major, _)| major >= 7)
-            .unwrap_or(false),
-        BackendType::Cpu => true,
-        BackendType::Rocm => true,
-        BackendType::Metal => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::types::{FlashAttentionConfig, FusedNode};
+    use crate::graph::types::{FlashAttentionConfig, FusedNode, FusedOp};
 
     #[test]
-    fn downgrade_flash_attention_for_cpu() {
+    fn no_downgrade_flash_attention_for_cpu() {
+        // NO_HW_DEGRADATION: FlashAttention 保持融合形态，不降级
         let pass = HardwareFusionPass;
         let ctx = OptimizationContext::cpu();
         let graph = FusedGraph {
@@ -103,6 +50,7 @@ mod tests {
         };
 
         let out = pass.run(graph, &ctx).unwrap();
-        assert!(matches!(out.nodes[0].op, FusedOp::Atomic(_)));
+        // FlashAttention 应保持融合形态
+        assert!(matches!(out.nodes[0].op, FusedOp::FlashAttention(_)));
     }
 }
