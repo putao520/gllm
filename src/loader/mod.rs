@@ -1394,6 +1394,7 @@ mod tests {
     use ::safetensors::tensor::Dtype;
 
     #[test]
+    #[cfg(feature = "jit-cuda")]
     fn test_24_prune_applied_on_load() {
         // 构造一个待测试的 gate_proj (能触发真 2:4 降维条件的 TensorName)
         let mut meta = TensorMeta {

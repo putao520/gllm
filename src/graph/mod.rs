@@ -106,13 +106,14 @@ mod tests {
     #[test]
     fn test_no_naive_1to1_translation() {
         // Build a graph with Q/K/V + RoPE pattern
+        // MatMul nodes need 2 inputs: activation + weight
         let graph = OnnxGraph {
             name: "test_qkv_rope".to_string(),
             doc_string: String::new(),
             nodes: vec![
-                make_onnx_node("layer_0_q_proj", "MatMul", &["x"], &["q"]),
-                make_onnx_node("layer_0_k_proj", "MatMul", &["x"], &["k"]),
-                make_onnx_node("layer_0_v_proj", "MatMul", &["x"], &["v"]),
+                make_onnx_node("layer_0_q_proj", "MatMul", &["x", "w_q"], &["q"]),
+                make_onnx_node("layer_0_k_proj", "MatMul", &["x", "w_k"], &["k"]),
+                make_onnx_node("layer_0_v_proj", "MatMul", &["x", "w_v"], &["v"]),
                 make_onnx_node("layer_0_rope", "RotaryEmbedding", &["q", "k"], &["output"]),
             ],
             inputs: vec![make_value_info("x")],

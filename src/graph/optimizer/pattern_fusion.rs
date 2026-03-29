@@ -534,6 +534,13 @@ mod tests {
 
     fn make_atomic_node(name: &str, op_type: &str) -> FusedNode {
         FusedNode::new(name, FusedOp::Atomic(AtomicOp::new(op_type)))
+            .with_inputs(vec![format!("{}_in", name)])
+            .with_outputs(vec![format!("{}_out", name)])
+    }
+
+    fn make_linear_node(name: &str, op_type: &str, activation: &str, weight: &str) -> FusedNode {
+        FusedNode::new(name, FusedOp::Atomic(AtomicOp::new(op_type)))
+            .with_inputs(vec![activation.to_string(), weight.to_string()])
             .with_outputs(vec![format!("{}_out", name)])
     }
 
@@ -562,9 +569,9 @@ mod tests {
         let ctx = OptimizationContext::default();
         let graph = FusedGraph {
             nodes: vec![
-                make_atomic_node("layer_0_q_proj", "MatMul"),
-                make_atomic_node("layer_0_k_proj", "MatMul"),
-                make_atomic_node("layer_0_v_proj", "MatMul"),
+                make_linear_node("layer_0_q_proj", "MatMul", "hidden", "w_q"),
+                make_linear_node("layer_0_k_proj", "MatMul", "hidden", "w_k"),
+                make_linear_node("layer_0_v_proj", "MatMul", "hidden", "w_v"),
                 make_atomic_node("layer_0_rope", "RotaryEmbedding"),
             ],
             ..FusedGraph::new()
@@ -573,6 +580,8 @@ mod tests {
         let fused = pass.run(graph, &ctx).unwrap();
         assert_eq!(fused.stats.qkv_rope_fusions, 1);
         assert!(matches!(fused.nodes[0].op, FusedOp::FusedQkvRope(_)));
+        // Verify fused inputs: [hidden, w_q, w_k, w_v]
+        assert_eq!(fused.nodes[0].inputs, vec!["hidden", "w_q", "w_k", "w_v"]);
     }
 
     #[test]
