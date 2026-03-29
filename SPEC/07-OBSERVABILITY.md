@@ -125,24 +125,10 @@ pub struct OomHaltError {
 
 ## 7. 全链路 Epilogue 白嫖遥测扩展 (ARCH-EPILOGUE-TELEMETRY)
 
-> **关联**: 02-ARCHITECTURE.md §13 (ARCH-EPILOGUE-FUSIONS + ARCH-EPILOGUE-EXTENDED)
-> **核心原则**: 所有遥测数据均在 Epilogue 尾段寄生采集，零额外全局内存读写，零独立 Kernel Launch。
-> **SSOT**: 遥测点的物理实现位置和指令级开销见 02-ARCHITECTURE.md §13.5-§13.11。
+> **SSOT**: 遥测点的物理实现位置、寄生采集方式、指令级开销、采集-消费闭环，均见 **02-ARCHITECTURE.md §13 (ARCH-EPILOGUE-FUSIONS + ARCH-EPILOGUE-EXTENDED)**。
+> 本节仅定义观测系统的持久化数据结构。
 
-### 7.1 扩展遥测指标矩阵
-
-| 指标 | 寄生位置 | 额外指令 | 写入目标 | 消费者 |
-|------|---------|---------|---------|--------|
-| **死神经元计数** | SiLU Epilogue (§13.5) | ~3 SIMD | 临时寄存器 → Gate-First 判断 | §13.1 Gate-First Skip |
-| **MoE 命中计数** | TopK Epilogue (§13.6) | ~2 (atomic add) | 共享内存计数器 | §15.4 Deopt Daemon |
-| **GEMM 行级范数** | GEMM Epilogue (§13.7) | ~10 SIMD | 临时寄存器 → 死神经元判断 | §13.5 前置信号 |
-| **per-channel scale** | RmsNorm 规约 (§13.8) | 1 SIMD | 临时寄存器 → KV 写入 | §11.2 KIVI 量化 |
-| **Attention Sink 标记** | Softmax Epilogue (§13.9) | ~2 SIMD | 临时寄存器 → Sink 保护 | §11.2 FP16 保护 |
-| **Softmax 锐度** | Softmax Epilogue (§13.9) | 1 除法 | 临时寄存器 → 调度决策 | 自适应 chunk |
-| **Embedding 范数** | Embedding copy (§13.10) | ~5 SIMD | 临时寄存器 → RmsNorm | §11.3 RaBitQ 初始值 |
-| **残差方向余弦** | Residual Add (§13.11) | ~5 (FMA+div) | 临时寄存器 → 旁路判断 | §13.3 Early Exit |
-
-### 7.2 KvPageHeader 扩展
+### 7.1 KvPageHeader 扩展
 
 Phase 2 扩展遥测字段直接写入现有 KvPageHeader 结构，保持紧凑布局：
 
@@ -172,31 +158,5 @@ pub struct KvPageHeader {
 - `rms_norm_norm` 和 `per_channel_scale` 为寄存器直传信号 (Tier A)，不持久化到 PageHeader
 - `softmax_centroid` 质心坐标仅用于 RDMA 预取场景，作为后续扩展保留
 - 保持 40B 而非 64B：减少 KV page metadata 内存开销
-
-### 7.3 采集-消费闭环
-
-```
-Epilogue 采集 (Kernel 内，寄存器级)
-    │
-    ├─ 死神经元计数 → Gate-First Skip 决策 → 跳过 Up/Down GEMM
-    ├─ MoE 命中计数 → 共享内存原子写入 → JIT Director 轮询 → Deopt
-    ├─ per-channel scale → KV Cache 写入时直接消费 → KIVI 量化
-    ├─ Softmax max + 锐度 → Sink 保护 + 自适应 chunk → 调度决策
-    ├─ RmsNorm ‖v‖ → PageHeader STG → RaBitQ 修正 → CPU 读回
-    └─ 残差 Δρ + cosθ → Early Exit 决策 → 跳过后续层
-```
-
-### 7.4 与已有 SPEC 的交叉引用
-
-| 本节指标 | 上游采集点 | 下游消费者 | SPEC 位置 |
-|---------|-----------|-----------|----------|
-| dead_neuron_ratio | SiLU Epilogue | Gate-First Skip | §13.1, §13.5 |
-| MoE hit counter | TopK Epilogue | Deopt Daemon | §15.4, §13.6 |
-| per_channel_scale | RmsNorm 规约 | KIVI KV 量化 | §11.2, §13.8 |
-| softmax_max | Softmax Epilogue | Sink 保护 | §11.2, §13.9 |
-| softmax_sharpness | Softmax Epilogue | 自适应调度 | §13.9 |
-| rms_norm_norm | RmsNorm Epilogue | RaBitQ 修正 | §11.3, §13.8 |
-| residual_delta_rho | Residual Add | Early Exit | §13.3, §13.11 |
-| residual_cosine | Residual Add | 精确 Early Exit | §13.11 |
 
 ---
