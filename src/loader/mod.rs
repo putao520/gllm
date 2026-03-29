@@ -925,54 +925,9 @@ impl<'a> TensorSlice<'a> {
     }
 }
 
-fn upload_native_tensor<B: Backend<E>, E: Element>(
-    backend: &B,
-    meta: &TensorMeta,
-    data: &[u8],
-) -> Result<B::Tensor> {
-    let elem_size = std::mem::size_of::<E>();
-    if elem_size == 0 || !data.len().is_multiple_of(elem_size) {
-        return Err(LoaderError::InvalidQuantization(format!(
-            "tensor {} has invalid byte length {} for element size {}",
-            meta.name,
-            data.len(),
-            elem_size
-        )));
-    }
+// upload_native_tensor removed — superseded by upload_native_tensor_with_convert which
+// handles dtype conversion (ARCH-DTYPE-FULLCHAIN).
 
-    let dtype_matches = match meta.dtype {
-        Dtype::F32 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>(),
-        Dtype::F16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::f16>(),
-        Dtype::BF16 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<half::bf16>(),
-        Dtype::F64 => std::any::TypeId::of::<E>() == std::any::TypeId::of::<f64>(),
-        _ => false,
-    };
-    if !dtype_matches {
-        return Err(LoaderError::Backend(format!(
-            "native-dtype upload required: tensor '{}' is {:?}, backend expects {}",
-            meta.name,
-            meta.dtype,
-            std::any::type_name::<E>()
-        )));
-    }
-
-    let (prefix, body, suffix) = unsafe { data.align_to::<E>() };
-    if prefix.is_empty() && suffix.is_empty() {
-        return backend
-            .upload_weights(body)
-            .map_err(|e| LoaderError::Backend(e.to_string()));
-    }
-
-    let count = data.len() / elem_size;
-    let mut converted = Vec::with_capacity(count);
-    for chunk in data.chunks_exact(elem_size) {
-        let value: E = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const E) };
-        converted.push(value);
-    }
-    backend
-        .upload_weights(&converted)
-        .map_err(|e| LoaderError::Backend(e.to_string()))
-}
 
 fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     backend: &B,
