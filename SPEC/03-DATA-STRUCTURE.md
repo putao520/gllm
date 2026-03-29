@@ -1697,3 +1697,265 @@ impl RdmaSyncManager {
     }
 }
 ```
+
+---
+
+## 16. 环境感知多版本算子数据结构 (DATA-ENV-VARIANT)
+
+> **关联架构**: 02-ARCHITECTURE.md §17 (ARCH-ENV-VARIANT)
+> **核心原则**: 同一标量算子根据环境向量编译多种物理实现，运行时通过完美哈希跳表零开销选择。
+
+### 16.1 离散化环境向量 (EnvVector)
+
+运行时环境的离散化表示，每个字段为 2-3 个枚举值之一。不包含连续值，确保可直接用作哈希表键。
+
+```rust
+/// 离散化的运行时环境向量
+/// 由 Epilogue 白嫖信号 + 调度器状态联合采样
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnvVector {
+    pub sharpness: SharpnessBin,       // Softmax 锐度区间
+    pub dead_neuron: DeadNeuronBin,    // 死神经元密度区间
+    pub residual_energy: EnergyBin,    // 残差能量区间
+    pub phase: PhaseBin,               // Prefill / Decode
+    pub batch_shape: BatchShapeBin,    // Dense / Sparse / Mixed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharpnessBin {
+    Sharp,   // max/sum > 0.5: 注意力集中在少数 token
+    Medium,  // 0.1 < max/sum <= 0.5: 正常关注范围
+    Flat,    // max/sum <= 0.1: 注意力均匀分散
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeadNeuronBin {
+    None,    // 死神经元 < 10%
+    Low,     // 10% <= 死神经元 < 50%
+    High,    // 死神经元 >= 50%: 触发 Gate-First Skip
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnergyBin {
+    Active,  // Δρ >= 0.01: 正常计算
+    Dormant, // 0.001 <= Δρ < 0.01: 可能跳过
+    Skip,    // Δρ < 0.001 且 cosθ > 0.99: 高置信度跳过
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PhaseBin {
+    Prefill,
+    Decode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BatchShapeBin {
+    Dense,   // 所有请求相似长度
+    Sparse,  // 混合长短请求，padding 浪费 > 30%
+    Mixed,   // 中间状态
+}
+```
+
+**离散化阈值来源**:
+
+| 字段 | 原始信号 (f32) | 量化规则 | Epilogue 采样位置 |
+|------|---------------|---------|-----------------|
+| `sharpness` | softmax max/sum | `vcmpps` + `vpshufb` 查表 | §13.9 Softmax Epilogue |
+| `dead_neuron` | 死神经元占比 | 计数 + 阈值比较 | §13.5 SiLU Epilogue |
+| `residual_energy` | Δρ + cosθ 联合判定 | 两个阈值交叉 | §13.3 + §13.11 Residual Add Epilogue |
+| `phase` | 调度器批构建 | 枚举直传 | Batcher |
+| `batch_shape` | prompt_len_skew | 统计 > 30% 判定 | Batcher (新盲区 2) |
+
+### 16.2 环境维度模板 (EnvSchema)
+
+描述一个模型需要编译哪些环境维度及其合法枚举值。
+
+```rust
+pub struct EnvSchema {
+    /// 该模型激活的环境维度列表
+    pub dimensions: Vec<EnvDimension>,
+}
+
+pub struct EnvDimension {
+    /// 维度名称: "sharpness", "dead_neuron" 等
+    pub name: String,
+    /// 合法枚举值列表
+    pub bins: Vec<String>,
+    /// 该维度影响哪些算子 (空 = 影响所有算子)
+    pub applicable_ops: Vec<OpKind>,
+    /// 是否默认激活 (某些模型可能没有 MoE，dead_neuron 维度不适用)
+    pub active_by_default: bool,
+}
+```
+
+| 模型特征 | 激活的维度 | 剪枝后变体数 |
+|---------|-----------|------------|
+| 稠密 Decoder (Qwen3) | phase, sharpness, dead_neuron, energy, batch_shape | ~6 |
+| MoE Decoder (DeepSeek) | + moe_load_balance | ~8 |
+| Embedding (BGE-M3) | phase=Prefill 固定, batch_shape | ~2 |
+
+### 16.3 算子变体标识 (VariantId)
+
+```rust
+/// 算子变体的唯一标识
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VariantId(pub u32);
+
+/// 变体元数据
+pub struct VariantMeta {
+    pub variant_id: VariantId,
+    pub op_kind: OpKind,
+    pub env: EnvVector,
+    /// 该变体机器码在 .text 段的偏移
+    pub code_offset: usize,
+    /// 机器码长度 (字节)
+    pub code_size: usize,
+    /// 是否为默认变体 (被热修补为首选入口)
+    pub is_default: bool,
+    /// 该变体被使用的频率 (JIT Director 统计)
+    pub hit_rate: f32,
+}
+```
+
+### 16.4 环境感知变体注册表 (EnvVariantRegistry)
+
+```rust
+pub struct EnvVariantRegistry {
+    /// (OpKind × EnvVector) → VariantId 的完美哈希表
+    /// 编译时填充，运行时只读
+    lookup: PerfectHashTable<(OpKind, EnvVector), VariantId>,
+
+    /// VariantId → 变体元数据
+    meta: HashMap<VariantId, VariantMeta>,
+
+    /// 每个 OpKind 的默认 VariantId (热修补入口)
+    defaults: HashMap<OpKind, VariantId>,
+
+    /// 该注册表覆盖的 EnvSchema
+    schema: EnvSchema,
+}
+
+impl EnvVariantRegistry {
+    /// O(1) 查询: 给定算子和环境，返回最优变体
+    pub fn select(&self, op: OpKind, env: &EnvVector) -> VariantId {
+        self.lookup.get(&(op, *env)).copied()
+            .unwrap_or_else(|| self.defaults[&op])
+    }
+
+    /// O(1) 查询变体机器码入口地址
+    pub fn code_entry(&self, id: VariantId) -> usize {
+        self.meta[&id].code_offset
+    }
+
+    /// JIT Director 调用: 更新默认变体 (热修补)
+    pub fn set_default(&mut self, op: OpKind, id: VariantId) {
+        self.defaults.insert(op, id);
+    }
+}
+```
+
+### 16.5 环境信号路由表 (SignalRouter)
+
+将 Epilogue 白嫖信号映射到 EnvVector 字段的采样逻辑。
+
+```rust
+pub struct SignalRouter {
+    /// Softmax Epilogue → sharpness 量化
+    pub sharpness_quantizer: ThresholdQuantizer<3>,
+    /// SiLU Epilogue → dead_neuron 量化
+    pub dead_neuron_quantizer: ThresholdQuantizer<3>,
+    /// Residual Add Epilogue → energy 量化
+    pub energy_quantizer: EnergyQuantizer,
+    /// Batcher → phase + batch_shape
+    pub batch_classifier: BatchClassifier,
+}
+
+/// 通用阈值量化器: 将 f32 信号量化为 N 个 bin
+pub struct ThresholdQuantizer<const N: usize> {
+    /// N-1 个升序阈值
+    pub thresholds: [f32; N - 1],
+}
+
+/// 能量量化器: Δρ 和 cosθ 联合判定
+pub struct EnergyQuantizer {
+    pub delta_rho_threshold: f32,  // 0.001
+    pub cos_theta_threshold: f32,  // 0.99
+}
+```
+
+### 16.6 变体编译描述 (VariantCompileRequest)
+
+传递给 JIT 编译管线的变体编译请求，包含环境约束。
+
+```rust
+pub struct VariantCompileRequest {
+    /// 目标算子
+    pub op_kind: OpKind,
+    /// 目标环境
+    pub env: EnvVector,
+    /// 硬件配置 (现有 DeviceProfile)
+    pub device_profile: DeviceProfile,
+    /// 该变体的特化指令:
+    /// - SharpnessBin::Sharp → 启用 Sink 保护 + 质心预取
+    /// - DeadNeuronBin::High → 启用 vcompress 挤压
+    /// - EnergyBin::Skip → 生成 NOP slide + Thread Exit
+    pub specialization_hints: Vec<SpecializationHint>,
+}
+
+pub enum SpecializationHint {
+    /// 启用 Attention Sink FP16 保护 (前 N token)
+    SinkProtection { sink_tokens: usize },
+    /// 启用 per-channel scale 直传 (KIVI)
+    KiviPerChannelScale,
+    /// 启用 FWHT 在线旋转
+    FwhtRotation,
+    /// 启用 Gate-First 行挤压 (vcompress)
+    GateCompaction { skip_ratio: f32 },
+    /// 启用 Early Exit (Thread Block 级跳过)
+    EarlyExit,
+    /// 启用质心驱动的 cuMemPrefetchAsync
+    CentroidPrefetch,
+    /// 启用 RaBitQ 无偏修正
+    RabitQCorrection,
+}
+```
+
+### 16.7 数据结构关系图
+
+```
+Epilogue 白嫖信号 (f32 连续值)
+    │
+    ▼ SignalRouter (阈值量化)
+EnvVector (5 个离散枚举字段)
+    │
+    ├─────────────────────────────┐
+    ▼                             ▼
+EnvVariantRegistry               EnvSchema
+  lookup: (OpKind, Env) → Vid     dimensions: [EnvDimension]
+  defaults: OpKind → Vid           applicable_ops per dim
+    │
+    ▼ select(OpKind, EnvVector)
+VariantId (u32)
+    │
+    ▼ code_entry(VariantId)
+Machine Code Offset (.text segment)
+    │
+    ▼ jmp [jump_table + offset]
+Specialized Machine Code Variant
+```
+
+### 16.8 缓存键扩展 (DATA-ENV-CACHE-KEY)
+
+```rust
+/// 扩展后的模型级缓存键
+pub struct ModelArchKey {
+    pub model_id: String,
+    pub backend: BackendKind,
+    /// 新增: 该模型的环境维度模板
+    pub env_schema: EnvSchema,
+}
+
+/// L3 磁盘缓存文件名格式:
+/// {model_hash}_{backend}_{env_schema_hash}.bin
+/// 例如: a1b2c3_Cuda_e4f5g6.bin
+```

@@ -3,24 +3,24 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 9 documents, 104+ REQs)
+- `./SPEC/` (Single Source of Truth, 9 documents, 111+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## SPEC Index
 
 | Document | Content |
 |----------|---------|
-| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) |
-| `02-ARCHITECTURE.md` | 4层物理架构, 彻底废弃 Native Float 软路由分流，全量拥抱 Mega-Kernel 与 Residual Bus |
-| `03-DATA-STRUCTURE.md` | 终极数据容器极化洗骨 (统一物理页框 Unified Virtual Page 与双轨极化显存池 Dual-Track Pool) |
+| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束, REQ-ENV-VARIANT-001~007 环境感知多版本算子) |
+| `02-ARCHITECTURE.md` | 4层物理架构, §17 ARCH-ENV-VARIANT 环境感知多版本算子 (同一标量算子多物理实现, 完美哈希跳表零开销选路) |
+| `03-DATA-STRUCTURE.md` | §16 DATA-ENV-VARIANT (EnvVector/EnvSchema/VariantId/EnvVariantRegistry/SignalRouter/SpecializationHint) |
 | `04-API-DESIGN.md` | 客户端公共 API (包含新加入的 Knowledge Injection & Intent SDK) |
-| `06-TESTING-STRATEGY.md` | 物理路由与并发抗毁考场 (JIT 热分发并行阻击、5-Byte 原子级 Hot JMP Patching 试炼) |
-| `07-OBSERVABILITY.md` | In-Kernel 核心寄生与物理灭顶法则 (STG 物理页头烙印与 Piggybacking 零通信 DMA 顺风回传) |
+| `06-TESTING-STRATEGY.md` | §12 TEST-ENV-VARIANT (信号量化/跳表选路/缓存键/冷热生命周期/变体数值正确性 8 项测试) |
+| `07-OBSERVABILITY.md` | §8 Epilogue 白嫖信号 → 环境感知变体路由 (信号量化管道/EnvVector 写入协议/64B KvPageHeader 最终设计) |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
-| `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议: 模型级缓存键, 全层融合粒度, 自适应 Tiling |
-| `DOCS/scheduling/unified-jit-architecture-master.md` | (SSOT 终极蓝图) Mega-Kernel 路由, TurboQuant 双轨内存池, 知识插管 API |
+| `DOCS/scheduling/jit-cache-protocol.md` | §5 ARCH-ENV-VARIANT-CACHE (变体编译协议/笛卡尔积剪枝/三级缓存/冷热分级) |
+| `DOCS/scheduling/unified-jit-architecture-master.md` | §10 ARCH-ENV-VARIANT (Epilogue→编译期变体→运行时零开销选路, §1-§9 全景闭环) |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 |
 

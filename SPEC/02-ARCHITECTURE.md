@@ -1553,10 +1553,11 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 
 ---
 
-## §13 Epilogue 白嫖网络的三大物理融合 (ARCH-EPILOGUE-FUSIONS)
+## §13 Epilogue 白嫖网络 — 全链路物理融合 (ARCH-EPILOGUE-FUSIONS)
 
-> **关联**: 会话 6e743114 §4
+> **关联**: 会话 6e743114 §4, 会话 全链路审计
 > **核心原则**: 所有的特征检测必须"寄生"在上游核函数的数学尾段（Epilogue），严禁单独发起采集循环。
+> **审计基准**: 从 Embedding → Layer Loop → lm_head 全管线，识别 11 个白嫖点（4 已规划 + 7 新发现）。
 
 ### 13.1 融合 1：Gate-First 掩码层跳过 (Masked CondGEMM)
 
@@ -1576,6 +1577,151 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 - **白嫖触发器**: Residual Add 循环的 Epilogue 免费测算跨层能量方差 $\Delta \rho$
 - **JIT 联动**: 如果 $\Delta \rho < 0.001$，直接触发底层的汇编跳转 `jmp END_OF_LAYER`
 - 不管是 Chunk 还是单步 Decode，整个 Layer Q/K/V 和 FFN 的核函数被暴力切掉，**省下 ~15% 全局算力**
+
+### 13.4 融合 4：KV Write FWHT 旋转 (Runtime FWHT Injection)
+
+- **白嫖触发器**: KV Cache 写入阶段数据已在寄存器，追加 $O(d \log d)$ FWHT 在线旋转
+- **JIT 联动**: 旋转后 KV 值的离群点被均匀分散，后续层的 Attention 计算数值稳定性提升
+- **净开销**: $O(d \log d)$ 算术（远低于 GEMM 的 $O(d^2)$），内联在 KV Write 指令流中
+
+---
+
+### 全链路审计：7 个新发现白嫖点 (ARCH-EPILOGUE-EXTENDED)
+
+> **审计时间**: 2026-03-29
+> **审计方法**: 逐阶段分析推理管线中"数据在寄存器/共享内存停留但被直接丢弃"的位置
+
+### 13.5 [P0] 融合 5：SiLU 死神经元掩码 (Dead Neuron Masking)
+
+> **前置条件**: §13.1 Gate-First Skip 的信号来源
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:12642-12680`（silu 实现）
+
+在计算 $\text{SiLU}(x) = x \cdot \sigma(x)$ 时，sigmoid 值已在寄存器中：
+- **白嫖触发器**: 追加 1 条 `vcmpps` + 1 条 `vphaddd`，统计 $\sigma(x) < \varepsilon$ 的元素数量
+- **免费产物**: 死神经元计数（该列对 FFN 输出无贡献）
+- **下游消费**: 如果死神经元 > 50%，触发 §13.1 Gate-First Skip，跳过 Up/Down GEMM
+- **额外指令**: ~3 条 SIMD
+- **关联**: §13.1 的前置信号源，替代已删除的 Amax 运行时检测（§14.1）
+
+### 13.6 [P0] 融合 6：MoE Gate 命中计数 (Expert Hit Counter)
+
+> **前置条件**: §15.4 冷板凳 Deopt 的信号源
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:3820-3980`（TopK 实现）
+
+Gate 概率经 softmax 后，TopK 线性扫描已在遍历所有概率值：
+- **白嫖触发器**: 在 TopK 扫描循环中追加 1 条原子 `add`，将选中的 expert ID 写入共享计数器
+- **免费产物**: 每个 expert 的命中率统计
+- **下游消费**: JIT Director Daemon 轮询计数器，持续零命中的冷板凳专家触发 §15.4 Uncommon Trap 物理封杀
+- **额外指令**: ~2 条（1 条 atomic add + 1 条条件判断）
+- **优势**: 替代 SPEC 原设计中"JIT Director 扫描 KV Page Header"的方案，精度更高、延迟更低
+
+### 13.7 [P1] 融合 7：GEMM 行级激活统计 (Row-wise Activation Stats)
+
+> **前置条件**: §13.5 死神经元检测的扩展
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:9301-9344`（`emit_epilogue_on_accumulators_inner`）
+
+K-loop 结束后累加器寄存器（ymm/zmm）包含完整 GEMM 输出：
+- **白嫖触发器**: 在 `emit_trace_on_accumulator` 写回前追加统计规约
+- **免费产物**: 行级 $\|row\|_1$（1 条 `vphaddd` + 1 条 `vpaddd`）、行级 max（1 条 `vpmaxsd`）、行级 min（1 条 `vpminsd`）
+- **下游消费**: 为 §13.5 Gate-First Skip 提供"是否死神经元"的前置判断；为后续层融合决策提供前驱张量分布特征
+- **额外指令**: ~10 条 SIMD
+- **关联**: 替代 §14.1 已删除的 Amax 检测，提供更丰富的分布信号
+
+### 13.8 [P1] 融合 8：RmsNorm per-channel Scale (KIVI 量化信号)
+
+> **前置条件**: §11 TurboQuant KV 非对称量化的 per-channel scale 来源
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:10324-10423`（RmsNorm 规约阶段）
+
+RmsNorm 的规约循环已在做 $\sum x^2$：
+- **白嫖触发器**: 追加 1 条 `vmaxps` 记录逐通道绝对值最大值
+- **免费产物**: per-channel scale = $\max(|x|)$，用于 KIVI 的 K per-channel 量化（§11.2）
+- **下游消费**: 直接传入 KV Cache 写入阶段，替代独立的 scale 计算 kernel
+- **额外指令**: 1 条 SIMD
+- **关联**: 与 §11.2 KIVI 非对称量化联动，消除独立的 scale 计算开销
+
+### 13.9 [P1] 融合 9：Softmax 锐度与 Attention Sink 检测 (Sharpness + Sink Detection)
+
+> **前置条件**: §13.2 质心预取的扩展
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:1880-1921`（Softmax max/sum 计算）
+
+Softmax 的 max（`ymm4`）和 sum（`ymm5`）已在寄存器中：
+- **白嫖触发器**: max 值本身免费可取；追加 1 条除法得到 max/sum 比值
+- **免费产物**:
+  - **max 值**: Attention Sink 检测（max 极高 → 当前 token 是 sink，保留全精度）
+  - **max/sum 比值（锐度）**: 接近 1 → 尖锐关注某个 token；接近 $1/n$ → 均匀分散
+  - **有效上下文长度**: `count(softmax > ε)`（追加 1 条 `vcmpps` + `vphaddd`）
+- **下游消费**: Sink 检测 → §11.2 前 N 个 token FP16 保护；锐度 → 动态 chunk 大小调整
+- **额外指令**: ~2 条
+- **关联**: 扩展 §13.2 的质心预取，丰富 Softmax Epilogue 的产出
+
+### 13.10 [P2] 融合 10：Embedding 范数初始化 (RaBitQ Bootstrap)
+
+> **前置条件**: §11.3 RaBitQ 修正因子的初始值
+> **实现位置**: `src/compat/decoder_forward.rs`（hidden_state 初始化）
+
+Token embedding 查表后数据在 copy 路径上经过寄存器：
+- **白嫖触发器**: 在 copy 循环中追加 reduce + sqrt
+- **免费产物**: $\|embed\|_2$，作为第一层 RaBitQ 修正因子的初始值 $C_0$
+- **下游消费**: 直接传入第一层 RmsNorm Epilogue，避免冷启动
+- **额外指令**: ~5 条
+- **关联**: 与 §11.3 RaBitQ 无偏修正联动
+
+### 13.11 [P2] 融合 11：残差方向余弦 (Residual Cosine Similarity)
+
+> **前置条件**: §13.3 残差旁路的精化指标
+> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:5613-5651`（`emit_cross_layer_residual`）
+
+Residual Add 的两个输入 $x_{in}$ 和 $x_{out}$ 都在寄存器中：
+- **白嫖触发器**: 在现有 $\Delta\rho = \|x_{out}\| / \|x_{in}\|$ 基础上追加内积累加
+- **免费产物**: 方向余弦 $\cos\theta = x_{in} \cdot x_{out} / (\|x_{in}\| \|x_{out}\|)$
+- **下游消费**: 更精确的 Early Exit 指标——不仅仅看能量衰减，还看方向偏移。$\cos\theta > 0.99$ 且 $\Delta\rho < 0.01$ 时高置信度跳过
+- **额外指令**: ~5 条（FMA + 除法）
+- **关联**: 精化 §13.3 的旁路决策，减少误跳
+
+---
+
+### 全链路白嫖全景图
+
+```
+推理管线数据流（白嫖全景）
+
+Token IDs
+  │
+  ▼
+Embedding Lookup ──── §13.10: ‖embed‖₂ → RaBitQ 初始修正
+  │
+  ▼
+═══ Layer Loop (×N) ═══
+  │
+  ├─ RmsNorm ─────── §11 ‖v‖ + §13.8 per-channel scale → KIVI 量化
+  │
+  ├─ Q/K/V GEMM ──── §13.7 行级 ‖row‖₁ + max → 死神经元检测
+  │
+  ├─ RoPE ────────── §13.4 FWHT 在线旋转
+  │
+  ├─ Softmax ─────── §13.2 Entropy + Centroid + §13.9 max + 锐度 → 预取 + Sink 检测
+  │
+  ├─ Residual Add ── §13.3 Δρ + §13.11 方向余弦 → Early Exit
+  │
+  ├─ RmsNorm2 ────── 同 RmsNorm
+  │
+  ├─ MoE Gate ────── §13.6 路由熵 + 命中计数 → Deopt 信号
+  │
+  ├─ FFN Gate SiLU ─ §13.5 死神经元掩码 → Gate-First Skip (40% FLOPs)
+  │
+  ├─ FFN Up × Down
+  │
+  └─ Residual Add ── 同上
+  │
+  ▼
+═══ End Layer Loop ═══
+  │
+  ▼
+lm_head GEMM ────── §13.7 logits 范数 → 采样策略调整
+  │
+  ▼
+Output Token
+```
 
 ---
 
@@ -1705,3 +1851,244 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 - 这是真正的**零延迟、无法越狱的安全物理护城河**
 
 > **架构结论**: 诸如意图识别、RAG、安全护栏等原先必须架设微服务集群的复杂大生态，被硬生生压成了 Kernel 里的几句附加指令，化为引擎出厂自带的超光速内置兵器！
+
+---
+
+## §17 环境感知多版本算子体系 (ARCH-ENV-VARIANT)
+
+> **关联**: §9 Mega-Kernel 路由, §12 空间异构, §13 Epilogue 白嫖, jit-cache-protocol.md
+> **核心宣言**: 同一标量算子在不同运行时环境（硬件能力 × 负载特征 × 白嫖信号）下编译为多种物理实现，由 Mega-Kernel 块级路由或 JIT Director 在实现间零开销切换。
+> **与 §14.1 的区别**: §14.1 禁止的是"Amax 运行时检测 → 精度切换"这种 if-else 幼稚分支。本节描述的是**编译期生成多种变体、运行期由硬件掩码/跳表选择**的静态化多版本体系，运行时零分支。
+
+### 17.1 设计动机
+
+§12 空间异构已定义了按硬件分区并行发射不同图的概念，但缺少一个**算子级**的多版本框架：
+
+**问题 1: 同一算子在不同"环境"下最优实现不同**
+
+| 算子 | 环境 A (Hopper SM90) | 环境 B (AVX2 CPU) | 环境 C (decode 锐度高) | 环境 D (prefill 锐度低) |
+|------|---------------------|-------------------|----------------------|----------------------|
+| Softmax | WGMMA + TMA + Split-Q | AVX2 向量 + L1 tiling | 质心精准预取 + Sink FP16 保护 | 激进量化 + FWHT 旋转 |
+| RmsNorm | 融合进 GEMM (NormIntoGemm) | ComputeRoot → L1 驻留 | per-channel scale 直传 | per-channel scale 写 PageHeader |
+| FFN Gate/Up/Down | FFNBlock 全融合 (Tensor Core) | BLIS 微内核 + Epilogue 链 | Gate-First Skip 50% 行 | 全量计算 |
+
+**问题 2: Epilogue 白嫖信号是运行时环境的一部分**
+
+§13 的 11 个白嫖产物在运行时持续产出，构成一个**动态环境向量 (EnvVector)**。这个向量影响下游算子的最优实现选择，但不能触发重编译（违反 JIT 缓存铁律）。
+
+**核心洞察**: 将白嫖信号作为**编译期已知的离散枚举维度**，而非连续值运行时参数。信号被量化为有限的枚举状态，与硬件维度一起构成编译时的笛卡尔积。运行时只做表查找 (jump table)，零分支。
+
+### 17.2 环境维度矩阵 (Environment Dimension Matrix)
+
+编译一个算子的物理实现时，考虑以下正交维度的笛卡尔积：
+
+| 维度类别 | 维度 | 类型 | 采样时机 | 示例值 |
+|---------|------|------|---------|--------|
+| **硬件** (§12.6) | `IsaLevel` | 枚举 | 加载时 | AVX2 / AVX-512 / SM90 |
+| **硬件** | `QuantType` | 枚举 | 加载时 | Q4_K / BF16 / W4A4 |
+| **硬件** | `GemmStrategy` | 枚举 | 加载时 | JitBlis / JitGpuTensorCore |
+| **负载** | `PhaseMode` | 枚举 | per-batch | Prefill / Decode |
+| **负载** | `BatchShape` | 离散枚举 | per-batch | Dense / Sparse / Mixed |
+| **白嫖信号** | `AttentionSharpness` | 离散枚举 | per-step | Sharp / Medium / Flat |
+| **白嫖信号** | `DeadNeuronLevel` | 离散枚举 | per-step | None / Low / High |
+| **白嫖信号** | `ResidualEnergy` | 离散枚举 | per-step | Active / Dormant / Skip |
+| **白嫖信号** | `MoeLoadBalance` | 离散枚举 | per-1000-steps | Balanced / Skewed / Extreme |
+
+**离散化铁律**: 每个白嫖信号的连续值 (f32) 必须在编译前量化为**不超过 3 个枚举状态**。这不是信息损失——§9.2 的卡尔曼平滑器已将信号稳定到可预测的区间，离散化只是将"稳定区间"映射到"编译策略"。
+
+### 17.3 算子变体注册表 (Operator Variant Registry)
+
+```rust
+/// 环境感知算子变体注册表
+pub struct EnvVariantRegistry {
+    /// (OpKind × EnvVector) → VariantId 的静态映射
+    /// 编译时由 FusionEngine 填充
+    variants: HashMap<(OpKind, EnvVector), VariantId>,
+}
+
+/// 离散化的运行时环境向量
+/// 每个字段为 2-3 个枚举值之一，不包含连续值
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnvVector {
+    pub sharpness: SharpnessBin,       // Softmax 锐度区间
+    pub dead_neuron: DeadNeuronBin,    // 死神经元密度区间
+    pub residual_energy: EnergyBin,    // 残差能量区间
+    pub phase: PhaseBin,               // Prefill / Decode
+    pub batch_shape: BatchShapeBin,    // Dense / Sparse / Mixed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharpnessBin { Sharp, Medium, Flat }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeadNeuronBin { None, Low, High }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnergyBin { Active, Dormant, Skip }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PhaseBin { Prefill, Decode }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BatchShapeBin { Dense, Sparse, Mixed }
+```
+
+### 17.4 变体编译与缓存
+
+**编译时机**: 模型加载时 + Autotuning 窗口期（与现有 JIT 缓存协议一致）。
+
+**编译流程扩展**:
+
+```
+模型加载:
+  1. DeviceProfile::detect() → 确定硬件维度 (IsaLevel, QuantType, GemmStrategy)
+  2. 对每个 OpKind，枚举所有合法的 EnvVector 组合:
+     - EnvVector 的笛卡尔积: 3 × 3 × 3 × 2 × 3 = 162 种环境
+     - 但绝大多数组合是非法的 (如 Prefill + Skip 不共存)
+     - 经过合法性剪枝后，每个 OpKind 通常只有 4-8 个有效变体
+  3. 对每个有效 (OpKind, EnvVector)，编译一个 VariantId:
+     - Phase 0-3 JIT 管线完整执行
+     - 产出机器码存入 VariantCache
+  4. 将所有变体注册到 EnvVariantRegistry
+
+Autotuning 窗口 (可选):
+  5. JIT Director 对热门 (OpKind, EnvVector) 组合执行微基准测试
+  6. 剔除性能在最优 80% 以下的变体 (减少内存占用)
+  7. 将保留的变体序列化为 L3 磁盘缓存
+```
+
+**缓存键扩展** (见 jit-cache-protocol.md §2.1):
+
+```rust
+ModelArchKey {
+    model_id: String,
+    backend: BackendKind,
+    // 新增: 该模型编译时覆盖的环境向量枚举
+    env_schema: EnvSchema,  // 描述哪些 EnvVector 维度对该模型有意义
+}
+
+/// 环境维度模板: 描述一个模型需要编译哪些环境维度
+pub struct EnvSchema {
+    pub dimensions: Vec<EnvDimension>,
+}
+
+pub struct EnvDimension {
+    pub name: String,                    // "sharpness", "dead_neuron" 等
+    pub bins: Vec<String>,               // ["Sharp", "Medium", "Flat"]
+    pub applicable_ops: Vec<OpKind>,     // 该维度影响哪些算子
+}
+```
+
+**缓存大小估算**:
+- 每个变体 = 一段机器码 (通常 4-64 KB)
+- 每个模型 × 每个算子 × 平均 6 个变体 = ~200 段代码
+- 总计: 200 × 32 KB ≈ 6.4 MB (完全可接受)
+
+### 17.5 运行时选择协议 (Zero-Branch Variant Selection)
+
+**选择流程 (在 Mega-Kernel 内部)**:
+
+```
+Mega-Kernel 启动:
+  1. Thread Block 检查 Request_State_Table
+  2. 读取当前 step 的 EnvVector (由上一个 step 的 Epilogue 写入)
+  3. 通过完美哈希跳表 (§12.7) O(1) 查找 VariantId
+  4. jmp 到对应变体的入口地址
+  5. 执行该变体的特化机器码
+```
+
+**EnvVector 的来源**:
+
+| 信号 | 采样者 | 写入位置 | 消费者 |
+|------|--------|---------|--------|
+| `sharpness` | Softmax Epilogue (§13.9) | Request_State_Table | Softmax/RmsNorm/KV Write 变体选择 |
+| `dead_neuron` | SiLU Epilogue (§13.5) | Request_State_Table | FFN Gate/Up/Down 变体选择 |
+| `residual_energy` | Residual Add Epilogue (§13.3) | Request_State_Table | 下层 RmsNorm/Attention 变体选择 |
+| `phase` | Scheduler (batch 构建时) | Batch Descriptor | 全局所有算子变体选择 |
+| `batch_shape` | Batcher (§13 新盲区 2) | Batch Descriptor | GEMM tile 策略选择 |
+
+**铁律**:
+- 禁止在 Mega-Kernel 内部做 `if sharpness > threshold` 类的浮点比较
+- 白嫖信号在 Epilogue 中**就地量化为枚举** (1 条 `vcmpps` + 1 条 `vpshufb` 查表)，写入 Request_State_Table 时已是离散值
+- 变体选择通过 `jmp [jump_table + VariantId * 8]` 完成，零分支预测惩罚
+
+### 17.6 五大核心算子的多版本示例
+
+#### 17.6.1 Softmax 多版本
+
+| VariantId | 环境条件 | 实现差异 |
+|-----------|---------|---------|
+| `Softmax_Dense_Prefill` | Phase=Prefill, Sharpness=Flat | 标准 FlashAttention tiled Softmax，无 Sink 保护 |
+| `Softmax_Dense_Decode` | Phase=Decode, Sharpness=Medium | 标准 + Sink FP16 保护 (前 N token) |
+| `Softmax_Sparse_Sharp` | Phase=Decode, Sharpness=Sharp | 质心精准预取 + Sink 保护 + 锐度写 PageHeader |
+| `Softmax_Sparse_Flat` | Phase=Decode, Sharpness=Flat | 激进量化 + FWHT 内联 + 有效上下文长度统计 |
+| `Softmax_CPU_AVX2` | IsaLevel=AVX2 | AVX2 向量化 Softmax + L1 cache tiling |
+| `Softmax_CPU_AVX512` | IsaLevel=AVX-512 | zmm 向量化 + VNNI 融合 |
+
+#### 17.6.2 RmsNorm 多版本
+
+| VariantId | 环境条件 | 实现差异 |
+|-----------|---------|---------|
+| `RmsNorm_IntoGemm` | 后继=GEMM, Phase=Decode | NormIntoGemm 融合，输出直接喂 GEMM，零中间写回 |
+| `RmsNorm_ComputeRoot` | 后继=GEMM, Phase=Prefill | ComputeRoot，全量输出驻留 L1，GEMM 从 L1 读取 |
+| `RmsNorm_WithScale` | DeadNeuron=High | 追加 vmaxps per-channel scale，直传 FFN 路径 |
+| `RmsNorm_WithRabitQ` | ResidualEnergy=Dormant | 追加 ‖v‖ RaBitQ 修正因子，写入 PageHeader |
+
+#### 17.6.3 FFN (Gate/Up/Down) 多版本
+
+| VariantId | 环境条件 | 实现差异 |
+|-----------|---------|---------|
+| `FFN_FullDense` | DeadNeuron=None | Gate+Up 共享 pack_a → SiLU·Up → Down 全融合 |
+| `FFN_GateSkip_Low` | DeadNeuron=Low | vcompress 挤压 20% 行 → Down GEMM 缩小 tile |
+| `FFN_GateSkip_High` | DeadNeuron=High | vcompress 挤压 50%+ 行 → Down GEMM 极小 tile |
+| `FFN_ResidualSkip` | Energy=Skip | 整个 FFN 被 Thread Block 级路由跳过 (§14.3) |
+
+#### 17.6.4 Attention 多版本
+
+| VariantId | 环境条件 | 实现差异 |
+|-----------|---------|---------|
+| `Attn_FlashV2_Prefill` | Phase=Prefill, IsaLevel=GPU_SM80 | FlashAttention-2 tiled + DenseLocal KvView |
+| `Attn_FlashV3_Prefill` | Phase=Prefill, IsaLevel=GPU_SM90 | TMA + WGMMA + warp specialization |
+| `Attn_Paged_Decode` | Phase=Decode, Sharpness=Medium | PagedHeadMajor KvView + Sink 保护 |
+| `Attn_Paged_Sharp` | Phase=Decode, Sharpness=Sharp | Paged + 质心预取 (cuMemPrefetchAsync) |
+| `Attn_CPU_CachedGQA` | IsaLevel=CPU | CachedGQA + head-major KV cache 直读 |
+
+#### 17.6.5 KV Write 多版本
+
+| VariantId | 环境条件 | 实现差异 |
+|-----------|---------|---------|
+| `KV_Write_Plain` | Sharpness=Flat | 标准 scatter 写入，无额外逻辑 |
+| `KV_Write_KIVI` | Sharpness=Medium | per-channel scale + K per-channel 量化 |
+| `KV_Write_SinkProtect` | Sharpness=Sharp | 前 N token FP16 + 其余 KIVI 量化 + FWHT 旋转 |
+| `KV_Write_FullFWHT` | Phase=Prefill | 全量 FWHT 在线旋转 (离群点均匀化) |
+
+### 17.7 与现有架构的联动
+
+| 现有机制 | 本节的增强 | SPEC 位置 |
+|---------|-----------|----------|
+| §9.1 Mega-Kernel 块级路由 | Thread Block 读取 EnvVector → 跳表选择变体 | §17.5 |
+| §9.2 热修补 | JIT Director 根据长尾 EnvVector 分布热切换默认变体 | §17.8 |
+| §12.1 空间异构流片 | 不同 SM 分区运行不同变体，而非不同图 | §17.5 |
+| §12.4 黄金装筒 | 每个 bucket 编译独立变体集 | §17.4 |
+| §13 Epilogue 白嫖 | 白嫖信号是 EnvVector 的运行时输入 | §17.2 |
+| §12.7 完美哈希跳表 | `EnvVector → VariantId` 通过完美哈希 O(1) | §17.5 |
+| jit-cache-protocol.md | 缓存键纳入 `EnvSchema` | §17.4 |
+
+### 17.8 JIT Director 的变体管理
+
+JIT Director Daemon (§9.2) 新增以下职责：
+
+1. **EnvVector 分布直方图**: 持续记录运行时的 EnvVector 分布。如果某个 EnvVector 在过去 100K step 中从未出现，其对应变体被标记为"冷变体"。
+2. **冷变体剔除**: 冷变体的机器码被 Uncommon Trap 替代。如果被突触发，走 §15.4 的 Deopt 恢复流程。
+3. **热变体提升**: 频率 > 10% 的变体被标记为"默认变体"，热修补写入 Thread Block 的首选跳表入口。
+4. **环境漂移检测**: 如果 EnvVector 分布发生显著变化（卡尔曼平滑器检测），触发后台沙盒编译新变体并热插入跳表。
+
+### 17.9 禁止事项
+
+| 禁止 | 原因 |
+|------|------|
+| 运行时浮点比较驱动变体选择 | 违反零分支铁律，应使用预量化枚举 |
+| 单个算子变体数 > 16 | 笛卡尔积爆炸，需剪枝无效组合 |
+| 运行时动态编译新变体 | 违反 JIT 缓存铁律 (jit-cache-protocol §1) |
+| 变体选择发生在 Host/CPU 侧 | 违反 Mega-Kernel 单发射铁律 (§9.1) |
+| EnvVector 包含连续值字段 | 必须离散化，否则无法构成哈希表键 |

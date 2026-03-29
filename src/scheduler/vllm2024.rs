@@ -16,7 +16,9 @@ pub struct ChunkedConfig {
     pub min_chunk: usize,
     pub max_chunk: usize,
     pub decode_slots: usize,
-    pub enable_splitfuse: bool,
+    /// ⛔ PERMANENTLY DISABLED (REQ-SCHED-007): SplitFuse 混批路径已废弃。
+    /// 此字段硬编码为 false，禁止运行时修改。
+    pub enable_splitfuse: bool, // always false
 }
 
 impl Default for ChunkedConfig {
@@ -25,7 +27,7 @@ impl Default for ChunkedConfig {
             min_chunk: 64,
             max_chunk: 2048,
             decode_slots: 2,
-            enable_splitfuse: true,
+            enable_splitfuse: false, // ⛔ REQ-SCHED-007: SplitFuse permanently disabled
         }
     }
 }
