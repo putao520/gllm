@@ -2,7 +2,6 @@
 
 > **SSOT 更新**: 2026-03-28
 > **关联需求**: REQ-JIT-CACHE-001~007, ARCH-JIT-FIRST, ARCH-CPU-GPU-UNIFIED
-> **关联文档**: [p4-p5-next-gen-optimizations.md](./p4-p5-next-gen-optimizations.md) §6, [optimization_strategy_master.md](./optimization_strategy_master.md) Tier V
 
 ---
 

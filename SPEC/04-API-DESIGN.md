@@ -279,7 +279,6 @@ match GgufReader::open("model.gguf") {
 
 > **定位**: gllm 高阶商业特性（Residual Bus）开发者接口。
 >
-> **关联需求**: REQ-CORE-015, REQ-CORE-016
 > **关联架构**: ARCH-RESIDUAL-BUS
 
 ### 7.1 Semantic Anchors (语义锚点)
