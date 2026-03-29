@@ -363,42 +363,7 @@ Chunked 调度（交织）:
 | **自适应切分** | 根据内存压力动态调整 | 显存受限 |
 | **优先级切分** | 高优先级请求更大 Chunk | SLA 保障 |
 
-#### 8.1.3 SplitFuse 优化
-
-**进一步细分 Prefill 阶段**：
-
-```
-SplitFuse = 分离 Q/K/V 计算 + 融合 Attention
-
-阶段 A (并行计算，充分利用 Tensor Core):
-  ┌─────────────────────────────────────────────────────────┐
-  │ Chunk 1: Q_proj │ Chunk 2: Q_proj │ Chunk 3: Q_proj │  │
-  │ Chunk 1: K_proj │ Chunk 2: K_proj │ Chunk 3: K_proj │  │
-  │ Chunk 1: V_proj │ Chunk 2: V_proj │ Chunk 3: V_proj │  │
-  └─────────────────────────────────────────────────────────┘
-                              ↓
-阶段 B (融合 Attention，内存优化):
-  ┌─────────────────────────────────────────────────────────┐
-  │ FlashAttention(Chunk1+Chunk2+Chunk3 KV Cache)          │
-  │   → 单次大矩阵 Attention，最大化内存局部性               │
-  └─────────────────────────────────────────────────────────┘
-```
-
-**数据流对比**：
-
-```
-传统方式:
-  Token[0-511] → QKV Projection → Attention → Output
-
-SplitFuse 方式:
-  Token[0-63]   → QKV → [缓存]
-  Token[64-127] → QKV → [缓存]
-  Token[128-191] → QKV → [缓存]
-  ...
-  → Attention([合并后的 KV]) → Output
-```
-
-#### 8.1.4 调度算法
+#### 8.1.3 调度算法
 
 **数据结构**：
 
@@ -406,7 +371,7 @@ SplitFuse 方式:
 |------|------|------|
 | `ChunkedScheduler` | config, prefill_queue, decode_queue | 调度器主体 |
 | `PrefillRequest` | id, total_tokens, completed_tokens, pending_chunks | Prefill 请求状态 |
-| `ChunkedConfig` | chunk_size, decode_slots, enable_splitfuse, max_chunks_per_batch | 配置参数 |
+| `ChunkedConfig` | chunk_size, decode_slots, max_chunks_per_batch | 配置参数 |
 
 **调度流程**：
 
