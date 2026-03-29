@@ -298,7 +298,7 @@
 |----|----------|------|----------|------|
 | **REQ-HARDWARE-SENSORS** | 全世代指令核探测 | 涵盖 CPU/GPU 最新前沿硅晶操作集的硬指标识别 | 1. **x86**: `AVX-512` (VNNI, BF16, VP2INTERSECT), `AVX10.1/10.2` (识别 P/E 混合锁定 256-bit Converged), `AMX`, `APX` (31 GPR 全量利用)。<br>2. **ARM**: `SVE2`, `SME/SME2` (`ZA_Array`)。<br>3. **NVIDIA GPU**: Hopper SM90 (`TMA`, `WGMMA`, `cuda::barrier`, `L2 mcast`), Blackwell SM100 (`FP4/FP6 Native Tension`, `Block Scale`)。<br>4. **AMD GPU**: CDNA3 (`WMMA`, XCD/GCD 拓扑屏障) | 🟢 架构约束生效 |
 | **REQ-COMM-SENSORS** | 跨域通信墙侦测 | 识别系统级别的异步传输障碍及延迟 | 1. 探明跨 NUMA 核心及缓存 (L1/L2/L3/TLB) 深度，生成 `Core Pinning` 强约束。<br>2. 识别主板 PCIe P2P 与 NVLink/XGMI 跳板限制。<br>3. 探测网卡 `RoCE v2/InfiniBand` 大吞吐 DMA 单向 `RDMA_Latency`。 | 🟢 架构约束生效 |
-| **REQ-LOAD-TIME-MATH** | Zero-Overhead 预量化权重加载 | 加载外部量化工具产出的预量化权重文件，绝不在推理引擎内执行量化 | 1. 读取已完成三阶段数学预处理（Smooth/旋转/补偿）的预量化权重文件。<br>2. 执行静态格式对齐（解包、内存布局重排、元数据提取）。<br>3. 提取附随的在线旋转矩阵元数据注入 GraphExecutor。<br>4. 强制 4-bit 驻留双极池，配合 VNNI / WGMMA / FP4 极速解包定点轰炸。 | 🟢 架构约束生效 |
+| **REQ-LOAD-TIME-MATH** | 全格式权重加载 + TurboQuant 运行时优化 | gllm 加载 SafeTensors/GGUF/ONNX 全格式权重，推理过程中执行 TurboQuant 数学精度优化 | 1. 加载任意格式权重文件（解包、内存布局重排、元数据提取）。<br>2. QuantType 直接驱动 JIT 生成硬件原生内核。<br>3. 前向传播中执行 3 个在线 FWHT 旋转（内联 Mega-Kernel Epilogue）。<br>4. KV Cache 非对称量化（K per-channel, V per-token）+ RaBitQ 无偏修正。 | 🟢 架构约束生效 |
 
 ## 10. AI 大一统运行时图策略 (REQ-UNIFIED-JIT)
 

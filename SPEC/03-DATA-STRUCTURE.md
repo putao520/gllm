@@ -233,7 +233,7 @@ pub struct QuantizedTensor {
 
 ### 5.1 通用配置字段 (Static TurboQuant Bounds)
 
-在 Mega-Kernel 架构下，所有加载的权重由 QuantType 直接驱动 JIT 生成对应的硬件原生内核。当权重文件满足 TurboQuant 2.0 数学契约（详见 02-ARCHITECTURE.md §11）时，推理精度逼近数学无损。
+在 Mega-Kernel 架构下，所有加载的权重由 QuantType 直接驱动 JIT 生成对应的硬件原生内核。gllm 在推理过程中执行 TurboQuant 运行时数学优化（在线 FWHT 旋转 + KV 非对称量化 + RaBitQ 无偏修正），使推理精度逼近数学无损（详见 02-ARCHITECTURE.md §11）。
 因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译位宽约束！
 
 | 字段 | 类型 | 说明 |
