@@ -60,7 +60,7 @@
 | **REQ-CORE-001** | 自动后端检测 | 自动选择 CUDA/CPU (ROCm/Metal 计划中) | 1. `detect_backend()` 检测逻辑完整<br>2. 优先级: CUDA > ROCm > Metal > CPU<br>3. 未实现后端返回 `Unimplemented` | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 | **REQ-CORE-002** | OOM Halt 硬件截断 | GPU OOM 必须直接引发全进程 Halt，严禁以任何降级/退回 CPU 形式处理 | `OomHaltError` 返回，无降级 | 🟢 架构约束生效 |
 | **REQ-CORE-003** | 静态极化量化支持 (TurboQuant) | 支持统一强转极化格式 (INT4/FP8) | 1. 能够加载量化模型权重<br>2. 运行时消除多态混合精度分派，全网强制统一至 TurboQuant 固定块规格<br>3. 废除反量化，只提供定点/微浮点硬派算子 | 🟢 已实现 |
-| **REQ-CORE-004** | 精度优先架构 | 系统强制运行在"精度优先"模式 | 1. 强制启用 Deterministic Scheduling<br>2. 强制启用 Phase Isolation<br>3. **移除** 任何吞吐量优先的妥协配置 | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
+| **REQ-CORE-004** | 精度优先架构 | 系统强制运行在"精度优先"模式 | 1. Mega-Kernel 块级路由确保 Batch 内每个请求 Thread Block 独立计算（§9）<br>2. Chunked Prefill 交织调度确保 Decode 永远零等待（§10）<br>3. **移除** 任何吞吐量优先的妥协配置 | 🟢 已实现 (2026-02-07) [commit: 823e6bd] |
 
 ## 4. 高级调度与内存管理 (REQ-SCHED)
 
