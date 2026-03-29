@@ -20,7 +20,7 @@
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) |
 | `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议 (三级缓存, SymDim 动态维度, CPU/GPU 统一) |
-| `DOCS/scheduling/unified-jit-architecture-master.md` | 大一统推理引擎蓝图 (§1-§9: 硬件探测/TurboQuant/Mega-Kernel/白嫖/热修补/MoE/残差总线/知识注入) |
+| `DOCS/scheduling/unified-jit-architecture-master.md` | 📎 索引文件（内容已迁移至 02-ARCHITECTURE.md §9-§16） |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 |
 

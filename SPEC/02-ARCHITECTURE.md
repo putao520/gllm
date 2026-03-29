@@ -1277,7 +1277,7 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 
 ## §10 Chunked Prefill 无限上下文支撑架构 (ARCH-CHUNKED-PREFILL)
 
-> **关联**: unified-jit-architecture-master.md §1 范式2, hgal-scheduler-algorithm.md §8.1
+> **关联**: 本文档 §12.6 (MicroArch-to-IR), hgal-scheduler-algorithm.md §8.1
 > **核心使命**: 让系统能够处理几乎无限大的上下文（10M+ Context），同时保持 Decode 请求的零等待延迟。
 
 ### 10.1 基于请求形态的交织调度 (Interleaved SEQ-Aware Scheduling)
@@ -1335,7 +1335,7 @@ Chunked 调度（交织）:
 
 ## §11 TurboQuant 2.0 运行时数学精度优化体系 (ARCH-TURBOQUANT)
 
-> **关联**: unified-jit-architecture-master.md §2, §4, §6.1, ai-development-guideline.md §1, hgal-scheduler-algorithm.md §3.3
+> **关联**: 本文档 §11 TurboQuant, ai-development-guideline.md §1, hgal-scheduler-algorithm.md §3.3
 > **学术依据**: SpinQuant (ICLR 2025), KurTail (2025), QuIP# (ICML 2024), RaBitQ (SIGMOD 2024), KIVI
 > **核心哲学**: "无损"不是"权重逼近原值"，而是"推理过程中内积/输出的期望与全精度一致"。TurboQuant 是 gllm 在前向传播中执行的一组运行时数学优化，通过在线旋转、非对称 KV 量化、无偏修正等手段，使推理精度在任意量化权重格式上逼近数学无损。
 > **定位**: gllm 加载 SafeTensors/GGUF/ONNX 全格式权重，TurboQuant 优化推理过程本身——不管权重来自哪里，不管权重用什么工具量化的。
@@ -1459,7 +1459,7 @@ gllm 在推理过程中执行的全部 TurboQuant 运算及其净开销：
 
 ### 12.6 硬件探测→IR 强约束变量体系 (MicroArch-to-IR Constraints)
 
-> **关联**: unified-jit-architecture-master.md §1.1-§1.2, resolved.10 §2.2
+> **关联**: 本文档 §12 硬件探测, resolved.10 §2.2
 > **核心法则**: 废弃散乱的指令集条件判断。所有加载期的硬件探测结果必须严格坍缩为对底层 JIT 编译器的 **强数学约束变量组（Compiler Constraints）**，确保 JIT 逻辑与物理实体芯片解耦。
 
 #### 物理传感器指标
@@ -1896,7 +1896,7 @@ trait FusionRule {
 
 ## §14 旧世代优化理念的全面突变升级 (ARCH-LEGACY-METAMORPHOSIS)
 
-> **关联**: unified-jit-architecture-master.md §6
+> **关联**: 本文档 §9 Mega-Kernel, §13 Epilogue 白嫖
 > **核心宣言**: 在"物理级隔离、指令级热修与 TurboQuant 降维"架构下，过去的优化思路发生了根本性突变。我们抛弃了所有 if-else 幼稚做法，将它们转为底层硬件法则。
 
 ### 14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)
@@ -1936,7 +1936,7 @@ trait FusionRule {
 
 ## §15 MoE 异构专家极致落地详案 (ARCH-MOE-EXTREME)
 
-> **关联**: unified-jit-architecture-master.md §7
+> **关联**: 本文档 §9 Mega-Kernel + §15 MoE
 > **核心宣言**: 在"大一统 JIT + TurboQuant + Deopt 兜底"的底层生态下，MoE 的异构不再是孤岛功能，而是底层组件相互摩擦后的自然现象。
 
 ### 15.1 核内分发与零启动开销 (In-Kernel Expert Dispatch)
@@ -1985,7 +1985,7 @@ trait FusionRule {
 
 ## §16 残差总线的四大物理应用全景 (ARCH-RESIDUAL-BUS-APPLICATIONS)
 
-> **关联**: unified-jit-architecture-master.md §8
+> **关联**: 本文档 §16 残差总线
 > **核心拷问**: 残差连接 $x_{out} = x_{in} + \text{Layer}(x_{in})$ 不仅仅是为了梯度不消失。在 JIT Mega-Kernel 架构中，残差流被物理重构为一条**贯穿始终的开放式数据总线**。
 
 ### 16.1 超大知识的外挂注入点 (Late-Fusion RAG Injection)
