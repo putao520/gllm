@@ -1725,6 +1725,142 @@ Output Token
 
 ---
 
+### 13.12 硬件感知融合拓扑变换 (Hardware-Topology-Aware Fusion)
+
+> **核心原则**: FusionRule 的 `plan()` 阶段根据 `DeviceProfile` 产生**不同的图拓扑**——不仅是同一算子的不同 codegen，而是节点数量、边连接、数据流方向根本不同。
+> **关联**: §8 AttentionStrategy, §9 Mega-Kernel, §11 TurboQuant, §12 空间异构, gllm-kernels FusionEngine
+
+FusionEngine 的 7 条 FusionRule 已在 `matches()` 阶段做硬件能力检查，但在 `plan()` 阶段目前只决定融合/降级。本节定义 `plan()` 阶段的**硬件感知拓扑变换规则**：根据 DeviceProfile 产生完全不同的子图结构。
+
+#### 13.12.1 Attention 子图拓扑
+
+| 硬件 Profile | 子图拓扑 | 节点列表 | 关键差异 |
+|---|---|---|---|
+| **GPU sm_90+ (TMA)** | FlashV3 Pipeline | `TMA_prefetch_QKV → WGMMA_QK → Online_Softmax → WGMMA_AV → FWHT_rot → Scatter_KV` | TMA 异步预取替代 cp.async；WGMMA warp 特化；Scatter 单节点写 KV |
+| **GPU sm_80-89** | FlashV2 Tiled | `cp_async_pack_QKV → mma.sync_QK → Online_Softmax → mma.sync_AV → FWHT_rot → DtoD_KV` | mma.sync 替代 WGMMA；cp.async 替代 TMA；DtoD 逐页写 KV |
+| **GPU sm_70-79** | wmma Tiled | `global_load_QKV → wmma_QK → Online_Softmax → wmma_AV → FWHT_rot → DtoD_KV` | wmma 16×16×16 替代 mma.sync；无异步预取；GEMM 性能约 1/2 |
+| **CPU AMX** | Tiled Naive + AMX | `AMX_QKV_GEMM → RoPE → AMX_Attn_GEMM → FWHT_rot → Direct_KV_Write` | AMX tile 8×8 BF16 GEMM；无 Flash tiling（CPU 无 shared memory 概念）|
+| **CPU AVX-512** | Naive + BLIS | `BLIS_QKV_GEMM → RoPE → Naive_Attn(O(n²)) → FWHT_rot → Direct_KV_Write` | BLIS 微内核 GEMM；朴素 attention（无 tiling）；无 scatter 概念 |
+
+**节点差异详解**:
+
+| 节点 | sm_90+ | sm_80 | sm_70 | CPU AMX | CPU AVX-512 |
+|------|--------|-------|-------|---------|-------------|
+| QKV GEMM 入口 | TMA 2D prefetch | cp.async 128B | global.ld 32B | AMX tile load | BLIS pack_a/b |
+| QK^T 计算 | WGMMA 16×16×64 | mma.sync 16×8×16 | wmma 16×16×16 | AMX tdpbssd | BLIS micro-kernel |
+| Softmax | Online + warp spec | Online tiled | Online tiled | Naive full | Naive full |
+| AV 计算 | WGMMA + TMA prefetch V | mma.sync | wmma | AMX tdpbssd | BLIS micro-kernel |
+| FWHT 旋转 | Epilogue 内联 (3 条 SIMD) | Epilogue 内联 | Epilogue 内联 | Epilogue 内联 (x86 VNNI) | Epilogue 内联 (AVX-512) |
+| KV 写入 | `KvScatterWrite` 单 kernel | DtoD 逐页拷贝 | DtoD 逐页拷贝 | 直写内存 | 直写内存 |
+
+**TurboQuant 拓扑注入**:
+- **GPU (sm_80+)**: FWHT 旋转内联在 Attention Epilogue 尾段（§11.1），不产生独立节点
+- **CPU**: FWHT 旋转同样内联在 Epilogue，但使用 x86 SIMD 而非 GPU 指令
+- **sm_70**: FWHT 旋转保留但性能收益较小（wmma 精度已较低），FusionRule 可选择跳过
+
+#### 13.12.2 FFN 子图拓扑
+
+| 硬件 Profile | 子图拓扑 | 节点列表 | 关键差异 |
+|---|---|---|---|
+| **GPU sm_90+** | FFNBlock Deep Fusion | `NormIntoGemm(RmsNorm+Gate_GEMM) → SiLU_Epilogue(§13.5 dead_neuron_mask) → GateSkip(vcompress) → Up_GEMM(shared_pack_a) → FusedMulAdd → Down_GEMM+Epilogue(residual)` | NormIntoGemm 融合消除中间写回；QkvSharedInput 复用 pack_a；GateSkip 条件跳过 |
+| **GPU sm_80-89** | FFNBlock Fusion | `RmsNorm → Gate_GEMM → SiLU → GateSkip → Up_GEMM(shared_pack_a) → FusedMulAdd → Down_GEMM+Epilogue` | RmsNorm 独立节点（无 NormIntoGemm，sm_80 寄存器压力不足）；其余同 |
+| **GPU sm_70-79** | FFN Partial Fusion | `RmsNorm → Gate_GEMM → SiLU → Up_GEMM → Mul → Down_GEMM → Residual_Add` | 无 GateSkip（wmma 寄存器不够做 vcompress）；无 shared_pack_a |
+| **CPU AMX** | FFN AMX Tiled | `RmsNorm → AMX_Gate_GEMM → SiLU → AMX_Up_GEMM → Mul → AMX_Down_GEMM → Residual_Add` | AMX tile GEMM 替代 BLIS；无 GateSkip（AMX 无 compress 指令）|
+| **CPU AVX-512** | FFN BLIS | `RmsNorm → BLIS_Gate_GEMM → SiLU → BLIS_Up_GEMM → Mul → BLIS_Down_GEMM → Residual_Add` | BLIS 微内核；最保守拓扑，所有节点独立 |
+
+**Gate-First Skip 拓扑条件** (§13.1):
+
+| 硬件 | 支持 | 拓扑效果 |
+|------|------|---------|
+| sm_90+ | ✅ WGMMA + 32 寄存器 | GateSkip 节点内联：vcompress 挤压 → 紧凑 Up/Down GEMM |
+| sm_80-89 | ✅ mma.sync + 32 寄存器 | GateSkip 节点内联：warp prefix sum 挤压 |
+| sm_70-79 | ❌ wmma + 16 寄存器 | **无 GateSkip 节点**：寄存器压力不允许压缩，SiLU 后直接 Up GEMM |
+| CPU AMX | ❌ | **无 GateSkip 节点**：AMX 无 compress 类指令 |
+| CPU AVX-512 | ✅ vcompressps | GateSkip 可选：vcompressps 挤压死神经元行 |
+
+#### 13.12.3 KV Cache 写入子图拓扑
+
+| 硬件 Profile | 子图拓扑 | 节点列表 | 关键差异 |
+|---|---|---|---|
+| **GPU (sm_80+, scatter)** | Scatter Pipeline | `RoPE → FWHT_K → Quantize_K → KvScatterWrite(per-head) → Quantize_V → KvScatterWrite(per-token)` | 1 次 kernel launch 替代 4096 次 DtoD（GQA 8heads×512seq）|
+| **GPU (sm_70, 无 scatter)** | DtoD Pipeline | `RoPE → FWHT_K → Quantize_K → DtoD_Copy(per_page) → Quantize_V → DtoD_Copy(per_page)` | 逐页 DtoD 拷贝，无 scatter 能力 |
+| **CPU** | Direct Write | `RoPE → FWHT_K → Quantize_K → memcpy(K_page) → Quantize_V → memcpy(V_page)` | 直接内存写入（CPU KV cache 在主存，无 DMA 概念）|
+
+**KvScatterWrite 节点** (§REQ-ARCH-004):
+- GPU scatter kernel: `grid=(num_kv_heads, seq_len), block=(head_dim)`，一次 launch 完成 GQA 多头写入
+- 仅 GPU 存在此节点，CPU 路径完全不生成
+
+#### 13.12.4 融合模式硬件决策树
+
+FusionRule 的 `plan()` 在以下决策点产生不同拓扑：
+
+```
+DeviceProfile
+  │
+  ├─ backend == Gpu?
+  │   ├─ YES → sm_version?
+  │   │   ├─ sm_90+ → TMA_prefetch_node + WGMMA_node + Scatter_KV_node
+  │   │   │         + NormIntoGemm(RmsNorm→GEMM 融合)
+  │   │   │         + GateSkip(vcompress 压缩)
+  │   │   │         + TileLevelFusion(shared_mem > 75%)
+  │   │   │
+  │   │   ├─ sm_80-89 → cp_async_node + mma.sync_node + DtoD_KV_node
+  │   │   │             + NormIntoGemm(可选, 受寄存器约束)
+  │   │   │             + GateSkip(warp prefix sum)
+  │   │   │             + TileLevelFusion(shared_mem > 75%)
+  │   │   │
+  │   │   └─ sm_70-79 → global_load_node + wmma_node + DtoD_KV_node
+  │   │                 + Standalone(无 NormIntoGemm)
+  │   │                 + 无 GateSkip(寄存器不足)
+  │   │                 + ComputeRoot(shared_mem < 48KB)
+  │   │
+  │   └─ NO → CPU
+  │       ├─ has_amx?
+  │       │   ├─ YES → AMX_tile_load + tdpbssd_node + Direct_KV_Write
+  │       │   │         + GateSkip(vcompressps, AVX-512 可用时)
+  │       │   │         + TileLevelFusion(L1 > 75%)
+  │       │   │
+  │       │   └─ NO → BLIS_pack_node + BLIS_micro_kernel + Direct_KV_Write
+  │       │             + 无 GateSkip(无 compress 指令)
+  │       │             + ComputeRoot(L1 < 32KB)
+  │       │
+  │       └─ TurboQuant FWHT:
+  │           ├─ GPU → Epilogue 内联 (GPU SIMD)
+  │           └─ CPU → Epilogue 内联 (x86 SIMD)
+  │
+  └─ turboquant_enabled?
+      ├─ YES → 在 3 个非线性边界插入 FWHT 旋转节点
+      │        (Softmax 后 / SwiGLU 后 / KV Write 前)
+      └─ NO → 标准前向传播拓扑
+```
+
+**FusionRule 接口扩展**:
+
+```rust
+trait FusionRule {
+    /// 匹配阶段: 检查子图模式是否适用 (不变)
+    fn matches(&self, subgraph: &[OpNode]) -> Option<MatchResult>;
+
+    /// 规划阶段: 根据 DeviceProfile 产生不同的图拓扑 (增强)
+    fn plan(&self, match_result: MatchResult, profile: &DeviceProfile) -> FusionPlan {
+        // 基于 profile 决定:
+        // 1. 插入哪些节点 (TMA_prefetch / Scatter_KV / FWHT_rot / ...)
+        // 2. 删除哪些节点 (sm_70 删除 GateSkip / ...)
+        // 3. 如何连接边 (shared_pack_a / NormIntoGemm 直通 / ...)
+        // 4. 选择融合模式 (TileLevelFusion / ComputeRoot / Standalone)
+    }
+}
+```
+
+**与 §12 空间异构的协同**:
+
+§12 定义了"不同请求走不同子图"。本节定义了"同一请求，不同硬件走不同子图"。两者正交组合：
+- §12 按请求形态 (Dense/Sparse/MoE) 分区 → 产生不同子批次
+- §13.12 按硬件能力 (sm_90/sm_80/AMX/AVX-512) → 产生不同子图拓扑
+- 最终: (请求形态 × 硬件能力) 的笛卡尔积由 §12.4 Shape Bucketing 统一调度
+
+---
+
 ## §14 旧世代优化理念的全面突变升级 (ARCH-LEGACY-METAMORPHOSIS)
 
 > **关联**: unified-jit-architecture-master.md §6
