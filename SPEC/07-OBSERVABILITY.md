@@ -19,23 +19,7 @@
 
 ### 2.1 物理页表遥测层 (Page Header Telemetry)
 
-抛弃松散的结构体观测，将所有遥测数据强制压缩并寄生到 KV Cache 的内存版图中：
-
-```rust
-#[repr(C)]
-pub struct KvPageHeader {
-    // 基础管理 (8 Bytes)
-    pub page_id: u32,
-    pub ref_count: u32,
-
-    // 负载与拓扑 (Phase 1 — Epilogue 自动写入)
-    pub fragmentation_metric: f32,  // 该块剩余碎片的熵
-    
-    // 意图与安全护栏 (Phase 2 — 知识引擎注入写回)
-    pub logits_entropy: f32,        // 输出分布熵（标定模型是否进入瞎猜断崖）
-    pub guard_veto_flag: u32,       // 0=Safe, 1=Veto (触发硬件级熔断)
-}
-```
+> **SSOT**: `KvPageHeader` 完整结构定义见本文件 **§7.1**（40B 完整版）。本节仅描述采集机制。
 
 **采集硬性规范**：
 
