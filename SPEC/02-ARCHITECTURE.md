@@ -497,38 +497,6 @@ src/
 
 ---
 
-## 2026 Accuracy First 架构 (ARCH-ACCURACY)
-
-> **核心哲学**: 在 2026 年标准下，推理引擎的首要任务是保证**数值确定性 (Determinism)** 和 **比特级可复现性 (Bitwise Reproducibility)**。任何牺牲精度的吞吐量优化（如 vLLM 的乱序执行）在 gllm 中默认禁用。
-
-### 1. 确定性调度 (ARCH-ACCURACY-SCHED)
-
-**问题**: 浮点数加法不满足结合律 (`(a+b)+c != a+(b+c)`)。在 GPU 并行计算中，Batch 内请求的物理布局顺序变化会导致 Attention 规约顺序变化，从而产生微小的数值漂移。
-
-**解决方案**: **Canonical Ordering (规范序)**
-- **约束**: 调度器输出的 `ScheduledBatch` 必须严格按照 `RequestId` (或创建时间戳) 排序。
-- **禁止**: 严禁为了填充空隙（Bin Packing）而打乱请求在 Batch 中的物理顺序。
-- **收益**: 无论系统负载如何波动，同一组请求在 Batch 中的相对位置永远固定，消除内存布局引起的误差。
-
-### 2. 串行微批次执行 (ARCH-ACCURACY-EXEC)
-
-**问题**: 即使 Layout 固定，大 Batch 的 GPU Kernel 内部并行规约路径仍可能因硬件调度产生不确定性（Non-Batch-Invariant）。
-
-**解决方案**: **Micro-Batch Serial Execution**
-- **机制**: 在 `Executor::step()` 内部，不将整个 Batch 打包为一个大 Tensor 发送给 GPU。
-- **实现**: 采用 Rust 循环，**串行**处理 Batch 中的每个请求（或极小的 Micro-Batch）。
-- **权衡**: 牺牲 Kernel Launch 开销（吞吐量下降），换取数学上的绝对正确性。
-- **配置**: **强制启用**。移除任何切换回并行模式的配置项。
-
-### 3. 阶段隔离 (ARCH-ACCURACY-ISOLATION)
-
-**问题**: Prefill（计算密集）和 Decode（带宽密集）混合会导致计算图剧烈抖动，影响算子精度。
-
-**解决方案**: **Strict Phase Isolation**
-- **规则**: 一个 Batch 必须是 **纯 Prefill** 或者 **纯 Decode**。
-- **补充**: 允许在 Prefill 阶段使用 `ChunkedConfig` 时间片切分，但不允许与 Decode 混批。
-- **优先级**: 调度器优先处理 Decode 队列。仅当 Decode 队列为空时，才处理 Prefill 队列。
-
 ---
 
 ## 调度器架构 (ARCH-SCHED)

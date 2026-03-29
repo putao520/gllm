@@ -38,15 +38,12 @@
 ## Core Architecture
 
 ### 0. Core Philosophy: Accuracy First (准确度优先)
-> **🚨 Critical Difference from vLLM**:
-> vLLM and similar frameworks often prioritize throughput by using out-of-order execution in continuous batching, approximate attention masks, or aggressive quantization. This can degrade inference accuracy, especially in long-context or complex instruction-following scenarios.
->
 > **gllm Principles**:
-> 1.  **Accuracy > Throughput**: Never sacrifice calculation precision for scheduling optimization.
-> 2.  **Strict Causal Ordering**: Intra-batch attention computation must guarantee strict causal masking. No out-of-order execution that risks context drift.
-> 3.  **Reliability First**: Memory management (PagedAttention) must have strict boundary checks and error recovery. Prefer OOM rejection over returning corrupted results. JIT must emit hardware Trap on Out-of-Bounds memory without CPU fallback.
-> 4.  **Deterministic Scheduling**: To combat floating-point non-associativity, batches must be strictly ordered (e.g., by RequestId). We prefer deterministic serial execution over messy parallel reduction.
-> 5.  **JIT Hot-Repair & Block Routing (物理核内调度)**: 摒弃主机层面的复杂分流切换，一切交由运行时 JIT 发射的原子擦写指令 (Hot JMP Patching / DCE) 及根据 `SystemTopology` 切割的物理块式异构动态图处理。
+> 1.  **Accuracy > Throughput**: TurboQuant 2.0 通过数学级静态湮灭（而非运行时分支）保证量化精度。
+> 2.  **Reliability First**: Memory management (PagedAttention) must have strict boundary checks and error recovery. Prefer OOM rejection over returning corrupted results. JIT must emit hardware Trap on Out-of-Bounds memory without CPU fallback.
+> 3.  **JIT Hot-Repair & Block Routing (物理核内调度)**: 摒弃主机层面的复杂分流切换，一切交由运行时 JIT 发射的原子擦写指令 (Hot JMP Patching / DCE) 及根据 `SystemTopology` 切割的物理块式异构动态图处理。
+>
+> **已废弃**: ARCH-ACCURACY-SCHED（规范序）、ARCH-ACCURACY-EXEC（串行微批次）、ARCH-ACCURACY-ISOLATION（阶段隔离）—— 三项均被 §9 Mega-Kernel 块级路由和 §10 Chunked Prefill 交织调度完全覆盖。
 
 ### 1. Backend Constraints (from gllm-kernels)
 - **Quantization**: Template-based kernels (1/2/4/8-bit unified)

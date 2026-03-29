@@ -65,13 +65,13 @@
 ## 4. 高级调度与内存管理 (REQ-SCHED)
 
 > **详细设计**: 见 [SPEC/DOCS/scheduling/hgal-scheduler-algorithm.md](./DOCS/scheduling/hgal-scheduler-algorithm.md)
-> **架构原则**: Accuracy First (见 ARCH-ACCURACY)。**所有牺牲精度的吞吐量优化均被废弃。**
+> **架构原则**: 精度优先。Mega-Kernel 块级路由（§9）确保 Batch 内每个请求的 Thread Block 独立计算，消除跨请求规约误差。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-SCHED-012** | 确定性调度 (Deterministic) | 强制 Batch 内请求排序，消除浮点非结合性误差 | 1. `ContinuousBatcher` 输出严格按 ID 排序<br>2. 相同输入在不同负载下输出比特级一致<br>3. **禁止** 随机插入插槽 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-SCHED-013** | 阶段隔离 (Phase Isolation) | 严禁 Prefill 和 Decode 请求混合在同一 Batch | 1. Batch 状态机：纯 Prefill 或 纯 Decode<br>2. 允许 Prefill 内 ChunkedConfig 分块，不允许 Prefill/Decode 混批<br>3. 消除计算图抖动 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
-| **REQ-EXEC-001** | 串行微批次执行 | Executor 内部串行执行 Batch 中的请求 | 1. `step()` 循环内串行调用 `forward`<br>2. 避免 GPU 并行规约误差<br>3. **无配置项**，强制开启 | 🟢 已实现 (2026-02-06) [commit: HEAD] |
+| **REQ-SCHED-012** | ~~确定性调度 (Deterministic)~~ | ⛔ **已废弃** — 被 §9 Mega-Kernel 块级路由覆盖。Thread Block 独立读取 Request_State_Table，Batch 物理布局不影响计算结果。 | - | ⛔ 已废弃 |
+| **REQ-SCHED-013** | ~~阶段隔离 (Phase Isolation)~~ | ⛔ **已废弃** — 被 §10 Chunked Prefill 交织调度覆盖。Prefill Chunk 与 Decode Token 交织塞入同一 Batch，Decode 永远零等待。 | - | ⛔ 已废弃 |
+| **REQ-EXEC-001** | ~~串行微批次执行~~ | ⛔ **已废弃** — 与 §9 Mega-Kernel 单次 Launch 全批次并行直接矛盾。串行执行吞吐量损失 10-100x，且块级路由已隔离各请求计算。 | - | ⛔ 已废弃 |
 | **REQ-EXEC-002** | ONNX 推理执行引擎 | 实现 ONNX 模型的完整推理执行能力 | 1. **Embedding/Reranker**: 单次前向传播已支持 (BERT/XLM-R/Qwen3)<br>2. **Generator**: 实现生成循环 + KV Cache + Sampling<br>3. 使用 FusedKernel 执行 ONNX 子图<br>4. 支持 ONNX 模型的动态批处理<br>5. 与现有 PagedAttention 调度器集成 | 🟢 已实现 (2026-02-07) [commit: 3a0957d] |
 | **REQ-EXEC-003** | ONNX KV Cache 集成 | ONNX Generator 模型的 KV Cache 支持 | 1. 从 ONNX 图中提取 KV 输出张量<br>2. 跨轮缓存 KV 状态<br>3. 支持 PagedAttention 页面分配 | 🟢 已实现 (2026-03-15) |
 | **REQ-SCHED-001** | PagedAttention 调度 | 实现自定义的分页注意力调度算法 (HGAL) | 1. 显存碎片率 < 5%<br>2. 支持动态 Block 分配<br>3. **禁止序列内页面分散换出**<br>4. **使用 LIRS 优先级计算** | 🟢 已实现 (2026-02-02) [commit: 063f150] |
