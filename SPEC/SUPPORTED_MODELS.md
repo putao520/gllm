@@ -1,6 +1,7 @@
 # Supported Models (SSOT) - 2026 SOTA Edition
 
 > **📌 SSOT**: 本文档是 `gllm` 支持的所有模型的唯一真源。
+> **关联需求**: REQ-MODEL-001 (Generator 架构覆盖), REQ-MODEL-002 (Embedding 模型), REQ-MODEL-003 (Reranker 模型), REQ-MODEL-004 (MoE 架构), REQ-MODEL-005 (Thinking Head)
 > **Constraint**: 严格遵循 **"Latest Version Only"** 策略。
 > **Strategy**: 同一系列出新版后，立即废弃旧版（e.g., Qwen3 发布即删除 Qwen2.5）。
 > **Exception (REQ-MODEL-LATEST)**: 仅允许在本表中**显式标注**的 Legacy Exception。

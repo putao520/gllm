@@ -234,7 +234,7 @@ pub struct QuantizedTensor {
 ### 5.1 通用配置字段 (Static TurboQuant Bounds)
 
 在 Mega-Kernel 架构下，所有加载的权重由 QuantType 直接驱动 JIT 生成对应的硬件原生内核。gllm 在推理过程中执行 TurboQuant 运行时数学优化（在线 FWHT 旋转 + KV 非对称量化 + RaBitQ 无偏修正），使推理精度逼近数学无损（详见 02-ARCHITECTURE.md §11）。
-因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译位宽约束！
+因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译 DType 约束！
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -384,7 +384,7 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 > **关联架构**: unified-jit-architecture-master.md §2, 02-ARCHITECTURE.md §11 (TurboQuant)
 > **铁律**: gllm 支持加载 SafeTensors/GGUF/ONNX 全格式权重文件。JIT 根据加载时检测到的 QuantType 生成专用内核，推理过程中无类型判断分支。
 
-#### 位宽传播路径
+#### 精度传播路径
 
 所有的执行与编译节点由 QuantType 驱动锁定：
 
@@ -557,7 +557,7 @@ pub enum PrefillPlan {
 ## 9. 硬件能力与 Codegen 维度 (DATA-HW-CODEGEN)
 
 > **关联需求**: REQ-ARCH-001, REQ-ARCH-003
-> **关联架构**: 02-ARCHITECTURE.md §5 (JIT 编译管线), ARCH-4-FEATURES.md 功能 7
+> **关联架构**: 02-ARCHITECTURE.md §5 (JIT 编译管线), ARCH-DETAILED-DESIGNS.md 功能 7
 > **核心原则**: JIT codegen 的最终机器码由 `f(算法语义, ISA, DType, 设备参数)` 的笛卡尔积决定
 
 ### 9.1 Codegen 维度模型 (DATA-CODEGEN-DIMENSIONS)
@@ -797,7 +797,7 @@ pub struct GpuDeviceProfile {
     pub max_grid_dim: [u32; 3],
     pub total_memory: usize,
     pub memory_bandwidth_gbs: f64,
-    pub peak_tops_polar: f64,     // 替换原有的浮点算力统计，使用极化位宽算力 (TOPS)
+    pub peak_tops_polar: f64,     // 替换原有的浮点算力统计，使用极化精度算力 (TOPS)
     pub has_matrix_unit: bool,    // Tensor Core / Matrix Core
     pub clock_mhz: u32,
     pub isv: GpuIsvCapabilities,
@@ -906,7 +906,7 @@ pub struct DeviceProfile {
     pub kernel_config: KernelConfig,
     pub hw_info: HwInfo,
     pub numa: NumaTopology,
-    pub peak_tops_polar: f64, // 使用定点极化 TOPS 替换废弃的 peak_gflops_f32
+    pub peak_tops_polar: f64, // 使用极化精度算力 (TOPS) 替换废弃的 peak_gflops_f32
     pub peak_bandwidth_gbs: f64,
     pub physical_cores: usize,
     pub logical_cores: usize,
@@ -927,11 +927,11 @@ pub struct DeviceProfile {
 
 **DeviceProfile 是所有 codegen 维度的聚合入口**: 从 `detect()` 开始，经过 `KernelConfig` 注入 codegen，驱动 Phase 3 ISA Lowering 的所有分派决策。
 
-### 9.11 量化位宽维度 (DATA-QUANT-DISPATCH)
+### 9.11 物理 DType 维度 (DATA-DTYPE-SPECIALIZATION)
 
 > **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs`, `gllm-kernels/src/compiler/graph.rs`
 
-量化 GEMM 统一被纳入 TurboQuant 静态位宽分派体系，不同位宽直接生成指令级定点融合路径：
+量化 GEMM 统一被纳入 TurboQuant 加载时 DType 特化体系，针对各精度在模型加载时一次性生成指令级定点融合路径：
 
 ```rust
 pub enum OpKind {
@@ -940,7 +940,7 @@ pub enum OpKind {
 }
 ```
 
-| 位宽 | 定点内联映射 (原 Dequant 路径) | 内存布局 | 指令特化 |
+| 精度/DType | 定点内联映射 (原 Dequant 路径) | 内存布局 | 指令特化 |
 |------|-------------|---------|---------|
 | 8-bit (Q8_0) | `emit_dequant_q8_0_loop()` — 逐 block 定点展开×i8 | 32 元素/block, 2B scale + 32B data | VNNI 可用时 `vpdpbusd` |
 | 4-bit (Q4_0) | `emit_dequant_q4_0_loop()` — 极化解码 + 定点映射 | 32 元素/block, 2B scale + 16B data | 位操作 `vpand`/`vpsrlw` |
@@ -1139,7 +1139,7 @@ fn apple_amx_gemm_eligible(m: usize, n: usize, k: usize) -> bool {
 │                                                                  │
 │  第三层: 算子时维度 (per-op, 每个算子可能不同)                    │
 │  ├── 量化类型: QuantType                                          │
-│  ├── 量化位宽: bits (4/8)                                       │
+│  ├── 物理精度: bits (4/8)                                       │
 │  ├── 算法策略: GemmStrategy / AttentionStrategy                 │
 │  ├── Codegen 提示: CodegenHints (memory_bound/AI/prefetch)      │
 │  └── HW Eligibility: 加速单元最小规模阈值                        │
@@ -1467,7 +1467,7 @@ pub struct AttentionConsume {
 ## 11. 物理结构一统：Unified Virtual Page 与 Dual-Track Pool (DATA-UNIFIED-PAGE)
 
 > **关联架构**: unified-jit-architecture-master.md
-> **目标**: 结束显存中按“功能”划分的隔阂，把所有驻留内存碎片归并入基于极化位宽的底层物理页框中。
+> **目标**: 结束显存中按“功能”划分的隔阂，把所有驻留内存碎片归并入基于极化精度的底层物理页框中。
 
 ### 11.1 互联通信墙极化拓扑 (SystemTopology)
 

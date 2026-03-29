@@ -275,7 +275,7 @@ match GgufReader::open("model.gguf") {
 
 ---
 
-## 7. 意图提取与知识外挂 (API-INJECTION-SDK)
+## 7. 意图提取与知识外挂 (API-KNOWLEDGE-INJECTION)
 
 > **定位**: gllm 高阶商业特性（Residual Bus）开发者接口。
 >
@@ -338,10 +338,11 @@ client.attach_guardrail(
 
 ---
 
-## §8 知识注入 SDK 工程化内部架构 (API-INJECTION-SDK)
+## §8 知识注入内部实现架构 (API-INJECTION-IMPL)
 
 > **关联**: unified-jit-architecture-master.md §9
-> **核心使命**: 底层的汇编 Hack 再狂野，如果不能作为一套优雅、结构化的 Library 被外部业务调用，那它就是死代码。以下定义将三大物理注入形态（侧载 KV、残差硬插、多路 LoRA）在工程代码结构上抽象化。
+> **上层 API**: §7 定义了用户侧接口（`LayerTarget` 枚举、`inject_knowledge()` 等）
+> **核心使命**: 将三大物理注入形态（侧载 KV、残差硬插、多路 LoRA）在工程代码结构上抽象化。
 
 ### 8.1 `KnowledgeDataSource` Trait — 数据源的多态抽象
 
@@ -367,20 +368,11 @@ pub enum InjectionKind {
 }
 ```
 
-### 8.2 `Semantic Anchors` — 智能语义锚点推断
+### 8.2 语义锚点推断 — 引擎内部实现
 
-抛弃硬编码层号的做法。引擎根据加载的模型拓扑，通过"熵分布曲线"自动标定锚点：
+> **枚举定义**: `LayerTarget` 已在 §7.1 定义，此处不重复。
 
-```rust
-pub enum LayerTarget {
-    /// 浅层词法区 (模型前 10-15% 层)
-    ShallowSyntax,
-    /// 中层语义区 (模型 40-60% 层) — 多数 RAG/NLU 任务的最佳注入点
-    MidSemantic,
-    /// 深层逻辑区 (模型后 80-95% 层) — 安全护栏的最佳嗅探点
-    DeepLogic,
-}
-```
+引擎根据加载的模型拓扑，通过"熵分布曲线"自动标定 `LayerTarget` 的物理层号映射。
 
 ### 8.3 编译器 IR 级标准拓扑扩展 (`InjectionHook` Nodes)
 
@@ -425,7 +417,7 @@ pub struct InjectionScheduler {
 
 ### 9.1 量化执行配置
 
-QuantType 从加载的权重文件自动检测，JIT 据此生成硬件原生内核。不需要用户手动指定位宽。
+QuantType 从加载的权重文件自动检测，JIT 据此生成硬件原生内核。不需要用户手动指定精度。
 
 ```rust
 // QuantType 从权重文件自动推导，无需用户配置：

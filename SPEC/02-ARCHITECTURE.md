@@ -95,7 +95,7 @@ let head_dim = config.get("head_dim").unwrap_or(128);
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `bits` | `u8` | ✅ | 量化位宽 (4 或 8) |
+| `bits` | `u8` | ✅ | 权重物理精度 (如 4 或 8) |
 | `signed` | `bool` | ✅ | 是否为有符号量化 |
 | `block_size` | `usize` | ✅ | 量化块大小（不可再使用默认值） |
 | `companions.scales` | `String` | ❌ | scales 张量名称模式 |
@@ -1089,7 +1089,7 @@ QView + KvView + AttentionSemantics
 > **关联**: TurboQuant 架构, Zero-Overhead Memory Pool
 > **状态**: 已替代旧有的 DType-Aware 性能优化。
 
-由于系统全面废除了多态的 `DType` 运行时分支，所有的 GEMM 阻塞 (Blocking) 逻辑（KC/MC/NC 计算）现在完全基于 **硬件检测 (hw_constraints.rs)** 和 **TurboQuant 固定位宽**。
+由于系统全面废除了多态的 `DType` 运行时分支，所有的 GEMM 阻塞 (Blocking) 逻辑（KC/MC/NC 计算）现在完全基于 **硬件检测 (hw_constraints.rs)** 和 **TurboQuant 特化精度**。
 
 `device_profile.rs:gemm_blocking()` 函数已退役。取而代之的是 `TurboQuant` 为 W4A4 和 W8A8 场景直接提供的硬连线 (hardwired) 最佳参数：
 - 不再包含关于 F16/BF16/F32 的 `elem_bytes` 动态除法
@@ -1271,7 +1271,7 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 - **取消主机条件网**: 禁止在主机侧 (CPU Host) 为 `Gate-First-Skip` 等建立多线程路调度。
 - **块内联路**: SM 核心内的 Thread Block 直接读取 `Request_State_Table`。条件不满足时，不破坏控制流掩码，直接在 `Shared Memory` / 寄存器堆通过向量外设掩码（AVX512 `vcompress` / GPU `Prefix Sum`）执行**物理挤压聚拢 (Ragged Tensor Compaction)**。
 - **Compact→Execute→Scatter 三段式循环**: 挤压聚拢仅仅是第一步（Compact）。在没有 Padding 气泡的连续稠密矩阵中执行完核函数运算后（Execute），必须**按原始 Request 偏移进行原位散射回写（Scatter）**，还原到初始 Batch 位置。整个 Compact→Execute→Scatter 流程在单次 Kernel Launch 内闭环。
-- **值域隔离的分组防线 (Range-Aware Compact Grouping)**: 针对极低位宽（如 W4A4）下的跨请求数值污染风险，Compact 过程**严禁单纯按 Batch 顺序挤压**。必须利用 §9.5 尾段观测白嫖到的 `Entropy` 和 `Residual Delta` 指标，在挤压时将激活值域（Activation Range）相近的请求聚集在同一 GEMM Tile 内。值域悬殊的请求互相物理隔离，防止小信号被大信号的量化噪声静默吞噬，确保 4-bit 有效精度刃尽其用。
+- **值域隔离的分组防线 (Range-Aware Compact Grouping)**: 针对极低精度（如 W4A4）下的跨请求数值污染风险，Compact 过程**严禁单纯按 Batch 顺序挤压**。必须利用 §9.5 尾段观测白嫖到的 `Entropy` 和 `Residual Delta` 指标，在挤压时将激活值域（Activation Range）相近的请求聚集在同一 GEMM Tile 内。值域悬殊的请求互相物理隔离，防止小信号被大信号的量化噪声静默吞噬，确保 4-bit 有效精度刃尽其用。
 
 ### 9.2 全域热修补 (Global Consensus Hot JMP Patching)
 
@@ -1320,7 +1320,7 @@ REQ-ARCH-007 (Paged 三端) ← 依赖 004（paged 路径也需要 scatter kerne
 
 **Gllm 的破局法则**：将无限大的 Prefill 长文强制切成固定大小的物理切片（Chunk），与 Decode Token 交织塞进同一个 Batch，**解码请求永远零等待**。
 
-- **精度的物理隔离壁 (Attention Phase Isolation)**：Prefill Chunk 的 Softmax 分布相对平坦，而 Decode Token 的 Softmax 高度尖锐。在极低位宽下，这两种注意力分布模式在同一 Shared Memory 中计算会发生严重的精度交叉污染。因此，**在 Attention 阶段，Prefill Chunk 和 Decode Token 必须被物理分轨调度到不同的 Thread Block 组和 SMEM 分区执行**（复用 §12.7 的 Fat-Binary 跳表实现零开销切换）。FFN 阶段因无分布敏感性允许合流。
+- **精度的物理隔离壁 (Attention Phase Isolation)**：Prefill Chunk 的 Softmax 分布相对平坦，而 Decode Token 的 Softmax 高度尖锐。在极低精度下，这两种注意力分布模式在同一 Shared Memory 中计算会发生严重的精度交叉污染。因此，**在 Attention 阶段，Prefill Chunk 和 Decode Token 必须被物理分轨调度到不同的 Thread Block 组和 SMEM 分区执行**（复用 §12.7 的 Fat-Binary 跳表实现零开销切换）。FFN 阶段因无分布敏感性允许合流。
 
 ```
 Chunked 调度（交织）:
@@ -1421,9 +1421,9 @@ gllm 在推理过程中执行的全部 TurboQuant 运算及其净开销：
 
 重构 `KvCacheConfig`，全面淘汰 `dtype_size`。由 `GlobalMemoryManager` 申请物理隔离的两轨架构:
 
-| 轨道 | 位宽 | 职能 |
+| 轨道 | 物理精度 | 职能 |
 |------|------|------|
-| **主池** | 3-bit / 4-bit | 组级缩放由 Epilogue 快递，KV 按 11.2 非对称量化 |
+| **主池** | 极低精度 (3-4bit) | 组级缩放由 Epilogue 快递，KV 按 11.2 非对称量化 |
 | **校验池 (QJL)** | 1-bit | XNOR 残差掩码阵列 |
 
 **多卡同步红利**: PCIe Swap 和跨卡 RDMA 同步 KV 时，仅需传输原 FP16 内存量纲的 25%（4x 压缩），突破总线墙。
@@ -1484,7 +1484,7 @@ gllm 在推理过程中执行的全部 TurboQuant 运算及其净开销：
 
 - **NVIDIA GPU 脉络 (Hopper/Blackwell Evolution)**
   - **Hopper (SM90) 内存墙突围**: 绝对禁止使用传统 `LDG` 执行 KV Cache 离散读取！JIT 代码必须生成 `TMA (Tensor Memory Accelerator)` 配置包，并结合 `WGMMA` 与 `cuda::barrier` 实现生产者-消费者（Thread Block Cluster）内存直接多播传输（L2 mcast）。
-  - **Blackwell (SM100) 精度原生力**: 针对 W4A4 / W4A8 TurboQuant 压制，编译器直写针对 `FP4 / FP6 Native Tension` 优化的 MMA 汇编指令，抛弃任何高精度的模拟或溢出防范开销，发挥 Block Scale 底层机制的最大吞吐。
+  - **Blackwell (SM100) 精度原生力**: 针对 W4A4 / W4A8 TurboQuant 适配，编译器直写针对 `FP4 / FP6 Native Tension` 优化的 MMA 汇编指令，抛弃任何高精度的模拟或溢出防范开销，发挥 Block Scale 底层机制的最大吞吐。
 
 - **AMD GPU 脉络 (CDNA)**
   - 利用 CDNA3 管线的 XCD/GCD 拓扑屏障，确立本地物理隔离。配合内置的 `WMMA` 指令进行张量吞吐提速。
@@ -1548,7 +1548,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 不需要再查地址树，JIT 解析图时直接将向远端投射地址和网络目标编码成恒定的双轨显存池物理只读指针，将通信网络操作像本地总线定址一样直呼。
 
 #### 5. 量化隔离与模型只读图折叠 (Lazy JIT Variant & Graph Folding)
-- **按需生成的量化泛型**：摒弃传统静态算子中的 `if (dtype == INT4)` 判断。在 Load 模型时权重位宽和计算路已定。JIT 编译器只精确生成**与该层目前物理类型一致的单特化汇编代码**（例如只生成带 SM100 FP4 的微指令汇编），运行时不需要推断，物理底层结构便保障了精度的零开销匹配。
+- **按需生成的量化泛型**：摒弃传统静态算子中的 `if (dtype == INT4)` 判断。在 Load 模型时权重 DType 精度与计算路径已定。JIT 编译器只精确生成**与该层目前物理类型一致的单特化汇编代码**（例如只生成带 SM100 FP4 的微指令汇编），运行时不需要推断，物理底层结构便保障了精度的零开销匹配。
 - **系统静态前缀折叠 (Static KV Prefill Folding)**：面对数十万 token 仍雷打不动的安全审核机制和 Prompt，由编译器（AOT 层面）运算后，化作只读状态流。不用再去查询 KV，此部分的树直接作为“固化的计算缓存”，彻底剥夺访问带宽需求。
 
 ---

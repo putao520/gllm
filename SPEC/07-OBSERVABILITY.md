@@ -1,10 +1,11 @@
-# 运行时观测与自适应调度 (Runtime Observability & Adaptive Scheduling)
+# 运行时观测与自适应调度 — 实现架构 (Runtime Observability & Adaptive Scheduling)
 
-> **📌 SSOT**: 本文档定义了 gllm 的可观测性架构、JIT 调度策略系统与错误处理铁律。
+> **📌 定位**: 本文档定义 gllm 可观测性与调度系统的**实现架构**。
+> **SSOT 声明**: 需求定义（REQ-OBS-001~003, REQ-ERR-001~003）见 [01-REQUIREMENTS.md](./01-REQUIREMENTS.md)，本文档不重复需求条目，仅定义实现方案。
 
 ## 1. 核心理念 (Zero-Overhead Telemetry)
 
-在极致的 Mega-Kernel 架构下，任何传统的**“旁路探测、CPU 定时轮询、无锁环形队列 (RingBuffer)”**都会引发致命的 PCIe 延迟与缓存击穿。
+在极致的 Mega-Kernel 架构下，任何传统的**"旁路探测、CPU 定时轮询、无锁环形队列 (RingBuffer)"**都会引发致命的 PCIe 延迟与缓存击穿。
 因此，gllm 的可观测性彻底抛弃外挂式的 `RuntimeObserver` 伴随线程，转而采用 **就地核心寄生（In-Place Piggybacking Logging）**。
 
 > **🌋 物理灭顶禁令**：禁止使用任何形式的单生产者/单消费者 `RingBuffer` (如 `crossbeam_channel`, `flume`) 向主机侧汇报遥测状态。状态传递仅允许寄生于算力管道残存带宽。
@@ -36,7 +37,7 @@ pub struct KvPageHeader {
 }
 ```
 
-**采集硬性规范（SSOT）**：
+**采集硬性规范**：
 
 | 指标 | 物理存放点 | 采集方式 (Kernel 执行期) | CPU 反馈成本 |
 |------|-----------|-------------------------|-------------|
@@ -77,7 +78,7 @@ impl SchedulingPolicy for AbsolutePolicy {
 }
 ```
 
-## 3. AbsolutePolicy 护栏级决策矩阵 (SSOT Dispatch)
+## 3. AbsolutePolicy 护栏级决策矩阵
 
 **决策矩阵**：
 
@@ -95,21 +96,11 @@ impl SchedulingPolicy for AbsolutePolicy {
 - Host 层仅用最简单的 `AbsolutePolicy`。
 - 将动态路由放权到底层 `jmp`！
 
-## 5. 错误处理铁律 (ARCH-ERR)
+## 5. 错误处理实现架构 (ARCH-ERR)
 
-所有调度/引擎/后端代码必须遵守：
+> **需求 SSOT**: REQ-ERR-001~003 见 [01-REQUIREMENTS.md](./01-REQUIREMENTS.md)。本节定义实现方案。
 
-### 5.1 禁止的错误处理模式
-
-| 模式 | 状态 | 替代方案 |
-|------|------|---------|
-| `Err(_)` catch-all | **禁止** | 匹配具体错误类型，或 `Err(e) => log::warn!("{e}")` |
-| `let _ = fallible_op()` | **禁止** | `fallible_op()?` 传播，或 `if let Err(e) = op() { log::warn!("{e}") }` |
-| `unwrap_or(default)` 掩盖错误 | **禁止** | `?` 传播，或显式 `match` 处理 |
-| `expect()` 在非初始化代码 | **禁止** | 返回 `Result`，让调用方处理 |
-| OOM Out of Memory 处理 | **核心铁律** | 必须当场 Panic (Halt) 抛出越界错误，绝对禁止任何形式的隐式重试或内存扩展 |
-
-### 5.2 OOM Halt 强制截断 (ARCH-ZERO-FALLBACK)
+### 5.1 OOM Halt 实现 (ARCH-ZERO-FALLBACK)
 
 ```rust
 pub struct OomHaltError {
@@ -121,33 +112,13 @@ pub struct OomHaltError {
 - OOM 发生时必须 `log::error!("OOM Halt triggered: Physical memory limit exceeded for {operation}")`
 - 架构底线：一旦触发硬件内存越界，系统必须当场截断 (Halt) 抛出严重错误，禁止框架层面自行容错。
 
-### 5.3 Backend Detection 错误传播
+### 5.2 Backend Detection 错误传播
 
 - `detect_backend()` 中的 `expect()` 替换为 `Result` 返回
 - 探测失败返回 `Err(BackendContextError)`，不 panic
 
-## 6. KV Cache 增量持久化 (ARCH-KV-PERSIST)
+## 6. 演进路线
 
-### 6.1 问题
-
-当前 `update_kv_cache()` 只更新 `seq_len` 计数器，K/V 值在 JIT graph 内部计算后未写入 cache buffer。增量 decode 每次重新计算全部 K/V。
-
-### 6.2 方案
-
-JIT graph 的 MHA op 通过额外的输出指针参数将 K/V 写入外部 buffer：
-
-```
-build_decoder_layer_graph() 添加 kv_cache_ptr 输出参数
-    → MHA op 计算 K/V 后写入 buffer
-    → update_kv_cache() 管理 buffer 生命周期和 seq_len
-    → 增量 decode 时传入已缓存的 K/V 前缀
-```
-
-**约束**：
-- 只修改 gllm 侧的 graph 构建和 buffer 管理
-
-## 7. 演进路线
-
-1.  **Phase 1** (当前): 实现 `SystemState` 实时采集 + 错误处理修复 + KV Cache 持久化
+1.  **Phase 1** (当前): 实现 `SystemState` 实时采集 + 错误处理修复
 2.  **Phase 2**: 实现 `logits_entropy` / `attention_sparsity` 采集
 3.  **Phase 3**: (取消) 策略矩阵 (Accuracy/Throughput/Balanced) 及运行时策略热切换已被 Architect 否决，全系统锁定在单轨 AbsolutePolicy 与 Mega-Kernel 静态块路由。

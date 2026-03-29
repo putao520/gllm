@@ -49,9 +49,9 @@
 | **REQ-QUANT-001** | GgmlDType→QuantType 桥接 | 映射 GGUF 量化类型到 gllm-kernels QuantType | `ggml_dtype_to_quant_type()` 覆盖 K-Quant/Classic/IQ 共 21 种类型 | 🟢 已实现 |
 | **REQ-QUANT-002** | TensorProvider 量化元数据 | TensorProvider 暴露原始 GGML dtype | `ggml_dtype()` default method，GgufReader 实现返回实际 dtype | 🟢 已实现 |
 | **REQ-QUANT-003** | QuantizedTensor 双存储 | WeightsHandle 支持量化/native 双存储 | `quantized` HashMap + `new_with_quantized()`/`quantized_tensor()`/`is_quantized()` | 🟢 已实现 |
-| **REQ-QUANT-004** | upload_provider 量化分流 | 量化 tensor 跳过 GPU upload | 量化→QuantizedTensor，非量化强制位宽压缩→upload_compressed_tensor_with_alignment () | 🟢 已实现 |
+| **REQ-QUANT-004** | upload_provider 精度分流 | 量化权重跳过 GPU 重加载 | 量化层级→QuantizedTensor 直接加载，非量化层级→按硬件原生极化 DType 映射上传 | 🟢 已实现 |
 | **REQ-QUANT-005** | TensorLookup 量化访问 | TensorLookup trait 支持量化 tensor 查询 | `get_quantized()` default method，WeightsHandle 实现 | 🟢 已实现 |
-| **REQ-QUANT-006** | Backend quantized_matmul | Backend trait 量化矩阵乘法 | JIT 编译静态位宽向量操作，完全抹除运行时 dispatch | 🟢 已实现 |
+| **REQ-QUANT-006** | Backend DType 特化 matmul | Backend trait DType 特化矩阵乘法 | JIT 编译 DType 特化向量操作，完全抹除运行时 dispatch | 🟢 已实现 |
 
 ## 3. 核心功能 (REQ-CORE)
 
@@ -319,7 +319,7 @@
 
 | 硬件级别 | 验收指标 | 说明 |
 |----------|----------|------|
-| **老卡 (1080Ti / P4 级)** | 通过 TurboQuant 6x KV 压缩 + DTOD 同步削减，**强行**运行原本无法承载的 128K 动态请求，性能无明显崩盘 | 验证极端降位宽的可用性与通用性 |
+| **老卡 (1080Ti / P4 级)** | 通过 TurboQuant 6x KV 压缩 + DTOD 同步削减，**强行**运行原本无法承载的 128K 动态请求，性能无明显崩盘 | 验证极端精度压缩下的可用性与通用性 |
 | **当代旗舰 (H100 / AMX)** | 利用 Gate-First 跳过和残差旁路削去 **~50%** 浮点算力需求；利用 TMA 预取消除长 Context 访存延迟 | 极限算力释放 |
 | **总吞吐** | 冲击现存开源方案 (vLLM/TGI) 的 **2.5×+** | 同硬件同精度下 End-to-End throughput |
 | **Tail Latency (P99)** | < 50ms (混合负载) | Chunked Prefill 交织调度保障 |
