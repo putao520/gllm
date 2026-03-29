@@ -414,10 +414,11 @@ Client::new_chat("Qwen/Qwen3-0.6B")
         - `num_layers` = 匹配到的最大 `layer_idx` + 1
     - **DType Adapter**: **(已弃用)** Loader 层不再根据硬件进行动态类型分发。
 
-6.  **预量化权重加载与格式对齐 (ARCH-LOADER-TURBO-QUANT)**
-    - **职责边界**: gllm 是纯推理引擎，**不执行量化、不执行训练**。Loader 只负责读取外部量化工具（如 AutoGPTQ、llama.cpp quantize 等）已经产出的预量化权重文件，并执行静态格式对齐（解包、内存布局重排、元数据提取）。
-    - **Load-time Format Alignment**: 装载时将预量化权重文件中的张量解包为 JIT 内核接受的固定底层位宽格式（如 INT4），并提取附随的在线旋转矩阵等元数据注入 GraphExecutor。
-    - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核生成的汇编直接读取预量化权重的定点网格点，数学运算纯基于整数/微字节累加器进行，实现零分支执行。
+6.  **权重加载与 TurboQuant 执行位宽管理 (ARCH-LOADER-TURBO-QUANT)**
+    - **职责边界**: gllm 是纯推理引擎，支持加载 SafeTensors/GGUF/ONNX 全格式权重文件。Loader 负责读取权重文件、解包张量、提取元数据，并将结果交给 JIT 执行引擎。
+    - **TurboQuantBits 静态位宽**: JIT 根据 TurboQuantBits (W4A4/W8A8) 生成对应位宽的执行内核。没有运行时位宽判断，没有 Amax 动态探测。
+    - **TurboQuant 2.0 数学契约**: 当权重文件满足 TurboQuant 2.0 数学契约（详见 §11）时，推理精度逼近数学无损。
+    - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核直接读取定点网格点，数学运算基于整数/微字节累加器进行，零分支执行。
 
 #### ONNX Adapter Architecture (ARCH-ONNX)
 
@@ -1615,8 +1616,8 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 14.1 动态混合精度检测 → 数学级静态湮灭 (Mathematical Annihilation)
 
 - **旧思路**: RmsNorm 尾端计算 `Amax`，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。
-- **新架构蜕变**: 外部量化工具通过 TurboQuant 2.0 数学契约（Cayley 学习旋转+GPTQ 等）离线预处理权重，使量化后内积与全精度期望一致。gllm 只消费预量化权重文件。
-- **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！管线静态锁定 W4A4 + VNNI/SVE2。
+- **新架构蜕变**: 详见 §11 TurboQuant 2.0 无损量化体系。
+- **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！TurboQuantBits 静态锁定 W4A4 + VNNI/SVE2。
 
 ### 14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)
 

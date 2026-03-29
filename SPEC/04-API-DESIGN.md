@@ -224,7 +224,7 @@ pub struct KernelTensorView<'a> {
     pub data: &'a [u8],          // 生命周期绑定的字节切片（零拷贝）
 }
 
-/// StorageFormat — 适配层物理源格式扩展（非 gllm 运行时格式，会在 Load-time 被转换为 TurboQuant 位宽）
+/// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 内部统一按 TurboQuantBits 执行）
 pub enum StorageFormat {
     F32, F16, BF16, U8,          // 表示文件中的原始物理存储格式
     PackedU8(PackedBits),        // Int1/Int2/Int4 量化打包

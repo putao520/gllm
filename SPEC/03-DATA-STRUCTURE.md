@@ -174,7 +174,7 @@ pub struct QuantizedTensor {
 | K-Quant | Q2_K ~ Q8_K | Q2K ~ Q8K | `kquant_matmul` |
 | Classic | Q4_0 ~ Q8_1 | Q4_0 ~ Q8_1 | `classic_matmul` |
 | IQ | IQ1_S ~ IQ4_XS | IQ1S ~ IQ4XS | `iq_matmul` |
-| Native | F32/F16/BF16/F64/I* | (None) | `upload_weights` 常规路径 (需使用外部量化工具预量化为 TurboQuant 静态位宽后再加载) |
+| Native | F32/F16/BF16/F64/I* | (None) | `upload_weights` 常规路径 (直接加载，JIT 根据 TurboQuantBits 生成对应位宽的执行内核) |
 
 ---
 
@@ -233,7 +233,7 @@ pub struct QuantizedTensor {
 
 ### 5.1 通用配置字段 (Static TurboQuant Bounds)
 
-在 Mega-Kernel 架构下，所有的张量都已由外部量化工具完成 TurboQuant 2.0 数学变换（如 SmoothQuant/Cayley 等）。gllm Loader 只读取预量化权重文件并执行静态格式对齐。这导致任何层级的中间计算已被**静态强制**为固定宽度的低比特规格。
+在 Mega-Kernel 架构下，所有加载的权重统一通过 TurboQuantBits 约束为固定位宽的低比特规格执行。当权重文件满足 TurboQuant 2.0 数学契约（详见 02-ARCHITECTURE.md §11）时，推理精度逼近数学无损。
 因此，抛弃旧有动态分配显存的 `dtype_size` 计算机制，统一以物理引擎预编译位宽约束！
 
 | 字段 | 类型 | 说明 |
@@ -389,7 +389,7 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 ### 6.6 TurboQuant 静态位宽约定 (DATA-STATIC-BITWIDTH)
 
 > **关联架构**: unified-jit-architecture-master.md §2 (TurboQuant)
-> **铁律**: gllm 只加载外部量化工具产出的预量化权重文件，系统严禁保留任何多态执行类型。
+> **铁律**: gllm 支持加载 SafeTensors/GGUF/ONNX 全格式权重文件。加载后受 TurboQuantBits 约束，系统严禁保留任何多态执行类型。
 
 #### 位宽统一归宿
 
@@ -408,7 +408,7 @@ let vocab_size = config.vocab_size.unwrap_or(32000);
 
 #### OOM 极高危行为禁止 (OOM Fallback 禁止)
 
-由于我们已通过 `TurboQuant 2.0` 预处理排除了所有异常位宽和 `Amax` 后备模式。如果仍然触发内存或尺寸不匹配错误，引擎不再进行 `GPU → CPU` 或者 `FP16 → FP32` 的动态降级保护！
+由于 TurboQuantBits 已将执行位宽静态锁定，排除了运行时 `Amax` 动态探测。如果仍然触发内存或尺寸不匹配错误，引擎不再进行 `GPU → CPU` 或者 `FP16 → FP32` 的动态降级保护！
 如果物理内存超过了 Dual-Track 的块总容量，或者编译参数和静态张量形状不匹配，必须**当场崩溃 (Halt)** 并报硬件越界错误。
 
 ## 7. 通用张量拓扑 (DATA-TENSOR-TOPOLOGY)
