@@ -224,7 +224,7 @@ pub struct KernelTensorView<'a> {
     pub data: &'a [u8],          // 生命周期绑定的字节切片（零拷贝）
 }
 
-/// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 内部统一按 TurboQuantBits 执行）
+/// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 根据 QuantType 生成对应内核）
 pub enum StorageFormat {
     F32, F16, BF16, U8,          // 表示文件中的原始物理存储格式
     PackedU8(PackedBits),        // Int1/Int2/Int4 量化打包
@@ -238,7 +238,7 @@ pub enum StorageFormat {
 > - GGUF 解析器使用 `GgmlDType` 枚举 (文件格式层)
 > - 适配层通过 `map_storage_format()` 映射到 `StorageFormat`（运行时类型）
 > - 量化内核分派通过 `ggml_dtype_to_quant_type()` 映射到 `QuantType`
-> - 两层映射职责分离：`map_storage` 负责提取物理布局，`ggml_dtype_to_quant_type` 结合 `TurboQuantBits` 静态选型
+> - 两层映射职责分离：`map_storage` 负责提取物理布局，`ggml_dtype_to_quant_type` 直接映射为 QuantType 驱动 JIT
 
 | GGUF 类型 | adapter StorageFormat | QuantType | 映射位置 |
 |-----------|-----------------------|-----------|----------|
@@ -423,24 +423,18 @@ pub struct InjectionScheduler {
 
 ## §9 全局引擎 API 配置 (API-GLOBAL-CONFIG)
 
-### 9.1 TurboQuant 位宽压制配置 (`QuantConfig`)
+### 9.1 量化执行配置
 
-尽管底层 JIT 锁定静态位宽，但对外允许在启动期显式声明量化级别。引擎据此验证加载的预量化权重文件是否符合 TurboQuant 2.0 数学契约：
+QuantType 从加载的权重文件自动检测，JIT 据此生成硬件原生内核。不需要用户手动指定位宽。
 
 ```rust
-pub struct QuantConfig {
-    /// 全局锁定的主干权重量化位宽 (如 W4A4)
-    pub compute_precision: TurboQuantBits,
-    /// 对于极少部分不可量化层的 fallback 选择（如果有）
-    pub fallback_policy: FallbackPolicy, // 通常为 None
-}
+// QuantType 从权重文件自动推导，无需用户配置：
+// GGUF Q4_K → QuantType::Q4K → kquant_matmul JIT 内核
+// SafeTensors F16 → QuantType::F16 → float_matmul JIT 内核
+// 推理过程中无类型判断分支
 
-// 在 Engine 构建时注入
 let engine = Engine::builder()
-    .with_quant_config(QuantConfig {
-        compute_precision: TurboQuantBits::W4A4,
-        fallback_policy: FallbackPolicy::PanicIfUnsupported,
-    })
+    .load_model("model.gguf")  // QuantType 自动检测
     .build().await?;
 ```
 

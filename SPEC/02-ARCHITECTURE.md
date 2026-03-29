@@ -416,7 +416,7 @@ Client::new_chat("Qwen/Qwen3-0.6B")
 
 6.  **权重加载与 TurboQuant 执行位宽管理 (ARCH-LOADER-TURBO-QUANT)**
     - **职责边界**: gllm 是纯推理引擎，支持加载 SafeTensors/GGUF/ONNX 全格式权重文件。Loader 负责读取权重文件、解包张量、提取元数据，并将结果交给 JIT 执行引擎。
-    - **TurboQuantBits 静态位宽**: JIT 根据 TurboQuantBits (W4A4/W8A8) 生成对应位宽的执行内核。没有运行时位宽判断，没有 Amax 动态探测。
+    - **QuantType 驱动 JIT**: 加载时检测到的 QuantType 直接驱动 JIT 生成对应的硬件原生内核。推理过程中无类型判断分支，无 Amax 动态探测。
     - **TurboQuant 2.0 数学契约**: 当权重文件满足 TurboQuant 2.0 数学契约（详见 §11）时，推理精度逼近数学无损。
     - **Backend::dequantize 废除**: 不再提供反量化能力。JIT 内核直接读取定点网格点，数学运算基于整数/微字节累加器进行，零分支执行。
 
@@ -926,7 +926,7 @@ impl CompiledLayer {
 | `layer_stride` | `usize` | 层间步长 |
 | `head_stride` | `usize` | 头间步长 |
 | `token_stride` | `usize` | token 间步长 |
-| `turbo_quant` | `TurboQuantBits` | 位宽约束 |
+| `quant_type` | `QuantType` | 量化格式 |
 | `append_semantics` | `AppendOnly \| Overwrite` | 追加语义 |
 
 #### 8.2.3 `KvView`
@@ -961,7 +961,7 @@ impl CompiledLayer {
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `logical_shape` | `Vec<usize>` | 逻辑形状 |
-| `turbo_quant` | `TurboQuantBits` | 极化压缩位宽 |
+| `quant_type` | `QuantType` | 量化格式 |
 | `quant_scheme` | `Option<QuantScheme>` | 量化方案（GGUF block quant 等） |
 | `base_ptr` | `*const u8` | 数据指针（mmap/device） |
 | `stride` | `Vec<usize>` | 步长 |
@@ -1045,7 +1045,7 @@ QView + KvView + AttentionSemantics
 | stride addressing | 根据 `KvLayoutContract` 生成 head/token/layer 索引 |
 | page lookup | 根据 `PagedKvView` 生成 page table 查找 |
 | append window | 将 append region 合并进可见窗口 |
-| static layout dispatch | 根据 TurboQuantBits 生成载入指令 |
+| static layout dispatch | 根据 QuantType 生成载入指令 |
 | RoPE on-the-fly | 根据 `PositionContract` 在消费时做旋转 |
 
 #### 不融合进 JIT 的（保留在 Engine/Scheduler 层）
@@ -1617,7 +1617,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 
 - **旧思路**: RmsNorm 尾端计算 `Amax`，发现 Outlier 就回退 FP16，否则降级 FP8/INT8。反复横跳引发严重流水线不确定性。
 - **新架构蜕变**: 详见 §11 TurboQuant 2.0 无损量化体系。
-- **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！TurboQuantBits 静态锁定 W4A4 + VNNI/SVE2。
+- **执行定论**: 所有 `Amax` 运行时检测代码**全盘删除**！QuantType 驱动 JIT 静态锁定执行路径。
 
 ### 14.2 门控网络失效截断 → 寄存器级动态挤压 (Register-Level Compaction)
 

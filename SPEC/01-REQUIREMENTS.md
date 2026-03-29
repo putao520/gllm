@@ -178,7 +178,7 @@
 
 ### REQ-OBS-002: 单轨 AbsolutePolicy 强制约束
 - 剥夺原设计中由 CPU 切换精度模式的权力（移除 AccuracyFirst, Balanced, ThroughputFirst）。
-- 系统被设定为对所有有效指令强制锁定 **TurboQuant (W4A4/W8A8)** 运行。
+- 系统由 QuantType 直接驱动 JIT 生成硬件原生内核，推理过程中无类型判断分支。
 - Scheduler 只能执行护栏级的吞吐保护 `AbsolutePolicy`，只改变 `admit_new_prefill` 等外围流水线压弹，绝不更改核心 `kernel_strategy`。
 - **验收标准**: 核心系统中不存在 `kernel_strategy` 传参，任何批次的硬件执行路线拥有绝对的静态等价性。
 
