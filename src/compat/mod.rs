@@ -29,7 +29,6 @@ mod cuda_backend;
 mod hip_backend;
 mod metal_backend;
 mod memory;
-pub mod model_adapter;
 
 // Re-export the *real* Element trait from gllm-kernels.
 pub use gllm_kernels::traits::Element;

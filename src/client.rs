@@ -13,10 +13,6 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
-use crate::intent::{
-    attach_guardrail, encode_intent, GuardrailAttachment, IntentEncoding, SafetyPolicyConfig,
-};
-use crate::knowledge::{KnowledgeInjectionConfig, KnowledgeError, LayerTarget};
 use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
     map_architecture_token, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
@@ -24,13 +20,9 @@ use crate::manifest::{
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
 #[derive(Debug, Error)]
-pub enum GllmError {
+pub enum ClientError {
     #[error("unknown model alias: {0}")]
     UnknownModel(String),
-    #[error("model not found: {0}")]
-    ModelNotFound(String),
-    #[error("invalid model type: {0}")]
-    InvalidModelType(String),
     #[error("unsupported architecture: {0:?}")]
     UnsupportedArchitecture(ModelArchitecture),
     #[error("state lock poisoned")]
@@ -41,6 +33,8 @@ pub enum GllmError {
     NotImplementedQueued { kind: &'static str, request_id: u64 },
     #[error("OOM halt: {message} (fatal={fatal})")]
     OomHalt { message: String, fatal: bool },
+    #[error("invalid model type for requested operation")]
+    InvalidModelType,
     #[error(transparent)]
     Loader(#[from] LoaderError),
 
@@ -55,15 +49,17 @@ pub enum GllmError {
 /// Unified error type for public API (per SPEC 04-API-DESIGN §4).
 ///
 /// This is the primary error type exposed to users of the gllm library.
+/// It is a type alias to `ClientError` for backward compatibility with
+/// internal code.
 ///
 /// # Error Variants
 ///
-/// - `ModelNotFound(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
-/// - `UnknownModel(String)` — Alias for ModelNotFound (backward compatibility)
-/// - `InvalidModelType(String)` — Model type mismatch (e.g., using Embedding model for Chat)
+/// - `UnknownModel(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
 /// - `UnsupportedArchitecture` — Backend initialization failed (maps to SPEC's `BackendError`)
 /// - `OomHalt` — Out of memory (maps to SPEC's `OutOfMemory`)
+/// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
 /// - Other variants represent runtime errors (maps to SPEC's `RuntimeError`)
+pub type GllmError = ClientError;
 
 pub struct ClientState {
     pub model_id: String,
@@ -81,22 +77,22 @@ pub struct AsyncClient {
     inner: Client,
 }
 
-impl From<BackendContextError> for GllmError {
+impl From<BackendContextError> for ClientError {
     fn from(err: BackendContextError) -> Self {
         match err {
             BackendContextError::UnsupportedArchitecture(arch) => {
-                GllmError::UnsupportedArchitecture(arch)
+                ClientError::UnsupportedArchitecture(arch)
             }
-            BackendContextError::Loader(err) => GllmError::Loader(err),
-            BackendContextError::Executor(err) => GllmError::Executor(err),
-            BackendContextError::Backend(err) => GllmError::Backend(err),
+            BackendContextError::Loader(err) => ClientError::Loader(err),
+            BackendContextError::Executor(err) => ClientError::Executor(err),
+            BackendContextError::Backend(err) => ClientError::Backend(err),
         }
     }
 }
 
 impl Client {
     #[allow(clippy::arc_with_non_send_sync)]
-    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, GllmError> {
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         let client = Self {
             state: Arc::new(RwLock::new(None)),
         };
@@ -104,22 +100,22 @@ impl Client {
         Ok(client)
     }
 
-    pub fn new_chat(model_id: &str) -> Result<Self, GllmError> {
+    pub fn new_chat(model_id: &str) -> Result<Self, ClientError> {
         Self::new(model_id, ModelKind::Chat)
     }
-    pub fn new_embedding(model_id: &str) -> Result<Self, GllmError> {
+    pub fn new_embedding(model_id: &str) -> Result<Self, ClientError> {
         Self::new(model_id, ModelKind::Embedding)
     }
 
-    pub fn manifest(&self) -> Result<Arc<ModelManifest>, GllmError> {
+    pub fn manifest(&self) -> Result<Arc<ModelManifest>, ClientError> {
         let state = self.read_state()?;
         state
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
-            .ok_or(GllmError::NoModelLoaded)
+            .ok_or(ClientError::NoModelLoaded)
     }
 
-    pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), GllmError> {
+    pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
         let mut guard = self.write_state()?;
         let state = Self::build_state(&model_id, kind)?;
@@ -127,19 +123,19 @@ impl Client {
         Ok(())
     }
 
-    pub fn unload_model(&self) -> Result<(), GllmError> {
+    pub fn unload_model(&self) -> Result<(), ClientError> {
         let mut guard = self.write_state()?;
         *guard = None;
         Ok(())
     }
 
-    pub fn swap_model(&self, model_id: &str) -> Result<(), GllmError> {
+    pub fn swap_model(&self, model_id: &str) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
         let mut guard = self.write_state()?;
         let kind = guard
             .as_ref()
             .map(|loaded| loaded.manifest.kind)
-            .ok_or(GllmError::NoModelLoaded)?;
+            .ok_or(ClientError::NoModelLoaded)?;
 
         *guard = None;
         let state = Self::build_state(&model_id, kind)?;
@@ -169,176 +165,14 @@ impl Client {
         RerankBuilder::new(self, query, documents)
     }
 
-    pub fn thinking_head_available(&self) -> Result<bool, GllmError> {
+    pub fn thinking_head_available(&self) -> Result<bool, ClientError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         let available = {
             let executor = loaded.backend.executor();
             executor.thinking_head_available()
         };
         Ok(available)
-    }
-
-    /// Injects knowledge into the model at a specified semantic layer.
-    ///
-    /// This method implements the Knowledge Injection API (SPEC 04-API-DESIGN.md §7).
-    /// It allows external knowledge to be injected into the model's residual stream
-    /// at a semantic anchor point (ShallowSyntax, MidSemantic, or DeepLogic).
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Knowledge injection configuration containing the source and target
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(), GllmError>` - Success or error
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use gllm::{Client, KnowledgeSource, LayerTarget, KnowledgeInjectionConfig};
-    ///
-    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
-    ///
-    /// let config = KnowledgeInjectionConfig::new(
-    ///     KnowledgeSource::from_text("Company policy document..."),
-    ///     LayerTarget::MidSemantic,
-    /// );
-    ///
-    /// client.inject_knowledge(config)?;
-    /// ```
-    ///
-    /// # Implementation Notes
-    ///
-    /// This is a skeleton implementation. The full implementation would:
-    /// 1. Materialize the knowledge source into an engine-ready payload
-    /// 2. Determine the physical layer number from the semantic anchor
-    /// 3. Register the injection with the engine's injection scheduler
-    /// 4. Update the Mega-Kernel launch parameters for affected requests
-    pub fn inject_knowledge(&self, config: KnowledgeInjectionConfig) -> Result<(), GllmError> {
-        // Verify a model is loaded
-        let _state = self.read_state()?;
-        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
-
-        // Materialize the knowledge source
-        let _payload = config.materialize().map_err(|e| match e {
-            KnowledgeError::EngineNotReady(msg) => GllmError::Executor(ExecutorError::Other(msg)),
-            KnowledgeError::MaterializationFailed(msg) => {
-                GllmError::Executor(ExecutorError::Other(msg))
-            }
-            KnowledgeError::InvalidSource(msg) => {
-                GllmError::Executor(ExecutorError::Other(format!("Invalid knowledge source: {}", msg)))
-            }
-            KnowledgeError::VectorDb(msg) => {
-                GllmError::Executor(ExecutorError::Other(format!("VectorDB error: {}", msg)))
-            }
-            KnowledgeError::File(e) => GllmError::Executor(ExecutorError::Other(format!(
-                "File error: {}",
-                e
-            ))),
-        })?;
-
-        // Skeleton: In a full implementation, this would:
-        // 1. Register the payload with the engine's KvSideloadManager or InjectionScheduler
-        // 2. Update the injection routing table for batched requests
-        // 3. Trigger JIT recompilation if necessary for the new injection pattern
-
-        Ok(())
-    }
-
-    /// Encodes an intent by extracting features at a specified semantic layer.
-    ///
-    /// This method implements the Multi-Intent Dimensionality Reduction API
-    /// (SPEC 04-API-DESIGN.md §7.3). It physically truncates computation at the
-    /// specified layer to accelerate discriminative tasks.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - Input text to encode
-    /// * `layer_target` - Semantic anchor point for truncation
-    ///
-    /// # Returns
-    ///
-    /// * `Result<IntentEncoding, GllmError>` - Feature vector and metadata
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use gllm::{Client, LayerTarget};
-    ///
-    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
-    ///
-    /// // Extract features at the mid-semantic layer for intent classification
-    /// let intent = client.encode_intent("Cancel my subscription", LayerTarget::MidSemantic)?;
-    ///
-    /// // The embedding can be used directly with an external lightweight classifier
-    /// ```
-    ///
-    /// # Implementation Notes
-    ///
-    /// This is a skeleton implementation. The full implementation would:
-    /// 1. Map the semantic anchor to a physical layer number based on model topology
-    /// 2. Execute forward propagation only up to the target layer
-    /// 3. Extract and return the hidden state at that layer
-    pub fn encode_intent(&self, text: &str, layer_target: LayerTarget) -> Result<IntentEncoding, GllmError> {
-        // Verify a model is loaded
-        let _state = self.read_state()?;
-        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
-
-        // Delegate to the intent module
-        encode_intent(text, layer_target)
-    }
-
-    /// Attaches a safety guardrail probe at a specified semantic layer.
-    ///
-    /// This method implements the In-Flight Guardrail API
-    /// (SPEC 04-API-DESIGN.md §7.4). It mounts a lightweight classifier
-    /// in the model's forward pass for zero-latency safety intervention.
-    ///
-    /// # Arguments
-    ///
-    /// * `probe_path` - Path to the guard probe weights (safetensors format)
-    /// * `layer_target` - Semantic anchor point for probe mounting
-    /// * `policy` - Safety policy configuration
-    ///
-    /// # Returns
-    ///
-    /// * `Result<GuardrailAttachment, GllmError>` - Probe attachment info
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use gllm::{Client, LayerTarget, SafetyPolicyConfig};
-    ///
-    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
-    ///
-    /// // Mount a toxicity classifier at the deep logic layer
-    /// let attachment = client.attach_guardrail(
-    ///     "toxicity_classifier_v1.safetensors",
-    ///     LayerTarget::DeepLogic,
-    ///     SafetyPolicyConfig::halt_and_veto(0.95),
-    /// )?;
-    /// ```
-    ///
-    /// # Implementation Notes
-    ///
-    /// This is a skeleton implementation. The full implementation would:
-    /// 1. Load the probe weights from the specified file
-    /// 2. Register the probe with the executor's guardrail registry
-    /// 3. Compile the probe integration into the Mega-Kernel launch parameters
-    /// 4. Enable hardware-level intervention when the threshold is exceeded
-    pub fn attach_guardrail(
-        &self,
-        probe_path: &str,
-        layer_target: LayerTarget,
-        policy: SafetyPolicyConfig,
-    ) -> Result<GuardrailAttachment, GllmError> {
-        // Verify a model is loaded
-        let _state = self.read_state()?;
-        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
-
-        // Delegate to the intent module
-        attach_guardrail(probe_path, layer_target, policy)
     }
 
     pub(crate) fn execute_generation(
@@ -349,11 +183,11 @@ impl Client {
         top_k: usize,
         top_p: f32,
         session_id: Option<u64>,
-    ) -> Result<GenerationResponse, GllmError> {
+    ) -> Result<GenerationResponse, ClientError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
-        // OOM errors propagate as-is via ExecutorError -> GllmError.
+        // OOM errors propagate as-is via ExecutorError -> ClientError.
         let mut executor = loaded.backend.executor_mut();
         let result = if let Some(sid) = session_id {
             executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
@@ -371,9 +205,9 @@ impl Client {
     pub(crate) fn execute_embeddings(
         &self,
         inputs: Vec<String>,
-    ) -> Result<EmbeddingsResponse, GllmError> {
+    ) -> Result<EmbeddingsResponse, ClientError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
         let mut executor = loaded.backend.executor_mut();
         let mut embeddings = Vec::with_capacity(inputs.len());
@@ -391,16 +225,16 @@ impl Client {
         query: String,
         documents: Vec<String>,
         top_n: usize,
-    ) -> Result<RerankResponse, GllmError> {
+    ) -> Result<RerankResponse, ClientError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
         let mut executor = loaded.backend.executor_mut();
         let mut scores = Vec::with_capacity(documents.len());
         for doc in documents.iter() {
             let score = executor.rerank_pair(&query, doc)?;
             let val = score.first().copied().ok_or_else(|| {
-                GllmError::Backend(BackendError::Cpu(
+                ClientError::Backend(BackendError::Cpu(
                     "rerank_pair returned empty scores for query/doc pair".into(),
                 ))
             })?;
@@ -428,15 +262,15 @@ impl Client {
         })
     }
 
-    fn normalize_model_id(model_id: &str) -> Result<String, GllmError> {
+    fn normalize_model_id(model_id: &str) -> Result<String, ClientError> {
         let trimmed = model_id.trim();
         if trimmed.is_empty() {
-            return Err(GllmError::UnknownModel(model_id.to_string()));
+            return Err(ClientError::UnknownModel(model_id.to_string()));
         }
         Ok(trimmed.to_string())
     }
 
-    fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, GllmError> {
+    fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
         let config = LoaderConfig::from_env();
 
         // Ω1: Tensor-driven loading - no config.json dependency (REQ-REFACTOR-004)
@@ -471,7 +305,7 @@ impl Client {
                         tensor_map: HashMap::new(),
                     }
                 } else {
-                    return Err(GllmError::UnknownModel(format!(
+                    return Err(ClientError::UnknownModel(format!(
                         "Unsupported GGUF architecture: {}",
                         arch_str
                     )));
@@ -538,19 +372,19 @@ impl Client {
         })
     }
 
-    fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, GllmError> {
-        self.state.read().map_err(|_| GllmError::ExecutorPoisoned)
+    fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, ClientError> {
+        self.state.read().map_err(|_| ClientError::ExecutorPoisoned)
     }
 
-    fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, GllmError> {
+    fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, ClientError> {
         self.state
             .write()
-            .map_err(|_| GllmError::ExecutorPoisoned)
+            .map_err(|_| ClientError::ExecutorPoisoned)
     }
 }
 
 impl AsyncClient {
-    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, GllmError> {
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         Ok(Self {
             inner: Client::new(model_id, kind)?,
         })
