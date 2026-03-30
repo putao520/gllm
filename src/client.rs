@@ -33,6 +33,8 @@ pub enum ClientError {
     NotImplementedQueued { kind: &'static str, request_id: u64 },
     #[error("OOM halt: {message} (fatal={fatal})")]
     OomHalt { message: String, fatal: bool },
+    #[error("invalid model type for requested operation")]
+    InvalidModelType,
     #[error(transparent)]
     Loader(#[from] LoaderError),
 
@@ -43,6 +45,21 @@ pub enum ClientError {
     #[error(transparent)]
     ModelConfig(#[from] crate::model_config::ModelConfigError),
 }
+
+/// Unified error type for public API (per SPEC 04-API-DESIGN §4).
+///
+/// This is the primary error type exposed to users of the gllm library.
+/// It is a type alias to `ClientError` for backward compatibility with
+/// internal code.
+///
+/// # Error Variants
+///
+/// - `UnknownModel(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
+/// - `UnsupportedArchitecture` — Backend initialization failed (maps to SPEC's `BackendError`)
+/// - `OomHalt` — Out of memory (maps to SPEC's `OutOfMemory`)
+/// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
+/// - Other variants represent runtime errors (maps to SPEC's `RuntimeError`)
+pub type GllmError = ClientError;
 
 pub struct ClientState {
     pub model_id: String,

@@ -31,6 +31,6 @@ pub use manifest::{
 
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
-pub use client::{AsyncClient, Client};
+pub use client::{AsyncClient, Client, GllmError};
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
