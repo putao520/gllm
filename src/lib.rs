@@ -14,6 +14,8 @@ pub mod scheduler;
 pub mod client;
 pub mod embeddings;
 pub mod generation;
+pub mod intent;
+pub mod knowledge;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
@@ -32,5 +34,13 @@ pub use manifest::{
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
 pub use client::{AsyncClient, Client, GllmError};
+pub use intent::{
+    attach_guardrail, encode_intent, GuardrailAction, GuardrailAttachment, IntentConfig,
+    IntentEncoding, IntentError, SafetyPolicyConfig,
+};
+pub use knowledge::{
+    FrozenKvSource, InjectionKind, KnowledgeDataSource, KnowledgeInjectionConfig,
+    KnowledgeInjectionResult, LayerTarget, VectorSource,
+};
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
