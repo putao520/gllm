@@ -13,6 +13,10 @@ use crate::backend::{
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::ExecutorError;
 use crate::generation::{GenerationBuilder, GenerationResponse};
+use crate::intent::{
+    attach_guardrail, encode_intent, GuardrailAttachment, IntentEncoding, SafetyPolicyConfig,
+};
+use crate::knowledge::{KnowledgeInjectionConfig, KnowledgeError, LayerTarget};
 use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
     map_architecture_token, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
@@ -173,6 +177,168 @@ impl Client {
             executor.thinking_head_available()
         };
         Ok(available)
+    }
+
+    /// Injects knowledge into the model at a specified semantic layer.
+    ///
+    /// This method implements the Knowledge Injection API (SPEC 04-API-DESIGN.md §7).
+    /// It allows external knowledge to be injected into the model's residual stream
+    /// at a semantic anchor point (ShallowSyntax, MidSemantic, or DeepLogic).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Knowledge injection configuration containing the source and target
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), GllmError>` - Success or error
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gllm::{Client, KnowledgeSource, LayerTarget, KnowledgeInjectionConfig};
+    ///
+    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
+    ///
+    /// let config = KnowledgeInjectionConfig::new(
+    ///     KnowledgeSource::from_text("Company policy document..."),
+    ///     LayerTarget::MidSemantic,
+    /// );
+    ///
+    /// client.inject_knowledge(config)?;
+    /// ```
+    ///
+    /// # Implementation Notes
+    ///
+    /// This is a skeleton implementation. The full implementation would:
+    /// 1. Materialize the knowledge source into an engine-ready payload
+    /// 2. Determine the physical layer number from the semantic anchor
+    /// 3. Register the injection with the engine's injection scheduler
+    /// 4. Update the Mega-Kernel launch parameters for affected requests
+    pub fn inject_knowledge(&self, config: KnowledgeInjectionConfig) -> Result<(), GllmError> {
+        // Verify a model is loaded
+        let _state = self.read_state()?;
+        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+
+        // Materialize the knowledge source
+        let _payload = config.materialize().map_err(|e| match e {
+            KnowledgeError::EngineNotReady(msg) => GllmError::Executor(ExecutorError::Other(msg)),
+            KnowledgeError::MaterializationFailed(msg) => {
+                GllmError::Executor(ExecutorError::Other(msg))
+            }
+            KnowledgeError::InvalidSource(msg) => {
+                GllmError::Executor(ExecutorError::Other(format!("Invalid knowledge source: {}", msg)))
+            }
+            KnowledgeError::VectorDb(msg) => {
+                GllmError::Executor(ExecutorError::Other(format!("VectorDB error: {}", msg)))
+            }
+            KnowledgeError::File(e) => GllmError::Executor(ExecutorError::Other(format!(
+                "File error: {}",
+                e
+            ))),
+        })?;
+
+        // Skeleton: In a full implementation, this would:
+        // 1. Register the payload with the engine's KvSideloadManager or InjectionScheduler
+        // 2. Update the injection routing table for batched requests
+        // 3. Trigger JIT recompilation if necessary for the new injection pattern
+
+        Ok(())
+    }
+
+    /// Encodes an intent by extracting features at a specified semantic layer.
+    ///
+    /// This method implements the Multi-Intent Dimensionality Reduction API
+    /// (SPEC 04-API-DESIGN.md §7.3). It physically truncates computation at the
+    /// specified layer to accelerate discriminative tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - Input text to encode
+    /// * `layer_target` - Semantic anchor point for truncation
+    ///
+    /// # Returns
+    ///
+    /// * `Result<IntentEncoding, GllmError>` - Feature vector and metadata
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gllm::{Client, LayerTarget};
+    ///
+    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
+    ///
+    /// // Extract features at the mid-semantic layer for intent classification
+    /// let intent = client.encode_intent("Cancel my subscription", LayerTarget::MidSemantic)?;
+    ///
+    /// // The embedding can be used directly with an external lightweight classifier
+    /// ```
+    ///
+    /// # Implementation Notes
+    ///
+    /// This is a skeleton implementation. The full implementation would:
+    /// 1. Map the semantic anchor to a physical layer number based on model topology
+    /// 2. Execute forward propagation only up to the target layer
+    /// 3. Extract and return the hidden state at that layer
+    pub fn encode_intent(&self, text: &str, layer_target: LayerTarget) -> Result<IntentEncoding, GllmError> {
+        // Verify a model is loaded
+        let _state = self.read_state()?;
+        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+
+        // Delegate to the intent module
+        encode_intent(text, layer_target)
+    }
+
+    /// Attaches a safety guardrail probe at a specified semantic layer.
+    ///
+    /// This method implements the In-Flight Guardrail API
+    /// (SPEC 04-API-DESIGN.md §7.4). It mounts a lightweight classifier
+    /// in the model's forward pass for zero-latency safety intervention.
+    ///
+    /// # Arguments
+    ///
+    /// * `probe_path` - Path to the guard probe weights (safetensors format)
+    /// * `layer_target` - Semantic anchor point for probe mounting
+    /// * `policy` - Safety policy configuration
+    ///
+    /// # Returns
+    ///
+    /// * `Result<GuardrailAttachment, GllmError>` - Probe attachment info
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gllm::{Client, LayerTarget, SafetyPolicyConfig};
+    ///
+    /// let client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
+    ///
+    /// // Mount a toxicity classifier at the deep logic layer
+    /// let attachment = client.attach_guardrail(
+    ///     "toxicity_classifier_v1.safetensors",
+    ///     LayerTarget::DeepLogic,
+    ///     SafetyPolicyConfig::halt_and_veto(0.95),
+    /// )?;
+    /// ```
+    ///
+    /// # Implementation Notes
+    ///
+    /// This is a skeleton implementation. The full implementation would:
+    /// 1. Load the probe weights from the specified file
+    /// 2. Register the probe with the executor's guardrail registry
+    /// 3. Compile the probe integration into the Mega-Kernel launch parameters
+    /// 4. Enable hardware-level intervention when the threshold is exceeded
+    pub fn attach_guardrail(
+        &self,
+        probe_path: &str,
+        layer_target: LayerTarget,
+        policy: SafetyPolicyConfig,
+    ) -> Result<GuardrailAttachment, GllmError> {
+        // Verify a model is loaded
+        let _state = self.read_state()?;
+        let _loaded = _state.as_ref().ok_or(GllmError::NoModelLoaded)?;
+
+        // Delegate to the intent module
+        attach_guardrail(probe_path, layer_target, policy)
     }
 
     pub(crate) fn execute_generation(
