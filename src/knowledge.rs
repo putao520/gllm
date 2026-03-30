@@ -41,7 +41,7 @@ pub enum InjectionKind {
     /// 晚期插入：密实特征向量列
     LateFusionVector,
     /// 领域特征挂载：LoRA 权重片
-    DynamicLoraAdapter,
+    DynamicLoRA,
 }
 
 /// 物理化载荷 (per SPEC 04-API-DESIGN §8.1)
