@@ -90,9 +90,15 @@ impl From<BackendError> for ClientError {
 
 impl From<ExecutorError> for ClientError {
     fn from(err: ExecutorError) -> Self {
+        ClientError::RuntimeError(format!("executor error: {}", err))
+    }
+}
+
+impl From<crate::scheduler::SchedulerError> for ClientError {
+    fn from(err: crate::scheduler::SchedulerError) -> Self {
         match err {
-            ExecutorError::OutOfMemory { .. } => ClientError::OutOfMemory,
-            _ => ClientError::RuntimeError(format!("executor error: {}", err)),
+            crate::scheduler::SchedulerError::OutOfMemory { .. } => ClientError::OutOfMemory,
+            _ => ClientError::RuntimeError(format!("scheduler error: {}", err)),
         }
     }
 }
@@ -103,14 +109,6 @@ impl From<crate::model_config::ModelConfigError> for ClientError {
     }
 }
 
-impl From<crate::engine::executor::ExecutorError> for ClientError {
-    fn from(err: crate::engine::executor::ExecutorError) -> Self {
-        match err {
-            crate::engine::executor::ExecutorError::OutOfMemory(_) => ClientError::OutOfMemory,
-            _ => ClientError::RuntimeError(format!("executor error: {}", err)),
-        }
-    }
-}
 
 // ============================================================================
 // Client State
@@ -420,7 +418,7 @@ impl Client {
             guard
                 .as_ref()
                 .map(|loaded| loaded.manifest.kind)
-                .ok_or(ClientError::NoModelLoaded)?
+                .ok_or(ClientError::RuntimeError("no model loaded".to_string()))?
         };
 
         // Unload current model
@@ -466,7 +464,7 @@ impl Client {
         state
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
-            .ok_or(ClientError::NoModelLoaded)
+            .ok_or(ClientError::RuntimeError("no model loaded".to_string()))
     }
 
     // ---------------------------------------------------------------------
@@ -586,10 +584,7 @@ impl Client {
             Self::build_state_blocking(&model_id, kind)
         })
         .await
-        .map_err(|e| ClientError::Executor(ExecutorError::Scheduler(format!(
-            "join error: {}",
-            e
-        ))))??;
+        .map_err(|e| ClientError::RuntimeError(format!("join error: {}", e)))??;
 
         let mut guard = self.write_state().await?;
         *guard = Some(state);
@@ -597,13 +592,13 @@ impl Client {
     }
 
     async fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, ClientError> {
-        self.state.read().map_err(|_| ClientError::ExecutorPoisoned)
+        self.state.read().map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))
     }
 
     async fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, ClientError> {
         self.state
             .write()
-            .map_err(|_| ClientError::ExecutorPoisoned)
+            .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))
     }
 
     fn normalize_model_id(model_id: &str) -> Result<String, ClientError> {
@@ -734,11 +729,11 @@ impl Client {
         let result = tokio::task::spawn_blocking(move || {
             let guard = state_handle
                 .read()
-                .map_err(|_| ClientError::ExecutorPoisoned)
+                .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let loaded = guard
                 .as_ref()
-                .ok_or(ClientError::NoModelLoaded)
+                .ok_or(ClientError::RuntimeError("no model loaded".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let mut executor = loaded.backend.executor_mut();
             if let Some(sid) = session_id {
@@ -749,7 +744,7 @@ impl Client {
         })
         .await
         .map_err(|e| {
-            ClientError::Executor(ExecutorError::Scheduler(format!("join error: {}", e)))
+            ClientError::RuntimeError(format!("join error: {}", e))
         })??;
 
         let (text, thinking_content) = crate::generation::split_thinking_content(&result);
@@ -769,11 +764,11 @@ impl Client {
         let embeddings = tokio::task::spawn_blocking(move || {
             let guard = state_handle
                 .read()
-                .map_err(|_| ClientError::ExecutorPoisoned)
+                .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let loaded = guard
                 .as_ref()
-                .ok_or(ClientError::NoModelLoaded)
+                .ok_or(ClientError::RuntimeError("no model loaded".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let mut executor = loaded.backend.executor_mut();
             let mut embeddings = Vec::with_capacity(inputs.len());
@@ -783,11 +778,11 @@ impl Client {
                 });
             }
             Result::<Vec<Embedding>, ExecutorError>::Ok(embeddings)
-                .map_err(|e| ClientError::Executor(e))
+                .map_err(|e| ClientError::RuntimeError(format!("executor error: {}", e)))
         })
         .await
         .map_err(|e| {
-            ClientError::Executor(ExecutorError::Scheduler(format!("join error: {}", e)))
+            ClientError::RuntimeError(format!("join error: {}", e))
         })??;
 
         Ok(EmbeddingsResponse {
@@ -807,11 +802,11 @@ impl Client {
         let results = tokio::task::spawn_blocking(move || {
             let guard = state_handle
                 .read()
-                .map_err(|_| ClientError::ExecutorPoisoned)
+                .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let loaded = guard
                 .as_ref()
-                .ok_or(ClientError::NoModelLoaded)
+                .ok_or(ClientError::RuntimeError("no model loaded".to_string()))
                 .map_err(|e| ExecutorError::Scheduler(e.to_string()))?;
             let mut executor = loaded.backend.executor_mut();
             let mut scores = Vec::with_capacity(documents.len());
@@ -846,7 +841,7 @@ impl Client {
         })
         .await
         .map_err(|e| {
-            ClientError::Executor(ExecutorError::Scheduler(format!("join error: {}", e)))
+            ClientError::RuntimeError(format!("join error: {}", e))
         })??;
 
         Ok(RerankResponse {
@@ -858,7 +853,7 @@ impl Client {
     /// Check if thinking head is available.
     pub async fn thinking_head_available(&self) -> Result<bool, ClientError> {
         let state = self.read_state().await?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(ClientError::RuntimeError("no model loaded".to_string()))?;
         let available = {
             let executor = loaded.backend.executor();
             executor.thinking_head_available()
@@ -890,10 +885,7 @@ impl Client {
         _config: crate::knowledge::KnowledgeInjectionConfig,
     ) -> Result<crate::knowledge::KnowledgeInjectionResult, ClientError> {
         // Skeleton: requires executor integration
-        Err(ClientError::NotImplementedQueued {
-            kind: "inject_knowledge",
-            request_id: 0,
-        })
+        Err(ClientError::RuntimeError("inject_knowledge not implemented".to_string()))
     }
 
     // ========================================================================
@@ -920,10 +912,7 @@ impl Client {
         _config: crate::intent::IntentConfig,
     ) -> Result<crate::intent::IntentEncoding, ClientError> {
         // Skeleton: requires executor integration
-        Err(ClientError::NotImplementedQueued {
-            kind: "encode_intent",
-            request_id: 0,
-        })
+        Err(ClientError::RuntimeError("encode_intent not implemented".to_string()))
     }
 
     /// Attach guardrail (per SPEC 04-API-DESIGN §7.4).
@@ -948,10 +937,7 @@ impl Client {
         _policy: crate::intent::SafetyPolicy,
     ) -> Result<crate::intent::GuardrailAttachment, ClientError> {
         // Skeleton: requires executor integration
-        Err(ClientError::NotImplementedQueued {
-            kind: "attach_guardrail",
-            request_id: 0,
-        })
+        Err(ClientError::RuntimeError("attach_guardrail not implemented".to_string()))
     }
 
     /// Attach global guardrail (per SPEC 04-API-DESIGN §9.2).
@@ -975,10 +961,7 @@ impl Client {
         _policy: crate::intent::SafetyPolicyConfig,
     ) -> Result<(), ClientError> {
         // Skeleton: requires executor integration
-        Err(ClientError::NotImplementedQueued {
-            kind: "attach_guardrail_global",
-            request_id: 0,
-        })
+        Err(ClientError::RuntimeError("attach_guardrail_global not implemented".to_string()))
     }
 
     /// Expose the internal state handle for streaming support.

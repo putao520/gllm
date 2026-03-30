@@ -126,10 +126,7 @@ pub enum IntentError {
 
 impl From<IntentError> for GllmError {
     fn from(err: IntentError) -> Self {
-        GllmError::NotImplementedQueued {
-            kind: "intent",
-            request_id: 0,
-        }
+        GllmError::RuntimeError(format!("intent error: {}", err))
     }
 }
 

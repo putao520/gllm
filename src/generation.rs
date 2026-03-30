@@ -123,8 +123,8 @@ impl Stream for GenerationStream {
                         let guard = this
                             .state
                             .write()
-                            .map_err(|_| GllmError::ExecutorPoisoned)?;
-                        let loaded = guard.as_ref().ok_or(GllmError::NoModelLoaded)?;
+                            .map_err(|_| GllmError::RuntimeError("state lock poisoned".to_string()))?;
+                        let loaded = guard.as_ref().ok_or(GllmError::RuntimeError("no model loaded".to_string()))?;
                         let mut executor = loaded.backend.executor_mut();
 
                         let text = if let Some(sid) = session_id {
@@ -189,14 +189,14 @@ impl Stream for GenerationStream {
                             Ok(g) => g,
                             Err(_) => {
                                 this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Err(GllmError::ExecutorPoisoned)));
+                                return Poll::Ready(Some(Err(GllmError::RuntimeError("state lock poisoned".to_string()))));
                             }
                         };
                         let loaded = match guard.as_ref() {
                             Some(s) => s,
                             None => {
                                 this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Err(GllmError::NoModelLoaded)));
+                                return Poll::Ready(Some(Err(GllmError::RuntimeError("no model loaded".to_string()))));
                             }
                         };
                         let executor = loaded.backend.executor();
