@@ -8,17 +8,28 @@ pub enum PackedBits {
     Int4,
 }
 
-/// Extended DType that includes quantized types not in gllm-kernels.
+/// StorageFormat — 适配层物理源格式扩展（文件中的原始物理存储格式，JIT 根据 QuantType 生成对应内核）
+///
+/// 这是 API-GGUF-ADAPTER 的核心类型，表示 GGUF 文件中的原始物理存储格式。
+/// 量化内核分派通过 `ggml_dtype_to_quant_type()` 映射到 `QuantType`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DType {
+pub enum StorageFormat {
+    /// 32-bit floating point
     F32,
+    /// 16-bit floating point (IEEE 754)
     F16,
+    /// Brain floating point (16-bit)
     BF16,
+    /// 8-bit unsigned integer
     U8,
+    /// Packed quantized bits (Int1/Int2/Int4)
     PackedU8(PackedBits),
 }
 
-impl DType {
+/// DType 是 StorageFormat 的别名（向后兼容）
+pub type DType = StorageFormat;
+
+impl StorageFormat {
     /// Size in bytes per element.
     pub const fn size_bytes(self) -> usize {
         match self {
@@ -76,10 +87,17 @@ pub fn ggml_dtype_to_quant_type(dtype: GgmlDType) -> Option<QuantType> {
     }
 }
 
+/// KernelTensorView — 零拷贝张量视图
+///
+/// 用于将 GGUF Tensor 转换为 gllm-kernels 格式。
+/// 生命周期绑定到 GGUF reader，确保零拷贝安全性。
 #[derive(Debug, Clone)]
 pub struct KernelTensorView<'a> {
-    pub dtype: DType,
+    /// 物理层映射结构（文件中的原始物理存储格式）
+    pub storage_format: StorageFormat,
+    /// 张量形状
     pub shape: Vec<usize>,
+    /// 生命周期绑定的字节切片（零拷贝）
     pub data: &'a [u8],
 }
 
@@ -109,7 +127,7 @@ impl GgufAdapter {
 
     pub fn tensor_for_kernel(&self, name: &str) -> Result<KernelTensorView<'_>, GgufError> {
         let info = self.reader.tensor_info(name)?;
-        let dtype = map_dtype(info.dtype)?;
+        let storage_format = map_storage_format(info.dtype)?;
         let data = self.reader.tensor_bytes(name)?;
 
         let mut shape = Vec::with_capacity(info.shape.len());
@@ -119,32 +137,49 @@ impl GgufAdapter {
             shape.push(dim);
         }
 
-        Ok(KernelTensorView { dtype, shape, data })
+        Ok(KernelTensorView { storage_format, shape, data })
     }
 }
 
-pub fn map_dtype(dtype: GgmlDType) -> Result<DType, GgufError> {
+/// 将 GGUF 的 GgmlDType 映射到适配层 StorageFormat
+///
+/// 这是物理存储格式的映射，JIT 根据 QuantType 生成对应内核。
+/// 量化内核分派通过 `ggml_dtype_to_quant_type()` 映射到 `QuantType`。
+///
+/// # 映射表
+///
+/// | GGUF 类型 | StorageFormat | QuantType |
+/// |-----------|---------------|-----------|
+/// | F32 | F32 | None |
+/// | F16 | F16 | None |
+/// | BF16 | BF16 | None |
+/// | Q4_0/Q4_1/Q4_K/IQ4_NL/IQ4_XS/MXFP4 | PackedU8(Int4) | Q4_0/Q4_1/Q4K/IQ4NL/IQ4XS/— |
+/// | Q2_K/IQ2_XXS/IQ2_XS/IQ2_S/TQ2_0 | PackedU8(Int2) | Q2K/IQ2XXS/IQ2XS/IQ2S/— |
+/// | IQ1_S/IQ1_M/TQ1_0 | PackedU8(Int1) | IQ1S/IQ1M/— |
+/// | Q8_0/Q8_1/Q8_K/I8 | U8 | Q8_0/Q8_1/Q8K/— |
+/// | Q3_K/Q5_0/Q5_1/Q5_K/Q6_K/IQ3_XXS/IQ3_S | UnsupportedType | Q3K/Q5_0/Q5_1/Q5K/Q6K/IQ3XXS/IQ3S |
+pub fn map_storage_format(dtype: GgmlDType) -> Result<StorageFormat, GgufError> {
     let mapped = match dtype {
-        GgmlDType::F32 => DType::F32,
-        GgmlDType::F16 => DType::F16,
-        GgmlDType::BF16 => DType::BF16,
+        GgmlDType::F32 => StorageFormat::F32,
+        GgmlDType::F16 => StorageFormat::F16,
+        GgmlDType::BF16 => StorageFormat::BF16,
 
         GgmlDType::Q4_0
         | GgmlDType::Q4_1
         | GgmlDType::Q4_K
         | GgmlDType::IQ4_NL
         | GgmlDType::IQ4_XS
-        | GgmlDType::MXFP4 => DType::PackedU8(PackedBits::Int4),
+        | GgmlDType::MXFP4 => StorageFormat::PackedU8(PackedBits::Int4),
 
         GgmlDType::Q2_K
         | GgmlDType::IQ2_XXS
         | GgmlDType::IQ2_XS
         | GgmlDType::IQ2_S
-        | GgmlDType::TQ2_0 => DType::PackedU8(PackedBits::Int2),
+        | GgmlDType::TQ2_0 => StorageFormat::PackedU8(PackedBits::Int2),
 
-        GgmlDType::IQ1_S | GgmlDType::IQ1_M | GgmlDType::TQ1_0 => DType::PackedU8(PackedBits::Int1),
+        GgmlDType::IQ1_S | GgmlDType::IQ1_M | GgmlDType::TQ1_0 => StorageFormat::PackedU8(PackedBits::Int1),
 
-        GgmlDType::Q8_0 | GgmlDType::Q8_1 | GgmlDType::Q8_K | GgmlDType::I8 => DType::U8,
+        GgmlDType::Q8_0 | GgmlDType::Q8_1 | GgmlDType::Q8_K | GgmlDType::I8 => StorageFormat::U8,
 
         GgmlDType::Q5_0
         | GgmlDType::Q5_1
@@ -167,60 +202,60 @@ mod tests {
     use super::*;
     use crate::loader::gguf::GgmlDType;
 
-    /// TEST-GGUF-010: 量化类型映射测试 — GgmlDType → adapter DType 正确映射
+    /// TEST-GGUF-010: 量化类型映射测试 — GgmlDType → StorageFormat 正确映射
     #[test]
     fn test_gguf_010_quant_type_mapping() {
         // P0 类型
-        assert_eq!(map_dtype(GgmlDType::F32).unwrap(), DType::F32);
-        assert_eq!(map_dtype(GgmlDType::F16).unwrap(), DType::F16);
-        assert_eq!(map_dtype(GgmlDType::BF16).unwrap(), DType::BF16);
-        assert_eq!(map_dtype(GgmlDType::Q4_0).unwrap(), DType::PackedU8(PackedBits::Int4));
-        assert_eq!(map_dtype(GgmlDType::Q8_0).unwrap(), DType::U8);
+        assert_eq!(map_storage_format(GgmlDType::F32).unwrap(), StorageFormat::F32);
+        assert_eq!(map_storage_format(GgmlDType::F16).unwrap(), StorageFormat::F16);
+        assert_eq!(map_storage_format(GgmlDType::BF16).unwrap(), StorageFormat::BF16);
+        assert_eq!(map_storage_format(GgmlDType::Q4_0).unwrap(), StorageFormat::PackedU8(PackedBits::Int4));
+        assert_eq!(map_storage_format(GgmlDType::Q8_0).unwrap(), StorageFormat::U8);
 
         // P1 类型
-        assert_eq!(map_dtype(GgmlDType::Q4_K).unwrap(), DType::PackedU8(PackedBits::Int4));
-        assert_eq!(map_dtype(GgmlDType::Q8_K).unwrap(), DType::U8);
+        assert_eq!(map_storage_format(GgmlDType::Q4_K).unwrap(), StorageFormat::PackedU8(PackedBits::Int4));
+        assert_eq!(map_storage_format(GgmlDType::Q8_K).unwrap(), StorageFormat::U8);
 
         // P2 类型
-        assert_eq!(map_dtype(GgmlDType::Q2_K).unwrap(), DType::PackedU8(PackedBits::Int2));
+        assert_eq!(map_storage_format(GgmlDType::Q2_K).unwrap(), StorageFormat::PackedU8(PackedBits::Int2));
 
         // IQ 系列
-        assert_eq!(map_dtype(GgmlDType::IQ4_NL).unwrap(), DType::PackedU8(PackedBits::Int4));
-        assert_eq!(map_dtype(GgmlDType::IQ2_XXS).unwrap(), DType::PackedU8(PackedBits::Int2));
-        assert_eq!(map_dtype(GgmlDType::IQ1_S).unwrap(), DType::PackedU8(PackedBits::Int1));
+        assert_eq!(map_storage_format(GgmlDType::IQ4_NL).unwrap(), StorageFormat::PackedU8(PackedBits::Int4));
+        assert_eq!(map_storage_format(GgmlDType::IQ2_XXS).unwrap(), StorageFormat::PackedU8(PackedBits::Int2));
+        assert_eq!(map_storage_format(GgmlDType::IQ1_S).unwrap(), StorageFormat::PackedU8(PackedBits::Int1));
 
         // 不支持的类型返回 Err
-        assert!(map_dtype(GgmlDType::Q5_0).is_err());
-        assert!(map_dtype(GgmlDType::Q6_K).is_err());
-        assert!(map_dtype(GgmlDType::Q3_K).is_err());
-        assert!(map_dtype(GgmlDType::F64).is_err());
+        assert!(map_storage_format(GgmlDType::Q5_0).is_err());
+        assert!(map_storage_format(GgmlDType::Q6_K).is_err());
+        assert!(map_storage_format(GgmlDType::Q3_K).is_err());
+        assert!(map_storage_format(GgmlDType::F64).is_err());
     }
 
     /// TEST-GGUF-011: 泛型约束验证 — GGUF 解析器返回原始字节 + 类型标识符
     /// 适配层负责类型映射，不依赖 GGUF 内部类型
     #[test]
     fn test_gguf_011_adapter_type_isolation() {
-        // map_dtype 是纯函数，不依赖 GGUF 文件 I/O
-        // 验证所有 DType 变体可以被正确构造和比较
+        // map_storage_format 是纯函数，不依赖 GGUF 文件 I/O
+        // 验证所有 StorageFormat 变体可以被正确构造和比较
         let types = [
-            DType::F32,
-            DType::F16,
-            DType::BF16,
-            DType::U8,
-            DType::PackedU8(PackedBits::Int1),
-            DType::PackedU8(PackedBits::Int2),
-            DType::PackedU8(PackedBits::Int4),
+            StorageFormat::F32,
+            StorageFormat::F16,
+            StorageFormat::BF16,
+            StorageFormat::U8,
+            StorageFormat::PackedU8(PackedBits::Int1),
+            StorageFormat::PackedU8(PackedBits::Int2),
+            StorageFormat::PackedU8(PackedBits::Int4),
         ];
         // 每种类型与自身相等
         for t in &types {
             assert_eq!(t, t);
         }
         // F32 与 F16 不相等
-        assert_ne!(DType::F32, DType::F16);
+        assert_ne!(StorageFormat::F32, StorageFormat::F16);
         // Int1 与 Int4 不相等
         assert_ne!(
-            DType::PackedU8(PackedBits::Int1),
-            DType::PackedU8(PackedBits::Int4)
+            StorageFormat::PackedU8(PackedBits::Int1),
+            StorageFormat::PackedU8(PackedBits::Int4)
         );
     }
 }

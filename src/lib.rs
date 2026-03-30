@@ -34,6 +34,9 @@ pub use manifest::{
 // GGUF Loader API (API-GGUF)
 pub use loader::gguf::{GgufReader, TensorInfo, GgufError, GgmlDType, TensorSlice, GgufValueType};
 
+// GGUF Adapter API (API-GGUF-ADAPTER)
+pub use loader::adapter::{GgufAdapter, KernelTensorView, StorageFormat, PackedBits};
+
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
 pub use client::{Client, GllmError, ModelInfo};
