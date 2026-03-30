@@ -432,7 +432,7 @@ impl Client {
     pub async fn model_info(&self) -> Option<ModelInfo> {
         let guard = self.state.read().ok()?;
         guard.as_ref().map(|loaded| ModelInfo {
-            model_id: loaded.model_id.clone(),
+            id: loaded.model_id.clone(),
             arch: loaded.manifest.arch,
             kind: loaded.manifest.kind,
         })
@@ -976,8 +976,8 @@ impl Client {
 /// Information about a loaded model.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
-    /// Model identifier (e.g., "Qwen/Qwen3-7B-Instruct")
-    pub model_id: String,
+    /// Model identifier (e.g., "Qwen/Qwen3-7B-Instruct") (SPEC: info.id)
+    pub id: String,
     /// Detected architecture
     pub arch: ModelArchitecture,
     /// Model kind/purpose
