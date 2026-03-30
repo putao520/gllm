@@ -22,20 +22,12 @@ pub struct SystemState {
     pub attention_sparsity: f32,
 }
 
-/// Kernel execution strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KernelStrategy {
-    AccuracyFirst,   // FP32 Accumulation, Deterministic
-    ThroughputFirst, // BF16/FP16, Aggressive Fused
-}
-
 /// JIT Decision output.
 #[derive(Debug, Clone)]
 pub struct SchedulerDecision {
     pub max_batch_size: usize,
     pub admit_new_prefill: bool,
     pub force_swap_out_count: usize,
-    pub kernel_strategy: KernelStrategy,
 }
 
 impl Default for SchedulerDecision {
@@ -44,7 +36,6 @@ impl Default for SchedulerDecision {
             max_batch_size: 1,
             admit_new_prefill: false,
             force_swap_out_count: 0,
-            kernel_strategy: KernelStrategy::AccuracyFirst,
         }
     }
 }

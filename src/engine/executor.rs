@@ -61,8 +61,6 @@ pub struct GeneratorForwardConfig {
     pub rerank_yes_token_id: Option<u32>,
     /// Token ID for "no" (used by decoder-based rerankers without a score head).
     pub rerank_no_token_id: Option<u32>,
-    /// Active kernel execution strategy from JIT scheduler.
-    pub kernel_strategy: crate::scheduler::jit_types::KernelStrategy,
     /// MoE configuration (None for dense models).
     pub moe_config: Option<crate::manifest::MoEConfig>,
     /// Model weight dtype string (e.g. "f32", "f16", "bf16").
@@ -445,7 +443,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12),
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
-            kernel_strategy: crate::scheduler::jit_types::KernelStrategy::AccuracyFirst,
             moe_config: manifest.moe_config,
             dtype: model_config.dtype.clone(),
             dtype_size: model_config.dtype_size,
