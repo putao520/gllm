@@ -45,8 +45,8 @@ pub use intent::{
     IntentError, SafetyPolicy, SafetyPolicyConfig,
 };
 pub use knowledge::{
-    FrozenKvSource, InjectionKind, KnowledgeDataSource, KnowledgeError, KnowledgeInjectionConfig,
-    KnowledgeInjectionResult, LayerTarget, MaterializedPayload,
+    InjectionKind, KnowledgeDataSource, KnowledgeError, KnowledgeInjectionConfig,
+    KnowledgeInjectionResult, KnowledgeSource, LayerTarget, MaterializedPayload,
 };
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};

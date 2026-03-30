@@ -96,16 +96,16 @@ impl KnowledgeInjectionConfig {
     }
 }
 
-/// 冻结 KV 数据源 (per SPEC 04-API-DESIGN §8.4)
+/// 冻结 KV 数据源 (per SPEC 04-API-DESIGN §7.2, §8.4)
 ///
-/// 从预存的 KV cache 文件加载数据。
+/// SPEC names this type `KnowledgeSource`. From预存的 KV cache 文件加载数据。
 #[derive(Debug, Clone)]
-pub struct FrozenKvSource {
+pub struct KnowledgeSource {
     pub path: PathBuf,
 }
 
-impl FrozenKvSource {
-    /// 从冻结 KV 文件创建数据源
+impl KnowledgeSource {
+    /// 从冻结 KV 文件创建数据源 (per SPEC 04-API-DESIGN §7.2)
     pub fn from_frozen_kv(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -113,7 +113,7 @@ impl FrozenKvSource {
     }
 }
 
-impl KnowledgeDataSource for FrozenKvSource {
+impl KnowledgeDataSource for KnowledgeSource {
     fn injection_kind(&self) -> InjectionKind {
         InjectionKind::FrozenKvChunk
     }
@@ -121,7 +121,7 @@ impl KnowledgeDataSource for FrozenKvSource {
     fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError> {
         // Skeleton: requires actual KV file loading implementation
         Err(KnowledgeError::NotImplemented(
-            "FrozenKvSource::materialize requires executor integration".into(),
+            "KnowledgeSource::materialize requires executor integration".into(),
         ))
     }
 }

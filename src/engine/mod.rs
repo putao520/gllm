@@ -25,3 +25,16 @@ pub use attention_contracts::{
     KvStorageKind, KvView, MaskMode, PackingDescriptor, PositionContract, ScalingMode,
     VisibilityMode, WeightBacking, WeightView,
 };
+
+// Re-export knowledge injection types at engine::knowledge (per SPEC 04-API-DESIGN §7.2)
+pub mod knowledge {
+    pub use crate::knowledge::{
+        InjectionKind, KnowledgeDataSource, KnowledgeError, KnowledgeInjectionConfig,
+        KnowledgeInjectionResult, KnowledgeSource, LayerTarget, MaterializedPayload,
+    };
+}
+
+// Re-export guardrail types at engine::guard (per SPEC 04-API-DESIGN §7.4)
+pub mod guard {
+    pub use crate::intent::{GuardProbe, SafetyPolicy};
+}
