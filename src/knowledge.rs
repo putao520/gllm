@@ -1,53 +1,115 @@
-//! Knowledge Injection API (per SPEC 04-API-DESIGN §7-§8)
-//!
-//! 提供知识注入、语义锚点定位和多态数据源抽象。
-//! 当前为骨架实现，底层注入机制依赖 SPEC §9-§16 的 Mega-Kernel 架构。
+//! Knowledge Injection API (per SPEC 04-API-DESIGN §7, §8)
 
-/// 语义锚点 — 指定知识注入的物理层目标。
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// 语义锚点 (per SPEC 04-API-DESIGN §7.1)
 ///
-/// 对应模型 Transformer 层的不同语义深度：
-/// - `Embedding`: 浅层嵌入区（token 表征注入）
-/// - `MidSemantic`: 中层语义区（概念级知识注入）
-/// - `DeepLogic`: 深层逻辑区（推理级知识注入）
+/// 摒弃死板的层号（如 `layer=15`），由引擎动态测算映射层深。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayerTarget {
-    Embedding,
+    /// 浅层词法区
+    ShallowSyntax,
+    /// 中层语义区
     MidSemantic,
+    /// 深层逻辑区（爆词前夕）
     DeepLogic,
 }
 
-/// 知识注入方式标识，供编译器分流处理。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InjectionKind {
-    /// 侧载 KV：业务端传入预存的 KV cache 片段
-    FrozenKvChunk,
-    /// 晚期插入：上游小模型算好的密实特征向量列
-    LateFusionVector,
-    /// 领域特征挂载：带有特定领域特征缩放因子的极小权重片
-    DynamicLoRA,
+impl LayerTarget {
+    /// 返回归一化深度 (0.0 到 1.0)
+    pub fn normalized_depth(&self) -> f32 {
+        match self {
+            LayerTarget::ShallowSyntax => 0.125,
+            LayerTarget::MidSemantic => 0.5,
+            LayerTarget::DeepLogic => 0.875,
+        }
+    }
+
+    /// 映射到物理层号
+    pub fn to_physical_layer(&self, total_layers: usize) -> usize {
+        let depth = self.normalized_depth();
+        (depth * total_layers as f32).floor() as usize
+    }
 }
 
-/// 知识数据源的多态抽象 (per SPEC 04-API-DESIGN §8.1)。
-///
-/// 开发者通过实现此 trait 定义自己的知识数据来源。
-/// 引擎根据 `injection_kind()` 返回值选择对应的注入路径。
-pub trait KnowledgeDataSource: Send + Sync {
-    /// 返回注入类型标识，供编译器分流。
+/// 注入类型标识 (per SPEC 04-API-DESIGN §8.1, §8.6)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InjectionKind {
+    /// 侧载 KV：预存的 KV cache 片段
+    FrozenKvChunk,
+    /// 晚期插入：密实特征向量列
+    LateFusionVector,
+    /// 领域特征挂载：LoRA 权重片
+    DynamicLoraAdapter,
+}
+
+/// 物理化载荷 (per SPEC 04-API-DESIGN §8.1)
+#[derive(Debug, Clone)]
+pub struct MaterializedPayload {
+    pub kind: InjectionKind,
+    pub data: Vec<u8>,
+    pub shape: Vec<usize>,
+    pub metadata: HashMap<String, String>,
+}
+
+/// 知识注入错误
+#[derive(Debug, thiserror::Error)]
+pub enum KnowledgeError {
+    #[error("source not found: {0}")]
+    SourceNotFound(String),
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+    #[error("invalid layer target")]
+    InvalidLayerTarget,
+    #[error("data format error: {0}")]
+    DataFormatError(String),
+}
+
+/// 知识注入结果 (per SPEC 04-API-DESIGN §7.2)
+#[derive(Debug, Clone)]
+pub struct KnowledgeInjectionResult {
+    /// 注入的实际物理层
+    pub actual_layer: usize,
+    /// 注入的数据大小（字节）
+    pub data_size_bytes: usize,
+}
+
+/// 知识数据源的多态抽象 (per SPEC 04-API-DESIGN §8.1)
+pub trait KnowledgeDataSource {
+    /// 返回注入类型标识
     fn injection_kind(&self) -> InjectionKind;
 
-    /// 返回数据源的描述信息（用于日志和调试）。
-    fn describe(&self) -> String;
+    /// 将数据物理化至引擎可感知的格式
+    fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError>;
 }
 
-/// 内置知识数据源：从冻结的 KV cache 文件加载。
+/// 知识注入配置 (per SPEC 04-API-DESIGN §7.2)
+pub struct KnowledgeInjectionConfig {
+    pub target: LayerTarget,
+    pub source: Box<dyn KnowledgeDataSource>,
+}
+
+impl KnowledgeInjectionConfig {
+    pub fn new(target: LayerTarget, source: Box<dyn KnowledgeDataSource>) -> Self {
+        Self { target, source }
+    }
+}
+
+/// 冻结 KV 数据源 (per SPEC 04-API-DESIGN §8.4)
+///
+/// 从预存的 KV cache 文件加载数据。
 #[derive(Debug, Clone)]
 pub struct FrozenKvSource {
-    pub path: String,
+    pub path: PathBuf,
 }
 
 impl FrozenKvSource {
-    pub fn from_path(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+    /// 从冻结 KV 文件创建数据源
+    pub fn from_frozen_kv(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+        }
     }
 }
 
@@ -56,61 +118,12 @@ impl KnowledgeDataSource for FrozenKvSource {
         InjectionKind::FrozenKvChunk
     }
 
-    fn describe(&self) -> String {
-        format!("FrozenKvSource({})", self.path)
+    fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError> {
+        // Skeleton: requires actual KV file loading implementation
+        Err(KnowledgeError::NotImplemented(
+            "FrozenKvSource::materialize requires executor integration".into(),
+        ))
     }
-}
-
-/// 内置知识数据源：从文本向量注入。
-#[derive(Debug, Clone)]
-pub struct VectorSource {
-    pub vectors: Vec<Vec<f32>>,
-    pub dimension: usize,
-}
-
-impl VectorSource {
-    pub fn new(vectors: Vec<Vec<f32>>) -> Self {
-        let dimension = vectors.first().map(|v| v.len()).unwrap_or(0);
-        Self { vectors, dimension }
-    }
-}
-
-impl KnowledgeDataSource for VectorSource {
-    fn injection_kind(&self) -> InjectionKind {
-        InjectionKind::LateFusionVector
-    }
-
-    fn describe(&self) -> String {
-        format!("VectorSource(count={}, dim={})", self.vectors.len(), self.dimension)
-    }
-}
-
-/// 知识注入配置 (per SPEC 04-API-DESIGN §7.2)。
-pub struct KnowledgeInjectionConfig {
-    /// 注入目标层
-    pub target: LayerTarget,
-    /// 数据源
-    pub source: Box<dyn KnowledgeDataSource>,
-}
-
-impl KnowledgeInjectionConfig {
-    pub fn new(target: LayerTarget, source: impl KnowledgeDataSource + 'static) -> Self {
-        Self {
-            target,
-            source: Box::new(source),
-        }
-    }
-}
-
-/// 知识注入结果
-#[derive(Debug, Clone)]
-pub struct KnowledgeInjectionResult {
-    /// 注入的目标层
-    pub target: LayerTarget,
-    /// 注入的 token 数量（若适用）
-    pub tokens_injected: usize,
-    /// 注入状态描述
-    pub status: String,
 }
 
 #[cfg(test)]
@@ -118,32 +131,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_layer_target_values() {
-        assert_ne!(LayerTarget::Embedding, LayerTarget::MidSemantic);
-        assert_ne!(LayerTarget::MidSemantic, LayerTarget::DeepLogic);
+    fn test_layer_target_discriminant() {
+        assert_ne!(LayerTarget::ShallowSyntax as u8, LayerTarget::MidSemantic as u8);
+        assert_ne!(LayerTarget::MidSemantic as u8, LayerTarget::DeepLogic as u8);
     }
 
     #[test]
-    fn test_frozen_kv_source() {
-        let source = FrozenKvSource::from_path("test.kv");
-        assert_eq!(source.injection_kind(), InjectionKind::FrozenKvChunk);
-        assert!(source.describe().contains("test.kv"));
+    fn test_layer_target_normalized_depth() {
+        assert_eq!(LayerTarget::ShallowSyntax.normalized_depth(), 0.125);
+        assert_eq!(LayerTarget::MidSemantic.normalized_depth(), 0.5);
+        assert_eq!(LayerTarget::DeepLogic.normalized_depth(), 0.875);
     }
 
     #[test]
-    fn test_vector_source() {
-        let source = VectorSource::new(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
-        assert_eq!(source.injection_kind(), InjectionKind::LateFusionVector);
-        assert_eq!(source.dimension, 3);
-        assert_eq!(source.vectors.len(), 2);
-    }
-
-    #[test]
-    fn test_injection_config() {
-        let config = KnowledgeInjectionConfig::new(
-            LayerTarget::MidSemantic,
-            FrozenKvSource::from_path("logs.kv"),
-        );
-        assert_eq!(config.target, LayerTarget::MidSemantic);
+    fn test_layer_target_to_physical_layer() {
+        assert_eq!(LayerTarget::ShallowSyntax.to_physical_layer(32), 4);
+        assert_eq!(LayerTarget::MidSemantic.to_physical_layer(32), 16);
+        assert_eq!(LayerTarget::DeepLogic.to_physical_layer(32), 28);
     }
 }

@@ -1,69 +1,93 @@
-//! Intent SDK (per SPEC 04-API-DESIGN §7.3-§7.4)
+//! Intent SDK — 意图提取与安全护栏 API
 //!
-//! 提供意图编码、安全护栏和全局安全策略配置。
-//! 当前为骨架实现，底层依赖 SPEC §9-§16 的 Mega-Kernel 架构。
+//! per SPEC 04-API-DESIGN §7.3, §7.4
+
+use crate::client::GllmError;
+use crate::knowledge::LayerTarget;
+
+/// 意图编码配置 (per SPEC 04-API-DESIGN §7.3)
+#[derive(Debug, Clone)]
+pub struct IntentConfig {
+    pub target: LayerTarget,
+    pub truncate_at_target: bool,
+}
+
+impl Default for IntentConfig {
+    fn default() -> Self {
+        Self {
+            target: LayerTarget::MidSemantic,
+            truncate_at_target: true,
+        }
+    }
+}
+
+impl IntentConfig {
+    pub fn new(target: LayerTarget) -> Self {
+        Self {
+            target,
+            truncate_at_target: true,
+        }
+    }
+}
 
 /// 意图编码结果
 #[derive(Debug, Clone)]
 pub struct IntentEncoding {
-    /// 意图特征向量（低维嵌入）
     pub embedding: Vec<f32>,
-    /// 置信度 [0.0, 1.0]
-    pub confidence: f32,
-    /// 意图标签（可选）
-    pub label: Option<String>,
+    pub actual_layer: usize,
 }
 
-/// 安全护栏动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardrailAction {
-    /// 允许继续
-    Allow,
-    /// 拦截并返回固定回复
-    Veto,
-    /// 标记但允许继续（用于日志记录）
-    Flag,
-}
-
-/// 护栏挂载结果
+/// 护栏挂载结果 (per SPEC 04-API-DESIGN §7.4)
 #[derive(Debug, Clone)]
 pub struct GuardrailAttachment {
-    /// 护栏 ID
-    pub guard_id: String,
-    /// 挂载的目标层
-    pub target_layer: crate::knowledge::LayerTarget,
-    /// 置信度阈值
-    pub threshold: f32,
+    /// 挂载的实际物理层
+    pub actual_layer: usize,
+    /// 探针标识符
+    pub probe_id: String,
 }
 
-/// 意图 SDK 错误类型
-#[derive(Debug, thiserror::Error)]
-pub enum IntentError {
-    #[error("intent encoding failed: {0}")]
-    EncodingFailed(String),
-    #[error("guardrail attachment failed: {0}")]
-    GuardrailFailed(String),
-    #[error("no model loaded")]
-    NoModelLoaded,
+/// 安全策略 (per SPEC 04-API-DESIGN §7.4, §9)
+#[derive(Debug, Clone, Copy)]
+pub enum SafetyPolicy {
+    HaltAndVeto { threshold: f32 },
+    SoftWarn { threshold: f32 },
 }
 
-/// 全局安全策略配置 (per SPEC 04-API-DESIGN §9.2)
+/// 安全护栏探针 (per SPEC 04-API-DESIGN §7.4)
+#[derive(Debug, Clone)]
+pub enum GuardProbe {
+    FromSafetensors { path: String },
+    FromModel { model_id: String },
+}
+
+impl GuardProbe {
+    pub fn from_safetensors(path: impl Into<String>) -> Self {
+        Self::FromSafetensors {
+            path: path.into(),
+        }
+    }
+
+    pub fn from_model(model_id: impl Into<String>) -> Self {
+        Self::FromModel {
+            model_id: model_id.into(),
+        }
+    }
+}
+
+/// 安全策略配置 (per SPEC 04-API-DESIGN §9.2)
 #[derive(Debug, Clone)]
 pub struct SafetyPolicyConfig {
-    /// 是否启用全局护栏
-    pub enabled: bool,
-    /// 拦截置信度阈值 [0.0, 1.0]
-    pub veto_threshold: f32,
-    /// 最大生成 token 数限制（安全兜底）
-    pub max_tokens_limit: usize,
+    pub global_guardrail_enabled: bool,
+    pub halt_and_veto_threshold: f32,
+    pub target_layer: LayerTarget,
 }
 
 impl Default for SafetyPolicyConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            veto_threshold: 0.95,
-            max_tokens_limit: 4096,
+            global_guardrail_enabled: false,
+            halt_and_veto_threshold: 0.95,
+            target_layer: LayerTarget::DeepLogic,
         }
     }
 }
@@ -73,92 +97,61 @@ impl SafetyPolicyConfig {
         Self::default()
     }
 
+    pub fn with_guardrail(mut self, enabled: bool) -> Self {
+        self.global_guardrail_enabled = enabled;
+        self
+    }
+
     pub fn with_threshold(mut self, threshold: f32) -> Self {
-        self.veto_threshold = threshold;
+        self.halt_and_veto_threshold = threshold;
         self
     }
 
-    pub fn with_max_tokens(mut self, limit: usize) -> Self {
-        self.max_tokens_limit = limit;
+    pub fn with_target_layer(mut self, target: LayerTarget) -> Self {
+        self.target_layer = target;
         self
     }
+}
 
-    pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            veto_threshold: 1.0,
-            max_tokens_limit: usize::MAX,
+/// Intent SDK 错误
+#[derive(Debug, thiserror::Error)]
+pub enum IntentError {
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+    #[error("probe load failed: {0}")]
+    ProbeLoadFailed(String),
+    #[error("invalid layer target")]
+    InvalidLayerTarget,
+}
+
+impl From<IntentError> for GllmError {
+    fn from(err: IntentError) -> Self {
+        GllmError::NotImplementedQueued {
+            kind: "intent",
+            request_id: 0,
         }
     }
 }
 
-/// 意图配置
-#[derive(Debug, Clone)]
-pub struct IntentConfig {
-    /// 目标意图标签（可选，用于有监督编码）
-    pub target_label: Option<String>,
-    /// 编码维度
-    pub embedding_dim: usize,
-}
-
-impl Default for IntentConfig {
-    fn default() -> Self {
-        Self {
-            target_label: None,
-            embedding_dim: 256,
-        }
-    }
-}
-
-impl IntentConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.target_label = Some(label.into());
-        self
-    }
-
-    pub fn with_dim(mut self, dim: usize) -> Self {
-        self.embedding_dim = dim;
-        self
-    }
-}
-
-/// 意图编码（骨架实现）
-///
-/// 将输入文本编码为低维意图向量，用于下游分类或路由决策。
-/// 当前返回空向量骨架，待 SPEC §9-§16 Mega-Kernel 架构实现后接入。
+/// 编码意图 (per SPEC 04-API-DESIGN §7.3)
 pub fn encode_intent(
     _text: &str,
-    _config: &IntentConfig,
+    _config: IntentConfig,
 ) -> Result<IntentEncoding, IntentError> {
-    // 骨架实现：待底层架构就绪后实现
-    Ok(IntentEncoding {
-        embedding: vec![0.0; _config.embedding_dim],
-        confidence: 0.0,
-        label: _config.target_label.clone(),
-    })
+    Err(IntentError::NotImplemented(
+        "encode_intent requires executor integration".into(),
+    ))
 }
 
-/// 附加安全护栏（骨架实现）
-///
-/// 将安全分类器挂载到指定层，超过阈值时触发熔断。
+/// 挂载安全护栏 (per SPEC 04-API-DESIGN §7.4)
 pub fn attach_guardrail(
-    _model_path: &str,
-    _target: crate::knowledge::LayerTarget,
-    _policy: &SafetyPolicyConfig,
-) -> Result<GuardrailAttachment, IntentError> {
-    // 骨架实现：待底层架构就绪后实现
-    Ok(GuardrailAttachment {
-        guard_id: format!("guard_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()),
-        target_layer: _target,
-        threshold: _policy.veto_threshold,
-    })
+    _probe: GuardProbe,
+    _target: LayerTarget,
+    _policy: SafetyPolicy,
+) -> Result<(), IntentError> {
+    Err(IntentError::NotImplemented(
+        "attach_guardrail requires executor integration".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -166,52 +159,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_safety_policy_default() {
-        let policy = SafetyPolicyConfig::default();
-        assert!(policy.enabled);
-        assert_eq!(policy.veto_threshold, 0.95);
-        assert_eq!(policy.max_tokens_limit, 4096);
+    fn test_layer_target_discriminant() {
+        assert_ne!(LayerTarget::ShallowSyntax as u8, LayerTarget::MidSemantic as u8);
+        assert_ne!(LayerTarget::MidSemantic as u8, LayerTarget::DeepLogic as u8);
     }
 
     #[test]
-    fn test_safety_policy_builder() {
-        let policy = SafetyPolicyConfig::new()
-            .with_threshold(0.8)
-            .with_max_tokens(2048);
-        assert_eq!(policy.veto_threshold, 0.8);
-        assert_eq!(policy.max_tokens_limit, 2048);
+    fn test_safety_policy_config_builder() {
+        let config = SafetyPolicyConfig::new()
+            .with_guardrail(true)
+            .with_threshold(0.9)
+            .with_target_layer(LayerTarget::ShallowSyntax);
+
+        assert!(config.global_guardrail_enabled);
+        assert_eq!(config.halt_and_veto_threshold, 0.9);
+        assert_eq!(config.target_layer, LayerTarget::ShallowSyntax);
     }
 
     #[test]
-    fn test_safety_policy_disabled() {
-        let policy = SafetyPolicyConfig::disabled();
-        assert!(!policy.enabled);
-    }
-
-    #[test]
-    fn test_intent_config() {
-        let config = IntentConfig::new().with_label("cancel_subscription").with_dim(128);
-        assert_eq!(config.target_label, Some("cancel_subscription".to_string()));
-        assert_eq!(config.embedding_dim, 128);
-    }
-
-    #[test]
-    fn test_encode_intent_skeleton() {
-        let config = IntentConfig::new().with_dim(64);
-        let result = encode_intent("Cancel my subscription", &config).unwrap();
-        assert_eq!(result.embedding.len(), 64);
-        assert_eq!(result.confidence, 0.0);
-    }
-
-    #[test]
-    fn test_attach_guardrail_skeleton() {
-        let policy = SafetyPolicyConfig::default();
-        let result = attach_guardrail(
-            "toxicity.safetensors",
-            crate::knowledge::LayerTarget::DeepLogic,
-            &policy,
-        ).unwrap();
-        assert_eq!(result.target_layer, crate::knowledge::LayerTarget::DeepLogic);
-        assert_eq!(result.threshold, 0.95);
+    fn test_guard_probe_from_safetensors() {
+        let probe = GuardProbe::from_safetensors("toxicity.safetensors");
+        match probe {
+            GuardProbe::FromSafetensors { path } => {
+                assert_eq!(path, "toxicity.safetensors");
+            }
+            _ => panic!("Wrong variant"),
+        }
     }
 }
