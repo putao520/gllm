@@ -1,6 +1,6 @@
 //! Rerank API skeleton.
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, GllmError};
 
 pub struct RerankBuilder<'a> {
     client: &'a Client,
@@ -28,7 +28,7 @@ impl<'a> RerankBuilder<'a> {
         self
     }
 
-    pub fn generate(self) -> Result<RerankResponse, ClientError> {
+    pub fn generate(self) -> Result<RerankResponse, GllmError> {
         self.client
             .execute_rerank(self.query, self.documents, self.top_n)
     }

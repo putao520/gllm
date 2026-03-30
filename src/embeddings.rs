@@ -1,6 +1,6 @@
 //! Embeddings API skeleton.
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, GllmError};
 
 pub struct EmbeddingsBuilder<'a> {
     client: &'a Client,
@@ -12,7 +12,7 @@ impl<'a> EmbeddingsBuilder<'a> {
         Self { client, inputs }
     }
 
-    pub fn generate(self) -> Result<EmbeddingsResponse, ClientError> {
+    pub fn generate(self) -> Result<EmbeddingsResponse, GllmError> {
         self.client.execute_embeddings(self.inputs)
     }
 }

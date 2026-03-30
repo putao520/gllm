@@ -1,6 +1,85 @@
 //! Generation loop skeleton.
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, GllmError};
+
+/// 流式生成输出块 (per SPEC 04-API-DESIGN §3.1)
+///
+/// 每个块包含生成的一个或多个 token 及其累积文本。
+#[derive(Debug, Clone)]
+pub struct GenerationChunk {
+    /// 当前块生成的 token ID 列表
+    pub tokens: Vec<u32>,
+    /// 当前块的累积文本（解码后）
+    pub text: String,
+    /// 是否为最后一个块
+    pub finished: bool,
+}
+
+impl GenerationChunk {
+    pub(crate) fn new() -> Self {
+        Self {
+            tokens: Vec::new(),
+            text: String::new(),
+            finished: false,
+        }
+    }
+
+    pub(crate) fn with_token(mut self, token: u32, text: String) -> Self {
+        self.tokens.push(token);
+        self.text = text;
+        self
+    }
+
+    pub(crate) fn finish(mut self) -> Self {
+        self.finished = true;
+        self
+    }
+}
+
+/// 流式生成迭代器 (per SPEC 04-API-DESIGN §3.1)
+///
+/// 返回 `impl Iterator<Item=GenerationChunk>`，允许逐 token 迭代处理。
+pub struct GenerationStream<'a> {
+    _client: &'a Client,
+    _prompt: String,
+    _max_tokens: usize,
+    _temperature: f32,
+    _top_k: usize,
+    _top_p: f32,
+    _session_id: Option<u64>,
+}
+
+impl<'a> GenerationStream<'a> {
+    pub(crate) fn new(
+        client: &'a Client,
+        prompt: String,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: Option<u64>,
+    ) -> Self {
+        Self {
+            _client: client,
+            _prompt: prompt,
+            _max_tokens: max_tokens,
+            _temperature: temperature,
+            _top_k: top_k,
+            _top_p: top_p,
+            _session_id: session_id,
+        }
+    }
+}
+
+impl<'a> Iterator for GenerationStream<'a> {
+    type Item = GenerationChunk;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // TODO: 实现逐 token 生成
+        // 当前返回 None 表示"暂未实现"
+        None
+    }
+}
 
 pub struct GenerationBuilder<'a> {
     client: &'a Client,
@@ -51,7 +130,22 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
-    pub fn generate(self) -> Result<GenerationResponse, ClientError> {
+    /// 启用流式生成 (per SPEC 04-API-DESIGN §3.1)
+    ///
+    /// 返回流式生成迭代器，逐 token 返回 `GenerationChunk`。
+    pub fn stream(self) -> GenerationStream<'a> {
+        GenerationStream::new(
+            self.client,
+            self.prompt,
+            self.max_tokens,
+            self.temperature,
+            self.top_k,
+            self.top_p,
+            self.session_id,
+        )
+    }
+
+    pub fn generate(self) -> Result<GenerationResponse, GllmError> {
         self.client.execute_generation(
             self.prompt,
             self.max_tokens,
