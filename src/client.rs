@@ -35,20 +35,20 @@ use thiserror::Error;
 ///
 /// # Error Variants
 ///
-/// - `UnknownModel(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
-/// - `UnsupportedArchitecture` — Backend initialization failed (maps to SPEC's `BackendError`)
+/// - `ModelNotFound(String)` — Model not found or download failed (per SPEC 04-API-DESIGN §4)
+/// - `ClientBackendError(String)` — Backend initialization failed (per SPEC 04-API-DESIGN §4)
 /// - `ExecutorPoisoned` — Internal state corruption
 /// - `NoModelLoaded` — Operation attempted without a loaded model
 /// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
-/// - `OomHalt` — Out of memory (maps to SPEC's `OutOfMemory`)
-/// - Other variants represent runtime errors (maps to SPEC's `RuntimeError`)
+/// - `OutOfMemory { message, fatal }` — Out of memory (per SPEC 04-API-DESIGN §4)
+/// - `RuntimeError(String)` — General runtime errors (per SPEC 04-API-DESIGN §4)
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("unknown model alias: {0}")]
-    UnknownModel(String),
+    #[error("model not found: {0}")]
+    ModelNotFound(String),
 
-    #[error("unsupported architecture: {0:?}")]
-    UnsupportedArchitecture(ModelArchitecture),
+    #[error("backend error: {0}")]
+    ClientBackendError(String),
 
     #[error("state lock poisoned")]
     ExecutorPoisoned,
@@ -59,8 +59,11 @@ pub enum ClientError {
     #[error("not implemented: {kind} (queued request {request_id})")]
     NotImplementedQueued { kind: &'static str, request_id: u64 },
 
-    #[error("OOM halt: {message} (fatal={fatal})")]
-    OomHalt { message: String, fatal: bool },
+    #[error("out of memory: {message} (fatal={fatal})")]
+    OutOfMemory { message: String, fatal: bool },
+
+    #[error("runtime error: {0}")]
+    RuntimeError(String),
 
     #[error("invalid model type for requested operation")]
     InvalidModelType,
@@ -85,7 +88,7 @@ impl From<BackendContextError> for ClientError {
     fn from(err: BackendContextError) -> Self {
         match err {
             BackendContextError::UnsupportedArchitecture(arch) => {
-                ClientError::UnsupportedArchitecture(arch)
+                ClientError::ClientBackendError(format!("unsupported architecture: {:?}", arch))
             }
             BackendContextError::Loader(err) => ClientError::Loader(err),
             BackendContextError::Executor(err) => ClientError::Executor(err),
@@ -189,7 +192,7 @@ impl ClientBuilder {
     pub async fn build(self) -> Result<Client, ClientError> {
         let model_id = self
             .model_id
-            .ok_or_else(|| ClientError::UnknownModel("<no model id>".to_string()))?;
+            .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
 
         let kind = self.kind.unwrap_or(ModelKind::Chat);
 
@@ -591,7 +594,7 @@ impl Client {
     fn normalize_model_id(model_id: &str) -> Result<String, ClientError> {
         let trimmed = model_id.trim();
         if trimmed.is_empty() {
-            return Err(ClientError::UnknownModel(model_id.to_string()));
+            return Err(ClientError::ModelNotFound(model_id.to_string()));
         }
         Ok(trimmed.to_string())
     }
@@ -634,7 +637,7 @@ impl Client {
                         tensor_map: HashMap::new(),
                     }
                 } else {
-                    return Err(ClientError::UnknownModel(format!(
+                    return Err(ClientError::ModelNotFound(format!(
                         "Unsupported GGUF architecture: {}",
                         arch_str
                     )));
