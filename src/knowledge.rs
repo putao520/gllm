@@ -41,8 +41,8 @@ pub enum InjectionKind {
     FrozenKvChunk,
     /// 晚期插入：密实特征向量列
     LateFusionVector,
-    /// 领域特征挂载：LoRA 权重片
-    DynamicLoraAdapter,
+    /// 领域特征挂载：LoRA 权重片 (per SPEC §8.1)
+    DynamicLoRA,
 }
 
 /// 物理化载荷 (per SPEC 04-API-DESIGN §8.1)
@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn test_injection_kind_dynamic_lora_adapter() {
         // Verify the variant name matches SPEC §8.6
-        let kind = InjectionKind::DynamicLoraAdapter;
-        assert_eq!(kind as u8, InjectionKind::DynamicLoraAdapter as u8);
+        let kind = InjectionKind::DynamicLoRA;
+        assert_eq!(kind as u8, InjectionKind::DynamicLoRA as u8);
     }
 
     #[test]
