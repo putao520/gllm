@@ -713,20 +713,51 @@ impl Loader {
     }
 
     /// 从张量名称推断架构
+    ///
+    /// REQ-ARCH-Ω1: 禁止使用 contains() 模糊匹配，必须使用前缀匹配或张量形状推导
     fn detect_architecture_from_tensors(&self) -> Option<crate::manifest::ModelArchitecture> {
         use crate::manifest::ModelArchitecture;
 
+        // 检查单个张量名称是否匹配特定架构模式
+        // 使用前缀匹配而非 contains() 避免模糊匹配
         let check_name = |name: &str| -> Option<ModelArchitecture> {
-            let lower = name.to_lowercase();
-            if lower.contains("bert") || lower.contains("roberta") {
+            let lower = name.to_ascii_lowercase();
+
+            // 将名称按 '.' 分割进行前缀匹配
+            let parts: Vec<&str> = lower.split('.').collect();
+
+            // BERT/RoBERTa/XLMR 风格: 前缀匹配
+            // "bert.embeddings", "roberta.encoder", "xlmr."
+            if parts.first().map_or(false, |p| {
+                matches!(*p, "bert" | "roberta" | "xlmr" | "encoder")
+            }) {
                 return Some(ModelArchitecture::XlmR);
             }
-            if lower.contains("mistral") {
+
+            // Mistral 风格: 前缀匹配 "model.layers" 或 "mistral."
+            if parts.first().map_or(false, |p| {
+                matches!(*p, "mistral" | "model")
+            }) && parts.get(1).map_or(false, |p| {
+                matches!(*p, "layers" | "embeddings")
+            }) {
                 return Some(ModelArchitecture::Mistral3);
             }
-            if lower.contains("encoder.layer.") || lower.contains("attention.self.query") {
+
+            // BERT encoder 模式: "encoder.layer.{N}.{...}" 或 "bert.encoder.layer.{N}"
+            // 使用精确路径匹配而非 contains
+            if parts.len() >= 3 {
+                if (parts[0] == "encoder" && parts[1] == "layer")
+                    || (parts[0] == "bert" && parts[1] == "encoder" && parts[2] == "layer")
+                {
+                    return Some(ModelArchitecture::XlmR);
+                }
+            }
+
+            // BERT attention 模式: "attention.self.query" 精确路径匹配
+            if parts.len() >= 3 && parts[1] == "attention" && parts[2] == "self" {
                 return Some(ModelArchitecture::XlmR);
             }
+
             None
         };
 
