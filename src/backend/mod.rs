@@ -163,6 +163,78 @@ impl DynBackendExecutor {
             DynBackendExecutor::BF16(_) => "bf16",
         }
     }
+
+    // ── Streaming support: delegate to inner Executor ──
+
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.decode_tokens(tokens),
+            DynBackendExecutor::F16(e) => e.decode_tokens(tokens),
+            DynBackendExecutor::BF16(e) => e.decode_tokens(tokens),
+        }
+    }
+
+    pub fn enqueue_with_config(
+        &mut self,
+        kind: crate::engine::executor::RequestKind,
+        prompt: &str,
+        max_new_tokens: usize,
+        sampling: crate::engine::executor::SamplingConfig,
+    ) -> Result<u64, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
+            DynBackendExecutor::F16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
+            DynBackendExecutor::BF16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
+        }
+    }
+
+    pub fn enqueue_with_session(
+        &mut self,
+        kind: crate::engine::executor::RequestKind,
+        prompt: &str,
+        max_new_tokens: usize,
+        sampling: crate::engine::executor::SamplingConfig,
+        session_id: u64,
+    ) -> Result<u64, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => {
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+            DynBackendExecutor::F16(e) => {
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+            DynBackendExecutor::BF16(e) => {
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+        }
+    }
+
+    pub fn step(&mut self) -> Result<(), ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.step(),
+            DynBackendExecutor::F16(e) => e.step(),
+            DynBackendExecutor::BF16(e) => e.step(),
+        }
+    }
+
+    pub fn get_request(
+        &self,
+        request_id: u64,
+    ) -> Option<&crate::engine::executor::RequestData> {
+        match self {
+            DynBackendExecutor::F32(e) => e.get_request(request_id),
+            DynBackendExecutor::F16(e) => e.get_request(request_id),
+            DynBackendExecutor::BF16(e) => e.get_request(request_id),
+        }
+    }
+
+    pub fn release_request(&mut self, request_id: u64) {
+        match self {
+            DynBackendExecutor::F32(e) => e.release_request(request_id),
+            DynBackendExecutor::F16(e) => e.release_request(request_id),
+            DynBackendExecutor::BF16(e) => e.release_request(request_id),
+        }
+    }
 }
 
 impl<E: Element> BackendExecutor<E> {
@@ -265,6 +337,103 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Rocm(exec) => exec.rerank_pair(query, document),
             BackendExecutor::Metal(exec) => exec.rerank_pair(query, document),
             BackendExecutor::Cpu(exec) => exec.rerank_pair(query, document),
+        }
+    }
+
+    // ── Streaming support: delegate to inner Executor ──
+
+    pub fn decode_tokens(&self, tokens: &[u32]) -> Result<String, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.decode_tokens(tokens),
+            BackendExecutor::Rocm(exec) => exec.decode_tokens(tokens),
+            BackendExecutor::Metal(exec) => exec.decode_tokens(tokens),
+            BackendExecutor::Cpu(exec) => exec.decode_tokens(tokens),
+        }
+    }
+
+    pub fn encode_prompt(&self, prompt: &str) -> Result<Vec<u32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.encode_prompt(prompt),
+            BackendExecutor::Rocm(exec) => exec.encode_prompt(prompt),
+            BackendExecutor::Metal(exec) => exec.encode_prompt(prompt),
+            BackendExecutor::Cpu(exec) => exec.encode_prompt(prompt),
+        }
+    }
+
+    pub fn enqueue_with_config(
+        &mut self,
+        kind: crate::engine::executor::RequestKind,
+        prompt: &str,
+        max_new_tokens: usize,
+        sampling: crate::engine::executor::SamplingConfig,
+    ) -> Result<u64, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => {
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+            }
+            BackendExecutor::Rocm(exec) => {
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+            }
+            BackendExecutor::Metal(exec) => {
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+            }
+            BackendExecutor::Cpu(exec) => {
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+            }
+        }
+    }
+
+    pub fn enqueue_with_session(
+        &mut self,
+        kind: crate::engine::executor::RequestKind,
+        prompt: &str,
+        max_new_tokens: usize,
+        sampling: crate::engine::executor::SamplingConfig,
+        session_id: u64,
+    ) -> Result<u64, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => {
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+            BackendExecutor::Rocm(exec) => {
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+            BackendExecutor::Metal(exec) => {
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+            BackendExecutor::Cpu(exec) => {
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+            }
+        }
+    }
+
+    pub fn step(&mut self) -> Result<(), ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.step(),
+            BackendExecutor::Rocm(exec) => exec.step(),
+            BackendExecutor::Metal(exec) => exec.step(),
+            BackendExecutor::Cpu(exec) => exec.step(),
+        }
+    }
+
+    pub fn get_request(
+        &self,
+        request_id: u64,
+    ) -> Option<&crate::engine::executor::RequestData> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.get_request(request_id),
+            BackendExecutor::Rocm(exec) => exec.get_request(request_id),
+            BackendExecutor::Metal(exec) => exec.get_request(request_id),
+            BackendExecutor::Cpu(exec) => exec.get_request(request_id),
+        }
+    }
+
+    pub fn release_request(&mut self, request_id: u64) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.release_request(request_id),
+            BackendExecutor::Rocm(exec) => exec.release_request(request_id),
+            BackendExecutor::Metal(exec) => exec.release_request(request_id),
+            BackendExecutor::Cpu(exec) => exec.release_request(request_id),
         }
     }
 }

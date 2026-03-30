@@ -381,6 +381,11 @@ impl Client {
             .write()
             .map_err(|_| ClientError::ExecutorPoisoned)
     }
+
+    /// Expose the internal state handle for streaming support.
+    pub(crate) fn state_handle(&self) -> Arc<RwLock<Option<ClientState>>> {
+        Arc::clone(&self.state)
+    }
 }
 
 impl AsyncClient {

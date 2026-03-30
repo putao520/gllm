@@ -259,7 +259,8 @@ use std::sync::Arc;
 
 use crate::scheduler::batcher::{BatchAction, BatchResult, ContinuousBatcher};
 use crate::scheduler::hgal::HGALConfig;
-use crate::scheduler::types::{BatchOrderPolicy, RequestKind};
+pub use crate::scheduler::types::RequestKind;
+use crate::scheduler::types::BatchOrderPolicy;
 use crate::scheduler::vllm2024::{AdaptiveChunkPolicy, Scheduler2024Config};
 use crate::scheduler::{
     BasicObserver, GlobalMemoryManager, MemoryManagerError, PagedScheduler, PolicyVariant,
@@ -268,15 +269,15 @@ use crate::scheduler::{
 use std::collections::HashMap;
 
 #[derive(Debug)]
-struct RequestData {
-    prompt_tokens: Vec<u32>,
-    output_tokens: Vec<u32>,
-    sampling_config: SamplingConfig,
-    is_prefill: bool,
+pub(crate) struct RequestData {
+    pub prompt_tokens: Vec<u32>,
+    pub output_tokens: Vec<u32>,
+    pub sampling_config: SamplingConfig,
+    pub is_prefill: bool,
     // kv_cache: KvCacheHandle, // Moved to Scheduler/BlockTable management
-    max_new_tokens: usize,
-    finished: bool,
-    session_id: Option<SessionId>,
+    pub max_new_tokens: usize,
+    pub finished: bool,
+    pub session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1408,6 +1409,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .get(&request_id)
             .map(|r| r.finished)
             .unwrap_or(false) // If removed, considered finished? Or unknown.
+    }
+
+    /// Get a reference to a request's data (for streaming inspection).
+    pub fn get_request(&self, request_id: RequestId) -> Option<&RequestData> {
+        self.requests.get(&request_id)
+    }
+
+    /// Release a finished request: free pages and remove from request map.
+    pub fn release_request(&mut self, request_id: RequestId) {
+        self.release_request_pages(request_id);
+        self.requests.remove(&request_id);
     }
 
     pub fn get_output(&self, request_id: RequestId) -> ExecutorResult<String> {
