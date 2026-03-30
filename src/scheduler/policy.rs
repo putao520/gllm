@@ -20,7 +20,7 @@ pub struct PolicyConfig {
 }
 
 impl PolicyConfig {
-    pub fn accuracy_first() -> Self {
+    pub fn absolute() -> Self {
         Self {
             pressure_emergency: 0.9,
             pressure_aggressive_ceiling: 1.0,
@@ -39,29 +39,29 @@ pub trait SchedulingPolicy {
     fn decide(&self, state: &SystemState) -> SchedulerDecision;
 }
 
-/// Accuracy First Policy (Single-Track Scheduling)
+/// Absolute Policy (Single-Track Scheduling)
 ///
-/// SPEC 07-OBSERVABILITY §2.2 decision matrix:
+/// SPEC 07-OBSERVABILITY §2.3 AbsolutePolicy:
 /// - memory_pressure > emergency: emergency mode
 /// - kv_fragmentation > frag_threshold: defrag mode
 /// - otherwise: safe mode
-pub struct AccuracyFirstPolicy {
+pub struct AbsolutePolicy {
     config: PolicyConfig,
 }
 
-impl Default for AccuracyFirstPolicy {
+impl Default for AbsolutePolicy {
     fn default() -> Self {
-        Self { config: PolicyConfig::accuracy_first() }
+        Self { config: PolicyConfig::absolute() }
     }
 }
 
-impl AccuracyFirstPolicy {
+impl AbsolutePolicy {
     pub fn with_config(config: PolicyConfig) -> Self {
         Self { config }
     }
 }
 
-impl SchedulingPolicy for AccuracyFirstPolicy {
+impl SchedulingPolicy for AbsolutePolicy {
     fn decide(&self, state: &SystemState) -> SchedulerDecision {
         if state.memory_pressure > self.config.pressure_emergency {
             SchedulerDecision {
@@ -89,14 +89,14 @@ impl SchedulingPolicy for AccuracyFirstPolicy {
 #[derive(Clone, Default)]
 pub enum PolicyVariant {
     #[default]
-    Accuracy,
+    Absolute,
 }
 
 impl PolicyVariant {
     #[inline(always)]
     pub fn decide(&self, state: &SystemState) -> SchedulerDecision {
         match self {
-            Self::Accuracy => AccuracyFirstPolicy::default().decide(state),
+            Self::Absolute => AbsolutePolicy::default().decide(state),
         }
     }
 }
@@ -117,24 +117,24 @@ mod tests {
     }
 
     #[test]
-    fn accuracy_first_emergency_mode() {
-        let d = AccuracyFirstPolicy::default().decide(&state_with(0.95, 0.0, 0, 4));
+    fn absolute_emergency_mode() {
+        let d = AbsolutePolicy::default().decide(&state_with(0.95, 0.0, 0, 4));
         assert_eq!(d.max_batch_size, 4);
         assert!(!d.admit_new_prefill);
         assert!(d.force_swap_out_count > 0);
     }
 
     #[test]
-    fn accuracy_first_defrag_mode() {
-        let d = AccuracyFirstPolicy::default().decide(&state_with(0.5, 0.6, 0, 3));
+    fn absolute_defrag_mode() {
+        let d = AbsolutePolicy::default().decide(&state_with(0.5, 0.6, 0, 3));
         assert_eq!(d.max_batch_size, 3);
         assert!(!d.admit_new_prefill);
         assert_eq!(d.force_swap_out_count, 1);
     }
 
     #[test]
-    fn accuracy_first_safe_mode() {
-        let d = AccuracyFirstPolicy::default().decide(&state_with(0.3, 0.2, 0, 2));
+    fn absolute_safe_mode() {
+        let d = AbsolutePolicy::default().decide(&state_with(0.3, 0.2, 0, 2));
         assert_eq!(d.max_batch_size, 32);
         assert!(d.admit_new_prefill);
         assert_eq!(d.force_swap_out_count, 0);
@@ -143,17 +143,17 @@ mod tests {
     #[test]
     fn policy_variant_dispatch() {
         let state = state_with(0.3, 0.2, 5, 2);
-        let a = PolicyVariant::Accuracy.decide(&state);
+        let a = PolicyVariant::Absolute.decide(&state);
         // Should produce valid decision
         assert!(a.admit_new_prefill);
     }
 
     #[test]
     fn custom_config_overrides() {
-        let mut config = PolicyConfig::accuracy_first();
+        let mut config = PolicyConfig::absolute();
         config.batch_safe = 128;
         config.pressure_emergency = 0.95;
-        let policy = AccuracyFirstPolicy::with_config(config);
+        let policy = AbsolutePolicy::with_config(config);
         // Safe mode uses custom batch size
         let d = policy.decide(&state_with(0.5, 0.0, 10, 4));
         assert_eq!(d.max_batch_size, 128);

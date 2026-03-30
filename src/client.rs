@@ -33,66 +33,81 @@ use thiserror::Error;
 ///
 /// This is the primary error type exposed to users of the gllm library.
 ///
-/// # Error Variants
+/// # Error Variants (SPEC §4)
 ///
-/// - `ModelNotFound(String)` — Model not found or download failed (per SPEC 04-API-DESIGN §4)
-/// - `ClientBackendError(String)` — Backend initialization failed (per SPEC 04-API-DESIGN §4)
-/// - `ExecutorPoisoned` — Internal state corruption
-/// - `NoModelLoaded` — Operation attempted without a loaded model
+/// - `ModelNotFound(String)` — Model not found or download failed
+/// - `BackendError(String)` — Backend initialization failed
+/// - `OutOfMemory` — Out of memory (simplified, no fields)
 /// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
-/// - `OutOfMemory { message, fatal }` — Out of memory (per SPEC 04-API-DESIGN §4)
-/// - `RuntimeError(String)` — General runtime errors (per SPEC 04-API-DESIGN §4)
+/// - `RuntimeError(String)` — General runtime errors
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
 
     #[error("backend error: {0}")]
-    ClientBackendError(String),
+    BackendError(String),
 
-    #[error("state lock poisoned")]
-    ExecutorPoisoned,
-
-    #[error("no model loaded")]
-    NoModelLoaded,
-
-    #[error("not implemented: {kind} (queued request {request_id})")]
-    NotImplementedQueued { kind: &'static str, request_id: u64 },
-
-    #[error("out of memory: {message} (fatal={fatal})")]
-    OutOfMemory { message: String, fatal: bool },
-
-    #[error("runtime error: {0}")]
-    RuntimeError(String),
+    #[error("out of memory")]
+    OutOfMemory,
 
     #[error("invalid model type for requested operation")]
     InvalidModelType,
 
-    #[error(transparent)]
-    Loader(#[from] LoaderError),
-
-    #[error(transparent)]
-    Backend(#[from] BackendError),
-
-    #[error(transparent)]
-    Executor(#[from] ExecutorError),
-
-    #[error(transparent)]
-    ModelConfig(#[from] crate::model_config::ModelConfigError),
+    #[error("runtime error: {0}")]
+    RuntimeError(String),
 }
 
 /// Primary error type exposed to users (type alias for clarity).
 pub type GllmError = ClientError;
 
+// Manual From implementations mapping internal errors to SPEC variants
+
 impl From<BackendContextError> for ClientError {
     fn from(err: BackendContextError) -> Self {
         match err {
             BackendContextError::UnsupportedArchitecture(arch) => {
-                ClientError::ClientBackendError(format!("unsupported architecture: {:?}", arch))
+                ClientError::BackendError(format!("unsupported architecture: {:?}", arch))
             }
-            BackendContextError::Loader(err) => ClientError::Loader(err),
-            BackendContextError::Executor(err) => ClientError::Executor(err),
-            BackendContextError::Backend(err) => ClientError::Backend(err),
+            BackendContextError::Loader(err) => ClientError::from(err),
+            BackendContextError::Executor(err) => ClientError::from(err),
+            BackendContextError::Backend(err) => ClientError::from(err),
+        }
+    }
+}
+
+impl From<LoaderError> for ClientError {
+    fn from(err: LoaderError) -> Self {
+        ClientError::RuntimeError(format!("loader error: {}", err))
+    }
+}
+
+impl From<BackendError> for ClientError {
+    fn from(err: BackendError) -> Self {
+        ClientError::BackendError(format!("{}", err))
+    }
+}
+
+impl From<ExecutorError> for ClientError {
+    fn from(err: ExecutorError) -> Self {
+        match err {
+            ExecutorError::OutOfMemory { .. } => ClientError::OutOfMemory,
+            _ => ClientError::RuntimeError(format!("executor error: {}", err)),
+        }
+    }
+}
+
+impl From<crate::model_config::ModelConfigError> for ClientError {
+    fn from(err: crate::model_config::ModelConfigError) -> Self {
+        ClientError::RuntimeError(format!("model config error: {}", err))
+    }
+}
+
+impl From<crate::engine::executor::ExecutorError> for ClientError {
+    fn from(err: crate::engine::executor::ExecutorError) -> Self {
+        match err {
+            crate::engine::executor::ExecutorError::OutOfMemory(_) => ClientError::OutOfMemory,
+            _ => ClientError::RuntimeError(format!("executor error: {}", err)),
         }
     }
 }

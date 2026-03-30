@@ -28,7 +28,7 @@ pub use memory_manager::{
 };
 pub use observer::{BasicObserver, ObserverError, RuntimeObserver};
 pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerError, SchedulerOutput};
-pub use policy::{PolicyVariant, SchedulingPolicy};
+pub use policy::{AbsolutePolicy, PolicyConfig, PolicyVariant, SchedulingPolicy};
 pub use prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 pub use sequence::{Sequence, SequenceState};
 pub use types::{

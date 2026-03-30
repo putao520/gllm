@@ -7,7 +7,7 @@ mod common;
 
 use gllm::scheduler::{
     observer::{BasicObserver, ObserverError, RuntimeObserver},
-    policy::{AccuracyFirstPolicy, PolicyConfig, PolicyVariant, SchedulingPolicy},
+    policy::{AbsolutePolicy, PolicyConfig, PolicyVariant, SchedulingPolicy},
     jit_types::{SchedulerDecision, SystemState},
 };
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheSlot, KvCacheState};
@@ -89,7 +89,7 @@ fn epilogue_telemetry_boundary_values() {
 ///
 /// **测试步骤**:
 /// 1. 构造 `SystemState { memory_pressure: 0.95, .. }`
-/// 2. 调用 `AccuracyFirstPolicy.decide()`
+/// 2. 调用 `AbsolutePolicy.decide()`
 /// 3. 验证决策符合 SPEC §3.1 决策矩阵
 ///
 /// **期望结果**: `admit_new_prefill == false`, `force_swap_out_count > 0`
@@ -105,7 +105,7 @@ fn absolute_policy_emergency_memory_pressure() {
         ..Default::default()
     };
 
-    let decision = AccuracyFirstPolicy::default().decide(&state);
+    let decision = AbsolutePolicy::default().decide(&state);
 
     // SPEC §3.1: memory_pressure > 0.9 → emergency mode
     assert!(!decision.admit_new_prefill, "应拒绝新的 prefill 请求");
@@ -124,7 +124,7 @@ fn absolute_policy_emergency_memory_pressure() {
 ///
 /// **测试步骤**:
 /// 1. 构造 `SystemState { kv_fragmentation: 0.6, .. }`
-/// 2. 调用 `AccuracyFirstPolicy.decide()`
+/// 2. 调用 `AbsolutePolicy.decide()`
 ///
 /// **期望结果**: `admit_new_prefill == false`, `force_swap_out_count == 1`
 #[test]
@@ -139,7 +139,7 @@ fn absolute_policy_defrag_mode() {
         ..Default::default()
     };
 
-    let decision = AccuracyFirstPolicy::default().decide(&state);
+    let decision = AbsolutePolicy::default().decide(&state);
 
     // SPEC §3.1: kv_fragmentation > 0.5 → defrag mode
     assert!(!decision.admit_new_prefill, "应拒绝新的 prefill 请求");
@@ -158,7 +158,7 @@ fn absolute_policy_defrag_mode() {
 ///
 /// **测试步骤**:
 /// 1. 构造正常 `SystemState`
-/// 2. 调用 `AccuracyFirstPolicy.decide()`
+/// 2. 调用 `AbsolutePolicy.decide()`
 ///
 /// **期望结果**: `admit_new_prefill == true`, `force_swap_out_count == 0`
 #[test]
@@ -173,7 +173,7 @@ fn absolute_policy_normal_mode() {
         ..Default::default()
     };
 
-    let decision = AccuracyFirstPolicy::default().decide(&state);
+    let decision = AbsolutePolicy::default().decide(&state);
 
     // SPEC §3.1: 正常模式
     assert!(decision.admit_new_prefill, "应接受新的 prefill 请求");
@@ -213,7 +213,7 @@ fn static_kernel_path_no_dynamic_strategy() {
 
     // 验证策略返回的是静态决策（无 kernel_strategy 字段）
     let state = SystemState::default();
-    let acc_decision = AccuracyFirstPolicy::default().decide(&state);
+    let acc_decision = AbsolutePolicy::default().decide(&state);
 
     // 所有决策都是有效的 SchedulerDecision
     assert!(acc_decision.max_batch_size > 0);
@@ -241,8 +241,8 @@ fn policy_variant_zero_cost_abstraction() {
         ..Default::default()
     };
 
-    // 验证 Accuracy variant 能正确决策
-    let acc = PolicyVariant::Accuracy.decide(&state);
+    // 验证 Absolute variant 能正确决策
+    let acc = PolicyVariant::Absolute.decide(&state);
 
     // 决策应有效
     assert!(acc.max_batch_size > 0);
@@ -257,7 +257,7 @@ fn policy_variant_zero_cost_abstraction() {
         batch_normal: 24,
         batch_aggressive: 128,
     };
-    let policy = AccuracyFirstPolicy::with_config(custom_config);
+    let policy = AbsolutePolicy::with_config(custom_config);
     let decision = policy.decide(&state);
 
     // 自定义配置应生效
