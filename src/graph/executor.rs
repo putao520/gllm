@@ -1561,70 +1561,30 @@ impl FusedGraphExecutor {
 
             // seq_len is provided explicitly by the caller
 
-            // Check if we need to execute the JIT kernel, or fallback unconditionally
-            // On CPU, RoPE generation is mathematically incomplete for seq_len > 1, so we evaluate RoPE in pure Rust.
-            let mut skip_jit = false;
-            #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
-            if let crate::graph::types::FusedOp::RoPE(ref config) = node.op {
-                skip_jit = true;
-                let out_f32 = unsafe { std::slice::from_raw_parts_mut(output_buf.as_mut_ptr() as *mut f32, output_buf.len() / 4) };
-                let in_f32 = unsafe { std::slice::from_raw_parts(activation.as_ptr() as *const f32, activation.len() / 4) };
-                out_f32.copy_from_slice(in_f32);
-                let pos_u32 = unsafe { std::slice::from_raw_parts(positions, seq_len) };
-                crate::compat::scalar_ops::scalar_rope(out_f32, pos_u32, config.head_dim, config.rope_theta);
+            unsafe {
+                cn.compiled.execute(
+                    if activation.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        activation.as_ptr()
+                    },
+                    if weight_blob.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        weight_blob.as_ptr()
+                    },
+                    kv_cache_ptr,
+                    positions,
+                    kv_cache_v_ptr as *const usize,
+                    1,
+                    seq_len,
+                    output_buf.as_mut_ptr(),
+                    scratchpad.as_mut_ptr(),
+                );
             }
 
-            if !skip_jit {
-                unsafe {
-                    cn.compiled.execute(
-                        if activation.is_empty() {
-                            std::ptr::null()
-                        } else {
-                            activation.as_ptr()
-                        },
-                        if weight_blob.is_empty() {
-                            std::ptr::null()
-                        } else {
-                            weight_blob.as_ptr()
-                        },
-                        kv_cache_ptr,
-                        positions,
-                        kv_cache_v_ptr as *const usize,
-                        1,
-                        seq_len,
-                        output_buf.as_mut_ptr(),
-                        scratchpad.as_mut_ptr(),
-                    );
-                }
-            }
-
-            // CPU Fallback for RoPE if part of FusedQkvRope
-            #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
-            {
-                if let crate::graph::types::FusedOp::FusedQkvRope(ref config) = node.op {
-                    let q_dim = config.num_heads * config.head_dim;
-                    let kv_dim = config.num_kv_heads * config.head_dim;
-                    let q_elems = seq_len * q_dim;
-                    let kv_elems = seq_len * kv_dim;
-                    
-                    let out_f32 = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            output_buf.as_mut_ptr() as *mut f32,
-                            output_buf.len() / 4,
-                        )
-                    };
-                    
-                    eprintln!("[ROPE-DBG] output_buf_len={} out_f32_len={} q_elems={} kv_elems={} seq_len={} q_dim={} kv_dim={} num_heads={} num_kv_heads={} head_dim={}",
-                        output_buf.len(), out_f32.len(), q_elems, kv_elems, seq_len,
-                        q_dim, kv_dim, config.num_heads, config.num_kv_heads, config.head_dim);
-                    let (q_slice, rest) = out_f32.split_at_mut(q_elems);
-                    let (k_slice, _) = rest.split_at_mut(kv_elems);
-                    
-                    let pos_u32 = unsafe { std::slice::from_raw_parts(positions, seq_len) };
-                    crate::compat::scalar_ops::scalar_rope(q_slice, pos_u32, config.head_dim, config.rope_theta);
-                    crate::compat::scalar_ops::scalar_rope(k_slice, pos_u32, config.head_dim, config.rope_theta);
-                }
-            }
+            // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
+            // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
 
             if cn.graph_output_names.len() == 1 {
                 tensors.insert(cn.graph_output_names[0].clone(), output_buf);

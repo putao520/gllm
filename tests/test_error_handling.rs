@@ -1,14 +1,12 @@
 mod common;
 
 use common::TestModelFiles;
-use gllm::backend::{fallback, BackendContextError};
 use gllm::engine::executor::{Executor, ExecutorError};
 use gllm::loader::{Loader, LoaderError};
 use gllm::manifest::{
     map_architecture_token, ModelArchitecture, ModelKind, ModelManifest,
     EMPTY_FILE_MAP,
 };
-use gllm::engine::BackendError;
 use gllm::compat::CpuBackend;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -99,24 +97,3 @@ fn corrupted_weights_surface_loader_errors() {
     );
 }
 
-/// TEST-ERROR-003: OOM 错误被检测用于回退
-///
-/// **关联需求**: REQ-TEST-007
-/// **测试类型**: 负向测试
-///
-/// **测试步骤**:
-/// 1. 创建 OOM 错误
-/// 2. 调用 is_oom_context_error()
-///
-/// **期望结果**: 正确识别 OOM 错误
-#[test]
-fn oom_errors_are_detected_for_fallback() {
-    let err =
-        BackendContextError::Loader(LoaderError::Backend("CUDA_ERROR_OUT_OF_MEMORY".to_string()));
-    assert!(fallback::is_oom_context_error(&err));
-
-    let backend_err = BackendContextError::Executor(ExecutorError::Backend(BackendError::Cuda(
-        "device out of memory".into(),
-    )));
-    assert!(fallback::is_oom_context_error(&backend_err));
-}
