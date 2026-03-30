@@ -82,10 +82,7 @@ pub trait KnowledgeDataSource {
     fn injection_kind(&self) -> InjectionKind;
 
     /// 将数据物理化至引擎可感知的格式
-    ///
-    /// # Parameters
-    /// - `engine`: 引擎上下文，提供模型配置信息
-    fn materialize(&self, engine: &crate::engine::EngineContext) -> Result<MaterializedPayload, KnowledgeError>;
+    fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError>;
 }
 
 /// 知识注入配置 (per SPEC 04-API-DESIGN §7.2)
