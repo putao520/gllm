@@ -20,9 +20,13 @@ use crate::manifest::{
 use crate::rerank::{RerankBuilder, RerankResponse, RerankResult};
 
 #[derive(Debug, Error)]
-pub enum ClientError {
+pub enum GllmError {
     #[error("unknown model alias: {0}")]
     UnknownModel(String),
+    #[error("model not found: {0}")]
+    ModelNotFound(String),
+    #[error("invalid model type: {0}")]
+    InvalidModelType(String),
     #[error("unsupported architecture: {0:?}")]
     UnsupportedArchitecture(ModelArchitecture),
     #[error("state lock poisoned")]
@@ -33,8 +37,6 @@ pub enum ClientError {
     NotImplementedQueued { kind: &'static str, request_id: u64 },
     #[error("OOM halt: {message} (fatal={fatal})")]
     OomHalt { message: String, fatal: bool },
-    #[error("invalid model type for requested operation")]
-    InvalidModelType,
     #[error(transparent)]
     Loader(#[from] LoaderError),
 
@@ -49,17 +51,15 @@ pub enum ClientError {
 /// Unified error type for public API (per SPEC 04-API-DESIGN §4).
 ///
 /// This is the primary error type exposed to users of the gllm library.
-/// It is a type alias to `ClientError` for backward compatibility with
-/// internal code.
 ///
 /// # Error Variants
 ///
-/// - `UnknownModel(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
+/// - `ModelNotFound(String)` — Model not found or download failed (maps to SPEC's `ModelNotFound`)
+/// - `UnknownModel(String)` — Alias for ModelNotFound (backward compatibility)
+/// - `InvalidModelType(String)` — Model type mismatch (e.g., using Embedding model for Chat)
 /// - `UnsupportedArchitecture` — Backend initialization failed (maps to SPEC's `BackendError`)
 /// - `OomHalt` — Out of memory (maps to SPEC's `OutOfMemory`)
-/// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
 /// - Other variants represent runtime errors (maps to SPEC's `RuntimeError`)
-pub type GllmError = ClientError;
 
 pub struct ClientState {
     pub model_id: String,
@@ -77,22 +77,22 @@ pub struct AsyncClient {
     inner: Client,
 }
 
-impl From<BackendContextError> for ClientError {
+impl From<BackendContextError> for GllmError {
     fn from(err: BackendContextError) -> Self {
         match err {
             BackendContextError::UnsupportedArchitecture(arch) => {
-                ClientError::UnsupportedArchitecture(arch)
+                GllmError::UnsupportedArchitecture(arch)
             }
-            BackendContextError::Loader(err) => ClientError::Loader(err),
-            BackendContextError::Executor(err) => ClientError::Executor(err),
-            BackendContextError::Backend(err) => ClientError::Backend(err),
+            BackendContextError::Loader(err) => GllmError::Loader(err),
+            BackendContextError::Executor(err) => GllmError::Executor(err),
+            BackendContextError::Backend(err) => GllmError::Backend(err),
         }
     }
 }
 
 impl Client {
     #[allow(clippy::arc_with_non_send_sync)]
-    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, GllmError> {
         let client = Self {
             state: Arc::new(RwLock::new(None)),
         };
@@ -100,22 +100,22 @@ impl Client {
         Ok(client)
     }
 
-    pub fn new_chat(model_id: &str) -> Result<Self, ClientError> {
+    pub fn new_chat(model_id: &str) -> Result<Self, GllmError> {
         Self::new(model_id, ModelKind::Chat)
     }
-    pub fn new_embedding(model_id: &str) -> Result<Self, ClientError> {
+    pub fn new_embedding(model_id: &str) -> Result<Self, GllmError> {
         Self::new(model_id, ModelKind::Embedding)
     }
 
-    pub fn manifest(&self) -> Result<Arc<ModelManifest>, ClientError> {
+    pub fn manifest(&self) -> Result<Arc<ModelManifest>, GllmError> {
         let state = self.read_state()?;
         state
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
-            .ok_or(ClientError::NoModelLoaded)
+            .ok_or(GllmError::NoModelLoaded)
     }
 
-    pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
+    pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), GllmError> {
         let model_id = Self::normalize_model_id(model_id)?;
         let mut guard = self.write_state()?;
         let state = Self::build_state(&model_id, kind)?;
@@ -123,19 +123,19 @@ impl Client {
         Ok(())
     }
 
-    pub fn unload_model(&self) -> Result<(), ClientError> {
+    pub fn unload_model(&self) -> Result<(), GllmError> {
         let mut guard = self.write_state()?;
         *guard = None;
         Ok(())
     }
 
-    pub fn swap_model(&self, model_id: &str) -> Result<(), ClientError> {
+    pub fn swap_model(&self, model_id: &str) -> Result<(), GllmError> {
         let model_id = Self::normalize_model_id(model_id)?;
         let mut guard = self.write_state()?;
         let kind = guard
             .as_ref()
             .map(|loaded| loaded.manifest.kind)
-            .ok_or(ClientError::NoModelLoaded)?;
+            .ok_or(GllmError::NoModelLoaded)?;
 
         *guard = None;
         let state = Self::build_state(&model_id, kind)?;
@@ -165,9 +165,9 @@ impl Client {
         RerankBuilder::new(self, query, documents)
     }
 
-    pub fn thinking_head_available(&self) -> Result<bool, ClientError> {
+    pub fn thinking_head_available(&self) -> Result<bool, GllmError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
         let available = {
             let executor = loaded.backend.executor();
             executor.thinking_head_available()
@@ -183,11 +183,11 @@ impl Client {
         top_k: usize,
         top_p: f32,
         session_id: Option<u64>,
-    ) -> Result<GenerationResponse, ClientError> {
+    ) -> Result<GenerationResponse, GllmError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
-        // OOM errors propagate as-is via ExecutorError -> ClientError.
+        // OOM errors propagate as-is via ExecutorError -> GllmError.
         let mut executor = loaded.backend.executor_mut();
         let result = if let Some(sid) = session_id {
             executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)?
@@ -205,9 +205,9 @@ impl Client {
     pub(crate) fn execute_embeddings(
         &self,
         inputs: Vec<String>,
-    ) -> Result<EmbeddingsResponse, ClientError> {
+    ) -> Result<EmbeddingsResponse, GllmError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
         let mut executor = loaded.backend.executor_mut();
         let mut embeddings = Vec::with_capacity(inputs.len());
@@ -225,16 +225,16 @@ impl Client {
         query: String,
         documents: Vec<String>,
         top_n: usize,
-    ) -> Result<RerankResponse, ClientError> {
+    ) -> Result<RerankResponse, GllmError> {
         let state = self.read_state()?;
-        let loaded = state.as_ref().ok_or(ClientError::NoModelLoaded)?;
+        let loaded = state.as_ref().ok_or(GllmError::NoModelLoaded)?;
         // ARCH-ZERO-FALLBACK: Direct executor call, no fallback wrapper.
         let mut executor = loaded.backend.executor_mut();
         let mut scores = Vec::with_capacity(documents.len());
         for doc in documents.iter() {
             let score = executor.rerank_pair(&query, doc)?;
             let val = score.first().copied().ok_or_else(|| {
-                ClientError::Backend(BackendError::Cpu(
+                GllmError::Backend(BackendError::Cpu(
                     "rerank_pair returned empty scores for query/doc pair".into(),
                 ))
             })?;
@@ -262,15 +262,15 @@ impl Client {
         })
     }
 
-    fn normalize_model_id(model_id: &str) -> Result<String, ClientError> {
+    fn normalize_model_id(model_id: &str) -> Result<String, GllmError> {
         let trimmed = model_id.trim();
         if trimmed.is_empty() {
-            return Err(ClientError::UnknownModel(model_id.to_string()));
+            return Err(GllmError::UnknownModel(model_id.to_string()));
         }
         Ok(trimmed.to_string())
     }
 
-    fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, ClientError> {
+    fn build_state(model_id: &str, kind: ModelKind) -> Result<ClientState, GllmError> {
         let config = LoaderConfig::from_env();
 
         // Ω1: Tensor-driven loading - no config.json dependency (REQ-REFACTOR-004)
@@ -305,7 +305,7 @@ impl Client {
                         tensor_map: HashMap::new(),
                     }
                 } else {
-                    return Err(ClientError::UnknownModel(format!(
+                    return Err(GllmError::UnknownModel(format!(
                         "Unsupported GGUF architecture: {}",
                         arch_str
                     )));
@@ -372,19 +372,19 @@ impl Client {
         })
     }
 
-    fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, ClientError> {
-        self.state.read().map_err(|_| ClientError::ExecutorPoisoned)
+    fn read_state(&self) -> Result<RwLockReadGuard<'_, Option<ClientState>>, GllmError> {
+        self.state.read().map_err(|_| GllmError::ExecutorPoisoned)
     }
 
-    fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, ClientError> {
+    fn write_state(&self) -> Result<RwLockWriteGuard<'_, Option<ClientState>>, GllmError> {
         self.state
             .write()
-            .map_err(|_| ClientError::ExecutorPoisoned)
+            .map_err(|_| GllmError::ExecutorPoisoned)
     }
 }
 
 impl AsyncClient {
-    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
+    pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, GllmError> {
         Ok(Self {
             inner: Client::new(model_id, kind)?,
         })
