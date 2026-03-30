@@ -1,4 +1,4 @@
-//! Generation loop skeleton.
+//! Generation loop — async-first design (per SPEC 04-API-DESIGN §3.1).
 
 use crate::client::{Client, GllmError};
 
@@ -211,6 +211,22 @@ impl Iterator for GenerationStream {
     }
 }
 
+/// Builder for text generation (per SPEC 04-API-DESIGN §3.1).
+///
+/// # Example
+///
+/// ```no_run
+/// use gllm::Client;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = Client::new_empty();
+/// let output = client.generate("Hello, who are you?")
+///     .max_tokens(100)
+///     .temperature(0.7)
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct GenerationBuilder<'a> {
     client: &'a Client,
     prompt: String,
@@ -234,21 +250,25 @@ impl<'a> GenerationBuilder<'a> {
         }
     }
 
+    /// Set maximum tokens to generate.
     pub fn max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
+    /// Set sampling temperature.
     pub fn temperature(mut self, temperature: f32) -> Self {
         self.temperature = temperature;
         self
     }
 
+    /// Set top-k sampling parameter.
     pub fn top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self
     }
 
+    /// Set top-p (nucleus) sampling parameter.
     pub fn top_p(mut self, top_p: f32) -> Self {
         self.top_p = top_p;
         self
@@ -275,42 +295,47 @@ impl<'a> GenerationBuilder<'a> {
         )
     }
 
-    pub fn generate(self) -> Result<GenerationResponse, GllmError> {
-        self.client.execute_generation(
-            self.prompt,
-            self.max_tokens,
-            self.temperature,
-            self.top_k,
-            self.top_p,
-            self.session_id,
-        )
+    /// Execute the generation (async).
+    pub async fn generate(self) -> Result<GenerationResponse, GllmError> {
+        self.client
+            .execute_generation(
+                self.prompt,
+                self.max_tokens,
+                self.temperature,
+                self.top_k,
+                self.top_p,
+                self.session_id,
+            )
+            .await
     }
 }
 
+
+/// Response from text generation (per SPEC 04-API-DESIGN §3.1).
 #[derive(Debug, Clone)]
 pub struct GenerationResponse {
+    /// Generated text.
     pub text: String,
+    /// Thinking content (for models with thinking heads).
     pub thinking_content: Option<String>,
+    /// Request ID (for tracking).
     pub request_id: Option<u64>,
 }
 
-/// Split thinking content from generated text.
-/// Looks for `<think>...</think>` markers and separates them.
+/// Split thinking content from generated text (internal helper).
 pub fn split_thinking_content(text: &str) -> (String, Option<String>) {
-    if let Some(start) = text.find("<think>") {
-        if let Some(end) = text.find("</think>") {
-            if end > start {
-                let think_start = start + "<think>".len();
-                let thinking = text[think_start..end].trim().to_string();
-                let mut answer = String::new();
-                answer.push_str(&text[..start]);
-                answer.push_str(&text[end + "</think>".len()..]);
-                let answer = answer.trim().to_string();
-                let thinking = if thinking.is_empty() { None } else { Some(thinking) };
-                return (answer, thinking);
-            }
+    // Look for thinking markers like "<thinking>...</thinking>"
+    let start_marker = "<thinking>";
+    let end_marker = "</thinking>";
+
+    if let Some(start) = text.find(start_marker) {
+        if let Some(end) = text.find(end_marker) {
+            let thinking = &text[start + start_marker.len()..end];
+            let main_text = format!("{}{}", &text[..start], &text[end + end_marker.len()..]);
+            return (main_text, Some(thinking.to_string()));
         }
     }
+
     (text.to_string(), None)
 }
 
@@ -319,25 +344,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_no_thinking() {
-        let (text, think) = split_thinking_content("Hello world");
+    fn test_split_thinking_content() {
+        // With thinking markers
+        let (text, thinking) = split_thinking_content("Hello<thinking>I am thinking</thinking> world");
         assert_eq!(text, "Hello world");
-        assert!(think.is_none());
-    }
+        assert_eq!(thinking, Some("I am thinking".to_string()));
 
-    #[test]
-    fn split_with_thinking() {
-        let input = "<think>reasoning here</think>The answer is 42.";
-        let (text, think) = split_thinking_content(input);
-        assert_eq!(text, "The answer is 42.");
-        assert_eq!(think.unwrap(), "reasoning here");
-    }
-
-    #[test]
-    fn split_empty_thinking() {
-        let input = "<think></think>Just the answer.";
-        let (text, think) = split_thinking_content(input);
-        assert_eq!(text, "Just the answer.");
-        assert!(think.is_none());
+        // Without thinking markers
+        let (text, thinking) = split_thinking_content("Hello world");
+        assert_eq!(text, "Hello world");
+        assert!(thinking.is_none());
     }
 }

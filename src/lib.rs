@@ -32,18 +32,21 @@ pub use manifest::{
 };
 
 // GGUF Loader API (API-GGUF)
-pub use loader::gguf::{GgufReader, TensorInfo, GgufError, GgmlDType, TensorSlice};
+pub use loader::gguf::{GgufReader, TensorInfo, GgufError, GgmlDType, TensorSlice, GgufValueType};
 
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
-pub use client::{AsyncClient, Client, GllmError};
+pub use client::{Client, GllmError, ModelInfo};
+pub use generation::{GenerationChunk, GenerationResponse, GenerationStream};
+pub use embeddings::{Embedding, EmbeddingsResponse};
+pub use rerank::{RerankResponse, RerankResult};
 pub use intent::{
-    attach_guardrail, encode_intent, GuardrailAction, GuardrailAttachment, IntentConfig,
-    IntentEncoding, IntentError, SafetyPolicyConfig,
+    attach_guardrail, encode_intent, GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,
+    IntentError, SafetyPolicy, SafetyPolicyConfig,
 };
 pub use knowledge::{
-    FrozenKvSource, InjectionKind, KnowledgeDataSource, KnowledgeInjectionConfig,
-    KnowledgeInjectionResult, LayerTarget, VectorSource,
+    FrozenKvSource, InjectionKind, KnowledgeDataSource, KnowledgeError, KnowledgeInjectionConfig,
+    KnowledgeInjectionResult, LayerTarget, MaterializedPayload,
 };
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};

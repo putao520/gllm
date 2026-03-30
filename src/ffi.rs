@@ -1,42 +1,29 @@
-//! C FFI exports for gllm inference engine.
+//! gllm C FFI exports.
 //!
-//! Provides a stable C ABI for loading models, running inference, and managing
-//! the lifecycle from C/C++ callers.
-//!
-//! # Lifecycle
-//! ```c
-//! GllmContext *ctx = gllm_init("model-id", GLLM_KIND_CHAT);
-//! GllmGenerateResult result = gllm_generate(ctx, "Hello", 128, 0.7, 40, 0.9);
-//! // use result.text ...
-//! gllm_free_generate_result(&result);
-//! gllm_destroy(ctx);
-//! ```
+//! This module provides a C-compatible API for gllm.
+//! Since the Client API is now async-first, the FFI layer uses
+//! `tokio::runtime::Runtime::new()` to block on async calls.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
 use crate::client::Client;
 use crate::manifest::ModelKind;
 
-/// Opaque context handle exposed to C callers.
+/// Opaque context for gllm C API.
+#[repr(C)]
 pub struct GllmContext {
-    client: Client,
+    pub client: Client,
 }
 
-/// Result of a text generation call.
+/// Result from `gllm_generate`.
 #[repr(C)]
 pub struct GllmGenerateResult {
-    /// Null-terminated UTF-8 text. NULL on error.
+    /// Generated text (allocated with `malloc`, must be freed with `gllm_free_generate_result`)
     pub text: *mut c_char,
-    /// Null-terminated error message. NULL on success.
+    /// Error message (allocated with `malloc`, must be freed with `gllm_free_generate_result`)
     pub error: *mut c_char,
 }
-
-/// Model kind constants for C callers.
-pub const GLLM_KIND_CHAT: u32 = 0;
-pub const GLLM_KIND_EMBEDDING: u32 = 1;
-pub const GLLM_KIND_RERANK: u32 = 2;
 
 fn kind_from_u32(kind: u32) -> ModelKind {
     match kind {
@@ -46,7 +33,7 @@ fn kind_from_u32(kind: u32) -> ModelKind {
     }
 }
 
-/// Initialize a gllm context by loading a model.
+/// Initialize a gllm context with a model.
 ///
 /// # Safety
 /// `model_id` must be a valid null-terminated UTF-8 string.
@@ -60,7 +47,20 @@ pub unsafe extern "C" fn gllm_init(model_id: *const c_char, kind: u32) -> *mut G
         Ok(s) => s,
         Err(_) => return ptr::null_mut(),
     };
-    match Client::new(model_id, kind_from_u32(kind)) {
+
+    // Create a tokio runtime for blocking on async calls
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[gllm FFI] failed to create runtime: {e}");
+            return ptr::null_mut();
+        }
+    };
+
+    // Block on the async Client::new call
+    let result = rt.block_on(Client::new(model_id, kind_from_u32(kind)));
+
+    match result {
         Ok(client) => Box::into_raw(Box::new(GllmContext { client })),
         Err(e) => {
             eprintln!("[gllm FFI] init failed: {e}");
@@ -108,14 +108,24 @@ pub unsafe extern "C" fn gllm_generate(
         Ok(s) => s.to_string(),
         Err(_) => return err_result("invalid UTF-8 in prompt"),
     };
-    match ctx.client.execute_generation(
+
+    // Create a tokio runtime for blocking on async calls
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => return err_result(&format!("failed to create runtime: {e}")),
+    };
+
+    // Block on the async execute_generation call
+    let result = rt.block_on(ctx.client.execute_generation(
         prompt_str,
         max_tokens as usize,
         temperature,
         top_k as usize,
         top_p,
         None,
-    ) {
+    ));
+
+    match result {
         Ok(resp) => GllmGenerateResult {
             text: CString::new(resp.text).unwrap_or_default().into_raw(),
             error: ptr::null_mut(),
