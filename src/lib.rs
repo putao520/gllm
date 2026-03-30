@@ -31,6 +31,9 @@ pub use manifest::{
     ArchFamily, FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
 };
 
+// GGUF Loader API (API-GGUF)
+pub use loader::gguf::{GgufReader, TensorInfo, GgufError, GgmlDType, TensorSlice};
+
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
 pub use client::{AsyncClient, Client, GllmError};
