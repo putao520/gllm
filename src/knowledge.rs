@@ -350,3 +350,13 @@ mod tests {
         assert_eq!(scheduler.hit_rate(), 2.0 / 3.0);
     }
 }
+
+// ============================================================================
+// Error conversion to ClientError
+// ============================================================================
+
+impl From<KnowledgeError> for crate::client::ClientError {
+    fn from(err: KnowledgeError) -> Self {
+        crate::client::ClientError::RuntimeError(format!("knowledge injection error: {}", err))
+    }
+}

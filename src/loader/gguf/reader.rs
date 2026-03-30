@@ -498,17 +498,23 @@ impl GgufReader {
         Ok(&self.mmap[info.offset..end])
     }
 
-    pub fn floating_point_dtype_size(&self) -> Option<usize> {
-        let mut best: Option<usize> = None;
+    /// Detect the dominant floating-point dtype from tensors.
+    /// Returns the smallest floating-point type found (BF16/F16 < F32 < F64).
+    pub fn floating_point_dtype(&self) -> Option<gllm_kernels::types::DType> {
+        use gllm_kernels::types::DType;
+        let mut best: Option<DType> = None;
         for tensor in &self.tensors {
-            let size = match tensor.dtype {
-                GgmlDType::F16 | GgmlDType::BF16 => 2,
-                GgmlDType::F32 => 4,
-                GgmlDType::F64 => 8,
+            let dtype = match tensor.dtype {
+                GgmlDType::F16 => DType::F16,
+                GgmlDType::BF16 => DType::BF16,
+                GgmlDType::F32 => DType::F32,
+                GgmlDType::F64 => DType::F32, // f64 降级到 f32
                 _ => continue,
             };
-            best = Some(best.map_or(size, |current| current.min(size)));
-            if best == Some(2) {
+            best = Some(best.map_or(dtype, |current| {
+                if dtype.size_bytes() < current.size_bytes() { dtype } else { current }
+            }));
+            if best.as_ref().is_some_and(|d| d.size_bytes() == 2) {
                 break;
             }
         }

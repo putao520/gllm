@@ -124,38 +124,15 @@ pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
     }
 }
 
-/// Convert ModelConfig.dtype_size (bytes per element) to gllm-kernels DType.
+/// Derive computation DType from a `GeneratorForwardConfig`.
 ///
-/// 2-byte storage → F16 or BF16 (based on dtype string).
-/// 4-byte storage → F32.
-/// All other sizes → F32 (safe default).
-#[inline]
-pub(crate) fn computation_dtype(dtype_size: usize) -> DType {
-    match dtype_size {
-        2 => DType::F16,  // Default to F16 for 2-byte types
-        _ => DType::F32,
-    }
-}
-
-/// Derive computation DType from a `GeneratorForwardConfig` with BF16 support.
-///
-/// Returns the model's native dtype — F16/BF16/F32 based on dtype_size and dtype string.
+/// Returns the model's native dtype — F16/BF16/F32.
 /// ARCH-DTYPE-ADAPTIVE: 禁止硬编码返回 F32。
 #[inline]
 pub(crate) fn computation_dtype_from_config(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> DType {
-    match config.dtype_size {
-        2 => {
-            // Distinguish F16 vs BF16 using dtype string
-            if config.dtype.to_lowercase().contains("bf16") {
-                DType::BF16
-            } else {
-                DType::F16
-            }
-        }
-        _ => DType::F32,
-    }
+    config.dtype
 }
 
 /// Convert a `gllm_kernels::types::DType` to the `crate::compat::DType` used in `ModelArchKey`.

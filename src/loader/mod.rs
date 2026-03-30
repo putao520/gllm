@@ -814,20 +814,22 @@ impl Loader {
         }
     }
 
-    pub fn detect_weight_dtype_size(&self) -> Result<Option<usize>> {
+    /// Detect the dominant weight dtype from loaded tensors.
+    /// Returns `DType` enum for type-safe dtype handling.
+    pub fn detect_weight_dtype(&self) -> Result<Option<gllm_kernels::types::DType>> {
+        use gllm_kernels::types::DType;
         if let Some(loader) = &self.safetensors {
-            Ok(loader.detect_weight_dtype_size())
+            Ok(loader.detect_weight_dtype())
         } else if let Some(reader) = &self.gguf {
-            Ok(reader.floating_point_dtype_size())
+            Ok(reader.floating_point_dtype())
         } else if let Some(loader) = &self.onnx {
-            // ONNX might have mixed precision, but we can try to find the dominant floating point type
-            // For now, let's look at the first few tensors
             let precisions = loader.unique_precisions();
             for dtype in precisions {
                 match dtype {
-                    Dtype::F32 => return Ok(Some(4)),
-                    Dtype::F16 | Dtype::BF16 => return Ok(Some(2)),
-                    Dtype::F64 => return Ok(Some(8)),
+                    Dtype::BF16 => return Ok(Some(DType::BF16)),
+                    Dtype::F16 => return Ok(Some(DType::F16)),
+                    Dtype::F32 => return Ok(Some(DType::F32)),
+                    Dtype::F64 => return Ok(Some(DType::F32)), // f64 降级到 f32
                     _ => continue,
                 }
             }

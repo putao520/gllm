@@ -7,6 +7,7 @@ use log;
 use crate::compat::backend_trait::{Backend, Element};
 use crate::compat::CpuBackend;
 use crate::scheduler::types::{PageId, RequestId, StorageKey};
+use gllm_kernels::types::DType;
 use thiserror::Error;
 
 // ---- Engine types (moved from compat) ----
@@ -63,10 +64,8 @@ pub struct GeneratorForwardConfig {
     pub rerank_no_token_id: Option<u32>,
     /// MoE configuration (None for dense models).
     pub moe_config: Option<crate::manifest::MoEConfig>,
-    /// Model weight dtype string (e.g. "f32", "f16", "bf16").
-    pub dtype: String,
-    /// Model weight dtype size in bytes (2 for F16/BF16, 4 for F32).
-    pub dtype_size: usize,
+    /// Model weight dtype (F32/F16/BF16).
+    pub dtype: DType,
     /// Paged attention page table (logical→physical page mapping).
     /// When `Some`, GPU decode uses paged KV cache instead of dense.
     pub paged_kv_page_table: Option<Vec<u32>>,
@@ -123,9 +122,15 @@ pub struct KvCacheConfig {
     pub num_heads: usize,
     pub head_dim: usize,
     pub max_seq_len: usize,
-    pub dtype_size: usize,
+    /// KV cache element dtype.
+    pub kv_dtype: DType,
     pub page_size: usize,
     pub swap_config: Option<SwapConfig>,
+}
+
+impl KvCacheConfig {
+    /// Bytes per KV cache element.
+    pub fn dtype_size(&self) -> usize { self.kv_dtype.size_bytes() }
 }
 
 /// Errors originating from a compute backend.
@@ -444,8 +449,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
-            dtype: model_config.dtype.clone(),
-            dtype_size: model_config.dtype_size,
+            dtype: model_config.dtype,
             paged_kv_page_table: None,
             paged_kv_page_size: model_config.kv_cache_block_size,
 
@@ -466,19 +470,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // CPU backend 只支持 f32 dtype for KV cache
         // 如果模型配置是 f16/bf16，需要强制转换为 f32
-        let cpu_dtype_size =
-            if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend<E>>() {
-                Some(4) // f32
-            } else {
-                None
-            };
+        let kv_dtype = if std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend<E>>() {
+            DType::F32 // CPU backend 只支持 f32
+        } else {
+            model_config.dtype
+        };
 
         let kv_cache_config = KvCacheConfig {
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_key_value_heads,
             head_dim: model_config.head_dim,
             max_seq_len: model_config.max_position_embeddings,
-            dtype_size: cpu_dtype_size.unwrap_or(model_config.dtype_size),
+            kv_dtype,
             page_size,
             swap_config: None,
         };
@@ -536,7 +539,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         &resolved,
                         1,
                         hidden,
-                        crate::compat::jit_helpers::computation_dtype(model_config.dtype_size),
+                        model_config.dtype,
                         model_id,
                         backend,
                         &cache

@@ -326,10 +326,12 @@ impl SafeTensorsLoader {
         self.gllm_tokenizer_config.as_ref()
     }
 
-    /// Ω1: 从实际张量中检测 dtype 大小（字节）
+    /// Ω1: 从实际张量中检测 dtype。
     ///
-    /// 优先检测权重张量的实际 dtype，而非依赖 config.json
-    pub fn detect_weight_dtype_size(&self) -> Option<usize> {
+    /// 优先检测权重张量的实际 dtype，而非依赖 config.json。
+    /// 返回 `DType` 枚举而非原始字节数。
+    pub fn detect_weight_dtype(&self) -> Option<gllm_kernels::types::DType> {
+        use gllm_kernels::types::DType;
         // 优先查找模型权重张量（排除量化张量）
         let weight_names = self
             .names()
@@ -354,17 +356,10 @@ impl SafeTensorsLoader {
         for name in weight_names {
             if let Some(meta) = self.tensor_meta(&name) {
                 return match meta.dtype {
-                    safetensors::Dtype::F32 => Some(4),
-                    safetensors::Dtype::F16 => Some(2),
-                    safetensors::Dtype::BF16 => Some(2),
-                    safetensors::Dtype::F64 => Some(8),
-                    // 量化类型不应出现在权重中，但返回已知的字节数
-                    safetensors::Dtype::I8 | safetensors::Dtype::U8 => Some(1),
-                    safetensors::Dtype::I16 | safetensors::Dtype::U16 => Some(2),
-                    safetensors::Dtype::I32 | safetensors::Dtype::U32 => Some(4),
-                    safetensors::Dtype::I64 | safetensors::Dtype::U64 => Some(8),
-                    safetensors::Dtype::BOOL => Some(1),
-                    // 处理 future 可能添加的新 dtype
+                    safetensors::Dtype::BF16 => Some(DType::BF16),
+                    safetensors::Dtype::F16 => Some(DType::F16),
+                    safetensors::Dtype::F32 => Some(DType::F32),
+                    safetensors::Dtype::F64 => Some(DType::F32), // f64 降级到 f32
                     _ => None,
                 };
             }

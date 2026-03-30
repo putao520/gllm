@@ -44,7 +44,7 @@ pub(crate) struct KvCacheBuffer {
 
 impl KvCacheBuffer {
     fn new(config: &KvCacheConfig) -> Self {
-        let elem_bytes = config.dtype_size.max(1);
+        let elem_bytes = config.dtype_size().max(1);
         let cache_dtype = match elem_bytes {
             2 => gllm_kernels::types::DType::F16, // F16 default for 2-byte; callers can override via set_cache_dtype
             _ => gllm_kernels::types::DType::F32,

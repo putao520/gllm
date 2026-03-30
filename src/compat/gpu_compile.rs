@@ -40,8 +40,8 @@ pub(super) struct GpuKvCacheMeta {
     pub max_seq_len: usize,
     /// Head dimension.
     pub head_dim: usize,
-    /// Bytes per element (dtype_size).
-    pub dtype_size: usize,
+    /// Data type of KV cache elements.
+    pub kv_dtype: DType,
     /// Tokens per page.
     pub page_size: usize,
     /// Current sequence length (tokens written so far).
@@ -50,9 +50,12 @@ pub(super) struct GpuKvCacheMeta {
 
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 impl GpuKvCacheMeta {
+    pub fn dtype_size(&self) -> usize { self.kv_dtype.size_bytes() }
+
     pub fn from_config(config: &KvCacheConfig, device_ptr: u64) -> Self {
+        let kv_dtype = DType::F32; // KvCacheConfig.dtype_size carries raw bytes; derive DType
         let total_bytes = config.num_layers * 2
-            * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size;
+            * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size();
         Self {
             device_ptr,
             total_bytes,
@@ -60,7 +63,7 @@ impl GpuKvCacheMeta {
             num_kv_heads: config.num_heads,
             max_seq_len: config.max_seq_len,
             head_dim: config.head_dim,
-            dtype_size: config.dtype_size,
+            kv_dtype,
             page_size: config.page_size,
             seq_len: 0,
         }
@@ -113,14 +116,16 @@ pub(super) struct GpuPagedKvMeta {
     pub num_kv_heads: usize,
     /// Head dimension.
     pub head_dim: usize,
-    /// Bytes per element.
-    pub dtype_size: usize,
+    /// Data type of KV cache elements.
+    pub kv_dtype: DType,
     /// Bytes per physical page (all layers, K+V, all heads).
     pub page_stride: usize,
 }
 
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 impl GpuPagedKvMeta {
+    pub fn dtype_size(&self) -> usize { self.kv_dtype.size_bytes() }
+
     pub fn new(
         pool_ptr: u64,
         num_physical_pages: usize,
@@ -128,8 +133,9 @@ impl GpuPagedKvMeta {
         num_layers: usize,
         num_kv_heads: usize,
         head_dim: usize,
-        dtype_size: usize,
+        kv_dtype: DType,
     ) -> Self {
+        let dtype_size = kv_dtype.size_bytes();
         let page_stride = num_layers * 2 * num_kv_heads * page_size * head_dim * dtype_size;
         let pool_bytes = num_physical_pages * page_stride;
         Self {
@@ -140,7 +146,7 @@ impl GpuPagedKvMeta {
             num_layers,
             num_kv_heads,
             head_dim,
-            dtype_size,
+            kv_dtype,
             page_stride,
         }
     }
@@ -454,10 +460,11 @@ fn gpu_write_kv_cache(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
     device: &gllm_kernels::gpu::cuda::CudaDevice,
     _stream: &gllm_kernels::gpu::cuda::device::CudaStream,
 ) -> Result<(), BE> {
+    let dtype_size = dtype.size_bytes();
     for head in 0..num_kv_heads {
         let dst_k = handle.0
             + ((layer * num_kv_heads + head) * head_stride
@@ -518,10 +525,11 @@ fn gpu_write_kv_cache_hip(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
     device: &gllm_kernels::gpu::hip::HipDevice,
     _stream: &gllm_kernels::gpu::hip::HipGpuStream,
 ) -> Result<(), BE> {
+    let dtype_size = dtype.size_bytes();
     for head in 0..num_kv_heads {
         let dst_k = handle.0
             + ((layer * num_kv_heads + head) * head_stride
@@ -592,12 +600,13 @@ fn gpu_write_kv_cache_device(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
     device: &gllm_kernels::gpu::cuda::CudaDevice,
     stream: &gllm_kernels::gpu::cuda::device::CudaStream,
     gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
     sm_version: u32,
 ) -> Result<(), BE> {
+    let dtype_size = dtype.size_bytes();
     // Fast path: single KV head (MQA) — one DtoD per K/V
     if num_kv_heads == 1 {
         let copy_bytes = seq_len * head_dim * dtype_size;
@@ -650,13 +659,14 @@ fn build_kv_scatter_graph(
     layer_offset: usize,
     half_offset: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     use gllm_kernels::types::DType;
 
+    let dtype_size = dtype.size_bytes();
     let mut g = CompilerGraph::new();
-    let dt = match dtype_size { 2 => DType::F16, _ => DType::F32 }; // ARCH-DTYPE-FULLCHAIN-ORCH: BF16 distinction requires caller to pass DType directly; tracked for future migration
+    let dt = dtype;
     let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], dt);
     let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], dt);
     // kv_cache is an opaque byte buffer — represent as 1-element placeholder
@@ -701,12 +711,13 @@ fn gpu_write_kv_cache_scatter_hip(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
     device: &gllm_kernels::gpu::hip::HipDevice,
     stream: &gllm_kernels::gpu::hip::HipGpuStream,
     gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
     gfx_arch: u32,
 ) -> Result<(), BE> {
+    let dtype_size = dtype.size_bytes();
     // MQA fast path: single head — 2 DtoD calls cheaper than kernel launch overhead
     if num_kv_heads == 1 {
         let copy_bytes = seq_len * head_dim * dtype_size;
@@ -763,11 +774,12 @@ fn build_kv_scatter_graph_hip(
     layer_offset: usize,
     half_offset: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     use gllm_kernels::types::DType;
 
+    let dtype_size = dtype.size_bytes();
     let mut g = CompilerGraph::new();
     let k_src = g.add_tensor_concrete("k_src", &[seq_len, kv_dim], DType::U8);
     let v_src = g.add_tensor_concrete("v_src", &[seq_len, kv_dim], DType::U8);
@@ -953,15 +965,15 @@ fn gpu_alloc_paged_kv_cache_hip(
     num_layers: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> Result<GpuPagedKvMeta, BE> {
     use gllm_kernels::gpu::GpuDevice;
-    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype);
     let buf = device.alloc(meta.pool_bytes)
         .map_err(|e| BE::Hip(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
     let ptr = buf.as_device_ptr();
     std::mem::forget(buf);
-    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype))
 }
 
 /// Upload a page table to GPU as a u32 array (HIP).
@@ -1038,15 +1050,15 @@ fn metal_alloc_paged_kv_cache(
     num_layers: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> Result<GpuPagedKvMeta, BE> {
     use gllm_kernels::gpu::GpuDevice;
-    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype);
     let buf = device.alloc(meta.pool_bytes)
         .map_err(|e| BE::Metal(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
     let ptr = buf.as_device_ptr();
     std::mem::forget(buf);
-    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype))
 }
 
 /// Write k_rope/v_proj into paged GPU KV cache via DtoD (CUDA).
@@ -1127,15 +1139,15 @@ fn gpu_alloc_paged_kv_cache(
     num_layers: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> Result<GpuPagedKvMeta, BE> {
     use gllm_kernels::gpu::GpuDevice;
-    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size);
+    let meta = GpuPagedKvMeta::new(0, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype);
     let buf = device.alloc(meta.pool_bytes)
         .map_err(|e| BE::Cuda(format!("paged KV cache alloc failed ({} bytes): {e}", meta.pool_bytes)))?;
     let ptr = buf.as_device_ptr();
     std::mem::forget(buf);
-    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype_size))
+    Ok(GpuPagedKvMeta::new(ptr, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, dtype))
 }
 
 /// Upload a page table (logical→physical mapping) to GPU as a u32 array.
@@ -1846,15 +1858,16 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Cuda("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
                 .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found", handle.0)))?;
-            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * m.dtype_size;
+            let ds = m.dtype_size();
+            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * ds;
             let tkf = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim;
-            let hs = m.max_seq_len * m.head_dim * m.dtype_size;
-            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
+            let hs = m.max_seq_len * m.head_dim * ds;
+            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.kv_dtype, ds)
         };
         let total_seq = cached_seq_len + seq_len;
 
@@ -1878,7 +1891,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             let pt = config.paged_kv_page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
             let meta = gpu_alloc_paged_kv_cache(
-                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype_size,
+                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;
             Some((meta, pt.clone()))
         } else {
@@ -2006,7 +2019,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 // Dense KV: contiguous write
                 gpu_write_kv_cache_device(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
-                    handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+                    handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype, device, stream,
                     gpu_profile, sm_version,
                 )?;
             }
@@ -2246,17 +2259,18 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 let meta = meta_store.get(&handle.0)
                     .ok_or_else(|| BE::Cuda(format!("KV cache handle {} not found", handle.0)))?;
 
-                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-                let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+                let ds = meta.dtype_size();
+                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * ds;
+                let head_stride = meta.max_seq_len * meta.head_dim * ds;
                 let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
-                let kv_ds = meta.dtype_size;
+                let kv_dt = meta.kv_dtype;
 
                 drop(meta_store);
 
                 // DtoD: write K/V directly from GPU buffers to KV cache (no host bounce)
                 gpu_write_kv_cache_device(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
-                    handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
+                    handle, layer, half_bytes, write_start, head_stride, kv_dt, device, stream,
                     gpu_profile, sm_version,
                 )?;
 
@@ -2741,8 +2755,9 @@ fn metal_write_kv_direct(
     half_bytes: usize,
     write_start: usize,
     head_stride: usize,
-    dtype_size: usize,
+    dtype: DType,
 ) -> Result<(), BE> {
+    let dtype_size = dtype.size_bytes();
     let k_src = k_buf_ptr as *const u8;
     let v_src = v_buf_ptr as *const u8;
     let kv_dst = kv_cache_handle.0 as *mut u8;
@@ -3586,15 +3601,16 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Hip("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
                 .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found", handle.0)))?;
-            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * m.dtype_size;
+            let ds = m.dtype_size();
+            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * ds;
             let tkf = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim;
-            let hs = m.max_seq_len * m.head_dim * m.dtype_size;
-            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
+            let hs = m.max_seq_len * m.head_dim * ds;
+            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.kv_dtype, ds)
         };
         let total_seq = cached_seq_len + seq_len;
 
@@ -3616,7 +3632,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             let pt = config.paged_kv_page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
             let meta = gpu_alloc_paged_kv_cache_hip(
-                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype_size,
+                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;
             Some((meta, pt.clone()))
         } else {
@@ -3735,7 +3751,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             } else {
                 gpu_write_kv_cache_scatter_hip(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
-                    handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size, device, stream,
+                    handle, layer, half_bytes, cached_seq_len, head_stride, kv_dtype, device, stream,
                     gpu_profile, gfx_arch,
                 )?;
             }
@@ -3966,16 +3982,17 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 let meta = meta_store.get(&handle.0)
                     .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found", handle.0)))?;
 
-                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-                let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+                let ds = meta.dtype_size();
+                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * ds;
+                let head_stride = meta.max_seq_len * meta.head_dim * ds;
                 let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
-                let kv_ds = meta.dtype_size;
+                let kv_dt = meta.kv_dtype;
 
                 drop(meta_store);
 
                 gpu_write_kv_cache_scatter_hip(
                     k_ptr, v_ptr, kv_dim, seq_len, num_kv_heads, head_dim,
-                    handle, layer, half_bytes, write_start, head_stride, kv_ds, device, stream,
+                    handle, layer, half_bytes, write_start, head_stride, kv_dt, device, stream,
                     gpu_profile, gfx_arch,
                 )?;
 
@@ -4205,15 +4222,16 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Metal("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype_size) = {
+        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype, kv_dtype_size) = {
             let ms = backend.kv_meta.lock()
                 .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
             let m = ms.get(&handle.0)
                 .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found", handle.0)))?;
-            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * m.dtype_size;
+            let ds = m.dtype_size();
+            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * ds;
             let tkf = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim;
-            let hs = m.max_seq_len * m.head_dim * m.dtype_size;
-            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.dtype_size)
+            let hs = m.max_seq_len * m.head_dim * ds;
+            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.kv_dtype, ds)
         };
         let total_seq = cached_seq_len + seq_len;
 
@@ -4235,7 +4253,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             let pt = config.paged_kv_page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
             let meta = metal_alloc_paged_kv_cache(
-                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype_size,
+                device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;
             Some((meta, pt.clone()))
         } else {
@@ -4335,7 +4353,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 metal_write_kv_direct(
                     k_buf.as_device_ptr(), v_buf.as_device_ptr(),
                     handle, kv_dim, seq_len, num_kv_heads, head_dim,
-                    layer, half_bytes, cached_seq_len, head_stride, kv_dtype_size,
+                    layer, half_bytes, cached_seq_len, head_stride, kv_dtype,
                 )?;
             }
 
@@ -4580,17 +4598,18 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 let meta = meta_store.get(&handle.0)
                     .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found", handle.0)))?;
 
-                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-                let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+                let ds = meta.dtype_size();
+                let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * ds;
+                let head_stride = meta.max_seq_len * meta.head_dim * ds;
                 let write_start = if layer == 0 { meta.seq_len } else { meta.seq_len.saturating_sub(seq_len) };
-                let kv_ds = meta.dtype_size;
+                let kv_dt = meta.kv_dtype;
 
                 drop(meta_store);
 
                 metal_write_kv_direct(
                     k_buf.as_device_ptr(), v_buf.as_device_ptr(),
                     handle, kv_dim, seq_len, num_kv_heads, head_dim,
-                    layer, half_bytes, write_start, head_stride, kv_ds,
+                    layer, half_bytes, write_start, head_stride, kv_dt,
                 )?;
 
                 if layer == 0 {

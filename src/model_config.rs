@@ -10,6 +10,7 @@ use crate::loader::{
     WeightFormat,
 };
 use crate::manifest::{ModelManifest, TensorRole};
+use gllm_kernels::types::DType;
 
 #[derive(Debug, Error)]
 pub enum ModelConfigError {
@@ -103,9 +104,8 @@ pub struct ModelConfig {
     pub rope_scaling: Option<RopeScalingConfig>,
     pub kv_cache_block_size: usize,
     pub head_dim: usize,
-    pub dtype_size: usize,
-    /// Dominant weight dtype string: "f32", "f16", "bf16", "f64", etc.
-    pub dtype: String,
+    /// Model weight dtype (F32/F16/BF16).
+    pub dtype: DType,
     pub use_cache: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub attention_dropout: Option<f32>,
@@ -145,11 +145,11 @@ impl ModelConfig {
             if config_path.exists() {
                 let content = std::fs::read_to_string(config_path)?;
                 let value: Value = serde_json::from_str(&content)?;
-                let weight_dtype_size = loader
-                    .detect_weight_dtype_size()
+                let weight_dtype = loader
+                    .detect_weight_dtype()
                     .ok()
                     .flatten();
-                return Self::from_value(manifest, &value, weight_dtype_size);
+                return Self::from_value(manifest, &value, weight_dtype);
             }
         }
 
@@ -234,7 +234,7 @@ impl ModelConfig {
         };
 
         // 4. Build config
-        let base = Self::from_value(manifest, &base_value, Some(derived.dtype_size))?;
+        let base = Self::from_value(manifest, &base_value, Some(derived.dtype))?;
         apply_tensor_derived(base, derived)
     }
 
@@ -385,7 +385,19 @@ impl ModelConfig {
                 .as_ref()
                 .and_then(|cfg| cfg.base)
                 .or_else(|| require_gguf_f32(reader.rope_freq_base(), "rope.freq_base").ok())
-                .unwrap_or(0.0);
+                .ok_or_else(|| {
+                    ModelConfigError::InvalidConfig(
+                        "GGUF metadata missing: rope.freq_base (rope_theta)".to_string(),
+                    )
+                })?;
+
+            // Ω1: GGUF 模型必须有 attention（已在 line 353 验证 num_attention_heads > 0）
+            // 因此 rope_theta 必须 > 0
+            if rope_theta == 0.0 {
+                return Err(ModelConfigError::InvalidConfig(
+                    "GGUF metadata invalid: rope.freq_base (rope_theta) must be > 0".to_string(),
+                ));
+            }
 
             let rope_scale = gguf_arch_f32(reader, arch, "rope.scale")
                 .or_else(|| {
@@ -393,6 +405,7 @@ impl ModelConfig {
                         .as_ref()
                         .and_then(RopeScalingConfig::runtime_factor)
                 })
+                // Ω1: rope_scale = 1.0 is the industry standard (no scaling)
                 .unwrap_or(1.0);
             if !rope_scale.is_finite() || rope_scale <= 0.0 {
                 return Err(ModelConfigError::InvalidConfig(
@@ -462,8 +475,7 @@ impl ModelConfig {
             rope_scaling,
             kv_cache_block_size: base_derived.head_dim.max(base_derived.num_key_value_heads),
             head_dim: base_derived.head_dim,
-            dtype_size: base_derived.dtype_size,
-            dtype: base_derived.dtype.clone(),
+            dtype: base_derived.dtype,
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout,
@@ -480,7 +492,7 @@ impl ModelConfig {
     pub fn from_value(
         manifest: &ModelManifest,
         value: &Value,
-        weight_dtype_size: Option<usize>,
+        weight_dtype: Option<DType>,
     ) -> ModelConfigResult<Self> {
         let hidden_size = require_usize(value, &["hidden_size", "n_embd", "d_model"])?;
         let num_attention_heads =
@@ -562,10 +574,15 @@ impl ModelConfig {
                 .as_ref()
                 .and_then(|cfg| cfg.base)
                 .or_else(|| find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]))
-                .unwrap_or(0.0)
+                .ok_or_else(|| {
+                    ModelConfigError::InvalidConfig(
+                        "model metadata missing: rope_theta (required for models with attention)".to_string(),
+                    )
+                })?
         };
 
         // RoPE 缩放系数优先读取完整 rope_scaling 对象；缺失时保持无缩放 (1.0)。
+        // Ω1: rope_scale = 1.0 is the industry standard (no rotation scaling)
         let rope_scale = find_f32(value, &["rope_scale", "rope_factor", "rope.scaling.factor"])
             .or_else(|| {
                 rope_scaling
@@ -573,7 +590,7 @@ impl ModelConfig {
                     .and_then(RopeScalingConfig::runtime_factor)
             })
             .unwrap_or_else(|| {
-                log::debug!("rope_scale not found: defaulting to 1.0");
+                log::debug!("rope_scale not found: defaulting to 1.0 (no scaling)");
                 1.0
             });
         if !rope_scale.is_finite() || rope_scale <= 0.0 {
@@ -616,6 +633,14 @@ impl ModelConfig {
             ));
         }
 
+        // Ω1: 对于有 attention 的模型，rope_theta 必须 > 0
+        // Embedding 模型（num_attention_heads == 0）可以有 rope_theta = 0
+        if num_attention_heads > 0 && rope_theta == 0.0 {
+            return Err(ModelConfigError::InvalidConfig(
+                "rope_theta must be > 0 for models with attention (non-embedding models)".to_string(),
+            ));
+        }
+
         let kv_cache_block_size = find_usize(
             value,
             &["kv_cache_block_size", "kv_block_size", "page_size"],
@@ -632,26 +657,26 @@ impl ModelConfig {
         }
 
         // Ω1: dtype 大小必须从实际权重中读取，不从外部配置推断。
-        let dtype_size = weight_dtype_size.ok_or_else(|| {
+        let weight_dtype = weight_dtype.ok_or_else(|| {
             ModelConfigError::InvalidConfig(
-                "无法确定模型 dtype_size：权重中缺少可识别浮点 dtype".to_string(),
+                "无法确定模型 dtype：权重中缺少可识别浮点 dtype".to_string(),
             )
         })?;
 
-        // Derive dtype string: prefer torch_dtype from config.json, fall back to dtype_size.
+        // Derive dtype: prefer torch_dtype from config.json, fall back to detected weight dtype.
         let dtype = find_string(value, &["torch_dtype", "dtype"])
-            .map(|s| match s.as_str() {
-                "bfloat16" => "bf16".to_string(),
-                "float16" => "f16".to_string(),
-                "float32" => "f32".to_string(),
-                "float64" => "f64".to_string(),
-                other => other.to_string(),
+            .and_then(|s| match s.as_str() {
+                "bfloat16" => Some(DType::BF16),
+                "float16" => Some(DType::F16),
+                "float32" => Some(DType::F32),
+                "float64" => Some(DType::F32), // f64 降级到 f32
+                other => {
+                    log::warn!("Unknown torch_dtype: {}, using detected weight dtype", other);
+                    None
+                }
             })
-            .unwrap_or_else(|| match dtype_size {
-                2 => "f16".to_string(),
-                8 => "f64".to_string(),
-                _ => "f32".to_string(),
-            });
+            .unwrap_or(weight_dtype);
+
 
         let attention_dropout = find_f32(value, &["attention_dropout", "attention.dropout"])
             .filter(|v| v.is_finite() && *v >= 0.0);
@@ -683,7 +708,6 @@ impl ModelConfig {
             rope_scaling,
             kv_cache_block_size,
             head_dim,
-            dtype_size,
             dtype,
             use_cache: find_bool(value, &["use_cache"]),
             tie_word_embeddings: find_bool(value, &["tie_word_embeddings"]),
@@ -726,8 +750,7 @@ pub(crate) struct TensorDerivedConfig {
     pub intermediate_size: Option<usize>,
     pub vocab_size: usize,
     pub head_dim: usize,
-    pub dtype_size: usize,
-    pub dtype: String,
+    pub dtype: DType,
     pub tensor_map: HashMap<TensorRole, String>,
 }
 
@@ -896,8 +919,7 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
         intermediate_size = Some(out);
     }
 
-    let dtype_size = derive_dtype_size(&metas)?;
-    let dtype = derive_dtype_str(&metas);
+    let dtype = derive_dtype(&metas)?;
 
     // 6. Build Tensor Map
     // We only need to store the pattern for each role once.
@@ -923,7 +945,6 @@ pub(crate) fn derive_config_from_tensors_with_hints<P: TensorProvider>(
         intermediate_size,
         vocab_size,
         head_dim,
-        dtype_size,
         dtype,
         tensor_map,
     })
@@ -991,7 +1012,6 @@ fn apply_tensor_derived(
     }
     base.vocab_size = derived.vocab_size;
     base.head_dim = derived.head_dim;
-    base.dtype_size = derived.dtype_size;
     base.dtype = derived.dtype;
     base.kv_cache_block_size = base.head_dim.max(base.num_key_value_heads);
     // Ω1: Update tensor map with derived patterns
@@ -1139,11 +1159,10 @@ fn derive_dtype_size(metas: &[TensorMeta]) -> ModelConfigResult<usize> {
 
 /// Derive the dominant floating-point dtype string from tensor metadata.
 /// Returns "f32" as default when no floating tensors are found.
-fn derive_dtype_str(metas: &[TensorMeta]) -> String {
+fn derive_dtype(metas: &[TensorMeta]) -> ModelConfigResult<DType> {
     let mut bf16_count = 0usize;
     let mut f16_count = 0usize;
     let mut f32_count = 0usize;
-    let mut f64_count = 0usize;
 
     for meta in metas {
         if !is_floating_dtype(meta.dtype) {
@@ -1153,24 +1172,22 @@ fn derive_dtype_str(metas: &[TensorMeta]) -> String {
             safetensors::Dtype::BF16 => bf16_count += 1,
             safetensors::Dtype::F16 => f16_count += 1,
             safetensors::Dtype::F32 => f32_count += 1,
-            safetensors::Dtype::F64 => f64_count += 1,
+            safetensors::Dtype::F64 => f32_count += 1, // f64 降级到 f32
             _ => {}
         }
     }
 
     // Pick the dominant dtype by count
-    let max = bf16_count.max(f16_count).max(f32_count).max(f64_count);
+    let max = bf16_count.max(f16_count).max(f32_count);
     if max == 0 {
-        return "f32".to_string();
+        return Ok(DType::F32); // 默认 F32
     }
     if bf16_count == max {
-        "bf16".to_string()
+        Ok(DType::BF16)
     } else if f16_count == max {
-        "f16".to_string()
-    } else if f64_count == max {
-        "f64".to_string()
+        Ok(DType::F16)
     } else {
-        "f32".to_string()
+        Ok(DType::F32)
     }
 }
 
@@ -1625,7 +1642,7 @@ mod tests {
         assert_eq!(derived.num_key_value_heads, 11);
         assert_eq!(derived.num_hidden_layers, 2);
         assert_eq!(derived.intermediate_size, Some(11264));
-        assert_eq!(derived.dtype_size, 2);
+        assert_eq!(derived.dtype, DType::F16);
     }
 
     #[test]
@@ -1688,8 +1705,7 @@ mod tests {
             rope_scaling: None,
             kv_cache_block_size: 128,
             head_dim: 128,
-            dtype_size: 2,
-            dtype: "bf16".to_string(),
+            dtype: DType::BF16,
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout: None,
@@ -1726,8 +1742,7 @@ mod tests {
             rope_scaling: None,
             kv_cache_block_size: 128,
             head_dim: 128,
-            dtype_size: 2,
-            dtype: "bf16".to_string(),
+            dtype: DType::BF16,
             use_cache: None,
             tie_word_embeddings: None,
             attention_dropout: None,

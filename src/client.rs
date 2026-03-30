@@ -36,20 +36,25 @@ use thiserror::Error;
 /// # Error Variants (SPEC §4)
 ///
 /// - `ModelNotFound(String)` — Model not found or download failed
-/// - `BackendError(String)` — Backend initialization failed
-/// - `OutOfMemory` — Out of memory (simplified, no fields)
+/// - `BackendError(BackendError)` — Backend initialization failed (nested type preserves error details)
+/// - `OutOfMemory(OomHaltError)` — Out of memory (nested type preserves OOM details)
 /// - `InvalidModelType` — Model type mismatch (e.g., using Embedding model for Chat)
 /// - `RuntimeError(String)` — General runtime errors
+///
+/// # Error Source Chain
+///
+/// Nested error types (`BackendError`, `OomHaltError`) are accessible via `source()`,
+/// allowing callers to inspect detailed error information (e.g., `Unimplemented` variants).
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
 
     #[error("backend error: {0}")]
-    BackendError(String),
+    BackendError(#[source] crate::engine::executor::BackendError),
 
-    #[error("out of memory")]
-    OutOfMemory,
+    #[error("out of memory: {0}")]
+    OutOfMemory(#[source] crate::kv_cache::OomHaltError),
 
     #[error("invalid model type for requested operation")]
     InvalidModelType,
@@ -66,8 +71,10 @@ pub type GllmError = ClientError;
 impl From<BackendContextError> for ClientError {
     fn from(err: BackendContextError) -> Self {
         match err {
-            BackendContextError::UnsupportedArchitecture(arch) => {
-                ClientError::BackendError(format!("unsupported architecture: {:?}", arch))
+            BackendContextError::UnsupportedArchitecture(_arch) => {
+                // PER SPEC 04-API-DESIGN §4: Map to InvalidModelType for architecture mismatch
+                // This preserves semantic meaning while avoiding string-based error loss
+                ClientError::InvalidModelType
             }
             BackendContextError::Loader(err) => ClientError::from(err),
             BackendContextError::Executor(err) => ClientError::from(err),
@@ -84,7 +91,7 @@ impl From<LoaderError> for ClientError {
 
 impl From<BackendError> for ClientError {
     fn from(err: BackendError) -> Self {
-        ClientError::BackendError(format!("{}", err))
+        ClientError::BackendError(err)
     }
 }
 
@@ -97,7 +104,14 @@ impl From<ExecutorError> for ClientError {
 impl From<crate::scheduler::SchedulerError> for ClientError {
     fn from(err: crate::scheduler::SchedulerError) -> Self {
         match err {
-            crate::scheduler::SchedulerError::OutOfMemory { .. } => ClientError::OutOfMemory,
+            crate::scheduler::paged_scheduler::SchedulerError::OutOfMemory {
+                operation,
+                needed_blocks,
+                free_blocks,
+            } => ClientError::OutOfMemory(crate::kv_cache::OomHaltError::fatal_halt(format!(
+                "{}: need {} blocks, only {} free",
+                operation, needed_blocks, free_blocks
+            ))),
             _ => ClientError::RuntimeError(format!("scheduler error: {}", err)),
         }
     }
@@ -883,11 +897,43 @@ impl Client {
     /// ```
     pub async fn inject_knowledge(
         &self,
-        _source: crate::knowledge::KnowledgeSource,
-        _target: crate::knowledge::LayerTarget,
+        source: crate::knowledge::KnowledgeSource,
+        target: crate::knowledge::LayerTarget,
     ) -> Result<crate::knowledge::KnowledgeInjectionResult, ClientError> {
-        // Skeleton: requires executor integration
-        Err(ClientError::RuntimeError("inject_knowledge not implemented".to_string()))
+        use crate::knowledge::KnowledgeDataSource;
+
+        // Get the executor state
+        let state_guard = self.state.read().map_err(|_| {
+            ClientError::RuntimeError("client state lock poisoned".to_string())
+        })?;
+        let client_state = state_guard.as_ref().ok_or_else(|| {
+            ClientError::RuntimeError("no model loaded".to_string())
+        })?;
+
+        // Create engine context with defaults (per SPEC §8.2)
+        // TODO: Extract actual values from executor's forward_config
+        let engine_ctx = crate::engine::EngineContext::new(
+            32,  // Default num_layers (TODO: get from model config)
+            4096, // Default hidden_size
+            16,   // Default kv_page_size
+        );
+
+        // Materialize the payload (per SPEC §8.1)
+        let _payload = source.materialize(&engine_ctx)?;
+
+        // TODO: Integrate with executor for actual injection
+        // This requires:
+        // 1. Physical layer mapping (target -> actual layer number)
+        // 2. KV cache page table manipulation (for FrozenKvChunk)
+        // 3. Residual stream injection (for LateFusionVector)
+        // 4. LoRA weight mounting (for DynamicLoRA)
+
+        // Calculate physical layer for result
+        let actual_layer = target.to_physical_layer(32); // TODO: get actual num_layers
+
+        Err(ClientError::RuntimeError(
+            "inject_knowledge requires executor integration for actual injection".to_string()
+        ))
     }
 
     // ========================================================================
@@ -916,8 +962,16 @@ impl Client {
         _text: &str,
         _target: crate::knowledge::LayerTarget,
     ) -> Result<crate::intent::IntentEncoding, ClientError> {
-        // Skeleton: requires executor integration
-        Err(ClientError::RuntimeError("encode_intent not implemented".to_string()))
+        use crate::intent::encode_intent as inner_encode_intent;
+
+        // TODO: Integrate with executor for actual intent encoding
+        // This requires:
+        // 1. Tokenize input text
+        // 2. Run forward pass truncated at target layer
+        // 3. Extract hidden state as embedding
+        Err(ClientError::RuntimeError(
+            "encode_intent requires executor integration for actual encoding".to_string()
+        ))
     }
 
     /// Attach guardrail (per SPEC 04-API-DESIGN §7.4).
@@ -941,8 +995,16 @@ impl Client {
         _target: LayerTarget,
         _policy: crate::intent::SafetyPolicy,
     ) -> Result<crate::intent::GuardrailAttachment, ClientError> {
-        // Skeleton: requires executor integration
-        Err(ClientError::RuntimeError("attach_guardrail not implemented".to_string()))
+        use crate::intent::attach_guardrail as inner_attach_guardrail;
+
+        // TODO: Integrate with executor for actual guardrail attachment
+        // This requires:
+        // 1. Load probe weights/model
+        // 2. Register injection hook at target layer
+        // 3. Configure policy (threshold-based halt/veto)
+        Err(ClientError::RuntimeError(
+            "attach_guardrail requires executor integration for actual attachment".to_string()
+        ))
     }
 
     /// Attach global guardrail (per SPEC 04-API-DESIGN §9.2).
@@ -965,8 +1027,14 @@ impl Client {
         &self,
         _policy: crate::intent::SafetyPolicyConfig,
     ) -> Result<(), ClientError> {
-        // Skeleton: requires executor integration
-        Err(ClientError::RuntimeError("attach_guardrail_global not implemented".to_string()))
+        // TODO: Integrate with executor for global guardrail configuration
+        // This requires:
+        // 1. Store policy in executor state
+        // 2. Apply to all forward passes
+        // 3. Monitor safety thresholds
+        Err(ClientError::RuntimeError(
+            "attach_guardrail_global requires executor integration for global policy".to_string()
+        ))
     }
 
     /// Expose the internal state handle for streaming support.

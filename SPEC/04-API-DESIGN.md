@@ -103,13 +103,30 @@ pub enum GllmError {
     /// 模型未找到或下载失败
     ModelNotFound(String),
     /// 后端初始化失败 (如 CUDA 不可用)
-    BackendError(String),
-    /// 显存不足
-    OutOfMemory,
+    /// 嵌套类型保留完整错误信息，可通过 source() 访问
+    BackendError(BackendError),
+    /// 显存不足 (嵌套类型保留 OOM 详情)
+    OutOfMemory(OomHaltError),
     /// 模型类型不匹配 (如用 Embedding 模型做 Chat)
     InvalidModelType,
     /// 运行时错误
     RuntimeError(String),
+}
+```
+
+### 4.1 错误源链 (Error Source Chain)
+
+嵌套错误类型 (`BackendError`, `OomHaltError`) 可通过 `source()` 方法访问，允许调用方检查详细错误信息：
+
+```rust
+match result {
+    Err(GllmError::BackendError(e)) => {
+        // 可通过 source() 或直接匹配检查具体变体
+        if let Some(backend_err) = err.source() {
+            // backend_err 是 BackendError，可匹配 Unimplemented 等变体
+        }
+    }
+    // ...
 }
 ```
 

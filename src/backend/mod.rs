@@ -659,10 +659,13 @@ impl DynBackendContext {
         // Try to create a temporary loader to detect dtype
         let loader = Loader::from_env()?.with_weights(weight_paths.to_vec());
 
-        if let Ok(Some(size)) = loader.detect_weight_dtype_size() {
-            if let Some(dtype) = DetectedDtype::from_size(size) {
-                return Ok(dtype);
-            }
+        if let Ok(Some(dtype)) = loader.detect_weight_dtype() {
+            return Ok(match dtype {
+                gllm_kernels::types::DType::F32 => DetectedDtype::F32,
+                gllm_kernels::types::DType::F16 => DetectedDtype::F16,
+                gllm_kernels::types::DType::BF16 => DetectedDtype::BF16,
+                gllm_kernels::types::DType::U8 => DetectedDtype::F32, // U8 不适用于推理，降级到 F32
+            });
         }
 
         // Default to f32 if detection fails

@@ -1,6 +1,7 @@
 //! KV cache tracking for executor (per SPEC 03-DATA-STRUCTURE.md, 07-OBSERVABILITY.md §7.1)
 
 use crate::engine::executor::{KvCacheHandle, KvCacheConfig};
+use gllm_kernels::types::DType;
 use thiserror::Error;
 
 // ============================================================================
@@ -392,10 +393,15 @@ mod tests {
 
     #[test]
     fn test_kv_cache_state_advance() {
-        let handle = KvCacheHandle::new();
+        let handle = KvCacheHandle(1);
         let config = KvCacheConfig {
+            num_layers: 32,
+            num_heads: 32,
+            head_dim: 128,
             max_seq_len: 100,
-            ..Default::default()
+            kv_dtype: DType::F16,
+            page_size: 16,
+            swap_config: None,
         };
         let mut state = KvCacheState::new(handle, config);
         assert_eq!(state.used(), 0);
@@ -410,10 +416,15 @@ mod tests {
 
     #[test]
     fn test_kv_cache_state_reset() {
-        let handle = KvCacheHandle::new();
+        let handle = KvCacheHandle(1);
         let config = KvCacheConfig {
+            num_layers: 32,
+            num_heads: 32,
+            head_dim: 128,
             max_seq_len: 100,
-            ..Default::default()
+            kv_dtype: DType::F16,
+            page_size: 16,
+            swap_config: None,
         };
         let mut state = KvCacheState::new(handle, config);
         state.advance(50).unwrap();
@@ -425,11 +436,16 @@ mod tests {
 
     #[test]
     fn test_kv_cache_double_buffer_swap() {
-        let handle1 = KvCacheHandle::new();
-        let handle2 = KvCacheHandle::new();
+        let handle1 = KvCacheHandle(1);
+        let handle2 = KvCacheHandle(2);
         let config = KvCacheConfig {
+            num_layers: 32,
+            num_heads: 32,
+            head_dim: 128,
             max_seq_len: 100,
-            ..Default::default()
+            kv_dtype: DType::F16,
+            page_size: 16,
+            swap_config: None,
         };
         let front = KvCacheState::new(handle1, config.clone());
         let back = KvCacheState::new(handle2, config);
