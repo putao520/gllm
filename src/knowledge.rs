@@ -82,7 +82,8 @@ pub trait KnowledgeDataSource {
     fn injection_kind(&self) -> InjectionKind;
 
     /// 将数据物理化至引擎可感知的格式
-    fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError>;
+    /// 将数据物理化至引擎可感知的格式 (per SPEC 04-API-DESIGN §8.1)
+    fn materialize(&self, _engine: &crate::engine::EngineContext) -> Result<MaterializedPayload, KnowledgeError>;
 }
 
 /// 知识注入配置 (per SPEC 04-API-DESIGN §7.2)
@@ -101,11 +102,11 @@ impl KnowledgeInjectionConfig {
 ///
 /// 从预存的 KV cache 文件加载数据。
 #[derive(Debug, Clone)]
-pub struct FrozenKvSource {
+pub struct KnowledgeSource {
     pub path: PathBuf,
 }
 
-impl FrozenKvSource {
+impl KnowledgeSource {
     /// 从冻结 KV 文件创建数据源
     pub fn from_frozen_kv(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -114,15 +115,14 @@ impl FrozenKvSource {
     }
 }
 
-impl KnowledgeDataSource for FrozenKvSource {
+impl KnowledgeDataSource for KnowledgeSource {
     fn injection_kind(&self) -> InjectionKind {
         InjectionKind::FrozenKvChunk
     }
 
-    fn materialize(&self) -> Result<MaterializedPayload, KnowledgeError> {
-        // Skeleton: requires actual KV file loading implementation
+    fn materialize(&self, _engine: &crate::engine::EngineContext) -> Result<MaterializedPayload, KnowledgeError> {
         Err(KnowledgeError::NotImplemented(
-            "FrozenKvSource::materialize requires executor integration".into(),
+            "KnowledgeSource::materialize requires executor integration".into(),
         ))
     }
 }
@@ -294,9 +294,10 @@ mod tests {
 
     #[test]
     fn test_frozen_kv_source() {
-        let source = FrozenKvSource::from_frozen_kv("test.kv");
+        let source = KnowledgeSource::from_frozen_kv("test.kv");
         assert_eq!(source.injection_kind(), InjectionKind::FrozenKvChunk);
-        assert!(source.materialize().is_err());
+        let ctx = crate::engine::EngineContext::new(32, 4096, 16);
+        assert!(source.materialize(&ctx).is_err());
     }
 
     #[test]

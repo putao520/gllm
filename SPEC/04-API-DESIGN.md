@@ -40,6 +40,9 @@ client.swap_model("Qwen/Qwen3-14B-Chat").await?;
 // 卸载当前模型 (释放资源，保持 Client 实例)
 client.unload_model().await?;
 
+// 重新加载
+client.load_model("org/model", ModelKind::Chat).await?;
+
 // 检查当前状态
 if let Some(info) = client.model_info().await {
     println!("Current model: {}", info.id);
@@ -59,13 +62,11 @@ if let Some(info) = client.model_info().await {
 let output = client.generate("Hello, who are you?")
     .max_tokens(100)
     .temperature(0.7)
-    .stream(true) // 返回 Stream
+    .stream(false)
+    .generate()
     .await?;
 
-// 流式处理
-while let Some(token) = output.next().await {
-    print!("{}", token);
-}
+println!("{}", output.text);
 ```
 
 ### 3.2 向量嵌入 (Embedding)
@@ -76,7 +77,6 @@ let embeddings = client.embed(vec![
     "Machine learning is fascinating"
 ]).await?;
 
-// 返回批量特征向量，底层类型依赖 TurboQuant 配置
 assert_eq!(embeddings.len(), 2);
 assert_eq!(embeddings[0].len(), 1024); // 维度
 ```
@@ -92,8 +92,6 @@ let scores = client.rerank(
         "Berlin is in Germany"
     ]
 ).await?;
-
-// 返回特征相关性打分（浮点标量输出，不涉及底层计算退化）
 ```
 
 ## 4. 错误处理
@@ -303,7 +301,7 @@ use gllm::engine::knowledge::{KnowledgeSource, LayerTarget};
 client.inject_knowledge(
     KnowledgeSource::from_frozen_kv("company_logs_dec_2025.kv"),
     LayerTarget::MidSemantic 
-).await?;
+)?;
 ```
 
 ### 7.3 Multi-Intent 降维提取 API
@@ -315,7 +313,7 @@ client.inject_knowledge(
 let intent_embedding = client.encode_intent(
     "Cancel my subscription",
     LayerTarget::MidSemantic 
-).await?;
+)?;
 
 // intent_embedding 直接对接外部轻量分类器
 ```
@@ -332,7 +330,7 @@ client.attach_guardrail(
     GuardProbe::from_safetensors("toxicity_classifier_v1.safetensors"),
     LayerTarget::DeepLogic,
     SafetyPolicy::HaltAndVeto { threshold: 0.95 }
-).await?;
+)?;
 ```
 
 ---
@@ -424,9 +422,9 @@ QuantType 从加载的权重文件自动检测，JIT 据此生成硬件原生内
 // SafeTensors F16 → QuantType::F16 → float_matmul JIT 内核
 // 推理过程中无类型判断分支
 
-let engine = Engine::builder()
-    .load_model("model.gguf")  // QuantType 自动检测
-    .build().await?;
+let client = Client::builder()
+    .model("model.gguf")  // QuantType 自动检测
+    .build()?;
 ```
 
 ### 9.2 飞行安全护栏全局守护 (`SafetyPolicyConfig`)

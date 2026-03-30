@@ -1,7 +1,7 @@
 //! gllm C FFI exports.
 //!
 //! This module provides a C-compatible API for gllm.
-//! Since the Client API is now async-first, the FFI layer uses
+//! Since the Client API is async-first, the FFI layer uses
 //! `tokio::runtime::Runtime::new()` to block on async calls.
 
 use std::ffi::{c_char, CStr, CString};
@@ -157,9 +157,8 @@ pub unsafe extern "C" fn gllm_free_generate_result(result: *mut GllmGenerateResu
 /// Get the gllm client library version string.
 ///
 /// Returns a static null-terminated string. Do not free.
-/// Note: `gllm_version()` is exported by gllm-kernels for the backend version.
 #[no_mangle]
 pub extern "C" fn gllm_client_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.11.0\0";
+    static VERSION: &[u8] = b"0.12.0\0";
     VERSION.as_ptr() as *const c_char
 }

@@ -63,7 +63,7 @@ pub use attention_contracts::{
 // Re-export knowledge injection types at engine::knowledge (per SPEC 04-API-DESIGN §7.2)
 pub mod knowledge {
     pub use crate::knowledge::{
-        FrozenKvSource, InjectionKind, InjectionScheduler, KnowledgeDataSource, KnowledgeError,
+        KnowledgeSource, InjectionKind, InjectionScheduler, KnowledgeDataSource, KnowledgeError,
         KnowledgeInjectionConfig, KnowledgeInjectionResult, KvSideloadManager, LayerTarget,
         MaterializedPayload,
     };

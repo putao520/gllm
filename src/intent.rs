@@ -133,7 +133,7 @@ impl From<IntentError> for GllmError {
 /// 编码意图 (per SPEC 04-API-DESIGN §7.3)
 pub fn encode_intent(
     _text: &str,
-    _config: IntentConfig,
+    _target: LayerTarget,
 ) -> Result<IntentEncoding, IntentError> {
     Err(IntentError::NotImplemented(
         "encode_intent requires executor integration".into(),

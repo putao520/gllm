@@ -48,7 +48,7 @@ pub use intent::{
     IntentError, SafetyPolicy, SafetyPolicyConfig,
 };
 pub use knowledge::{
-    FrozenKvSource, HitRateTracker, InjectionKind, InjectionScheduler, KnowledgeDataSource,
+    KnowledgeSource, HitRateTracker, InjectionKind, InjectionScheduler, KnowledgeDataSource,
     KnowledgeError, KnowledgeInjectionConfig, KnowledgeInjectionResult, KvSideloadManager,
     LayerTarget, MaterializedPayload,
 };

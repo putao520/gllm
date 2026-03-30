@@ -870,19 +870,21 @@ impl Client {
     /// # Example
     ///
     /// ```no_run
-    /// use gllm::{Client, knowledge::{KnowledgeInjectionConfig, LayerTarget, FrozenKvSource}};
+    /// use gllm::{Client, knowledge::{KnowledgeSource, LayerTarget}};
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = Client::new_empty();
-    /// let source = FrozenKvSource::from_frozen_kv("company_logs.kv");
-    /// let config = KnowledgeInjectionConfig::new(LayerTarget::MidSemantic, Box::new(source));
-    /// let result = client.inject_knowledge(config).await?;
+    /// let result = client.inject_knowledge(
+    ///     KnowledgeSource::from_frozen_kv("company_logs.kv"),
+    ///     LayerTarget::MidSemantic
+    /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn inject_knowledge(
         &self,
-        _config: crate::knowledge::KnowledgeInjectionConfig,
+        _source: crate::knowledge::KnowledgeSource,
+        _target: crate::knowledge::LayerTarget,
     ) -> Result<crate::knowledge::KnowledgeInjectionResult, ClientError> {
         // Skeleton: requires executor integration
         Err(ClientError::RuntimeError("inject_knowledge not implemented".to_string()))
@@ -894,22 +896,25 @@ impl Client {
 
     /// Encode intent (per SPEC 04-API-DESIGN §7.3).
     ///
+    /// Only compute to the semantic layer target and return the feature vector,
+    /// truncated from the current layer to return immediately.
+    /// The method name follows SPEC convention (shorter verb form).
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// use gllm::{Client, intent::{IntentConfig, LayerTarget}};
+    /// use gllm::{Client, knowledge::LayerTarget};
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = Client::new_empty();
-    /// let config = IntentConfig::new(LayerTarget::MidSemantic);
-    /// let intent = client.encode_intent("Cancel my subscription", config).await?;
+    /// let intent = client.encode_intent("Cancel my subscription", LayerTarget::MidSemantic).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn encode_intent(
         &self,
         _text: &str,
-        _config: crate::intent::IntentConfig,
+        _target: crate::knowledge::LayerTarget,
     ) -> Result<crate::intent::IntentEncoding, ClientError> {
         // Skeleton: requires executor integration
         Err(ClientError::RuntimeError("encode_intent not implemented".to_string()))
