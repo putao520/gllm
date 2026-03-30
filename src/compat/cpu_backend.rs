@@ -167,9 +167,6 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
     ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
-        if config.kernel_strategy != crate::scheduler::jit_types::KernelStrategy::AccuracyFirst {
-            log::info!("cpu_backend: executing with {:?} strategy", config.kernel_strategy);
-        }
         use crate::engine::executor::AttentionMaskType;
         match topology.mask_type {
             AttentionMaskType::Causal => {

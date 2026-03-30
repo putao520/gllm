@@ -38,6 +38,9 @@ use gllm_kernels::quant::QuantType;
 pub use adapter::ggml_dtype_to_quant_type;
 pub use pytorch::{convert_bins_to_safetensors, PytorchConversionConfig, PytorchConversionOutput};
 
+// Re-export quantization metadata types (defined later in this file)
+// Note: CompanionConfig and QuantizationMetadata are already public below
+
 /// A quantized tensor stored as raw block bytes with its QuantType metadata.
 /// These are not uploaded via `Backend::upload_weights()` — they stay as raw bytes
 /// and are dispatched to quantized matmul kernels at inference time.
@@ -1207,14 +1210,36 @@ fn deduplicate_q_heads_heuristic(meta: &TensorMeta, data: &mut [f32]) {
     }
 }
 
+/// 量化配置的伴生张量信息
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompanionConfig {
+    /// 量化 scales 张量名称
+    pub scales: String,
+    /// 量化 zeros 张量名称（可选，某些量化方案不需要）
+    pub zeros: Option<String>,
+}
+
+/// 量化元数据
+///
+/// REQ-ARCH-Ω1: 量化配置必须包含完整信息，包括符号位和伴生张量
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationMetadata {
-    pub group_size: usize,
+    /// 量化分组大小（某些文档中称为 group_size，这里统一使用 block_size）
+    pub block_size: usize,
+    /// 量化位宽
     pub bits: u8,
+    /// 是否使用激活值降序排列
     #[serde(default)]
     pub desc_act: bool,
+    /// 是否使用对称量化
     #[serde(default)]
     pub is_sym: bool,
+    /// 是否为有符号量化
+    #[serde(default)]
+    pub signed: bool,
+    /// 伴生张量配置（scales/zeros）
+    #[serde(default)]
+    pub companions: Option<CompanionConfig>,
 }
 
 impl QuantizationMetadata {

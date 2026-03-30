@@ -7,11 +7,8 @@ mod common;
 
 use gllm::scheduler::{
     observer::{BasicObserver, ObserverError, RuntimeObserver},
-    policy::{
-        AccuracyFirstPolicy, BalancedPolicy, PolicyConfig, PolicyVariant,
-        SchedulingPolicy, ThroughputFirstPolicy,
-    },
-    jit_types::{KernelStrategy, SchedulerDecision, SystemState},
+    policy::{AccuracyFirstPolicy, PolicyConfig, PolicyVariant, SchedulingPolicy},
+    jit_types::{SchedulerDecision, SystemState},
 };
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheSlot, KvCacheState};
 use gllm::engine::executor::{KvCacheHandle, KvCacheConfig};
@@ -118,10 +115,6 @@ fn absolute_policy_emergency_memory_pressure() {
         5,
         "max_batch_size 应等于当前运行数"
     );
-    assert_eq!(
-        decision.kernel_strategy,
-        KernelStrategy::AccuracyFirst
-    );
 }
 
 /// TEST-OBS-002-B: AbsolutePolicy KV 碎片整理决策
@@ -188,77 +181,6 @@ fn absolute_policy_normal_mode() {
     assert_eq!(decision.max_batch_size, 32, "应使用 safe mode batch size");
 }
 
-/// TEST-OBS-002-D: ThroughputFirstPolicy 激进模式决策
-///
-/// **关联需求**: REQ-OBS-002
-/// **测试类型**: 正向测试
-///
-/// **测试步骤**:
-/// 1. 构造高队列低内存压力状态
-/// 2. 调用 `ThroughputFirstPolicy.decide()`
-///
-/// **期望结果**: `admit_new_prefill == true`, `max_batch_size == 256`
-#[test]
-fn throughput_policy_aggressive_mode() {
-    let state = SystemState {
-        memory_pressure: 0.5,
-        kv_fragmentation: 0.2,
-        waiting_queue_len: 60,
-        current_running_len: 10,
-        current_batch_size: 10,
-        mean_context_len: 128,
-        ..Default::default()
-    };
-
-    let decision = ThroughputFirstPolicy::default().decide(&state);
-
-    // SPEC §3.2: waiting_queue_len > 50 AND memory_pressure < 0.8 → aggressive
-    assert!(decision.admit_new_prefill, "应接受新的 prefill 请求");
-    assert_eq!(
-        decision.max_batch_size,
-        256,
-        "应使用激进模式 batch size"
-    );
-    assert_eq!(
-        decision.kernel_strategy,
-        KernelStrategy::ThroughputFirst
-    );
-}
-
-/// TEST-OBS-002-E: BalancedPolicy 保守模式决策
-///
-/// **关联需求**: REQ-OBS-002
-/// **测试类型**: 正向测试
-///
-/// **测试步骤**:
-/// 1. 构造高内存压力状态
-/// 2. 调用 `BalancedPolicy.decide()`
-///
-/// **期望结果**: `admit_new_prefill == false`, `force_swap_out_count == 1`
-#[test]
-fn balanced_policy_conservative_mode() {
-    let state = SystemState {
-        memory_pressure: 0.9,
-        kv_fragmentation: 0.2,
-        waiting_queue_len: 10,
-        current_running_len: 5,
-        current_batch_size: 5,
-        mean_context_len: 128,
-        ..Default::default()
-    };
-
-    let decision = BalancedPolicy::default().decide(&state);
-
-    // SPEC §3.3: memory_pressure > 0.85 → conservative mode
-    assert!(!decision.admit_new_prefill, "应拒绝新的 prefill 请求");
-    assert_eq!(decision.force_swap_out_count, 1, "应 swap out 1 页");
-    assert_eq!(
-        decision.max_batch_size,
-        5,
-        "max_batch_size 应等于当前运行数"
-    );
-}
-
 // ============================================================================
 // TEST-OBS-003: 静态内核路径不可更改性测试
 // ============================================================================
@@ -282,25 +204,19 @@ fn static_kernel_path_no_dynamic_strategy() {
         max_batch_size: 32,
         admit_new_prefill: true,
         force_swap_out_count: 0,
-        kernel_strategy: KernelStrategy::AccuracyFirst,
     };
 
     // 验证决策结构只包含吞吐量生命周期管理字段
-    // kernel_strategy 存在但由 JIT 编译期静态决定，不是运行时动态切换
     assert_eq!(decision.max_batch_size, 32);
     assert!(decision.admit_new_prefill);
     assert_eq!(decision.force_swap_out_count, 0);
 
-    // 验证所有策略返回的都是静态决策
+    // 验证策略返回的是静态决策（无 kernel_strategy 字段）
     let state = SystemState::default();
     let acc_decision = AccuracyFirstPolicy::default().decide(&state);
-    let thr_decision = ThroughputFirstPolicy::default().decide(&state);
-    let bal_decision = BalancedPolicy::default().decide(&state);
 
     // 所有决策都是有效的 SchedulerDecision
     assert!(acc_decision.max_batch_size > 0);
-    assert!(thr_decision.max_batch_size > 0);
-    assert!(bal_decision.max_batch_size > 0);
 }
 
 /// TEST-OBS-003-B: PolicyVariant 零成本抽象验证
@@ -325,15 +241,11 @@ fn policy_variant_zero_cost_abstraction() {
         ..Default::default()
     };
 
-    // 验证所有 variant 都能正确决策
+    // 验证 Accuracy variant 能正确决策
     let acc = PolicyVariant::Accuracy.decide(&state);
-    let thr = PolicyVariant::Throughput.decide(&state);
-    let bal = PolicyVariant::Balanced.decide(&state);
 
-    // 所有决策都应有效
+    // 决策应有效
     assert!(acc.max_batch_size > 0);
-    assert!(thr.max_batch_size > 0);
-    assert!(bal.max_batch_size > 0);
 
     // 验证自定义配置
     let custom_config = PolicyConfig {
@@ -345,15 +257,11 @@ fn policy_variant_zero_cost_abstraction() {
         batch_normal: 24,
         batch_aggressive: 128,
     };
-    let custom = PolicyVariant::Custom {
-        accuracy: custom_config.clone(),
-        throughput: custom_config.clone(),
-        balanced: custom_config,
-    };
-    let decision = custom.decide(&state);
+    let policy = AccuracyFirstPolicy::with_config(custom_config);
+    let decision = policy.decide(&state);
 
     // 自定义配置应生效
-    assert_eq!(decision.max_batch_size, 24); // balanced normal mode
+    assert_eq!(decision.max_batch_size, 16); // safe mode with custom batch_safe
 }
 
 // ============================================================================

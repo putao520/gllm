@@ -922,14 +922,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         );
         let system_state = self.observer.last_state;
 
-        // 1. JIT Decision: Decide Scheduling Strategy
+        // JIT Decision: Decide Scheduling Strategy
         let decision = self.policy.decide(&system_state);
-        self.forward_config.kernel_strategy = decision.kernel_strategy;
-        if decision.kernel_strategy != crate::scheduler::jit_types::KernelStrategy::AccuracyFirst {
-            log::info!("executor: kernel_strategy changed to {:?}", decision.kernel_strategy);
-        }
 
-        // 2. Schedule
+        // Schedule
         // Pass dynamic decision parameters to batcher
         let batch = if !self.batcher.has_pending_work() {
             return Ok(());
