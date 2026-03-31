@@ -531,6 +531,36 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => exec.hook_count(),
         }
     }
+
+    /// Get forward configuration (per SPEC 04-API-DESIGN §7.3 for encode_intent).
+    pub fn forward_config(&self) -> Result<crate::engine::executor::GeneratorForwardConfig, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => Ok(exec.forward_config()),
+            BackendExecutor::Rocm(exec) => Ok(exec.forward_config()),
+            BackendExecutor::Metal(exec) => Ok(exec.forward_config()),
+            BackendExecutor::Cpu(exec) => Ok(exec.forward_config()),
+        }
+    }
+
+    /// Get CPU backend reference (for knowledge injection and intent encoding).
+    pub fn cpu_backend(&self) -> Result<&crate::compat::CpuBackend<E>, ExecutorError> {
+        match self {
+            BackendExecutor::Cpu(exec) => Ok(exec.backend()),
+            _ => Err(ExecutorError::Backend(
+                crate::engine::executor::BackendError::Unimplemented("cpu_backend only available for CPU backend")
+            )),
+        }
+    }
+
+    /// Get weights reference (for knowledge injection and intent encoding).
+    pub fn weights(&self) -> Result<&crate::loader::WeightsHandle<crate::compat::CpuBackend<E>, E>, ExecutorError> {
+        match self {
+            BackendExecutor::Cpu(exec) => Ok(exec.weights()),
+            _ => Err(ExecutorError::Backend(
+                crate::engine::executor::BackendError::Unimplemented("weights only available for CPU backend in this API")
+            )),
+        }
+    }
 }
 
 /// Backward-compatible type alias for f32 backend executor.
@@ -579,7 +609,7 @@ impl BackendContext {
     }
 
     pub fn executor(&self) -> MutexGuard<'_, BackendExecutor<f32>> {
-        self.executor.lock().unwrap_or_else(|err| err.into_inner())
+        self.executor.lock().unwrap_or_else(|err| err.into_inner()) // LEGAL: Mutex poison 时恢复内部数据
     }
 
     pub fn executor_mut(&self) -> MutexGuard<'_, BackendExecutor<f32>> {
@@ -736,7 +766,7 @@ impl DynBackendContext {
     }
 
     pub fn executor(&self) -> MutexGuard<'_, DynBackendExecutor> {
-        self.executor.lock().unwrap_or_else(|err| err.into_inner())
+        self.executor.lock().unwrap_or_else(|err| err.into_inner()) // LEGAL: Mutex poison 时恢复内部数据
     }
 
     pub fn executor_mut(&self) -> MutexGuard<'_, DynBackendExecutor> {

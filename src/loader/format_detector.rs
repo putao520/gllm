@@ -19,7 +19,7 @@ pub fn detect_format_from_path(path: &Path) -> Result<WeightFormat> {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
-        .unwrap_or("")
+        .unwrap_or("") // LEGAL: 无扩展名时返回空字符串
         .to_ascii_lowercase();
     match ext.as_str() {
         "safetensors" => Ok(WeightFormat::SafeTensors),
@@ -49,7 +49,7 @@ pub fn collect_local_files(
 ) -> Result<LocalModelFiles> {
     if path.is_file() {
         let detected = detect_format_from_path(path)?;
-        let format = format_hint.unwrap_or(detected);
+        let format = format_hint.unwrap_or(detected); // LEGAL: 无 hint 时使用检测到的格式
         if detected != format {
             return Err(LoaderError::FormatNotFound(format));
         }

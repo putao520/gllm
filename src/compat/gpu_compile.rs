@@ -1542,7 +1542,7 @@ pub(crate) fn cuda_launch_graph(
                     .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
                 let n = input_meta.shape.last()
                     .and_then(|d| d.as_concrete())
-                    .unwrap_or(1);
+                    .unwrap_or(1); // LEGAL: 标量输入时 hidden_size=1
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
@@ -1569,7 +1569,7 @@ pub(crate) fn cuda_launch_graph(
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
-                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1);
+                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1); // LEGAL: 标量输入时 seq_len=1
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
@@ -2547,7 +2547,7 @@ pub(crate) fn hip_launch_graph(
                     .ok_or_else(|| BE::Other(format!("tensor meta for LayerNorm/RmsNorm input {:?}", entry.input_tids[0])))?;
                 let n = input_meta.shape.last()
                     .and_then(|d| d.as_concrete())
-                    .unwrap_or(1);
+                    .unwrap_or(1); // LEGAL: 标量输入时 hidden_size=1
                 raw_params[2] = n as u64;
             }
             OpKind::Residual | OpKind::Add | OpKind::Mul => {
@@ -2574,7 +2574,7 @@ pub(crate) fn hip_launch_graph(
             OpKind::RoPE { .. } => {
                 let input_meta = graph.tensor(entry.input_tids[0])
                     .ok_or_else(|| BE::Other(format!("tensor meta for RoPE input {:?}", entry.input_tids[0])))?;
-                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1);
+                let seq_len = input_meta.shape[0].as_concrete().unwrap_or(1); // LEGAL: 标量输入时 seq_len=1
                 let last = raw_params.len() - 1;
                 raw_params[last] = seq_len as u64;
             }
@@ -3470,7 +3470,7 @@ pub(crate) fn sample_logits_cpu(
             .collect();
 
         // Sort descending by score
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
 
         // Top-k filtering
         if sampling.top_k > 0 && sampling.top_k < scored.len() {
@@ -3500,7 +3500,7 @@ pub(crate) fn sample_logits_cpu(
         let probs: Vec<f32> = exp_vals.iter().map(|e| e / exp_sum).collect();
 
         let best_idx = probs.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) // LEGAL: NaN 比较的标准 Rust 模式
             .map(|(i, _)| i)
             .unwrap_or(0); // LEGAL: 空 probs 时默认索引 0
 

@@ -448,7 +448,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     "model config missing intermediate_size (FFN hidden dimension)".to_string(),
                 ))
             })?,
-            norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12),
+            norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12), // LEGAL: eps=1e-12 是 LayerNorm 的行业标准默认值
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
@@ -696,6 +696,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         &self.model_config
     }
 
+    /// Get forward configuration (per SPEC 04-API-DESIGN §7.3 for encode_intent).
+    pub fn forward_config(&self) -> GeneratorForwardConfig {
+        self.forward_config.clone()
+    }
+
     /// Add a generation hook (guardrail/probe).
     ///
     /// per SPEC 04-API-DESIGN §7.4 — hooks are called after each decode step
@@ -728,7 +733,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn hook_count(&self) -> usize {
         self.hooks.read()
             .map(|h| h.len())
-            .unwrap_or(0)
+            .unwrap_or(0) // LEGAL: 锁失败时返回 0（表示无 hooks）
     }
 
     pub fn allocate_kv_cache(&mut self, config: &KvCacheConfig) -> ExecutorResult<KvCacheHandle> {
@@ -922,7 +927,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .graph_executor
             .as_mut()
             .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
+            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         Ok(self.backend.batch_forward_gpu_pure(
             batch_input,
             &self.topology,
@@ -1159,8 +1164,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let hooks_guard = self.hooks.read();
             let hooks_decision = if let Ok(hooks) = &hooks_guard {
                 let mut decision = crate::generation::HookDecision::Continue;
+                // Get current generated tokens for this request
+                let generated_tokens = self
+                    .requests
+                    .get(&req_id)
+                    .map(|req| req.output_tokens.clone())
+                    .unwrap_or_default();
                 for hook in hooks.iter() {
-                    match hook.post_step(&logits.data, next_token) {
+                    match hook.post_step(&logits.data, &generated_tokens) {
                         crate::generation::HookDecision::Continue => continue,
                         crate::generation::HookDecision::Veto(reason) => {
                             log::debug!("executor: hook vetoed token {} for request {}: {}", next_token, req_id, reason);
@@ -1290,7 +1301,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .graph_executor
             .as_mut()
             .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
+            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         // Profiling/test execution (run pure forward manually without inserting into metrics stream)
         let (logits_list, _sparsity, _telemetries) = self.backend.batch_forward_gpu_pure(
             &batch_input,
@@ -1418,7 +1429,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .graph_executor
                 .as_mut()
                 .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut());
+                .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
             self.backend.embedding_forward_gpu_pure(
                 &tokens,
                 &self.topology,
@@ -1438,7 +1449,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .graph_executor
             .as_mut()
             .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
+            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,
@@ -1483,7 +1494,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .graph_executor
             .as_mut()
             .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
+            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,

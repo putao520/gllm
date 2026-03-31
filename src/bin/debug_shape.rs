@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 默认使用示例路径（可根据需要修改）
         std::env::var("HOME")
             .map(|h| format!("{}/.gllm/models/models--microsoft--Phi-4-mini-instruct/snapshots/*/model-00001-of-00002.safetensors", h))
-            .unwrap_or_else(|_| "./model.safetensors".to_string())
+            .unwrap_or_else(|_| "./model.safetensors".to_string()) // LEGAL: HOME 环境变量缺失时使用当前目录
     };
 
     // 读取 safetensors 文件头部

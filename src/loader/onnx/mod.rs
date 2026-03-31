@@ -175,7 +175,7 @@ impl OnnxLoader {
                 self.reverse_alias
                     .get(k)
                     .cloned()
-                    .unwrap_or_else(|| k.clone())
+                    .unwrap_or_else(|| k.clone()) // LEGAL: 无别名时使用原始名称
             })
             .collect();
         names.sort();
@@ -183,7 +183,7 @@ impl OnnxLoader {
     }
 
     pub fn tensor(&self, name: &str) -> Result<TensorSlice<'_>> {
-        let resolved = self.resolve(name).unwrap_or(name);
+        let resolved = self.resolve(name).unwrap_or(name); // LEGAL: 解析失败时使用原始名称
         let tensor = self
             .model
             .graph
@@ -194,7 +194,7 @@ impl OnnxLoader {
     }
 
     pub fn tensor_dtype(&self, name: &str) -> Result<Dtype> {
-        let resolved = self.resolve(name).unwrap_or(name);
+        let resolved = self.resolve(name).unwrap_or(name); // LEGAL: 解析失败时使用原始名称
         let tensor = self
             .model
             .graph
@@ -215,7 +215,7 @@ impl OnnxLoader {
                     .reverse_alias
                     .get(name)
                     .cloned()
-                    .unwrap_or_else(|| name.clone());
+                    .unwrap_or_else(|| name.clone()); // LEGAL: 无别名时使用原始名称
                 (display_name, tensor.dtype)
             })
             .collect::<Vec<_>>();
@@ -268,7 +268,7 @@ impl super::TensorProvider for OnnxLoader {
                     .reverse_alias
                     .get(name)
                     .cloned()
-                    .unwrap_or_else(|| name.clone());
+                    .unwrap_or_else(|| name.clone()); // LEGAL: 无别名时使用原始名称
                 super::TensorMeta {
                     name: display_name,
                     shape: tensor.shape.clone(),

@@ -18,7 +18,7 @@ impl ExternalDataResolver {
         let base_dir = model_path
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(|| PathBuf::from(".")); // LEGAL: 无父目录时使用当前目录
         Self {
             base_dir,
             cache: HashMap::new(),

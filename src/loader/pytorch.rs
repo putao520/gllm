@@ -269,7 +269,7 @@ impl PickleStack {
         };
         let reduced = reduced.unwrap_or_else(|| Object::Reduce {
             callable: Box::new(callable), args: Box::new(args),
-        });
+        }); // LEGAL: 无简化模式时使用 Reduce 模式
         self.push(reduced);
         Ok(())
     }

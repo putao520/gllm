@@ -149,7 +149,7 @@ pub fn prune_dead_columns_24(
             // Select the 2 elements with highest absolute value per group of 4
             let mut order = [0usize, 1, 2, 3];
             order.sort_unstable_by(|&a, &b| {
-                elems[b].abs().partial_cmp(&elems[a].abs()).unwrap_or(std::cmp::Ordering::Equal)
+                elems[b].abs().partial_cmp(&elems[a].abs()).unwrap_or(std::cmp::Ordering::Equal) // LEGAL: NaN 比较的标准 Rust 模式
             });
             // Surviving positions are order[0] and order[1] — the two largest |vals|
             let keep: [usize; 2] = [order[0].min(order[1]), order[0].max(order[1])]; // keep sorted

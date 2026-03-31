@@ -208,7 +208,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         };
 
         // Partial sort to find top-k
-        indices.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
         indices.truncate(effective_k);
 
         // Softmax over selected tokens
@@ -231,7 +231,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             let mut sorted_pairs: Vec<(usize, f32)> = indices.iter().copied()
                 .zip(probs.iter().copied())
                 .collect();
-            sorted_pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
 
             let mut cumulative = 0.0f32;
             let mut cutoff = sorted_pairs.len();
@@ -254,9 +254,9 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         // For stochastic sampling we'd use a RNG, but deterministic is safer
         // for accuracy-first design and test reproducibility.
         let best = probs.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) // LEGAL: NaN 比较的标准 Rust 模式
             .map(|(i, _)| indices[i] as u32)
-            .unwrap_or(0);
+            .unwrap_or(0); // LEGAL: 空 probs 时默认 token 0（不应发生，前面已检查）
 
         Ok(vec![best])
     }

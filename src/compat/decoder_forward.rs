@@ -115,7 +115,7 @@ pub(crate) fn decoder_forward<E: Element>(
             if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
                 first_node.outputs.first().unwrap().clone()
             } else {
-                ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+                ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
             }
         } else {
             "hidden_state".to_string()
@@ -251,7 +251,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()
@@ -274,7 +274,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         let emb: Vec<f32> = out_bytes
             .chunks_exact(4)
             .map(|c| {
-                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
+                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，chunks_exact(4) 保证 4 字节对齐
                 f32::from_le_bytes(arr)
             })
             .collect();
@@ -351,7 +351,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()
@@ -374,7 +374,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         if out_bytes.len() < 4 {
             return Err(BE::Other("Invalid score bytes length from GraphExecutor".into()));
         }
-        let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]);
+        let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，前面已检查 len >= 4
         let logit = f32::from_le_bytes(arr);
         let score = 1.0 / (1.0 + (-logit).exp());
         Ok(vec![score])
@@ -389,18 +389,12 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 
 /// Map LayerTarget to physical layer index.
 ///
-/// Per SPEC 04-API-DESIGN §7.3:
-/// - ShallowSyntax → num_layers / 4
-/// - MidSemantic → num_layers / 2
-/// - DeepLogic → num_layers * 3 / 4
+/// Delegates to `LayerTarget::to_physical_layer()` for consistent mapping
+/// across all APIs (per SPEC 04-API-DESIGN §7.1).
 ///
-/// Returns a layer index in the range [1, num_layers-1].
+/// Returns a layer index in the range [0, num_layers-1].
 pub fn layer_target_to_idx(target: crate::knowledge::LayerTarget, num_layers: usize) -> usize {
-    match target {
-        crate::knowledge::LayerTarget::ShallowSyntax => (num_layers / 4).max(1),
-        crate::knowledge::LayerTarget::MidSemantic => (num_layers / 2).max(1),
-        crate::knowledge::LayerTarget::DeepLogic => (num_layers * 3 / 4).max(1),
-    }
+    target.to_physical_layer(num_layers)
 }
 
 /// Extract layer index from node name.
@@ -428,6 +422,8 @@ fn extract_layer_index(node_name: &str) -> Option<usize> {
 /// the hidden state at that layer. Used by `encode_intent()` for extracting
 /// intermediate representations.
 ///
+/// Per SPEC 04-API-DESIGN §7.3 and 02-ARCHITECTURE §16.2 "任意层数据召回与高维截断".
+///
 /// # Arguments
 /// - `backend`: CPU backend for execution
 /// - `tokens`: Input token IDs
@@ -437,7 +433,7 @@ fn extract_layer_index(node_name: &str) -> Option<usize> {
 ///
 /// # Returns
 /// Hidden state vector at the target layer (flattened [seq_len * hidden_size])
-pub(crate) fn forward_to_layer<E: Element>(
+pub fn forward_to_layer<E: Element>(
     backend: &CpuBackend<E>,
     tokens: &[u32],
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
@@ -508,7 +504,7 @@ pub(crate) fn forward_to_layer<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()
@@ -536,7 +532,7 @@ pub(crate) fn forward_to_layer<E: Element>(
         let hs: Vec<f32> = out_bytes
             .chunks_exact(4)
             .map(|c| {
-                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
+                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，chunks_exact(4) 保证 4 字节对齐
                 f32::from_le_bytes(arr)
             })
             .collect();
@@ -552,6 +548,8 @@ pub(crate) fn forward_to_layer<E: Element>(
 /// as it uses semantic layer names (ShallowSyntax, MidSemantic, DeepLogic)
 /// rather than hardcoded layer indices.
 ///
+/// Per SPEC 04-API-DESIGN §7.3.
+///
 /// # Arguments
 /// - `backend`: CPU backend for execution
 /// - `tokens`: Input token IDs
@@ -561,7 +559,7 @@ pub(crate) fn forward_to_layer<E: Element>(
 ///
 /// # Returns
 /// Hidden state vector at the target semantic layer
-pub(crate) fn forward_to_semantic_layer<E: Element>(
+pub fn forward_to_semantic_layer<E: Element>(
     backend: &CpuBackend<E>,
     tokens: &[u32],
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
@@ -602,18 +600,18 @@ mod tests {
     fn test_layer_target_to_idx() {
         use crate::knowledge::LayerTarget;
 
-        // 32 layers model
-        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 32), 8);
+        // 32 layers model — uses to_physical_layer() (normalized depth mapping)
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 32), 4);
         assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 32), 16);
-        assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 32), 24);
+        assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 32), 28);
 
         // Small model (4 layers)
-        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 4), 1);
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 4), 0);
         assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 4), 2);
         assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 4), 3);
 
         // Very small model (2 layers)
-        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 2), 1);
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 2), 0);
         assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 2), 1);
         assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 2), 1);
     }

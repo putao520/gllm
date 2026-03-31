@@ -29,7 +29,7 @@ impl BlockQuantization {
         self.scales
             .get(block)
             .copied()
-            .unwrap_or_else(|| f16::from_f32(1.0))
+            .unwrap_or_else(|| f16::from_f32(1.0)) // LEGAL: scale=1.0 是量化参数的合法默认值（无缩放）
             .to_f32()
     }
 }

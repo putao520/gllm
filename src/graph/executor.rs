@@ -1520,7 +1520,7 @@ impl FusedGraphExecutor {
                 tensors
                     .get(&cn.graph_input_names[0])
                     .cloned()
-                    .unwrap_or_default()
+                    .unwrap_or_default() // LEGAL: 不存在的输入 tensor 返回空数据
             } else {
                 Vec::new()
             };

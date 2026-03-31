@@ -2,6 +2,8 @@ use super::backend_trait::{self, Backend};
 use super::cpu_backend::CpuBackend;
 use super::Element;
 use crate::engine::executor::BackendError as BE;
+use crate::loader::QuantizedTensor;
+use gllm_kernels::quant::QuantType;
 use gllm_kernels::types::DType;
 
 /// Reinterpret a slice of Element as &[f32]. Only valid when E is f32.
@@ -25,58 +27,46 @@ pub(crate) fn element_to_dtype<E: Element>() -> Result<DType, BE> {
     }
 }
 
-/// Try to get tensor data as an owned Vec<f32>. Tries each name in order.
-/// Handles both native (f32) tensors and quantized (GGUF) tensors.
-pub(crate) fn get_f32_data<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+/// Internal helper: dequantize a quantized tensor to f32 Vec.
+/// Handles GGUF row-padding for block quantization.
+fn _dequantize_to_f32<E: Element>(
+    qt: &QuantizedTensor,
     backend: &CpuBackend<E>,
-    names: &[impl AsRef<str>],
 ) -> Result<Vec<f32>, BE> {
-    for name in names {
-        let name = name.as_ref();
-        if let Some(t) = weights.get_tensor(name) {
-            let data = as_f32_slice(t.as_slice()).to_vec();
-            return Ok(data);
+    let n: usize = qt.shape.iter().product();
+    let mut out = vec![0.0f32; n];
+    let blk_bytes = qt.quant_type.block_bytes();
+    let blk_elems = qt.quant_type.block_size();
+
+    // GGUF pads each row (innermost dim) to the block boundary.
+    // When ne0 % block_size != 0, we must dequantize row-by-row,
+    // skipping the padding blocks at the end of each row.
+    // GGUF shape is [ne0, ne1, ...] where ne0 is the innermost dim (first element).
+    let ne0 = if qt.shape.is_empty() { n } else { qt.shape[0] };
+    let blocks_per_row = ne0.div_ceil(blk_elems);
+    let row_data_bytes = blocks_per_row * blk_bytes;
+    let needs_row_dequant = ne0 % blk_elems != 0 && qt.shape.len() >= 2;
+
+    if needs_row_dequant {
+        let n_rows: usize = qt.shape[1..].iter().product();
+        let mut out_off = 0;
+        let mut data_off = 0;
+        // Temp buffer for one full row (including padding elements)
+        let row_elems_padded = blocks_per_row * blk_elems;
+        let mut row_buf = vec![0.0f32; row_elems_padded];
+        for _row in 0..n_rows {
+            let row_data = &qt.data[data_off..data_off + row_data_bytes];
+            backend.dequantize(row_data, &mut row_buf, qt.quant_type)?;
+            // Copy only the valid (non-padding) elements
+            out[out_off..out_off + ne0].copy_from_slice(&row_buf[..ne0]);
+            out_off += ne0;
+            data_off += row_data_bytes;
         }
-        if let Some(qt) = weights.get_quantized(name) {
-            let n: usize = qt.shape.iter().product();
-            let mut out = vec![0.0f32; n];
-            let blk_bytes = qt.quant_type.block_bytes();
-            let blk_elems = qt.quant_type.block_size();
-
-            // GGUF pads each row (innermost dim) to the block boundary.
-            // When ne0 % block_size != 0, we must dequantize row-by-row,
-            // skipping the padding blocks at the end of each row.
-            // GGUF shape is [ne0, ne1, ...] where ne0 is the innermost dim (first element).
-            let ne0 = if qt.shape.is_empty() { n } else { qt.shape[0] };
-            let blocks_per_row = ne0.div_ceil(blk_elems);
-            let row_data_bytes = blocks_per_row * blk_bytes;
-            let needs_row_dequant = ne0 % blk_elems != 0 && qt.shape.len() >= 2;
-
-            if needs_row_dequant {
-                let n_rows: usize = qt.shape[1..].iter().product();
-                let mut out_off = 0;
-                let mut data_off = 0;
-                // Temp buffer for one full row (including padding elements)
-                let row_elems_padded = blocks_per_row * blk_elems;
-                let mut row_buf = vec![0.0f32; row_elems_padded];
-                for _row in 0..n_rows {
-                    let row_data = &qt.data[data_off..data_off + row_data_bytes];
-                    backend.dequantize(row_data, &mut row_buf, qt.quant_type)?;
-                    // Copy only the valid (non-padding) elements
-                    out[out_off..out_off + ne0].copy_from_slice(&row_buf[..ne0]);
-                    out_off += ne0;
-                    data_off += row_data_bytes;
-                }
-            } else {
-                backend.dequantize(&qt.data, &mut out, qt.quant_type)?;
-            }
-
-            return Ok(out);
-        }
+    } else {
+        backend.dequantize(&qt.data, &mut out, qt.quant_type)?;
     }
-    let name_strs: Vec<&str> = names.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("tensor not found: {:?}", name_strs)))
+
+    Ok(out)
 }
 
 /// Try to get bias data as Vec<f32>. Returns zeros if not found.
@@ -188,18 +178,6 @@ pub(crate) fn try_get_typed_data<E: Element>(
     get_typed_data(weights, backend, names).ok()
 }
 
-/// LEGACY: Try to get tensor data as Vec<f32>. Returns None if not found.
-///
-/// Deprecated: Use get_typed_data() instead. This function exists only for
-/// backward compatibility during the DType migration.
-pub(crate) fn try_get_f32_data<E: Element>(
-    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
-    backend: &CpuBackend<E>,
-    names: &[impl AsRef<str>],
-) -> Option<Vec<f32>> {
-    get_f32_data(weights, backend, names).ok()
-}
-
 /// Transpose a row-major matrix [rows, cols] → [cols, rows].
 /// Adaptively handles 2:4 structure sparsity where physical dimension is halved.
 pub(crate) fn transpose_f32(data: &[f32], rows: usize, _cols_expected: usize) -> Vec<f32> {
@@ -223,7 +201,7 @@ pub(crate) enum WeightData {
     /// Quantized weight: raw block bytes, quant type, and shape [out_dim, in_dim].
     Quantized {
         data: Vec<u8>,
-        quant_type: backend_trait::QuantType,
+        quant_type: QuantType,
         out_dim: usize,
         in_dim: usize,
     },
@@ -264,7 +242,7 @@ pub(crate) fn get_weight_data<E: Element>(
                 });
             }
             // 1D quantized tensor (norm weights etc.): dequantize to f32
-            return Ok(WeightData::F32(get_f32_data(weights, backend, &[name])?));
+            return Ok(WeightData::F32(_dequantize_to_f32(qt, backend)?));
         }
     }
     let name_strs: Vec<&str> = names.iter().map(|s| s.as_ref()).collect();
@@ -355,7 +333,11 @@ pub(crate) fn f32_to_typed_bytes(data: &[f32], dtype: DType) -> Vec<u8> {
                 out[i * 2 + 1] = b[1];
             }
         }
-        DType::U8 => unimplemented!("U8 not supported for F32 generic arrays"),
+        DType::U8 => {
+            for (i, &v) in data.iter().enumerate() {
+                out[i] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
     }
     out
 }
@@ -410,7 +392,7 @@ pub(crate) fn get_typed_data<E: Element>(
     for name in names {
         let name = name.as_ref();
         if let Some(qt) = weights.get_quantized(name) {
-            let f32_data = get_f32_data(weights, backend, &[name])?;
+            let f32_data = _dequantize_to_f32(qt, backend)?;
             return Ok((f32_to_typed_bytes(&f32_data, dtype), dtype));
         }
     }

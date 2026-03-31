@@ -53,7 +53,7 @@ impl<E: Element> Clone for MetalBackend<E> {
             gpu_profile: self.gpu_profile.clone(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             compiled_msl: std::sync::Mutex::new(
-                self.compiled_msl.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                self.compiled_msl.lock().unwrap_or_else(|e| e.into_inner()).clone(), // LEGAL: Mutex poison 时恢复内部数据
             ),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             swap_store: self.swap_store.clone(),

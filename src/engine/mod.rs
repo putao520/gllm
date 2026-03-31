@@ -6,10 +6,11 @@ pub mod pipeline;
 
 pub use pipeline::{PipelineError, UnifiedPipeline};
 
-/// 引擎上下文 (per SPEC 04-API-DESIGN §8.1)
+/// 引擎上下文 (per SPEC 04-API-DESIGN §8.1, §7.2, 元数据)
 ///
 /// 提供给 `KnowledgeDataSource::materialize()` 的引擎访问接口。
 /// 允许数据源在物理化时访问引擎资源（如 KV cache、权重等）。
+/// 所有维度字段从模型配置读取 (Ω1 真实性原则).
 #[derive(Clone)]
 pub struct EngineContext {
     /// 模型总层数（用于语义锚点映射）
@@ -18,24 +19,38 @@ pub struct EngineContext {
     pub hidden_size: usize,
     /// KV cache 页大小
     pub kv_page_size: usize,
+    /// KV cache 头数 (GQA 模型, per SPEC §3.3)
+    pub num_kv_heads: usize,
+    /// 最大序列长度
+    pub max_seq_len: usize,
 }
 
 impl EngineContext {
     /// 创建新的引擎上下文
-    pub fn new(num_layers: usize, hidden_size: usize, kv_page_size: usize) -> Self {
+    pub fn new(
+        num_layers: usize,
+        hidden_size: usize,
+        kv_page_size: usize,
+        num_kv_heads: usize,
+        max_seq_len: usize,
+    ) -> Self {
         Self {
             num_layers,
             hidden_size,
             kv_page_size,
+            num_kv_heads,
+            max_seq_len,
         }
     }
 
-    /// 从执行器配置创建引擎上下文
+    /// 从执行器配置创建引擎上下文 (Ω1: 从实际模型配置读取)
     pub fn from_executor_config(config: &GeneratorForwardConfig) -> Self {
         Self {
             num_layers: config.num_layers,
             hidden_size: config.hidden_size,
             kv_page_size: config.paged_kv_page_size,
+            num_kv_heads: config.num_kv_heads,
+            max_seq_len: config.max_seq_len,
         }
     }
 }

@@ -103,7 +103,7 @@ impl GgufReader {
             .get("general.alignment")
             .and_then(GgufValue::as_u64);
         // GGUF spec: default alignment is 32 bytes when general.alignment is not set.
-        let alignment = alignment_val.unwrap_or(32);
+        let alignment = alignment_val.unwrap_or(32); // LEGAL: GGUF spec 规定默认对齐为 32 字节
         let data_offset = if alignment == 0 {
             return Err(GgufError::InvalidMetadata(
                 "general.alignment must be > 0".to_string(),
@@ -276,12 +276,12 @@ impl GgufReader {
 
     pub fn add_bos_token(&self) -> bool {
         self.get_metadata_bool("tokenizer.ggml.add_bos_token")
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: GGUF 元数据可选字段，默认 false
     }
 
     pub fn add_eos_token(&self) -> bool {
         self.get_metadata_bool("tokenizer.ggml.add_eos_token")
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: GGUF 元数据可选字段，默认 false
     }
 
     fn get_arch_u64(&self, suffix: &str) -> Option<u64> {

@@ -406,7 +406,7 @@ impl ModelConfig {
                         .and_then(RopeScalingConfig::runtime_factor)
                 })
                 // Ω1: rope_scale = 1.0 is the industry standard (no scaling)
-                .unwrap_or(1.0);
+                .unwrap_or(1.0); // LEGAL: GGUF 元数据可选字段，缺失时使用行业标准默认值
             if !rope_scale.is_finite() || rope_scale <= 0.0 {
                 return Err(ModelConfigError::InvalidConfig(
                     "GGUF metadata field invalid: rope.scale".to_string(),
@@ -414,7 +414,7 @@ impl ModelConfig {
             }
 
             let rope_interleaved =
-                gguf_arch_bool(reader, arch, "rope.interleaved").unwrap_or(false);
+                gguf_arch_bool(reader, arch, "rope.interleaved").unwrap_or(false); // LEGAL: GGUF 元数据可选字段，缺失时使用行业标准默认值
             let attention_dropout =
                 gguf_arch_f32(reader, arch, "attention.dropout").filter(|v| v.is_finite());
             let hidden_act = gguf_arch_str(reader, arch, "feed_forward.activation")
@@ -449,13 +449,13 @@ impl ModelConfig {
 
         let max_position_embeddings = manifest
             .max_context_override
-            .unwrap_or(max_position_embeddings);
+            .unwrap_or(max_position_embeddings); // LEGAL: manifest 可选字段，缺失时使用推导值
         if max_position_embeddings == 0 {
             return Err(ModelConfigError::InvalidConfig(
                 "missing max_position_embeddings".to_string(),
             ));
         }
-        let rope_theta = manifest.rope_base_override.unwrap_or(rope_theta);
+        let rope_theta = manifest.rope_base_override.unwrap_or(rope_theta); // LEGAL: manifest 可选字段，缺失时使用推导值
 
         let base_derived = derived.clone();
         let base = Self {
@@ -508,7 +508,7 @@ impl ModelConfig {
         )
         .unwrap_or_else(|| {
             log::debug!("num_key_value_heads not found: defaulting to num_attention_heads = {}", num_attention_heads);
-            num_attention_heads
+            num_attention_heads // LEGAL: num_key_value_heads 默认等于 num_attention_heads（非 GQA 模型）
         });
         let num_hidden_layers =
             require_usize(value, &["num_hidden_layers", "n_layer", "num_layers"])?;
@@ -552,12 +552,12 @@ impl ModelConfig {
         )
         .unwrap_or_else(|| {
             log::debug!("max_position_embeddings not found: defaulting to 0 prior to manifest override");
-            0
+            0 // LEGAL: 默认 0，后续由 manifest.override 或错误检查处理
         });
 
         let max_position_embeddings = manifest
             .max_context_override
-            .unwrap_or(max_position_embeddings);
+            .unwrap_or(max_position_embeddings); // LEGAL: manifest 可选字段，缺失时使用推导值
 
         if max_position_embeddings == 0 {
             return Err(ModelConfigError::InvalidConfig(
@@ -591,7 +591,7 @@ impl ModelConfig {
             })
             .unwrap_or_else(|| {
                 log::debug!("rope_scale not found: defaulting to 1.0 (no scaling)");
-                1.0
+                1.0 // LEGAL: rope_scale=1.0 是 RoPE 的行业标准默认值（无缩放）
             });
         if !rope_scale.is_finite() || rope_scale <= 0.0 {
             return Err(ModelConfigError::InvalidConfig(
@@ -610,7 +610,7 @@ impl ModelConfig {
         )
         .unwrap_or_else(|| {
             log::debug!("rope_interleaved not found: defaulting to false");
-            false
+            false // LEGAL: rope_interleaved=false 是 RoPE 的行业标准默认值（非交错）
         });
 
         // Ω1: head_dim 从元数据读取，或使用标准公式计算
@@ -620,7 +620,7 @@ impl ModelConfig {
                 .unwrap_or_else(|| {
                     let derived = hidden_size / num_attention_heads;
                     log::debug!("head_dim not found: deriving from hidden_size/num_heads => {}", derived);
-                    derived
+                    derived // LEGAL: head_dim 可由 hidden_size/num_heads 推导（标准公式）
                 })
         } else {
             // Embedding 模型没有 attention heads
@@ -648,7 +648,7 @@ impl ModelConfig {
         .unwrap_or_else(|| {
             let derived = head_dim.max(num_key_value_heads);
             log::debug!("kv_cache_block_size not found: deriving from head_dim.max(num_key_value_heads) => {}", derived);
-            derived
+            derived // LEGAL: kv_cache_block_size 可由 head_dim.max(num_kv_heads) 推导（标准公式）
         });
         if kv_cache_block_size == 0 {
             return Err(ModelConfigError::InvalidConfig(
@@ -675,7 +675,7 @@ impl ModelConfig {
                     None
                 }
             })
-            .unwrap_or(weight_dtype);
+            .unwrap_or(weight_dtype); // LEGAL: 配置缺失时使用从权重检测的 dtype
 
 
         let attention_dropout = find_f32(value, &["attention_dropout", "attention.dropout"])
@@ -727,7 +727,7 @@ impl ModelConfig {
         if num_experts <= 1 {
             return None;
         }
-        let num_experts_per_tok = self.num_experts_per_tok.unwrap_or(2);
+        let num_experts_per_tok = self.num_experts_per_tok.unwrap_or(2); // LEGAL: num_experts_per_tok=2 是 MoE 的行业标准默认值
         let router_type = match arch {
             crate::manifest::ModelArchitecture::DeepSeek => crate::manifest::RouterType::DeepSeek,
             crate::manifest::ModelArchitecture::Qwen3MoE => crate::manifest::RouterType::Qwen,
@@ -1607,8 +1607,23 @@ mod tests {
             self.tensors.clone().into_iter()
         }
 
-        fn load_tensor_data(&self, _name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
-            unimplemented!("MockTensorProvider::load_tensor_data")
+        fn load_tensor_data(&self, name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
+            let meta = self.tensors
+                .iter()
+                .find(|t| t.name == name)
+                .ok_or_else(|| crate::loader::LoaderError::MissingTensor(name.to_string()))?;
+            let element_size = match meta.dtype {
+                safetensors::Dtype::F32 => 4,
+                safetensors::Dtype::F16 | safetensors::Dtype::BF16 => 2,
+                safetensors::Dtype::U8 => 1,
+                safetensors::Dtype::I64 => 8,
+                safetensors::Dtype::I32 => 4,
+                safetensors::Dtype::F64 => 8,
+                safetensors::Dtype::BOOL => 1,
+                _ => 2,
+            };
+            let total_elements: usize = meta.shape.iter().product();
+            Ok(Cow::Owned(vec![0u8; total_elements * element_size]))
         }
     }
 

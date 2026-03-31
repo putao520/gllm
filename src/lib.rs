@@ -2,6 +2,7 @@
 
 pub mod compat;
 
+pub mod guardrail;
 pub mod manifest;
 
 pub mod arch;
@@ -42,12 +43,13 @@ pub use backend::{detect_backend, BackendType};
 pub use client::{Client, GllmError, ModelInfo};
 pub use generation::{
     GenerationChunk, GenerationResponse, GenerationStream,
-    GenerationHook, HookDecision,
+    GenerationHook, HookDecision, ThresholdHook,
 };
+pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse};
 pub use rerank::{RerankResponse, RerankResult};
 pub use intent::{
-    attach_guardrail, encode_intent, GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,
+    GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,
     IntentError, SafetyPolicy, SafetyPolicyConfig,
 };
 pub use knowledge::{

@@ -487,7 +487,7 @@ mod tests {
 
         for &(raw, expected) in cases {
             let parsed = GgmlDType::try_from(raw)
-                .unwrap_or_else(|_| panic!("GgmlDType::try_from({raw}) failed"));
+                .unwrap_or_else(|_| panic!("GgmlDType::try_from({raw}) failed")); // LEGAL: 测试代码中的 panic 是合理的
             assert_eq!(parsed, expected, "dtype mismatch for raw={raw}");
             // as_str() must not panic
             let _ = parsed.as_str();

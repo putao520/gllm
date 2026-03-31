@@ -123,7 +123,7 @@ impl OnnxTensor {
             ..
         } = proto;
 
-        let name = resolve_name(name.unwrap_or_default(), name_policy)?;
+        let name = resolve_name(name.unwrap_or_default(), name_policy)?; // LEGAL: protobuf 可选字段
         let data_type = parse::parse_data_type(
             data_type
                 .ok_or_else(|| LoaderError::Onnx(format!("tensor {name} missing data_type")))?,
@@ -140,7 +140,7 @@ impl OnnxTensor {
             )));
         }
 
-        let data_location = data_location.unwrap_or_default();
+        let data_location = data_location.unwrap_or_default(); // LEGAL: protobuf 可选字段
         let data = if data_location == proto::tensor_proto::DataLocation::External as i32 {
             parse::load_external_data(resolver, &external_data, data_type, dtype, element_count, &name)?
         } else {
@@ -148,7 +148,7 @@ impl OnnxTensor {
                 data_type,
                 dtype,
                 element_count,
-                raw_data: raw_data.unwrap_or_default(),
+                raw_data: raw_data.unwrap_or_default(), // LEGAL: protobuf 可选字段
                 float_data,
                 int32_data,
                 int64_data,

@@ -237,7 +237,7 @@ impl HGALScheduler {
                 .saturating_duration_since(entry.last_access)
                 .as_millis()
                 .try_into()
-                .unwrap_or(usize::MAX);
+                .unwrap_or(usize::MAX); // LEGAL: 溢出时使用 MAX（极端边界情况）
             entry.recency = irr;
             entry.access_count = entry.access_count.saturating_add(1);
             entry.last_access = now;

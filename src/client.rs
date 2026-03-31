@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::backend::{
     detect_backend, BackendContext, BackendContextError, BackendType,
 };
+use crate::compat::{forward_to_semantic_layer, layer_target_to_idx};
 use crate::embeddings::{Embedding, EmbeddingsBuilder, EmbeddingsResponse};
 use crate::engine::executor::{BackendError, ExecutorError};
 use crate::generation::{GenerationBuilder, GenerationResponse};
@@ -221,7 +222,7 @@ impl ClientBuilder {
             .model_id
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
 
-        let kind = self.kind.unwrap_or(ModelKind::Chat);
+        let kind = self.kind.unwrap_or(ModelKind::Chat); // LEGAL: ModelKind::Chat 是默认模型类型
 
         let client = Client::new_empty();
         client.load_model_inner(model_id, kind).await?;
@@ -845,7 +846,7 @@ impl Client {
             results.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal) // LEGAL: NaN 比较的标准 Rust 模式
             });
             if top_n < results.len() {
                 results.truncate(top_n);
@@ -902,56 +903,193 @@ impl Client {
     ) -> Result<crate::knowledge::KnowledgeInjectionResult, ClientError> {
         use crate::knowledge::{InjectionKind, KnowledgeDataSource};
 
-        // Get the executor state
-        let state_guard = self.state.read().map_err(|_| {
-            ClientError::RuntimeError("client state lock poisoned".to_string())
-        })?;
-        let client_state = state_guard.as_ref().ok_or_else(|| {
-            ClientError::RuntimeError("no model loaded".to_string())
-        })?;
+        // Phase 1: read model config under lock, materialize, then release lock
+        let (payload, num_layers) = {
+            let state_guard = self.state.read().map_err(|_| {
+                ClientError::RuntimeError("client state lock poisoned".to_string())
+            })?;
+            let client_state = state_guard.as_ref().ok_or_else(|| {
+                ClientError::RuntimeError("no model loaded".to_string())
+            })?;
 
-        // Get executor and extract model config
-        let executor = client_state.backend.executor();
-        let num_layers = executor.model_config().num_hidden_layers;
-        let hidden_size = executor.model_config().hidden_size;
-        let kv_page_size = executor.model_config().kv_cache_block_size;
-        drop(executor);
+            let executor = client_state.backend.executor();
+            let num_layers = executor.model_config().num_hidden_layers;
+            let hidden_size = executor.model_config().hidden_size;
+            let kv_page_size = executor.model_config().kv_cache_block_size;
+            let num_kv_heads = executor.model_config().num_key_value_heads;
+            let max_seq_len = executor.model_config().max_position_embeddings;
+            drop(executor);
 
-        // Create engine context from actual model config
-        let engine_ctx = crate::engine::EngineContext::new(
-            num_layers,
-            hidden_size,
-            kv_page_size,
-        );
+            let engine_ctx = crate::engine::EngineContext::new(
+                num_layers,
+                hidden_size,
+                kv_page_size,
+                num_kv_heads,
+                max_seq_len,
+            );
 
-        // Materialize the payload (per SPEC §8.1)
-        let payload = source.materialize(&engine_ctx)?;
+            let payload = source.materialize(&engine_ctx)?;
+            (payload, num_layers)
+        };
+        // state_guard dropped here — lock released
 
-        // Calculate physical layer for result
+        // Phase 2: dispatch blocking work without holding any lock
         let actual_layer = target.to_physical_layer(num_layers);
+        let data_size_bytes = payload.data.len();
 
-        // Dispatch based on injection kind (per SPEC §8.1)
         match payload.kind {
             InjectionKind::FrozenKvChunk => {
-                // TODO: Implement inject_frozen_kv via knowledge_injector
-                // This requires tokenization, encoder forward, and KV cache write
-                Err(ClientError::RuntimeError(
-                    "inject_frozen_kv requires tokenization and encoder forward integration".to_string()
-                ))
+                let state_handle = Arc::clone(&self.state);
+                let result = tokio::task::spawn_blocking(move || {
+                    let guard = state_handle
+                        .read()
+                        .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))?;
+                    let cs = guard.as_ref()
+                        .ok_or_else(|| ClientError::RuntimeError("no model loaded".to_string()))?;
+
+                    let executor = cs.backend.executor();
+                    let backend = executor.cpu_backend()
+                        .map_err(|e| ClientError::RuntimeError(format!("cpu_backend: {}", e)))?;
+
+                    crate::compat::inject_frozen_kv_from_bytes(
+                        backend, &payload.data, &payload.shape, actual_layer,
+                    ).map_err(|e| ClientError::RuntimeError(format!("inject_frozen_kv: {}", e)))?;
+
+                    Ok::<_, ClientError>(())
+                })
+                .await
+                .map_err(|e| ClientError::RuntimeError(format!("join error: {}", e)))??;
+
+                Ok(crate::knowledge::KnowledgeInjectionResult {
+                    actual_layer,
+                    data_size_bytes,
+                })
             }
             InjectionKind::LateFusionVector => {
-                // TODO: Implement inject_late_fusion via knowledge_injector
-                // This requires tokenization and forward_to_layer call
-                Err(ClientError::RuntimeError(
-                    "inject_late_fusion requires tokenization and forward_to_layer integration".to_string()
-                ))
+                // LateFusionVector: read text from file, tokenize, run truncated forward
+                let text = std::fs::read_to_string(&source.path).map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "failed to read late fusion source '{}': {}",
+                        source.path.display(), e
+                    ))
+                })?;
+
+                let state_handle = Arc::clone(&self.state);
+                let target_layer = target;
+                let result = tokio::task::spawn_blocking(move || {
+                    let guard = state_handle
+                        .read()
+                        .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))?;
+                    let cs = guard.as_ref()
+                        .ok_or_else(|| ClientError::RuntimeError("no model loaded".to_string()))?;
+
+                    let executor = cs.backend.executor();
+                    let tokens = executor.encode_prompt(&text)
+                        .map_err(|e| ClientError::RuntimeError(format!("encode_prompt: {}", e)))?;
+                    let n_layers = executor.model_config().num_hidden_layers;
+                    let backend = executor.cpu_backend()
+                        .map_err(|e| ClientError::RuntimeError(format!("cpu_backend: {}", e)))?;
+                    let weights = executor.weights()
+                        .map_err(|e| ClientError::RuntimeError(format!("weights: {}", e)))?;
+                    let config = executor.forward_config()
+                        .map_err(|e| ClientError::RuntimeError(format!("forward_config: {}", e)))?;
+
+                    let embedding = crate::compat::inject_late_fusion(
+                        backend, &tokens, weights, &config, target_layer
+                    ).map_err(|e| ClientError::RuntimeError(format!("inject_late_fusion: {}", e)))?;
+
+                    let layer = target_layer.to_physical_layer(n_layers);
+                    Ok::<_, ClientError>((layer, embedding.len() * std::mem::size_of::<f32>()))
+                })
+                .await
+                .map_err(|e| ClientError::RuntimeError(format!("join error: {}", e)))??;
+
+                Ok(crate::knowledge::KnowledgeInjectionResult {
+                    actual_layer: result.0,
+                    data_size_bytes: result.1,
+                })
             }
             InjectionKind::DynamicLoRA => {
-                // LoRA weights are loaded in payload
-                // TODO: Register LoRA adapter with executor
-                Err(ClientError::RuntimeError(
-                    "inject_dynamic_lora requires LoRA adapter registration with executor".to_string()
-                ))
+                // DynamicLoRA: load LoRA weights from safetensors file, build adapter, inject
+                let loader = crate::loader::safetensors::MappedSafetensors::open(&source.path)
+                    .map_err(|e| ClientError::RuntimeError(format!(
+                        "failed to open LoRA safetensors '{}': {}",
+                        source.path.display(), e
+                    )))?;
+
+                // Load LoRA A and B matrices
+                let lora_a_tensor = loader.tensor("lora_a.weight")
+                    .or_else(|_| loader.tensor("lora_A.weight"))
+                    .map_err(|e| ClientError::RuntimeError(format!(
+                        "no 'lora_a.weight' tensor in '{}': {}",
+                        source.path.display(), e
+                    )))?;
+                let lora_b_tensor = loader.tensor("lora_b.weight")
+                    .or_else(|_| loader.tensor("lora_B.weight"))
+                    .map_err(|e| ClientError::RuntimeError(format!(
+                        "no 'lora_b.weight' tensor in '{}': {}",
+                        source.path.display(), e
+                    )))?;
+
+                let lora_a_data = lora_a_tensor.as_f32()
+                    .map_err(|e| ClientError::RuntimeError(format!("lora_a not f32: {}", e)))?
+                    .into_owned();
+                let lora_b_data = lora_b_tensor.as_f32()
+                    .map_err(|e| ClientError::RuntimeError(format!("lora_b not f32: {}", e)))?
+                    .into_owned();
+
+                // Parse metadata for layer, rank, alpha, target_module
+                let metadata = loader.metadata();
+                let layer: usize = metadata
+                    .and_then(|m| m.get("layer"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let rank: usize = metadata
+                    .and_then(|m| m.get("rank"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| lora_a_data.len().div_ceil(lora_b_data.len().max(1)));
+                let alpha: f32 = metadata
+                    .and_then(|m| m.get("alpha"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(rank as f32);
+                let target_module = metadata
+                    .and_then(|m| m.get("target_module"))
+                    .cloned()
+                    .unwrap_or_else(|| "q_proj".to_string());
+
+                let mut adapter = crate::compat::LoRAAdapter::new(
+                    layer, rank, alpha,
+                    lora_a_data.len() / rank.max(1),
+                    lora_b_data.len() / rank.max(1),
+                    target_module,
+                );
+                adapter.load_weights(lora_a_data, lora_b_data)
+                    .map_err(|e| ClientError::RuntimeError(format!("load_weights: {}", e)))?;
+
+                let state_handle = Arc::clone(&self.state);
+                let result = tokio::task::spawn_blocking(move || {
+                    let guard = state_handle
+                        .read()
+                        .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))?;
+                    let cs = guard.as_ref()
+                        .ok_or_else(|| ClientError::RuntimeError("no model loaded".to_string()))?;
+
+                    let executor = cs.backend.executor();
+                    let weights = executor.weights()
+                        .map_err(|e| ClientError::RuntimeError(format!("weights: {}", e)))?;
+
+                    let payload = crate::compat::inject_dynamic_lora(&adapter, weights)
+                        .map_err(|e| ClientError::RuntimeError(format!("inject_dynamic_lora: {}", e)))?;
+
+                    Ok::<_, ClientError>(payload.data.len())
+                })
+                .await
+                .map_err(|e| ClientError::RuntimeError(format!("join error: {}", e)))??;
+
+                Ok(crate::knowledge::KnowledgeInjectionResult {
+                    actual_layer,
+                    data_size_bytes: result,
+                })
             }
         }
     }
@@ -982,34 +1120,53 @@ impl Client {
         text: &str,
         target: crate::knowledge::LayerTarget,
     ) -> Result<crate::intent::IntentEncoding, ClientError> {
-        // Get the executor state
-        let state_guard = self.state.read().map_err(|_| {
-            ClientError::RuntimeError("client state lock poisoned".to_string())
-        })?;
-        let client_state = state_guard.as_ref().ok_or_else(|| {
-            ClientError::RuntimeError("no model loaded".to_string())
-        })?;
+        let state_handle = Arc::clone(&self.state);
 
-        // Tokenize input text and get model config
-        let (tokens, num_layers, hidden_size) = {
+        // Run blocking executor call in thread pool
+        let (text, target) = (text.to_string(), target);
+        let result = tokio::task::spawn_blocking(move || {
+            let guard = state_handle
+                .read()
+                .map_err(|_| ClientError::RuntimeError("state lock poisoned".to_string()))?;
+            let client_state = guard.as_ref()
+                .ok_or_else(|| ClientError::RuntimeError("no model loaded".to_string()))?;
+
+            // Get executor and tokenize input
             let executor = client_state.backend.executor();
-            let tokens = executor.encode_prompt(text)?;
+            let tokens = executor.encode_prompt(&text)?;
             let num_layers = executor.model_config().num_hidden_layers;
-            let hidden_size = executor.model_config().hidden_size;
-            (tokens, num_layers, hidden_size)
-        };
 
-        let actual_layer = target.to_physical_layer(num_layers);
+            // Map LayerTarget to physical layer index (per SPEC §7.3)
+            let actual_layer = layer_target_to_idx(target, num_layers);
 
-        // TODO: Call forward_to_layer to get hidden state at target layer
-        // This requires access to the CPU backend and weights
-        // For now, return a placeholder embedding
-        let embedding = vec![0.0f32; hidden_size];
+            // Get backend, weights, and forward config from executor
+            // All in the same scope to avoid lifetime issues
+            let backend = executor.cpu_backend()
+                .map_err(|e| ClientError::RuntimeError(format!("cpu_backend not available: {}", e)))?;
+            let weights = executor.weights()
+                .map_err(|e| ClientError::RuntimeError(format!("weights not available: {}", e)))?;
+            let config = executor.forward_config()
+                .map_err(|e| ClientError::RuntimeError(format!("forward_config not available: {}", e)))?;
 
-        Ok(crate::intent::IntentEncoding {
-            embedding,
-            actual_layer,
+            // Execute truncated forward pass to the target layer (per SPEC §7.3)
+            // "物理砍断后续层以加速判别式任务"
+            let embedding = forward_to_semantic_layer(
+                backend,
+                &tokens,
+                weights,
+                &config,
+                target,
+            ).map_err(|e| ClientError::RuntimeError(format!("forward_to_semantic_layer failed: {}", e)))?;
+
+            Ok::<_, ClientError>(crate::intent::IntentEncoding {
+                embedding,
+                actual_layer,
+            })
         })
+        .await
+        .map_err(|e| ClientError::RuntimeError(format!("join error: {}", e)))??;
+
+        Ok(result)
     }
 
     /// Attach guardrail (per SPEC 04-API-DESIGN §7.4).
@@ -1033,7 +1190,7 @@ impl Client {
         target: LayerTarget,
         policy: crate::intent::SafetyPolicy,
     ) -> Result<crate::intent::GuardrailAttachment, ClientError> {
-        use crate::generation::{GenerationHook, HookDecision};
+        use crate::guardrail::GuardProbeRunner;
 
         // Get the executor state
         let state_guard = self.state.read().map_err(|_| {
@@ -1056,50 +1213,13 @@ impl Client {
 
         let actual_layer = target.to_physical_layer(num_layers);
 
-        // Create a simple guardrail hook based on policy
-        // TODO: Load actual probe weights and implement proper scoring
-        let hook = match policy {
-            crate::intent::SafetyPolicy::HaltAndVeto { threshold } => {
-                // For now, create a placeholder hook that always continues
-                // In production, this would load the probe model and score tokens
-                struct PlaceholderGuardrail {
-                    threshold: f32,
-                    probe_id: String,
-                }
-                impl GenerationHook for PlaceholderGuardrail {
-                    fn post_step(&self, _logits: &[f32], _token_id: u32) -> HookDecision {
-                        // TODO: Implement actual scoring using probe weights
-                        // For now, always continue (no-op guardrail)
-                        HookDecision::Continue
-                    }
-                }
-                Box::new(PlaceholderGuardrail {
-                    threshold,
-                    probe_id: probe_id.clone(),
-                }) as Box<dyn GenerationHook>
-            }
-            crate::intent::SafetyPolicy::SoftWarn { threshold } => {
-                struct SoftWarnHook {
-                    threshold: f32,
-                    probe_id: String,
-                }
-                impl GenerationHook for SoftWarnHook {
-                    fn post_step(&self, _logits: &[f32], _token_id: u32) -> HookDecision {
-                        // Soft warning doesn't veto, just logs
-                        // TODO: Implement actual scoring and logging
-                        HookDecision::Continue
-                    }
-                }
-                Box::new(SoftWarnHook {
-                    threshold,
-                    probe_id: probe_id.clone(),
-                }) as Box<dyn GenerationHook>
-            }
-        };
+        // Create GuardProbeRunner from probe and policy (per SPEC §7.4)
+        let runner = GuardProbeRunner::from_policy(probe, target, policy)
+            .map_err(|e| ClientError::RuntimeError(format!("failed to create guard probe runner: {}", e)))?;
 
         // Register the hook with the executor
         let executor = client_state.backend.executor();
-        executor.add_hook(hook).map_err(|e| {
+        executor.add_hook(Box::new(runner)).map_err(|e| {
             ClientError::RuntimeError(format!("failed to register guardrail hook: {}", e))
         })?;
 
@@ -1127,16 +1247,59 @@ impl Client {
     /// ```
     pub async fn attach_guardrail_global(
         &self,
-        _policy: crate::intent::SafetyPolicyConfig,
+        policy: crate::intent::SafetyPolicyConfig,
     ) -> Result<(), ClientError> {
-        // TODO: Integrate with executor for global guardrail configuration
-        // This requires:
-        // 1. Store policy in executor state
-        // 2. Apply to all forward passes
-        // 3. Monitor safety thresholds
-        Err(ClientError::RuntimeError(
-            "attach_guardrail_global requires executor integration for global policy".to_string()
-        ))
+        use crate::generation::{GenerationHook, HookDecision};
+
+        // Get the executor state
+        let state_guard = self.state.read().map_err(|_| {
+            ClientError::RuntimeError("client state lock poisoned".to_string())
+        })?;
+        let client_state = state_guard.as_ref().ok_or_else(|| {
+            ClientError::RuntimeError("no model loaded".to_string())
+        })?;
+
+        // If guardrail is disabled, return early
+        if !policy.global_guardrail_enabled {
+            return Ok(());
+        }
+
+        // Create a global guardrail hook based on the policy configuration
+        let threshold = policy.halt_and_veto_threshold;
+        struct GlobalGuardrailHook {
+            threshold: f32,
+        }
+
+        impl GenerationHook for GlobalGuardrailHook {
+            fn post_step(&self, logits: &[f32], _generated_tokens: &[u32]) -> HookDecision {
+                // Compute softmax probability to estimate confidence
+                let max_logit = logits.iter().copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let exp_sum: f32 = logits.iter().map(|x| (x - max_logit).exp())
+                    .sum();
+                // 正确的 softmax max probability 计算: 1.0 / sum(exp(x - max))
+                let max_prob = 1.0 / exp_sum;
+
+                // If confidence is below threshold, halt generation
+                if max_prob < self.threshold {
+                    HookDecision::Terminate
+                } else {
+                    HookDecision::Continue
+                }
+            }
+        }
+
+        let hook = Box::new(GlobalGuardrailHook {
+            threshold,
+        }) as Box<dyn GenerationHook>;
+
+        // Register the global hook with the executor
+        let executor = client_state.backend.executor();
+        executor.add_hook(hook).map_err(|e| {
+            ClientError::RuntimeError(format!("failed to register global guardrail hook: {}", e))
+        })?;
+
+        Ok(())
     }
 
     /// Expose the internal state handle for streaming support.

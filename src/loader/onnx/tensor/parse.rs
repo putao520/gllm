@@ -100,7 +100,7 @@ pub(super) fn load_external_data(
     let offset = parse_optional_usize(entries.get("offset"), "offset", name)?.unwrap_or(0); // LEGAL: offset 可选，默认 0
     let expected = byte_size_for_elements(data_type, dtype, element_count);
     let length = parse_optional_usize(entries.get("length"), "length", name)?
-        .unwrap_or(expected);
+        .unwrap_or(expected); // LEGAL: length 缺失时使用计算值
     if length != expected {
         return Err(LoaderError::Onnx(format!(
             "external tensor {name} length {length} does not match expected {expected}"
@@ -162,7 +162,7 @@ fn external_data_map(
         if key.is_empty() {
             continue;
         }
-        let value = entry.value.clone().unwrap_or_default();
+        let value = entry.value.clone().unwrap_or_default(); // LEGAL: protobuf 可选字段
         map.insert(key, value);
     }
     map

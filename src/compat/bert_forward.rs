@@ -152,7 +152,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 let pooled: Vec<f32> = out_bytes
                     .chunks_exact(4)
                     .map(|c| {
-                        let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
+                        let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，chunks_exact(4) 保证 4 字节对齐
                         f32::from_le_bytes(arr)
                     })
                     .collect();
@@ -166,7 +166,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                 if out_bytes.len() < 4 {
                     return Err(BE::Other("Invalid score bytes length from GraphExecutor".into()));
                 }
-                let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]);
+                let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，前面已检查 len >= 4
                 let logit = f32::from_le_bytes(arr);
                 let score = 1.0 / (1.0 + (-logit).exp());
                 Ok(vec![score])

@@ -135,6 +135,7 @@ impl TierState {
             return None;
         }
         let physical_id = self.free_ids.pop_front().unwrap_or_else(|| {
+            // LEGAL: 无空闲 ID 时分配新 ID
             let id = self.next_id;
             self.next_id = self.next_id.saturating_add(1);
             id

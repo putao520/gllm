@@ -374,7 +374,7 @@ impl ContinuousBatcher {
                     self.running
                         .get(request_id)
                         .map(|sequence| (sequence.enqueue_order, *request_id))
-                        .unwrap_or((u64::MAX, *request_id))
+                        .unwrap_or((u64::MAX, *request_id)) // LEGAL: 不存在的 request 排在最后
                 });
             }
             BatchOrderPolicy::ThroughputFirst => {
@@ -383,7 +383,7 @@ impl ContinuousBatcher {
                     self.running
                         .get(request_id)
                         .map(|sequence| (usize::MAX - sequence.context_len(), *request_id))
-                        .unwrap_or((usize::MAX, *request_id))
+                        .unwrap_or((usize::MAX, *request_id)) // LEGAL: 不存在的 request 排在最后
                 });
             }
         }

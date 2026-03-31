@@ -79,7 +79,7 @@ impl Default for LoaderConfig {
     fn default() -> Self {
         let cache_dir = dirs::home_dir()
             .map(|h| h.join(".gllm").join("models"))
-            .unwrap_or_else(|| PathBuf::from(".gllm/models"));
+            .unwrap_or_else(|| PathBuf::from(".gllm/models")); // LEGAL: 无 HOME 环境变量时使用当前目录
         Self {
             cache_dir,
             source: ModelSource::HuggingFace,

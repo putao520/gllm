@@ -59,12 +59,16 @@ pub struct MaterializedPayload {
 pub enum KnowledgeError {
     #[error("source not found: {0}")]
     SourceNotFound(String),
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
+    #[error("unsupported element type: {0}")]
+    UnsupportedElementType(String),
     #[error("invalid layer target")]
     InvalidLayerTarget,
     #[error("data format error: {0}")]
     DataFormatError(String),
+    #[error("KV cache error: {0}")]
+    KvCacheError(String),
+    #[error("injection failed: {0}")]
+    InjectionFailed(String),
 }
 
 /// 知识注入结果 (per SPEC 04-API-DESIGN §7.2)
@@ -98,33 +102,247 @@ impl KnowledgeInjectionConfig {
     }
 }
 
-/// 冻结 KV 数据源 (per SPEC 04-API-DESIGN §8.4)
+/// 知识数据源 (per SPEC 04-API-DESIGN §8.1)
 ///
-/// 从预存的 KV cache 文件加载数据。
+/// 统一的数据源抽象，支持三种注入类型：
+/// - `FrozenKvChunk`: 侧载预存的 KV cache
+/// - `LateFusionVector`: 截断前向传播生成密实特征向量
+/// - `DynamicLoRA`: LoRA 权重片注入
 #[derive(Debug, Clone)]
 pub struct KnowledgeSource {
+    /// 数据源文件路径
     pub path: PathBuf,
+    /// 注入类型
+    kind: InjectionKind,
 }
 
 impl KnowledgeSource {
-    /// 从冻结 KV 文件创建数据源
+    /// 从冻结 KV 文件创建数据源 (per SPEC §8.1 FrozenKvChunk)
     pub fn from_frozen_kv(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            kind: InjectionKind::FrozenKvChunk,
+        }
+    }
+
+    /// 从文本文件创建晚期融合数据源 (per SPEC §8.1 LateFusionVector)
+    ///
+    /// 读取文本内容，tokenize 后运行截断式前向传播，
+    /// 将生成的隐藏状态向量注入到指定层。
+    pub fn from_late_fusion(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: InjectionKind::LateFusionVector,
+        }
+    }
+
+    /// 从 safetensors 文件创建 LoRA 数据源 (per SPEC §8.1 DynamicLoRA)
+    ///
+    /// 加载 LoRA A/B 权重矩阵，解析元数据中的 rank/alpha/target_module，
+    /// 注入到指定层的目标模块。
+    pub fn from_lora(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: InjectionKind::DynamicLoRA,
         }
     }
 }
 
 impl KnowledgeDataSource for KnowledgeSource {
     fn injection_kind(&self) -> InjectionKind {
-        InjectionKind::FrozenKvChunk
+        self.kind
     }
 
-    fn materialize(&self, _engine: &crate::engine::EngineContext) -> Result<MaterializedPayload, KnowledgeError> {
-        Err(KnowledgeError::NotImplemented(
-            "KnowledgeSource::materialize requires executor integration".into(),
-        ))
+    fn materialize(&self, engine: &crate::engine::EngineContext) -> Result<MaterializedPayload, KnowledgeError> {
+        match self.kind {
+            InjectionKind::FrozenKvChunk => self.materialize_frozen_kv(engine),
+            InjectionKind::LateFusionVector => {
+                // LateFusionVector: 文件存在性检查后返回轻量 payload
+                // 实际的 tokenize + forward 在 client.rs 中执行
+                if !self.path.exists() {
+                    return Err(KnowledgeError::SourceNotFound(format!(
+                        "late fusion source file not found: {}", self.path.display()
+                    )));
+                }
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("source_path".to_string(), self.path.display().to_string());
+                Ok(MaterializedPayload {
+                    kind: InjectionKind::LateFusionVector,
+                    data: Vec::new(),
+                    shape: Vec::new(),
+                    metadata,
+                })
+            }
+            InjectionKind::DynamicLoRA => {
+                // DynamicLoRA: 文件存在性检查后返回轻量 payload
+                // 实际的 safetensors 加载 + LoRA 构建在 client.rs 中执行
+                if !self.path.exists() {
+                    return Err(KnowledgeError::SourceNotFound(format!(
+                        "LoRA safetensors file not found: {}", self.path.display()
+                    )));
+                }
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("source_path".to_string(), self.path.display().to_string());
+                Ok(MaterializedPayload {
+                    kind: InjectionKind::DynamicLoRA,
+                    data: Vec::new(),
+                    shape: Vec::new(),
+                    metadata,
+                })
+            }
+        }
     }
+}
+
+impl KnowledgeSource {
+    /// FrozenKvChunk 物理化：从文件加载 KV cache 数据
+    fn materialize_frozen_kv(
+        &self,
+        engine: &crate::engine::EngineContext,
+    ) -> Result<MaterializedPayload, KnowledgeError> {
+        use std::path::Path;
+
+        let path = &self.path;
+
+        if !path.exists() {
+            return Err(KnowledgeError::SourceNotFound(format!(
+                "frozen KV file not found: {}", path.display()
+            )));
+        }
+
+        // Ω1 真实性原则 — 从 EngineContext 读取所有维度参数
+        let num_kv_heads = engine.num_kv_heads;
+        let max_seq_len = engine.max_seq_len;
+        let head_dim = engine.hidden_size / num_kv_heads;
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("source_path".to_string(), path.display().to_string());
+        metadata.insert("num_layers".to_string(), engine.num_layers.to_string());
+        metadata.insert("hidden_size".to_string(), engine.hidden_size.to_string());
+        metadata.insert("kv_page_size".to_string(), engine.kv_page_size.to_string());
+        metadata.insert("num_kv_heads".to_string(), num_kv_heads.to_string());
+        metadata.insert("max_seq_len".to_string(), max_seq_len.to_string());
+        metadata.insert("head_dim".to_string(), head_dim.to_string());
+
+        let shape = vec![engine.num_layers, 2, num_kv_heads, max_seq_len, head_dim];
+
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let data = if extension == "safetensors" {
+            load_kv_from_safetensors(path, &shape)?
+        } else {
+            load_kv_from_raw(path, &shape)?
+        };
+
+        Ok(MaterializedPayload {
+            kind: InjectionKind::FrozenKvChunk,
+            data,
+            shape,
+            metadata,
+        })
+    }
+}
+
+/// 从 safetensors 格式的 KV cache 文件加载权重数据
+///
+/// 期望的 tensor 名称:
+/// - `kv_cache`: 完整的 KV cache 数据 (shape: [num_layers, 2, num_kv_heads, max_seq_len, head_dim])
+/// - 或 `key_cache` + `value_cache`: 分开的 K/V cache
+///
+/// per SPEC 04-API-DESIGN §8.4 — 从 safetensors 文件加载预计算的 KV cache
+fn load_kv_from_safetensors(
+    path: &std::path::Path,
+    expected_shape: &[usize],
+) -> Result<Vec<u8>, KnowledgeError> {
+    let loader = crate::loader::safetensors::MappedSafetensors::open(path).map_err(|e| {
+        KnowledgeError::DataFormatError(format!(
+            "failed to open safetensors '{}': {}", path.display(), e
+        ))
+    })?;
+
+    // 尝试加载统一的 kv_cache tensor
+    if let Ok(tensor) = loader.tensor("kv_cache") {
+        let data = tensor.as_f32().map_err(|e| {
+            KnowledgeError::DataFormatError(format!(
+                "kv_cache tensor is not f32 in '{}': {}", path.display(), e
+            ))
+        })?;
+
+        // 验证形状匹配
+        let expected_elements: usize = expected_shape.iter().product();
+        if data.len() != expected_elements {
+            return Err(KnowledgeError::DataFormatError(format!(
+                "kv_cache shape mismatch: expected {} elements (shape {:?}), got {} elements (shape {:?})",
+                expected_elements, expected_shape, data.len(), tensor.shape
+            )));
+        }
+
+        // 转换为原始字节（f32 → u8）
+        let f32_slice: &[f32] = &data;
+        let byte_len = f32_slice.len() * std::mem::size_of::<f32>();
+        let mut bytes = vec![0u8; byte_len];
+        let view = unsafe { std::slice::from_raw_parts(f32_slice.as_ptr() as *const u8, byte_len) };
+        bytes.copy_from_slice(view);
+        return Ok(bytes);
+    }
+
+    // 尝试分开的 key_cache + value_cache
+    let key_tensor = loader.tensor("key_cache")
+        .or_else(|_| loader.tensor("k_cache"))
+        .map_err(|e| KnowledgeError::DataFormatError(format!(
+            "no 'kv_cache', 'key_cache', or 'k_cache' tensor found in '{}': {}",
+            path.display(), e
+        )))?;
+
+    let val_tensor = loader.tensor("value_cache")
+        .or_else(|_| loader.tensor("v_cache"))
+        .map_err(|e| KnowledgeError::DataFormatError(format!(
+            "no 'value_cache' or 'v_cache' tensor found in '{}': {}", path.display(), e
+        )))?;
+
+    let key_data = key_tensor.as_f32().map_err(|e| KnowledgeError::DataFormatError(
+        format!("key_cache tensor is not f32: {}", e)
+    ))?;
+    let val_data = val_tensor.as_f32().map_err(|e| KnowledgeError::DataFormatError(
+        format!("value_cache tensor is not f32: {}", e)
+    ))?;
+
+    // 合并 K 和 V 数据（K 在前，V 在后）
+    let key_f32: &[f32] = &key_data;
+    let val_f32: &[f32] = &val_data;
+    let key_byte_len = key_f32.len() * std::mem::size_of::<f32>();
+    let val_byte_len = val_f32.len() * std::mem::size_of::<f32>();
+    let mut bytes = Vec::with_capacity(key_byte_len + val_byte_len);
+
+    let key_bytes = unsafe { std::slice::from_raw_parts(key_f32.as_ptr() as *const u8, key_byte_len) };
+    bytes.extend_from_slice(key_bytes);
+    let val_bytes = unsafe { std::slice::from_raw_parts(val_f32.as_ptr() as *const u8, val_byte_len) };
+    bytes.extend_from_slice(val_bytes);
+
+    Ok(bytes)
+}
+
+/// 从原始二进制文件加载 KV cache 数据
+///
+/// 直接读取文件内容作为 KV cache 的原始字节。
+/// 要求文件大小与 expected_shape 对应的字节数匹配。
+fn load_kv_from_raw(
+    path: &std::path::Path,
+    expected_shape: &[usize],
+) -> Result<Vec<u8>, KnowledgeError> {
+    let expected_bytes: usize = expected_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+
+    let data = std::fs::read(path).map_err(|e| KnowledgeError::DataFormatError(format!(
+        "failed to read KV file '{}': {}", path.display(), e
+    )))?;
+
+    if data.len() != expected_bytes {
+        return Err(KnowledgeError::DataFormatError(format!(
+            "KV file size mismatch: expected {} bytes (shape {:?}), got {} bytes",
+            expected_bytes, expected_shape, data.len()
+        )));
+    }
+
+    Ok(data)
 }
 
 // ============================================================================
@@ -293,11 +511,90 @@ mod tests {
     }
 
     #[test]
-    fn test_frozen_kv_source() {
-        let source = KnowledgeSource::from_frozen_kv("test.kv");
+    fn test_frozen_kv_source_file_not_found() {
+        // Non-existent file should return SourceNotFound
+        let source = KnowledgeSource::from_frozen_kv("nonexistent_test_file_12345.kv");
         assert_eq!(source.injection_kind(), InjectionKind::FrozenKvChunk);
-        let ctx = crate::engine::EngineContext::new(32, 4096, 16);
-        assert!(source.materialize(&ctx).is_err());
+        let ctx = crate::engine::EngineContext::new(32, 4096, 16, 32, 2048);
+        let result = source.materialize(&ctx);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KnowledgeError::SourceNotFound(_)));
+    }
+
+    #[test]
+    fn test_frozen_kv_source_raw_file() {
+        // Create a temporary raw KV file with correct size
+        let ctx = crate::engine::EngineContext::new(2, 64, 16, 4, 32);
+        let head_dim = ctx.hidden_size / ctx.num_kv_heads;
+        // shape: [num_layers, 2, num_kv_heads, max_seq_len, head_dim]
+        let shape = vec![ctx.num_layers, 2, ctx.num_kv_heads, ctx.max_seq_len, head_dim];
+        let total_elements: usize = shape.iter().product();
+        let total_bytes = total_elements * std::mem::size_of::<f32>();
+
+        // Write a temp file with the exact expected size
+        let dir = std::env::temp_dir().join("gllm_test_kv");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_raw.kv");
+        let data = vec![1.0f32; total_elements];
+        let data_bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, total_bytes)
+        };
+        std::fs::write(&path, data_bytes).unwrap();
+
+        let source = KnowledgeSource::from_frozen_kv(&path);
+        let payload = source.materialize(&ctx).unwrap();
+        assert_eq!(payload.kind, InjectionKind::FrozenKvChunk);
+        assert_eq!(payload.data.len(), total_bytes);
+        assert_eq!(payload.shape, shape);
+        assert!(payload.metadata.contains_key("source_path"));
+
+        // Cleanup
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_late_fusion_source() {
+        // Late fusion source should report LateFusionVector kind
+        let source = KnowledgeSource::from_late_fusion("input.txt");
+        assert_eq!(source.injection_kind(), InjectionKind::LateFusionVector);
+
+        // Non-existent file should return SourceNotFound
+        let ctx = crate::engine::EngineContext::new(32, 4096, 16, 32, 2048);
+        let result = source.materialize(&ctx);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KnowledgeError::SourceNotFound(_)));
+    }
+
+    #[test]
+    fn test_late_fusion_source_file_exists() {
+        // Create a temp file
+        let dir = std::env::temp_dir().join("gllm_test_late_fusion");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_input.txt");
+        std::fs::write(&path, "Hello world").unwrap();
+
+        let source = KnowledgeSource::from_late_fusion(&path);
+        let ctx = crate::engine::EngineContext::new(2, 64, 16, 4, 32);
+        let payload = source.materialize(&ctx).unwrap();
+        assert_eq!(payload.kind, InjectionKind::LateFusionVector);
+        assert!(payload.data.is_empty());
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_lora_source() {
+        // LoRA source should report DynamicLoRA kind
+        let source = KnowledgeSource::from_lora("adapter.safetensors");
+        assert_eq!(source.injection_kind(), InjectionKind::DynamicLoRA);
+
+        // Non-existent file should return SourceNotFound
+        let ctx = crate::engine::EngineContext::new(32, 4096, 16, 32, 2048);
+        let result = source.materialize(&ctx);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KnowledgeError::SourceNotFound(_)));
     }
 
     #[test]

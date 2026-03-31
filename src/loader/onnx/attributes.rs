@@ -66,7 +66,7 @@ fn parse_attribute(
         .name
         .clone()
         .ok_or_else(|| LoaderError::Onnx("attribute missing name".to_string()))?;
-    let doc_string = attr.doc_string.clone().unwrap_or_default();
+    let doc_string = attr.doc_string.clone().unwrap_or_default(); // LEGAL: protobuf 可选字段
     let ref_attr_name = match attr.ref_attr_name.clone() {
         Some(value) if !value.is_empty() => Some(value),
         _ => None,

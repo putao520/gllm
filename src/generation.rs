@@ -35,12 +35,13 @@ pub enum HookDecision {
 /// }
 ///
 /// impl GenerationHook for ProfanityFilter {
-///     fn post_step(&self, _logits: &[f32], token_id: u32) -> HookDecision {
-///         if self.bad_words.contains(&token_id) {
-///             HookDecision::Veto("profanity detected".to_string())
-///         } else {
-///             HookDecision::Continue
+///     fn post_step(&self, _logits: &[f32], generated_tokens: &[u32]) -> HookDecision {
+///         if let Some(&last_token) = generated_tokens.last() {
+///             if self.bad_words.contains(&last_token) {
+///                 return HookDecision::Veto("profanity detected".to_string());
+///             }
 ///         }
+///         HookDecision::Continue
 ///     }
 /// }
 /// ```
@@ -50,14 +51,14 @@ pub trait GenerationHook: Send + Sync {
     /// # Parameters
     ///
     /// - `logits`: Raw model output logits (vocab_size dimensions)
-    /// - `token_id`: The sampled token ID for this step
+    /// - `generated_tokens`: All generated tokens so far (including current step)
     ///
     /// # Return
     ///
     /// - `HookDecision::Continue`: Accept token and continue generation
     /// - `HookDecision::Veto(reason)`: Reject token, retry sampling
     /// - `HookDecision::Terminate`: Stop generation immediately
-    fn post_step(&self, logits: &[f32], token_id: u32) -> HookDecision;
+    fn post_step(&self, logits: &[f32], generated_tokens: &[u32]) -> HookDecision;
 }
 
 /// Simple safety hook that vetoes tokens above a threshold.
@@ -84,17 +85,18 @@ impl ThresholdHook {
 }
 
 impl GenerationHook for ThresholdHook {
-    fn post_step(&self, _logits: &[f32], token_id: u32) -> HookDecision {
-        if self.veto_tokens.contains(&token_id) {
-            let count = self.veto_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count + 1 >= self.max_vetoes {
-                HookDecision::Terminate
-            } else {
-                HookDecision::Veto(format!("token {} blocked by threshold policy", token_id))
+    fn post_step(&self, _logits: &[f32], generated_tokens: &[u32]) -> HookDecision {
+        if let Some(&last_token) = generated_tokens.last() {
+            if self.veto_tokens.contains(&last_token) {
+                let count = self.veto_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count + 1 >= self.max_vetoes {
+                    return HookDecision::Terminate;
+                } else {
+                    return HookDecision::Veto(format!("token {} blocked by threshold policy", last_token));
+                }
             }
-        } else {
-            HookDecision::Continue
         }
+        HookDecision::Continue
     }
 }
 

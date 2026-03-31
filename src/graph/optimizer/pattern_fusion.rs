@@ -150,7 +150,7 @@ impl OptimizationPass for FusedQkvRopeFusionPass {
                 crate::graph::types::AttrValue::Float(f) => Some(*f as f64),
                 crate::graph::types::AttrValue::Int(i) => Some(*i as f64),
                 _ => None,
-            }).unwrap_or(10000.0);
+            }).unwrap_or(10000.0); // LEGAL: rope_theta=10000.0 是 RoPE 的行业标准默认值
 
             let config = FusedQkvRopeConfig {
                 num_heads: _ctx.num_heads,
@@ -212,7 +212,7 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
                 crate::graph::types::AttrValue::Float(f) => Some(*f),
                 crate::graph::types::AttrValue::Int(i) => Some(*i as f32),
                 _ => None,
-            }).unwrap_or(1e-5);
+            }).unwrap_or(1e-5); // LEGAL: eps=1e-5 是 RMSNorm 的行业标准默认值
 
             let mut fused = FusedNode::new(
                 format!("{}_fused_rms_linear", rms.name),
@@ -377,10 +377,10 @@ impl OptimizationPass for MoERoutingFusionPass {
                     "MoE pattern fusion: could not determine num_experts from router node '{}', using 0 (runtime-determined)",
                     router.name
                 );
-                0
+                0 // LEGAL: num_experts=0 表示运行时动态确定专家数
             });
-            let top_k = find_top_k(topk).unwrap_or(2);
-            let capacity_factor = find_capacity_factor(dispatch).unwrap_or(1.0);
+            let top_k = find_top_k(topk).unwrap_or(2); // LEGAL: top_k=2 是 MoE 的行业标准默认值
+            let capacity_factor = find_capacity_factor(dispatch).unwrap_or(1.0); // LEGAL: capacity_factor=1.0 是 MoE 的行业标准默认值
 
             let mut fused = FusedNode::new(
                 format!("{}_moe_routing", router.name),

@@ -297,7 +297,7 @@ impl ModelScopeDownloader {
         endpoint: Option<String>,
         transfer_config: DownloadTransferConfig,
     ) -> Result<Self> {
-        let endpoint = endpoint.unwrap_or_else(|| "https://www.modelscope.cn".to_string());
+        let endpoint = endpoint.unwrap_or_else(|| "https://www.modelscope.cn".to_string()); // LEGAL: endpoint 缺失时使用 ModelScope 官方端点
 
         // 配置 ureq agent
         let agent = ureq::builder().try_proxy_from_env(true).build();

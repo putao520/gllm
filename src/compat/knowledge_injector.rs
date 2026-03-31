@@ -51,8 +51,8 @@ pub fn inject_frozen_kv<E: Element>(
     target_layer: usize,
 ) -> Result<usize, KnowledgeError> {
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
-        return Err(KnowledgeError::NotImplemented(
-            "inject_frozen_kv only supports f32 element type".into(),
+        return Err(KnowledgeError::UnsupportedElementType(
+            format!("inject_frozen_kv requires f32, got {}", std::any::type_name::<E>()),
         ));
     }
 
@@ -172,6 +172,112 @@ pub fn inject_frozen_kv<E: Element>(
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Frozen KV Injection from pre-materialized bytes (per SPEC 04-API-DESIGN §8.4)
+// ---------------------------------------------------------------------------
+
+/// Inject frozen KV cache from pre-materialized bytes.
+///
+/// This is the side-loading path: the caller has already serialized KV data
+/// (e.g., from a safetensors file) and wants to write it directly into the
+/// backend's KV store at the specified layer.
+///
+/// # Arguments
+/// - `backend`: CPU backend holding the KV store
+/// - `data`: Raw f32 KV data serialized as bytes (K then V concatenated)
+/// - `shape`: Expected shape `[num_layers, 2, num_kv_heads, max_seq_len, head_dim]`
+/// - `target_layer`: Physical layer index to write into
+///
+/// # Returns
+/// Number of bytes written
+///
+/// # Errors
+/// - If KV store lock fails
+/// - If data shape doesn't match expectations
+pub fn inject_frozen_kv_from_bytes<E: Element>(
+    backend: &CpuBackend<E>,
+    data: &[u8],
+    shape: &[usize],
+    target_layer: usize,
+) -> Result<usize, KnowledgeError> {
+    // shape = [num_layers, 2, num_kv_heads, max_seq_len, head_dim]
+    if shape.len() != 5 {
+        return Err(KnowledgeError::DataFormatError(format!(
+            "expected 5D shape [num_layers, 2, num_kv_heads, max_seq_len, head_dim], got {}D",
+            shape.len()
+        )));
+    }
+    let num_layers = shape[0];
+    let num_kv_heads = shape[2];
+    let max_seq_len = shape[3];
+    let head_dim = shape[4];
+
+    if target_layer >= num_layers {
+        return Err(KnowledgeError::InvalidLayerTarget);
+    }
+
+    // Each layer's K or V tensor size in bytes (f32)
+    let kv_elem_bytes = std::mem::size_of::<f32>();
+    let layer_kv_elements = num_kv_heads * max_seq_len * head_dim;
+    let layer_kv_bytes = layer_kv_elements * kv_elem_bytes;
+
+    // data layout: [num_layers][2][num_kv_heads * max_seq_len * head_dim] as f32 bytes
+    // K for layer i starts at: i * 2 * layer_kv_bytes
+    // V for layer i starts at: i * 2 * layer_kv_bytes + layer_kv_bytes
+    let k_offset = target_layer * 2 * layer_kv_bytes;
+    let v_offset = k_offset + layer_kv_bytes;
+
+    // Validate data has enough bytes
+    let required_total = num_layers * 2 * layer_kv_bytes;
+    if data.len() < required_total {
+        return Err(KnowledgeError::DataFormatError(format!(
+            "data too small: need {} bytes, got {}",
+            required_total, data.len()
+        )));
+    }
+
+    // Write into the backend's KV store
+    let mut store = backend.kv_store().lock()
+        .map_err(|e| KnowledgeError::KvCacheError(format!("KV store lock failed: {e}")))?;
+
+    // Find or create a KV cache buffer entry (use handle 0 as default)
+    let entry = store.entry(0).or_insert_with(|| {
+        let total_bytes = num_layers * num_kv_heads * max_seq_len * head_dim * kv_elem_bytes;
+        super::cpu_backend::KvCacheBuffer {
+            k: vec![0u8; total_bytes],
+            v: vec![0u8; total_bytes],
+            num_layers,
+            num_kv_heads,
+            max_seq_len,
+            head_dim,
+            page_size: 16,
+            seq_len: 0,
+            elem_bytes: kv_elem_bytes,
+            cache_dtype: gllm_kernels::types::DType::F32,
+        }
+    });
+
+    // Calculate offset within the flat K/V buffers
+    // Layout: [num_layers * num_kv_heads * max_seq_len * head_dim] per K and V
+    let layer_flat_offset = target_layer * num_kv_heads * max_seq_len * head_dim * kv_elem_bytes;
+
+    // Write K data
+    let k_dst_start = layer_flat_offset;
+    let k_dst_end = k_dst_start + layer_kv_bytes;
+    if k_dst_end <= entry.k.len() {
+        entry.k[k_dst_start..k_dst_end].copy_from_slice(&data[k_offset..k_offset + layer_kv_bytes]);
+    }
+
+    // Write V data
+    let v_dst_start = layer_flat_offset;
+    let v_dst_end = v_dst_start + layer_kv_bytes;
+    if v_dst_end <= entry.v.len() {
+        entry.v[v_dst_start..v_dst_end].copy_from_slice(&data[v_offset..v_offset + layer_kv_bytes]);
+    }
+
+    Ok(layer_kv_bytes * 2)
+}
+
+// ---------------------------------------------------------------------------
 // 2. Late Fusion Injection (per SPEC 04-API-DESIGN §8.2)
 // ---------------------------------------------------------------------------
 
@@ -202,8 +308,8 @@ pub fn inject_late_fusion<E: Element>(
     target: LayerTarget,
 ) -> Result<Vec<f32>, KnowledgeError> {
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
-        return Err(KnowledgeError::NotImplemented(
-            "inject_late_fusion only supports f32 element type".into(),
+        return Err(KnowledgeError::UnsupportedElementType(
+            format!("inject_late_fusion requires f32, got {}", std::any::type_name::<E>()),
         ));
     }
 

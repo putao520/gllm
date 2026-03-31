@@ -114,12 +114,12 @@ impl OnnxModel {
             .graph
             .ok_or_else(|| LoaderError::Onnx("missing graph in ONNX model".to_string()))?;
         let metadata = OnnxModelMetadata {
-            ir_version: proto.ir_version.unwrap_or_default(),
-            producer_name: proto.producer_name.unwrap_or_default(),
-            producer_version: proto.producer_version.unwrap_or_default(),
-            domain: proto.domain.unwrap_or_default(),
-            model_version: proto.model_version.unwrap_or_default(),
-            doc_string: proto.doc_string.unwrap_or_default(),
+            ir_version: proto.ir_version.unwrap_or_default(), // LEGAL: protobuf 可选字段，缺失时使用默认值
+            producer_name: proto.producer_name.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            producer_version: proto.producer_version.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            domain: proto.domain.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            model_version: proto.model_version.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            doc_string: proto.doc_string.unwrap_or_default(), // LEGAL: protobuf 可选字段
             opset_import: parse_opsets(proto.opset_import),
             metadata_props: parse_metadata_props(proto.metadata_props),
         };
@@ -158,8 +158,8 @@ impl OnnxGraph {
         let quantization_annotation = parse_quantization(proto.quantization_annotation, &initializers);
 
         Ok(Self {
-            name: proto.name.unwrap_or_default(),
-            doc_string: proto.doc_string.unwrap_or_default(),
+            name: proto.name.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            doc_string: proto.doc_string.unwrap_or_default(), // LEGAL: protobuf 可选字段
             nodes,
             inputs,
             outputs,
@@ -255,7 +255,7 @@ fn parse_nodes(
 ) -> Result<Vec<OnnxNode>> {
     let mut out = Vec::with_capacity(nodes.len());
     for (idx, node) in nodes.into_iter().enumerate() {
-        let op_type = node.op_type.unwrap_or_default();
+        let op_type = node.op_type.unwrap_or_default(); // LEGAL: protobuf 可选字段
         if op_type.is_empty() {
             return Err(LoaderError::Onnx(format!("node {idx} missing op_type")));
         }
@@ -267,7 +267,7 @@ fn parse_nodes(
         out.push(OnnxNode {
             name,
             op_type,
-            domain: node.domain.unwrap_or_default(),
+            domain: node.domain.unwrap_or_default(), // LEGAL: protobuf 可选字段
             inputs: node.input,
             outputs: node.output,
             attributes,
@@ -289,7 +289,7 @@ fn parse_value_info(values: Vec<proto::ValueInfoProto>) -> Result<Vec<OnnxValueI
         out.push(OnnxValueInfo {
             name,
             value_type,
-            doc_string: value.doc_string.unwrap_or_default(),
+            doc_string: value.doc_string.unwrap_or_default(), // LEGAL: protobuf 可选字段
             metadata_props: parse_metadata_props(value.metadata_props),
         });
     }
@@ -300,8 +300,8 @@ fn parse_opsets(opsets: Vec<proto::OperatorSetIdProto>) -> Vec<OnnxOperatorSet> 
     opsets
         .into_iter()
         .map(|opset| OnnxOperatorSet {
-            domain: opset.domain.unwrap_or_default(),
-            version: opset.version.unwrap_or_default(),
+            domain: opset.domain.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            version: opset.version.unwrap_or_default(), // LEGAL: protobuf 可选字段
         })
         .collect()
 }
@@ -315,7 +315,7 @@ fn parse_metadata_props(entries: Vec<proto::StringStringEntryProto>) -> HashMap<
         if key.is_empty() {
             continue;
         }
-        let value = entry.value.unwrap_or_default();
+        let value = entry.value.unwrap_or_default(); // LEGAL: protobuf 可选字段
         out.insert(key, value);
     }
     out
@@ -340,7 +340,7 @@ fn parse_quantization(
             .get("AXIS")
             .and_then(|value| value.parse::<i32>().ok());
         out.push(OnnxQuantizationAnnotation {
-            tensor_name: entry.tensor_name.unwrap_or_default(),
+            tensor_name: entry.tensor_name.unwrap_or_default(), // LEGAL: protobuf 可选字段
             quant_param_tensor_names,
             scale,
             zero_point,
@@ -356,7 +356,7 @@ fn parse_functions(
 ) -> Result<Vec<OnnxFunction>> {
     let mut out = Vec::with_capacity(functions.len());
     for func in functions {
-        let name = func.name.unwrap_or_default();
+        let name = func.name.unwrap_or_default(); // LEGAL: protobuf 可选字段
         if name.is_empty() {
             return Err(LoaderError::Onnx("function missing name".to_string()));
         }
@@ -365,8 +365,8 @@ fn parse_functions(
         let value_info = parse_value_info(func.value_info)?;
         out.push(OnnxFunction {
             name,
-            domain: func.domain.unwrap_or_default(),
-            overload: func.overload.unwrap_or_default(),
+            domain: func.domain.unwrap_or_default(), // LEGAL: protobuf 可选字段
+            overload: func.overload.unwrap_or_default(), // LEGAL: protobuf 可选字段
             inputs: func.input,
             outputs: func.output,
             attributes: func.attribute,
@@ -374,7 +374,7 @@ fn parse_functions(
             nodes,
             opset_import: parse_opsets(func.opset_import),
             value_info,
-            doc_string: func.doc_string.unwrap_or_default(),
+            doc_string: func.doc_string.unwrap_or_default(), // LEGAL: protobuf 可选字段
             metadata_props: parse_metadata_props(func.metadata_props),
         });
     }

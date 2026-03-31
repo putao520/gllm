@@ -195,38 +195,17 @@ pub(crate) fn pack_weights_typed(slices: &[&[f32]], dtype: DType) -> Vec<u8> {
 
 /// Pack weight slices with per-tensor dtype (mixed dtype graphs).
 /// Each tuple is (slice, dtype) — GEMM weights use model dtype, norm weights use F32.
-pub(crate) fn pack_weights_multi(slices_with_dtypes: &[(&[f32], DType)]) -> Vec<u8> {
+/// ARCH-DTYPE-FULLCHAIN-ORCH: accepts &[u8] instead of &[f32].
+pub(crate) fn pack_weights_multi(slices_with_dtypes: &[(&[u8], DType)]) -> Vec<u8> {
     let total_bytes: usize = slices_with_dtypes.iter()
-        .map(|(s, dt)| s.len() * dt.size_bytes())
+        .map(|(s, dt)| s.len() / dt.size_bytes() * dt.size_bytes())
         .sum();
     let mut buf = vec![0u8; total_bytes];
     let mut offset = 0;
     for &(slice, dtype) in slices_with_dtypes {
-        let bytes = slice.len() * dtype.size_bytes();
-        match dtype {
-            DType::U8 => panic!("U8 unsupported"),
-            DType::F32 => {
-                buf[offset..offset + bytes].copy_from_slice(unsafe {
-                    std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes)
-                });
-            }
-            DType::F16 => {
-                for (i, &val) in slice.iter().enumerate() {
-                    let h = half::f16::from_f32(val);
-                    let hb = h.to_le_bytes();
-                    buf[offset + i * 2] = hb[0];
-                    buf[offset + i * 2 + 1] = hb[1];
-                }
-            }
-            DType::BF16 => {
-                for (i, &val) in slice.iter().enumerate() {
-                    let h = half::bf16::from_f32(val);
-                    let hb = h.to_le_bytes();
-                    buf[offset + i * 2] = hb[0];
-                    buf[offset + i * 2 + 1] = hb[1];
-                }
-            }
-        }
+        let bytes = slice.len();
+        // Direct byte copy — slice is already in target dtype
+        buf[offset..offset + bytes].copy_from_slice(slice);
         offset += bytes;
     }
     buf
@@ -336,16 +315,16 @@ pub(crate) fn build_decoder_layer_graph(
 }
 
 /// Execute a JIT-compiled decoder layer.
-/// ARCH-DTYPE-ADAPTIVE: GEMM weights packed at model dtype, norm weights at F32.
+/// ARCH-DTYPE-FULLCHAIN-ORCH: accepts &[u8] for all data, dtype via parameter.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_jit_decoder_layer(
     compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    q_w: &[f32], k_w: &[f32], v_w: &[f32], o_w: &[f32], rn1_w: &[f32],
-    gate_w: &[f32], up_w: &[f32], down_w: &[f32], rn2_w: &[f32],
+    hidden_state: &[u8],
+    q_w: &[u8], k_w: &[u8], v_w: &[u8], o_w: &[u8], rn1_w: &[u8],
+    gate_w: &[u8], up_w: &[u8], down_w: &[u8], rn2_w: &[u8],
     positions: &[u32],
     seq_len: usize,
-    output: &mut [f32],
+    output: &mut [u8],
     dtype: DType,
 ) {
     let ft = dtype; // norm weight dtype
@@ -357,13 +336,13 @@ pub(crate) fn execute_jit_decoder_layer(
 
     unsafe {
         compiled.execute(
-            hidden_state.as_ptr() as *const u8,
+            hidden_state.as_ptr(),
             weights_buf.as_ptr(),
             std::ptr::null_mut(),
             positions.as_ptr(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -376,92 +355,6 @@ pub(crate) fn execute_jit_decoder_layer(
 // ---------------------------------------------------------------------------
 // KV cache write
 // ---------------------------------------------------------------------------
-
-/// Write pre-computed K/V data into the KV cache buffer.
-pub(crate) fn write_kv_to_cache<E: Element>(
-    backend: &CpuBackend<E>,
-    handle: KvCacheHandle,
-    layer: usize,
-    k_data: &[f32],
-    v_data: &[f32],
-    seq_len: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-) -> Result<(), BE> {
-    let kv_dim = num_kv_heads * head_dim;
-    let mut store = backend.kv_store().lock().map_err(|e| {
-        BE::Cpu(format!("KV store lock poisoned: {e}"))
-    })?;
-
-    let buffer = store.get_mut(&handle.0).ok_or_else(|| {
-        BE::Cpu(format!("KV cache handle {} not found", handle.0))
-    })?;
-
-    let write_start = if layer == 0 { buffer.seq_len } else { buffer.seq_len.saturating_sub(seq_len) };
-    let max_seq = buffer.max_seq_len;
-    let eb = buffer.elem_bytes;
-
-    if write_start + seq_len > max_seq {
-        return Err(BE::Cpu(format!(
-            "KV cache overflow: write_start={write_start} + seq_len={seq_len} > max_seq_len={max_seq}"
-        )));
-    }
-
-    // Convert f32 source data to bytes and write into typed KV cache
-    let k_bytes = f32_as_bytes(k_data);
-    let v_bytes = f32_as_bytes(v_data);
-    let src_eb = std::mem::size_of::<f32>();
-
-    for h in 0..num_kv_heads {
-        let layer_head_base = (layer * num_kv_heads + h) * max_seq * head_dim;
-        for s in 0..seq_len {
-            let cache_offset = (layer_head_base + (write_start + s) * head_dim) * eb;
-            let proj_offset = (s * kv_dim + h * head_dim) * src_eb;
-            if eb == src_eb {
-                // F32 cache: direct byte copy
-                buffer.k[cache_offset..cache_offset + head_dim * eb]
-                    .copy_from_slice(&k_bytes[proj_offset..proj_offset + head_dim * src_eb]);
-                buffer.v[cache_offset..cache_offset + head_dim * eb]
-                    .copy_from_slice(&v_bytes[proj_offset..proj_offset + head_dim * src_eb]);
-            } else {
-                // F16/BF16 cache: convert f32 → target dtype per element
-                let k_src = &k_data[s * kv_dim + h * head_dim..s * kv_dim + h * head_dim + head_dim];
-                let v_src = &v_data[s * kv_dim + h * head_dim..s * kv_dim + h * head_dim + head_dim];
-                for d in 0..head_dim {
-                    let dst = cache_offset + d * eb;
-                    if eb == 2 {
-                        // Use cache_dtype to distinguish F16 vs BF16
-                        match buffer.cache_dtype {
-                            DType::BF16 => {
-                                let kh = half::bf16::from_f32(k_src[d]).to_le_bytes();
-                                buffer.k[dst..dst + 2].copy_from_slice(&kh);
-                                let vh = half::bf16::from_f32(v_src[d]).to_le_bytes();
-                                buffer.v[dst..dst + 2].copy_from_slice(&vh);
-                            }
-                            _ => {
-                                let kh = half::f16::from_f32(k_src[d]).to_le_bytes();
-                                buffer.k[dst..dst + 2].copy_from_slice(&kh);
-                                let vh = half::f16::from_f32(v_src[d]).to_le_bytes();
-                                buffer.v[dst..dst + 2].copy_from_slice(&vh);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if layer == 0 {
-        buffer.seq_len = (buffer.seq_len + seq_len).min(max_seq);
-    }
-
-    log::debug!(
-        "write_kv_to_cache: layer={layer}, wrote {seq_len} tokens at pos {write_start}, total_seq={}",
-        if layer == 0 { write_start + seq_len } else { buffer.seq_len }
-    );
-
-    Ok(())
-}
 
 /// Write typed KV data (any dtype) into the KV cache buffer.
 /// ARCH-DTYPE-FULLCHAIN-ORCH: accepts &[u8] + src_dtype instead of &[f32].
@@ -609,14 +502,15 @@ pub(crate) fn build_lm_head_graph(
 }
 
 /// Execute the JIT-compiled lm_head.
+/// ARCH-DTYPE-FULLCHAIN-ORCH: accepts &[u8] for all data.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn execute_jit_lm_head(
     compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    norm_w: &[f32],
-    lm_w: &[f32],
+    hidden_state: &[u8],
+    norm_w: &[u8],
+    lm_w: &[u8],
     seq_len: usize,
-    output: &mut [f32],
+    output: &mut [u8],
     dtype: DType,
 ) {
     let weights_buf = pack_weights_multi(&[(norm_w, dtype), (lm_w, dtype)]);
@@ -624,13 +518,13 @@ pub(crate) fn execute_jit_lm_head(
 
     unsafe {
         compiled.execute(
-            hidden_state.as_ptr() as *const u8,
+            hidden_state.as_ptr(),
             weights_buf.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             1, seq_len,
-            output.as_mut_ptr() as *mut u8,
+            output.as_mut_ptr(),
             scratchpad.as_mut_ptr(),
         );
     }
@@ -749,9 +643,9 @@ pub(crate) fn build_moe_pre_attention_graph(
 #[allow(dead_code)]
 pub(crate) fn execute_moe_pre_attention(
     compiled: &gllm_kernels::compiler::CompiledLayer,
-    hidden_state: &[f32],
-    rn1_w: &[f32],
-    q_w: &[f32], k_w: &[f32], v_w: &[f32],
+    hidden_state: &[u8],
+    rn1_w: &[u8],
+    q_w: &[u8], k_w: &[u8], v_w: &[u8],
     positions: &[u32],
     seq_len: usize,
     hidden: usize,
@@ -760,7 +654,7 @@ pub(crate) fn execute_moe_pre_attention(
     head_dim: usize,
     eps: f32,
     dtype: DType,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+) -> Result<(TypedBuffer, TypedBuffer, TypedBuffer), String> {
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
 
@@ -770,7 +664,7 @@ pub(crate) fn execute_moe_pre_attention(
 
     unsafe {
         compiled.execute(
-            hidden_state.as_ptr() as *const u8,
+            hidden_state.as_ptr(),
             weights_buf.as_ptr(),
             std::ptr::null_mut(),
             positions.as_ptr(),

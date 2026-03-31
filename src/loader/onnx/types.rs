@@ -89,7 +89,7 @@ impl OnnxTensorType {
             .shape
             .map(OnnxTensorShape::from_proto)
             .transpose()?
-            .unwrap_or_else(|| OnnxTensorShape { dims: Vec::new() });
+            .unwrap_or_else(|| OnnxTensorShape { dims: Vec::new() }); // LEGAL: shape 缺失时使用空维度
         Ok(Self { elem_type, shape })
     }
 
@@ -104,7 +104,7 @@ impl OnnxTensorType {
             .shape
             .map(OnnxTensorShape::from_proto)
             .transpose()?
-            .unwrap_or_else(|| OnnxTensorShape { dims: Vec::new() });
+            .unwrap_or_else(|| OnnxTensorShape { dims: Vec::new() }); // LEGAL: shape 缺失时使用空维度
         Ok(Self { elem_type, shape })
     }
 }

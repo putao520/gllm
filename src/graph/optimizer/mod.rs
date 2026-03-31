@@ -160,7 +160,7 @@ impl GraphOptimizer {
                 .get("SCALE_TENSOR")
                 .and_then(|name| graph.initializers.get(name))
                 .and_then(OnnxTensor::scalar_f32)
-                .unwrap_or(1.0);
+                .unwrap_or(1.0); // LEGAL: scale=1.0 是量化参数的合法默认值（无缩放）
             let zero_point = annotation
                 .quant_param_tensor_names
                 .get("ZERO_POINT_TENSOR")

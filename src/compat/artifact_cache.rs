@@ -20,7 +20,8 @@ impl ArtifactCache {
     /// Create a new Artifact Cache, defaulting to ~/.gllm/jit_cache/
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         let dir = cache_dir.unwrap_or_else(|| {
-            let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            // LEGAL: cache_dir 缺失时使用默认路径 ~/.gllm/jit_cache
+            let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")); // LEGAL: 无 HOME 环境变量时使用当前目录
             p.push(".gllm");
             p.push("jit_cache");
             p

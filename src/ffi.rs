@@ -97,7 +97,7 @@ pub unsafe extern "C" fn gllm_generate(
     let err_result = |msg: &str| -> GllmGenerateResult {
         GllmGenerateResult {
             text: ptr::null_mut(),
-            error: CString::new(msg).unwrap_or_default().into_raw(),
+            error: CString::new(msg).unwrap_or_default().into_raw(), // LEGAL: FFI 边界，CString::new 仅在含 NUL 时失败，极端边界
         }
     };
     if ctx.is_null() || prompt.is_null() {
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn gllm_generate(
 
     match result {
         Ok(resp) => GllmGenerateResult {
-            text: CString::new(resp.text).unwrap_or_default().into_raw(),
+            text: CString::new(resp.text).unwrap_or_default().into_raw(), // LEGAL: FFI 边界，CString::new 仅在含 NUL 时失败，极端边界
             error: ptr::null_mut(),
         },
         Err(e) => err_result(&format!("{e}")),

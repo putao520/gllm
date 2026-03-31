@@ -205,6 +205,11 @@ pub(crate) enum PoolingMode {
 
 // Re-export knowledge injection API (per SPEC 04-API-DESIGN §8)
 pub use knowledge_injector::{
-    inject_frozen_kv, inject_late_fusion, inject_dynamic_lora,
+    inject_frozen_kv, inject_frozen_kv_from_bytes, inject_late_fusion, inject_dynamic_lora,
     LoRAAdapter, register_kv_pages,
+};
+
+// Re-export forward_to_layer API (per SPEC 04-API-DESIGN §7.3)
+pub use decoder_forward::{
+    forward_to_layer, forward_to_semantic_layer, layer_target_to_idx,
 };

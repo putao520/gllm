@@ -477,7 +477,7 @@ impl HfHubClient {
         let endpoint = std::env::var("HF_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "https://huggingface.co".to_string());
+            .unwrap_or_else(|| "https://huggingface.co".to_string()); // LEGAL: HF_ENDPOINT 缺失时使用官方端点
         let url = format!("{}/api/models/{}", endpoint.trim_end_matches('/'), repo);
         let response = ureq::get(&url).call().ok()?;
         if response.status() != 200 {
@@ -588,7 +588,7 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
 fn resolve_onnx_external_repo_path(onnx_repo_path: &str, location: &str) -> Result<String> {
     let base = Path::new(onnx_repo_path)
         .parent()
-        .unwrap_or_else(|| Path::new(""));
+        .unwrap_or_else(|| Path::new("")); // LEGAL: 无父目录时使用空路径
     normalize_repo_path(&base.join(location))
 }
 
