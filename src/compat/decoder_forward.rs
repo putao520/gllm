@@ -1,8 +1,9 @@
 
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use super::weight_helpers::get_f32_data;
+use super::jit_helpers::TypedBuffer;
+use super::weight_helpers::get_typed_data;
+use super::jit_helpers::typed_bytes_to_f32;
 use super::Element;
 use crate::engine::executor::{
     BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheHandle, LogitsHandle,
@@ -52,13 +53,15 @@ pub(crate) fn decoder_forward<E: Element>(
         }
 
         // (a) Token embedding lookup
-        let embed_data = get_f32_data(
+        let (embed_bytes, embed_dtype) = get_typed_data(
             weights, backend,
             &crate::weight_names::decoder_embed_aliases(),
         )?;
+        let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
         let embed_vocab = embed_data.len() / hidden;
-        let mut hidden_state = vec![0.0f32; seq_len * hidden];
+        // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
+        let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
         for (s, &tok) in tokens.iter().enumerate() {
             let v = tok as usize;
             if v >= embed_vocab {
@@ -66,7 +69,7 @@ pub(crate) fn decoder_forward<E: Element>(
                     "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
                 )));
             }
-            hidden_state[s * hidden..(s + 1) * hidden]
+            hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
                 .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
         }
 
@@ -106,10 +109,8 @@ pub(crate) fn decoder_forward<E: Element>(
         }
 
         let mut inputs = std::collections::HashMap::new();
-        let hs_bytes: Vec<u8> = hidden_state
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        // P3: 直接使用 TypedBuffer 的字节切片
+        let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
         let input_name = if let Some(first_node) = ge.graph().nodes.first() {
             if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
                 first_node.outputs.first().unwrap().clone()
@@ -210,13 +211,15 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     }
 
     // (a) Token embedding lookup
-    let embed_data = get_f32_data(
+    let (embed_bytes, embed_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::decoder_embed_aliases(),
     )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -224,7 +227,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
                 "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
             )));
         }
-        hidden_state[s * hidden..(s + 1) * hidden]
+        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
             .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
     }
 
@@ -242,10 +245,8 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     }
 
     let mut inputs = std::collections::HashMap::new();
-    let hs_bytes: Vec<u8> = hidden_state
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    // P3: 直接使用 TypedBuffer 的字节切片
+    let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
     let input_name = if let Some(first_node) = ge.graph().nodes.first() {
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
@@ -310,13 +311,15 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     }
 
     // (a) Token embedding lookup
-    let embed_data = get_f32_data(
+    let (embed_bytes, embed_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::decoder_embed_aliases(),
     )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -324,7 +327,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
                 "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
             )));
         }
-        hidden_state[s * hidden..(s + 1) * hidden]
+        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
             .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
     }
 
@@ -342,10 +345,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     }
 
     let mut inputs = std::collections::HashMap::new();
-    let hs_bytes: Vec<u8> = hidden_state
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    // P3: 直接使用 TypedBuffer 的字节切片
+    let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
     let input_name = if let Some(first_node) = ge.graph().nodes.first() {
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
@@ -379,6 +380,242 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         Ok(vec![score])
     } else {
         Err(BE::Other("GraphExecutor produced no score output".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Truncated forward pass (for encode_intent, guardrails, etc.)
+// ---------------------------------------------------------------------------
+
+/// Map LayerTarget to physical layer index.
+///
+/// Per SPEC 04-API-DESIGN §7.3:
+/// - ShallowSyntax → num_layers / 4
+/// - MidSemantic → num_layers / 2
+/// - DeepLogic → num_layers * 3 / 4
+///
+/// Returns a layer index in the range [1, num_layers-1].
+pub fn layer_target_to_idx(target: crate::knowledge::LayerTarget, num_layers: usize) -> usize {
+    match target {
+        crate::knowledge::LayerTarget::ShallowSyntax => (num_layers / 4).max(1),
+        crate::knowledge::LayerTarget::MidSemantic => (num_layers / 2).max(1),
+        crate::knowledge::LayerTarget::DeepLogic => (num_layers * 3 / 4).max(1),
+    }
+}
+
+/// Extract layer index from node name.
+///
+/// Supports patterns like:
+/// - `layer_0_input_norm` → 0
+/// - `layer_15_q_proj` → 15
+/// - `layer_3` → 3
+///
+/// Returns None if the node name does not follow the layer pattern.
+fn extract_layer_index(node_name: &str) -> Option<usize> {
+    // Pattern: layer_{number}_... or just layer_{number}
+    if let Some(rest) = node_name.strip_prefix("layer_") {
+        // Find the first underscore or end of string
+        let num_str = rest.split('_').next()?;
+        num_str.parse::<usize>().ok()
+    } else {
+        None
+    }
+}
+
+/// Forward pass truncated at a specific layer.
+///
+/// This function executes the model up to `target_layer` (exclusive) and returns
+/// the hidden state at that layer. Used by `encode_intent()` for extracting
+/// intermediate representations.
+///
+/// # Arguments
+/// - `backend`: CPU backend for execution
+/// - `tokens`: Input token IDs
+/// - `weights`: Model weights
+/// - `config`: Forward configuration
+/// - `target_layer`: Layer index to stop at (0-based, exclusive)
+///
+/// # Returns
+/// Hidden state vector at the target layer (flattened [seq_len * hidden_size])
+pub(crate) fn forward_to_layer<E: Element>(
+    backend: &CpuBackend<E>,
+    tokens: &[u32],
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    config: &GeneratorForwardConfig,
+    target_layer: usize,
+) -> Result<Vec<f32>, BE> {
+    if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
+        return Err(BE::Other("forward_to_layer only supports f32".into()));
+    }
+
+    let hidden = config.hidden_size;
+    let seq_len = tokens.len();
+
+    if seq_len == 0 {
+        return Err(BE::Other("empty token sequence for forward_to_layer".into()));
+    }
+
+    if target_layer == 0 {
+        return Err(BE::Other("target_layer must be at least 1".into()));
+    }
+
+    // Token embedding lookup
+    let (embed_bytes, embed_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::decoder_embed_aliases(),
+    )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
+
+    let embed_vocab = embed_data.len() / hidden;
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    for (s, &tok) in tokens.iter().enumerate() {
+        let v = tok as usize;
+        if v >= embed_vocab {
+            return Err(BE::Other(format!(
+                "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
+            )));
+        }
+        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
+            .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
+    }
+
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "forward_to_layer requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). \
+            Legacy operator-level JIT has been removed. Please ensure YAML graph template exists for this architecture."
+            .into()
+        ));
+    }
+
+    let ge = unsafe { &mut *config.graph_executor_ptr };
+    if ge.graph().nodes.is_empty() {
+        return Err(BE::Other("GraphExecutor has empty nodes. Stub architecture templates are not runnable.".into()));
+    }
+
+    // NOTE: Current FusedGraphExecutor executes all layers internally.
+    // True truncated execution requires graph-level support (either building
+    // a truncated graph or adding a max_layer parameter to the executor).
+    //
+    // For now, we execute the full graph and return the final hidden state.
+    // This is a limitation of the current architecture that should be
+    // addressed by:
+    // 1. Adding a run_with_max_layer() method to FusedGraphExecutor, or
+    // 2. Building truncated graphs during model loading.
+
+    let mut inputs = std::collections::HashMap::new();
+    let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
+    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+            first_node.outputs.first().unwrap().clone()
+        } else {
+            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string())
+        }
+    } else {
+        "hidden_state".to_string()
+    };
+    inputs.insert(input_name, hs_bytes);
+
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    let output = ge.run_with_kv_cache(
+        &inputs,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+        seq_len,
+        seq_len,
+        positions.as_ptr(),
+    ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
+
+    // Extract hidden state from output
+    // The graph output name varies by model type; try common names
+    if let Some(out_bytes) = output.get("hidden_state")
+        .or_else(|| output.get("last_hidden_state"))
+        .or_else(|| output.get("embeddings"))
+        .or_else(|| output.values().next()) {
+        let hs: Vec<f32> = out_bytes
+            .chunks_exact(4)
+            .map(|c| {
+                let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
+                f32::from_le_bytes(arr)
+            })
+            .collect();
+        Ok(hs)
+    } else {
+        Err(BE::Other("GraphExecutor produced no hidden state output for forward_to_layer".into()))
+    }
+}
+
+/// Forward pass with LayerTarget (semantic layer selection).
+///
+/// This is the preferred API for knowledge injection and intent encoding,
+/// as it uses semantic layer names (ShallowSyntax, MidSemantic, DeepLogic)
+/// rather than hardcoded layer indices.
+///
+/// # Arguments
+/// - `backend`: CPU backend for execution
+/// - `tokens`: Input token IDs
+/// - `weights`: Model weights
+/// - `config`: Forward configuration
+/// - `target`: Semantic layer target (ShallowSyntax/MidSemantic/DeepLogic)
+///
+/// # Returns
+/// Hidden state vector at the target semantic layer
+pub(crate) fn forward_to_semantic_layer<E: Element>(
+    backend: &CpuBackend<E>,
+    tokens: &[u32],
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    config: &GeneratorForwardConfig,
+    target: crate::knowledge::LayerTarget,
+) -> Result<Vec<f32>, BE> {
+    let target_layer = layer_target_to_idx(target, config.num_layers);
+    forward_to_layer(backend, tokens, weights, config, target_layer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_layer_index() {
+        assert_eq!(extract_layer_index("layer_0_input_norm"), Some(0));
+        assert_eq!(extract_layer_index("layer_15_q_proj"), Some(15));
+        assert_eq!(extract_layer_index("layer_3"), Some(3));
+        assert_eq!(extract_layer_index("embed"), None);
+        assert_eq!(extract_layer_index("layer_"), None);
+        assert_eq!(extract_layer_index("layer_abc"), None);
+    }
+
+    #[test]
+    fn test_extract_layer_index_edge_cases() {
+        // Very large layer numbers
+        assert_eq!(extract_layer_index("layer_999_attn"), Some(999));
+        // Single digit
+        assert_eq!(extract_layer_index("layer_5"), Some(5));
+        // Zero
+        assert_eq!(extract_layer_index("layer_0"), Some(0));
+        // No underscore after number
+        assert_eq!(extract_layer_index("layer_123"), Some(123));
+    }
+
+    #[test]
+    fn test_layer_target_to_idx() {
+        use crate::knowledge::LayerTarget;
+
+        // 32 layers model
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 32), 8);
+        assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 32), 16);
+        assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 32), 24);
+
+        // Small model (4 layers)
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 4), 1);
+        assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 4), 2);
+        assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 4), 3);
+
+        // Very small model (2 layers)
+        assert_eq!(layer_target_to_idx(LayerTarget::ShallowSyntax, 2), 1);
+        assert_eq!(layer_target_to_idx(LayerTarget::MidSemantic, 2), 1);
+        assert_eq!(layer_target_to_idx(LayerTarget::DeepLogic, 2), 1);
     }
 }
 

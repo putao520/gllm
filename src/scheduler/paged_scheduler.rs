@@ -197,7 +197,7 @@ impl PagedScheduler {
     ) -> Result<usize, SchedulerError> {
         // Check prefix tree for longest matching prefix
         let prefix_match = self.prefix_index.find_longest_prefix(tokens);
-        let reused_tokens = prefix_match.as_ref().map(|m| m.matched_tokens).unwrap_or(0);
+        let reused_tokens = prefix_match.as_ref().map(|m| m.matched_tokens).unwrap_or(0); // LEGAL: 无匹配前缀时 reused_tokens=0
         let reused_blocks = reused_tokens.div_ceil(self.block_size.max(1));
 
         // Only allocate blocks for the non-reused portion
@@ -459,7 +459,7 @@ impl PagedScheduler {
         self.block_tables
             .get(&request_id)
             .map(|table| table.blocks.iter().copied().enumerate().collect())
-            .unwrap_or_default()
+            .unwrap_or_default() // LEGAL: 不存在的 request 返回空 pages 列表
     }
 
     pub fn free_sequence(&mut self, request_id: RequestId) {
@@ -516,7 +516,7 @@ impl PagedScheduler {
                 .sequence_groups
                 .get(request_id)
                 .map(|group| group.context_len.min(capacity))
-                .unwrap_or(0);
+                .unwrap_or(0); // LEGAL: 不存在的 sequence group 返回 0 used tokens
             used_tokens = used_tokens.saturating_add(used);
         }
 

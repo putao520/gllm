@@ -204,6 +204,11 @@ pub(crate) fn cached_gqa_attention(
     let mut sparse_count: u64 = 0;
     let mut total_count: u64 = 0;
 
+    // Convert byte slices to f32 views based on dtype
+    let elem_size = kv.dtype.size_bytes();
+    let k_f32: &[f32] = unsafe { std::slice::from_raw_parts(kv.k.as_ptr() as *const f32, kv.k.len() / elem_size) };
+    let v_f32: &[f32] = unsafe { std::slice::from_raw_parts(kv.v.as_ptr() as *const f32, kv.v.len() / elem_size) };
+
     for h in 0..geom.num_heads {
         let kv_h = h / geom.heads_per_group;
         let cache_base = (kv.layer * geom.num_kv_heads + kv_h) * kv.max_seq_len * geom.head_dim;
@@ -216,7 +221,7 @@ pub(crate) fn cached_gqa_attention(
                 let k_offset = cache_base + t * geom.head_dim;
                 let mut dot = 0.0f32;
                 for d in 0..geom.head_dim {
-                    dot += q[q_offset + d] * kv.k[k_offset + d];
+                    dot += q[q_offset + d] * k_f32[k_offset + d];
                 }
                 *score = dot * scale;
             }
@@ -257,7 +262,7 @@ pub(crate) fn cached_gqa_attention(
                 let mut val = 0.0f32;
                 for (t, &score) in scores.iter().enumerate().take(seq.total_seq) {
                     let v_offset = cache_base + t * geom.head_dim;
-                    val += score * kv.v[v_offset + d];
+                    val += score * v_f32[v_offset + d];
                 }
                 attn_out[out_offset + d] = val;
             }

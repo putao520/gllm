@@ -10,6 +10,7 @@ mod weight_helpers;
 mod bert_forward;
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod decoder_forward;
+mod knowledge_injector;
 pub(crate) mod artifact_cache;
 
 mod gpu_compile;
@@ -201,3 +202,9 @@ pub(crate) enum PoolingMode {
     /// [CLS] token + classifier head (for reranker/classification models).
     ClsClassifier,
 }
+
+// Re-export knowledge injection API (per SPEC 04-API-DESIGN §8)
+pub use knowledge_injector::{
+    inject_frozen_kv, inject_late_fusion, inject_dynamic_lora,
+    LoRAAdapter, register_kv_pages,
+};

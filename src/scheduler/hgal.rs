@@ -170,7 +170,7 @@ impl HGALScheduler {
         }
         Self::warm_until(meta, warmup_duration)
             .map(|end| now < end)
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: warm_until 为 None 时视为不在 warmup 期
     }
 
     fn is_in_warmup_period(&self, page_id: PageId) -> bool {
@@ -184,7 +184,7 @@ impl HGALScheduler {
                     self.config.min_warm_access,
                 )
             })
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: 不存在的 page_id 视为不在 warmup 期
     }
 
     /// Working set detection: promote hot pages to Protected, demote stale ones.

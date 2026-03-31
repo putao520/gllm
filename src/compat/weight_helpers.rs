@@ -13,6 +13,18 @@ pub(crate) fn as_f32_slice<E: Element>(data: &[E]) -> &[f32] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len()) }
 }
 
+/// Derive DType from Element type.
+/// Returns error for unsupported element types.
+pub(crate) fn element_to_dtype<E: Element>() -> Result<DType, BE> {
+    let elem_id = E::ELEM_ID;
+    match elem_id {
+        0 => Ok(DType::F32),  // f32
+        1 => Ok(DType::F16),  // f16
+        2 => Ok(DType::BF16), // bf16
+        _ => Err(BE::Other(format!("Unsupported element type with ELEM_ID: {}", elem_id))),
+    }
+}
+
 /// Try to get tensor data as an owned Vec<f32>. Tries each name in order.
 /// Handles both native (f32) tensors and quantized (GGUF) tensors.
 pub(crate) fn get_f32_data<E: Element>(
@@ -81,6 +93,35 @@ pub(crate) fn get_bias_data<E: Element>(
     vec![0.0; size]
 }
 
+/// Get bias data as (Vec<u8>, DType). Returns zeros if not found.
+pub(crate) fn get_bias_data_typed<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    names: &[impl AsRef<str>],
+    size: usize,
+) -> (Vec<u8>, DType) {
+    let dtype = match element_to_dtype::<E>() {
+        Ok(d) => d,
+        Err(_) => DType::F32, // Fallback for unsupported types
+    };
+
+    for name in names {
+        if let Some(t) = weights.get_tensor(name.as_ref()) {
+            let e_slice: &[E] = t.as_slice();
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    e_slice.as_ptr() as *const u8,
+                    std::mem::size_of_val(e_slice),
+                )
+            };
+            return (bytes.to_vec(), dtype);
+        }
+    }
+
+    // Return zero-initialized buffer
+    let elem_bytes = dtype.size_bytes();
+    (vec![0u8; size * elem_bytes], dtype)
+}
+
 /// Detect whether linear-layer weights need transposing before GEMM.
 ///
 /// Returns `true` when the dequantized flat array stores weights in
@@ -138,7 +179,19 @@ pub(crate) fn needs_weight_transpose<E: Element>(
     })
 }
 
-/// Try to get tensor data as Vec<f32>. Returns None if not found (instead of Err).
+/// Try to get tensor data as (Vec<u8>, DType). Returns None if not found.
+pub(crate) fn try_get_typed_data<E: Element>(
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    backend: &CpuBackend<E>,
+    names: &[impl AsRef<str>],
+) -> Option<(Vec<u8>, DType)> {
+    get_typed_data(weights, backend, names).ok()
+}
+
+/// LEGACY: Try to get tensor data as Vec<f32>. Returns None if not found.
+///
+/// Deprecated: Use get_typed_data() instead. This function exists only for
+/// backward compatibility during the DType migration.
 pub(crate) fn try_get_f32_data<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     backend: &CpuBackend<E>,
@@ -322,18 +375,48 @@ pub(crate) fn transpose_typed(data: &[u8], rows: usize, cols: usize, dtype: DTyp
     out
 }
 
-/// Load tensor data in target dtype. Returns (bytes, actual_dtype).
+/// Load tensor data, returning (bytes, dtype).
 ///
-/// For native f32 tensors: converts to target_dtype.
-/// For quantized tensors: dequantizes to f32, then converts to target_dtype.
+/// Derives dtype from the Element type parameter E:
+/// - f32 → DType::F32
+/// - f16 → DType::F16
+/// - bf16 → DType::BF16
+///
+/// For native tensors: returns raw bytes in Element's dtype.
+/// For quantized tensors: dequantizes to f32, then converts to Element's dtype.
 pub(crate) fn get_typed_data<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     backend: &CpuBackend<E>,
     names: &[impl AsRef<str>],
-    target_dtype: DType,
-) -> Result<Vec<u8>, BE> {
-    let f32_data = get_f32_data(weights, backend, names)?;
-    Ok(f32_to_typed_bytes(&f32_data, target_dtype))
+) -> Result<(Vec<u8>, DType), BE> {
+    let dtype = element_to_dtype::<E>()?;
+
+    // Try native tensor first (raw bytes in Element's dtype)
+    for name in names {
+        let name = name.as_ref();
+        if let Some(t) = weights.get_tensor(name) {
+            let e_slice: &[E] = t.as_slice();
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    e_slice.as_ptr() as *const u8,
+                    std::mem::size_of_val(e_slice),
+                )
+            };
+            return Ok((bytes.to_vec(), dtype));
+        }
+    }
+
+    // Try quantized tensor (dequantize to f32, then convert to Element's dtype)
+    for name in names {
+        let name = name.as_ref();
+        if let Some(qt) = weights.get_quantized(name) {
+            let f32_data = get_f32_data(weights, backend, &[name])?;
+            return Ok((f32_to_typed_bytes(&f32_data, dtype), dtype));
+        }
+    }
+
+    let name_strs: Vec<&str> = names.iter().map(|s| s.as_ref()).collect();
+    Err(BE::Other(format!("tensor not found: {:?}", name_strs)))
 }
 
 /// Convert WeightData to typed bytes in target dtype.

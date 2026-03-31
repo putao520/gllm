@@ -1837,7 +1837,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
         meta_store.get(&handle.0)
             .map(|m| m.seq_len > 0)
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
 
@@ -1889,7 +1889,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         // Paged KV: allocate paged cache + upload page table (once before layer loop)
         let paged_meta = if use_paged {
             let pt = config.paged_kv_page_table.as_ref().unwrap();
-            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = gpu_alloc_paged_kv_cache(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;
@@ -3502,7 +3502,7 @@ pub(crate) fn sample_logits_cpu(
         let best_idx = probs.iter().enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
-            .unwrap_or(0);
+            .unwrap_or(0); // LEGAL: 空 probs 时默认索引 0
 
         result.push(scored[best_idx].0 as u32);
     }
@@ -3582,7 +3582,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
         meta_store.get(&handle.0)
             .map(|m| m.seq_len > 0)
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
 
@@ -3630,7 +3630,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
         // Paged KV: allocate paged cache + upload page table (once before layer loop)
         let paged_meta = if use_paged {
             let pt = config.paged_kv_page_table.as_ref().unwrap();
-            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = gpu_alloc_paged_kv_cache_hip(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;
@@ -4203,7 +4203,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
         meta_store.get(&handle.0)
             .map(|m| m.seq_len > 0)
-            .unwrap_or(false)
+            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
             && input.sequences.iter().all(|s| s.position > 0)
     } else { false };
 
@@ -4251,7 +4251,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
         // Paged KV: allocate paged cache (once before layer loop)
         let paged_meta = if use_paged {
             let pt = config.paged_kv_page_table.as_ref().unwrap();
-            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+            let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = metal_alloc_paged_kv_cache(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
             )?;

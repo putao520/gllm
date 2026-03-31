@@ -286,7 +286,7 @@ impl EvictionPolicy {
                 )
             })
             .map(|meta| {
-                let semantic = semantic_priorities.get(&meta.page_id).copied().unwrap_or(0);
+                let semantic = semantic_priorities.get(&meta.page_id).copied().unwrap_or(0); // LEGAL: 未设置语义优先级的页面默认 0
                 let score = self.eviction_score(meta, semantic, now);
                 (meta.page_id, score)
             })
@@ -685,7 +685,7 @@ impl GlobalMemoryManager {
                         freed += 1;
                         log::debug!(
                             "entropy_evict: freed page {pid} (entropy {:.4} < {threshold:.4})",
-                            page_entropies.get(&pid).copied().unwrap_or(0.0)
+                            page_entropies.get(&pid).copied().unwrap_or(0.0) // LEGAL: 日志中的熵值，默认 0
                         );
                     }
                     Err(e) => {

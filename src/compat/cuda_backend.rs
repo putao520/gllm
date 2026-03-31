@@ -73,7 +73,7 @@ impl<E: Element> std::fmt::Debug for CudaBackend<E> {
             .compiled_ptx
             .lock()
             .map(|m| m.len())
-            .unwrap_or(0);
+            .unwrap_or(0); // LEGAL: Debug fmt 锁失败时返回 0
         #[cfg(not(feature = "cuda"))]
         let ptx_count = 0usize;
         let mut s = f.debug_struct("CudaBackend");

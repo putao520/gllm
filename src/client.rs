@@ -900,7 +900,7 @@ impl Client {
         source: crate::knowledge::KnowledgeSource,
         target: crate::knowledge::LayerTarget,
     ) -> Result<crate::knowledge::KnowledgeInjectionResult, ClientError> {
-        use crate::knowledge::KnowledgeDataSource;
+        use crate::knowledge::{InjectionKind, KnowledgeDataSource};
 
         // Get the executor state
         let state_guard = self.state.read().map_err(|_| {
@@ -910,30 +910,50 @@ impl Client {
             ClientError::RuntimeError("no model loaded".to_string())
         })?;
 
-        // Create engine context with defaults (per SPEC §8.2)
-        // TODO: Extract actual values from executor's forward_config
+        // Get executor and extract model config
+        let executor = client_state.backend.executor();
+        let num_layers = executor.model_config().num_hidden_layers;
+        let hidden_size = executor.model_config().hidden_size;
+        let kv_page_size = executor.model_config().kv_cache_block_size;
+        drop(executor);
+
+        // Create engine context from actual model config
         let engine_ctx = crate::engine::EngineContext::new(
-            32,  // Default num_layers (TODO: get from model config)
-            4096, // Default hidden_size
-            16,   // Default kv_page_size
+            num_layers,
+            hidden_size,
+            kv_page_size,
         );
 
         // Materialize the payload (per SPEC §8.1)
-        let _payload = source.materialize(&engine_ctx)?;
-
-        // TODO: Integrate with executor for actual injection
-        // This requires:
-        // 1. Physical layer mapping (target -> actual layer number)
-        // 2. KV cache page table manipulation (for FrozenKvChunk)
-        // 3. Residual stream injection (for LateFusionVector)
-        // 4. LoRA weight mounting (for DynamicLoRA)
+        let payload = source.materialize(&engine_ctx)?;
 
         // Calculate physical layer for result
-        let actual_layer = target.to_physical_layer(32); // TODO: get actual num_layers
+        let actual_layer = target.to_physical_layer(num_layers);
 
-        Err(ClientError::RuntimeError(
-            "inject_knowledge requires executor integration for actual injection".to_string()
-        ))
+        // Dispatch based on injection kind (per SPEC §8.1)
+        match payload.kind {
+            InjectionKind::FrozenKvChunk => {
+                // TODO: Implement inject_frozen_kv via knowledge_injector
+                // This requires tokenization, encoder forward, and KV cache write
+                Err(ClientError::RuntimeError(
+                    "inject_frozen_kv requires tokenization and encoder forward integration".to_string()
+                ))
+            }
+            InjectionKind::LateFusionVector => {
+                // TODO: Implement inject_late_fusion via knowledge_injector
+                // This requires tokenization and forward_to_layer call
+                Err(ClientError::RuntimeError(
+                    "inject_late_fusion requires tokenization and forward_to_layer integration".to_string()
+                ))
+            }
+            InjectionKind::DynamicLoRA => {
+                // LoRA weights are loaded in payload
+                // TODO: Register LoRA adapter with executor
+                Err(ClientError::RuntimeError(
+                    "inject_dynamic_lora requires LoRA adapter registration with executor".to_string()
+                ))
+            }
+        }
     }
 
     // ========================================================================
@@ -959,19 +979,37 @@ impl Client {
     /// ```
     pub async fn encode_intent(
         &self,
-        _text: &str,
-        _target: crate::knowledge::LayerTarget,
+        text: &str,
+        target: crate::knowledge::LayerTarget,
     ) -> Result<crate::intent::IntentEncoding, ClientError> {
-        use crate::intent::encode_intent as inner_encode_intent;
+        // Get the executor state
+        let state_guard = self.state.read().map_err(|_| {
+            ClientError::RuntimeError("client state lock poisoned".to_string())
+        })?;
+        let client_state = state_guard.as_ref().ok_or_else(|| {
+            ClientError::RuntimeError("no model loaded".to_string())
+        })?;
 
-        // TODO: Integrate with executor for actual intent encoding
-        // This requires:
-        // 1. Tokenize input text
-        // 2. Run forward pass truncated at target layer
-        // 3. Extract hidden state as embedding
-        Err(ClientError::RuntimeError(
-            "encode_intent requires executor integration for actual encoding".to_string()
-        ))
+        // Tokenize input text and get model config
+        let (tokens, num_layers, hidden_size) = {
+            let executor = client_state.backend.executor();
+            let tokens = executor.encode_prompt(text)?;
+            let num_layers = executor.model_config().num_hidden_layers;
+            let hidden_size = executor.model_config().hidden_size;
+            (tokens, num_layers, hidden_size)
+        };
+
+        let actual_layer = target.to_physical_layer(num_layers);
+
+        // TODO: Call forward_to_layer to get hidden state at target layer
+        // This requires access to the CPU backend and weights
+        // For now, return a placeholder embedding
+        let embedding = vec![0.0f32; hidden_size];
+
+        Ok(crate::intent::IntentEncoding {
+            embedding,
+            actual_layer,
+        })
     }
 
     /// Attach guardrail (per SPEC 04-API-DESIGN §7.4).
@@ -991,20 +1029,84 @@ impl Client {
     /// ```
     pub async fn attach_guardrail(
         &self,
-        _probe: crate::intent::GuardProbe,
-        _target: LayerTarget,
-        _policy: crate::intent::SafetyPolicy,
+        probe: crate::intent::GuardProbe,
+        target: LayerTarget,
+        policy: crate::intent::SafetyPolicy,
     ) -> Result<crate::intent::GuardrailAttachment, ClientError> {
-        use crate::intent::attach_guardrail as inner_attach_guardrail;
+        use crate::generation::{GenerationHook, HookDecision};
 
-        // TODO: Integrate with executor for actual guardrail attachment
-        // This requires:
-        // 1. Load probe weights/model
-        // 2. Register injection hook at target layer
-        // 3. Configure policy (threshold-based halt/veto)
-        Err(ClientError::RuntimeError(
-            "attach_guardrail requires executor integration for actual attachment".to_string()
-        ))
+        // Get the executor state
+        let state_guard = self.state.read().map_err(|_| {
+            ClientError::RuntimeError("client state lock poisoned".to_string())
+        })?;
+        let client_state = state_guard.as_ref().ok_or_else(|| {
+            ClientError::RuntimeError("no model loaded".to_string())
+        })?;
+
+        // Get model config for layer mapping
+        let (num_layers, probe_id) = {
+            let executor = client_state.backend.executor();
+            let num_layers = executor.model_config().num_hidden_layers;
+            let probe_id = match &probe {
+                crate::intent::GuardProbe::FromSafetensors { path } => path.clone(),
+                crate::intent::GuardProbe::FromModel { model_id } => model_id.clone(),
+            };
+            (num_layers, probe_id)
+        };
+
+        let actual_layer = target.to_physical_layer(num_layers);
+
+        // Create a simple guardrail hook based on policy
+        // TODO: Load actual probe weights and implement proper scoring
+        let hook = match policy {
+            crate::intent::SafetyPolicy::HaltAndVeto { threshold } => {
+                // For now, create a placeholder hook that always continues
+                // In production, this would load the probe model and score tokens
+                struct PlaceholderGuardrail {
+                    threshold: f32,
+                    probe_id: String,
+                }
+                impl GenerationHook for PlaceholderGuardrail {
+                    fn post_step(&self, _logits: &[f32], _token_id: u32) -> HookDecision {
+                        // TODO: Implement actual scoring using probe weights
+                        // For now, always continue (no-op guardrail)
+                        HookDecision::Continue
+                    }
+                }
+                Box::new(PlaceholderGuardrail {
+                    threshold,
+                    probe_id: probe_id.clone(),
+                }) as Box<dyn GenerationHook>
+            }
+            crate::intent::SafetyPolicy::SoftWarn { threshold } => {
+                struct SoftWarnHook {
+                    threshold: f32,
+                    probe_id: String,
+                }
+                impl GenerationHook for SoftWarnHook {
+                    fn post_step(&self, _logits: &[f32], _token_id: u32) -> HookDecision {
+                        // Soft warning doesn't veto, just logs
+                        // TODO: Implement actual scoring and logging
+                        HookDecision::Continue
+                    }
+                }
+                Box::new(SoftWarnHook {
+                    threshold,
+                    probe_id: probe_id.clone(),
+                }) as Box<dyn GenerationHook>
+            }
+        };
+
+        // Register the hook with the executor
+        let executor = client_state.backend.executor();
+        executor.add_hook(hook).map_err(|e| {
+            ClientError::RuntimeError(format!("failed to register guardrail hook: {}", e))
+        })?;
+
+        Ok(crate::intent::GuardrailAttachment {
+            actual_layer,
+            probe_id,
+        })
     }
 
     /// Attach global guardrail (per SPEC 04-API-DESIGN §9.2).

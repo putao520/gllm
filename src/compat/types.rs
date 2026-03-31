@@ -5,6 +5,7 @@
 //! sequence context, KV cache slices, and per-layer weights).
 
 use super::weight_helpers::WeightData;
+use gllm_kernels::inference::DType;
 
 /// Attention head geometry — derived from `GeneratorForwardConfig`.
 #[derive(Debug, Clone, Copy)]
@@ -35,52 +36,56 @@ pub(crate) struct SeqContext<'a> {
 
 /// A read-only view into one layer's KV cache.
 pub(crate) struct KvCacheSlice<'a> {
-    pub k: &'a [f32],
-    pub v: &'a [f32],
+    pub k: &'a [u8],
+    pub v: &'a [u8],
+    pub dtype: DType,
     pub layer: usize,
     pub max_seq_len: usize,
 }
 
-/// Dense decoder layer weights (all f32, post-transpose).
+/// Dense decoder layer weights (DType-aware byte slices).
 pub(crate) struct DecoderLayerWeights<'a> {
-    pub q_w: &'a [f32],
-    pub k_w: &'a [f32],
-    pub v_w: &'a [f32],
-    pub o_w: &'a [f32],
-    pub rn1_w: &'a [f32],
-    pub rn2_w: &'a [f32],
-    pub gate_w: &'a [f32],
-    pub up_w: &'a [f32],
-    pub down_w: &'a [f32],
+    pub q_w: &'a [u8],
+    pub k_w: &'a [u8],
+    pub v_w: &'a [u8],
+    pub o_w: &'a [u8],
+    pub rn1_w: &'a [u8],
+    pub rn2_w: &'a [u8],
+    pub gate_w: &'a [u8],
+    pub up_w: &'a [u8],
+    pub down_w: &'a [u8],
+    pub dtype: DType,
 }
 
-/// Quantized decoder layer weights (attention via WeightData, norms as f32).
+/// Quantized decoder layer weights (attention via WeightData, norms DType-aware).
 pub(crate) struct QuantizedDecoderWeights<'a> {
     pub q: &'a WeightData,
     pub o: &'a WeightData,
-    pub rn1_w: &'a [f32],
-    pub rn2_w: &'a [f32],
+    pub rn1_w: &'a [u8],
+    pub rn2_w: &'a [u8],
+    pub rn_dtype: DType,
     pub gate: &'a WeightData,
     pub up: &'a WeightData,
     pub down: &'a WeightData,
 }
 
-/// BERT encoder layer weights (all f32, with biases).
+/// BERT encoder layer weights (DType-aware byte slices, with biases).
 pub(crate) struct BertLayerWeights<'a> {
-    pub q_w: &'a [f32],
-    pub q_b: &'a [f32],
-    pub k_w: &'a [f32],
-    pub k_b: &'a [f32],
-    pub v_w: &'a [f32],
-    pub v_b: &'a [f32],
-    pub out_w: &'a [f32],
-    pub out_b: &'a [f32],
-    pub ln1_w: &'a [f32],
-    pub ln1_b: &'a [f32],
-    pub ffn_up_w: &'a [f32],
-    pub ffn_up_b: &'a [f32],
-    pub ffn_down_w: &'a [f32],
-    pub ffn_down_b: &'a [f32],
-    pub ln2_w: &'a [f32],
-    pub ln2_b: &'a [f32],
+    pub q_w: &'a [u8],
+    pub q_b: &'a [u8],
+    pub k_w: &'a [u8],
+    pub k_b: &'a [u8],
+    pub v_w: &'a [u8],
+    pub v_b: &'a [u8],
+    pub out_w: &'a [u8],
+    pub out_b: &'a [u8],
+    pub ln1_w: &'a [u8],
+    pub ln1_b: &'a [u8],
+    pub ffn_up_w: &'a [u8],
+    pub ffn_up_b: &'a [u8],
+    pub ffn_down_w: &'a [u8],
+    pub ffn_down_b: &'a [u8],
+    pub ln2_w: &'a [u8],
+    pub ln2_b: &'a [u8],
+    pub dtype: DType,
 }

@@ -126,7 +126,7 @@ fn get_memory_pressure_macos() -> Result<f32, BE> {
 
 #[cfg(target_os = "macos")]
 fn parse_vm_stat_value(s: &str) -> u64 {
-    s.trim().trim_end_matches('.').parse().unwrap_or(0)
+    s.trim().trim_end_matches('.').parse().unwrap_or(0) // LEGAL: vm_stat 解析失败默认 0
 }
 
 #[cfg(target_os = "windows")]

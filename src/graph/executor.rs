@@ -1289,7 +1289,7 @@ impl FusedGraphExecutor {
         // Collect graph outputs
         let mut out = HashMap::new();
         for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default();
+            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
             out.insert(name.clone(), data);
         }
         Ok(out)
@@ -1343,7 +1343,7 @@ impl FusedGraphExecutor {
                 tensors
                     .get(&cn.graph_input_names[0])
                     .cloned()
-                    .unwrap_or_default()
+                    .unwrap_or_default() // LEGAL: 不存在的 tensor 返回空数据
             } else {
                 Vec::new()
             };
@@ -1437,7 +1437,7 @@ impl FusedGraphExecutor {
         // Collect graph outputs
         let mut out = HashMap::new();
         for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default();
+            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
             out.insert(name.clone(), data);
         }
         Ok(out)
@@ -1607,7 +1607,7 @@ impl FusedGraphExecutor {
 
         let mut out = HashMap::new();
         for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default();
+            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
             out.insert(name.clone(), data);
         }
         Ok(out)

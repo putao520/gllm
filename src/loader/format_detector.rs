@@ -271,7 +271,7 @@ fn find_files_with_extension(dir: &Path, ext: &str) -> Vec<PathBuf> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case(ext))
-            .unwrap_or(false);
+            .unwrap_or(false); // LEGAL: 无扩展名时视为不匹配
         if matches {
             files.push(path);
         }

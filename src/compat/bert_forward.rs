@@ -1,6 +1,8 @@
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
-use super::weight_helpers::{get_f32_data, get_bias_data};
+use super::jit_helpers::TypedBuffer;
+use super::weight_helpers::{get_bias_data_typed, get_typed_data};
+use super::jit_helpers::typed_bytes_to_f32;
 use super::{Element, PoolingMode};
 use crate::engine::executor::{BackendError as BE, GeneratorForwardConfig};
 
@@ -31,11 +33,13 @@ pub(crate) fn bert_encoder_forward<E: Element>(
 
     // Step (a): Token embedding lookup
     // All formats store embeddings as [vocab, hidden] in row-major after dequant.
-    let word_emb = get_f32_data(
+    let (word_emb_bytes, word_emb_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")),
     )?;
-    let mut hidden_state = vec![0.0f32; seq_len * hidden];
+    let word_emb = typed_bytes_to_f32(&word_emb_bytes, word_emb_dtype);
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
     {
         let vocab = word_emb.len() / hidden;
         for (s, &tok) in tokens.iter().enumerate() {
@@ -45,16 +49,17 @@ pub(crate) fn bert_encoder_forward<E: Element>(
                     "token id {} out of range for word_embeddings (vocab {})", tok, vocab
                 )));
             }
-            hidden_state[s * hidden..(s + 1) * hidden]
+            hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
                 .copy_from_slice(&word_emb[v * hidden..(v + 1) * hidden]);
         }
     }
 
     // Step (b): Add position embeddings (positions 0..seq_len)
-    let pos_emb = get_f32_data(
+    let (pos_emb_bytes, pos_emb_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")),
     )?;
+    let pos_emb = typed_bytes_to_f32(&pos_emb_bytes, pos_emb_dtype);
     {
         let max_pos = pos_emb.len() / hidden;
         for s in 0..seq_len {
@@ -65,45 +70,48 @@ pub(crate) fn bert_encoder_forward<E: Element>(
             }
         }
         let mut added = vec![0.0f32; seq_len * hidden];
-        _kern.vec_add(&hidden_state, &pos_emb[..seq_len * hidden], &mut added);
-        hidden_state.copy_from_slice(&added);
+        _kern.vec_add(hidden_state.as_f32(), &pos_emb[..seq_len * hidden], &mut added);
+        hidden_state.as_f32_mut().copy_from_slice(&added);
     }
 
     // Step (c): Add token_type embeddings (all type 0)
-    let tt_emb = get_f32_data(
+    let (tt_emb_bytes, tt_emb_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")),
     )?;
+    let tt_emb = typed_bytes_to_f32(&tt_emb_bytes, tt_emb_dtype);
     // All formats: [num_types, hidden] row-major. Type 0 is the first row.
     if tt_emb.len() >= hidden {
         let tt_broadcast: Vec<f32> = tt_emb[..hidden].iter().cloned().cycle().take(seq_len * hidden).collect();
         let mut added = vec![0.0f32; seq_len * hidden];
-        _kern.vec_add(&hidden_state, &tt_broadcast, &mut added);
-        hidden_state.copy_from_slice(&added);
+        _kern.vec_add(hidden_state.as_f32(), &tt_broadcast, &mut added);
+        hidden_state.as_f32_mut().copy_from_slice(&added);
     }
 
     // Step (d): Embedding LayerNorm
-    let emb_ln_w = get_f32_data(
+    let (emb_ln_w_bytes, emb_ln_w_dtype) = get_typed_data(
         weights, backend,
         &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")),
     )?;
-    let emb_ln_b = get_bias_data(
+    let emb_ln_w = typed_bytes_to_f32(&emb_ln_w_bytes, emb_ln_w_dtype);
+    let (emb_ln_b_bytes, emb_ln_b_dtype) = get_bias_data_typed(
         weights,
         &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")),
         hidden,
     );
+    let emb_ln_b = typed_bytes_to_f32(&emb_ln_b_bytes, emb_ln_b_dtype);
     {
         let mut ln_out = vec![0.0f32; seq_len * hidden];
         for s in 0..seq_len {
             _kern.layer_norm(
-                &hidden_state[s * hidden..(s + 1) * hidden],
+                &hidden_state.as_f32()[s * hidden..(s + 1) * hidden],
                 &emb_ln_w,
                 &emb_ln_b,
                 &mut ln_out[s * hidden..(s + 1) * hidden],
                 eps,
             );
         }
-        hidden_state.copy_from_slice(&ln_out);
+        hidden_state.as_f32_mut().copy_from_slice(&ln_out);
     }
 
     // ── Graph executor path (YAML→JIT, ONLY valid path) ──
@@ -121,10 +129,8 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     }
 
     let mut inputs = std::collections::HashMap::new();
-    let hs_bytes: Vec<u8> = hidden_state
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    // P3: 直接使用 TypedBuffer 的字节切片
+    let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
     inputs.insert("hidden_state".to_string(), hs_bytes);
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();

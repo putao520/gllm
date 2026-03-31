@@ -303,7 +303,7 @@ impl ContinuousBatcher {
         waiting_total
             .saturating_add(running_total)
             .checked_div(total_count)
-            .unwrap_or(0)
+            .unwrap_or(0) // LEGAL: 除零保护，total_count=0 时返回 0
     }
 
     fn admit_waiting(&mut self, scheduler: &mut PagedScheduler) {
@@ -346,7 +346,7 @@ impl ContinuousBatcher {
                         .block_tables
                         .get(&request_id)
                         .map(|table| table.blocks.clone())
-                        .unwrap_or_default();
+                        .unwrap_or_default(); // LEGAL: 不存在的 request 返回空 block table
                     sequence.mark_running(pages);
                     self.running.insert(request_id, sequence);
                 }

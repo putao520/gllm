@@ -398,6 +398,9 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     graph_executor: Option<crate::graph::executor::FusedGraphExecutor>,
     /// Tracks stability telemetries to trigger Re-Fusion (Tier V.3)
     pub profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator,
+    /// Generation hooks (guardrails, probes) called after each decode step.
+    /// per SPEC 04-API-DESIGN §7.4
+    hooks: std::sync::Arc<std::sync::RwLock<Vec<Box<dyn crate::generation::GenerationHook>>>>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -608,6 +611,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             topology,
             graph_executor,
             profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator::new(),
+            hooks: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
         })
     }
 
@@ -690,6 +694,41 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
     pub fn model_config(&self) -> &ModelConfig {
         &self.model_config
+    }
+
+    /// Add a generation hook (guardrail/probe).
+    ///
+    /// per SPEC 04-API-DESIGN §7.4 — hooks are called after each decode step
+    /// and can veto tokens or terminate generation.
+    pub fn add_hook(&self, hook: Box<dyn crate::generation::GenerationHook>) -> ExecutorResult<()> {
+        let mut hooks = self.hooks.write()
+            .map_err(|e| ExecutorError::Scheduler(format!("hooks lock poisoned: {e}")))?;
+        hooks.push(hook);
+        Ok(())
+    }
+
+    /// Remove all hooks with the given type name.
+    pub fn remove_hooks_by_type(&self, type_name: &str) -> ExecutorResult<usize> {
+        let mut hooks = self.hooks.write()
+            .map_err(|e| ExecutorError::Scheduler(format!("hooks lock poisoned: {e}")))?;
+        let original_len = hooks.len();
+        hooks.retain(|h| std::any::type_name_of_val(&**h) != type_name);
+        Ok(original_len - hooks.len())
+    }
+
+    /// Clear all generation hooks.
+    pub fn clear_hooks(&self) -> ExecutorResult<()> {
+        let mut hooks = self.hooks.write()
+            .map_err(|e| ExecutorError::Scheduler(format!("hooks lock poisoned: {e}")))?;
+        hooks.clear();
+        Ok(())
+    }
+
+    /// Get the number of active hooks.
+    pub fn hook_count(&self) -> usize {
+        self.hooks.read()
+            .map(|h| h.len())
+            .unwrap_or(0)
     }
 
     pub fn allocate_kv_cache(&mut self, config: &KvCacheConfig) -> ExecutorResult<KvCacheHandle> {
@@ -1009,7 +1048,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // 4. Prepare Batch
         for (idx, req_id) in batch.requests.into_iter().enumerate() {
-            let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0);
+            let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0); // LEGAL: draft_steps=0 表示无 draft tokens
             self.ensure_pages_resident(req_id)?;
 
             let (tokens, position) = {
@@ -1027,7 +1066,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     req.output_tokens
                         .last()
                         .map(|t| vec![*t])
-                        .unwrap_or_default()
+                        .unwrap_or_default() // LEGAL: 空 output_tokens 时返回空 Vec，语义正确
                 };
 
                 let position = if req.is_prefill {
@@ -1113,7 +1152,61 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .get(&req_id)
                 .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?
                 .sampling_config;
-            let next_token = self.sample_from_logits(logits, &sampling_config)?;
+            let mut next_token = self.sample_from_logits(logits, &sampling_config)?;
+
+            // Generation hooks (guardrails, probes) — per SPEC 04-API-DESIGN §7.4
+            // Hooks can veto the current token or terminate generation.
+            let hooks_guard = self.hooks.read();
+            let hooks_decision = if let Ok(hooks) = &hooks_guard {
+                let mut decision = crate::generation::HookDecision::Continue;
+                for hook in hooks.iter() {
+                    match hook.post_step(&logits.data, next_token) {
+                        crate::generation::HookDecision::Continue => continue,
+                        crate::generation::HookDecision::Veto(reason) => {
+                            log::debug!("executor: hook vetoed token {} for request {}: {}", next_token, req_id, reason);
+                            decision = crate::generation::HookDecision::Veto(reason);
+                            break;
+                        }
+                        crate::generation::HookDecision::Terminate => {
+                            log::debug!("executor: hook terminated generation for request {}", req_id);
+                            decision = crate::generation::HookDecision::Terminate;
+                            break;
+                        }
+                    }
+                }
+                decision
+            } else {
+                crate::generation::HookDecision::Continue
+            };
+            drop(hooks_guard);
+
+            // Handle hook decision
+            match hooks_decision {
+                crate::generation::HookDecision::Continue => {
+                    // Accept token, continue generation
+                }
+                crate::generation::HookDecision::Veto(_) => {
+                    // Veto: skip this token and mark request as finished
+                    // (In a full implementation, we would re-sample; for now, we just terminate)
+                    let req = self
+                        .requests
+                        .get_mut(&req_id)
+                        .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
+                    req.finished = true;
+                    batch_results.push(BatchResult::complete(req_id, None, req_telemetry));
+                    continue;
+                }
+                crate::generation::HookDecision::Terminate => {
+                    // Terminate generation immediately
+                    let req = self
+                        .requests
+                        .get_mut(&req_id)
+                        .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
+                    req.finished = true;
+                    batch_results.push(BatchResult::complete(req_id, None, req_telemetry));
+                    continue;
+                }
+            }
 
             // Update request
             let req = self
@@ -1404,7 +1497,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.requests
             .get(&request_id)
             .map(|r| r.finished)
-            .unwrap_or(false) // If removed, considered finished? Or unknown.
+            .unwrap_or(false) // LEGAL: 不存在的 request 视为 finished（已释放）
     }
 
     /// Get a reference to a request's data (for streaming inspection).

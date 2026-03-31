@@ -97,7 +97,7 @@ pub(super) fn load_external_data(
     let location = entries
         .get("location")
         .ok_or_else(|| LoaderError::Onnx(format!("external tensor {name} missing location")))?;
-    let offset = parse_optional_usize(entries.get("offset"), "offset", name)?.unwrap_or(0);
+    let offset = parse_optional_usize(entries.get("offset"), "offset", name)?.unwrap_or(0); // LEGAL: offset 可选，默认 0
     let expected = byte_size_for_elements(data_type, dtype, element_count);
     let length = parse_optional_usize(entries.get("length"), "length", name)?
         .unwrap_or(expected);

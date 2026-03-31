@@ -40,7 +40,10 @@ pub use loader::adapter::{GgufAdapter, KernelTensorView, StorageFormat, PackedBi
 // Re-export for convenience
 pub use backend::{detect_backend, BackendType};
 pub use client::{Client, GllmError, ModelInfo};
-pub use generation::{GenerationChunk, GenerationResponse, GenerationStream};
+pub use generation::{
+    GenerationChunk, GenerationResponse, GenerationStream,
+    GenerationHook, HookDecision,
+};
 pub use embeddings::{Embedding, EmbeddingsResponse};
 pub use rerank::{RerankResponse, RerankResult};
 pub use intent::{

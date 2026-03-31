@@ -235,6 +235,51 @@ impl DynBackendExecutor {
             DynBackendExecutor::BF16(e) => e.release_request(request_id),
         }
     }
+
+    /// Get model configuration (delegate to inner Executor).
+    pub fn model_config(&self) -> &crate::model_config::ModelConfig {
+        match self {
+            DynBackendExecutor::F32(e) => e.model_config(),
+            DynBackendExecutor::F16(e) => e.model_config(),
+            DynBackendExecutor::BF16(e) => e.model_config(),
+        }
+    }
+
+    /// Add a generation hook (guardrail/probe).
+    pub fn add_hook(&self, hook: Box<dyn crate::generation::GenerationHook>) -> Result<(), crate::engine::executor::ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.add_hook(hook),
+            DynBackendExecutor::F16(e) => e.add_hook(hook),
+            DynBackendExecutor::BF16(e) => e.add_hook(hook),
+        }
+    }
+
+    /// Remove hooks by type name.
+    pub fn remove_hooks_by_type(&self, type_name: &str) -> Result<usize, crate::engine::executor::ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.remove_hooks_by_type(type_name),
+            DynBackendExecutor::F16(e) => e.remove_hooks_by_type(type_name),
+            DynBackendExecutor::BF16(e) => e.remove_hooks_by_type(type_name),
+        }
+    }
+
+    /// Clear all hooks.
+    pub fn clear_hooks(&self) -> Result<(), crate::engine::executor::ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.clear_hooks(),
+            DynBackendExecutor::F16(e) => e.clear_hooks(),
+            DynBackendExecutor::BF16(e) => e.clear_hooks(),
+        }
+    }
+
+    /// Get current hook count.
+    pub fn hook_count(&self) -> usize {
+        match self {
+            DynBackendExecutor::F32(e) => e.hook_count(),
+            DynBackendExecutor::F16(e) => e.hook_count(),
+            DynBackendExecutor::BF16(e) => e.hook_count(),
+        }
+    }
 }
 
 impl<E: Element> BackendExecutor<E> {
@@ -434,6 +479,56 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Rocm(exec) => exec.release_request(request_id),
             BackendExecutor::Metal(exec) => exec.release_request(request_id),
             BackendExecutor::Cpu(exec) => exec.release_request(request_id),
+        }
+    }
+
+    /// Get model configuration (delegate to inner Executor).
+    pub fn model_config(&self) -> &crate::model_config::ModelConfig {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.model_config(),
+            BackendExecutor::Rocm(exec) => exec.model_config(),
+            BackendExecutor::Metal(exec) => exec.model_config(),
+            BackendExecutor::Cpu(exec) => exec.model_config(),
+        }
+    }
+
+    /// Add a generation hook (guardrail/probe).
+    pub fn add_hook(&self, hook: Box<dyn crate::generation::GenerationHook>) -> Result<(), crate::engine::executor::ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.add_hook(hook),
+            BackendExecutor::Rocm(exec) => exec.add_hook(hook),
+            BackendExecutor::Metal(exec) => exec.add_hook(hook),
+            BackendExecutor::Cpu(exec) => exec.add_hook(hook),
+        }
+    }
+
+    /// Remove hooks by type name.
+    pub fn remove_hooks_by_type(&self, type_name: &str) -> Result<usize, crate::engine::executor::ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.remove_hooks_by_type(type_name),
+            BackendExecutor::Rocm(exec) => exec.remove_hooks_by_type(type_name),
+            BackendExecutor::Metal(exec) => exec.remove_hooks_by_type(type_name),
+            BackendExecutor::Cpu(exec) => exec.remove_hooks_by_type(type_name),
+        }
+    }
+
+    /// Clear all hooks.
+    pub fn clear_hooks(&self) -> Result<(), crate::engine::executor::ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.clear_hooks(),
+            BackendExecutor::Rocm(exec) => exec.clear_hooks(),
+            BackendExecutor::Metal(exec) => exec.clear_hooks(),
+            BackendExecutor::Cpu(exec) => exec.clear_hooks(),
+        }
+    }
+
+    /// Get current hook count.
+    pub fn hook_count(&self) -> usize {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.hook_count(),
+            BackendExecutor::Rocm(exec) => exec.hook_count(),
+            BackendExecutor::Metal(exec) => exec.hook_count(),
+            BackendExecutor::Cpu(exec) => exec.hook_count(),
         }
     }
 }

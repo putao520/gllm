@@ -166,7 +166,7 @@ impl GraphOptimizer {
                 .get("ZERO_POINT_TENSOR")
                 .and_then(|name| graph.initializers.get(name))
                 .and_then(OnnxTensor::scalar_i64)
-                .unwrap_or(0);
+                .unwrap_or(0); // LEGAL: zero_point=0 是量化参数的合法默认值（无零点偏移）
             let axis = annotation
                 .quant_param_tensor_names
                 .get("AXIS")

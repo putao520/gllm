@@ -6,6 +6,98 @@ use futures::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Hook decision after each decode step.
+///
+/// per SPEC 04-API-DESIGN §7.4 — guardrail attachment control flow.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookDecision {
+    /// Continue generation with the current token.
+    Continue,
+    /// Veto current token, provide reason.
+    Veto(String),
+    /// Terminate generation entirely.
+    Terminate,
+}
+
+/// Trait for generation-time hooks (guardrails, probes).
+///
+/// per SPEC 04-API-DESIGN §7.4 — safety probes can inspect logits
+/// and generated tokens to implement content moderation, output filtering,
+/// and custom stopping conditions.
+///
+/// # Example
+///
+/// ```no_run
+/// use gllm::generation::{GenerationHook, HookDecision};
+///
+/// struct ProfanityFilter {
+///     bad_words: Vec<u32>,
+/// }
+///
+/// impl GenerationHook for ProfanityFilter {
+///     fn post_step(&self, _logits: &[f32], token_id: u32) -> HookDecision {
+///         if self.bad_words.contains(&token_id) {
+///             HookDecision::Veto("profanity detected".to_string())
+///         } else {
+///             HookDecision::Continue
+///         }
+///     }
+/// }
+/// ```
+pub trait GenerationHook: Send + Sync {
+    /// Called after each decode step. Returns whether to continue.
+    ///
+    /// # Parameters
+    ///
+    /// - `logits`: Raw model output logits (vocab_size dimensions)
+    /// - `token_id`: The sampled token ID for this step
+    ///
+    /// # Return
+    ///
+    /// - `HookDecision::Continue`: Accept token and continue generation
+    /// - `HookDecision::Veto(reason)`: Reject token, retry sampling
+    /// - `HookDecision::Terminate`: Stop generation immediately
+    fn post_step(&self, logits: &[f32], token_id: u32) -> HookDecision;
+}
+
+/// Simple safety hook that vetoes tokens above a threshold.
+///
+/// per SPEC 04-API-DESIGN §9.2 — SafetyPolicy::HaltAndVeto
+#[derive(Debug)]
+pub struct ThresholdHook {
+    /// Token IDs to veto
+    pub veto_tokens: Vec<u32>,
+    /// Maximum allowed vetoes before termination
+    pub max_vetoes: usize,
+    /// Current veto count
+    pub veto_count: std::sync::atomic::AtomicUsize,
+}
+
+impl ThresholdHook {
+    pub fn new(veto_tokens: Vec<u32>, max_vetoes: usize) -> Self {
+        Self {
+            veto_tokens,
+            max_vetoes,
+            veto_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GenerationHook for ThresholdHook {
+    fn post_step(&self, _logits: &[f32], token_id: u32) -> HookDecision {
+        if self.veto_tokens.contains(&token_id) {
+            let count = self.veto_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count + 1 >= self.max_vetoes {
+                HookDecision::Terminate
+            } else {
+                HookDecision::Veto(format!("token {} blocked by threshold policy", token_id))
+            }
+        } else {
+            HookDecision::Continue
+        }
+    }
+}
+
 /// 流式生成输出块 (per SPEC 04-API-DESIGN §3.1)
 ///
 /// 每个块包含生成的一个或多个 token 及其累积文本。
@@ -200,9 +292,13 @@ impl Stream for GenerationStream {
                             }
                         };
                         let executor = loaded.backend.executor();
-                        executor
-                            .decode_tokens(&tokens[..end])
-                            .unwrap_or_default()
+                        match executor.decode_tokens(&tokens[..end]) {
+                            Ok(text) => text,
+                            Err(e) => {
+                                this.phase = StreamPhase::Done;
+                                return Poll::Ready(Some(Err(GllmError::RuntimeError(format!("decode_tokens failed: {e}")))));
+                            }
+                        }
                     };
 
                     *index += 1;
