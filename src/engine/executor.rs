@@ -83,6 +83,7 @@ unsafe impl Sync for GeneratorForwardConfig {}
 
 impl GeneratorForwardConfig {
     /// Extract attention head geometry as a grouped struct.
+    #[allow(dead_code)]
     pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
         let q_dim = self.num_heads * self.head_dim;
         let kv_dim = self.num_kv_heads * self.head_dim;
@@ -97,6 +98,7 @@ impl GeneratorForwardConfig {
     }
 
     /// Extract per-layer dimension constants.
+    #[allow(dead_code)]
     pub(crate) fn layer_dims(&self) -> crate::compat::types::LayerDims {
         crate::compat::types::LayerDims {
             hidden: self.hidden_size,
@@ -272,7 +274,7 @@ use crate::scheduler::{
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub(crate) struct RequestData {
+pub struct RequestData {
     pub prompt_tokens: Vec<u32>,
     pub output_tokens: Vec<u32>,
     pub sampling_config: SamplingConfig,
@@ -429,7 +431,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             _ => PositionEncoding::Rope,
         };
-        let mut forward_config = GeneratorForwardConfig {
+        let forward_config = GeneratorForwardConfig {
             hidden_size: model_config.hidden_size,
             num_layers: model_config.num_hidden_layers,
             num_heads: model_config.num_attention_heads,
@@ -628,11 +630,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let onnx_graph = onnx.graph();
 
         // Use the new GraphOptimizer to generate FusedGraph
-        let mut ctx = OptimizationContext::default();
-        ctx.hidden_size = model_config.hidden_size;
-        ctx.num_heads = model_config.num_attention_heads;
-        ctx.num_kv_heads = model_config.num_key_value_heads;
-        ctx.head_dim = model_config.head_dim;
+        let ctx = OptimizationContext {
+            hidden_size: model_config.hidden_size,
+            num_heads: model_config.num_attention_heads,
+            num_kv_heads: model_config.num_key_value_heads,
+            head_dim: model_config.head_dim,
+            ..Default::default()
+        };
         let optimizer = GraphOptimizer::new(ctx);
         let fused_graph = optimizer
             .optimize(onnx_graph)
@@ -1157,7 +1161,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .get(&req_id)
                 .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?
                 .sampling_config;
-            let mut next_token = self.sample_from_logits(logits, &sampling_config)?;
+            let next_token = self.sample_from_logits(logits, &sampling_config)?;
 
             // Generation hooks (guardrails, probes) — per SPEC 04-API-DESIGN §7.4
             // Hooks can veto the current token or terminate generation.
@@ -1554,8 +1558,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(cache.slot(slot).handle())
     }
 
-    /// 异步友好的 swap-out；目前内部仍为同步调用，提供 async 接口方便集成。
-    pub async fn swap_out_pages_async(
+    /// Swap-out pages to secondary storage (sync).
+    pub fn swap_out_pages(
         &mut self,
         page_mappings: &[(PageId, StorageKey)],
     ) -> ExecutorResult<()> {
@@ -1564,21 +1568,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(())
     }
 
-    /// 异步友好的 swap-in，完成后通知调度器进入 Warm 保护。
-    pub async fn swap_in_pages_async(
-        &mut self,
-        request_id: RequestId,
-        page_mappings: &[(PageId, StorageKey)],
-    ) -> ExecutorResult<()> {
-        let mut handle = self.active_kv_handle()?;
-        self.backend.swap_in_pages(&mut handle, page_mappings)?;
-        let page_indices: Vec<PageId> = page_mappings
-            .iter()
-            .map(|(physical_id, _)| *physical_id)
-            .collect();
-        self.scheduler.on_swap_in(request_id, &page_indices);
-        Ok(())
-    }
 
     /// 从 backend 同步页面状态到调度器（集成 get_page_states）。
     pub fn refresh_page_states(&mut self) -> ExecutorResult<()> {

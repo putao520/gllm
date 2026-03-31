@@ -237,7 +237,7 @@ impl ContinuousBatcher {
 
             match result.action {
                 BatchAction::Continue => {
-                    let prefill_done = self.chunked_state.as_ref().map_or(true, |c| c.is_request_complete(&sequence.id));
+                    let prefill_done = self.chunked_state.as_ref().is_none_or(|c| c.is_request_complete(&sequence.id));
                     
                     if sequence.generated_tokens.is_empty() && !sequence.prompt_tokens.is_empty() && prefill_done {
                         scheduler.insert_prefix(sequence.id, &sequence.prompt_tokens);

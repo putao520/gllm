@@ -545,7 +545,7 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
     let elem_bytes = comp_dtype.size_bytes();
 
-    let seq_len = tokens.len();
+    let _seq_len = tokens.len();
     
 
 

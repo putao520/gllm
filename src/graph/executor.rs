@@ -229,7 +229,7 @@ fn build_flash_attention_graph(
     let out = g.add_tensor_concrete("attn_out", &[seq_len, h], dt);
     g.add_op(
         OpKind::MultiHeadAttention {
-            seq_len: seq_len.into(),
+            seq_len,
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
@@ -327,7 +327,7 @@ fn build_fused_qkv_rope_graph(
 
     let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len.into(), n: q_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype },
         vec![input, w_q],
         vec![q_out],
         "gemm_q",
@@ -335,7 +335,7 @@ fn build_fused_qkv_rope_graph(
 
     let k_out = g.add_tensor_concrete("k", &[seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len.into(), n: kv_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
         vec![input, w_k],
         vec![k_out],
         "gemm_k",
@@ -343,7 +343,7 @@ fn build_fused_qkv_rope_graph(
 
     let v_out = g.add_tensor_concrete("v", &[seq_len, kv_dim], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len.into(), n: kv_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
         vec![input, w_v],
         vec![v_out],
         "gemm_v",
@@ -406,7 +406,7 @@ fn build_fused_rms_linear_graph(
 
     let out = g.add_tensor_concrete("rms_linear_out", &[seq_len, h], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len.into(), n: h, k: h, dtype },
+        OpKind::Gemm { m: seq_len, n: h, k: h, dtype },
         vec![normed, linear_w],
         vec![out],
         "linear",
@@ -440,7 +440,7 @@ fn build_gqa_graph(
     let out = g.add_tensor_concrete("gqa_out", &[seq_len, q_dim], dt);
     g.add_op(
         OpKind::MultiHeadAttention {
-            seq_len: seq_len.into(),
+            seq_len,
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
@@ -476,7 +476,7 @@ fn build_moe_routing_graph(
 
     let gate_logits = g.add_tensor_concrete("gate_logits", &[seq_len, n], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len.into(), n, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len, n, k: hidden, dtype },
         vec![input, gate_w],
         vec![gate_logits],
         "gate_gemm",
@@ -543,9 +543,9 @@ fn atomic_op_to_kind(
             let m = a[a.len() - 2];
             let k = a[a.len() - 1];
             let n = b[b.len() - 1];
-            Ok(OpKind::Gemm { m: m.into(), n, k, dtype })
+            Ok(OpKind::Gemm { m, n, k, dtype })
         }
-        "LayerNorm" | "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
+        "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
         _ => Err(ExecutionError::UnsupportedOp(format!(
             "atomic op '{}' has no CompilerGraph mapping — \
@@ -835,7 +835,7 @@ impl FusedGraphExecutor {
         use gllm_kernels::types::DType;
         
         let mut nodes = Vec::with_capacity(payload.nodes.len());
-        for (i, p) in payload.nodes.into_iter().enumerate() {
+        for p in payload.nodes.into_iter() {
             let mut layer = gllm_kernels::compiler::CompiledLayer::from_code(
                 &p.code_bytes,
                 p.scratchpad_bytes,
@@ -1509,7 +1509,7 @@ impl FusedGraphExecutor {
         let kv_cache_v_ptr = kv_cache_v as *mut u8;
         let _ = (layer, total_seq); // used by caller for layout; kernel uses internal strides
 
-        for (node_idx, node) in self.graph.nodes.iter().enumerate() {
+        for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
 
             if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {

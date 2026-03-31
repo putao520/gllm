@@ -58,11 +58,13 @@ pub fn build_executor_from_yaml(
         ))
     })?;
 
-    let mut ctx = crate::graph::optimizer::OptimizationContext::default();
-    ctx.hidden_size = config.hidden_size;
-    ctx.num_heads = config.num_attention_heads;
-    ctx.num_kv_heads = config.num_key_value_heads;
-    ctx.head_dim = config.head_dim;
+    let ctx = crate::graph::optimizer::OptimizationContext {
+        hidden_size: config.hidden_size,
+        num_heads: config.num_attention_heads,
+        num_kv_heads: config.num_key_value_heads,
+        head_dim: config.head_dim,
+        ..Default::default()
+    };
 
     crate::graph::executor::FusedGraphExecutor::from_graph_with_cache(
         onnx_graph, seq_len, hidden, dtype, model_id, backend, cache, ctx

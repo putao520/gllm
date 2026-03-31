@@ -25,6 +25,7 @@ pub struct GuardProbeRunner {
     /// 线性分类器偏置 (shape: [1])
     bias: f32,
     /// 隐藏层维度
+    #[allow(dead_code)]
     hidden_dim: usize,
     /// 目标审查层
     target_layer: LayerTarget,
@@ -232,13 +233,77 @@ fn load_probe_weights(
             Ok((weight_vec, bias, hidden_dim))
         }
         GuardProbe::FromModel { model_id } => {
-            // TODO: 从 HuggingFace Hub 下载模型 safetensors 并加载
-            // 完整实现需要: 1) HF Hub API 下载 2) 缓存管理 3) 权重提取
-            Err(GuardProbeError::ProbeLoadFailed(format!(
-                "model probe loading not yet implemented: model_id={}. \
-                 Use GuardProbe::FromSafetensors with a local safetensors file instead.",
-                model_id
-            )))
+            // 从 HuggingFace Hub 下载模型 safetensors 并加载
+            let cache_dir = std::env::var("GLLM_CACHE_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    std::path::PathBuf::from(home).join(".gllm").join("models")
+                });
+
+            let hf_client = crate::loader::hf_hub::HfHubClient::new(cache_dir)
+                .map_err(|e| GuardProbeError::ProbeLoadFailed(format!(
+                    "failed to create HF Hub client for probe model '{}': {}", model_id, e
+                )))?;
+
+            // 下载 safetensors 文件（利用 HfHubClient 缓存机制，已下载则直接使用缓存）
+            let file_map: crate::manifest::FileMap = &[];
+            let downloaded = hf_client.download_model_files_with_format(
+                model_id,
+                file_map,
+                crate::loader::parallel::ParallelLoader::new(false),
+                Some(crate::loader::hf_hub::WeightFormat::SafeTensors),
+            ).map_err(|e| GuardProbeError::ProbeLoadFailed(format!(
+                "failed to download probe model '{}': {}", model_id, e
+            )))?;
+
+            // 分类器模型通常只有一个 safetensors 文件
+            let st_path = downloaded.weights.into_iter().next()
+                .ok_or_else(|| GuardProbeError::ProbeLoadFailed(
+                    format!("no safetensors weight file found for probe model '{}'", model_id)
+                ))?;
+
+            // 复用 safetensors 加载逻辑（与 FromSafetensors 路径完全一致）
+            let st_loader = crate::loader::safetensors::MappedSafetensors::open(&st_path)
+                .map_err(|e| GuardProbeError::SafetensorsError(format!(
+                    "failed to open downloaded safetensors for '{}': {}", model_id, e
+                )))?;
+
+            let weight_tensor = st_loader.tensor("weight")
+                .or_else(|_| st_loader.tensor("classifier.weight"))
+                .map_err(|e| GuardProbeError::SafetensorsError(format!(
+                    "no 'weight' or 'classifier.weight' in probe '{}': {}", model_id, e
+                )))?;
+
+            let weight_data = weight_tensor.as_f32()
+                .map_err(|e| GuardProbeError::SafetensorsError(format!(
+                    "weight tensor not f32 in probe '{}': {}", model_id, e
+                )))?
+                .into_owned();
+
+            let hidden_dim = match weight_tensor.shape.as_slice() {
+                [d] => *d,
+                [1, d] => *d,
+                [n, d] if *n == 1 => *d,
+                shape => *shape.last().ok_or_else(|| GuardProbeError::SafetensorsError(
+                    "weight tensor has empty shape".to_string()
+                ))?,
+            };
+
+            let weight_vec = if weight_data.len() > hidden_dim && hidden_dim > 0 {
+                weight_data[..hidden_dim].to_vec()
+            } else {
+                weight_data
+            };
+
+            let bias: f32 = st_loader.tensor("bias")
+                .or_else(|_| st_loader.tensor("classifier.bias"))
+                .and_then(|t| t.as_f32())
+                .ok()
+                .and_then(|b| b.first().copied())
+                .unwrap_or(0.0);
+
+            Ok((weight_vec, bias, hidden_dim))
         }
     }
 }
@@ -265,10 +330,10 @@ mod tests {
     }
 
     #[test]
-    fn test_guard_probe_runner_from_model_unimplemented() {
-        // FromModel 当前未实现，应返回 Err
+    fn test_guard_probe_runner_from_model_nonexistent_repo() {
+        // FromModel 对不存在的 repo 应返回 Err（下载失败）
         let result = GuardProbeRunner::from_model(
-            "toxicity-detector-v1",
+            "nonexistent-org/nonexistent-probe-model-v99999",
             LayerTarget::MidSemantic,
             SafetyPolicy::SoftWarn { threshold: 0.8 },
         );
@@ -276,7 +341,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), GuardProbeError::ProbeLoadFailed(_)),
-            "Expected ProbeLoadFailed for unimplemented model probe"
+            "Expected ProbeLoadFailed for nonexistent probe model repo"
         );
     }
 

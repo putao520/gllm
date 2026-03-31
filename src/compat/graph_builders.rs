@@ -361,12 +361,12 @@ pub(crate) fn build_fused_attention_layer_graph(
 
     let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s.into(), num_heads, num_kv_heads, head_dim },
+        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim },
         vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
     );
 
     let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s.into(), n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
     
     let resid1 = g.add_tensor_concrete("residual1", &[s, h], ft);
     let tel1 = g.add_tensor_concrete("telemetry1", &[s], DType::F32);
@@ -419,7 +419,7 @@ pub(crate) fn build_fused_attention_layer_graph(
     let kv_written  = g.add_tensor_concrete("kv_written",   &[s, kv_dim], ft);
     g.add_op(
         OpKind::KvScatterWrite {
-            seq_len:      s.into(),
+            seq_len:      s,
             num_kv_heads,
             head_dim,
             kv_dim,
@@ -504,7 +504,7 @@ pub(crate) fn build_fused_ffn_layer_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn2_w], vec![normed2], "rms_norm_2");
 
     let gate_out = g.add_tensor_concrete("ffn_gate", &[s, inter], ft);
-    g.add_op(OpKind::Gemm { m: s.into(), n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
     
     let mask_out = g.add_tensor_concrete("gate_mask", &[s, inter], ft);
     g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], "gate_mask");
@@ -516,7 +516,7 @@ pub(crate) fn build_fused_ffn_layer_graph(
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     
     let down_out = g.add_tensor_concrete("ffn_down", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s.into(), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     let output = g.add_tensor_concrete("output", &[s, h], ft);
     let tel2 = g.add_tensor_concrete("telemetry2", &[s], DType::F32);
@@ -578,11 +578,11 @@ pub(crate) fn build_fused_moe_layer_graph(
 
     // 2. Router Path
     let gate_probs = g.add_tensor_concrete("gate_probs", &[s, num_experts], ft);
-    g.add_op(OpKind::MoEGate { seq_len: s.into(), num_experts, hidden: h }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
+    g.add_op(OpKind::MoEGate { seq_len: s, num_experts, hidden: h }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
 
     let topk_idx = g.add_tensor_concrete("topk_idx", &[s, top_k], DType::F32);
     let topk_w = g.add_tensor_concrete("topk_w", &[s, top_k], DType::F32);
-    g.add_op(OpKind::TopK { seq_len: s.into(), num_experts, top_k }, vec![gate_probs], vec![topk_idx, topk_w], "top_k");
+    g.add_op(OpKind::TopK { seq_len: s, num_experts, top_k }, vec![gate_probs], vec![topk_idx, topk_w], "top_k");
 
     // 3. Dynamic Zero-Overhead Mega-Graph Construction for all Experts
     // We instantiate a zeroed accumulator and iteratively process branches.
@@ -596,7 +596,7 @@ pub(crate) fn build_fused_moe_layer_graph(
 
     for i in 0..num_experts {
         let gate_out = g.add_tensor_concrete(&format!("ffn_gate_{}", i), &[s, inter], ft);
-        g.add_op(OpKind::Gemm { m: s.into(), n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
+        g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
         
         let mask_out = g.add_tensor_concrete(&format!("gate_mask_{}", i), &[s, inter], ft);
         g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], &format!("gate_mask_{}", i));
@@ -608,7 +608,7 @@ pub(crate) fn build_fused_moe_layer_graph(
         g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("swiglu_{}", i));
         
         let down_out = g.add_tensor_concrete(&format!("ffn_down_{}", i), &[s, h], ft);
-        g.add_op(OpKind::Gemm { m: s.into(), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
+        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
         
         let next_acc = g.add_tensor_concrete(&format!("acc_after_{}", i), &[s, h], ft);
         g.add_op(

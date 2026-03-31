@@ -92,7 +92,7 @@ pub(crate) fn decoder_forward<E: Element>(
         } else {
             0
         };
-        let is_incremental = has_kv_cache && cached_seq_len > 0 && position > 0;
+        let _is_incremental = has_kv_cache && cached_seq_len > 0 && position > 0;
 
         // ── Graph executor path (YAML→JIT, ONLY valid path) ──
         if config.graph_executor_ptr.is_null() {
@@ -115,7 +115,7 @@ pub(crate) fn decoder_forward<E: Element>(
             if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
                 first_node.outputs.first().unwrap().clone()
             } else {
-                ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
+                ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
             }
         } else {
             "hidden_state".to_string()
@@ -251,7 +251,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
+            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()
@@ -351,7 +351,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
+            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()
@@ -405,6 +405,7 @@ pub fn layer_target_to_idx(target: crate::knowledge::LayerTarget, num_layers: us
 /// - `layer_3` → 3
 ///
 /// Returns None if the node name does not follow the layer pattern.
+#[allow(dead_code)]
 fn extract_layer_index(node_name: &str) -> Option<usize> {
     // Pattern: layer_{number}_... or just layer_{number}
     if let Some(rest) = node_name.strip_prefix("layer_") {
@@ -504,7 +505,7 @@ pub fn forward_to_layer<E: Element>(
         if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
             first_node.outputs.first().unwrap().clone()
         } else {
-            ge.graph().inputs.first().map(|s| s.clone()).unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
+            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
         }
     } else {
         "hidden_state".to_string()

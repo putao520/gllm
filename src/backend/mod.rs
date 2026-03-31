@@ -567,10 +567,14 @@ impl<E: Element> BackendExecutor<E> {
 pub type BackendExecutorF32 = BackendExecutor<f32>;
 
 pub struct BackendContext {
+    #[allow(dead_code)]
     model_ref: String,
     manifest: Arc<ModelManifest>,
+    #[allow(dead_code)]
     weight_paths: Vec<std::path::PathBuf>,
+    #[allow(dead_code)]
     config_path: Option<std::path::PathBuf>,
+    #[allow(dead_code)]
     tokenizer_path: Option<std::path::PathBuf>,
     executor: Mutex<BackendExecutor<f32>>,
 }

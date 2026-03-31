@@ -140,7 +140,7 @@ impl ChunkedState {
     }
 
     pub fn is_request_complete(&self, request_id: &RequestId) -> bool {
-        self.trackers.get(request_id).map_or(true, |t| t.pending_tokens == 0)
+        self.trackers.get(request_id).is_none_or(|t| t.pending_tokens == 0)
     }
 
     pub fn pop_adaptive_chunk(&mut self, request_id: RequestId, l1_available_ratio: f32, concurrent_reqs: usize, remaining_budget: usize) -> Option<PrefillChunk> {
@@ -236,9 +236,8 @@ impl SwiftKvState {
         let mut akv_shared = Vec::new();
         let mut pf = false;
         for i in 0..merged.len() {
-            if i > 0 && self.config.enable_across_kv {
-                if cosine_similarity(&merged[i - 1], &merged[i]) >= E::from_f32(self.config.similarity_threshold) { continue; }
-            }
+            if i > 0 && self.config.enable_across_kv
+                && cosine_similarity(&merged[i - 1], &merged[i]) >= E::from_f32(self.config.similarity_threshold) { continue; }
             akv_shared.push(merged[i].clone());
         }
         let ppl_diff = approx_ppl_delta(pages, &akv_shared);

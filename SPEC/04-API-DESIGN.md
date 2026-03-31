@@ -5,7 +5,8 @@
 ## 1. 核心设计原则
 
 - **Builder 模式**: 复杂配置通过 Builder 链式调用
-- **异步优先**: 核心 IO 接口均为 `async` (兼容同步封装)
+- **同步优先**: 所有操作均为同步（CPU-bound 推理无需异步运行时，无 tokio/async/await）
+- **Lock-free 状态**: `arc_swap::ArcSwapOption<ClientState>` 实现零开销原子模型切换，无 RwLock
 - **显式类型**: 使用强类型枚举而非字符串魔法值
 - **结果导向**: 返回 `Result<Output, Error>` 清晰表达成功/失败
 
@@ -21,12 +22,11 @@ let client = Client::builder()
     .model("Qwen/Qwen3-7B-Instruct")
     .kind(ModelKind::Chat)  // 显式指定用途
     .backend(BackendType::Cuda) // 可选：强制指定后端
-    .build()
-    .await?;
+    .build()?;
 
 // 快捷方式
-let chat_client = Client::new_chat("Qwen/Qwen3-7B-Instruct").await?;
-let embed_client = Client::new_embedding("BAAI/bge-m3").await?;
+let chat_client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
+let embed_client = Client::new_embedding("BAAI/bge-m3")?;
 ```
 
 ### 2.2 运行时模型切换 (Runtime Switching)
@@ -34,17 +34,17 @@ let embed_client = Client::new_embedding("BAAI/bge-m3").await?;
 支持在不重启进程的情况下切换底层模型。
 
 ```rust
-// 切换到新模型 (自动释放旧模型显存)
-client.swap_model("Qwen/Qwen3-14B-Chat").await?;
+// 切换到新模型 (原子操作，自动释放旧模型显存)
+client.swap_model("Qwen/Qwen3-14B-Chat")?;
 
 // 卸载当前模型 (释放资源，保持 Client 实例)
-client.unload_model().await?;
+client.unload_model()?;
 
 // 重新加载
-client.load_model("org/model", ModelKind::Chat).await?;
+client.load_model("org/model", ModelKind::Chat)?;
 
 // 检查当前状态
-if let Some(info) = client.model_info().await {
+if let Some(info) = client.model_info() {
     println!("Current model: {}", info.id);
 }
 ```
@@ -63,8 +63,7 @@ let output = client.generate("Hello, who are you?")
     .max_tokens(100)
     .temperature(0.7)
     .stream(false)
-    .generate()
-    .await?;
+    .generate()?;
 
 println!("{}", output.text);
 ```
@@ -75,7 +74,7 @@ println!("{}", output.text);
 let embeddings = client.embed(vec![
     "Hello world",
     "Machine learning is fascinating"
-]).await?;
+])?;
 
 assert_eq!(embeddings.len(), 2);
 assert_eq!(embeddings[0].len(), 1024); // 维度
@@ -91,7 +90,7 @@ let scores = client.rerank(
         "London is in UK",
         "Berlin is in Germany"
     ]
-).await?;
+)?;
 ```
 
 ## 4. 错误处理
@@ -134,7 +133,7 @@ match result {
 
 | API 层 | 内部组件 | 说明 |
 |--------|----------|------|
-| `Client` | `Arc<RwLock<Option<Executor>>>` | 线程安全的执行器容器 |
+| `Client` | `Arc<ArcSwapOption<ClientState>>` | Lock-free 原子模型状态容器 |
 | `Executor` | `Backend + Scheduler` | 核心推理引擎 |
 | `Builder` | `Loader` | 模型加载与配置 |
 

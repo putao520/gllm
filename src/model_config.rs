@@ -268,7 +268,7 @@ impl ModelConfig {
             .and_then(|v| v.as_u64())
             .filter(|&n| n > 0);
         match (num_heads, hidden_size) {
-            (Some(nh), Some(hs)) if hs as usize % nh as usize == 0 => TensorDeriveHints {
+            (Some(nh), Some(hs)) if (hs as usize).is_multiple_of(nh as usize) => TensorDeriveHints {
                 head_dim: Some(hs as usize / nh as usize),
             },
             _ => TensorDeriveHints::default(),
@@ -1131,6 +1131,7 @@ fn insert_json_path_segments(
     insert_json_path_segments(child, &segments[1..], value);
 }
 
+#[allow(dead_code)]
 fn derive_dtype_size(metas: &[TensorMeta]) -> ModelConfigResult<usize> {
     let mut float_sizes = Vec::new();
     let mut all_sizes = Vec::new();
@@ -1191,6 +1192,7 @@ fn derive_dtype(metas: &[TensorMeta]) -> ModelConfigResult<DType> {
     }
 }
 
+#[allow(dead_code)]
 fn dtype_size_from_dtype(dtype: safetensors::Dtype) -> Option<usize> {
     match dtype {
         safetensors::Dtype::F64 | safetensors::Dtype::I64 | safetensors::Dtype::U64 => Some(8),
@@ -1220,6 +1222,7 @@ fn is_floating_dtype(dtype: safetensors::Dtype) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn unique_mode(values: &[usize], field: &str) -> ModelConfigResult<usize> {
     if values.is_empty() {
         return Err(ModelConfigError::InvalidConfig(format!(

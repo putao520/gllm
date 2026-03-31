@@ -1,8 +1,8 @@
 //! gllm C FFI exports.
 //!
 //! This module provides a C-compatible API for gllm.
-//! Since the Client API is async-first, the FFI layer uses
-//! `tokio::runtime::Runtime::new()` to block on async calls.
+//! All operations are synchronous — no tokio runtime needed.
+//! Inference is CPU-bound compute, not I/O-bound web service.
 
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
@@ -48,17 +48,8 @@ pub unsafe extern "C" fn gllm_init(model_id: *const c_char, kind: u32) -> *mut G
         Err(_) => return ptr::null_mut(),
     };
 
-    // Create a tokio runtime for blocking on async calls
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("[gllm FFI] failed to create runtime: {e}");
-            return ptr::null_mut();
-        }
-    };
-
-    // Block on the async Client::new call
-    let result = rt.block_on(Client::new(model_id, kind_from_u32(kind)));
+    // Sync call — no tokio runtime needed
+    let result = Client::new(model_id, kind_from_u32(kind));
 
     match result {
         Ok(client) => Box::into_raw(Box::new(GllmContext { client })),
@@ -97,7 +88,7 @@ pub unsafe extern "C" fn gllm_generate(
     let err_result = |msg: &str| -> GllmGenerateResult {
         GllmGenerateResult {
             text: ptr::null_mut(),
-            error: CString::new(msg).unwrap_or_default().into_raw(), // LEGAL: FFI 边界，CString::new 仅在含 NUL 时失败，极端边界
+            error: CString::new(msg).unwrap_or_default().into_raw(), // LEGAL: FFI boundary
         }
     };
     if ctx.is_null() || prompt.is_null() {
@@ -109,25 +100,19 @@ pub unsafe extern "C" fn gllm_generate(
         Err(_) => return err_result("invalid UTF-8 in prompt"),
     };
 
-    // Create a tokio runtime for blocking on async calls
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => return err_result(&format!("failed to create runtime: {e}")),
-    };
-
-    // Block on the async execute_generation call
-    let result = rt.block_on(ctx.client.execute_generation(
+    // Sync call — no tokio runtime needed
+    let result = ctx.client.execute_generation(
         prompt_str,
         max_tokens as usize,
         temperature,
         top_k as usize,
         top_p,
         None,
-    ));
+    );
 
     match result {
         Ok(resp) => GllmGenerateResult {
-            text: CString::new(resp.text).unwrap_or_default().into_raw(), // LEGAL: FFI 边界，CString::new 仅在含 NUL 时失败，极端边界
+            text: CString::new(resp.text).unwrap_or_default().into_raw(), // LEGAL: FFI boundary
             error: ptr::null_mut(),
         },
         Err(e) => err_result(&format!("{e}")),

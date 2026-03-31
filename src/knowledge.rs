@@ -200,7 +200,7 @@ impl KnowledgeSource {
         &self,
         engine: &crate::engine::EngineContext,
     ) -> Result<MaterializedPayload, KnowledgeError> {
-        use std::path::Path;
+        
 
         let path = &self.path;
 
@@ -278,7 +278,7 @@ fn load_kv_from_safetensors(
 
         // 转换为原始字节（f32 → u8）
         let f32_slice: &[f32] = &data;
-        let byte_len = f32_slice.len() * std::mem::size_of::<f32>();
+        let byte_len = std::mem::size_of_val(f32_slice);
         let mut bytes = vec![0u8; byte_len];
         let view = unsafe { std::slice::from_raw_parts(f32_slice.as_ptr() as *const u8, byte_len) };
         bytes.copy_from_slice(view);
@@ -309,8 +309,8 @@ fn load_kv_from_safetensors(
     // 合并 K 和 V 数据（K 在前，V 在后）
     let key_f32: &[f32] = &key_data;
     let val_f32: &[f32] = &val_data;
-    let key_byte_len = key_f32.len() * std::mem::size_of::<f32>();
-    let val_byte_len = val_f32.len() * std::mem::size_of::<f32>();
+    let key_byte_len = std::mem::size_of_val(key_f32);
+    let val_byte_len = std::mem::size_of_val(val_f32);
     let mut bytes = Vec::with_capacity(key_byte_len + val_byte_len);
 
     let key_bytes = unsafe { std::slice::from_raw_parts(key_f32.as_ptr() as *const u8, key_byte_len) };

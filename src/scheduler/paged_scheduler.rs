@@ -174,8 +174,8 @@ impl PagedScheduler {
 
             // Register in GMM page table (L1 tier)
             let virtual_id = VirtualPageId::new(group.id, logical_idx);
-            if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
-            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.track_page(Tier::L1, block) { log::warn!("GMM track_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block) { log::warn!("GMM bind_virtual_page failed: {}", e); }
         }
 
         let mut block_table = BlockTable::new();
@@ -240,8 +240,8 @@ impl PagedScheduler {
             self.hgal.mark_accessed(block);
 
             let virtual_id = VirtualPageId::new(group.id, logical_idx);
-            if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
-            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.track_page(Tier::L1, block) { log::warn!("GMM track_page failed: {}", e); }
+            if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block) { log::warn!("GMM bind_virtual_page failed: {}", e); }
         }
 
         let mut block_table = BlockTable::new();
@@ -355,8 +355,8 @@ impl PagedScheduler {
 
         // Register new block in GMM
         let virtual_id = VirtualPageId::new(request_id, logical_idx);
-        if let Err(e) = self.memory_manager.track_page(Tier::L1, block as usize) { log::warn!("GMM track_page failed: {}", e); }
-        if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block as usize) { log::warn!("GMM bind_virtual_page failed: {}", e); }
+        if let Err(e) = self.memory_manager.track_page(Tier::L1, block) { log::warn!("GMM track_page failed: {}", e); }
+        if let Err(e) = self.memory_manager.bind_virtual_page(virtual_id, Tier::L1, block) { log::warn!("GMM bind_virtual_page failed: {}", e); }
 
         Ok(Some(block))
     }
@@ -469,7 +469,7 @@ impl PagedScheduler {
                 // Unmap from GMM page table
                 let virtual_id = VirtualPageId::new(request_id, logical_idx);
                 self.memory_manager.unmap_virtual_page(virtual_id);
-                if let Err(e) = self.memory_manager.free_page(Tier::L1, *block as usize) {
+                if let Err(e) = self.memory_manager.free_page(Tier::L1, *block ) {
                     log::warn!("free_page L1 block {} failed during sequence cleanup: {}", *block, e);
                 }
             }

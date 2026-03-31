@@ -728,16 +728,16 @@ impl Loader {
 
             // BERT/RoBERTa/XLMR 风格: 前缀匹配
             // "bert.embeddings", "roberta.encoder", "xlmr."
-            if parts.first().map_or(false, |p| {
+            if parts.first().is_some_and(|p| {
                 matches!(*p, "bert" | "roberta" | "xlmr" | "encoder")
             }) {
                 return Some(ModelArchitecture::XlmR);
             }
 
             // Mistral 风格: 前缀匹配 "model.layers" 或 "mistral."
-            if parts.first().map_or(false, |p| {
+            if parts.first().is_some_and(|p| {
                 matches!(*p, "mistral" | "model")
-            }) && parts.get(1).map_or(false, |p| {
+            }) && parts.get(1).is_some_and(|p| {
                 matches!(*p, "layers" | "embeddings")
             }) {
                 return Some(ModelArchitecture::Mistral3);
@@ -745,13 +745,12 @@ impl Loader {
 
             // BERT encoder 模式: "encoder.layer.{N}.{...}" 或 "bert.encoder.layer.{N}"
             // 使用精确路径匹配而非 contains
-            if parts.len() >= 3 {
-                if (parts[0] == "encoder" && parts[1] == "layer")
-                    || (parts[0] == "bert" && parts[1] == "encoder" && parts[2] == "layer")
+            if parts.len() >= 3
+                && ((parts[0] == "encoder" && parts[1] == "layer")
+                    || (parts[0] == "bert" && parts[1] == "encoder" && parts[2] == "layer"))
                 {
                     return Some(ModelArchitecture::XlmR);
                 }
-            }
 
             // BERT attention 模式: "attention.self.query" 精确路径匹配
             if parts.len() >= 3 && parts[1] == "attention" && parts[2] == "self" {
@@ -1025,7 +1024,7 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     // Apply P4/P5 Tier II Structural Sparsity logic on the CPU prior to GPU upload
     apply_ffn_sparsity_heuristic(&cloned_meta, &mut converted_f32);
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
-    deduplicate_q_heads_heuristic(&mut cloned_meta, &mut converted_f32);
+    deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
     if is_f32_backend {
         // Safety: we know E is f32 here
@@ -1078,8 +1077,8 @@ fn apply_ffn_sparsity_heuristic(meta: &TensorMeta, data: &mut [f32]) {
     let threshold = 0.01 * mean_l2;
 
     let mut pruned = 0;
-    for r in 0..rows {
-        if l2_norms[r] < threshold {
+    for (r, norm) in l2_norms.iter().enumerate() {
+        if *norm < threshold {
             let start = r * cols;
             for c in 0..cols {
                 data[start + c] = 0.0;
@@ -1102,13 +1101,13 @@ fn compress_24_sparsity_heuristic(meta: &mut TensorMeta, data: &mut Vec<f32>) ->
     // (NVIDIA Ampere+). On CPU-only JIT builds, the dense GEMM expects full-
     // dimension weights. Compressing here causes the JIT GEMM to read past
     // the buffer boundary → SIGSEGV.
-    #[cfg(not(feature = "jit-cuda"))]
+    #[cfg(not(feature = "cuda"))]
     {
         let _ = (meta, data);
-        return None;
+        None
     }
 
-    #[cfg(feature = "jit-cuda")]
+    #[cfg(feature = "cuda")]
     {
     if !meta.name.contains("mlp.gate_proj") && !meta.name.contains("mlp.up_proj") && !meta.name.contains("experts") {
         return None;
@@ -1175,7 +1174,7 @@ fn deduplicate_q_heads_heuristic(meta: &TensorMeta, data: &mut [f32]) {
 
     // Infer head_dim conservatively (usually 128 or 64). 
     // If cols is not divisible by 128, try 64, else abort heuristic.
-    let head_dim = if cols % 128 == 0 { 128 } else if cols % 64 == 0 { 64 } else { return; };
+    let head_dim = if cols.is_multiple_of(128) { 128 } else if cols.is_multiple_of(64) { 64 } else { return; };
     let num_heads = cols / head_dim;
 
     if num_heads <= 1 {
@@ -1186,7 +1185,7 @@ fn deduplicate_q_heads_heuristic(meta: &TensorMeta, data: &mut [f32]) {
     // A head is a set of columns. 
     // Let's compute the L2 norm for each head.
     let mut head_norms = vec![0.0f32; num_heads];
-    for h in 0..num_heads {
+    for (h, norm_out) in head_norms.iter_mut().enumerate() {
         let mut sq_norm = 0.0f32;
         let start_col = h * head_dim;
         for r in 0..rows {
@@ -1196,7 +1195,7 @@ fn deduplicate_q_heads_heuristic(meta: &TensorMeta, data: &mut [f32]) {
                 sq_norm += val * val;
             }
         }
-        head_norms[h] = sq_norm.sqrt();
+        *norm_out = sq_norm.sqrt();
     }
 
     let mut merged = 0;

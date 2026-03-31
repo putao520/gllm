@@ -9,10 +9,10 @@ use super::backend_trait;
 use super::cpu_backend::CpuBackend;
 use super::decoder_forward;
 use super::jit_helpers::TypedBuffer;
-use super::weight_helpers::{get_typed_data, get_bias_data_typed};
+use super::weight_helpers::get_typed_data;
 use super::jit_helpers::typed_bytes_to_f32;
-use super::{Element, PoolingMode};
-use crate::engine::executor::{BackendError as BE, GeneratorForwardConfig, KvCacheHandle};
+use super::Element;
+use crate::engine::executor::{GeneratorForwardConfig, KvCacheHandle};
 use crate::knowledge::{InjectionKind, KnowledgeError, LayerTarget, MaterializedPayload};
 use crate::scheduler::memory_manager::VirtualPageId;
 
@@ -64,7 +64,7 @@ pub fn inject_frozen_kv<E: Element>(
     // Step 1: Run encoder forward to get K/V tensors
     // For now, we use a simplified approach: compute K/V from attention projection
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
+    let _num_heads = config.num_heads;
     let num_kv_heads = config.num_kv_heads;
     let head_dim = config.head_dim;
 
@@ -134,7 +134,7 @@ pub fn inject_frozen_kv<E: Element>(
                 .flat_map(|v| v.to_le_bytes())
                 .collect();
 
-            let total_kv_layers = config.num_layers;
+            let _total_kv_layers = config.num_layers;
             let layer_kv_byte_size = k_bytes.len() + v_bytes.len();
 
             // Calculate offset for target layer (in bytes)

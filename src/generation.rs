@@ -1,10 +1,13 @@
-//! Generation loop — async-first design (per SPEC 04-API-DESIGN §3.1).
+//! Generation loop — sync-first design (per SPEC 04-API-DESIGN §3.1).
+//!
+//! No async runtime, no `futures::Stream`, no `Pin<Box<dyn Future>>`.
+//! Inference is CPU-bound compute, exposed as synchronous operations.
 
-use crate::client::{Client, GllmError};
-use futures::stream::Stream;
-use futures::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+
+use arc_swap::ArcSwapOption;
+
+use crate::client::{Client, ClientState, GllmError};
 
 /// Hook decision after each decode step.
 ///
@@ -92,7 +95,10 @@ impl GenerationHook for ThresholdHook {
                 if count + 1 >= self.max_vetoes {
                     return HookDecision::Terminate;
                 } else {
-                    return HookDecision::Veto(format!("token {} blocked by threshold policy", last_token));
+                    return HookDecision::Veto(format!(
+                        "token {} blocked by threshold policy",
+                        last_token
+                    ));
                 }
             }
         }
@@ -100,20 +106,21 @@ impl GenerationHook for ThresholdHook {
     }
 }
 
-/// 流式生成输出块 (per SPEC 04-API-DESIGN §3.1)
+/// Streaming generation output chunk (per SPEC 04-API-DESIGN §3.1)
 ///
-/// 每个块包含生成的一个或多个 token 及其累积文本。
+/// Each chunk contains one or more generated tokens and their accumulated text.
 #[derive(Debug, Clone)]
 pub struct GenerationChunk {
-    /// 当前块生成的 token ID 列表
+    /// Token IDs in this chunk
     pub tokens: Vec<u32>,
-    /// 当前块的累积文本（解码后）
+    /// Accumulated decoded text for this chunk
     pub text: String,
-    /// 是否为最后一个块
+    /// Whether this is the final chunk
     pub finished: bool,
 }
 
 impl GenerationChunk {
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
             tokens: Vec::new(),
@@ -122,19 +129,33 @@ impl GenerationChunk {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_token(mut self, token: u32, text: String) -> Self {
         self.tokens.push(token);
         self.text = text;
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn finish(mut self) -> Self {
         self.finished = true;
         self
     }
 }
 
-/// Internal state machine for the streaming future.
+/// Streaming generation iterator (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004/005)
+///
+/// Implements `Iterator` for synchronous token-by-token iteration.
+/// No async runtime, no `futures::Stream` — just a standard Rust iterator.
+///
+/// On first call to `next()`, executes the full generation synchronously,
+/// then yields tokens one-by-one as `GenerationChunk`s.
+pub struct GenerationStream {
+    state: Arc<ArcSwapOption<ClientState>>,
+    phase: StreamPhase,
+}
+
+/// Internal state machine for the streaming iterator.
 enum StreamPhase {
     /// Not yet started — need to run full generation.
     Pending {
@@ -152,19 +173,6 @@ enum StreamPhase {
     },
     /// All tokens yielded.
     Done,
-}
-
-/// 流式生成 Stream (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004/005)
-///
-/// 实现 `futures::Stream<Item = Result<GenerationChunk, GllmError>>`，允许异步逐 token 迭代处理。
-///
-/// # 实现策略
-///
-/// 首次调用 `poll_next()` 时执行完整的 `generate()` 生成全部 tokens，
-/// 随后逐 token 生成 `GenerationChunk` 并 yield。
-pub struct GenerationStream {
-    state: std::sync::Arc<std::sync::RwLock<Option<crate::client::ClientState>>>,
-    phase: StreamPhase,
 }
 
 impl GenerationStream {
@@ -191,19 +199,12 @@ impl GenerationStream {
     }
 }
 
-impl Stream for GenerationStream {
+impl Iterator for GenerationStream {
     type Item = Result<GenerationChunk, GllmError>;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        // SAFETY: GenerationStream contains only Arc<RwLock<_>> + enum,
-        // both of which are safe to access through Pin.
-        let this = unsafe { self.get_unchecked_mut() };
-
+    fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match &mut this.phase {
+            match &mut self.phase {
                 StreamPhase::Pending {
                     prompt,
                     max_tokens,
@@ -212,15 +213,14 @@ impl Stream for GenerationStream {
                     top_p,
                     session_id,
                 } => {
-                    // Run full generation under write lock.
+                    // Run full generation synchronously (lock-free state read)
                     let result = (|| -> Result<Vec<u32>, GllmError> {
-                        let guard = this
+                        let loaded = self
                             .state
-                            .write()
-                            .map_err(|_| GllmError::RuntimeError("state lock poisoned".to_string()))?;
-                        let loaded = guard.as_ref().ok_or(GllmError::RuntimeError("no model loaded".to_string()))?;
-                        let mut executor = loaded.backend.executor_mut();
+                            .load_full()
+                            .ok_or(GllmError::NoModelLoaded)?;
 
+                        let mut executor = loaded.backend.executor_mut();
                         let text = if let Some(sid) = session_id {
                             executor.generate_with_session(
                                 prompt,
@@ -240,7 +240,7 @@ impl Stream for GenerationStream {
                             )?
                         };
 
-                        // Re-encode text to tokens for per-token yielding.
+                        // Re-encode text to tokens for per-token yielding
                         drop(executor);
                         let tokens = {
                             let executor = loaded.backend.executor();
@@ -252,67 +252,63 @@ impl Stream for GenerationStream {
                     match result {
                         Ok(tokens) => {
                             if tokens.is_empty() {
-                                this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Ok(GenerationChunk {
+                                self.phase = StreamPhase::Done;
+                                return Some(Ok(GenerationChunk {
                                     tokens: Vec::new(),
                                     text: String::new(),
                                     finished: true,
-                                })));
+                                }));
                             }
-                            this.phase = StreamPhase::Yielding { tokens, index: 0 };
+                            self.phase = StreamPhase::Yielding { tokens, index: 0 };
                         }
                         Err(e) => {
-                            this.phase = StreamPhase::Done;
-                            return Poll::Ready(Some(Err(e)));
+                            self.phase = StreamPhase::Done;
+                            return Some(Err(e));
                         }
                     }
                 }
                 StreamPhase::Yielding { tokens, index } => {
                     if *index >= tokens.len() {
-                        this.phase = StreamPhase::Done;
-                        return Poll::Ready(None);
+                        self.phase = StreamPhase::Done;
+                        return None;
                     }
 
                     let token = tokens[*index];
                     let end = *index + 1;
                     let is_last = end >= tokens.len();
 
-                    // Decode the text up to this token.
+                    // Decode the text up to this token (lock-free state read)
                     let text_up_to = {
-                        let guard = match this.state.read() {
-                            Ok(g) => g,
-                            Err(_) => {
-                                this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Err(GllmError::RuntimeError("state lock poisoned".to_string()))));
-                            }
-                        };
-                        let loaded = match guard.as_ref() {
+                        let state_arc = match self.state.load_full() {
                             Some(s) => s,
                             None => {
-                                this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Err(GllmError::RuntimeError("no model loaded".to_string()))));
+                                self.phase = StreamPhase::Done;
+                                return Some(Err(GllmError::NoModelLoaded));
                             }
                         };
-                        let executor = loaded.backend.executor();
+                        let executor = state_arc.backend.executor();
                         match executor.decode_tokens(&tokens[..end]) {
                             Ok(text) => text,
                             Err(e) => {
-                                this.phase = StreamPhase::Done;
-                                return Poll::Ready(Some(Err(GllmError::RuntimeError(format!("decode_tokens failed: {e}")))));
+                                self.phase = StreamPhase::Done;
+                                return Some(Err(GllmError::RuntimeError(format!(
+                                    "decode_tokens failed: {}",
+                                    e
+                                ))));
                             }
                         }
                     };
 
                     *index += 1;
 
-                    return Poll::Ready(Some(Ok(GenerationChunk {
+                    return Some(Ok(GenerationChunk {
                         tokens: vec![token],
                         text: text_up_to,
                         finished: is_last,
-                    })));
+                    }));
                 }
                 StreamPhase::Done => {
-                    return Poll::Ready(None);
+                    return None;
                 }
             }
         }
@@ -336,17 +332,15 @@ pub struct GenerationResponse {
 ///
 /// ```no_run
 /// use gllm::Client;
-/// use futures::stream::StreamExt;
 ///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = Client::new_empty();
 /// // Non-streaming
 /// let response = client.generate("Hello, who are you?")
 ///     .max_tokens(100)
 ///     .temperature(0.7)
 ///     .stream(false)
-///     .generate()
-///     .await?;
+///     .generate()?;
 /// println!("Generated: {}", response.text);
 ///
 /// // Streaming
@@ -355,7 +349,7 @@ pub struct GenerationResponse {
 ///     .stream(true)
 ///     .generate();
 ///
-/// while let Some(chunk) = stream.next().await {
+/// while let Some(chunk) = stream.next() {
 ///     let chunk = chunk?;
 ///     println!("Token: {}", chunk.text);
 /// }
@@ -417,10 +411,7 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
-    /// 启用/禁用流式生成 (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004)
-    ///
-    /// - `true`: 返回 `GenerationStream`
-    /// - `false`: 返回 `impl Future<Output = Result<GenerationResponse, GllmError>>`
+    /// Enable/disable streaming generation (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004)
     pub fn stream(mut self, enable: bool) -> Self {
         self.stream = enable;
         self
@@ -428,19 +419,20 @@ impl<'a> GenerationBuilder<'a> {
 
     /// Execute the generation (per SPEC 04-API-DESIGN §3.1 REQ-GEN-005)
     ///
-    /// 根据 `stream` 字段返回不同类型：
-    /// - `stream == false`: 返回 `impl Future<Output = Result<GenerationResponse, GllmError>>`
-    /// - `stream == true`: 返回 `GenerationStream` (implements `futures::Stream`)
+    /// Returns either:
+    /// - `GenerationOutput::Response(...)`: Synchronous `Result<GenerationResponse, GllmError>`
+    /// - `GenerationOutput::Stream(...)`: `GenerationStream` implementing `Iterator`
     ///
     /// # Example (Non-streaming)
     ///
     /// ```no_run
     /// # use gllm::Client;
-    /// # async fn example(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn example(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let response = client.generate("Hello")
     ///     .stream(false)
     ///     .generate()
-    ///     .await?;
+    ///     .response()?;
+    /// println!("{}", response.text);
     /// # Ok(())
     /// # }
     /// ```
@@ -449,19 +441,19 @@ impl<'a> GenerationBuilder<'a> {
     ///
     /// ```no_run
     /// # use gllm::Client;
-    /// # use futures::stream::StreamExt;
-    /// # async fn example(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn example(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut stream = client.generate("Hello")
     ///     .stream(true)
-    ///     .generate();
-    /// while let Some(chunk) = stream.next().await {
+    ///     .generate()
+    ///     stream();
+    /// while let Some(chunk) = stream.next() {
     ///     let chunk = chunk?;
     ///     println!("Token: {}", chunk.text);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub fn generate(self) -> GenerationOutput<'a> {
+    pub fn generate(self) -> GenerationOutput {
         if self.stream {
             GenerationOutput::Stream(GenerationStream::new(
                 self.client,
@@ -473,57 +465,65 @@ impl<'a> GenerationBuilder<'a> {
                 self.session_id,
             ))
         } else {
-            // Create the async future for non-streaming generation
-            let future = async move {
-                self.client
-                    .execute_generation(
-                        self.prompt,
-                        self.max_tokens,
-                        self.temperature,
-                        self.top_k,
-                        self.top_p,
-                        self.session_id,
-                    )
-                    .await
-            };
-            GenerationOutput::Response(Box::pin(future))
+            let result = self.client.execute_generation(
+                self.prompt,
+                self.max_tokens,
+                self.temperature,
+                self.top_k,
+                self.top_p,
+                self.session_id,
+            );
+            GenerationOutput::Response(result)
         }
     }
 }
 
 /// Generation output type (per SPEC 04-API-DESIGN §3.1 REQ-GEN-004/005)
 ///
-/// 封装了流式和非流式两种生成输出，统一 API。
+/// Wraps streaming and non-streaming generation output into a unified type.
 ///
 /// # Variants
 ///
-/// - `Response(...)`: 非流式，返回 `Future<Output = Result<GenerationResponse, GllmError>>`
-/// - `Stream(...)`: 流式，返回 `GenerationStream` (implements `futures::Stream`)
-pub enum GenerationOutput<'a> {
-    /// 完整生成响应（非流式，Future）
-    Response(
-        Pin<
-            Box<
-                dyn Future<Output = Result<GenerationResponse, GllmError>>
-                    + Send
-                    + 'a,
-            >,
-        >,
-    ),
-    /// 流式生成 Stream
+/// - `Response(...)`: Non-streaming, contains `Result<GenerationResponse, GllmError>`
+/// - `Stream(...)`: Streaming, contains `GenerationStream` (implements `Iterator`)
+pub enum GenerationOutput {
+    /// Complete generation response (non-streaming)
+    Response(Result<GenerationResponse, GllmError>),
+    /// Streaming generation iterator
     Stream(GenerationStream),
 }
 
-impl<'a> GenerationOutput<'a> {
-    /// 检查是否为流式输出
+impl GenerationOutput {
+    /// Check if this is a streaming output
     pub fn is_stream(&self) -> bool {
         matches!(self, GenerationOutput::Stream(_))
+    }
+
+    /// Extract the response from a non-streaming output.
+    ///
+    /// # Panics
+    /// Panics if this is a streaming output.
+    pub fn response(self) -> Result<GenerationResponse, GllmError> {
+        match self {
+            GenerationOutput::Response(result) => result,
+            GenerationOutput::Stream(_) => panic!("called response() on a streaming output"),
+        }
+    }
+
+    /// Extract the stream from a streaming output.
+    ///
+    /// # Panics
+    /// Panics if this is a non-streaming output.
+    pub fn stream(self) -> GenerationStream {
+        match self {
+            GenerationOutput::Stream(s) => s,
+            GenerationOutput::Response(_) => panic!("called stream() on a non-streaming output"),
+        }
     }
 }
 
 /// Split thinking content from generated text (internal helper).
 pub fn split_thinking_content(text: &str) -> (String, Option<String>) {
-    // Look for thinking markers like "<thinking>...</thinking>"
     let start_marker = "<thinking>";
     let end_marker = "</thinking>";
 
@@ -545,7 +545,8 @@ mod tests {
     #[test]
     fn test_split_thinking_content() {
         // With thinking markers
-        let (text, thinking) = split_thinking_content("Hello<thinking>I am thinking</thinking> world");
+        let (text, thinking) =
+            split_thinking_content("Hello<thinking>I am thinking</thinking> world");
         assert_eq!(text, "Hello world");
         assert_eq!(thinking, Some("I am thinking".to_string()));
 

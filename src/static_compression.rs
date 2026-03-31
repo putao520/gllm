@@ -33,8 +33,8 @@ pub fn deduplicate_gqa_heads(
         head_group.push(vec![head_i]);
         assignments[head_i] = Some(group_idx);
 
-        for head_j in (head_i + 1)..num_heads {
-            if assignments[head_j].is_some() {
+        for (head_j, assignment) in assignments.iter_mut().enumerate().skip(head_i + 1) {
+            if assignment.is_some() {
                 continue;
             }
 
@@ -47,7 +47,7 @@ pub fn deduplicate_gqa_heads(
 
             if sim >= similarity_threshold {
                 head_group[group_idx].push(head_j);
-                assignments[head_j] = Some(group_idx);
+                *assignment = Some(group_idx);
                 log::debug!(
                     "gqa_dedup: merged head {} into head {} (cosine_sim={:.4})",
                     head_j, head_i, sim
@@ -128,14 +128,14 @@ pub fn prune_dead_columns_24(
 
     // NVIDIA 2:4 requires cols divisible by 4
     assert!(
-        cols % 4 == 0,
+        cols.is_multiple_of(4),
         "prune_dead_columns_24: cols ({cols}) must be divisible by 4 for NVIDIA 2:4 format"
     );
 
     let meta_cols = cols / 4; // one u16 covers 8 elements (2 groups of 4, 2×2 bits each)
     let mut pruned = weight.to_vec();
     // sp_meta: packed 2-bit position indices: 2 groups of 4 per u16 → ceil(cols/4/2) u16 per row
-    let meta_u16_cols = (meta_cols + 1) / 2; // 2 4-element groups per u16
+    let meta_u16_cols = meta_cols.div_ceil(2); // 2 4-element groups per u16
     let mut sp_meta: Vec<Vec<u16>> = vec![vec![0u16; meta_u16_cols]; rows];
 
     let mut total_pruned_elems = 0usize;

@@ -1,4 +1,4 @@
-//! Embeddings API — async-first design (per SPEC 04-API-DESIGN §3.2).
+//! Embeddings API — sync-first design (per SPEC 04-API-DESIGN §3.2).
 
 use std::ops::Index;
 
@@ -11,12 +11,12 @@ use crate::client::{Client, GllmError};
 /// ```no_run
 /// use gllm::Client;
 ///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = Client::new_empty();
 /// let embeddings = client.embed(vec![
 ///     "Hello world",
 ///     "Machine learning is fascinating"
-/// ]).await?;
+/// ])?;
 /// # Ok(())
 /// # }
 /// ```
@@ -26,13 +26,14 @@ pub struct EmbeddingsBuilder<'a> {
 }
 
 impl<'a> EmbeddingsBuilder<'a> {
+    #[allow(dead_code)]
     pub(crate) fn new(client: &'a Client, inputs: Vec<String>) -> Self {
         Self { client, inputs }
     }
 
-    /// Execute the embedding generation (async).
-    pub async fn generate(self) -> Result<EmbeddingsResponse, GllmError> {
-        self.client.execute_embeddings(self.inputs).await
+    /// Execute the embedding generation (sync).
+    pub fn generate(self) -> Result<EmbeddingsResponse, GllmError> {
+        self.client.execute_embeddings(self.inputs)
     }
 }
 

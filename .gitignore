@@ -15,9 +15,21 @@ SPEC/
 ~/.gllm/
 test_models/
 
+# Environment
+.env
+.env.local
+.env.*.local
+
+# AI Agent
+CLAUDE.md
+.claude/
+
 # IDE / tooling
 .gsc/
 PLAN.md
+*.log
+*.tmp
+.DS_Store
 
 # Alignment test golden data
 tests/e2e_alignment/data/

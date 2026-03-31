@@ -31,7 +31,6 @@ gllm = "0.11"
 | `cuda` | No | NVIDIA GPU backend (PTX JIT, sm_70/80/90/100+) |
 | `hip` | No | AMD GPU backend (HIP codegen) |
 | `metal` | No | Apple GPU backend (MSL codegen) |
-| `tokio` | No | Async interface support |
 | `paged-attention` | No | PagedAttention KV cache management |
 | `flash-attention` | No | FlashAttention v2 tiled attention |
 

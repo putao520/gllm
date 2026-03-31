@@ -39,6 +39,7 @@ pub(crate) struct KvCacheBuffer {
     /// Bytes per element (4 for F32, 2 for F16/BF16)
     pub elem_bytes: usize,
     /// Cache dtype for F16/BF16 distinction (ARCH-DTYPE-FULLCHAIN-ORCH)
+    #[allow(dead_code)]
     pub cache_dtype: gllm_kernels::types::DType,
 }
 

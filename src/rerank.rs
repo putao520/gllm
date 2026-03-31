@@ -1,4 +1,4 @@
-//! Rerank API — async-first design (per SPEC 04-API-DESIGN §3.3).
+//! Rerank API — sync-first design (per SPEC 04-API-DESIGN §3.3).
 
 use crate::client::{Client, GllmError};
 
@@ -9,7 +9,7 @@ use crate::client::{Client, GllmError};
 /// ```no_run
 /// use gllm::Client;
 ///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = Client::new_empty();
 /// let scores = client.rerank(
 ///     "What is the capital of France?",
@@ -17,8 +17,8 @@ use crate::client::{Client, GllmError};
 ///         "Paris is the capital of France",
 ///         "London is in UK",
 ///         "Berlin is in Germany"
-///     ]
-/// ).await?;
+///     ],
+/// )?;
 /// # Ok(())
 /// # }
 /// ```
@@ -30,6 +30,7 @@ pub struct RerankBuilder<'a> {
 }
 
 impl<'a> RerankBuilder<'a> {
+    #[allow(dead_code)]
     pub(crate) fn new(
         client: &'a Client,
         query: impl Into<String>,
@@ -49,11 +50,9 @@ impl<'a> RerankBuilder<'a> {
         self
     }
 
-    /// Execute the reranking (async).
-    pub async fn generate(self) -> Result<RerankResponse, GllmError> {
-        self.client
-            .execute_rerank(self.query, self.documents, self.top_n)
-            .await
+    /// Execute the reranking (sync).
+    pub fn generate(self) -> Result<RerankResponse, GllmError> {
+        self.client.execute_rerank(self.query, self.documents, self.top_n)
     }
 }
 
@@ -66,11 +65,11 @@ pub struct RerankResponse {
     pub request_id: Option<u64>,
 }
 
-/// A single reranking result (per SPEC 04-API-DESIGN §3.3).
+/// A single reranking result ( per SPEC 04-API-DESIGN §3.3).
 #[derive(Debug, Clone)]
 pub struct RerankResult {
     /// Original document index.
     pub index: usize,
-    /// Relevance score (higher = more relevant).
+    /// Relevance score ( higher = more relevant).
     pub score: f32,
 }

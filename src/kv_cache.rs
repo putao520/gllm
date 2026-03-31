@@ -1,7 +1,6 @@
 //! KV cache tracking for executor (per SPEC 03-DATA-STRUCTURE.md, 07-OBSERVABILITY.md §7.1)
 
 use crate::engine::executor::{KvCacheHandle, KvCacheConfig};
-use gllm_kernels::types::DType;
 use thiserror::Error;
 
 // ============================================================================
@@ -321,6 +320,7 @@ impl KvCacheDoubleBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gllm_kernels::types::DType;
 
     #[test]
     fn test_kv_page_header_size() {

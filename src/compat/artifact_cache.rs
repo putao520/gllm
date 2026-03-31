@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, Duration};
 use crate::graph::types::FusedGraph;
@@ -27,7 +27,7 @@ impl ArtifactCache {
             p
         });
         
-        let mut ac = Self { cache_dir: dir };
+        let ac = Self { cache_dir: dir };
         
         #[cfg(not(debug_assertions))]
         let _ = ac.cleanup_ttl_cache(Duration::from_secs(7 * 24 * 3600)); // 7 days TTL
@@ -119,6 +119,7 @@ impl ArtifactCache {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn cleanup_ttl_cache(&mut self, ttl: Duration) -> std::io::Result<()> {
         if !self.cache_dir.exists() {
             return Ok(());

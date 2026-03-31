@@ -7,6 +7,7 @@ use gllm_kernels::quant::QuantType;
 use gllm_kernels::types::DType;
 
 /// Reinterpret a slice of Element as &[f32]. Only valid when E is f32.
+#[allow(dead_code)]
 pub(crate) fn as_f32_slice<E: Element>(data: &[E]) -> &[f32] {
     debug_assert_eq!(
         std::mem::size_of::<E>(), std::mem::size_of::<f32>(),
@@ -70,6 +71,7 @@ fn _dequantize_to_f32<E: Element>(
 }
 
 /// Try to get bias data as Vec<f32>. Returns zeros if not found.
+#[allow(dead_code)]
 pub(crate) fn get_bias_data<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     names: &[impl AsRef<str>],
@@ -121,6 +123,7 @@ pub(crate) fn get_bias_data_typed<E: Element>(
 ///
 /// Returns `false` only for genuine ONNX layout where the flat array is
 /// already `[in_dim, out_dim]`.
+#[allow(dead_code)]
 pub(crate) fn needs_weight_transpose<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
 ) -> bool {
@@ -170,6 +173,7 @@ pub(crate) fn needs_weight_transpose<E: Element>(
 }
 
 /// Try to get tensor data as (Vec<u8>, DType). Returns None if not found.
+#[allow(dead_code)]
 pub(crate) fn try_get_typed_data<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     backend: &CpuBackend<E>,
@@ -180,6 +184,7 @@ pub(crate) fn try_get_typed_data<E: Element>(
 
 /// Transpose a row-major matrix [rows, cols] → [cols, rows].
 /// Adaptively handles 2:4 structure sparsity where physical dimension is halved.
+#[allow(dead_code)]
 pub(crate) fn transpose_f32(data: &[f32], rows: usize, _cols_expected: usize) -> Vec<f32> {
     let actual_cols = data.len() / rows;
     assert_eq!(data.len(), rows * actual_cols, "data length must be a multiple of rows");
@@ -197,6 +202,7 @@ pub(crate) fn transpose_f32(data: &[f32], rows: usize, _cols_expected: usize) ->
 // ---------------------------------------------------------------------------
 
 /// Result of looking up a weight: either quantized raw blocks or dequantized f32.
+#[allow(dead_code)]
 pub(crate) enum WeightData {
     /// Quantized weight: raw block bytes, quant type, and shape [out_dim, in_dim].
     Quantized {
@@ -217,6 +223,7 @@ pub(crate) enum WeightData {
 ///
 /// For native f32 tensors or 1D quantized tensors (e.g. norm weights),
 /// returns `WeightData::F32`.
+#[allow(dead_code)]
 pub(crate) fn get_weight_data<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
     backend: &CpuBackend<E>,
@@ -252,6 +259,7 @@ pub(crate) fn get_weight_data<E: Element>(
 /// Extract the f32 data from a WeightData, dequantizing if necessary.
 /// Used for weights that cannot go through quantized_matmul (e.g. norm weights,
 /// or weights needed for non-GEMM operations like KV cache update).
+#[allow(dead_code)]
 pub(crate) fn weight_data_to_f32<E: Element>(
     weight: &WeightData,
     backend: &CpuBackend<E>,
@@ -343,6 +351,7 @@ pub(crate) fn f32_to_typed_bytes(data: &[f32], dtype: DType) -> Vec<u8> {
 }
 
 /// Transpose a row-major matrix stored as typed bytes [rows, cols] → [cols, rows].
+#[allow(dead_code)]
 pub(crate) fn transpose_typed(data: &[u8], rows: usize, cols: usize, dtype: DType) -> Vec<u8> {
     let eb = dtype.size_bytes();
     assert_eq!(data.len(), rows * cols * eb);
@@ -405,6 +414,7 @@ pub(crate) fn get_typed_data<E: Element>(
 ///
 /// Quantized weights are dequantized then converted.
 /// F32 weights are converted directly.
+#[allow(dead_code)]
 pub(crate) fn weight_data_to_typed<E: Element>(
     weight: &WeightData,
     backend: &CpuBackend<E>,
@@ -421,6 +431,7 @@ pub(crate) fn weight_data_to_typed<E: Element>(
 ///
 /// All slices must already be in the correct dtype. This is the typed equivalent
 /// of `pack_weights()` but operates on raw bytes instead of `&[f32]`.
+#[allow(dead_code)]
 pub(crate) fn pack_typed_byte_slices(slices: &[&[u8]]) -> Vec<u8> {
     let total: usize = slices.iter().map(|s| s.len()).sum();
     let mut buf = vec![0u8; total];

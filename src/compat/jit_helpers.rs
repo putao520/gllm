@@ -90,13 +90,13 @@ impl TypedBuffer {
 /// Zero-copy reinterpret `&[f32]` as `&[u8]`.
 #[inline]
 pub(crate) fn f32_as_bytes(s: &[f32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<f32>()) }
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
 }
 
 /// Zero-copy reinterpret `&mut [f32]` as `&mut [u8]`.
 #[inline]
 pub(crate) fn f32_as_bytes_mut(s: &mut [f32]) -> &mut [u8] {
-    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut u8, s.len() * std::mem::size_of::<f32>()) }
+    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut u8, std::mem::size_of_val(s)) }
 }
 
 /// Zero-copy reinterpret `&[u8]` as `&[f32]`.
@@ -202,7 +202,7 @@ pub(crate) fn pack_weights_multi(slices_with_dtypes: &[(&[u8], DType)]) -> Vec<u
         .sum();
     let mut buf = vec![0u8; total_bytes];
     let mut offset = 0;
-    for &(slice, dtype) in slices_with_dtypes {
+    for &(slice, _dtype) in slices_with_dtypes {
         let bytes = slice.len();
         // Direct byte copy — slice is already in target dtype
         buf[offset..offset + bytes].copy_from_slice(slice);
@@ -648,15 +648,15 @@ pub(crate) fn execute_moe_pre_attention(
     q_w: &[u8], k_w: &[u8], v_w: &[u8],
     positions: &[u32],
     seq_len: usize,
-    hidden: usize,
+    _hidden: usize,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    eps: f32,
+    _eps: f32,
     dtype: DType,
 ) -> Result<(TypedBuffer, TypedBuffer, TypedBuffer), String> {
     let q_dim = num_heads * head_dim;
-    let kv_dim = num_kv_heads * head_dim;
+    let _kv_dim = num_kv_heads * head_dim;
 
     let weights_buf = pack_weights_multi(&[(rn1_w, dtype), (q_w, dtype), (k_w, dtype), (v_w, dtype)]);
     let mut q_rope = TypedBuffer::zeros(seq_len * q_dim, dtype);
