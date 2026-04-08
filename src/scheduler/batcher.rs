@@ -100,6 +100,11 @@ impl ContinuousBatcher {
         self
     }
 
+    /// 获取运行中序列的可变引用（供 Epilogue 决策写入 draft_budget 等）
+    pub fn get_running_mut(&mut self, request_id: RequestId) -> Option<&mut Sequence> {
+        self.running.get_mut(&request_id)
+    }
+
     pub fn enqueue(&mut self, mut sequence: Sequence) {
         if self.running.contains_key(&sequence.id)
             || self

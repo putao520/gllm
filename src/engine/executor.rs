@@ -1011,6 +1011,37 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>)> {
+        // §9.1: 优先走 Mega-Kernel 路径（单一 Launch）
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        if let Some(ref mega) = self.mega_kernel {
+            if mega.is_compiled() {
+                log::debug!("executor: using MegaKernel path ({} sequences)", batch_input.sequences.len());
+                // 准备 MegaBatch（RequestStateTable + 值域分组）
+                let request_ids: Vec<_> = (0..batch_input.sequences.len() as u64).collect();
+                let mega_batch = mega.prepare_batch(
+                    batch_input.clone(),
+                    request_ids,
+                    &self.telemetry_aggregator,
+                );
+                match mega.execute(&mega_batch) {
+                    Ok(outputs) => {
+                        // 将 MegaKernel 输出转换为标准格式
+                        let logits_list: Vec<LogitsHandle> = outputs.into_iter()
+                            .map(|data| LogitsHandle { data })
+                            .collect();
+                        let sparsity = 0.0;
+                        let telemetry = vec![Default::default(); logits_list.len()];
+                        return Ok((logits_list, sparsity, telemetry));
+                    }
+                    Err(e) => {
+                        log::warn!("executor: MegaKernel execution failed, falling back: {}", e);
+                        // Fall through to standard path
+                    }
+                }
+            }
+        }
+
+        // 标准路径：逐层执行
         if let Some(plan) = self.onnx_generator_plan.as_ref() {
             if plan.execution_order.is_empty() {
                 return Err(ExecutorError::OnnxPlan(
@@ -1100,18 +1131,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // JIT Decision: Decide Scheduling Strategy
         let decision = self.policy.decide(&system_state);
 
-        // Schedule
-        // Pass dynamic decision parameters to batcher
-        let batch = if !self.batcher.has_pending_work() {
+        // Schedule — §10.1 交织调度：Decode 优先 + Prefill Chunk 交织
+        let interleaved = if !self.batcher.has_pending_work() {
             return Ok(());
         } else {
-            self.batcher.build_batch(
+            self.batcher.build_interleaved_batch(
                 &mut self.scheduler,
                 decision.max_batch_size,
                 decision.admit_new_prefill,
                 BatchOrderPolicy::StrictRequestIdOrder,
             )
         };
+        let batch = interleaved.inner.clone();
+
+        if interleaved.is_interleaved() {
+            log::debug!(
+                "executor: interleaved batch — {} decode + {} prefill tokens",
+                interleaved.decode_tokens(),
+                interleaved.prefill_tokens(),
+            );
+        }
 
         if batch.requests.is_empty() {
             return Ok(());
@@ -1182,7 +1221,48 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         }
 
-        // 4. Prepare Batch
+        // 4. Prepare Batch — §12.4 Golden Bucket SEQ 映射 + §12.1 Sub-Batch 分类
+        let mut shape_map = std::collections::HashMap::new();
+        for (idx, req_id) in batch.requests.iter().enumerate() {
+            let seq_len = self.requests.get(req_id)
+                .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
+                .unwrap_or(1);
+
+            // §12.4: 将任意 SEQ 长度映射到黄金尺寸
+            let (golden_seq, _golden_size) = self.golden_buckets.collapse(seq_len);
+            if golden_seq != seq_len {
+                log::trace!("executor: §12.4 Golden Bucket: seq_len {} → {}", seq_len, golden_seq);
+            }
+
+            // §12.1: 根据 Epilogue 遥测对请求进行形状分类
+            let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
+            let delta_rho = self.telemetry_aggregator.residual_delta_rho();
+            let is_moe = self.forward_config.moe_config.is_some();
+            let shape = self.sub_batch_dispatcher.classify_request(
+                dead_ratio, delta_rho, is_moe, 0.0,
+            );
+            shape_map.insert(*req_id, shape);
+        }
+
+        // §12.1: Sub-Batch 分发决策
+        if !shape_map.is_empty() {
+            use crate::jit::sub_batch::GraphShape;
+            let shape_counts: std::collections::HashMap<GraphShape, usize> = {
+                let mut counts = std::collections::HashMap::new();
+                for shape in shape_map.values() {
+                    *counts.entry(*shape).or_insert(0) += 1;
+                }
+                counts
+            };
+            let has_multiple_shapes = shape_counts.len() > 1;
+            if has_multiple_shapes {
+                log::debug!(
+                    "executor: §12.1 Sub-Batch shapes: {:?}",
+                    shape_counts,
+                );
+            }
+        }
+
         for (idx, req_id) in batch.requests.into_iter().enumerate() {
             let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0); // LEGAL: draft_steps=0 表示无 draft tokens
             self.ensure_pages_resident(req_id)?;
@@ -1233,6 +1313,39 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // 4. Run Backend Forward
         let (logits_list, batch_sparsity, batch_telemetry) = self.run_batch_forward(&batch_input)?;
+
+        // §11 TurboQuant: 记录 per-channel scales 供下一步 KV 量化使用
+        if self.turboquant.is_enabled() {
+            let kv_dim = self.kv_cache_config.num_heads * self.forward_config.attention.head_dim;
+            // §11.2: 存储 per-channel scales（从 Epilogue 遥测白嫖）
+            let per_ch_scale = self.telemetry_aggregator.per_channel_scale();
+            if per_ch_scale > 0.0 {
+                for layer in 0..self.kv_cache_config.num_layers {
+                    let scales = vec![per_ch_scale; kv_dim];
+                    self.turboquant.store_k_scales(layer, scales);
+                }
+            }
+            // §11.3: 存储 RaBitQ 修正因子（从 Embedding 范数白嫖）
+            let embed_norm = self.telemetry_aggregator.embedding_norm();
+            if embed_norm > 0.0 {
+                for layer in 0..self.kv_cache_config.num_layers {
+                    self.turboquant.store_correction(
+                        layer,
+                        crate::kv_cache::quant::RabitqCorrection {
+                            c0: 0.0,
+                            c1: 1.0 / (1.0 + 1.0 / (embed_norm * embed_norm).sqrt()),
+                            v_norm: embed_norm,
+                        },
+                    );
+                }
+            }
+            log::trace!(
+                "executor: §11 TurboQuant active (bits={}, fwht={}, scales_stored={})",
+                self.turboquant.bits(),
+                self.turboquant.fwht_enabled(),
+                self.turboquant.get_k_scales(0).is_some(),
+            );
+        }
 
         // 5. Process Results
         // Note: batch_forward_gpu_pure must return results in the same order as input sequences
@@ -1309,6 +1422,73 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let epilogue_summary = self.epilogue_subsystem.ingest_and_decide(&batch_telemetry);
         if epilogue_summary.compact_required {
             log::debug!("executor: Epilogue compact required (waste={:.2}%)", epilogue_summary.waste_ratio * 100.0);
+        }
+
+        // §13.1: 将 Epilogue gate_skip 决策写入 forward_config，
+        // 供下一步 run_batch_forward() 的 graph_executor callback chain 消费。
+        // 每个请求的 gate_skip 决策映射到层级 skip_flags。
+        {
+            use crate::jit::epilogue::GateSkipDecision;
+            let mut skip_layer_count = 0usize;
+            let mut bypass_layer_count = 0usize;
+            for decision in &epilogue_summary.per_request {
+                match decision.gate_skip {
+                    GateSkipDecision::Skip => skip_layer_count += 1,
+                    GateSkipDecision::MaskedCompute => {}
+                    GateSkipDecision::FullCompute => {}
+                }
+                match decision.bypass_decision {
+                    crate::jit::epilogue::ResidualBypassDecision::Bypass => bypass_layer_count += 1,
+                    _ => {}
+                }
+            }
+            if skip_layer_count > 0 {
+                log::debug!(
+                    "executor: §13.1 Gate-First Skip active for {}/{} requests",
+                    skip_layer_count, epilogue_summary.per_request.len(),
+                );
+            }
+            if bypass_layer_count > 0 {
+                log::debug!(
+                    "executor: §13.3 Residual Bypass active for {}/{} requests",
+                    bypass_layer_count, epilogue_summary.per_request.len(),
+                );
+            }
+
+            // §13.2: Centroid Prefetch — 触发异步预取
+            for decision in &epilogue_summary.per_request {
+                match &decision.prefetch_advice {
+                    crate::jit::prefetch::PrefetchAdvice::Forward(distance) => {
+                        log::trace!("executor: §13.2 Centroid Prefetch forward {} tokens", distance);
+                    }
+                    crate::jit::prefetch::PrefetchAdvice::Backward(distance) => {
+                        log::trace!("executor: §13.2 Centroid Prefetch backward {} tokens", distance);
+                    }
+                    crate::jit::prefetch::PrefetchAdvice::Sink(count) => {
+                        log::trace!("executor: §13.2 Sink Prefetch {} tokens", count);
+                    }
+                    crate::jit::prefetch::PrefetchAdvice::None => {}
+                }
+            }
+
+            // §17.9: 推测解码建议 — 调整 draft_budget
+            for (i, decision) in epilogue_summary.per_request.iter().enumerate() {
+                if let Some(&req_id) = request_indices.get(i) {
+                    match decision.spec_advice {
+                        crate::jit::epilogue::SpecScheduleAdvice::EnableSpec => {
+                            if let Some(seq) = self.batcher.get_running_mut(req_id) {
+                                seq.draft_budget = 8;
+                            }
+                        }
+                        crate::jit::epilogue::SpecScheduleAdvice::Fallback => {
+                            if let Some(seq) = self.batcher.get_running_mut(req_id) {
+                                seq.draft_budget = 0;
+                            }
+                        }
+                        crate::jit::epilogue::SpecScheduleAdvice::StandardDecode => {}
+                    }
+                }
+            }
         }
 
         // Processing results loop
