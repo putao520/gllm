@@ -11,7 +11,8 @@
 
 use std::collections::HashMap;
 
-use crate::scheduler::types::{RequestId, BatchManifest};
+use crate::scheduler::types::RequestId;
+use crate::scheduler::chunked_prefill::BatchManifest;
 use super::compiler_constraints::{CompilerConstraints, GpuSmPartition};
 
 // ── 形状分类 (Shape Classification) ──
@@ -379,29 +380,25 @@ impl SubBatchDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::types::{BatchSlot, ExitState, SlotType, SubBatchKey};
+    use crate::scheduler::chunked_prefill::{BatchSlot, BatchManifest, SlotType};
 
     fn make_manifest_with_ids(ids: &[RequestId]) -> BatchManifest {
         let slots: Vec<BatchSlot> = ids.iter().enumerate().map(|(i, &id)| {
             BatchSlot {
                 request_id: id,
                 slot_type: SlotType::Decode,
-                token_range: (i * 10, i * 10 + 10),
-                priority: 0.0,
-                sub_batch_key: SubBatchKey {
-                    seq_len_range: 10,
-                    exit_state: ExitState::Normal,
-                    moe_active: false,
-                },
+                token_start: i * 10,
+                token_end: i * 10 + 10,
+                compact_target: i as i32,
             }
         }).collect();
-        let waste = 0.0;
         BatchManifest {
             slots,
-            total_decode_tokens: ids.len() * 10,
-            total_prefill_tokens: 0,
+            total_tokens: ids.len() * 10,
+            decode_tokens: ids.len() * 10,
+            prefill_tokens: 0,
             compact_required: false,
-            waste_ratio: waste,
+            waste_ratio: 0.0,
         }
     }
 

@@ -92,8 +92,8 @@ impl std::fmt::Display for VariantKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}_{}{}_{}_{}_{}",
-            self.arch.as_str(),
+            "{:?}_{}{}_{}_{}_{}",
+            self.arch,
             if self.moe_enabled { "moe_" } else { "" },
             match self.spec_phase {
                 Some(SpecPhase::Draft) => "draft_",

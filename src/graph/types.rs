@@ -422,3 +422,26 @@ mod tests {
         assert!((stats.reduction_ratio() - 0.4).abs() < 0.01);
     }
 }
+
+// ============================================================================
+// LayeredRequestControl — 逐层请求控制 (§9.3 残差总线)
+// ============================================================================
+
+/// 逐层请求控制信号
+///
+/// 由 RequestState 转换而来，供 PolymorphicExecutor 在逐层执行时
+/// 检查 Early-Exit / 层跳过等控制信号。
+pub struct LayeredRequestControl {
+    /// 目标层索引（Early-Exit 截断点）
+    pub target_layer: u32,
+    /// 退出标志（非零 = 请求已终止）
+    pub exit_flag: std::sync::atomic::AtomicU32,
+}
+
+impl LayeredRequestControl {
+    /// 检查是否应在指定层退出
+    pub fn should_exit_at(&self, layer_idx: u32) -> bool {
+        self.exit_flag.load(std::sync::atomic::Ordering::Relaxed) != 0
+            || (self.target_layer > 0 && layer_idx >= self.target_layer)
+    }
+}

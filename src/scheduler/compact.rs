@@ -4,7 +4,7 @@
 //! Compact is a GEMM-level optimization that re-packs active SIMD lanes to
 //! eliminate wasted compute. It must NOT be applied to memory-bound ops (Attention).
 
-use crate::scheduler::types::BatchManifest;
+use crate::scheduler::chunked_prefill::BatchManifest;
 
 /// Configuration for the compact decision model.
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ pub fn evaluate_compact(
     }
 
     // Count active elements (slots with non-zero tokens)
-    let active = manifest.slots.iter().filter(|s| s.token_range.1 > s.token_range.0).count();
+    let active = manifest.slots.iter().filter(|s| s.token_end > s.token_start).count();
     let waste_ratio = if total > 0 {
         (total - active) as f32 / total as f32
     } else {
@@ -199,7 +199,7 @@ pub fn evaluate_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::types::{BatchSlot, ExitState, SlotType, SubBatchKey};
+    use crate::scheduler::chunked_prefill::{BatchSlot, BatchManifest, SlotType};
 
     fn make_manifest(total: usize, active: usize) -> BatchManifest {
         let mut slots = Vec::new();
@@ -207,34 +207,26 @@ mod tests {
             slots.push(BatchSlot {
                 request_id: i as u64,
                 slot_type: SlotType::Decode,
-                token_range: (i, i + 1),
-                priority: 0.0,
-                sub_batch_key: SubBatchKey {
-                    seq_len_range: 10,
-                    exit_state: ExitState::Normal,
-                    moe_active: false,
-                },
+                token_start: i,
+                token_end: i + 1,
+                compact_target: i as i32,
             });
         }
-        // Inactive slots (empty token range)
         for i in active..total {
             slots.push(BatchSlot {
                 request_id: i as u64,
                 slot_type: SlotType::Decode,
-                token_range: (0, 0), // Empty = inactive
-                priority: 0.0,
-                sub_batch_key: SubBatchKey {
-                    seq_len_range: 0,
-                    exit_state: ExitState::Normal,
-                    moe_active: false,
-                },
+                token_start: 0,
+                token_end: 0,
+                compact_target: -1,
             });
         }
         let waste = if total > 0 { (total - active) as f32 / total as f32 } else { 0.0 };
         BatchManifest {
             slots,
-            total_decode_tokens: active,
-            total_prefill_tokens: 0,
+            total_tokens: total,
+            decode_tokens: active,
+            prefill_tokens: 0,
             compact_required: waste > 0.25,
             waste_ratio: waste,
         }
@@ -277,7 +269,14 @@ mod tests {
 
     #[test]
     fn test_compact_empty_batch() {
-        let manifest = BatchManifest::default();
+        let manifest = BatchManifest {
+            slots: Vec::new(),
+            total_tokens: 0,
+            decode_tokens: 0,
+            prefill_tokens: 0,
+            compact_required: false,
+            waste_ratio: 0.0,
+        };
         let config = CompactConfig::default();
         let decision = evaluate_compact(&manifest, OpKind::Gemm, &config);
         assert!(!decision.should_compact);

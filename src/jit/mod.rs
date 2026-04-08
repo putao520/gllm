@@ -27,6 +27,7 @@ pub mod compiler_constraints;
 pub mod golden_bucket;
 pub mod sub_batch;
 pub mod epilogue_subsystem;
+pub mod director;
 
 // Re-export 核心类型
 pub use profiler::{ProbeConfig, ProbeResult, LatencyProfiler, ProbeError};

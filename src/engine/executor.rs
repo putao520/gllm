@@ -432,6 +432,12 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     /// Generation hooks (guardrails, probes) called after each decode step.
     /// per SPEC 04-API-DESIGN §7.4
     hooks: std::sync::Arc<std::sync::RwLock<Vec<Box<dyn crate::generation::GenerationHook>>>>,
+    /// §12.6 系统级硬件拓扑（一次性探测，运行时固定）
+    system_topology: crate::sensors::SystemTopology,
+    /// §9.2 JIT Director Daemon（后台常驻监控线程）
+    jit_director: Option<crate::jit::director::JitDirector>,
+    /// §18.1 Epilogue 遥测聚合器
+    telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -525,6 +531,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             swap_config: None,
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
+        let moe_num_experts = manifest.moe_config.map(|c| c.num_experts).unwrap_or(0);
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -648,6 +655,30 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             graph_executor,
             profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator::new(),
             hooks: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+            system_topology: {
+                let topo = crate::sensors::SystemTopology::detect();
+                log::info!(
+                    "SystemTopology: {} cores, NUMA={}, SIMD={}bit, L2={}KB",
+                    topo.cpu.core_count,
+                    topo.numa_node_count(),
+                    topo.constraints.simd_width_bits,
+                    topo.constraints.l2_cache_size / 1024,
+                );
+                topo
+            },
+            jit_director: {
+                let num_experts = moe_num_experts;
+                if num_experts > 0 {
+                    let config = crate::jit::director::DirectorConfig {
+                        num_experts,
+                        ..Default::default()
+                    };
+                    Some(crate::jit::director::JitDirector::spawn(config))
+                } else {
+                    None
+                }
+            },
+            telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
         })
     }
 
@@ -732,6 +763,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
     pub fn model_config(&self) -> &ModelConfig {
         &self.model_config
+    }
+
+    /// §12.6 获取系统硬件拓扑
+    pub fn system_topology(&self) -> &crate::sensors::SystemTopology {
+        &self.system_topology
+    }
+
+    /// §12.6 获取 JIT 编译器约束变量
+    pub fn compiler_constraints(&self) -> &crate::jit::compiler_constraints::CompilerConstraints {
+        &self.system_topology.constraints
+    }
+
+    /// §18.1 获取遥测聚合器
+    pub fn telemetry(&self) -> &crate::jit::epilogue::TelemetryAggregator {
+        &self.telemetry_aggregator
     }
 
     /// Get forward configuration (per SPEC 04-API-DESIGN §7.3 for encode_intent).
@@ -1166,6 +1212,42 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         self.observer.update_logits_entropy(batch_entropy);
         self.observer.update_attention_sparsity(batch_sparsity);
+
+        // §9.2 + §9.5: Push telemetry to JIT Director Daemon
+        if let Some(ref director) = self.jit_director {
+            let shared = director.shared();
+            shared.advance_step();
+            // Feed batch-level telemetry to Director via synthetic KvPageHeaders
+            for tel in &batch_telemetry {
+                let header = crate::kv_cache::KvPageHeader {
+                    page_id: 0,
+                    ref_count: 1,
+                    fragmentation_metric: 0.0,
+                    logits_entropy: tel.output_entropy,
+                    guard_veto_flag: 0,
+                    softmax_max: 0.0,
+                    softmax_sharpness: 0.0,
+                    residual_delta_rho: tel.transform_ratio,
+                    dead_neuron_ratio: 0.0,
+                    per_channel_scale: 0.0,
+                };
+                self.telemetry_aggregator.ingest_from_page_header(&header);
+            }
+            // Drain consensus events from Director
+            for event in shared.drain_events() {
+                match &event {
+                    crate::jit::director::ConsensusEvent::ExpertFrozen { expert_idx, zero_hit_steps } => {
+                        log::info!("executor: JIT Director detected frozen expert {} (zero hits for {} steps)", expert_idx, zero_hit_steps);
+                    }
+                    crate::jit::director::ConsensusEvent::AttentionSilent { avg_entropy, duration_steps } => {
+                        log::warn!("executor: JIT Director detected attention silence (entropy={:.4}, duration={})", avg_entropy, duration_steps);
+                    }
+                    crate::jit::director::ConsensusEvent::LayerRedundant { avg_delta_rho, duration_steps } => {
+                        log::info!("executor: JIT Director detected redundant layer (delta_rho={:.6}, duration={})", avg_delta_rho, duration_steps);
+                    }
+                }
+            }
+        }
 
         let page_size = self.scheduler.page_size().max(1);
         let mut page_entropies = std::collections::HashMap::new();

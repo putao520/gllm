@@ -28,6 +28,16 @@ pub mod static_compression;
 
 pub mod ffi;
 
+pub mod jit;
+pub mod sensors;
+pub mod moe;
+pub mod speculative;
+pub mod early_exit;
+pub mod fp8;
+pub mod rag;
+pub mod routing;
+pub mod prefetch;
+
 pub use manifest::{
     ArchFamily, FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
 };

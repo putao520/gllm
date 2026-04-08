@@ -17,6 +17,9 @@ pub mod sequence;
 pub mod types;
 pub mod vllm2024;
 pub mod telemetry;
+pub mod chunked_prefill;
+pub mod compact;
+pub mod request_state;
 
 pub use allocator::BlockAllocator;
 pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};

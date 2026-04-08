@@ -638,7 +638,7 @@ mod tests {
             .with_target_layer(7);
         let ctrl = rs.to_layered_control();
         assert_eq!(ctrl.target_layer, 7);
-        assert!(!ctrl.is_exited());
+        assert!(!ctrl.should_exit_at(0));
     }
 
     #[test]

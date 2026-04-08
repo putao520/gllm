@@ -4,6 +4,7 @@
 //! 探测跨机/跨片的物理拓扑参数，转化为 JIT 编译器的约束变量。
 
 use gllm_kernels::dispatch::DeviceProfile;
+use crate::jit::compiler_constraints::CompilerConstraints;
 
 /// NUMA 拓扑结构
 #[derive(Debug, Clone)]
@@ -168,6 +169,150 @@ impl MemoryNetworkSensors {
         }
     }
 
+    /// 获取 L3 缓存大小（从 NUMA 拓扑推导）
+    pub fn total_l3_bytes(&self) -> usize {
+        self.ccx_numa_topology
+            .as_ref()
+            .map(|t| t.nodes.iter().map(|n| n.l3_bytes).sum())
+            .unwrap_or(0)
+    }
+}
+
+// ============================================================================
+// SystemTopology — 聚合 CPU/GPU 拓扑 + CompilerConstraints (§12.6)
+// ============================================================================
+
+/// CPU 拓扑信息
+#[derive(Debug, Clone)]
+pub struct CpuTopology {
+    /// 物理核心数
+    pub core_count: usize,
+    /// NUMA 拓扑
+    pub numa: Option<NumaTopology>,
+    /// L1d 缓存大小 (bytes)
+    pub l1d_bytes: usize,
+    /// L2 缓存大小 (bytes)
+    pub l2_bytes: usize,
+    /// L3 缓存大小 (bytes, 所有 NUMA 节点总和)
+    pub l3_bytes: usize,
+}
+
+/// GPU 拓扑信息
+#[derive(Debug, Clone)]
+pub struct GpuTopology {
+    /// SM/CU 数量
+    pub compute_unit_count: usize,
+    /// 共享内存大小 (bytes per SM)
+    pub smem_bytes: usize,
+    /// L2 缓存大小 (bytes)
+    pub l2_bytes: usize,
+    /// SM 版本 (NVIDIA: 70/80/90/100)
+    pub sm_version: Option<u32>,
+    /// Warp/Wavefront 大小
+    pub warp_size: usize,
+}
+
+/// 系统级硬件拓扑 (§12.6)
+///
+/// 聚合 CPU + GPU 拓扑信息，一次性探测，运行时固定。
+/// 输出 `CompilerConstraints` 供 JIT 编译器消费。
+#[derive(Debug, Clone)]
+pub struct SystemTopology {
+    /// CPU 拓扑
+    pub cpu: CpuTopology,
+    /// GPU 拓扑 (None = CPU-only)
+    pub gpu: Option<GpuTopology>,
+    /// 底层传感器读数
+    pub sensors: MemoryNetworkSensors,
+    /// DeviceProfile (gllm-kernels)
+    pub profile: DeviceProfile,
+    /// 推导出的 JIT 编译器约束变量
+    pub constraints: CompilerConstraints,
+}
+
+impl SystemTopology {
+    /// 一次性探测系统拓扑 (§12.6: 加载期探测，运行时固定)
+    pub fn detect() -> Self {
+        let profile = DeviceProfile::detect();
+        let sensors = MemoryNetworkSensors::detect(&profile);
+        let (l1d, l2, _l3) = profile.cache_sizes();
+
+        let core_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let l3_bytes = sensors.total_l3_bytes();
+
+        let cpu = CpuTopology {
+            core_count,
+            numa: sensors.ccx_numa_topology.clone(),
+            l1d_bytes: l1d,
+            l2_bytes: l2,
+            l3_bytes,
+        };
+
+        // GPU 拓扑：当前通过 DeviceProfile 推导
+        // 真实 GPU 检测需要 feature-gated CUDA/HIP/Metal 路径
+        let gpu = None; // TODO(Phase 4): GPU 拓扑探测
+
+        let constraints = CompilerConstraints::derive(&profile, &sensors, None);
+
+        Self {
+            cpu,
+            gpu,
+            sensors,
+            profile,
+            constraints,
+        }
+    }
+
+    /// 从已有 DeviceProfile 构建（避免重复探测）
+    pub fn from_profile(profile: DeviceProfile) -> Self {
+        let sensors = MemoryNetworkSensors::detect(&profile);
+        let (l1d, l2, _l3) = profile.cache_sizes();
+
+        let core_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let l3_bytes = sensors.total_l3_bytes();
+
+        let cpu = CpuTopology {
+            core_count,
+            numa: sensors.ccx_numa_topology.clone(),
+            l1d_bytes: l1d,
+            l2_bytes: l2,
+            l3_bytes,
+        };
+
+        let constraints = CompilerConstraints::derive(&profile, &sensors, None);
+
+        Self {
+            cpu,
+            gpu: None,
+            sensors,
+            profile,
+            constraints,
+        }
+    }
+
+    /// 获取 JIT 编译器约束变量
+    pub fn compiler_constraints(&self) -> &CompilerConstraints {
+        &self.constraints
+    }
+
+    /// 是否有 GPU
+    pub fn has_gpu(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// NUMA 节点数
+    pub fn numa_node_count(&self) -> usize {
+        self.cpu.numa.as_ref().map(|n| n.nodes.len()).unwrap_or(1)
+    }
+}
+
+impl MemoryNetworkSensors {
     /// 设置 RDMA 参数（用于分布式推理）
     pub fn set_rdma_params(&mut self, bandwidth_gbs: f32, latency_us: f32) {
         self.nic_bandwidth_gbs = Some(bandwidth_gbs);
@@ -202,6 +347,24 @@ mod tests {
 
         assert!(sensors.l2_cache_bytes > 0);
         assert!(sensors.tlb_entries > 0);
+    }
+
+    #[test]
+    fn test_system_topology_detect() {
+        let topo = SystemTopology::detect();
+        assert!(topo.cpu.core_count > 0);
+        assert!(topo.cpu.l1d_bytes > 0);
+        assert!(topo.constraints.simd_width_bits > 0);
+        assert!(topo.constraints.l2_cache_size > 0);
+    }
+
+    #[test]
+    fn test_system_topology_from_profile() {
+        let profile = DeviceProfile::detect();
+        let topo = SystemTopology::from_profile(profile);
+        assert!(topo.cpu.core_count > 0);
+        assert_eq!(topo.has_gpu(), false); // CPU-only for now
+        assert!(topo.numa_node_count() >= 1);
     }
 
     #[test]
