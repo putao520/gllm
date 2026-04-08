@@ -445,6 +445,12 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     turboquant: crate::kv_cache::turboquant::TurboQuantRuntime,
     /// §9-§18 Epilogue 优化子系统（Gate Skip + Sink + Bypass + Prefetch + Spec）
     epilogue_subsystem: crate::jit::epilogue_subsystem::EpilogueSubsystem,
+    /// §12.1 Sub-Batch 分发器（空间异构）
+    sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher,
+    /// §12.4 Golden Bucket 注册表
+    golden_buckets: crate::jit::golden_bucket::GoldenBucketRegistry,
+    /// §15.4 MoE 专家热度管理器（冷专家封杀 + Uncommon Trap）
+    moe_thermal: Option<crate::moe::thermal::ExpertThermalManager>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -698,6 +704,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     ..Default::default()
                 };
                 crate::jit::epilogue_subsystem::EpilogueSubsystem::new(config)
+            },
+            sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher::new(
+                crate::jit::compiler_constraints::CompilerConstraints::default(),
+            ),
+            golden_buckets: {
+                let probe = crate::jit::profiler::ProbeResult {
+                    spill_points: vec![128, 512, 1024],
+                    smem_cliffs: Vec::new(),
+                    l2_thrash_threshold: 4 * 1024 * 1024,
+                    device_fingerprint: "default".to_string(),
+                    raw_measurements: std::collections::HashMap::new(),
+                };
+                crate::jit::golden_bucket::GoldenBucketRegistry::from_probe_results(
+                    &probe,
+                    crate::jit::compiler_constraints::CompilerConstraints::default(),
+                )
+            },
+            moe_thermal: if moe_num_experts > 0 {
+                Some(crate::moe::thermal::ExpertThermalManager::new(moe_num_experts))
+            } else {
+                None
             },
         })
     }
@@ -1253,11 +1280,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 };
                 self.telemetry_aggregator.ingest_from_page_header(&header);
             }
-            // Drain consensus events from Director
+            // Drain consensus events from Director → drive MoE thermal actions
             for event in shared.drain_events() {
                 match &event {
                     crate::jit::director::ConsensusEvent::ExpertFrozen { expert_idx, zero_hit_steps } => {
                         log::info!("executor: JIT Director detected frozen expert {} (zero hits for {} steps)", expert_idx, zero_hit_steps);
+                        // §15.4: 触发冷专家封杀
+                        if let Some(ref mut thermal) = self.moe_thermal {
+                            if thermal.evict_expert(*expert_idx) {
+                                log::info!("executor: Expert {} evicted via Hot JMP Patching", expert_idx);
+                            }
+                        }
                     }
                     crate::jit::director::ConsensusEvent::AttentionSilent { avg_entropy, duration_steps } => {
                         log::warn!("executor: JIT Director detected attention silence (entropy={:.4}, duration={})", avg_entropy, duration_steps);
