@@ -1467,6 +1467,25 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let batch_input = BatchInput { sequences };
 
+        // §15.3: MoE 硬件分发（在 forward 之前决定专家→硬件映射）
+        if let Some(ref dispatcher) = self.moe_dispatcher {
+            if let Some(ref thermal) = self.moe_thermal {
+                let heat_levels: Vec<crate::moe::thermal::ExpertHeatLevel> = (0..dispatcher.config().num_experts)
+                    .map(|i| thermal.state(i).map(|s| s.heat_level).unwrap_or(crate::moe::thermal::ExpertHeatLevel::Warm))
+                    .collect();
+                log::trace!(
+                    "executor: §15.3 MoE dispatch ready ({} experts, {} hot)",
+                    heat_levels.len(),
+                    heat_levels.iter().filter(|h| matches!(h, crate::moe::thermal::ExpertHeatLevel::Hot)).count(),
+                );
+            }
+        }
+
+        // §12.4: 记录 SEQ 长度到直方图（供 JIT Director 运行时演化）
+        for seq in &batch_input.sequences {
+            self.golden_buckets.collapse(seq.tokens.len());
+        }
+
         // 4. Run Backend Forward
         let (logits_list, batch_sparsity, batch_telemetry) = self.run_batch_forward(&batch_input)?;
 
