@@ -454,6 +454,10 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     golden_buckets: crate::jit::golden_bucket::GoldenBucketRegistry,
     /// §15.4 MoE 专家热度管理器（冷专家封杀 + Uncommon Trap）
     moe_thermal: Option<crate::moe::thermal::ExpertThermalManager>,
+    /// §15.3 MoE 硬件分发器（专家→GPU/CPU 分配）
+    moe_dispatcher: Option<crate::moe::dispatch::MoeHardwareDispatcher>,
+    /// §17 推测解码引擎（EESD / SAGUARO / Standard）
+    spec_decoding: crate::speculative::engine::SpecDecodingState,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -549,6 +553,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
         let moe_num_experts = manifest.moe_config.map(|c| c.num_experts).unwrap_or(0);
+        let moe_top_k = manifest.moe_config.map(|c| c.num_experts_per_tok).unwrap_or(2);
         let num_hidden_layers = model_config.num_hidden_layers;
         let hidden_size_for_mega = model_config.hidden_size;
         let vocab_size_for_mega = model_config.vocab_size;
@@ -770,6 +775,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             } else {
                 None
             },
+            moe_dispatcher: if moe_num_experts > 0 {
+                let route_config = crate::moe::routing::ExpertRouteConfig::new(
+                    moe_num_experts,
+                    moe_top_k,
+                );
+                Some(crate::moe::dispatch::MoeHardwareDispatcher::new(route_config))
+            } else {
+                None
+            },
+            spec_decoding: crate::speculative::engine::SpecDecodingState::new_standard(),
         })
     }
 
@@ -1249,6 +1264,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 interleaved.decode_tokens(),
                 interleaved.prefill_tokens(),
             );
+        }
+
+        // §17.9: 推测解码自适应决策
+        let decode_count = interleaved.decode_slots.len();
+        let spec_advice = self.spec_decoding.should_speculate(decode_count);
+        match spec_advice {
+            crate::jit::epilogue::SpecScheduleAdvice::EnableSpec => {
+                log::debug!("executor: §17.9 speculative decoding ENABLED (acceptance_rate={:.2})",
+                    self.spec_decoding.avg_acceptance_rate());
+            }
+            crate::jit::epilogue::SpecScheduleAdvice::Fallback => {
+                log::debug!("executor: §17.9 speculative decoding FALLBACK (low acceptance streak)");
+            }
+            crate::jit::epilogue::SpecScheduleAdvice::StandardDecode => {}
         }
 
         if batch.requests.is_empty() {

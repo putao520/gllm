@@ -15,6 +15,7 @@ use crate::engine::executor::{
 };
 use crate::graph::executor::{ExecutionError, FusedGraphExecutor};
 use crate::jit::epilogue::TelemetryAggregator;
+use crate::jit::ragged::{CompactIndex, CompactPlatform, RequestActiveMask, RaggedCompaction, COMPACT_THRESHOLD};
 use crate::scheduler::types::RequestId;
 use gllm_kernels::types::DType;
 
@@ -283,46 +284,87 @@ pub struct CompactedBatch {
     pub active_count: usize,
     /// 值域分组信息
     pub range_groups: Vec<u32>,
+    /// RaggedCompaction 索引（当触发 compact 时非 None）
+    pub compact_index: Option<CompactIndex>,
 }
 
 /// Compact→Execute→Scatter 管线 (§9.1)
 ///
+/// 使用 jit/ragged.rs 的 RaggedCompaction 实现物理挤压。
 /// 挤压聚拢仅仅是第一步（Compact）。在没有 Padding 气泡的连续稠密矩阵中
 /// 执行完核函数运算后（Execute），必须按原始 Request 偏移进行原位散射回写（Scatter）。
 #[derive(Debug)]
 pub struct CompactScatterPipeline {
     /// 是否启用 Compact（小批次时跳过）
     compact_threshold: usize,
+    /// 硬件平台（决定 compact 指令路径）
+    platform: CompactPlatform,
 }
 
 impl CompactScatterPipeline {
     pub fn new() -> Self {
+        // 从当前硬件检测 compact 平台
+        let profile = gllm_kernels::dispatch::DeviceProfile::detect();
+        let kc = &profile.kernel_config;
+        let platform = CompactPlatform::detect(
+            "cpu",
+            kc.use_avx512,
+            kc.has_sve,
+            kc.sve_vl_bytes,
+            0,
+        );
         Self {
-            compact_threshold: 4, // 少于 4 个请求时跳过 Compact
+            compact_threshold: 4,
+            platform,
         }
     }
 
-    /// Compact: 按值域分组挤压请求到连续稠密矩阵
+    /// Compact: 按值域分组 + RaggedCompaction 挤压请求到连续稠密矩阵
     pub fn compact(&self, state_table: &RequestStateTable) -> CompactedBatch {
         let n = state_table.len();
         if n < self.compact_threshold {
-            // 小批次：identity mapping，不做 compact
             return CompactedBatch {
                 index_map: (0..n).collect(),
                 active_count: n,
                 range_groups: state_table.iter().map(|e| e.range_group).collect(),
+                compact_index: None,
             };
         }
 
-        // 按 range_group 排序，值域相近的请求聚集在一起
-        let mut indices: Vec<usize> = (0..n).collect();
-        let entries: Vec<&RequestStateEntry> = state_table.iter().collect();
-        indices.sort_by_key(|&i| entries[i].range_group);
+        // 构建活跃 mask（所有请求都活跃，skip_flags=0 的才参与计算）
+        let mask_vec: Vec<bool> = state_table.iter().map(|e| e.skip_flags == 0).collect();
+        let active_mask = RequestActiveMask::new(mask_vec);
 
-        CompactedBatch {
-            index_map: indices,
-            active_count: n,
-            range_groups: state_table.iter().map(|e| e.range_group).collect(),
+        // 检查是否需要 compact（浪费率 > 25%）
+        if active_mask.should_compact() {
+            let compact_idx = CompactIndex::from_mask(&active_mask);
+            let index_map = compact_idx.compact_to_original().to_vec();
+
+            log::debug!(
+                "executor: §9.1 RaggedCompaction triggered (waste={:.1}%, active={}/{})",
+                active_mask.waste_ratio() * 100.0,
+                active_mask.active_count(),
+                n,
+            );
+
+            CompactedBatch {
+                index_map,
+                active_count: compact_idx.active_count(),
+                range_groups: state_table.iter().map(|e| e.range_group).collect(),
+                compact_index: Some(compact_idx),
+            }
+        } else {
+            // 按 range_group 排序（值域相近的请求聚集在一起）
+            let mut indices: Vec<usize> = (0..n).collect();
+            let entries: Vec<&RequestStateEntry> = state_table.iter().collect();
+            indices.sort_by_key(|&i| entries[i].range_group);
+
+            CompactedBatch {
+                index_map: indices,
+                active_count: n,
+                range_groups: state_table.iter().map(|e| e.range_group).collect(),
+                compact_index: None,
+            }
         }
     }
 
@@ -333,21 +375,33 @@ impl CompactScatterPipeline {
         results: &[Vec<f32>],
         batch_size: usize,
     ) -> Vec<Vec<f32>> {
-        if compacted.index_map.len() == batch_size
+        if compacted.compact_index.is_some() {
+            // 使用 CompactIndex 的反向映射
+            let ci = compacted.compact_index.as_ref().unwrap();
+            let c2o = ci.compact_to_original();
+            let mut scattered = vec![Vec::new(); batch_size];
+            for (compact_idx, result) in results.iter().enumerate() {
+                if compact_idx < c2o.len() {
+                    let original_idx = c2o[compact_idx];
+                    if original_idx < batch_size {
+                        scattered[original_idx] = result.clone();
+                    }
+                }
+            }
+            scattered
+        } else if compacted.index_map.len() == batch_size
             && compacted.index_map.iter().enumerate().all(|(i, &v)| i == v)
         {
-            // Identity mapping: 无需 scatter
-            return results.to_vec();
-        }
-
-        // 反向映射：compact 后索引 → 原始索引
-        let mut scattered = vec![Vec::new(); batch_size];
-        for (compact_idx, &original_idx) in compacted.index_map.iter().enumerate() {
-            if compact_idx < results.len() && original_idx < batch_size {
-                scattered[original_idx] = results[compact_idx].clone();
+            results.to_vec()
+        } else {
+            let mut scattered = vec![Vec::new(); batch_size];
+            for (compact_idx, &original_idx) in compacted.index_map.iter().enumerate() {
+                if compact_idx < results.len() && original_idx < batch_size {
+                    scattered[original_idx] = results[compact_idx].clone();
+                }
             }
+            scattered
         }
-        scattered
     }
 }
 
