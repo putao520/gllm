@@ -141,14 +141,23 @@ pub(crate) fn decoder_forward<E: Element>(
         let total_seq = cached_seq_len + seq_len;
         let positions: Vec<u32> = (0..seq_len).map(|i| (position + i) as u32).collect();
 
-        let output = ge.run_with_kv_cache(
+        // §9-§18: 从 forward_config 获取 callback chain 指针
+        let mut cb_chain = if !config.callback_chain_ptr.is_null() {
+            Some(unsafe { &mut *config.callback_chain_ptr })
+        } else {
+            None
+        };
+
+        let output = ge.run_with_kv_cache_and_callbacks(
             &inputs,
             kv_cache_k_ptr,
             kv_cache_v_ptr,
-            0, // layer 0; graph executor handles all layers internally
+            0,
             total_seq,
             seq_len,
             positions.as_ptr(),
+            cb_chain.as_deref_mut(),
+            Some(config),
         ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
         // Extract logits from graph output

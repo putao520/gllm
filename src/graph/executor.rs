@@ -1468,6 +1468,23 @@ impl FusedGraphExecutor {
         seq_len: usize,
         positions: *const u32,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, None)
+    }
+
+    /// §9-§18: run_with_kv_cache with optional callback chain for Gate-First Skip / Residual Bypass / Early Exit.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn run_with_kv_cache_and_callbacks(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        kv_cache_k: *mut f32,
+        kv_cache_v: *mut f32,
+        layer: usize,
+        total_seq: usize,
+        seq_len: usize,
+        positions: *const u32,
+        mut callbacks: Option<&mut super::layer_callback::CallbackChain>,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         if !self.is_compiled {
             return Err(ExecutionError::NotCompiled);
         }
@@ -1514,6 +1531,54 @@ impl FusedGraphExecutor {
 
             if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
                 continue;
+            }
+
+            // §9-§18: Pre-node callback — Gate-First Skip / Residual Bypass / Early Exit
+            let layer_idx = node_idx / 2; // 每层约 2 个 FusedNode (Attention + FFN)
+            if let Some(ref mut cb) = callbacks {
+                let hidden_state = tensors.values().next().map(|v| v.as_slice()).unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state,
+                    kv_cache_k,
+                    kv_cache_v,
+                    total_seq,
+                    seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("callback requires forward_config"),
+                };
+                match cb.dispatch_pre_node(&ctx) {
+                    super::layer_callback::CallbackAction::SkipThisNode => {
+                        log::trace!("graph_executor: §13.1 callback skipped node {} (layer {})", node_idx, layer_idx);
+                        // 跳过此节点：将输入直接传递为输出（残差恒等映射）
+                        if !cn.graph_output_names.is_empty() && !cn.graph_input_names.is_empty() {
+                            if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
+                                for out_name in &cn.graph_output_names {
+                                    tensors.insert(out_name.clone(), input_data.clone());
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    super::layer_callback::CallbackAction::ExitEarly { logits } => {
+                        log::trace!("graph_executor: §16.2 early exit at node {} (layer {})", node_idx, layer_idx);
+                        let mut out = HashMap::new();
+                        if !logits.is_empty() {
+                            let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            out.insert("logits".to_string(), logits_bytes);
+                        }
+                        return Ok(out);
+                    }
+                    super::layer_callback::CallbackAction::InjectHidden { data } => {
+                        if !cn.graph_input_names.is_empty() {
+                            tensors.insert(cn.graph_input_names[0].clone(), data);
+                        }
+                    }
+                    super::layer_callback::CallbackAction::Continue => {}
+                }
             }
 
             let activation = if !cn.graph_input_names.is_empty() {
@@ -1602,6 +1667,41 @@ impl FusedGraphExecutor {
                     "node has {} outputs but no per_output_numel",
                     cn.graph_output_names.len(),
                 )));
+            }
+
+            // §9-§18: Post-node callback — Early Exit / Guardrail Probe / Intent Recall
+            if let Some(ref mut cb) = callbacks {
+                let output_data = cn.graph_output_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state: output_data,
+                    kv_cache_k,
+                    kv_cache_v,
+                    total_seq,
+                    seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("callback requires forward_config"),
+                };
+                match cb.dispatch_post_node(&ctx, output_data) {
+                    super::layer_callback::CallbackAction::ExitEarly { logits } => {
+                        log::trace!("graph_executor: §16.2 post-node early exit at node {} (layer {})", node_idx, layer_idx);
+                        let mut out = HashMap::new();
+                        if !logits.is_empty() {
+                            let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            out.insert("logits".to_string(), logits_bytes);
+                        } else if let Some(last_output) = cn.graph_output_names.first().and_then(|n| tensors.get(n)) {
+                            out.insert("logits".to_string(), last_output.clone());
+                        }
+                        return Ok(out);
+                    }
+                    _ => {} // Continue / SkipThisNode / InjectHidden are no-ops in post_node
+                }
             }
         }
 

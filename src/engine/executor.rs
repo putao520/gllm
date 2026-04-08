@@ -90,6 +90,9 @@ pub struct GeneratorForwardConfig {
     /// YAML→JIT graph executor pointer.
     /// Points into the Executor's `graph_executor` Option; null when not available.
     pub graph_executor_ptr: *mut crate::graph::executor::FusedGraphExecutor,
+    /// §9-§18: Callback chain pointer for Gate-First Skip / Residual Bypass / Early Exit.
+    /// Points into the Executor's callback chain; null when no callbacks active.
+    pub callback_chain_ptr: *mut crate::graph::layer_callback::CallbackChain,
 }
 
 impl GeneratorForwardConfig {
@@ -513,6 +516,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             },
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             graph_executor_ptr: std::ptr::null_mut(),
+            callback_chain_ptr: std::ptr::null_mut(),
         };
 
         let block_size = model_config.kv_cache_block_size;
@@ -546,6 +550,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
         let moe_num_experts = manifest.moe_config.map(|c| c.num_experts).unwrap_or(0);
         let num_hidden_layers = model_config.num_hidden_layers;
+        let hidden_size_for_mega = model_config.hidden_size;
+        let vocab_size_for_mega = model_config.vocab_size;
+        let dtype_for_mega = model_config.dtype;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -647,6 +654,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             bound_executor
         };
+
+        // §9.1: 从 graph_executor 构建 MegaKernelExecutor（在 move 之前）
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        let mega_kernel = if let Some(ref ge) = graph_executor {
+            if ge.is_compiled() {
+                log::info!("executor: §9.1 MegaKernelExecutor built from compiled graph_executor");
+                Some(super::mega_kernel::MegaKernelExecutor::from_graph_executor(
+                    crate::graph::executor::FusedGraphExecutor::new(ge.graph().clone()),
+                    num_hidden_layers,
+                    hidden_size_for_mega,
+                    vocab_size_for_mega,
+                    dtype_for_mega,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             scheduler,
@@ -694,8 +721,25 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             },
             telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-            mega_kernel: None, // Built lazily after graph_executor is compiled
-            turboquant: crate::kv_cache::turboquant::TurboQuantRuntime::disabled(),
+            mega_kernel,
+            turboquant: {
+                // §11: 非 F32 模型自动启用 TurboQuant（FWHT + KV 非对称量化）
+                let dt = dtype_for_mega;
+                if dt != gllm_kernels::types::DType::F32 {
+                    log::info!("executor: §11 TurboQuant enabled (dtype={:?}, fwht=true)", dt);
+                    crate::kv_cache::turboquant::TurboQuantRuntime::new(
+                        crate::kv_cache::turboquant::TurboQuantConfig {
+                            bits: 4,
+                            sink_count: 4,
+                            fwht_enabled: true,
+                            mode: crate::kv_cache::quant::QuantMode::Deterministic,
+                            dual_track_enabled: false,
+                        },
+                    )
+                } else {
+                    crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
+                }
+            },
             epilogue_subsystem: {
                 let num_experts = moe_num_experts;
                 let config = crate::jit::epilogue_subsystem::EpilogueConfig {
@@ -1090,13 +1134,45 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .as_mut()
             .map(|ge| ge as *mut _)
             .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
-        Ok(self.backend.batch_forward_gpu_pure(
+
+        // §9-§18: 构建 callback chain 并通过 forward_config 传递给 decoder_forward
+        // 基于上一步 epilogue 决策构建 GateSkipCallback
+        let num_layers = self.forward_config.num_layers;
+        let gate_decisions: Vec<crate::engine::callbacks::gate_skip::SkipDecision> = {
+            use crate::jit::epilogue::GateSkipDecision;
+            // 从 epilogue_subsystem 获取最近的批次决策
+            // 将请求级决策映射到层级决策（取最保守：任何请求需要 FullCompute 则该层 FullCompute）
+            let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
+            (0..num_layers).map(|_layer| {
+                if dead_ratio > 0.5 {
+                    crate::engine::callbacks::gate_skip::SkipDecision::Skip
+                } else if dead_ratio > 0.3 {
+                    crate::engine::callbacks::gate_skip::SkipDecision::MaskedCompute
+                } else {
+                    crate::engine::callbacks::gate_skip::SkipDecision::FullCompute
+                }
+            }).collect()
+        };
+        let gate_skip_cb = crate::engine::callbacks::gate_skip::GateSkipCallback::new(
+            num_layers, gate_decisions,
+        );
+        let mut callback_chain = crate::graph::layer_callback::CallbackChain::new(vec![
+            Box::new(gate_skip_cb),
+        ]);
+        self.forward_config.callback_chain_ptr = &mut callback_chain as *mut _;
+
+        let result = self.backend.batch_forward_gpu_pure(
             batch_input,
             &self.topology,
             &self.weights,
             &mut kv_caches,
             &self.forward_config,
-        )?)
+        );
+
+        // 清除指针（callback_chain 生命周期结束）
+        self.forward_config.callback_chain_ptr = std::ptr::null_mut();
+
+        Ok(result?)
     }
 
     /// Hot-swap the scheduling policy. Takes effect on the next `step()` call.

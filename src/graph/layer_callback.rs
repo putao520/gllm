@@ -373,6 +373,7 @@ mod tests {
                         page_size: 16,
                     },
                     graph_executor_ptr: std::ptr::null_mut(),
+                    callback_chain_ptr: std::ptr::null_mut(),
                 },
                 hidden_state: vec![0u8; 256 * 4],
             }
