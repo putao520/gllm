@@ -269,7 +269,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-    let output = ge.run_with_kv_cache(
+    let output = ge.run_with_kv_cache_and_callbacks(
         &inputs,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -277,6 +277,8 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         seq_len,
         seq_len,
         positions.as_ptr(),
+        None,
+        None,
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
     if let Some(out_bytes) = output.get("embedding").or_else(|| output.get("pool_out")).or_else(|| output.values().next()) {
@@ -369,7 +371,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-    let output = ge.run_with_kv_cache(
+    let output = ge.run_with_kv_cache_and_callbacks(
         &inputs,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -377,6 +379,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         seq_len,
         seq_len,
         positions.as_ptr(),
+        None,
+        None,
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
     if let Some(out_bytes) = output.get("score").or_else(|| output.values().next()) {
@@ -523,7 +527,7 @@ pub fn forward_to_layer<E: Element>(
 
     let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-    let output = ge.run_with_kv_cache(
+    let output = ge.run_with_kv_cache_and_callbacks(
         &inputs,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -531,6 +535,8 @@ pub fn forward_to_layer<E: Element>(
         seq_len,
         seq_len,
         positions.as_ptr(),
+        None,
+        None,
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
     // Extract hidden state from output

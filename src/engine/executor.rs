@@ -1135,15 +1135,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .map(|ge| ge as *mut _)
             .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
 
-        // §9-§18: 构建 callback chain 并通过 forward_config 传递给 decoder_forward
-        // 基于上一步 epilogue 决策构建 GateSkipCallback
+        // §9-§18: 构建完整 callback chain 并通过 forward_config 传递给 decoder_forward
         let num_layers = self.forward_config.num_layers;
+
+        // §13.1 Gate-First Skip callback
         let gate_decisions: Vec<crate::engine::callbacks::gate_skip::SkipDecision> = {
-            use crate::jit::epilogue::GateSkipDecision;
-            // 从 epilogue_subsystem 获取最近的批次决策
-            // 将请求级决策映射到层级决策（取最保守：任何请求需要 FullCompute 则该层 FullCompute）
             let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
-            (0..num_layers).map(|_layer| {
+            (0..num_layers).map(|_| {
                 if dead_ratio > 0.5 {
                     crate::engine::callbacks::gate_skip::SkipDecision::Skip
                 } else if dead_ratio > 0.3 {
@@ -1156,9 +1154,34 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let gate_skip_cb = crate::engine::callbacks::gate_skip::GateSkipCallback::new(
             num_layers, gate_decisions,
         );
-        let mut callback_chain = crate::graph::layer_callback::CallbackChain::new(vec![
-            Box::new(gate_skip_cb),
-        ]);
+
+        // §16.2 Early Exit callback
+        let early_exit_cb = crate::engine::callbacks::early_exit::EarlyExitCallback::new(
+            crate::early_exit::EarlyExitConfig::default(),
+            num_layers,
+        );
+
+        let mut callbacks: Vec<Box<dyn crate::graph::layer_callback::LayerCallback + Send>> = vec![
+            Box::new(gate_skip_cb),    // priority 60
+            Box::new(early_exit_cb),   // priority 50
+        ];
+
+        // §16.4 Guardrail Probe callback (if any probes registered)
+        // GuardrailProbeCallback requires a loaded GuardProbeRunner — only add if available
+        // (probes are registered via Client::attach_guardrail, not always present)
+
+        // §15 MoE Dispatch callback (if MoE model)
+        if let Some(moe_config) = self.forward_config.moe_config {
+            let moe_cb = crate::engine::callbacks::moe_dispatch::MoeDispatchCallback::new(
+                moe_config.num_experts,
+                moe_config.num_experts_per_tok,
+                num_layers,
+                0, // moe_start_layer: 默认从第 0 层开始
+            );
+            callbacks.push(Box::new(moe_cb));  // priority 70
+        }
+
+        let mut callback_chain = crate::graph::layer_callback::CallbackChain::new(callbacks);
         self.forward_config.callback_chain_ptr = &mut callback_chain as *mut _;
 
         let result = self.backend.batch_forward_gpu_pure(
@@ -1320,24 +1343,52 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             shape_map.insert(*req_id, shape);
         }
 
-        // §12.1: Sub-Batch 分发决策
-        if !shape_map.is_empty() {
+        // §12.1: Sub-Batch 分发决策 + §12.4 golden_seq 传递
+        let dispatch_plan = if !shape_map.is_empty() {
             use crate::jit::sub_batch::GraphShape;
-            let shape_counts: std::collections::HashMap<GraphShape, usize> = {
-                let mut counts = std::collections::HashMap::new();
-                for shape in shape_map.values() {
-                    *counts.entry(*shape).or_insert(0) += 1;
+            use crate::scheduler::chunked_prefill::{BatchManifest, BatchSlot, SlotType};
+
+            // 构建 BatchManifest 供 dispatcher 消费
+            let slots: Vec<BatchSlot> = batch.requests.iter().enumerate().map(|(i, &rid)| {
+                let seq_len = self.requests.get(&rid)
+                    .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
+                    .unwrap_or(1);
+                let (golden_seq, _) = self.golden_buckets.collapse(seq_len);
+                let is_prefill = self.requests.get(&rid).map(|r| r.is_prefill).unwrap_or(false);
+                BatchSlot {
+                    request_id: rid,
+                    slot_type: if is_prefill { SlotType::PrefillChunk } else { SlotType::Decode },
+                    token_start: 0,
+                    token_end: golden_seq, // §12.4: 使用黄金尺寸而非原始 seq_len
+                    compact_target: i as i32,
                 }
-                counts
+            }).collect();
+
+            let total_tokens = slots.iter().map(|s| s.token_end - s.token_start).sum();
+            let decode_tokens = slots.iter().filter(|s| matches!(s.slot_type, SlotType::Decode)).map(|s| s.token_end - s.token_start).sum();
+            let prefill_tokens = total_tokens - decode_tokens;
+
+            let manifest = BatchManifest {
+                slots,
+                total_tokens,
+                decode_tokens,
+                prefill_tokens,
+                compact_required: false,
+                waste_ratio: 0.0,
             };
-            let has_multiple_shapes = shape_counts.len() > 1;
-            if has_multiple_shapes {
-                log::debug!(
-                    "executor: §12.1 Sub-Batch shapes: {:?}",
-                    shape_counts,
+
+            // §12.1: 实际分发
+            let plan = self.sub_batch_dispatcher.dispatch(&manifest, &shape_map);
+            if plan.sub_batches.len() > 1 {
+                log::info!(
+                    "executor: §12.1 Sub-Batch dispatched {} sub-batches ({} orphans, reason={:?})",
+                    plan.sub_batches.len(), plan.orphan_count, plan.reason,
                 );
             }
-        }
+            Some(plan)
+        } else {
+            None
+        };
 
         for (idx, req_id) in batch.requests.into_iter().enumerate() {
             let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0); // LEGAL: draft_steps=0 表示无 draft tokens
