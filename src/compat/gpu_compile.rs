@@ -1640,8 +1640,8 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
@@ -1796,50 +1796,25 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     }
 
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let num_kv_heads = config.attention.num_kv_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
     let vocab_size = config.vocab_size;
 
     // Flatten all sequences into a single batch dimension
-    let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
-    let seq_len = total_tokens;
-
     // Embedding lookup (CPU, dtype-adaptive)
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
     let elem_bytes = comp_dtype.size_bytes();
     let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
         comp_dtype)?;
-    let hidden_bytes = hidden * elem_bytes;
-    let vocab = word_emb.len() / hidden_bytes;
-    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
-    let mut pos = 0;
-    for seq in &input.sequences {
-        for &tok in &seq.tokens {
-            let v = tok as usize;
-            if v >= vocab {
-                return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-            }
-            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
-                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
-            pos += 1;
-        }
-    }
+    let (mut hidden_state, seq_len) = scatter_token_embeddings(input, &word_emb, hidden, elem_bytes)?;
 
-    // Detect incremental decode: position > 0 and KV cache has data
-    let rope_theta = config.rope_theta;
-    let is_incremental = if let Some(handle) = kv_caches.first() {
-        let meta_store = backend.kv_meta.lock()
-            .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-        meta_store.get(&handle.0)
-            .map(|m| m.seq_len > 0)
-            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
-            && input.sequences.iter().all(|s| s.position > 0)
-    } else { false };
+    let rope_theta = config.rope.theta;
+    let is_incremental = detect_incremental(kv_caches, &backend.kv_meta, input)?;
 
     // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
     let mut last_gpu_hidden: Option<gllm_kernels::gpu::cuda::CudaBuffer> = None;
@@ -1873,8 +1848,8 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
         // Compile GPU cached attention kernel (once, shared across all layers)
         // Choose paged or dense attention based on config
-        let use_paged = config.paged_kv_page_table.is_some();
-        let page_size = config.paged_kv_page_size;
+        let use_paged = config.paged_kv.page_table.is_some();
+        let page_size = config.paged_kv.page_size;
         let attn_graph = if use_paged {
             build_gpu_paged_attention_graph(
                 seq_len, total_seq, num_heads, num_kv_heads, head_dim, page_size, comp_dtype,
@@ -1888,7 +1863,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
         // Paged KV: allocate paged cache + upload page table (once before layer loop)
         let paged_meta = if use_paged {
-            let pt = config.paged_kv_page_table.as_ref().unwrap();
+            let pt = config.paged_kv.page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = gpu_alloc_paged_kv_cache(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
@@ -2025,11 +2000,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
             }
 
             if layer == 0 {
-                let mut ms = backend.kv_meta.lock()
-                    .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-                if let Some(m) = ms.get_mut(&handle.0) {
-                    m.seq_len = (m.seq_len + seq_len).min(m.max_seq_len);
-                }
+                update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
             }
 
             // ── GPU: cached attention (q stays on GPU, reads KV cache directly) ──
@@ -2275,11 +2246,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
                 )?;
 
                 if layer == 0 {
-                    let mut meta_store = backend.kv_meta.lock()
-                        .map_err(|e| BE::Cuda(format!("kv_meta lock poisoned: {e}")))?;
-                    if let Some(meta) = meta_store.get_mut(&handle.0) {
-                        meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
-                    }
+                    update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
                 }
             }
 
@@ -2392,18 +2359,7 @@ pub(super) fn cuda_decoder_forward<E: Element>(
 
     let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
-    // Split logits per sequence
-    let mut results = Vec::new();
-    let mut offset = 0;
-    for seq in &input.sequences {
-        let tok_count = seq.tokens.len();
-        let last_pos = offset + tok_count - 1;
-        let seq_logits = logits_f32[last_pos * vocab_size..(last_pos + 1) * vocab_size].to_vec();
-        results.push(LogitsHandle { data: seq_logits });
-        offset += tok_count;
-    }
-
-    Ok(results)
+    Ok(split_logits_per_sequence(&logits_f32, input, vocab_size))
 }
 
 // ---------------------------------------------------------------------------
@@ -2627,8 +2583,8 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
@@ -2964,8 +2920,8 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
@@ -3541,50 +3497,25 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let gfx_arch = device.gfx_arch();
 
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let num_kv_heads = config.attention.num_kv_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
     let vocab_size = config.vocab_size;
 
     // Flatten all sequences into a single batch dimension
-    let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
-    let seq_len = total_tokens;
-
     // Embedding lookup (CPU, dtype-adaptive)
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
     let elem_bytes = comp_dtype.size_bytes();
     let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
         comp_dtype)?;
-    let hidden_bytes = hidden * elem_bytes;
-    let vocab = word_emb.len() / hidden_bytes;
-    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
-    let mut pos = 0;
-    for seq in &input.sequences {
-        for &tok in &seq.tokens {
-            let v = tok as usize;
-            if v >= vocab {
-                return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-            }
-            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
-                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
-            pos += 1;
-        }
-    }
+    let (mut hidden_state, seq_len) = scatter_token_embeddings(input, &word_emb, hidden, elem_bytes)?;
 
-    // Detect incremental decode: position > 0 and KV cache has data
-    let rope_theta = config.rope_theta;
-    let is_incremental = if let Some(handle) = kv_caches.first() {
-        let meta_store = backend.kv_meta.lock()
-            .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-        meta_store.get(&handle.0)
-            .map(|m| m.seq_len > 0)
-            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
-            && input.sequences.iter().all(|s| s.position > 0)
-    } else { false };
+    let rope_theta = config.rope.theta;
+    let is_incremental = detect_incremental(kv_caches, &backend.kv_meta, input)?;
 
     // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
     let mut last_gpu_hidden: Option<gllm_kernels::gpu::hip::HipBuffer> = None;
@@ -3601,21 +3532,12 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Hip("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype, kv_dtype_size) = {
-            let ms = backend.kv_meta.lock()
-                .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-            let m = ms.get(&handle.0)
-                .ok_or_else(|| BE::Hip(format!("KV cache handle {} not found", handle.0)))?;
-            let ds = m.dtype_size();
-            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * ds;
-            let tkf = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim;
-            let hs = m.max_seq_len * m.head_dim * ds;
-            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.kv_dtype, ds)
-        };
+        let (cached_seq_len, half_bytes, _max_seq_len, head_stride, kv_dtype, _kv_dtype_size) =
+            extract_kv_cache_meta(handle, &backend.kv_meta)?;
         let total_seq = cached_seq_len + seq_len;
 
-        let use_paged = config.paged_kv_page_table.is_some();
-        let page_size = config.paged_kv_page_size;
+        let use_paged = config.paged_kv.page_table.is_some();
+        let page_size = config.paged_kv.page_size;
         let attn_graph = if use_paged {
             build_gpu_paged_attention_graph(
                 seq_len, total_seq, num_heads, num_kv_heads, head_dim, page_size, comp_dtype,
@@ -3629,7 +3551,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
         // Paged KV: allocate paged cache + upload page table (once before layer loop)
         let paged_meta = if use_paged {
-            let pt = config.paged_kv_page_table.as_ref().unwrap();
+            let pt = config.paged_kv.page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = gpu_alloc_paged_kv_cache_hip(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
@@ -3757,11 +3679,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
             }
 
             if layer == 0 {
-                let mut ms = backend.kv_meta.lock()
-                    .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-                if let Some(m) = ms.get_mut(&handle.0) {
-                    m.seq_len = (m.seq_len + seq_len).min(m.max_seq_len);
-                }
+                update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
             }
 
             // ── GPU: cached attention ──
@@ -3997,11 +3915,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
                 )?;
 
                 if layer == 0 {
-                    let mut meta_store = backend.kv_meta.lock()
-                        .map_err(|e| BE::Hip(format!("kv_meta lock poisoned: {e}")))?;
-                    if let Some(meta) = meta_store.get_mut(&handle.0) {
-                        meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
-                    }
+                    update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
                 }
             }
 
@@ -4114,18 +4028,7 @@ pub(super) fn hip_decoder_forward<E: Element>(
 
     let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
-    // Split logits per sequence
-    let mut results = Vec::new();
-    let mut offset = 0;
-    for seq in &input.sequences {
-        let tok_count = seq.tokens.len();
-        let last_pos = offset + tok_count - 1;
-        let seq_logits = logits_f32[last_pos * vocab_size..(last_pos + 1) * vocab_size].to_vec();
-        results.push(LogitsHandle { data: seq_logits });
-        offset += tok_count;
-    }
-
-    Ok(results)
+    Ok(split_logits_per_sequence(&logits_f32, input, vocab_size))
 }
 
 // ===========================================================================
@@ -4163,16 +4066,13 @@ pub(super) fn metal_decoder_forward<E: Element>(
     };
 
     let hidden = config.hidden_size;
-    let num_heads = config.num_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let head_dim = config.head_dim;
+    let num_heads = config.attention.num_heads;
+    let num_kv_heads = config.attention.num_kv_heads;
+    let head_dim = config.attention.head_dim;
     let inter = config.intermediate_size;
     let eps = config.norm_eps;
     let num_layers = config.num_layers;
     let vocab_size = config.vocab_size;
-
-    let total_tokens: usize = input.sequences.iter().map(|s| s.tokens.len()).sum();
-    let seq_len = total_tokens;
 
     // Embedding lookup (CPU, dtype-adaptive)
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
@@ -4180,32 +4080,10 @@ pub(super) fn metal_decoder_forward<E: Element>(
     let word_emb = super::gpu_helpers::get_typed_data_gpu(weights, backend,
         &crate::weight_names::embedding_aliases("token_embedding.weight", Some("token_embd.weight")),
         comp_dtype)?;
-    let hidden_bytes = hidden * elem_bytes;
-    let vocab = word_emb.len() / hidden_bytes;
-    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
-    let mut pos = 0;
-    for seq in &input.sequences {
-        for &tok in &seq.tokens {
-            let v = tok as usize;
-            if v >= vocab {
-                return Err(BE::Other(format!("token id {} out of range (vocab {})", tok, vocab)));
-            }
-            hidden_state[pos * hidden_bytes..(pos + 1) * hidden_bytes]
-                .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
-            pos += 1;
-        }
-    }
+    let (mut hidden_state, seq_len) = scatter_token_embeddings(input, &word_emb, hidden, elem_bytes)?;
 
-    // Detect incremental decode: position > 0 and KV cache has data
-    let rope_theta = config.rope_theta;
-    let is_incremental = if let Some(handle) = kv_caches.first() {
-        let meta_store = backend.kv_meta.lock()
-            .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-        meta_store.get(&handle.0)
-            .map(|m| m.seq_len > 0)
-            .unwrap_or(false) // LEGAL: KV cache 元数据缺失时视为非增量模式
-            && input.sequences.iter().all(|s| s.position > 0)
-    } else { false };
+    let rope_theta = config.rope.theta;
+    let is_incremental = detect_incremental(kv_caches, &backend.kv_meta, input)?;
 
     // Holds gpu_hidden after layer loop — used by lm_head for DtoD (FC-010)
     let mut last_gpu_hidden: Option<gllm_kernels::gpu::metal::MetalBuffer> = None;
@@ -4222,21 +4100,12 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
         let handle = kv_caches.first()
             .ok_or_else(|| BE::Metal("no KV cache handles provided".into()))?;
-        let (cached_seq_len, half_bytes, _total_kv_floats, max_seq_len, head_stride, kv_dtype, kv_dtype_size) = {
-            let ms = backend.kv_meta.lock()
-                .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-            let m = ms.get(&handle.0)
-                .ok_or_else(|| BE::Metal(format!("KV cache handle {} not found", handle.0)))?;
-            let ds = m.dtype_size();
-            let hb = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim * ds;
-            let tkf = m.num_layers * m.num_kv_heads * m.max_seq_len * m.head_dim;
-            let hs = m.max_seq_len * m.head_dim * ds;
-            (m.seq_len, hb, tkf, m.max_seq_len, hs, m.kv_dtype, ds)
-        };
+        let (cached_seq_len, half_bytes, _max_seq_len, head_stride, kv_dtype, _kv_dtype_size) =
+            extract_kv_cache_meta(handle, &backend.kv_meta)?;
         let total_seq = cached_seq_len + seq_len;
 
-        let use_paged = config.paged_kv_page_table.is_some();
-        let page_size = config.paged_kv_page_size;
+        let use_paged = config.paged_kv.page_table.is_some();
+        let page_size = config.paged_kv.page_size;
         let attn_graph = if use_paged {
             build_gpu_paged_attention_graph(
                 seq_len, total_seq, num_heads, num_kv_heads, head_dim, page_size, comp_dtype,
@@ -4250,7 +4119,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
         // Paged KV: allocate paged cache (once before layer loop)
         let paged_meta = if use_paged {
-            let pt = config.paged_kv_page_table.as_ref().unwrap();
+            let pt = config.paged_kv.page_table.as_ref().unwrap();
             let num_physical_pages = pt.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0); // LEGAL: 空 page table 时返回 0
             let meta = metal_alloc_paged_kv_cache(
                 device, num_physical_pages, page_size, num_layers, num_kv_heads, head_dim, kv_dtype,
@@ -4358,11 +4227,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
             }
 
             if layer == 0 {
-                let mut ms = backend.kv_meta.lock()
-                    .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-                if let Some(m) = ms.get_mut(&handle.0) {
-                    m.seq_len = (m.seq_len + seq_len).min(m.max_seq_len);
-                }
+                update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
             }
 
             // ── GPU: cached attention ──
@@ -4613,11 +4478,7 @@ pub(super) fn metal_decoder_forward<E: Element>(
                 )?;
 
                 if layer == 0 {
-                    let mut meta_store = backend.kv_meta.lock()
-                        .map_err(|e| BE::Metal(format!("kv_meta lock poisoned: {e}")))?;
-                    if let Some(meta) = meta_store.get_mut(&handle.0) {
-                        meta.seq_len = (meta.seq_len + seq_len).min(meta.max_seq_len);
-                    }
+                    update_kv_seq_len(handle, &backend.kv_meta, seq_len)?;
                 }
             }
 
@@ -4683,16 +4544,5 @@ pub(super) fn metal_decoder_forward<E: Element>(
 
     let logits_f32 = super::jit_helpers::typed_bytes_to_f32(&logits_host, lm_comp_dtype);
 
-    // Split logits per sequence
-    let mut results = Vec::new();
-    let mut offset = 0;
-    for seq in &input.sequences {
-        let tok_count = seq.tokens.len();
-        let last_pos = offset + tok_count - 1;
-        let seq_logits = logits_f32[last_pos * vocab_size..(last_pos + 1) * vocab_size].to_vec();
-        results.push(LogitsHandle { data: seq_logits });
-        offset += tok_count;
-    }
-
-    Ok(results)
+    Ok(split_logits_per_sequence(&logits_f32, input, vocab_size))
 }

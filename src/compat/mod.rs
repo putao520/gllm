@@ -25,6 +25,8 @@ pub(crate) mod jit_helpers;
 pub(crate) mod graph_builders;
 #[allow(dead_code)]
 pub(crate) mod gpu_helpers;
+#[macro_use]
+mod gpu_backend_macro;
 pub mod cpu_backend;
 mod cuda_backend;
 mod hip_backend;

@@ -25,7 +25,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         return Err(BE::Other("BERT encoder only supports f32 element type".into()));
     }
 
-    let _kern = gllm_kernels::backend::CpuKernels::<f32>::new();
+    let _kern = gllm_kernels::cpu_kernels::CpuKernels::<f32>::new();
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size;

@@ -842,6 +842,7 @@ dependencies = [
  "paste",
  "rayon",
  "seq-macro",
+ "winapi",
 ]
 
 [[package]]

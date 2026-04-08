@@ -64,9 +64,9 @@ pub fn inject_frozen_kv<E: Element>(
     // Step 1: Run encoder forward to get K/V tensors
     // For now, we use a simplified approach: compute K/V from attention projection
     let hidden = config.hidden_size;
-    let _num_heads = config.num_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let head_dim = config.head_dim;
+    let _num_heads = config.attention.num_heads;
+    let num_kv_heads = config.attention.num_kv_heads;
+    let head_dim = config.attention.head_dim;
 
     // Token embedding lookup (same as decoder_forward)
     let (embed_bytes, embed_dtype) = get_typed_data(

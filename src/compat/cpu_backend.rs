@@ -469,7 +469,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
     ) -> Result<(), BE> {
         use gllm_kernels::quant::QuantType::*;
         use gllm_kernels::Kernels;
-        let kern = gllm_kernels::backend::CpuKernels::<E>::new();
+        let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
         match quant_type {
             // K-Quant family
             Q2K | Q3K | Q4K | Q5K | Q6K | Q8K => {
@@ -499,7 +499,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
     ) -> Result<(), BE> {
         use gllm_kernels::quant::QuantType::*;
         use gllm_kernels::Kernels;
-        let kern = gllm_kernels::backend::CpuKernels::<E>::new();
+        let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
 
         // Each dequant_* kernel decodes a single block. We must loop over
         // all blocks in the tensor, advancing the byte and output pointers.

@@ -37,20 +37,39 @@ impl Default for SamplingConfig {
     }
 }
 
+/// RoPE (Rotary Position Embedding) configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct RoPEConfig {
+    pub theta: f64,
+    pub scale: f64,
+    pub interleaved: bool,
+    pub precompute: bool,
+}
+
+/// Attention head geometry.
+#[derive(Debug, Clone, Copy)]
+pub struct AttentionHeadConfig {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+/// Paged KV cache configuration for GPU decode.
+#[derive(Debug, Clone)]
+pub struct PagedKvConfig {
+    pub page_table: Option<Vec<u32>>,
+    pub page_size: usize,
+}
+
 /// Static configuration for the generator forward pass.
 #[derive(Debug, Clone)]
 pub struct GeneratorForwardConfig {
     pub hidden_size: usize,
     pub num_layers: usize,
-    pub num_heads: usize,
-    pub num_kv_heads: usize,
-    pub head_dim: usize,
+    pub attention: AttentionHeadConfig,
     pub max_seq_len: usize,
     pub vocab_size: usize,
-    pub rope_theta: f64,
-    pub rope_scale: f64,
-    pub rope_interleaved: bool,
-    pub rope_precompute: bool,
+    pub rope: RoPEConfig,
     pub position_encoding: PositionEncoding,
     /// Architecture family (Encoder vs Decoder).
     pub arch_family: crate::manifest::ArchFamily,
@@ -66,14 +85,24 @@ pub struct GeneratorForwardConfig {
     pub moe_config: Option<crate::manifest::MoEConfig>,
     /// Model weight dtype (F32/F16/BF16).
     pub dtype: DType,
-    /// Paged attention page table (logical→physical page mapping).
-    /// When `Some`, GPU decode uses paged KV cache instead of dense.
-    pub paged_kv_page_table: Option<Vec<u32>>,
-    /// Paged attention page size (tokens per page).
-    pub paged_kv_page_size: usize,
+    /// Paged KV cache configuration.
+    pub paged_kv: PagedKvConfig,
     /// YAML→JIT graph executor pointer.
     /// Points into the Executor's `graph_executor` Option; null when not available.
     pub graph_executor_ptr: *mut crate::graph::executor::FusedGraphExecutor,
+}
+
+impl GeneratorForwardConfig {
+    /// Backward-compatible accessor: number of attention heads.
+    pub fn num_heads(&self) -> usize { self.attention.num_heads }
+    /// Backward-compatible accessor: number of KV heads.
+    pub fn num_kv_heads(&self) -> usize { self.attention.num_kv_heads }
+    /// Backward-compatible accessor: head dimension.
+    pub fn head_dim(&self) -> usize { self.attention.head_dim }
+    /// Backward-compatible accessor: RoPE theta.
+    pub fn rope_theta(&self) -> f64 { self.rope.theta }
+    /// Backward-compatible accessor: RoPE scale.
+    pub fn rope_scale(&self) -> f64 { self.rope.scale }
 }
 
 // SAFETY: graph_executor_ptr is only written/read while the Executor's Mutex is held,
@@ -85,15 +114,15 @@ impl GeneratorForwardConfig {
     /// Extract attention head geometry as a grouped struct.
     #[allow(dead_code)]
     pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
-        let q_dim = self.num_heads * self.head_dim;
-        let kv_dim = self.num_kv_heads * self.head_dim;
+        let q_dim = self.attention.num_heads * self.attention.head_dim;
+        let kv_dim = self.attention.num_kv_heads * self.attention.head_dim;
         crate::compat::types::AttentionGeometry {
-            num_heads: self.num_heads,
-            num_kv_heads: self.num_kv_heads,
-            head_dim: self.head_dim,
+            num_heads: self.attention.num_heads,
+            num_kv_heads: self.attention.num_kv_heads,
+            head_dim: self.attention.head_dim,
             q_dim,
             kv_dim,
-            heads_per_group: self.num_heads / self.num_kv_heads.max(1),
+            heads_per_group: self.attention.num_heads / self.attention.num_kv_heads.max(1),
         }
     }
 
@@ -104,7 +133,7 @@ impl GeneratorForwardConfig {
             hidden: self.hidden_size,
             inter: self.intermediate_size,
             eps: self.norm_eps,
-            rope_theta: self.rope_theta,
+            rope_theta: self.rope.theta,
         }
     }
 }
@@ -434,15 +463,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let forward_config = GeneratorForwardConfig {
             hidden_size: model_config.hidden_size,
             num_layers: model_config.num_hidden_layers,
-            num_heads: model_config.num_attention_heads,
-            num_kv_heads: model_config.num_key_value_heads,
-            head_dim: model_config.head_dim,
+            attention: AttentionHeadConfig {
+                num_heads: model_config.num_attention_heads,
+                num_kv_heads: model_config.num_key_value_heads,
+                head_dim: model_config.head_dim,
+            },
             max_seq_len: model_config.max_position_embeddings,
             vocab_size: model_config.vocab_size,
-            rope_theta: model_config.rope_theta as f64,
-            rope_scale: model_config.rope_scale as f64,
-            rope_interleaved: model_config.rope_interleaved,
-            rope_precompute: true,
+            rope: RoPEConfig {
+                theta: model_config.rope_theta as f64,
+                scale: model_config.rope_scale as f64,
+                interleaved: model_config.rope_interleaved,
+                precompute: true,
+            },
             position_encoding,
             arch_family: manifest.arch.family(),
             intermediate_size: model_config.intermediate_size.ok_or_else(|| {
@@ -455,9 +488,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
             dtype: model_config.dtype,
-            paged_kv_page_table: None,
-            paged_kv_page_size: model_config.kv_cache_block_size,
-
+            paged_kv: PagedKvConfig {
+                page_table: None,
+                page_size: model_config.kv_cache_block_size,
+            },
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             graph_executor_ptr: std::ptr::null_mut(),
         };

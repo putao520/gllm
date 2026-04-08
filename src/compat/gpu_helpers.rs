@@ -129,7 +129,7 @@ pub(super) fn get_f32_data_gpu<E: Element, B: Backend<E>>(
         if let Some(qt) = weights.get_quantized(name.as_ref()) {
             let n_elements = qt.shape.iter().product::<usize>();
             let mut out = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
+            let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
             use gllm_kernels::Kernels;
             let blk_elems = qt.quant_type.block_size();
             let blk_bytes = qt.quant_type.block_bytes();
@@ -204,7 +204,7 @@ pub(super) fn get_typed_data_gpu<E: Element, B: Backend<E>>(
         if let Some(qt) = weights.get_quantized(name.as_ref()) {
             let n_elements = qt.shape.iter().product::<usize>();
             let mut f32_buf = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::backend::CpuKernels::<E>::new();
+            let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
             use gllm_kernels::Kernels;
             let blk_elems = qt.quant_type.block_size();
             let blk_bytes = qt.quant_type.block_bytes();
@@ -586,7 +586,7 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
         }
     }
     let mut hidden_f32 = super::jit_helpers::typed_bytes_to_f32(&hidden_state, comp_dtype);
-    let _kern = gllm_kernels::backend::CpuKernels::<f32>::new();
+    let _kern = gllm_kernels::cpu_kernels::CpuKernels::<f32>::new();
     use gllm_kernels::Kernels;
 
     {

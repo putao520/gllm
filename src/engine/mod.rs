@@ -48,8 +48,8 @@ impl EngineContext {
         Self {
             num_layers: config.num_layers,
             hidden_size: config.hidden_size,
-            kv_page_size: config.paged_kv_page_size,
-            num_kv_heads: config.num_kv_heads,
+            kv_page_size: config.paged_kv.page_size,
+            num_kv_heads: config.attention.num_kv_heads,
             max_seq_len: config.max_seq_len,
         }
     }
@@ -63,9 +63,9 @@ pub use crate::scheduler::types::{PageId, PageState, RequestId};
 
 // Re-export engine types
 pub use executor::{
-    AttentionMaskType, AttentionTopology, BackendError, BatchInput, GeneratorForwardConfig,
-    KvCacheConfig, KvCacheHandle, LogitsHandle, PositionEncoding, SamplingConfig, SequenceInput,
-    SwapConfig,
+    AttentionHeadConfig, AttentionMaskType, AttentionTopology, BackendError, BatchInput,
+    GeneratorForwardConfig, KvCacheConfig, KvCacheHandle, LogitsHandle, PagedKvConfig,
+    PositionEncoding, RoPEConfig, SamplingConfig, SequenceInput, SwapConfig,
 };
 
 // Re-export attention contract types (ARCH-ATTN-UNIFIED)

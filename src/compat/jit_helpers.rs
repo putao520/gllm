@@ -749,12 +749,11 @@ pub(crate) fn build_cached_gqa_graph(
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
     use gllm_kernels::compiler::codegen::attention_strategy::select_attention_strategy;
-    use gllm_kernels::dispatch::DeviceProfile;
 
-    let profile = DeviceProfile::detect();
+    let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
     let strategy = select_attention_strategy(
         seq_len, total_seq, head_dim, num_heads,
-        dtype, &profile, None, None,
+        dtype, &exec_plan, None, None,
     );
 
     let mut g = CompilerGraph::new();

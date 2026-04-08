@@ -86,6 +86,32 @@ impl RopeScalingConfig {
     }
 }
 
+/// Activation function used in FFN layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HiddenAct {
+    Silu,
+    Gelu,
+    GeluNew,
+    Relu,
+    Swish,
+    QuickGelu,
+    Unknown(String),
+}
+
+impl HiddenAct {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "silu" | "swiglu" => Self::Silu,
+            "gelu" => Self::Gelu,
+            "gelu_new" | "gelu_pytorch_tanh" => Self::GeluNew,
+            "relu" => Self::Relu,
+            "swish" => Self::Swish,
+            "quick_gelu" | "gelu_fast" => Self::QuickGelu,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub hidden_size: usize,
@@ -109,7 +135,7 @@ pub struct ModelConfig {
     pub use_cache: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub attention_dropout: Option<f32>,
-    pub hidden_act: Option<String>,
+    pub hidden_act: Option<HiddenAct>,
     pub layer_norm_epsilon: Option<f32>,
     pub bos_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
@@ -419,7 +445,7 @@ impl ModelConfig {
                 gguf_arch_f32(reader, arch, "attention.dropout").filter(|v| v.is_finite());
             let hidden_act = gguf_arch_str(reader, arch, "feed_forward.activation")
                 .or_else(|| gguf_arch_str(reader, arch, "hidden_act"))
-                .map(|v| v.to_string());
+                .map(|v| HiddenAct::parse(v));
             let layer_norm_epsilon = gguf_arch_f32(reader, arch, "layer_norm_epsilon")
                 .or_else(|| gguf_arch_f32(reader, arch, "layer_norm_rms_epsilon"))
                 .or_else(|| gguf_arch_f32(reader, arch, "attention.layer_norm_rms_epsilon"))
@@ -712,7 +738,7 @@ impl ModelConfig {
             use_cache: find_bool(value, &["use_cache"]),
             tie_word_embeddings: find_bool(value, &["tie_word_embeddings"]),
             attention_dropout,
-            hidden_act: find_string(value, &["hidden_act", "hidden_activation"]),
+            hidden_act: find_string(value, &["hidden_act", "hidden_activation"]).map(|s| HiddenAct::parse(&s)),
             layer_norm_epsilon,
             bos_token_id: find_u32(value, &["bos_token_id"]),
             eos_token_id: find_u32(value, &["eos_token_id"]),
