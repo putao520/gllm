@@ -389,6 +389,111 @@ impl ContinuousBatcher {
         }
         ordered_ids
     }
+
+    /// §10.1 交织调度：Decode 优先填充，剩余预算分配给 Prefill Chunks
+    ///
+    /// 与 `build_batch()` 的区别：
+    /// - 返回 `InterleavedBatch`，包含 decode/prefill 的物理分轨信息
+    /// - Attention 阶段 Prefill/Decode 物理分轨到不同 Thread Block 组
+    /// - FFN 阶段允许合流
+    pub fn build_interleaved_batch(
+        &mut self,
+        scheduler: &mut PagedScheduler,
+        token_budget: usize,
+        admit_new_prefill: bool,
+        policy: BatchOrderPolicy,
+    ) -> InterleavedBatch {
+        let batch = self.build_batch(scheduler, token_budget, admit_new_prefill, policy);
+
+        // 分类：哪些是 decode，哪些是 prefill chunk
+        let mut decode_slots = Vec::new();
+        let mut prefill_slots = Vec::new();
+
+        for (idx, &req_id) in batch.requests.iter().enumerate() {
+            let is_prefill = self.running.get(&req_id)
+                .map(|seq| seq.needs_prefill())
+                .unwrap_or(false);
+
+            let token_count = if idx + 1 < batch.seq_offsets.len() {
+                batch.seq_offsets[idx + 1] - batch.seq_offsets[idx]
+            } else {
+                1
+            };
+
+            let slot = InterleavedSlot {
+                request_id: req_id,
+                batch_index: idx,
+                token_count,
+                draft_steps: batch.draft_steps.get(idx).copied().unwrap_or(0),
+            };
+
+            if is_prefill {
+                prefill_slots.push(slot);
+            } else {
+                decode_slots.push(slot);
+            }
+        }
+
+        InterleavedBatch {
+            inner: batch,
+            decode_slots,
+            prefill_slots,
+        }
+    }
+}
+
+/// §10.1 交织调度结果
+///
+/// 包含 decode/prefill 的物理分轨信息。
+/// Attention 阶段 Prefill/Decode 物理分轨到不同 Thread Block 组。
+#[derive(Debug, Clone)]
+pub struct InterleavedBatch {
+    /// 底层 ScheduledBatch
+    pub inner: ScheduledBatch,
+    /// Decode 请求槽位
+    pub decode_slots: Vec<InterleavedSlot>,
+    /// Prefill Chunk 请求槽位
+    pub prefill_slots: Vec<InterleavedSlot>,
+}
+
+/// 交织调度中的单个槽位
+#[derive(Debug, Clone)]
+pub struct InterleavedSlot {
+    /// 请求 ID
+    pub request_id: RequestId,
+    /// 在 batch 中的索引
+    pub batch_index: usize,
+    /// 该槽位的 token 数量（decode=1, prefill chunk=chunk_size）
+    pub token_count: usize,
+    /// 推测解码步数
+    pub draft_steps: usize,
+}
+
+impl InterleavedBatch {
+    /// Decode token 总数
+    pub fn decode_tokens(&self) -> usize {
+        self.decode_slots.iter().map(|s| s.token_count).sum()
+    }
+
+    /// Prefill chunk token 总数
+    pub fn prefill_tokens(&self) -> usize {
+        self.prefill_slots.iter().map(|s| s.token_count).sum()
+    }
+
+    /// 总 token 数
+    pub fn total_tokens(&self) -> usize {
+        self.decode_tokens() + self.prefill_tokens()
+    }
+
+    /// 是否包含交织（同时有 decode 和 prefill）
+    pub fn is_interleaved(&self) -> bool {
+        !self.decode_slots.is_empty() && !self.prefill_slots.is_empty()
+    }
+
+    /// 所有请求 ID（保持原始顺序）
+    pub fn request_ids(&self) -> &[RequestId] {
+        &self.inner.requests
+    }
 }
 
 #[cfg(test)]

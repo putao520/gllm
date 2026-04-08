@@ -438,6 +438,9 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     jit_director: Option<crate::jit::director::JitDirector>,
     /// §18.1 Epilogue 遥测聚合器
     telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator,
+    /// §9.1 Mega-Kernel 执行器（模型加载时编译，推理时优先使用）
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    mega_kernel: Option<super::mega_kernel::MegaKernelExecutor>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -679,6 +682,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             },
             telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+            mega_kernel: None, // Built lazily after graph_executor is compiled
         })
     }
 

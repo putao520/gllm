@@ -13,6 +13,7 @@
 pub mod executor;
 pub mod optimizer;
 pub mod types;
+pub mod layer_callback;
 
 pub use executor::{
     ExecutionContext, ExecutionError, ExecutionOp, ExecutionPlan, FusedGraphExecutor,

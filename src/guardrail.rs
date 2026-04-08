@@ -100,6 +100,24 @@ impl GuardProbeRunner {
         self.target_layer
     }
 
+    /// 对 hidden state 进行安全分类评分
+    ///
+    /// 供 GuardrailProbeCallback 在逐层执行时调用。
+    /// score = sigmoid(w · hidden + b)
+    pub fn score(&self, hidden: &[f32]) -> f32 {
+        self.classify(hidden)
+    }
+
+    /// 获取触发阈值
+    pub fn threshold_value(&self) -> f32 {
+        self.threshold
+    }
+
+    /// 获取 veto 状态管理器
+    pub fn veto_state(&self) -> VetoState {
+        VetoState { probe_name: self.probe_name.clone() }
+    }
+
     /// 线性分类器前向传播: score = sigmoid(w · logits + b)
     ///
     /// per SPEC 02-ARCHITECTURE §16.4 — 在模型深度层物理强插入极小安全审查头。
@@ -140,6 +158,19 @@ impl GenerationHook for GuardProbeRunner {
         } else {
             HookDecision::Continue
         }
+    }
+}
+
+/// Veto 状态管理器（供 callback 使用）
+#[derive(Debug)]
+pub struct VetoState {
+    probe_name: String,
+}
+
+impl VetoState {
+    /// 记录 veto 事件
+    pub fn set_veto(&self, reason: String) {
+        log::warn!("guardrail veto [{}]: {}", self.probe_name, reason);
     }
 }
 

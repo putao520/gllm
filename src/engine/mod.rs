@@ -3,6 +3,8 @@
 pub mod attention_contracts;
 pub mod executor;
 pub mod pipeline;
+pub mod mega_kernel;
+pub mod callbacks;
 
 pub use pipeline::{PipelineError, UnifiedPipeline};
 
