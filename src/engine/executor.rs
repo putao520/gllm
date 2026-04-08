@@ -441,6 +441,10 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     /// §9.1 Mega-Kernel 执行器（模型加载时编译，推理时优先使用）
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     mega_kernel: Option<super::mega_kernel::MegaKernelExecutor>,
+    /// §11 TurboQuant 运行时（KV Cache 量化 + FWHT + RaBitQ）
+    turboquant: crate::kv_cache::turboquant::TurboQuantRuntime,
+    /// §9-§18 Epilogue 优化子系统（Gate Skip + Sink + Bypass + Prefetch + Spec）
+    epilogue_subsystem: crate::jit::epilogue_subsystem::EpilogueSubsystem,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -535,6 +539,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
         let moe_num_experts = manifest.moe_config.map(|c| c.num_experts).unwrap_or(0);
+        let num_hidden_layers = model_config.num_hidden_layers;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -684,6 +689,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             mega_kernel: None, // Built lazily after graph_executor is compiled
+            turboquant: crate::kv_cache::turboquant::TurboQuantRuntime::disabled(),
+            epilogue_subsystem: {
+                let num_experts = moe_num_experts;
+                let config = crate::jit::epilogue_subsystem::EpilogueConfig {
+                    num_layers: num_hidden_layers,
+                    num_experts,
+                    ..Default::default()
+                };
+                crate::jit::epilogue_subsystem::EpilogueSubsystem::new(config)
+            },
         })
     }
 
@@ -1256,6 +1271,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let page_size = self.scheduler.page_size().max(1);
         let mut page_entropies = std::collections::HashMap::new();
+
+        // §9-§18: Epilogue 优化子系统 — 从遥测驱动全链路决策
+        let epilogue_summary = self.epilogue_subsystem.ingest_and_decide(&batch_telemetry);
+        if epilogue_summary.compact_required {
+            log::debug!("executor: Epilogue compact required (waste={:.2}%)", epilogue_summary.waste_ratio * 100.0);
+        }
 
         // Processing results loop
         for (i, logits) in logits_list.iter().enumerate() {

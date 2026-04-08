@@ -1,5 +1,9 @@
 //! KV cache tracking for executor (per SPEC 03-DATA-STRUCTURE.md, 07-OBSERVABILITY.md §7.1)
 
+pub mod quant;
+pub mod dual_track;
+pub mod turboquant;
+
 use crate::engine::executor::{KvCacheHandle, KvCacheConfig};
 use thiserror::Error;
 
