@@ -1560,3 +1560,59 @@ archetype.memory_intensive = clamp(memory_raw, 0.0, 1.0);
 | `05-OPTIMIZATIONS.md` | MoE/SpecDecoding 模块消费 StrategyBias |
 | `06-RUNTIME.md §3` ContinuousBatcher | batch 策略受 `batch_flexibility` 影响 |
 | `DOCS/scheduling/jit-cache-protocol.md` | JIT 缓存 key 包含 InferenceMode |
+
+## 18. Integration Trace — 真实调用链追踪
+
+> **NO_ISLAND_MODULE 合规**: 以下是从用户 API 到最终消费的完整调用链，每一跳标明文件和函数。
+
+```
+Client::builder()
+    .model("Qwen/Qwen3-7B")
+    .inference_mode(InferenceMode::Throughput)    ← src/client.rs:ClientBuilder::inference_mode()
+    .build()                                       ← src/client.rs:ClientBuilder::build()
+  │
+  └→ ClientBuilder::build_state(model_id, kind, inference_mode)   ← src/client.rs
+       │
+       ├── [1] Loader 加载模型 → ModelConfig 提取
+       │   └→ ModelConfig::from_loader()           ← src/model_config.rs
+       │
+       ├── [2] GraphProfiler::profile(&model_config)    ← src/graph/profile.rs
+       │   └→ GraphProfile { hidden_dim, num_experts, ffn_kind, ... }
+       │
+       ├── [3] GraphArchetype::derive(&graph_profile)   ← src/graph/profile.rs
+       │   └→ GraphArchetype { compute: 0.73, memory: 0.40, ... }
+       │
+       ├── [4] ArbiterHwView::from(device_profile)      ← src/engine/arbiter.rs
+       │
+       ├── [5] StrategyArbiter::arbitrate(mode, &archetype, &hw_view)  ← src/engine/arbiter.rs
+       │   └→ StrategyBias { fusion_cost_scale: 0.79, parallelism: 0.46, ... }
+       │
+       ├── [6] 转换 gllm::StrategyBias → gllm_kernels::StrategyBias   ← src/client.rs
+       │
+       ├── [7] init_global_execution_plan_with_bias(&kernels_bias)
+       │   └→ gllm-kernels/src/compiler/planner.rs:EXECUTION_PLAN.get_or_init()
+       │       └→ HwOptEngine::solve(ir, profile, &bias)
+       │           ├── solve_cache_budget(..., &bias)     // L2 kv/weight 比例调制
+       │           ├── solve_gemm(..., &bias)              // k_depth + epilogue 调制
+       │           ├── solve_fusion(..., &bias)            // tile_threshold 调制
+       │           ├── solve_parallelism(..., &bias)       // wave_count 调制
+       │           ├── solve_batch(..., &bias)             // batch_flexibility 调制
+       │           └── solve_features(..., &bias)          // spec_decoding 调制
+       │
+       └── [8] BackendContext::new()                      ← 此后 JIT 编译使用已注入 bias 的 ExecutionPlan
+```
+
+**验证命令** (grep 确认非测试调用):
+```bash
+# StrategyArbiter::arbitrate 在真实路径被调用
+grep -rn "StrategyArbiter::arbitrate\|arbitrate_cpu" src/ | grep -v test | grep -v "mod tests"
+# 期望: src/client.rs 中有调用
+
+# init_global_execution_plan_with_bias 在真实路径被调用
+grep -rn "init_global_execution_plan_with_bias" src/ | grep -v test
+# 期望: src/client.rs 中有调用
+
+# StrategyBias 不仅存在于定义和测试
+grep -rn "StrategyBias" src/ | grep -v test | grep -v "mod tests" | grep -v "///" | grep -v "pub struct\|pub use"
+# 期望: src/client.rs 中有实例化和传递
+```
