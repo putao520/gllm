@@ -27,6 +27,14 @@ let client = Client::builder()
 // 快捷方式
 let chat_client = Client::new_chat("Qwen/Qwen3-7B-Instruct")?;
 let embed_client = Client::new_embedding("BAAI/bge-m3")?;
+
+// 多模型管线 (ARCH-MULTI-MODEL-PIPELINE)
+let pipeline_client = Client::builder()
+    .model("BAAI/bge-m3")                           // embedder (必需)
+    .reranker("BAAI/bge-reranker-v2-m3")             // reranker (可选)
+    .generator("Qwen/Qwen3-7B-Instruct")            // LLM (可选)
+    .inference_mode(InferenceMode::Latency)
+    .build()?;
 ```
 
 ### 2.2 运行时模型切换 (Runtime Switching)
@@ -71,6 +79,7 @@ println!("{}", output.text);
 ### 3.2 向量嵌入 (Embedding)
 
 ```rust
+// 基础用法：纯 embed
 let embeddings = client.embed(vec![
     "Hello world",
     "Machine learning is fascinating"
@@ -92,6 +101,83 @@ let scores = client.rerank(
     ]
 )?;
 ```
+
+### 3.4 Embed+Rerank 融合管线 (REQ-PIPELINE-004)
+
+当 Client 挂载了 reranker 模型时，embed API 支持透明内部 rerank。用户体验与普通 embed 完全一致，但返回结果已按 query 相关性重排序。
+
+```rust
+// 前提：Client 已挂载 reranker
+let client = Client::builder()
+    .model("BAAI/bge-m3")
+    .reranker("BAAI/bge-reranker-v2-m3")
+    .build()?;
+
+// Level 2: embed + 内部 rerank（对用户透明）
+let results = client.embed(vec!["doc1", "doc2", "doc3"])
+    .rerank_query("What is the capital of France?")  // 触发内部 rerank
+    .top_n(2)                                         // rerank 后取 top-n
+    .generate()?;
+
+// 返回的 embeddings 已按 rerank score 排序
+// results.embeddings[0] 是最相关的文档的 embedding
+// results.rerank_scores — 可选，附带 rerank 分数
+```
+
+**行为约束**:
+
+1. 未设 `.rerank_query()` 时行为与普通 embed 完全一致（向后兼容）
+2. 设了 `.rerank_query()` 但 Client 未挂载 reranker → 返回 `GllmError::RerankerNotLoaded`
+3. Reranker 与 embedder 架构相同时，encoder 权重共享（零重复加载）
+4. Reranker 与 embedder 架构不同时，各自独立 encoder forward
+
+**内部流程**:
+```
+embed(texts).rerank_query(query).generate()
+  → texts 分词
+  → [Embedder Encoder] forward → hidden_states
+  → MeanPool(hidden_states) → L2Norm → embeddings
+  → [Reranker] forward(query, texts) → scores  (共享 encoder 或独立 encoder)
+  → 按 scores 降序重排 embeddings
+  → 截取 top_n
+  → 返回 EmbeddingsResponse { embeddings, rerank_scores }
+```
+
+### 3.5 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-005)
+
+当 Client 同时挂载了 reranker 和 generator 时，支持一体化 RAG：embed → rerank → LLM 生成。
+
+```rust
+let client = Client::builder()
+    .model("BAAI/bge-m3")
+    .reranker("BAAI/bge-reranker-v2-m3")
+    .generator("Qwen/Qwen3-7B-Instruct")
+    .build()?;
+
+// Level 3: embed + rerank + LLM 生成
+let answer = client.embed(vec!["doc1", "doc2", "doc3"])
+    .rerank_query("What is the capital of France?")
+    .top_n(3)
+    .generate_answer("基于以下文档回答问题")?;
+
+// answer.text — LLM 生成的答案
+// answer.sources — 被选中的 top-n 文档索引
+// answer.rerank_scores — 各文档的 rerank 分数
+```
+
+**内部流程**:
+```
+embed(texts).rerank_query(query).top_n(n).generate_answer(prompt)
+  → Level 2 流程产出 top-n embeddings + 对应原文
+  → 拼接 prompt: "{system_prompt}\n\n文档:\n{top_n_docs}\n\n问题: {query}"
+  → [Generator LLM] forward → sample → answer
+  → 返回 RagResponse { text, sources, rerank_scores }
+```
+
+**行为约束**:
+1. 未挂载 generator 时调用 `.generate_answer()` → 返回 `GllmError::GeneratorNotLoaded`
+2. Generator 独立于 embedder/reranker（Decoder 架构 vs Encoder 架构），权重不共享
+3. top-n 文档通过文本拼接传入 LLM（非 hidden state 注入），保持 LLM 的通用性
 
 ## 4. 错误处理
 

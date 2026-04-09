@@ -145,12 +145,57 @@ let metadata = loader.quantization_metadata()?
 | **Rerank** | 文本重排序 | BGE-Reranker-v3, Qwen3-Rerank |
 | **Generator** | 文本生成 | Qwen3, Llama 4, GLM-5, Mistral 3, Phi-4 |
 
+### 多模型推理管线 (ARCH-MULTI-MODEL-PIPELINE)
+
+Client 支持可选挂载最多三个模型，组成透明管线。用户调用 embed API，内部自动执行 rerank 和/或 LLM 生成。
+
+#### 管线层级
+
+```
+Level 1: Embed only (单模型)
+  texts → [Embedder Encoder] → MeanPool → L2Norm → embeddings
+
+Level 2: Embed + Rerank (双模型)
+  texts → [Embedder Encoder] → MeanPool → L2Norm → embeddings
+  query + texts → [Reranker] → scores → 按 score 重排 embeddings
+
+Level 3: Embed + Rerank + LLM (三模型，完整 RAG)
+  texts → [Embedder Encoder] → embeddings
+  query + texts → [Reranker] → scores → top-n 筛选
+  query + top-n docs → [Generator LLM] → answer
+```
+
+#### 模型挂载与共享
+
+| 挂载点 | 模型类型 | 必需 | ArchFamily | 共享条件 |
+|--------|---------|------|-----------|---------|
+| embedder | Embedding | 是 | Encoder/Decoder | — |
+| reranker | Reranker | 否 | Encoder/Decoder | 与 embedder 同架构时共享编码器权重 |
+| generator | Chat | 否 | Decoder | 独立权重 |
+
+**编码器共享 (REQ-PIPELINE-001)**：当 embedder 和 reranker 共享相同 `ModelArchitecture`（如都是 XLM-R），编码器权重只加载一份。Reranker 只额外加载分类器 head 权重。不同架构时各自独立加载。
+
+**数据流零拷贝 (REQ-PIPELINE-002)**：管线内部的 hidden_states/embeddings 在阶段间通过引用传递，不做内存拷贝。Reranker 直接消费 embedder encoder 的 hidden_states 输出。
+
+#### ArchFamily 感知图融合 (ARCH-FAMILY-AWARE-FUSION)
+
+**REQ-PIPELINE-003**: 图优化器必须感知 `ArchFamily`，在融合算子中正确设置注意力 mask 类型：
+
+| ArchFamily | FlashAttention.causal | 注意力模式 | 位置编码 |
+|-----------|----------------------|-----------|---------|
+| Encoder | `false` (双向) | 全注意力矩阵 | 绝对位置 |
+| Decoder | `true` (因果) | 下三角 mask | RoPE |
+
+**禁止**: `FlashAttentionConfig.causal` 硬编码 `true`。必须从 `OptimizationContext.arch_family` 读取。
+
+**实现位置**: `src/graph/optimizer/pattern_fusion.rs` 的 `FlashAttentionFusionPass` 和 `CanonicalizeAttentionPass`。
+
 ### 公共 API
 
 **同步/异步客户端**：提供 `Client` 和 `AsyncClient` 两种接口类型
 
 **Builder 模式**：支持链式调用配置生成参数
-- `embeddings([texts])` - 批量文本向量化
+- `embed([texts])` - 批量文本向量化（可选 rerank + generate）
 - `rerank(query, docs)` - 文本重排序
 - `generate(prompt).max_tokens(n)` - 文本生成
 
