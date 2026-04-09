@@ -800,7 +800,7 @@ impl FusedGraphExecutor {
         cache: &crate::compat::artifact_cache::ArtifactCache,
     ) -> Result<(), ExecutionError> {
         // Generate model hash for filename (REQ-JIT-CACHE-003 format)
-        let model_hash = cache.get_model_hash(model_id, &self.graph);
+        let model_hash = cache.get_model_hash(model_id, &self.graph, "default");
 
         // 1. Try L3 Cache bypass (load by model_hash + backend)
         if let Some(blob) = cache.load_blob(&model_hash, backend) {

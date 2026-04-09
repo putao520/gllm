@@ -38,9 +38,12 @@ impl ArtifactCache {
     /// Calculate model hash (excluding backend) for the L3 cache filename.
     ///
     /// Returns a short hash (first 16 chars of SHA256) for the model structure.
-    pub fn get_model_hash(&self, model_id: &str, graph: &FusedGraph) -> String {
+    /// REQ-ARB-009: includes inference_mode so Latency/Throughput caches don't collide.
+    pub fn get_model_hash(&self, model_id: &str, graph: &FusedGraph, inference_mode: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(model_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(inference_mode.as_bytes());
         hasher.update(b"|");
 
         // Use Debug print of the graph structure as structural unique key
@@ -56,9 +59,12 @@ impl ArtifactCache {
     /// Calculate the full blueprint hash (including hardware fingerprint) for cache validation.
     ///
     /// This is used internally to verify that a cached binary matches the current hardware.
-    pub fn get_blueprint_hash(&self, model_id: &str, graph: &FusedGraph, hardware_fingerprint: &str) -> String {
+    /// REQ-ARB-009: includes inference_mode in hash.
+    pub fn get_blueprint_hash(&self, model_id: &str, graph: &FusedGraph, hardware_fingerprint: &str, inference_mode: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(model_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(inference_mode.as_bytes());
         hasher.update(b"|");
 
         // Use Debug print of the graph structure as structural unique key
