@@ -122,17 +122,26 @@ impl From<crate::model_config::ModelConfigError> for ClientError {
 pub struct ClientState {
     pub model_id: String,
     pub manifest: Arc<ModelManifest>,
-    pub backend: BackendContext,
+    pub backend: Arc<BackendContext>,
     pub inference_mode: InferenceMode,
     pub reranker_state: Option<PipelineModelState>,
     pub generator_state: Option<PipelineModelState>,
 }
 
 /// State for a pipeline sub-model (reranker or generator).
+///
+/// When `shared_encoder` is true, `backend` is an `Arc` clone of the primary
+/// model's backend — both embedder and reranker share the same encoder weights
+/// and executor, eliminating duplicate weight loads for same-architecture pairs
+/// (e.g. BAAI/bge-m3 + BAAI/bge-reranker-v2-m3, both XLM-R).
 pub struct PipelineModelState {
     pub model_id: String,
     pub manifest: Arc<ModelManifest>,
-    pub backend: BackendContext,
+    pub backend: Arc<BackendContext>,
+    /// True when this pipeline model shares the primary model's encoder backend
+    /// (same `ModelArchitecture`). The reranker uses CLS→Classifier while the
+    /// embedder uses MeanPool→L2Norm, but the encoder forward pass is identical.
+    pub shared_encoder: bool,
 }
 
 // ============================================================================
@@ -238,6 +247,12 @@ impl ClientBuilder {
     }
 
     /// Build the `Client` and load the model synchronously.
+    ///
+    /// When both an embedder and reranker are configured with the same
+    /// `ModelArchitecture`, the encoder backend is shared (Arc clone) to
+    /// avoid loading duplicate weights. The reranker uses CLS→Classifier
+    /// while the embedder uses MeanPool→L2Norm, but the underlying
+    /// encoder forward pass is identical.
     pub fn build(self) -> Result<Client, ClientError> {
         let model_id = self
             .model_id
@@ -246,8 +261,14 @@ impl ClientBuilder {
         let mut state = Self::build_state(&model_id, kind, self.inference_mode)?;
 
         if let Some(ref reranker_id) = self.reranker_model_id {
-            state.reranker_state =
-                Some(Self::build_pipeline_model(reranker_id, ModelKind::Reranker)?);
+            state.reranker_state = Some(
+                Self::build_pipeline_model_with_sharing(
+                    reranker_id,
+                    ModelKind::Reranker,
+                    &state.manifest,
+                    &state.backend,
+                )?
+            );
         }
 
         if let Some(ref generator_id) = self.generator_model_id {
@@ -371,7 +392,7 @@ impl ClientBuilder {
         Ok(ClientState {
             model_id: model_id.to_string(),
             manifest,
-            backend,
+            backend: Arc::new(backend),
             inference_mode,
             reranker_state: None,
             generator_state: None,
@@ -391,6 +412,7 @@ impl ClientBuilder {
             model_id: state.model_id,
             manifest: state.manifest,
             backend: state.backend,
+            shared_encoder: false,
         })
     }
 }
