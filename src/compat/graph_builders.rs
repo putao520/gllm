@@ -23,11 +23,11 @@ use gllm_kernels::types::DType;
 pub(crate) fn build_fused_attention_layer_graph_symbolic(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> CompilerGraph {
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let num_kv_heads = config.attention.num_kv_heads;
     let head_dim = config.attention.head_dim;
-    let eps = config.norm_eps;
+    let eps = config.norm_eps();
     let rope_theta = config.rope.theta;
     let dtype = crate::compat::jit_helpers::computation_dtype_from_config(config);
     let mut g = CompilerGraph::new();
@@ -158,9 +158,9 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
 pub(crate) fn build_fused_ffn_layer_graph_symbolic(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> CompilerGraph {
-    let hidden = config.hidden_size;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
+    let hidden = config.hidden_size();
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
     let dtype = crate::compat::jit_helpers::computation_dtype_from_config(config);
     let mut g = CompilerGraph::new();
     let dt = dtype;
@@ -221,12 +221,12 @@ pub(crate) fn build_fused_ffn_layer_graph_symbolic(
 pub(crate) fn build_fused_moe_layer_graph_symbolic(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> CompilerGraph {
-    let hidden = config.hidden_size;
-    let inter = config.intermediate_size;
+    let hidden = config.hidden_size();
+    let inter = config.intermediate_size();
     let moe = config.moe_config.as_ref().unwrap();
     let num_experts = moe.num_experts;
     let top_k = moe.num_experts_per_tok;
-    let eps = config.norm_eps;
+    let eps = config.norm_eps();
     let dtype = crate::compat::jit_helpers::computation_dtype_from_config(config);
     let mut g = CompilerGraph::new();
     let dt = dtype;

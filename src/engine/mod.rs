@@ -49,11 +49,11 @@ impl EngineContext {
     /// 从执行器配置创建引擎上下文 (Ω1: 从实际模型配置读取)
     pub fn from_executor_config(config: &GeneratorForwardConfig) -> Self {
         Self {
-            num_layers: config.num_layers,
-            hidden_size: config.hidden_size,
+            num_layers: config.num_layers(),
+            hidden_size: config.hidden_size(),
             kv_page_size: config.paged_kv.page_size,
-            num_kv_heads: config.attention.num_kv_heads,
-            max_seq_len: config.max_seq_len,
+            num_kv_heads: config.num_kv_heads(),
+            max_seq_len: config.max_seq_len(),
         }
     }
 }

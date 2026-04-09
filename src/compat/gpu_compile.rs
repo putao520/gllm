@@ -54,12 +54,12 @@ impl GpuKvCacheMeta {
 
     pub fn from_config(config: &KvCacheConfig, device_ptr: u64) -> Self {
         let kv_dtype = DType::F32; // KvCacheConfig.dtype_size carries raw bytes; derive DType
-        let total_bytes = config.num_layers * 2
+        let total_bytes = config.num_layers() * 2
             * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size();
         Self {
             device_ptr,
             total_bytes,
-            num_layers: config.num_layers,
+            num_layers: config.num_layers(),
             num_kv_heads: config.num_heads,
             max_seq_len: config.max_seq_len,
             head_dim: config.head_dim,
@@ -1639,12 +1639,12 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
     }
 
     let seq_len = tokens.len();
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
     let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
     // ── Step (a-d): Embedding lookup + LayerNorm (CPU, same as CPU path) ──
@@ -1795,14 +1795,14 @@ pub(super) fn cuda_decoder_forward<E: Element>(
         )));
     }
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let num_kv_heads = config.attention.num_kv_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
-    let vocab_size = config.vocab_size;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
+    let vocab_size = config.vocab_size();
 
     // Flatten all sequences into a single batch dimension
     // Embedding lookup (CPU, dtype-adaptive)
@@ -2582,12 +2582,12 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
     let gfx_arch = device.gfx_arch();
 
     let seq_len = tokens.len();
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
     let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
     let mut hidden_state = super::gpu_helpers::embed_tokens_gpu(tokens, weights, backend, config)?;
@@ -2919,12 +2919,12 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     };
 
     let seq_len = tokens.len();
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
     let transpose_w = super::gpu_helpers::needs_weight_transpose_gpu(weights);
 
     // Embedding lookup on CPU
@@ -3496,14 +3496,14 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let gpu_profile = &backend.gpu_profile;
     let gfx_arch = device.gfx_arch();
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let num_kv_heads = config.attention.num_kv_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
-    let vocab_size = config.vocab_size;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
+    let vocab_size = config.vocab_size();
 
     // Flatten all sequences into a single batch dimension
     // Embedding lookup (CPU, dtype-adaptive)
@@ -4065,14 +4065,14 @@ pub(super) fn metal_decoder_forward<E: Element>(
         }
     };
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let num_heads = config.attention.num_heads;
     let num_kv_heads = config.attention.num_kv_heads;
     let head_dim = config.attention.head_dim;
-    let inter = config.intermediate_size;
-    let eps = config.norm_eps;
-    let num_layers = config.num_layers;
-    let vocab_size = config.vocab_size;
+    let inter = config.intermediate_size();
+    let eps = config.norm_eps();
+    let num_layers = config.num_layers();
+    let vocab_size = config.vocab_size();
 
     // Embedding lookup (CPU, dtype-adaptive)
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);

@@ -36,8 +36,8 @@ pub(crate) fn decoder_forward<E: Element>(
         return Err(BE::Other("Decoder forward only supports f32 element type".into()));
     }
 
-    let hidden = config.hidden_size;
-    let vocab_size = config.vocab_size;
+    let hidden = config.hidden_size();
+    let vocab_size = config.vocab_size();
 
     let mut results = Vec::with_capacity(input.sequences.len());
     let total_sparsity = 0.0f32;
@@ -60,8 +60,8 @@ pub(crate) fn decoder_forward<E: Element>(
         let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
         let embed_vocab = embed_data.len() / hidden;
-        // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
-        let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+        // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
+        let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
         for (s, &tok) in tokens.iter().enumerate() {
             let v = tok as usize;
             if v >= embed_vocab {
@@ -211,7 +211,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
         return Err(BE::Other("Decoder embedding forward only supports f32".into()));
     }
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
 
     let seq_len = tokens.len();
 
@@ -227,8 +227,8 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -313,7 +313,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         return Err(BE::Other("Decoder rerank forward only supports f32".into()));
     }
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
 
     let seq_len = tokens.len();
 
@@ -329,8 +329,8 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -458,7 +458,7 @@ pub fn forward_to_layer<E: Element>(
         return Err(BE::Other("forward_to_layer only supports f32".into()));
     }
 
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let seq_len = tokens.len();
 
     if seq_len == 0 {
@@ -477,7 +477,7 @@ pub fn forward_to_layer<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -582,7 +582,7 @@ pub fn forward_to_semantic_layer<E: Element>(
     config: &GeneratorForwardConfig,
     target: crate::knowledge::LayerTarget,
 ) -> Result<Vec<f32>, BE> {
-    let target_layer = layer_target_to_idx(target, config.num_layers);
+    let target_layer = layer_target_to_idx(target, config.num_layers());
     forward_to_layer(backend, tokens, weights, config, target_layer)
 }
 

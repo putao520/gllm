@@ -63,7 +63,7 @@ pub fn inject_frozen_kv<E: Element>(
 
     // Step 1: Run encoder forward to get K/V tensors
     // For now, we use a simplified approach: compute K/V from attention projection
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let _num_heads = config.attention.num_heads;
     let num_kv_heads = config.attention.num_kv_heads;
     let head_dim = config.attention.head_dim;
@@ -76,7 +76,7 @@ pub fn inject_frozen_kv<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -134,7 +134,7 @@ pub fn inject_frozen_kv<E: Element>(
                 .flat_map(|v| v.to_le_bytes())
                 .collect();
 
-            let _total_kv_layers = config.num_layers;
+            let _total_kv_layers = config.num_layers();
             let layer_kv_byte_size = k_bytes.len() + v_bytes.len();
 
             // Calculate offset for target layer (in bytes)

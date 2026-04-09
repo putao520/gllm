@@ -28,8 +28,8 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     let _kern = gllm_kernels::cpu_kernels::CpuKernels::<f32>::new();
 
     let seq_len = tokens.len();
-    let hidden = config.hidden_size;
-    let eps = config.norm_eps;
+    let hidden = config.hidden_size();
+    let eps = config.norm_eps();
 
     // Step (a): Token embedding lookup
     // All formats store embeddings as [vocab, hidden] in row-major after dequant.
@@ -38,8 +38,8 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")),
     )?;
     let word_emb = typed_bytes_to_f32(&word_emb_bytes, word_emb_dtype);
-    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype);
+    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
     {
         let vocab = word_emb.len() / hidden;
         for (s, &tok) in tokens.iter().enumerate() {

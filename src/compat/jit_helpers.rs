@@ -132,7 +132,7 @@ pub(crate) fn typed_bytes_to_f32(data: &[u8], dtype: DType) -> Vec<f32> {
 pub(crate) fn computation_dtype_from_config(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> DType {
-    config.dtype
+    config.dtype()
 }
 
 /// Convert a `gllm_kernels::types::DType` to the `crate::compat::DType` used in `ModelArchKey`.

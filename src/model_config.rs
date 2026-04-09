@@ -12,6 +12,84 @@ use crate::loader::{
 use crate::manifest::{ModelManifest, TensorRole};
 use gllm_kernels::types::DType;
 
+/// Model geometric constants — single source of truth.
+/// Created once from ModelConfig, immutable, Arc-shared across all subsystems.
+/// Eliminates field copying between GeneratorForwardConfig, KvCacheConfig,
+/// AttentionTopology, ResolvedConfig, OptimizationContext, etc.
+#[derive(Debug, Clone)]
+pub struct ModelGeometry {
+    // ── Core dimensions ──
+    pub hidden_size: usize,
+    pub num_layers: usize,
+    pub vocab_size: usize,
+    pub intermediate_size: usize,
+
+    // ── Attention ──
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub max_seq_len: usize,
+
+    // ── RoPE ──
+    pub rope_theta: f64,
+    pub rope_scale: f64,
+    pub rope_interleaved: bool,
+
+    // ── Precision ──
+    pub dtype: DType,
+    pub norm_eps: f32,
+
+    // ── MoE ──
+    pub num_experts: usize,
+    pub moe_top_k: usize,
+    pub expert_intermediate_size: usize,
+}
+
+impl ModelGeometry {
+    /// Create from ModelConfig + manifest MoE info.
+    /// This is the ONLY place model geometry is derived.
+    pub fn from_config(config: &ModelConfig, moe_config: Option<crate::manifest::MoEConfig>) -> Self {
+        let intermediate_size = config.intermediate_size.unwrap_or(config.hidden_size * 4);
+        let num_experts = moe_config.map(|c| c.num_experts).unwrap_or(0);
+        let moe_top_k = moe_config.map(|c| c.num_experts_per_tok).unwrap_or(0);
+        let expert_intermediate_size = config.expert_intermediate_size.unwrap_or(intermediate_size);
+
+        Self {
+            hidden_size: config.hidden_size,
+            num_layers: config.num_hidden_layers,
+            vocab_size: config.vocab_size,
+            intermediate_size,
+            num_heads: config.num_attention_heads,
+            num_kv_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            max_seq_len: config.max_position_embeddings,
+            rope_theta: config.rope_theta as f64,
+            rope_scale: config.rope_scale as f64,
+            rope_interleaved: config.rope_interleaved,
+            dtype: config.dtype,
+            norm_eps: config.layer_norm_epsilon.unwrap_or(1e-12),
+            num_experts,
+            moe_top_k,
+            expert_intermediate_size,
+        }
+    }
+
+    /// Whether this is a MoE model.
+    pub fn is_moe(&self) -> bool {
+        self.num_experts > 0
+    }
+
+    /// KV cache bytes per token (for memory estimation).
+    pub fn kv_bytes_per_token(&self) -> usize {
+        2 * self.num_kv_heads * self.head_dim * self.num_layers * self.dtype.size_bytes()
+    }
+
+    /// Expert weight bytes (gate + up + down matrices).
+    pub fn expert_weight_bytes(&self) -> usize {
+        self.hidden_size * self.expert_intermediate_size * 3 * self.dtype.size_bytes()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ModelConfigError {
     #[error("metadata-driven config unavailable")]

@@ -541,7 +541,7 @@ pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
     backend: &B,
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> Result<Vec<u8>, BE> {
-    let hidden = config.hidden_size;
+    let hidden = config.hidden_size();
     let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
     let elem_bytes = comp_dtype.size_bytes();
 

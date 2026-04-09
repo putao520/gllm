@@ -64,27 +64,21 @@ pub struct PagedKvConfig {
 /// Static configuration for the generator forward pass.
 #[derive(Debug, Clone)]
 pub struct GeneratorForwardConfig {
-    pub hidden_size: usize,
-    pub num_layers: usize,
+    /// Model geometric constants (Arc-shared single source of truth).
+    pub geometry: Arc<crate::model_config::ModelGeometry>,
+    /// Attention head config (convenience view, derived from geometry).
     pub attention: AttentionHeadConfig,
-    pub max_seq_len: usize,
-    pub vocab_size: usize,
+    /// RoPE config (convenience view, derived from geometry).
     pub rope: RoPEConfig,
     pub position_encoding: PositionEncoding,
     /// Architecture family (Encoder vs Decoder).
     pub arch_family: crate::manifest::ArchFamily,
-    /// FFN intermediate dimension.
-    pub intermediate_size: usize,
-    /// LayerNorm epsilon.
-    pub norm_eps: f32,
     /// Token ID for "yes" (used by decoder-based rerankers without a score head).
     pub rerank_yes_token_id: Option<u32>,
     /// Token ID for "no" (used by decoder-based rerankers without a score head).
     pub rerank_no_token_id: Option<u32>,
     /// MoE configuration (None for dense models).
     pub moe_config: Option<crate::manifest::MoEConfig>,
-    /// Model weight dtype (F32/F16/BF16).
-    pub dtype: DType,
     /// Paged KV cache configuration.
     pub paged_kv: PagedKvConfig,
     /// YAML→JIT graph executor pointer.
@@ -96,6 +90,20 @@ pub struct GeneratorForwardConfig {
 }
 
 impl GeneratorForwardConfig {
+    /// Backward-compatible accessor: hidden size.
+    pub fn hidden_size(&self) -> usize { self.geometry.hidden_size }
+    /// Backward-compatible accessor: number of layers.
+    pub fn num_layers(&self) -> usize { self.geometry.num_layers }
+    /// Backward-compatible accessor: vocabulary size.
+    pub fn vocab_size(&self) -> usize { self.geometry.vocab_size }
+    /// Backward-compatible accessor: FFN intermediate dimension.
+    pub fn intermediate_size(&self) -> usize { self.geometry.intermediate_size }
+    /// Backward-compatible accessor: LayerNorm epsilon.
+    pub fn norm_eps(&self) -> f32 { self.geometry.norm_eps }
+    /// Backward-compatible accessor: model weight dtype.
+    pub fn dtype(&self) -> DType { self.geometry.dtype }
+    /// Backward-compatible accessor: maximum sequence length.
+    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
     /// Backward-compatible accessor: number of attention heads.
     pub fn num_heads(&self) -> usize { self.attention.num_heads }
     /// Backward-compatible accessor: number of KV heads.
@@ -133,9 +141,9 @@ impl GeneratorForwardConfig {
     #[allow(dead_code)]
     pub(crate) fn layer_dims(&self) -> crate::compat::types::LayerDims {
         crate::compat::types::LayerDims {
-            hidden: self.hidden_size,
-            inter: self.intermediate_size,
-            eps: self.norm_eps,
+            hidden: self.geometry.hidden_size,
+            inter: self.geometry.intermediate_size,
+            eps: self.geometry.norm_eps,
             rope_theta: self.rope.theta,
         }
     }
@@ -416,6 +424,7 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     manifest: Arc<ModelManifest>,
     weights: WeightsHandle<B, E>,
     add_special_tokens: bool,
+    geometry: Arc<crate::model_config::ModelGeometry>,
     model_config: ModelConfig,
     forward_config: GeneratorForwardConfig,
     kv_cache_config: KvCacheConfig,
@@ -465,18 +474,6 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
 /// Backward-compatible type alias for f32 executor.
 pub type ExecutorF32<B> = Executor<B, f32>;
 
-/// Fields extracted from `ModelConfig` before it moves into `Executor`.
-/// Groups all pre-move reads in one place for clarity.
-struct PreMoveConfig {
-    moe_num_experts: usize,
-    moe_top_k: usize,
-    num_hidden_layers: usize,
-    hidden_size: usize,
-    vocab_size: usize,
-    dtype: DType,
-    moe_expert_inter: usize,
-}
-
 impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn from_loader(
         backend: B,
@@ -500,39 +497,41 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             _ => PositionEncoding::Rope,
         };
+        // Validate intermediate_size is present before creating geometry
+        if model_config.intermediate_size.is_none() {
+            return Err(ExecutorError::Config(ModelConfigError::InvalidConfig(
+                "model config missing intermediate_size (FFN hidden dimension)".to_string(),
+            )));
+        }
+
+        // Create geometry ONCE — single source of truth for all model dimensions
+        let geometry = Arc::new(crate::model_config::ModelGeometry::from_config(
+            &model_config,
+            manifest.moe_config,
+        ));
+
         let forward_config = GeneratorForwardConfig {
-            hidden_size: model_config.hidden_size,
-            num_layers: model_config.num_hidden_layers,
+            geometry: geometry.clone(),
             attention: AttentionHeadConfig {
-                num_heads: model_config.num_attention_heads,
-                num_kv_heads: model_config.num_key_value_heads,
-                head_dim: model_config.head_dim,
+                num_heads: geometry.num_heads,
+                num_kv_heads: geometry.num_kv_heads,
+                head_dim: geometry.head_dim,
             },
-            max_seq_len: model_config.max_position_embeddings,
-            vocab_size: model_config.vocab_size,
             rope: RoPEConfig {
-                theta: model_config.rope_theta as f64,
-                scale: model_config.rope_scale as f64,
-                interleaved: model_config.rope_interleaved,
+                theta: geometry.rope_theta,
+                scale: geometry.rope_scale,
+                interleaved: geometry.rope_interleaved,
                 precompute: true,
             },
             position_encoding,
             arch_family: manifest.arch.family(),
-            intermediate_size: model_config.intermediate_size.ok_or_else(|| {
-                ExecutorError::Config(ModelConfigError::InvalidConfig(
-                    "model config missing intermediate_size (FFN hidden dimension)".to_string(),
-                ))
-            })?,
-            norm_eps: model_config.layer_norm_epsilon.unwrap_or(1e-12), // LEGAL: eps=1e-12 是 LayerNorm 的行业标准默认值
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
-            dtype: model_config.dtype,
             paged_kv: PagedKvConfig {
                 page_table: None,
                 page_size: model_config.kv_cache_block_size,
             },
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             graph_executor_ptr: std::ptr::null_mut(),
             callback_chain_ptr: std::ptr::null_mut(),
         };
@@ -557,28 +556,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
 
         let kv_cache_config = KvCacheConfig {
-            num_layers: model_config.num_hidden_layers,
-            num_heads: model_config.num_key_value_heads,
-            head_dim: model_config.head_dim,
-            max_seq_len: model_config.max_position_embeddings,
+            num_layers: geometry.num_layers,
+            num_heads: geometry.num_kv_heads,
+            head_dim: geometry.head_dim,
+            max_seq_len: geometry.max_seq_len,
             kv_dtype,
             page_size,
             swap_config: None,
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
 
-        // Extract all fields needed after model_config moves into Self.
-        let pre = PreMoveConfig {
-            moe_num_experts: manifest.moe_config.map(|c| c.num_experts).unwrap_or(0),
-            moe_top_k: manifest.moe_config.map(|c| c.num_experts_per_tok).unwrap_or(2),
-            num_hidden_layers: model_config.num_hidden_layers,
-            hidden_size: model_config.hidden_size,
-            vocab_size: model_config.vocab_size,
-            dtype: model_config.dtype,
-            moe_expert_inter: model_config.expert_intermediate_size
-                .unwrap_or(model_config.intermediate_size.unwrap_or(model_config.hidden_size * 4)),
-        };
-        let is_moe = pre.moe_num_experts > 0;
+        let is_moe = geometry.is_moe();
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -588,16 +576,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             GlobalMemoryManager::new_with_capacities(l1_capacity, l2_capacity, l3_capacity);
         let topology = match manifest.kind {
             ModelKind::Chat => AttentionTopology::causal(
-                model_config.num_attention_heads,
-                model_config.num_key_value_heads,
-                model_config.head_dim,
-                model_config.max_position_embeddings,
+                geometry.num_heads,
+                geometry.num_kv_heads,
+                geometry.head_dim,
+                geometry.max_seq_len,
             ),
             ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(
-                model_config.num_attention_heads,
-                model_config.num_key_value_heads,
-                model_config.head_dim,
-                model_config.max_position_embeddings,
+                geometry.num_heads,
+                geometry.num_kv_heads,
+                geometry.head_dim,
+                geometry.max_seq_len,
             ),
         };
 
@@ -607,18 +595,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template_by_arch, ResolvedConfig};
             register_builtin_templates();
             let resolved = ResolvedConfig {
-                num_hidden_layers: model_config.num_hidden_layers,
-                hidden_size: model_config.hidden_size,
-                num_attention_heads: model_config.num_attention_heads,
-                num_key_value_heads: model_config.num_key_value_heads,
-                head_dim: model_config.head_dim,
-                intermediate_size: model_config.intermediate_size,
-                vocab_size: model_config.vocab_size,
-                rope_theta: model_config.rope_theta as f64,
+                num_hidden_layers: geometry.num_layers,
+                hidden_size: geometry.hidden_size,
+                num_attention_heads: geometry.num_heads,
+                num_key_value_heads: geometry.num_kv_heads,
+                head_dim: geometry.head_dim,
+                intermediate_size: Some(geometry.intermediate_size),
+                vocab_size: geometry.vocab_size,
+                rope_theta: geometry.rope_theta,
                 dtype: "f32".to_string(),
                 extra: std::collections::HashMap::new(),
             };
-            let hidden = model_config.hidden_size;
+            let hidden = geometry.hidden_size;
             let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
             // Use "cpu" as backend identifier (REQ-JIT-CACHE-003)
             let backend = "cpu";
@@ -632,7 +620,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         &resolved,
                         1,
                         hidden,
-                        model_config.dtype,
+                        geometry.dtype,
                         model_id,
                         backend,
                         &cache
@@ -688,10 +676,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 log::info!("executor: §9.1 MegaKernelExecutor built from compiled graph_executor");
                 Some(super::mega_kernel::MegaKernelExecutor::from_graph_executor(
                     crate::graph::executor::FusedGraphExecutor::new(ge.graph().clone()),
-                    pre.num_hidden_layers,
-                    pre.hidden_size,
-                    pre.vocab_size,
-                    pre.dtype,
+                    geometry.num_layers,
+                    geometry.hidden_size,
+                    geometry.vocab_size,
+                    geometry.dtype,
                 ))
             } else {
                 None
@@ -708,24 +696,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
             let bias = &exec_plan.strategy_bias;
 
-            let thermal = crate::moe::thermal::ExpertThermalManager::new(pre.moe_num_experts)
+            let thermal = crate::moe::thermal::ExpertThermalManager::new(geometry.num_experts)
                 .with_eviction_aggressiveness(bias.expert_eviction_aggressiveness());
 
             let route_config = crate::moe::routing::ExpertRouteConfig::new(
-                pre.moe_num_experts,
-                pre.moe_top_k,
+                geometry.num_experts,
+                geometry.moe_top_k,
             );
             let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config);
 
-            let elem_bytes = pre.dtype.size_bytes();
-            let weight_bytes_per_expert = pre.hidden_size * pre.moe_expert_inter * 3 * elem_bytes;
             let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
-                pre.moe_num_experts,
-                weight_bytes_per_expert,
+                geometry.num_experts,
+                geometry.expert_weight_bytes(),
             ).with_prefetch_priority(bias.expert_prefetch_priority());
 
             let director_config = crate::jit::director::DirectorConfig {
-                num_experts: pre.moe_num_experts,
+                num_experts: geometry.num_experts,
                 ..Default::default()
             };
             let director = crate::jit::director::JitDirector::spawn(director_config);
@@ -743,6 +729,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             manifest,
             weights,
             add_special_tokens: true,
+            geometry: geometry.clone(),
             model_config,
             forward_config,
             kv_cache_config,
@@ -776,8 +763,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             mega_kernel,
             turboquant: {
                 // §11: 非 F32 模型自动启用 TurboQuant（FWHT + KV 非对称量化）
-                if pre.dtype != gllm_kernels::types::DType::F32 {
-                    log::info!("executor: §11 TurboQuant enabled (dtype={:?}, fwht=true)", pre.dtype);
+                if geometry.dtype != gllm_kernels::types::DType::F32 {
+                    log::info!("executor: §11 TurboQuant enabled (dtype={:?}, fwht=true)", geometry.dtype);
                     crate::kv_cache::turboquant::TurboQuantRuntime::new(
                         crate::kv_cache::turboquant::TurboQuantConfig {
                             bits: 4,
@@ -793,8 +780,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             },
             epilogue_subsystem: {
                 let config = crate::jit::epilogue_subsystem::EpilogueConfig {
-                    num_layers: pre.num_hidden_layers,
-                    num_experts: pre.moe_num_experts,
+                    num_layers: geometry.num_layers,
+                    num_experts: geometry.num_experts,
                     ..Default::default()
                 };
                 crate::jit::epilogue_subsystem::EpilogueSubsystem::new(config)
@@ -1098,7 +1085,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let tokens = self.backend.sample_from_tensor(
             logits,
             &self.topology,
-            self.model_config.vocab_size,
+            self.geometry.vocab_size,
             sampling,
         )?;
         tokens.into_iter().next().ok_or(ExecutorError::EmptySample)
@@ -1186,7 +1173,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
 
         // §9-§18: 构建完整 callback chain 并通过 forward_config 传递给 decoder_forward
-        let num_layers = self.forward_config.num_layers;
+        let num_layers = self.geometry.num_layers;
 
         // §13.1 Gate-First Skip callback
         let gate_decisions: Vec<crate::engine::callbacks::gate_skip::SkipDecision> = {
@@ -1526,7 +1513,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // §11 TurboQuant: 记录 per-channel scales 供下一步 KV 量化使用
         if self.turboquant.is_enabled() {
-            let kv_dim = self.kv_cache_config.num_heads * self.forward_config.attention.head_dim;
+            let kv_dim = self.kv_cache_config.num_heads * self.geometry.head_dim;
             // §11.2: 存储 per-channel scales（从 Epilogue 遥测白嫖）
             let per_ch_scale = self.telemetry_aggregator.per_channel_scale();
             if per_ch_scale > 0.0 {
