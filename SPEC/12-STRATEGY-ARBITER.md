@@ -693,7 +693,467 @@ cache_key = device_fingerprint + model_id + inference_mode
 | ExpertThermalManager | `expert_eviction_aggressiveness` | 驱逐阈值 |
 | ExpertWeightPrefetcher | `expert_prefetch_priority` | 预取优先级 |
 
-## 10. 关联文档
+## 10. 数学基础与辅助函数
+
+本节定义 SPEC 中所有公式使用的辅助函数。实现必须严格使用这些定义，禁止替换为近似形式。
+
+### 10.1 sigmoid (标准逻辑函数)
+
+```rust
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
+}
+```
+
+值域: (0.0, 1.0)。当 x=0 → 0.5，x=5 → 0.993，x=-5 → 0.007。
+
+**注意**: §3.5 中部分 sigmoid 输入可能为负值（例如 `(2048 - hidden_dim) / 2048` 当 hidden_dim=4096 时输入为 -1.0 → 输出 0.27），这是预期行为。
+
+### 10.2 lerp (线性插值)
+
+```rust
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + t * (b - a)
+}
+```
+
+当 t=0.0 → a，t=1.0 → b，t=0.5 → (a+b)/2。t 不要求在 [0,1] 内，但本 SPEC 中所有 t 均来自 GraphArchetype 维度（已 clamp 到 [0,1]）。
+
+### 10.3 clamp
+
+```rust
+fn clamp(x: f64, min: f64, max: f64) -> f64 {
+    x.max(min).min(max)
+}
+```
+
+## 11. StrategyBias 字段值域与验证
+
+### 11.1 字段合法范围
+
+每个 StrategyBias 字段有明确的合法范围。超出范围的值在 `validate()` 中被 clamp（不是 panic/error），因为 Arbiter 是数值计算，浮点累积偏差是正常现象。
+
+| 字段 | 最小值 | 最大值 | 含义 |
+|------|--------|--------|------|
+| `fusion_cost_scale` | 0.2 | 3.0 | 0.2 = 融合代价被低估 5×（极度偏好融合） |
+| `pipeline_cost_scale` | 0.2 | 3.0 | 同上 |
+| `parallelism_cost_scale` | 0.1 | 3.0 | 0.1 = MoE 极端场景可达 |
+| `epilogue_depth_preference` | 0.3 | 3.0 | 0.3 = 极度抑制 epilogue |
+| `k_depth_preference` | 0.3 | 3.0 | 0.3 = 极度抑制 pipeline |
+| `kv_cache_budget_scale` | 0.2 | 3.0 | L2 预算倍率 |
+| `weight_prefetch_budget_scale` | 0.2 | 3.0 | L2 预算倍率 |
+| `batch_flexibility` | 0.0 | 1.0 | 0.0 = batch=1 硬约束 |
+| `decode_ratio_scale` | 0.3 | 2.0 | decode/prefill 混合比倍率 |
+| `expert_eviction_aggressiveness` | 0.0 | 2.0 | 0.0 = 全部常驻 |
+| `expert_prefetch_priority` | 0.1 | 5.0 | 5.0 = 极激进预取 |
+| `speculative_decoding_value` | 0.1 | 3.0 | 收益倍率 |
+| `quantization_aggressiveness` | 0.3 | 3.0 | 量化倾向倍率 |
+
+### 11.2 validate() 实现
+
+```rust
+impl StrategyBias {
+    /// clamp 所有字段到合法范围。不 panic，不返回 error。
+    pub fn validate(&mut self) {
+        self.fusion_cost_scale = self.fusion_cost_scale.clamp(0.2, 3.0);
+        self.pipeline_cost_scale = self.pipeline_cost_scale.clamp(0.2, 3.0);
+        self.parallelism_cost_scale = self.parallelism_cost_scale.clamp(0.1, 3.0);
+        self.epilogue_depth_preference = self.epilogue_depth_preference.clamp(0.3, 3.0);
+        self.k_depth_preference = self.k_depth_preference.clamp(0.3, 3.0);
+        self.kv_cache_budget_scale = self.kv_cache_budget_scale.clamp(0.2, 3.0);
+        self.weight_prefetch_budget_scale = self.weight_prefetch_budget_scale.clamp(0.2, 3.0);
+        self.batch_flexibility = self.batch_flexibility.clamp(0.0, 1.0);
+        self.decode_ratio_scale = self.decode_ratio_scale.clamp(0.3, 2.0);
+        self.expert_eviction_aggressiveness = self.expert_eviction_aggressiveness.clamp(0.0, 2.0);
+        self.expert_prefetch_priority = self.expert_prefetch_priority.clamp(0.1, 5.0);
+        self.speculative_decoding_value = self.speculative_decoding_value.clamp(0.1, 3.0);
+        self.quantization_aggressiveness = self.quantization_aggressiveness.clamp(0.3, 3.0);
+    }
+}
+```
+
+**REQ-ARB-010**: `validate()` 使用 clamp 而非 panic。Arbiter 是数值管线，边界值是合法的极端策略，不是错误。
+
+## 12. Throughput 模式 effective_M 循环依赖解决
+
+### 12.1 问题
+
+RooflineAnalyzer（Level 0）需要 `effective_M` 计算算术强度，但精确的 batch size 由 BatchSolver（Level 3）决定。这形成循环依赖。
+
+### 12.2 解决方案: 两阶段求解
+
+```
+阶段 1: 使用估算 M 完成初始求解
+  estimated_M = estimate_batch_size(mode, profile, model)
+  roofline = RooflineAnalyzer::analyze(profile, model, estimated_M)
+  → 完成 Level 0~4 全部求解 → 初始 HwOptPlan
+
+阶段 2: 用初始 BatchPlan 的实际 batch size 校正（仅当偏差显著时）
+  actual_M = initial_plan.batch.decode_slots
+  if abs(actual_M - estimated_M) / estimated_M > 0.5:  // 偏差超过 50%
+      重新用 actual_M 跑 RooflineAnalyzer → 重新求解（最多 1 轮校正）
+```
+
+### 12.3 estimate_batch_size() 估算函数
+
+```rust
+fn estimate_batch_size(mode: InferenceMode, profile: &DeviceProfile, model: &ModelConfig) -> usize {
+    match mode {
+        InferenceMode::Latency => 1,  // 永远是 1，无需估算
+        InferenceMode::Throughput => {
+            // 目标: GPU 内存的 60% 给 KV cache + 权重，剩余给 batch
+            // batch_M ≈ remaining_memory / (kv_per_token × max_seq_len)
+            // 保守估算: min(64, gpu_memory_gb × 4)
+            // CPU: min(32, num_cores × 2)
+            if profile.is_gpu() {
+                let gpu_mem_gb = profile.total_memory_bytes() / (1 << 30);
+                (gpu_mem_gb * 4).min(256).max(8) as usize
+            } else {
+                let cores = profile.num_cores();
+                (cores * 2).min(64).max(4)
+            }
+        }
+    }
+}
+```
+
+**REQ-ARB-011**: Throughput 模式使用两阶段求解打破循环依赖。Latency 模式 effective_M=1，无循环。校正最多执行 1 轮，禁止迭代收敛。
+
+## 13. CacheBudget 归一化公式
+
+当 StrategyBias 调制后 L2 三项预算（kv + weight + activation）之和超过 100% 时，按比例缩放：
+
+```
+raw_kv     = 0.40 × bias.kv_cache_budget_scale
+raw_weight = 0.35 × bias.weight_prefetch_budget_scale
+raw_act    = 0.25  // activation 不受 bias 调制
+
+total = raw_kv + raw_weight + raw_act
+
+if total > 1.0:
+    kv_ratio     = raw_kv / total
+    weight_ratio = raw_weight / total
+    act_ratio    = raw_act / total
+else:
+    kv_ratio     = raw_kv
+    weight_ratio = raw_weight
+    act_ratio    = 1.0 - raw_kv - raw_weight  // activation 吃剩余
+
+kv_budget     = L2 × kv_ratio
+weight_budget = L2 × weight_ratio
+activation    = L2 × act_ratio
+```
+
+**REQ-ARB-012**: activation 预算不受 bias 直接调制。activation 始终 = L2 × (1 - kv_ratio - weight_ratio)，作为 kv 和 weight 调制的被动结果。
+
+## 14. CostModel 注入方向规则
+
+**核心原则**: StrategyBias 的 `*_cost_scale` 系列字段遵循统一语义——**乘到代价侧，除到收益侧**。
+
+```
+代价侧 (越低越好):
+  adjusted_cost = base_cost × bias.*_cost_scale
+  // cost_scale < 1.0 → 代价降低 → Solver 更倾向选择该策略
+
+收益侧 (越高越好):
+  adjusted_benefit = base_benefit × (1.0 / bias.*_cost_scale)
+  // cost_scale < 1.0 → 1/scale > 1.0 → 收益放大 → Solver 更倾向选择该策略
+```
+
+**方向一致性**: 对于同一个 bias 字段，代价侧和收益侧的调制方向必须一致。`fusion_cost_scale = 0.5` 意味着"融合的代价减半"和"融合的收益翻倍"，二者效果相同。
+
+### 14.1 各 Solver 注入方向表
+
+| Solver | 注入点 | bias 字段 | 注入方式 | 效果 |
+|--------|-------|----------|---------|------|
+| GemmSolver | T_overhead (pipeline setup) | `pipeline_cost_scale` | `T_overhead × scale` | scale↓ → pipeline 便宜 → 偏好深 k_depth |
+| GemmSolver | k_depth 候选范围 | `k_depth_preference` | pref>1.0 → 扩展候选 | pref↑ → 更多 k_depth 选项 |
+| GemmSolver | max_epilogue_depth | `epilogue_depth_preference` | `base × pref` | pref↑ → 允许更深 epilogue |
+| FusionSolver | fusion_savings | `fusion_cost_scale` | `savings × (1/scale)` | scale↓ → 收益放大 → 偏好融合 |
+| FusionSolver | TileFusion 阈值 | `fusion_cost_scale` | `threshold × scale` | scale↓ → 阈值降低 → 更多 TileFusion |
+| CacheBudgetSolver | L2 kv 比例 | `kv_cache_budget_scale` | `0.40 × scale` | scale↑ → KV 预算更大 |
+| CacheBudgetSolver | L2 weight 比例 | `weight_prefetch_budget_scale` | `0.35 × scale` | scale↑ → 权重预取预算更大 |
+| ParallelismSolver | sync_cost | `parallelism_cost_scale` | `sync_cost × scale` | scale↓ → 同步便宜 → 更多 wave |
+| BatchSolver | max_batch_size | `batch_flexibility` | `base × flex` | flex=0 → batch=1 |
+| BatchSolver | decode_ratio_cap | `decode_ratio_scale` | `cap × scale` | scale↑ → decode 占比上限更高 |
+| FeatureRouter | spec_decoding benefit | `speculative_decoding_value` | `benefit × value` | value↑ → 更倾向启用 |
+| FeatureRouter | quant benefit | `quantization_aggressiveness` | `benefit × aggr` | aggr↑ → 更倾向低比特 |
+
+**REQ-ARB-013**: 此表是 CostModel 注入的权威映射。实现时必须按此表的注入方式和方向执行，禁止自行设计注入点。
+
+## 15. 黄金测试向量
+
+以下测试向量用于验证 Arbiter 实现的正确性。每个向量给出输入和期望的 StrategyBias 关键字段值（±10% 容差）。
+
+### 15.1 测试辅助: 标准 DeviceProfile
+
+```
+CPU_AVX2:    { is_gpu: false, num_simd_regs: 16, cache_sizes: (32768, 262144, 8388608) }
+CPU_AVX512:  { is_gpu: false, num_simd_regs: 32, cache_sizes: (49152, 1048576, 33554432) }
+GPU_A100:    { is_gpu: true,  num_simd_regs: 255, total_memory: 80GB }
+```
+
+### 15.2 向量 1: Llama-70B + Latency + CPU_AVX2
+
+```
+GraphArchetype: { compute: 0.95, memory: 0.60, parallel: 0.20, fusion: 0.85, pipeline: 0.15 }
+
+阶段 1 — mode_baseline(Latency):
+  fusion_cost_scale = 0.5
+  pipeline_cost_scale = 0.6
+  parallelism_cost_scale = 1.5
+  epilogue_depth_preference = 1.5
+  k_depth_preference = 1.3
+  batch_flexibility = 0.0
+
+阶段 2 — archetype 调制:
+  fusion_cost_scale = 0.5 × lerp(1.0, 0.6, 0.85) = 0.5 × 0.66 = 0.33 → clamp → 0.33
+  pipeline_cost_scale = 0.6 × lerp(1.0, 0.6, 0.15) = 0.6 × 0.94 = 0.564
+  parallelism_cost_scale = 1.5 × lerp(1.0, 0.5, 0.20) = 1.5 × 0.90 = 1.35
+  reg_tension = 0.85 - 0.15 = 0.70 > 0:
+    epilogue_depth_preference = 1.5 × (1.0 + 0.70 × 0.5) = 1.5 × 1.35 = 2.025
+    k_depth_preference = 1.3 × (1.0 - 0.70 × 0.3) = 1.3 × 0.79 = 1.027
+
+阶段 3 — 硬件微调 (CPU_AVX2, num_simd_regs=16):
+  reg_scarcity = 1.0 - 16/32 = 0.5
+  epilogue_depth_preference = 2.025 × (1.0 + 0.5 × 0.3) = 2.025 × 1.15 = 2.329
+  k_depth_preference = 1.027 × (1.0 - 0.5 × 0.2) = 1.027 × 0.90 = 0.924
+  l1_richness = (32768 / 65536).min(2.0) = 0.5
+  fusion_cost_scale = 0.33 × 1.0/sqrt(0.5) = 0.33 × 1.414 = 0.467
+  not GPU → pipeline_cost_scale 不变 = 0.564
+
+期望结果 (±10%):
+  fusion_cost_scale ≈ 0.47
+  pipeline_cost_scale ≈ 0.56
+  parallelism_cost_scale ≈ 1.35
+  epilogue_depth_preference ≈ 2.33
+  k_depth_preference ≈ 0.92
+  batch_flexibility = 0.0 (精确)
+
+解读: 极度偏好融合 (0.47)，深 epilogue (2.33)，batch=1 固定。
+符合预期: Llama-70B + Latency → memory-bound GEMV，融合每省一字节 = 省一 cycle。
+```
+
+### 15.3 向量 2: DeepSeek-V3 + Throughput + GPU_A100
+
+```
+GraphArchetype: { compute: 0.50, memory: 0.90, parallel: 0.99, fusion: 0.60, pipeline: 0.35 }
+
+阶段 1 — mode_baseline(Throughput):
+  fusion_cost_scale = 1.0
+  pipeline_cost_scale = 1.3
+  parallelism_cost_scale = 0.5
+  epilogue_depth_preference = 0.8
+  k_depth_preference = 0.8
+  batch_flexibility = 1.0
+  expert_eviction_aggressiveness = 0.8
+  expert_prefetch_priority = 1.5
+
+阶段 2 — archetype 调制:
+  fusion_cost_scale = 1.0 × lerp(1.0, 0.6, 0.60) = 1.0 × 0.76 = 0.76
+  pipeline_cost_scale = 1.3 × lerp(1.0, 0.6, 0.35) = 1.3 × 0.86 = 1.118
+  parallelism_cost_scale = 0.5 × lerp(1.0, 0.5, 0.99) = 0.5 × 0.505 = 0.253
+  reg_tension = 0.60 - 0.35 = 0.25 > 0:
+    epilogue_depth_preference = 0.8 × (1.0 + 0.25 × 0.5) = 0.8 × 1.125 = 0.90
+    k_depth_preference = 0.8 × (1.0 - 0.25 × 0.3) = 0.8 × 0.925 = 0.74
+  MoE (parallel > 0.5):
+    expert_eviction = 0.8 × lerp(1.0, 1.5, 0.90) = 0.8 × 1.45 = 1.16
+    expert_prefetch = 1.5 × lerp(1.0, 2.0, 0.90) = 1.5 × 1.90 = 2.85
+  kv_cache_budget_scale = 1.5 × lerp(1.0, 1.5, 0.90) = 1.5 × 1.45 = 2.175
+  quantization_aggressiveness = 0.8 × lerp(1.0, 1.3, 0.90) = 0.8 × 1.27 = 1.016
+
+阶段 3 — 硬件微调 (GPU_A100):
+  is_gpu → epilogue_depth_preference = 0.90 × 1.2 = 1.08
+  is_gpu → k_depth_preference = 0.74 × 1.2 = 0.888
+  is_gpu → pipeline_cost_scale = 1.118 × 1.2 = 1.342
+  not CPU (num_simd_regs > 16) → 无寄存器稀缺调制
+  l1_richness: GPU 的 cache_sizes.0 视为 shared_mem, 这里假设 49152
+    l1_richness = (49152 / 65536).min(2.0) = 0.75
+    fusion_cost_scale = 0.76 / sqrt(0.75) = 0.76 / 0.866 = 0.878
+
+期望结果 (±10%):
+  fusion_cost_scale ≈ 0.88
+  pipeline_cost_scale ≈ 1.34
+  parallelism_cost_scale ≈ 0.25
+  epilogue_depth_preference ≈ 1.08
+  k_depth_preference ≈ 0.89
+  batch_flexibility = 1.0 (精确)
+  expert_eviction ≈ 1.16
+  expert_prefetch ≈ 2.85
+
+解读: 极度偏好并行 (0.25)，极激进专家预取 (2.85)，pipeline 惩罚 (1.34)。
+符合预期: MoE 256 专家 + Throughput → wave 最大化，专家权重异步预取。
+```
+
+### 15.4 向量 3: Phi-4 (3B) + Latency + CPU_AVX512
+
+```
+GraphArchetype: { compute: 0.35, memory: 0.25, parallel: 0.10, fusion: 0.70, pipeline: 0.80 }
+
+阶段 1 — mode_baseline(Latency):
+  fusion_cost_scale = 0.5
+  pipeline_cost_scale = 0.6
+  k_depth_preference = 1.3
+  epilogue_depth_preference = 1.5
+
+阶段 2 — archetype 调制:
+  fusion_cost_scale = 0.5 × lerp(1.0, 0.6, 0.70) = 0.5 × 0.72 = 0.36
+  pipeline_cost_scale = 0.6 × lerp(1.0, 0.6, 0.80) = 0.6 × 0.68 = 0.408
+  parallelism_cost_scale = 1.5 × lerp(1.0, 0.5, 0.10) = 1.5 × 0.95 = 1.425
+  reg_tension = 0.70 - 0.80 = -0.10 < 0:
+    k_depth_preference = 1.3 × (1.0 + 0.10 × 0.5) = 1.3 × 1.05 = 1.365
+    epilogue_depth_preference = 1.5 × (1.0 - 0.10 × 0.3) = 1.5 × 0.97 = 1.455
+
+阶段 3 — 硬件微调 (CPU_AVX512, num_simd_regs=32):
+  num_simd_regs > 16 → 无寄存器稀缺调制
+  l1_richness = (49152 / 65536).min(2.0) = 0.75
+  fusion_cost_scale = 0.36 / sqrt(0.75) = 0.36 / 0.866 = 0.416
+  not GPU → pipeline_cost_scale 不变 = 0.408
+
+期望结果 (±10%):
+  fusion_cost_scale ≈ 0.42
+  pipeline_cost_scale ≈ 0.41
+  k_depth_preference ≈ 1.37
+  epilogue_depth_preference ≈ 1.46
+  batch_flexibility = 0.0 (精确)
+
+解读: 融合和流水线几乎等权偏好 (0.42 vs 0.41)，pipeline 略优先获得寄存器 (k_depth 1.37 > epilogue 1.46 的相对偏移较小)。
+符合预期: 小模型 + Latency → memory-bound，GEMM 小所以 pipeline 和 fusion 都极重要。
+```
+
+### 15.5 向量 4: Qwen3-7B + Throughput + GPU_A100
+
+```
+GraphArchetype: { compute: 0.73, memory: 0.40, parallel: 0.15, fusion: 0.80, pipeline: 0.45 }
+
+阶段 1 — mode_baseline(Throughput):
+  fusion_cost_scale = 1.0
+  parallelism_cost_scale = 0.5
+  batch_flexibility = 1.0
+  speculative_decoding_value = 0.3
+
+阶段 2 — archetype 调制:
+  fusion_cost_scale = 1.0 × lerp(1.0, 0.6, 0.80) = 1.0 × 0.68 = 0.68
+  parallelism_cost_scale = 0.5 × lerp(1.0, 0.5, 0.15) = 0.5 × 0.925 = 0.463
+  not MoE (parallel < 0.5) → 无专家调制
+
+阶段 3 — 硬件微调 (GPU_A100):
+  fusion_cost_scale: l1_richness = 0.75, 0.68 / 0.866 = 0.785
+
+期望结果 (±10%):
+  fusion_cost_scale ≈ 0.79
+  parallelism_cost_scale ≈ 0.46
+  batch_flexibility = 1.0 (精确)
+  speculative_decoding_value ≈ 0.3
+
+解读: 中度偏好融合 (0.79)，中度偏好并行 (0.46)。
+符合预期: Dense 7B + Throughput + GPU → 平衡策略，GEMM 够大不需要极端偏向。
+```
+
+### 15.6 测试验证规则
+
+**REQ-ARB-014**: 实现必须包含上述 4 个黄金测试向量作为单元测试。每个 StrategyBias 字段的实际值与期望值的偏差不超过 ±10%。测试失败意味着仲裁算法实现有误。
+
+```rust
+#[test]
+fn test_golden_vector_llama70b_latency_cpu_avx2() {
+    let archetype = GraphArchetype {
+        compute_intensive: 0.95,
+        memory_intensive: 0.60,
+        parallelism_exploitable: 0.20,
+        fusion_profitable: 0.85,
+        pipeline_valuable: 0.15,
+    };
+    let profile = DeviceProfile::test_cpu_avx2();
+    let bias = StrategyArbiter::arbitrate(InferenceMode::Latency, &archetype, &profile);
+
+    assert_approx(bias.fusion_cost_scale, 0.47, 0.10);
+    assert_approx(bias.pipeline_cost_scale, 0.56, 0.10);
+    assert_approx(bias.parallelism_cost_scale, 1.35, 0.10);
+    assert_approx(bias.epilogue_depth_preference, 2.33, 0.10);
+    assert_approx(bias.k_depth_preference, 0.92, 0.10);
+    assert_eq!(bias.batch_flexibility, 0.0);
+}
+
+fn assert_approx(actual: f64, expected: f64, tolerance_ratio: f64) {
+    let diff = (actual - expected).abs();
+    let max_diff = expected.abs() * tolerance_ratio;
+    assert!(diff <= max_diff,
+        "expected ≈{expected}, got {actual} (diff {diff} > tolerance {max_diff})");
+}
+```
+
+## 16. 常见实现错误与反模式
+
+### 16.1 ❌ 注入方向搞反
+
+```rust
+// ❌ 错误: fusion_cost_scale < 1.0 时反而提高了融合代价
+effective_savings = fusion_savings × bias.fusion_cost_scale;  // 应该是 ÷
+
+// ✅ 正确: fusion_cost_scale < 1.0 时融合收益放大
+effective_savings = fusion_savings × (1.0 / bias.fusion_cost_scale);
+// 或等价地: effective_savings = fusion_savings / bias.fusion_cost_scale;
+```
+
+### 16.2 ❌ 直接读 InferenceMode 做分支
+
+```rust
+// ❌ 错误: 绕过 StrategyBias
+if plan.inference_mode == InferenceMode::Latency {
+    self.max_batch = 1;
+    self.disable_continuous_batching();
+}
+
+// ✅ 正确: 通过 bias 传导
+self.max_batch = (base_max as f64 * plan.strategy_bias.batch_flexibility) as usize;
+// Latency mode: batch_flexibility = 0.0 → max_batch = 0 → 实际 max(1, 0) = 1
+```
+
+**注意**: `batch_flexibility = 0.0` 会导致 `max_batch = 0`，调用方必须 `max(1, computed)`。
+
+### 16.3 ❌ validate() 改为 panic
+
+```rust
+// ❌ 错误: 数值计算边界值不应 panic
+fn validate(&self) -> Result<(), ArbiterError> {
+    if self.fusion_cost_scale <= 0.0 { return Err(...); }
+}
+
+// ✅ 正确: clamp 到合法范围
+fn validate(&mut self) {
+    self.fusion_cost_scale = self.fusion_cost_scale.clamp(0.2, 3.0);
+}
+```
+
+### 16.4 ❌ sigmoid 用错形式
+
+```rust
+// ❌ 错误: 用 tanh 代替 sigmoid
+fn sigmoid(x: f64) -> f64 { x.tanh() }  // 值域 (-1, 1)，不是 (0, 1)
+
+// ❌ 错误: 用 ReLU 代替 sigmoid
+fn sigmoid(x: f64) -> f64 { x.max(0.0).min(1.0) }  // 线性 clamp，不是 S 曲线
+
+// ✅ 正确: 标准逻辑函数
+fn sigmoid(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
+```
+
+### 16.5 ❌ GraphArchetype 维度相加归一化
+
+```rust
+// ❌ 错误: 五维之和归一化为 1.0
+let total = c + m + p + f + pl;
+archetype.compute_intensive = c / total;
+// 这会丢失绝对强度信息！五维独立，不要求和为 1.0
+
+// ✅ 正确: 每个维度独立 clamp 到 [0, 1]
+archetype.compute_intensive = clamp(compute_raw, 0.0, 1.0);
+archetype.memory_intensive = clamp(memory_raw, 0.0, 1.0);
+// 五维之和可以 > 1.0 也可以 < 1.0
+```
+
+## 17. 关联文档
 
 | 文档 | 关系 |
 |------|------|
