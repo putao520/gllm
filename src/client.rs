@@ -415,6 +415,93 @@ impl ClientBuilder {
             shared_encoder: false,
         })
     }
+
+    /// Build a pipeline sub-model, sharing the primary model's encoder backend
+    /// when both models have the same `ModelArchitecture`.
+    ///
+    /// This avoids loading duplicate encoder weights for same-architecture pairs
+    /// (e.g. BAAI/bge-m3 embedder + BAAI/bge-reranker-v2-m3 reranker, both XLM-R).
+    ///
+    /// When architectures differ, falls back to independent loading via
+    /// `build_pipeline_model`.
+    fn build_pipeline_model_with_sharing(
+        model_id: &str,
+        kind: ModelKind,
+        primary_manifest: &Arc<ModelManifest>,
+        primary_backend: &Arc<BackendContext>,
+    ) -> Result<PipelineModelState, ClientError> {
+        // Resolve the pipeline model's manifest to determine its architecture.
+        let pipeline_manifest = Self::resolve_manifest(model_id, kind)?;
+
+        if pipeline_manifest.arch == primary_manifest.arch {
+            // Same architecture: share the primary model's encoder backend.
+            // The reranker uses CLS→Classifier while the embedder uses
+            // MeanPool→L2Norm, but the encoder forward pass is identical.
+            log::info!(
+                "pipeline: sharing encoder weights between primary ({}) and pipeline ({}) — architecture {:?}",
+                primary_manifest.model_id, model_id, pipeline_manifest.arch,
+            );
+            Ok(PipelineModelState {
+                model_id: model_id.to_string(),
+                manifest: Arc::new(pipeline_manifest),
+                backend: Arc::clone(primary_backend),
+                shared_encoder: true,
+            })
+        } else {
+            // Different architecture: load independently.
+            log::info!(
+                "pipeline: loading independent backend for {} (arch {:?} != primary {:?})",
+                model_id, pipeline_manifest.arch, primary_manifest.arch,
+            );
+            Self::build_pipeline_model(model_id, kind)
+        }
+    }
+
+    /// Resolve a model's manifest (architecture, kind, MoE config) without
+    /// constructing a full `BackendContext`.
+    ///
+    /// This performs weight loading and architecture detection but stops before
+    /// JIT compilation, making it suitable for arch-matching decisions.
+    fn resolve_manifest(
+        model_id: &str,
+        kind: ModelKind,
+    ) -> Result<ModelManifest, ClientError> {
+        let config = LoaderConfig::from_env();
+        let mut loader = Loader::from_source_with_config(model_id.to_string(), config)?;
+
+        let manifest = match loader.weight_format() {
+            WeightFormat::Gguf => {
+                loader = loader.load()?;
+                let arch_str = loader.gguf_architecture()?;
+                if let Some(arch) = map_architecture_token(arch_str) {
+                    let dummy_manifest = make_dummy_manifest(model_id, arch, kind);
+                    let cfg_result =
+                        crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
+                    let moe_config = cfg_result
+                        .as_ref()
+                        .ok()
+                        .and_then(|cfg| cfg.build_moe_config(arch));
+                    make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+                } else {
+                    return Err(ClientError::ModelNotFound(format!(
+                        "Unsupported GGUF architecture: {}",
+                        arch_str
+                    )));
+                }
+            }
+            WeightFormat::SafeTensors | WeightFormat::Onnx | WeightFormat::PyTorch => {
+                loader = loader.load()?;
+                let dummy_manifest = make_dummy_manifest(model_id, ModelArchitecture::Llama4, kind);
+                let derived_config =
+                    crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
+                let arch = loader.detect_architecture();
+                let moe_config = derived_config.build_moe_config(arch);
+                make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+            }
+        };
+
+        Ok(manifest)
+    }
 }
 
 impl Default for ClientBuilder {

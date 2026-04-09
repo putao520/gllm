@@ -1358,6 +1358,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // §17.9: 推测解码自适应决策
         let decode_count = interleaved.decode_slots.len();
         let spec_advice = self.spec_decoding.should_speculate(decode_count);
+        let spec_enabled = matches!(spec_advice, crate::jit::epilogue::SpecScheduleAdvice::EnableSpec);
         match spec_advice {
             crate::jit::epilogue::SpecScheduleAdvice::EnableSpec => {
                 log::debug!("executor: §17.9 speculative decoding ENABLED (acceptance_rate={:.2})",
@@ -1867,12 +1868,162 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         }
 
+        // §17.1-§17.9: Speculative Decoding Draft→Verify Pipeline (PLD-based)
+        //
+        // When spec_advice == EnableSpec, run PLD (Prompt Lookup Decoding) to draft
+        // additional tokens via n-gram matching, then verify them with a batched
+        // forward pass through the full model. Accepted tokens are appended directly
+        // to request output, yielding multiple tokens per step.
+        let mut spec_extra_tokens = 0usize;
+        if spec_enabled && self.spec_decoding.is_active() {
+            // Collect decode requests that are still running (got a Continue result)
+            let continuing_decode_reqs: Vec<RequestId> = batch_results
+                .iter()
+                .filter(|r| r.action == BatchAction::Continue)
+                .map(|r| r.request_id)
+                .collect();
+
+            if !continuing_decode_reqs.is_empty() {
+                // Phase A: Draft via PLD for each continuing decode request.
+                // We pick the first continuing request's logits to extract top-k
+                // for the shared SpecTree (EqSpec I1: all sequences share same topology).
+                let first_req_idx = request_indices
+                    .iter()
+                    .position(|&rid| rid == continuing_decode_reqs[0]);
+                if let Some(logits_idx) = first_req_idx {
+                    let top_k_tokens = extract_top_k_token_ids(&logits_list[logits_idx].data, 3);
+
+                    // Gather full token context (prompt + output) from the first request
+                    let all_tokens: Vec<u32> = {
+                        let req = &self.requests[&continuing_decode_reqs[0]];
+                        let mut tokens = req.prompt_tokens.clone();
+                        tokens.extend_from_slice(&req.output_tokens);
+                        tokens
+                    };
+
+                    // Build spec tree using n-gram PLD
+                    let tree = self.spec_decoding.draft_phase(&top_k_tokens, &all_tokens);
+                    let spine_tokens = tree.spine_token_ids();
+
+                    if spine_tokens.len() > 1 {
+                        // Phase B: Verify — run full model forward with draft tokens batched.
+                        // Build one verify sequence per continuing request, each containing
+                        // the spine draft tokens at successive positions after the last token.
+                        let mut verify_sequences = Vec::with_capacity(continuing_decode_reqs.len());
+                        let mut verify_req_indices = Vec::with_capacity(continuing_decode_reqs.len());
+                        for &req_id in &continuing_decode_reqs {
+                            let req = &self.requests[&req_id];
+                            if req.finished {
+                                continue;
+                            }
+                            let position = req.prompt_tokens.len() + req.output_tokens.len();
+                            verify_sequences.push(SequenceInput {
+                                tokens: spine_tokens.clone(),
+                                position,
+                                draft_steps: spine_tokens.len(),
+                            });
+                            verify_req_indices.push(req_id);
+                        }
+
+                        if !verify_sequences.is_empty() {
+                            let verify_input = BatchInput {
+                                sequences: verify_sequences,
+                            };
+
+                            match self.run_batch_forward(&verify_input) {
+                                Ok((verify_logits, _verify_sparsity, _verify_telemetry)) => {
+                                    // For each verified request, compare greedy argmax from each
+                                    // verify position against the draft spine tokens.
+                                    let mut seq_results = Vec::with_capacity(verify_req_indices.len());
+
+                                    for (vi, &req_id) in verify_req_indices.iter().enumerate() {
+                                        // The verify forward returns logits for each spine token position.
+                                        // We take the argmax of each position's logits as the target token.
+                                        let target_tokens: Vec<u32> = if vi < verify_logits.len() {
+                                            // Single logits per sequence: the model predicts what follows
+                                            // the last spine token. We compare the prefix.
+                                            vec![argmax_token(&verify_logits[vi].data)]
+                                        } else {
+                                            Vec::new()
+                                        };
+
+                                        let seq_result = crate::speculative::verify::SequenceVerifyResult::verify_spine(
+                                            req_id,
+                                            &spine_tokens,
+                                            &target_tokens,
+                                        );
+
+                                        // Append accepted tokens to request output
+                                        if seq_result.accepted_count > 0 {
+                                            if let Some(req) = self.requests.get_mut(&req_id) {
+                                                let eos = self.model_config.eos_token_id;
+                                                for &tok in &seq_result.accepted_tokens {
+                                                    if req.finished {
+                                                        break;
+                                                    }
+                                                    req.output_tokens.push(tok);
+                                                    spec_extra_tokens += 1;
+                                                    if eos.is_some_and(|id| id == tok)
+                                                        || req.output_tokens.len() >= req.max_new_tokens
+                                                    {
+                                                        req.finished = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        seq_results.push(seq_result);
+                                    }
+
+                                    // Phase C: Update speculative decoding state with verify results
+                                    let verify_result = crate::speculative::verify::VerifyResult::from_sequence_results(seq_results);
+
+                                    // Generate KV commit/rollback instructions (§17.4 I3)
+                                    let kv_instructions = crate::speculative::verify::generate_kv_commit_instructions(&verify_result);
+                                    for instr in &kv_instructions {
+                                        match instr {
+                                            crate::speculative::verify::KvCommitInstruction::Commit { request_id, accepted_tokens, .. } => {
+                                                log::debug!(
+                                                    "executor: §17.4 spec KV commit req={} accepted={} tokens",
+                                                    request_id, accepted_tokens.len(),
+                                                );
+                                            }
+                                            crate::speculative::verify::KvCommitInstruction::Rollback { request_id, rejected_count, .. } => {
+                                                log::debug!(
+                                                    "executor: §17.4 spec KV rollback req={} rejected={} tokens",
+                                                    request_id, rejected_count,
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    self.spec_decoding.verify_phase(&verify_result);
+
+                                    log::debug!(
+                                        "executor: §17.1 spec decode complete — drafted={}, accepted={}, rate={:.2}",
+                                        verify_result.total_draft_tokens,
+                                        verify_result.total_accepted_tokens,
+                                        verify_result.avg_acceptance_rate,
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!("executor: §17.1 spec verify forward failed: {}", e);
+                                    // On verify failure, we gracefully degrade — the standard decode
+                                    // token was already accepted above, so we lose nothing.
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Advance KV cache
         {
             let slot = self.kv_cache_slot;
             if let Some(kv_cache) = self.kv_cache.as_mut() {
                 let active = kv_cache.slot_mut(slot);
-                active.advance(total_tokens)?;
+                active.advance(total_tokens + spec_extra_tokens)?;
             }
         }
 
@@ -2486,6 +2637,34 @@ fn onnx_kv_layer_count(kv_outputs: &[String]) -> usize {
     kv_outputs.len() / 2
 }
 
+/// Extract the top-k token IDs from a logits vector, sorted by descending probability.
+///
+/// Used by §17.3 to seed the SpecTree with adapter top-k candidates.
+fn extract_top_k_token_ids(logits: &[f32], k: usize) -> Vec<u32> {
+    if logits.is_empty() || k == 0 {
+        return Vec::new();
+    }
+    let mut indexed: Vec<(u32, f32)> = logits
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as u32, v))
+        .collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.into_iter().take(k).map(|(id, _)| id).collect()
+}
+
+/// Return the token ID with the highest logit (greedy argmax).
+///
+/// Used by §17.4 to determine the target model's prediction for verification.
+fn argmax_token(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0)
+}
+
 fn shannon_entropy(logits: &[f32]) -> f32 {
     if logits.is_empty() {
         return 0.0;
@@ -2577,5 +2756,41 @@ mod tests {
             "present.1.key".to_string(),
         ];
         assert_eq!(super::onnx_kv_layer_count(&kv), 1);
+    }
+
+    #[test]
+    fn extract_top_k_basic() {
+        let logits = vec![1.0, 5.0, 3.0, 4.0, 2.0];
+        let top3 = super::extract_top_k_token_ids(&logits, 3);
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0], 1); // logits[1] = 5.0 is highest
+        assert_eq!(top3[1], 3); // logits[3] = 4.0
+        assert_eq!(top3[2], 2); // logits[2] = 3.0
+    }
+
+    #[test]
+    fn extract_top_k_empty() {
+        assert!(super::extract_top_k_token_ids(&[], 5).is_empty());
+        assert!(super::extract_top_k_token_ids(&[1.0, 2.0], 0).is_empty());
+    }
+
+    #[test]
+    fn extract_top_k_exceeds_len() {
+        let logits = vec![3.0, 1.0];
+        let top5 = super::extract_top_k_token_ids(&logits, 5);
+        assert_eq!(top5.len(), 2);
+        assert_eq!(top5[0], 0);
+        assert_eq!(top5[1], 1);
+    }
+
+    #[test]
+    fn argmax_token_basic() {
+        let logits = vec![1.0, 3.0, 2.0, 5.0, 4.0];
+        assert_eq!(super::argmax_token(&logits), 3);
+    }
+
+    #[test]
+    fn argmax_token_single() {
+        assert_eq!(super::argmax_token(&[42.0]), 0);
     }
 }
