@@ -210,6 +210,9 @@ impl ClientBuilder {
         // Ω1: Tensor-driven loading — no config.json dependency
         let mut loader = Loader::from_source_with_config(model_id.to_string(), config.clone())?;
 
+        // model_config is extracted during manifest construction for Strategy Arbiter use.
+        let mut model_config_for_arbiter: Option<crate::model_config::ModelConfig> = None;
+
         let manifest = match loader.weight_format() {
             WeightFormat::Gguf => {
                 loader = loader.load()?;
@@ -225,10 +228,15 @@ impl ClientBuilder {
                         moe_config: None,
                         tensor_map: HashMap::new(),
                     };
-                    let moe_config =
-                        crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)
-                            .ok()
-                            .and_then(|cfg| cfg.build_moe_config(arch));
+                    let cfg_result =
+                        crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
+                    let moe_config = cfg_result
+                        .as_ref()
+                        .ok()
+                        .and_then(|cfg| cfg.build_moe_config(arch));
+                    if let Ok(cfg) = cfg_result {
+                        model_config_for_arbiter = Some(cfg);
+                    }
                     ModelManifest {
                         model_id: Cow::Owned(model_id.to_string()),
                         file_map: EMPTY_FILE_MAP,
@@ -266,6 +274,7 @@ impl ClientBuilder {
 
                 let arch = loader.detect_architecture();
                 let moe_config = derived_config.build_moe_config(arch);
+                model_config_for_arbiter = Some(derived_config);
 
                 ModelManifest {
                     model_id: Cow::Owned(model_id.to_string()),
@@ -279,6 +288,38 @@ impl ClientBuilder {
                 }
             }
         };
+
+        // Strategy Arbiter: compute StrategyBias from InferenceMode × GraphArchetype × Hardware.
+        // Must happen BEFORE BackendContext::new() which triggers JIT compilation.
+        if let Some(ref model_cfg) = model_config_for_arbiter {
+            let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
+            let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
+
+            let device_profile = gllm_kernels::dispatch::device_profile();
+            let hw_view = crate::engine::arbiter::ArbiterHwView::from(device_profile);
+
+            let arbiter_bias = crate::engine::arbiter::StrategyArbiter::arbitrate(
+                inference_mode,
+                &archetype,
+                &hw_view,
+            );
+
+            let kernels_bias = gllm_kernels::compiler::planner::StrategyBias {
+                fusion_cost_scale: arbiter_bias.fusion_cost_scale,
+                pipeline_cost_scale: arbiter_bias.pipeline_cost_scale,
+                parallelism_cost_scale: arbiter_bias.parallelism_cost_scale,
+                epilogue_depth_preference: arbiter_bias.epilogue_depth_preference,
+                k_depth_preference: arbiter_bias.k_depth_preference,
+                kv_cache_budget_scale: arbiter_bias.kv_cache_budget_scale,
+                weight_prefetch_budget_scale: arbiter_bias.weight_prefetch_budget_scale,
+                batch_flexibility: arbiter_bias.batch_flexibility,
+                decode_ratio_scale: arbiter_bias.decode_ratio_scale,
+                speculative_decoding_value: arbiter_bias.speculative_decoding_value,
+                quantization_aggressiveness: arbiter_bias.quantization_aggressiveness,
+            };
+
+            gllm_kernels::compiler::planner::init_global_execution_plan_with_bias(&kernels_bias);
+        }
 
         let config_path = loader.config_path().map(|p| p.to_path_buf());
         let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
