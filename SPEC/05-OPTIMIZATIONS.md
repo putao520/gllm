@@ -307,7 +307,7 @@ lm_head GEMM ──── logits 范数 → 采样策略调整
 | Guardrail Probe | `GuardrailProbeCallback` (via Callback Chain) | `post_node(all_layers)` | `Veto / Terminate` | 需调用 `add_guardrail_runner()` | Integrated |
 | Intent NLU | `IntentRecallCallback` | `post_node(target_layer)` | Recall extraction | — | Integrated |
 | MoE Dispatch | `MoeDispatchCallback` | `pre_node(moe_layers)` | Routing setup | MoE 模型 | Integrated |
-| Speculative Decoding | `SpecDecodingState` | `step()` advice only | `should_speculate()` 建议 | — | Integrated (状态机; draft/verify 管线未实现) |
+| Speculative Decoding | `SpecDecodingState` | `step()` draft→verify loop | PLD draft + argmax verify + EMA 自适应 | — | Integrated |
 | Knowledge Injection | `KnowledgeInjectCallback` | `pre_node(target_layer)` | `InjectHidden { data }` | 需调用 `inject_knowledge()` → `set_knowledge_payload()` | Integrated |
 | Embed+Rerank Fusion | `EmbeddingsBuilder.rerank_query()` → `Client::execute_embed_rerank_pipeline()` | `generate()` 内部 | `ReorderByScore` | 多模型管线 (02-ARCHITECTURE.md ARCH-MULTI-MODEL-PIPELINE) | Integrated |
 
