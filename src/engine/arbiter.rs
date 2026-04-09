@@ -6,6 +6,8 @@
 
 use gllm_kernels::dispatch::DeviceProfile;
 
+pub use crate::graph::profile::GraphArchetype;
+
 // ── InferenceMode (SPEC §2.1) ──────────────────────────────────────────────
 
 /// Global optimization objective. Determined at model-load time, immutable
@@ -22,18 +24,6 @@ impl Default for InferenceMode {
     fn default() -> Self {
         Self::Latency
     }
-}
-
-// ── GraphArchetype (SPEC §3.4) ──────────────────────────────────────────────
-
-/// Static topological characterization of a model graph. All fields ∈ [0, 1].
-#[derive(Debug, Clone, Copy)]
-pub struct GraphArchetype {
-    pub compute_intensive: f64,
-    pub memory_intensive: f64,
-    pub parallelism_exploitable: f64,
-    pub fusion_profitable: f64,
-    pub pipeline_valuable: f64,
 }
 
 // ── Hardware view for the arbiter ───────────────────────────────────────────

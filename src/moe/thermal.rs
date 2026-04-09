@@ -201,6 +201,8 @@ pub struct ExpertThermalManager {
     adaptive_eviction: bool,
     /// Current memory pressure (updated externally).
     memory_pressure: f32,
+    /// Eviction aggressiveness from StrategyBias: 0.0 = full resident, 2.0 = aggressive eviction.
+    eviction_aggressiveness: f64,
 }
 
 impl ExpertThermalManager {
@@ -221,6 +223,7 @@ impl ExpertThermalManager {
             working_set: WorkingSetTracker::new(num_experts, 100, base_threshold),
             adaptive_eviction: false,
             memory_pressure: 0.0,
+            eviction_aggressiveness: 0.0,
         }
     }
 
@@ -242,18 +245,31 @@ impl ExpertThermalManager {
         self
     }
 
+    /// Set eviction aggressiveness from StrategyBias (SPEC §5.9).
+    /// 0.0 = full resident (never evict), 2.0 = aggressive eviction.
+    pub fn with_eviction_aggressiveness(mut self, aggressiveness: f64) -> Self {
+        self.eviction_aggressiveness = aggressiveness;
+        self
+    }
+
     /// Update memory pressure for adaptive eviction threshold.
     pub fn update_memory_pressure(&mut self, pressure: f32) {
         self.memory_pressure = pressure.clamp(0.0, 1.0);
     }
 
     /// Get the current effective eviction threshold.
+    ///
+    /// When `eviction_aggressiveness` > 0, the threshold is scaled down
+    /// (making eviction easier). Formula per SPEC §5.9:
+    /// `bias_factor = 1.0 / (1.0 + aggressiveness)`, then threshold *= bias_factor.
     pub fn effective_eviction_threshold(&self) -> u64 {
-        if self.adaptive_eviction {
+        let base = if self.adaptive_eviction {
             self.working_set.adaptive_threshold(self.memory_pressure)
         } else {
             self.eviction_streak_threshold
-        }
+        };
+        let bias_factor = 1.0 / (1.0 + self.eviction_aggressiveness);
+        (base as f64 * bias_factor) as u64
     }
 
     /// Get the working set size (experts accessed in the tracking window).

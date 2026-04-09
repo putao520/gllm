@@ -97,6 +97,9 @@ pub struct ExpertWeightPrefetcher {
     rdma_bandwidth_gbs: f32,
     /// GPU 单层计算时间 (μs)
     layer_compute_time_us: f32,
+    /// Prefetch priority from StrategyBias: scales the number of experts to prefetch.
+    /// Default 1.0 (no scaling). >1.0 = prefetch more, <1.0 = prefetch fewer.
+    prefetch_priority: f64,
 }
 
 impl ExpertWeightPrefetcher {
@@ -122,6 +125,7 @@ impl ExpertWeightPrefetcher {
             pcie_bandwidth_gbs: 32.0,   // PCIe 4.0 x16
             rdma_bandwidth_gbs: 100.0,  // 100 Gbps RDMA
             layer_compute_time_us: 100.0, // ~100μs per layer
+            prefetch_priority: 1.0,
         }
     }
 
@@ -135,6 +139,13 @@ impl ExpertWeightPrefetcher {
     /// 配置 GPU 层计算时间
     pub fn with_layer_compute_time(mut self, us: f32) -> Self {
         self.layer_compute_time_us = us;
+        self
+    }
+
+    /// Set prefetch priority from StrategyBias.
+    /// >1.0 = prefetch more experts, <1.0 = prefetch fewer.
+    pub fn with_prefetch_priority(mut self, priority: f64) -> Self {
+        self.prefetch_priority = priority;
         self
     }
 
@@ -195,6 +206,13 @@ impl ExpertWeightPrefetcher {
 
         // 按优先级排序 (低优先级数字 = 高优先级)
         requests.sort_by_key(|r| r.priority);
+
+        // Apply prefetch_priority: scale the number of prefetch requests.
+        // priority > 1.0 keeps more, priority < 1.0 keeps fewer.
+        let effective_count = ((requests.len() as f64) * self.prefetch_priority)
+            .round()
+            .max(0.0) as usize;
+        requests.truncate(effective_count);
 
         requests
     }

@@ -190,7 +190,7 @@ impl ClientBuilder {
             .model_id
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
         let kind = self.kind.unwrap_or(ModelKind::Chat);
-        let state = Self::build_state(&model_id, kind)?;
+        let state = Self::build_state(&model_id, kind, self.inference_mode)?;
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
         })
@@ -203,6 +203,7 @@ impl ClientBuilder {
     pub(crate) fn build_state(
         model_id: &str,
         kind: ModelKind,
+        inference_mode: InferenceMode,
     ) -> Result<ClientState, ClientError> {
         let config = LoaderConfig::from_env();
 
@@ -299,6 +300,7 @@ impl ClientBuilder {
             model_id: model_id.to_string(),
             manifest,
             backend,
+            inference_mode,
         })
     }
 }
@@ -362,7 +364,7 @@ impl Client {
 
     /// Create a new client with the specified model and kind (sync, blocking).
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
-        let state = ClientBuilder::build_state(model_id, kind)?;
+        let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency)?;
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
         })
@@ -385,7 +387,7 @@ impl Client {
     /// are released once all in-flight operations complete.
     pub fn load_model(&self, model_id: &str, kind: ModelKind) -> Result<(), ClientError> {
         let model_id = Self::normalize_model_id(model_id)?;
-        let state = ClientBuilder::build_state(&model_id, kind)?;
+        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency)?;
         self.state.store(Some(Arc::new(state)));
         Ok(())
     }
@@ -411,7 +413,7 @@ impl Client {
             .ok_or(ClientError::NoModelLoaded)?;
 
         // Atomic swap: old state kept alive for in-flight reads, new state installed
-        let state = ClientBuilder::build_state(&model_id, kind)?;
+        let state = ClientBuilder::build_state(&model_id, kind, InferenceMode::Latency)?;
         self.state.store(Some(Arc::new(state)));
         Ok(())
     }
@@ -501,7 +503,7 @@ impl Client {
         model_id: &str,
         kind: ModelKind,
     ) -> Result<ClientState, ClientError> {
-        ClientBuilder::build_state(model_id, kind)
+        ClientBuilder::build_state(model_id, kind, InferenceMode::Latency)
     }
 
     pub(crate) fn require_state(&self) -> Result<Arc<ClientState>, ClientError> {
