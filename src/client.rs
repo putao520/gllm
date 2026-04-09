@@ -295,8 +295,10 @@ impl ClientBuilder {
             let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
             let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
 
-            let device_profile = gllm_kernels::dispatch::device_profile();
-            let hw_view = crate::engine::arbiter::ArbiterHwView::from(device_profile);
+            // Detect actual backend type to build correct hardware view.
+            // GPU backends need ArbiterHwView::gpu() for correct bias adjustments
+            // (SPEC §4.3.3: epilogue×1.2, k_depth×1.2, pipeline×1.2 on GPU).
+            let hw_view = Self::detect_arbiter_hw_view();
 
             let arbiter_bias = crate::engine::arbiter::StrategyArbiter::arbitrate(
                 inference_mode,
@@ -343,6 +345,34 @@ impl ClientBuilder {
             backend,
             inference_mode,
         })
+    }
+
+    /// Detect hardware view for the Strategy Arbiter.
+    ///
+    /// Probes GPU availability via backend detection (CUDA→ROCm→Metal→CPU).
+    /// GPU backends get `ArbiterHwView::gpu()` with typical shared memory size.
+    /// CPU backends get the real DeviceProfile values.
+    fn detect_arbiter_hw_view() -> crate::engine::arbiter::ArbiterHwView {
+        use crate::engine::arbiter::ArbiterHwView;
+        use crate::backend::BackendType;
+
+        // Quick probe: which backend would be selected?
+        let backend_type = detect_backend()
+            .map(|b| b.backend_type())
+            .unwrap_or(BackendType::Cpu);
+
+        match backend_type {
+            BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
+                // GPU detected. Use typical shared memory size (49152 bytes = 48KB).
+                // Exact value doesn't matter for Arbiter — it only drives
+                // L1 richness scaling in §4.3.3 and the is_gpu flag.
+                ArbiterHwView::gpu(49152)
+            }
+            BackendType::Cpu => {
+                let profile = gllm_kernels::dispatch::device_profile();
+                ArbiterHwView::from(profile)
+            }
+        }
     }
 }
 
