@@ -27,7 +27,7 @@ use crate::generation::GenerationResponse;
 use crate::knowledge::LayerTarget;
 use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
-    map_architecture_token, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
+    map_architecture_token, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use crate::rerank::{RerankResponse, RerankResult};
 use thiserror::Error;
@@ -154,6 +154,28 @@ pub struct ClientBuilder {
     inference_mode: InferenceMode,
 }
 
+fn make_dummy_manifest(model_id: &str, arch: ModelArchitecture, kind: ModelKind) -> ModelManifest {
+    make_dummy_manifest_with_moe(model_id, arch, kind, None)
+}
+
+fn make_dummy_manifest_with_moe(
+    model_id: &str,
+    arch: ModelArchitecture,
+    kind: ModelKind,
+    moe_config: Option<MoEConfig>,
+) -> ModelManifest {
+    ModelManifest {
+        model_id: Cow::Owned(model_id.to_string()),
+        file_map: EMPTY_FILE_MAP,
+        arch,
+        kind,
+        rope_base_override: None,
+        max_context_override: None,
+        moe_config,
+        tensor_map: HashMap::new(),
+    }
+}
+
 impl ClientBuilder {
     pub fn new() -> Self {
         Self {
@@ -218,16 +240,7 @@ impl ClientBuilder {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
                 if let Some(arch) = map_architecture_token(arch_str) {
-                    let dummy_manifest = ModelManifest {
-                        model_id: Cow::Owned(model_id.to_string()),
-                        file_map: EMPTY_FILE_MAP,
-                        arch,
-                        kind,
-                        rope_base_override: None,
-                        max_context_override: None,
-                        moe_config: None,
-                        tensor_map: HashMap::new(),
-                    };
+                    let dummy_manifest = make_dummy_manifest(model_id, arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
                     let moe_config = cfg_result
@@ -237,16 +250,7 @@ impl ClientBuilder {
                     if let Ok(cfg) = cfg_result {
                         model_config_for_arbiter = Some(cfg);
                     }
-                    ModelManifest {
-                        model_id: Cow::Owned(model_id.to_string()),
-                        file_map: EMPTY_FILE_MAP,
-                        arch,
-                        kind,
-                        rope_base_override: None,
-                        max_context_override: None,
-                        moe_config,
-                        tensor_map: HashMap::new(),
-                    }
+                    make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
                 } else {
                     return Err(ClientError::ModelNotFound(format!(
                         "Unsupported GGUF architecture: {}",
@@ -258,16 +262,7 @@ impl ClientBuilder {
                 // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
                 loader = loader.load()?;
 
-                let dummy_manifest = ModelManifest {
-                    model_id: Cow::Owned(model_id.to_string()),
-                    file_map: EMPTY_FILE_MAP,
-                    arch: ModelArchitecture::Llama4,
-                    kind,
-                    rope_base_override: None,
-                    max_context_override: None,
-                    moe_config: None,
-                    tensor_map: HashMap::new(),
-                };
+                let dummy_manifest = make_dummy_manifest(model_id, ModelArchitecture::Llama4, kind);
 
                 let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
@@ -276,16 +271,7 @@ impl ClientBuilder {
                 let moe_config = derived_config.build_moe_config(arch);
                 model_config_for_arbiter = Some(derived_config);
 
-                ModelManifest {
-                    model_id: Cow::Owned(model_id.to_string()),
-                    file_map: EMPTY_FILE_MAP,
-                    arch,
-                    kind,
-                    rope_base_override: None,
-                    max_context_override: None,
-                    moe_config,
-                    tensor_map: HashMap::new(),
-                }
+                make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
             }
         };
 

@@ -465,6 +465,18 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
 /// Backward-compatible type alias for f32 executor.
 pub type ExecutorF32<B> = Executor<B, f32>;
 
+/// Fields extracted from `ModelConfig` before it moves into `Executor`.
+/// Groups all pre-move reads in one place for clarity.
+struct PreMoveConfig {
+    moe_num_experts: usize,
+    moe_top_k: usize,
+    num_hidden_layers: usize,
+    hidden_size: usize,
+    vocab_size: usize,
+    dtype: DType,
+    moe_expert_inter: usize,
+}
+
 impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn from_loader(
         backend: B,
@@ -554,14 +566,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             swap_config: None,
         };
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
-        let moe_num_experts = manifest.moe_config.map(|c| c.num_experts).unwrap_or(0);
-        let moe_top_k = manifest.moe_config.map(|c| c.num_experts_per_tok).unwrap_or(2);
-        let num_hidden_layers = model_config.num_hidden_layers;
-        let hidden_size_for_mega = model_config.hidden_size;
-        let vocab_size_for_mega = model_config.vocab_size;
-        let dtype_for_mega = model_config.dtype;
-        let moe_expert_inter = model_config.expert_intermediate_size
-            .unwrap_or(model_config.intermediate_size.unwrap_or(hidden_size_for_mega * 4));
+
+        // Extract all fields needed after model_config moves into Self.
+        let pre = PreMoveConfig {
+            moe_num_experts: manifest.moe_config.map(|c| c.num_experts).unwrap_or(0),
+            moe_top_k: manifest.moe_config.map(|c| c.num_experts_per_tok).unwrap_or(2),
+            num_hidden_layers: model_config.num_hidden_layers,
+            hidden_size: model_config.hidden_size,
+            vocab_size: model_config.vocab_size,
+            dtype: model_config.dtype,
+            moe_expert_inter: model_config.expert_intermediate_size
+                .unwrap_or(model_config.intermediate_size.unwrap_or(model_config.hidden_size * 4)),
+        };
+        let is_moe = pre.moe_num_experts > 0;
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -671,10 +688,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 log::info!("executor: §9.1 MegaKernelExecutor built from compiled graph_executor");
                 Some(super::mega_kernel::MegaKernelExecutor::from_graph_executor(
                     crate::graph::executor::FusedGraphExecutor::new(ge.graph().clone()),
-                    num_hidden_layers,
-                    hidden_size_for_mega,
-                    vocab_size_for_mega,
-                    dtype_for_mega,
+                    pre.num_hidden_layers,
+                    pre.hidden_size,
+                    pre.vocab_size,
+                    pre.dtype,
                 ))
             } else {
                 None
@@ -685,30 +702,40 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // MoE subsystem: read global ExecutionPlan once, initialize all three
         // MoE components in a single block.
-        let (moe_thermal, moe_dispatcher, moe_prefetcher) = if moe_num_experts > 0 {
+        // MoE subsystem + JitDirector: read global ExecutionPlan once, initialize all
+        // MoE components and the JIT director in a single block.
+        let (moe_thermal, moe_dispatcher, moe_prefetcher, jit_director) = if is_moe {
             let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
             let bias = &exec_plan.strategy_bias;
 
-            let thermal = crate::moe::thermal::ExpertThermalManager::new(moe_num_experts)
+            let thermal = crate::moe::thermal::ExpertThermalManager::new(pre.moe_num_experts)
                 .with_eviction_aggressiveness(bias.expert_eviction_aggressiveness());
 
             let route_config = crate::moe::routing::ExpertRouteConfig::new(
-                moe_num_experts,
-                moe_top_k,
+                pre.moe_num_experts,
+                pre.moe_top_k,
             );
             let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config);
 
-            let elem_bytes = dtype_for_mega.size_bytes();
-            let weight_bytes_per_expert = hidden_size_for_mega * moe_expert_inter * 3 * elem_bytes;
+            let elem_bytes = pre.dtype.size_bytes();
+            let weight_bytes_per_expert = pre.hidden_size * pre.moe_expert_inter * 3 * elem_bytes;
             let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
-                moe_num_experts,
+                pre.moe_num_experts,
                 weight_bytes_per_expert,
             ).with_prefetch_priority(bias.expert_prefetch_priority());
 
-            (Some(thermal), Some(dispatcher), Some(prefetcher))
+            let director_config = crate::jit::director::DirectorConfig {
+                num_experts: pre.moe_num_experts,
+                ..Default::default()
+            };
+            let director = crate::jit::director::JitDirector::spawn(director_config);
+
+            (Some(thermal), Some(dispatcher), Some(prefetcher), Some(director))
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
+
+        let compiler_constraints = crate::jit::compiler_constraints::CompilerConstraints::default();
 
         Ok(Self {
             backend,
@@ -743,26 +770,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 );
                 topo
             },
-            jit_director: {
-                let num_experts = moe_num_experts;
-                if num_experts > 0 {
-                    let config = crate::jit::director::DirectorConfig {
-                        num_experts,
-                        ..Default::default()
-                    };
-                    Some(crate::jit::director::JitDirector::spawn(config))
-                } else {
-                    None
-                }
-            },
+            jit_director,
             telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             mega_kernel,
             turboquant: {
                 // §11: 非 F32 模型自动启用 TurboQuant（FWHT + KV 非对称量化）
-                let dt = dtype_for_mega;
-                if dt != gllm_kernels::types::DType::F32 {
-                    log::info!("executor: §11 TurboQuant enabled (dtype={:?}, fwht=true)", dt);
+                if pre.dtype != gllm_kernels::types::DType::F32 {
+                    log::info!("executor: §11 TurboQuant enabled (dtype={:?}, fwht=true)", pre.dtype);
                     crate::kv_cache::turboquant::TurboQuantRuntime::new(
                         crate::kv_cache::turboquant::TurboQuantConfig {
                             bits: 4,
@@ -777,16 +792,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             },
             epilogue_subsystem: {
-                let num_experts = moe_num_experts;
                 let config = crate::jit::epilogue_subsystem::EpilogueConfig {
-                    num_layers: num_hidden_layers,
-                    num_experts,
+                    num_layers: pre.num_hidden_layers,
+                    num_experts: pre.moe_num_experts,
                     ..Default::default()
                 };
                 crate::jit::epilogue_subsystem::EpilogueSubsystem::new(config)
             },
             sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher::new(
-                crate::jit::compiler_constraints::CompilerConstraints::default(),
+                compiler_constraints.clone(),
             ),
             golden_buckets: {
                 let probe = crate::jit::profiler::ProbeResult {
@@ -798,7 +812,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 };
                 crate::jit::golden_bucket::GoldenBucketRegistry::from_probe_results(
                     &probe,
-                    crate::jit::compiler_constraints::CompilerConstraints::default(),
+                    compiler_constraints,
                 )
             },
             // MoE subsystem: single global_execution_plan() read, single expert check.
