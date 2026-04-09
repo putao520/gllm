@@ -456,6 +456,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     moe_thermal: Option<crate::moe::thermal::ExpertThermalManager>,
     /// §15.3 MoE 硬件分发器（专家→GPU/CPU 分配）
     moe_dispatcher: Option<crate::moe::dispatch::MoeHardwareDispatcher>,
+    /// §15.2 MoE 专家权重预取调度器
+    moe_prefetcher: Option<crate::moe::prefetch::ExpertWeightPrefetcher>,
     /// §17 推测解码引擎（EESD / SAGUARO / Standard）
     spec_decoding: crate::speculative::engine::SpecDecodingState,
 }
@@ -558,6 +560,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let hidden_size_for_mega = model_config.hidden_size;
         let vocab_size_for_mega = model_config.vocab_size;
         let dtype_for_mega = model_config.dtype;
+        let moe_expert_inter = model_config.expert_intermediate_size
+            .unwrap_or(model_config.intermediate_size.unwrap_or(hidden_size_for_mega * 4));
         let tokenizer = TokenizerHandle::from_loader(loader)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
@@ -786,6 +790,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     moe_top_k,
                 );
                 Some(crate::moe::dispatch::MoeHardwareDispatcher::new(route_config))
+            } else {
+                None
+            },
+            moe_prefetcher: if moe_num_experts > 0 {
+                // Expert weight bytes: gate + up + down matrices × elem_size
+                let elem_bytes = dtype_for_mega.size_bytes();
+                let weight_bytes_per_expert = hidden_size_for_mega * moe_expert_inter * 3 * elem_bytes;
+                let ep = gllm_kernels::compiler::planner::global_execution_plan();
+                let prefetch_priority = ep.strategy_bias.expert_prefetch_priority();
+                let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
+                    moe_num_experts,
+                    weight_bytes_per_expert,
+                ).with_prefetch_priority(prefetch_priority);
+                Some(prefetcher)
             } else {
                 None
             },
