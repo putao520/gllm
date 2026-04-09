@@ -683,6 +683,33 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             None
         };
 
+        // MoE subsystem: read global ExecutionPlan once, initialize all three
+        // MoE components in a single block.
+        let (moe_thermal, moe_dispatcher, moe_prefetcher) = if moe_num_experts > 0 {
+            let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
+            let bias = &exec_plan.strategy_bias;
+
+            let thermal = crate::moe::thermal::ExpertThermalManager::new(moe_num_experts)
+                .with_eviction_aggressiveness(bias.expert_eviction_aggressiveness());
+
+            let route_config = crate::moe::routing::ExpertRouteConfig::new(
+                moe_num_experts,
+                moe_top_k,
+            );
+            let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config);
+
+            let elem_bytes = dtype_for_mega.size_bytes();
+            let weight_bytes_per_expert = hidden_size_for_mega * moe_expert_inter * 3 * elem_bytes;
+            let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
+                moe_num_experts,
+                weight_bytes_per_expert,
+            ).with_prefetch_priority(bias.expert_prefetch_priority());
+
+            (Some(thermal), Some(dispatcher), Some(prefetcher))
+        } else {
+            (None, None, None)
+        };
+
         Ok(Self {
             backend,
             scheduler,
@@ -774,39 +801,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     crate::jit::compiler_constraints::CompilerConstraints::default(),
                 )
             },
-            moe_thermal: if moe_num_experts > 0 {
-                let mut thermal = crate::moe::thermal::ExpertThermalManager::new(moe_num_experts);
-                // §5.9: inject eviction_aggressiveness from StrategyBias via global ExecutionPlan
-                let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
-                let eviction_aggr = exec_plan.strategy_bias.expert_eviction_aggressiveness();
-                thermal = thermal.with_eviction_aggressiveness(eviction_aggr);
-                Some(thermal)
-            } else {
-                None
-            },
-            moe_dispatcher: if moe_num_experts > 0 {
-                let route_config = crate::moe::routing::ExpertRouteConfig::new(
-                    moe_num_experts,
-                    moe_top_k,
-                );
-                Some(crate::moe::dispatch::MoeHardwareDispatcher::new(route_config))
-            } else {
-                None
-            },
-            moe_prefetcher: if moe_num_experts > 0 {
-                // Expert weight bytes: gate + up + down matrices × elem_size
-                let elem_bytes = dtype_for_mega.size_bytes();
-                let weight_bytes_per_expert = hidden_size_for_mega * moe_expert_inter * 3 * elem_bytes;
-                let ep = gllm_kernels::compiler::planner::global_execution_plan();
-                let prefetch_priority = ep.strategy_bias.expert_prefetch_priority();
-                let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
-                    moe_num_experts,
-                    weight_bytes_per_expert,
-                ).with_prefetch_priority(prefetch_priority);
-                Some(prefetcher)
-            } else {
-                None
-            },
+            // MoE subsystem: single global_execution_plan() read, single expert check.
+            moe_thermal,
+            moe_dispatcher,
+            moe_prefetcher,
             spec_decoding: crate::speculative::engine::SpecDecodingState::new_standard(),
         })
     }

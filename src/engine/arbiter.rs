@@ -64,42 +64,9 @@ impl ArbiterHwView {
 
 // ── StrategyBias (SPEC §4.2) ────────────────────────────────────────────────
 
-/// Normalized resource-priority weights output by the arbiter.
-#[derive(Debug, Clone, Copy)]
-pub struct StrategyBias {
-    pub fusion_cost_scale: f64,
-    pub pipeline_cost_scale: f64,
-    pub parallelism_cost_scale: f64,
-    pub epilogue_depth_preference: f64,
-    pub k_depth_preference: f64,
-    pub kv_cache_budget_scale: f64,
-    pub weight_prefetch_budget_scale: f64,
-    pub batch_flexibility: f64,
-    pub decode_ratio_scale: f64,
-    pub expert_eviction_aggressiveness: f64,
-    pub expert_prefetch_priority: f64,
-    pub speculative_decoding_value: f64,
-    pub quantization_aggressiveness: f64,
-}
-
-impl StrategyBias {
-    /// Clamp every field to its SPEC §11.1 valid range.
-    pub fn validate(&mut self) {
-        self.fusion_cost_scale = self.fusion_cost_scale.clamp(0.2, 3.0);
-        self.pipeline_cost_scale = self.pipeline_cost_scale.clamp(0.2, 3.0);
-        self.parallelism_cost_scale = self.parallelism_cost_scale.clamp(0.1, 3.0);
-        self.epilogue_depth_preference = self.epilogue_depth_preference.clamp(0.3, 3.0);
-        self.k_depth_preference = self.k_depth_preference.clamp(0.3, 3.0);
-        self.kv_cache_budget_scale = self.kv_cache_budget_scale.clamp(0.2, 3.0);
-        self.weight_prefetch_budget_scale = self.weight_prefetch_budget_scale.clamp(0.2, 3.0);
-        self.batch_flexibility = self.batch_flexibility.clamp(0.0, 1.0);
-        self.decode_ratio_scale = self.decode_ratio_scale.clamp(0.3, 2.0);
-        self.expert_eviction_aggressiveness = self.expert_eviction_aggressiveness.clamp(0.0, 2.0);
-        self.expert_prefetch_priority = self.expert_prefetch_priority.clamp(0.1, 5.0);
-        self.speculative_decoding_value = self.speculative_decoding_value.clamp(0.1, 3.0);
-        self.quantization_aggressiveness = self.quantization_aggressiveness.clamp(0.3, 3.0);
-    }
-}
+// Re-export the canonical StrategyBias from gllm-kernels.
+// Single source of truth — no duplicate struct, no field-by-field copy.
+pub use gllm_kernels::compiler::planner::StrategyBias;
 
 // ── StrategyArbiter (SPEC §4.3) ─────────────────────────────────────────────
 

@@ -289,40 +289,40 @@ impl ClientBuilder {
             }
         };
 
+        // Detect backend ONCE — reused for both arbiter hardware view and BackendContext.
+        let detected_backend = detect_backend()?;
+        let backend_type = detected_backend.backend_type();
+
         // Strategy Arbiter: compute StrategyBias from InferenceMode × GraphArchetype × Hardware.
         // Must happen BEFORE BackendContext::new() which triggers JIT compilation.
         if let Some(ref model_cfg) = model_config_for_arbiter {
+            use crate::engine::arbiter::ArbiterHwView;
+
             let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
             let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
 
-            // Detect actual backend type to build correct hardware view.
-            // GPU backends need ArbiterHwView::gpu() for correct bias adjustments
+            // Build hardware view from the already-detected backend type.
+            // GPU backends get ArbiterHwView::gpu() for correct bias adjustments
             // (SPEC §4.3.3: epilogue×1.2, k_depth×1.2, pipeline×1.2 on GPU).
-            let hw_view = Self::detect_arbiter_hw_view();
+            let hw_view = match backend_type {
+                BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
+                    ArbiterHwView::gpu(49152)
+                }
+                BackendType::Cpu => {
+                    let profile = gllm_kernels::dispatch::device_profile();
+                    ArbiterHwView::from(profile)
+                }
+            };
 
+            // StrategyArbiter now returns gllm_kernels::compiler::planner::StrategyBias
+            // directly — no field-by-field copy needed.
             let arbiter_bias = crate::engine::arbiter::StrategyArbiter::arbitrate(
                 inference_mode,
                 &archetype,
                 &hw_view,
             );
 
-            let kernels_bias = gllm_kernels::compiler::planner::StrategyBias {
-                fusion_cost_scale: arbiter_bias.fusion_cost_scale,
-                pipeline_cost_scale: arbiter_bias.pipeline_cost_scale,
-                parallelism_cost_scale: arbiter_bias.parallelism_cost_scale,
-                epilogue_depth_preference: arbiter_bias.epilogue_depth_preference,
-                k_depth_preference: arbiter_bias.k_depth_preference,
-                kv_cache_budget_scale: arbiter_bias.kv_cache_budget_scale,
-                weight_prefetch_budget_scale: arbiter_bias.weight_prefetch_budget_scale,
-                batch_flexibility: arbiter_bias.batch_flexibility,
-                decode_ratio_scale: arbiter_bias.decode_ratio_scale,
-                speculative_decoding_value: arbiter_bias.speculative_decoding_value,
-                quantization_aggressiveness: arbiter_bias.quantization_aggressiveness,
-                expert_eviction_aggressiveness: arbiter_bias.expert_eviction_aggressiveness,
-                expert_prefetch_priority: arbiter_bias.expert_prefetch_priority,
-            };
-
-            gllm_kernels::compiler::planner::init_global_execution_plan_with_bias(&kernels_bias);
+            gllm_kernels::compiler::planner::init_global_execution_plan_with_bias(&arbiter_bias);
         }
 
         let config_path = loader.config_path().map(|p| p.to_path_buf());
@@ -331,7 +331,6 @@ impl ClientBuilder {
 
         let manifest = Arc::new(manifest);
 
-        let detected_backend = detect_backend()?;
         let backend = BackendContext::new(
             model_id.to_string(),
             manifest.clone(),
@@ -347,34 +346,6 @@ impl ClientBuilder {
             backend,
             inference_mode,
         })
-    }
-
-    /// Detect hardware view for the Strategy Arbiter.
-    ///
-    /// Probes GPU availability via backend detection (CUDA→ROCm→Metal→CPU).
-    /// GPU backends get `ArbiterHwView::gpu()` with typical shared memory size.
-    /// CPU backends get the real DeviceProfile values.
-    fn detect_arbiter_hw_view() -> crate::engine::arbiter::ArbiterHwView {
-        use crate::engine::arbiter::ArbiterHwView;
-        use crate::backend::BackendType;
-
-        // Quick probe: which backend would be selected?
-        let backend_type = detect_backend()
-            .map(|b| b.backend_type())
-            .unwrap_or(BackendType::Cpu);
-
-        match backend_type {
-            BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
-                // GPU detected. Use typical shared memory size (49152 bytes = 48KB).
-                // Exact value doesn't matter for Arbiter — it only drives
-                // L1 richness scaling in §4.3.3 and the is_gpu flag.
-                ArbiterHwView::gpu(49152)
-            }
-            BackendType::Cpu => {
-                let profile = gllm_kernels::dispatch::device_profile();
-                ArbiterHwView::from(profile)
-            }
-        }
     }
 }
 
