@@ -23,11 +23,6 @@ path = "src/bin/download.rs"
 # Default: Auto-detect backend at runtime
 default = []
 
-# Optional features
-test-utils = []
-paged-attention = []
-flash-attention = []
-
 # GPU features (forward to gllm-kernels)
 cuda = ["gllm-kernels/jit-cuda"]
 hip = ["gllm-kernels/jit-hip"]

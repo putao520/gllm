@@ -280,6 +280,42 @@ impl DynBackendExecutor {
             DynBackendExecutor::BF16(e) => e.hook_count(),
         }
     }
+
+    /// §8.1 Set knowledge injection payload for KnowledgeInjectCallback.
+    pub fn set_knowledge_payload(&mut self, payload: crate::knowledge::MaterializedPayload) {
+        match self {
+            DynBackendExecutor::F32(e) => e.set_knowledge_payload(payload),
+            DynBackendExecutor::F16(e) => e.set_knowledge_payload(payload),
+            DynBackendExecutor::BF16(e) => e.set_knowledge_payload(payload),
+        }
+    }
+
+    /// §16.1 Set the Late-Fusion RAG system for RagInjectCallback.
+    pub fn set_rag_system(&mut self, rag: crate::rag::LateFusionRag) {
+        match self {
+            DynBackendExecutor::F32(e) => e.set_rag_system(rag),
+            DynBackendExecutor::F16(e) => e.set_rag_system(rag),
+            DynBackendExecutor::BF16(e) => e.set_rag_system(rag),
+        }
+    }
+
+    /// §16.4 Add a guardrail probe runner for GuardrailProbeCallback.
+    pub fn add_guardrail_runner(&mut self, runner: crate::guardrail::GuardProbeRunner) {
+        match self {
+            DynBackendExecutor::F32(e) => e.add_guardrail_runner(runner),
+            DynBackendExecutor::F16(e) => e.add_guardrail_runner(runner),
+            DynBackendExecutor::BF16(e) => e.add_guardrail_runner(runner),
+        }
+    }
+
+    /// §16.3 Set intent recall configuration for IntentRecallCallback.
+    pub fn set_intent_config(&mut self, config: crate::intent::IntentConfig) {
+        match self {
+            DynBackendExecutor::F32(e) => e.set_intent_config(config),
+            DynBackendExecutor::F16(e) => e.set_intent_config(config),
+            DynBackendExecutor::BF16(e) => e.set_intent_config(config),
+        }
+    }
 }
 
 impl<E: Element> BackendExecutor<E> {
@@ -559,6 +595,46 @@ impl<E: Element> BackendExecutor<E> {
             _ => Err(ExecutorError::Backend(
                 crate::engine::executor::BackendError::Unimplemented("weights only available for CPU backend in this API")
             )),
+        }
+    }
+
+    /// §8.1 Set knowledge injection payload for KnowledgeInjectCallback.
+    pub fn set_knowledge_payload(&mut self, payload: crate::knowledge::MaterializedPayload) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.set_knowledge_payload(payload),
+            BackendExecutor::Rocm(exec) => exec.set_knowledge_payload(payload),
+            BackendExecutor::Metal(exec) => exec.set_knowledge_payload(payload),
+            BackendExecutor::Cpu(exec) => exec.set_knowledge_payload(payload),
+        }
+    }
+
+    /// §16.1 Set the Late-Fusion RAG system for RagInjectCallback.
+    pub fn set_rag_system(&mut self, rag: crate::rag::LateFusionRag) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.set_rag_system(rag),
+            BackendExecutor::Rocm(exec) => exec.set_rag_system(rag),
+            BackendExecutor::Metal(exec) => exec.set_rag_system(rag),
+            BackendExecutor::Cpu(exec) => exec.set_rag_system(rag),
+        }
+    }
+
+    /// §16.4 Add a guardrail probe runner for GuardrailProbeCallback.
+    pub fn add_guardrail_runner(&mut self, runner: crate::guardrail::GuardProbeRunner) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.add_guardrail_runner(runner),
+            BackendExecutor::Rocm(exec) => exec.add_guardrail_runner(runner),
+            BackendExecutor::Metal(exec) => exec.add_guardrail_runner(runner),
+            BackendExecutor::Cpu(exec) => exec.add_guardrail_runner(runner),
+        }
+    }
+
+    /// §16.3 Set intent recall configuration for IntentRecallCallback.
+    pub fn set_intent_config(&mut self, config: crate::intent::IntentConfig) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.set_intent_config(config),
+            BackendExecutor::Rocm(exec) => exec.set_intent_config(config),
+            BackendExecutor::Metal(exec) => exec.set_intent_config(config),
+            BackendExecutor::Cpu(exec) => exec.set_intent_config(config),
         }
     }
 }

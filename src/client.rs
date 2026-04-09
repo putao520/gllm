@@ -921,7 +921,13 @@ impl Client {
         let actual_layer = target.to_physical_layer(num_layers);
         let data_size_bytes = payload.data.len();
 
-        // Phase 2: dispatch by injection kind (all sync, no locks)
+        // Phase 2a: Store payload on executor for KnowledgeInjectCallback (§8.1)
+        {
+            let mut executor = state.backend.executor_mut();
+            executor.set_knowledge_payload(payload.clone());
+        }
+
+        // Phase 2b: dispatch by injection kind (all sync, no locks)
         match payload.kind {
             InjectionKind::FrozenKvChunk => {
                 let executor = state.backend.executor();
@@ -1075,6 +1081,10 @@ impl Client {
     }
 
     /// Attach guardrail (per SPEC 04-API-DESIGN §7.4).
+    ///
+    /// Registers the probe runner into the executor's callback chain
+    /// (GuardrailProbeCallback, priority 40) for deep-layer hidden state
+    /// classification per SPEC §16.4.
     pub fn attach_guardrail(
         &self,
         probe: crate::intent::GuardProbe,
@@ -1084,20 +1094,19 @@ impl Client {
         use crate::guardrail::GuardProbeRunner;
 
         let state = self.require_state()?;
-        let executor = state.backend.executor();
-        let num_layers = executor.model_config().num_hidden_layers;
         let probe_id = match &probe {
             crate::intent::GuardProbe::FromSafetensors { path } => path.clone(),
             crate::intent::GuardProbe::FromModel { model_id } => model_id.clone(),
         };
-        let actual_layer = target.to_physical_layer(num_layers);
 
         let runner = GuardProbeRunner::from_policy(probe, target, policy)
             .map_err(|e| ClientError::RuntimeError(format!("failed to create guard probe runner: {}", e)))?;
 
-        executor.add_hook(Box::new(runner)).map_err(|e| {
-            ClientError::RuntimeError(format!("failed to register guardrail hook: {}", e))
-        })?;
+        let mut executor = state.backend.executor_mut();
+        let num_layers = executor.model_config().num_hidden_layers;
+        let actual_layer = target.to_physical_layer(num_layers);
+
+        executor.add_guardrail_runner(runner);
 
         Ok(crate::intent::GuardrailAttachment {
             actual_layer,
