@@ -771,7 +771,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 )
             },
             moe_thermal: if moe_num_experts > 0 {
-                Some(crate::moe::thermal::ExpertThermalManager::new(moe_num_experts))
+                let mut thermal = crate::moe::thermal::ExpertThermalManager::new(moe_num_experts);
+                // §5.9: inject eviction_aggressiveness from StrategyBias via global ExecutionPlan
+                let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
+                let eviction_aggr = exec_plan.strategy_bias.expert_eviction_aggressiveness();
+                thermal = thermal.with_eviction_aggressiveness(eviction_aggr);
+                Some(thermal)
             } else {
                 None
             },

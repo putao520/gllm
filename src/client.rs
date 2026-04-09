@@ -318,6 +318,8 @@ impl ClientBuilder {
                 decode_ratio_scale: arbiter_bias.decode_ratio_scale,
                 speculative_decoding_value: arbiter_bias.speculative_decoding_value,
                 quantization_aggressiveness: arbiter_bias.quantization_aggressiveness,
+                expert_eviction_aggressiveness: arbiter_bias.expert_eviction_aggressiveness,
+                expert_prefetch_priority: arbiter_bias.expert_prefetch_priority,
             };
 
             gllm_kernels::compiler::planner::init_global_execution_plan_with_bias(&kernels_bias);

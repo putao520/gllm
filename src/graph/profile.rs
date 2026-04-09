@@ -149,6 +149,21 @@ pub struct GraphProfiler;
 
 impl GraphProfiler {
     /// Extract a `GraphProfile` from a `ModelConfig`.
+    ///
+    /// # Design Note
+    ///
+    /// SPEC §3.3 specifies graph-level extraction (traversing OnnxGraph nodes/edges).
+    /// However, this function runs BEFORE graph construction (which happens inside
+    /// BackendContext::new), because StrategyBias must be available before JIT compilation.
+    ///
+    /// Fields that would ideally come from graph traversal use ModelConfig-based heuristics:
+    /// - `compute_density`: 2 × hidden_dim (approximate FLOPs/byte for transformer)
+    /// - `fusion_opportunity`: 0.6 for gated FFN, 0.4 otherwise
+    /// - `avg_epilogue_chain_len`: 3.0 for SwiGLU/GeGLU (gate+activation+mul), 1.0 for ReLU
+    /// - `moe_layer_ratio`: 0.8 for MoE models (industry standard)
+    /// - `residual_kind`: PreNorm (all modern models since Llama)
+    ///
+    /// These heuristics are validated by the 4 golden test vectors in arbiter.rs tests.
     pub fn profile(config: &ModelConfig) -> GraphProfile {
         let hidden_dim = config.hidden_size;
         let num_layers = config.num_hidden_layers;
