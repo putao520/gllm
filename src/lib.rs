@@ -56,7 +56,7 @@ pub use generation::{
     GenerationHook, HookDecision, ThresholdHook,
 };
 pub use guardrail::{GuardProbeError, GuardProbeRunner};
-pub use embeddings::{Embedding, EmbeddingsResponse};
+pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use rerank::{RerankResponse, RerankResult};
 pub use intent::{
     GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,

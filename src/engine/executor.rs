@@ -631,7 +631,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         geometry.dtype,
                         model_id,
                         backend,
-                        &cache
+                        &cache,
+                        manifest.arch.family(),
                     ).map_err(|e| {
                         eprintln!("Failed to build executor from yaml: {}", e);
                         e
@@ -833,6 +834,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Use the new GraphOptimizer to generate FusedGraph
         let ctx = OptimizationContext {
             geometry: geometry.clone(),
+            arch_family: manifest.arch.family(),
             ..Default::default()
         };
         let optimizer = GraphOptimizer::new(ctx);

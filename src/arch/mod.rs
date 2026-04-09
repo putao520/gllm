@@ -43,6 +43,7 @@ pub fn build_executor_from_yaml(
     model_id: &str,
     backend: &str,
     cache: &crate::compat::artifact_cache::ArtifactCache,
+    arch_family: crate::manifest::ArchFamily,
 ) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
     register_builtin_templates();
 
@@ -78,6 +79,7 @@ pub fn build_executor_from_yaml(
     });
     let ctx = crate::graph::optimizer::OptimizationContext {
         geometry,
+        arch_family,
         ..Default::default()
     };
 

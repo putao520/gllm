@@ -50,7 +50,7 @@ impl OptimizationPass for FlashAttentionFusionPass {
                     .iter()
                     .find_map(|input| out.quantization_info.get(input).map(|q| q.scale))
                     .or(Some(1.0 / (ctx.head_dim() as f32).sqrt())),
-                causal: true,
+                causal: !ctx.is_encoder(),
             };
             let mut fused = FusedNode::new(
                 format!("{}_flash_attn", qk.name),
@@ -320,7 +320,7 @@ impl OptimizationPass for CanonicalizeAttentionPass {
                         num_kv_heads: ctx.num_kv_heads(),
                         head_dim: ctx.head_dim(),
                         scale: Some(1.0 / (ctx.head_dim() as f32).sqrt()),
-                        causal: true,
+                        causal: !ctx.is_encoder(),
                     };
                     node.op = FusedOp::FlashAttention(config);
                 } else {

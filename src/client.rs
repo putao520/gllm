@@ -560,6 +560,34 @@ impl Client {
         self.embed(inputs)
     }
 
+    /// Create an embeddings builder with pipeline support (embed + rerank + RAG).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use gllm::Client;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::builder()
+    ///     .model("BAAI/bge-small-en-v1.5")
+    ///     .reranker("BAAI/bge-reranker-v2-m3")
+    ///     .build()?;
+    ///
+    /// let result = client.embed_builder(vec!["doc1", "doc2"])
+    ///     .rerank_query("query")
+    ///     .top_n(5)
+    ///     .generate()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn embed_builder<I, S>(&self, inputs: I) -> crate::embeddings::EmbeddingsBuilder<'_>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let inputs = inputs.into_iter().map(Into::into).collect();
+        crate::embeddings::EmbeddingsBuilder::new(self, inputs)
+    }
+
     /// Rerank documents by relevance to query (sync).
     pub fn rerank<I, S>(
         &self,
@@ -682,6 +710,164 @@ impl Client {
 
         Ok(RerankResponse {
             results,
+            request_id: None,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Pipeline Execution (REQ-PIPELINE-001, 004, 005)
+    // -----------------------------------------------------------------
+
+    /// Execute the embed+rerank pipeline: embed all inputs, then rerank
+    /// against the query using the pipeline reranker model.
+    ///
+    /// Returns embeddings sorted by descending rerank score, with
+    /// `rerank_scores` populated.
+    pub(crate) fn execute_embed_rerank_pipeline(
+        &self,
+        inputs: Vec<String>,
+        query: String,
+        top_n: Option<usize>,
+    ) -> Result<EmbeddingsResponse, ClientError> {
+        let state = self.require_state()?;
+
+        // Step 1: embed all inputs using the primary model
+        let embeddings = self.execute_embeddings(inputs.clone())?;
+
+        // Step 2: rerank using the pipeline reranker model
+        let reranker = state
+            .reranker_state
+            .as_ref()
+            .ok_or_else(|| {
+                ClientError::RuntimeError(
+                    "reranker not loaded; use .reranker() in ClientBuilder".into(),
+                )
+            })?;
+
+        let scores = self.execute_rerank_with_pipeline_state(reranker, &query, &inputs)?;
+
+        // Step 3: sort embeddings by rerank score (descending)
+        let mut indexed: Vec<(usize, f32, Embedding)> = scores
+            .into_iter()
+            .zip(embeddings.embeddings.into_iter())
+            .enumerate()
+            .map(|(i, (score, emb))| (i, score, emb))
+            .collect();
+        indexed.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Step 4: truncate to top_n
+        if let Some(n) = top_n {
+            indexed.truncate(n);
+        }
+
+        let rerank_scores: Vec<f32> = indexed.iter().map(|(_, s, _)| *s).collect();
+        let sorted_embeddings: Vec<Embedding> =
+            indexed.into_iter().map(|(_, _, e)| e).collect();
+
+        Ok(EmbeddingsResponse {
+            embeddings: sorted_embeddings,
+            rerank_scores: Some(rerank_scores),
+            request_id: None,
+        })
+    }
+
+    /// Score query-document pairs using a pipeline reranker model's backend.
+    fn execute_rerank_with_pipeline_state(
+        &self,
+        reranker: &PipelineModelState,
+        query: &str,
+        documents: &[String],
+    ) -> Result<Vec<f32>, ClientError> {
+        let mut executor = reranker.backend.executor_mut();
+        let mut scores = Vec::with_capacity(documents.len());
+        for doc in documents {
+            let score_vec = executor.rerank_pair(query, doc).map_err(|e| {
+                ClientError::RuntimeError(format!("pipeline rerank_pair error: {}", e))
+            })?;
+            let val = score_vec.first().copied().ok_or_else(|| {
+                ClientError::RuntimeError(
+                    "pipeline rerank_pair returned empty scores".into(),
+                )
+            })?;
+            scores.push(val);
+        }
+        Ok(scores)
+    }
+
+    /// Execute the full RAG pipeline: embed → rerank → generate answer.
+    ///
+    /// Performs reranking once, tracks original document indices, builds
+    /// an LLM prompt from the top-n documents, and generates an answer.
+    pub(crate) fn execute_rag_pipeline(
+        &self,
+        inputs: Vec<String>,
+        query: String,
+        top_n: usize,
+        system_prompt: String,
+    ) -> Result<RagResponse, ClientError> {
+        let state = self.require_state()?;
+
+        // Validate pipeline models are loaded
+        let reranker = state
+            .reranker_state
+            .as_ref()
+            .ok_or_else(|| {
+                ClientError::RuntimeError(
+                    "reranker not loaded; use .reranker() in ClientBuilder".into(),
+                )
+            })?;
+        let generator = state
+            .generator_state
+            .as_ref()
+            .ok_or_else(|| {
+                ClientError::RuntimeError(
+                    "generator not loaded; use .generator() in ClientBuilder".into(),
+                )
+            })?;
+
+        // Step 1: rerank documents against the query (single pass)
+        let scores = self.execute_rerank_with_pipeline_state(reranker, &query, &inputs)?;
+
+        // Step 2: sort by score descending, keeping original indices
+        let mut score_indices: Vec<(usize, f32)> =
+            scores.into_iter().enumerate().collect();
+        score_indices.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        score_indices.truncate(top_n);
+
+        let source_indices: Vec<usize> = score_indices.iter().map(|(i, _)| *i).collect();
+        let rerank_scores: Vec<f32> = score_indices.iter().map(|(_, s)| *s).collect();
+
+        // Step 3: build LLM prompt from top-n document texts
+        let top_docs: Vec<&str> = source_indices
+            .iter()
+            .map(|&i| inputs[i].as_str())
+            .collect();
+
+        let prompt = format!(
+            "{}\n\nDocuments:\n{}\n\nQuestion: {}",
+            system_prompt,
+            top_docs.join("\n---\n"),
+            query,
+        );
+
+        // Step 4: generate answer with the pipeline generator model
+        let mut gen_executor = generator.backend.executor_mut();
+        let answer = gen_executor
+            .generate(&prompt, 512, 0.7, 50, 0.9)
+            .map_err(|e| {
+                ClientError::RuntimeError(format!("pipeline generator error: {}", e))
+            })?;
+
+        Ok(RagResponse {
+            text: answer,
+            sources: source_indices,
+            rerank_scores,
             request_id: None,
         })
     }

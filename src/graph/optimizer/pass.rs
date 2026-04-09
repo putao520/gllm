@@ -34,6 +34,8 @@ pub trait OptimizationPass: Send + Sync + std::fmt::Debug {
 pub struct OptimizationContext {
     /// Model geometry (provides num_heads, num_kv_heads, head_dim, max_seq_len, hidden_size).
     pub geometry: std::sync::Arc<crate::model_config::ModelGeometry>,
+    /// 架构族: Encoder (bidirectional) vs Decoder (causal)
+    pub arch_family: crate::manifest::ArchFamily,
     /// 后端类型
     pub backend_type: BackendType,
     /// CUDA SM 版本（如 (8, 0) 表示 SM 8.0）
@@ -67,6 +69,14 @@ impl OptimizationContext {
     pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
     /// Hidden layer dimension.
     pub fn hidden_size(&self) -> usize { self.geometry.hidden_size }
+    /// Whether this is an encoder model (bidirectional attention).
+    pub fn is_encoder(&self) -> bool {
+        self.arch_family == crate::manifest::ArchFamily::Encoder
+    }
+    /// Whether this is a decoder model (causal attention).
+    pub fn is_decoder(&self) -> bool {
+        self.arch_family == crate::manifest::ArchFamily::Decoder
+    }
 }
 
 impl Default for OptimizationContext {
@@ -91,6 +101,7 @@ impl Default for OptimizationContext {
         });
         Self {
             geometry,
+            arch_family: crate::manifest::ArchFamily::Decoder,
             backend_type: BackendType::Cpu,
             cuda_sm_version: None,
             available_memory: 0,
@@ -130,7 +141,7 @@ impl OptimizationContext {
         self.enable_swiglu_fusion
     }
 
-    /// 创建 CUDA 上下文
+    /// 创建 CUDA 上下文 (defaults to Decoder arch family)
     pub fn cuda(sm_version: (u32, u32)) -> Self {
         let tensor_core_gen = if sm_version.0 >= 9 { 3 } else if sm_version.0 >= 8 { 2 } else if sm_version.0 >= 7 { 1 } else { 0 };
         Self {
@@ -140,6 +151,13 @@ impl OptimizationContext {
             warp_size: 32,
             ..Default::default()
         }
+    }
+
+    /// 创建 CUDA 上下文 with specified arch family
+    pub fn cuda_with_arch(sm_version: (u32, u32), arch_family: crate::manifest::ArchFamily) -> Self {
+        let mut ctx = Self::cuda(sm_version);
+        ctx.arch_family = arch_family;
+        ctx
     }
 
     /// 创建 CPU 上下文
@@ -154,6 +172,18 @@ impl OptimizationContext {
     pub fn from_geometry(geometry: std::sync::Arc<crate::model_config::ModelGeometry>) -> Self {
         Self {
             geometry,
+            ..Default::default()
+        }
+    }
+
+    /// Create from ModelGeometry with specified arch family.
+    pub fn from_geometry_with_arch(
+        geometry: std::sync::Arc<crate::model_config::ModelGeometry>,
+        arch_family: crate::manifest::ArchFamily,
+    ) -> Self {
+        Self {
+            geometry,
+            arch_family,
             ..Default::default()
         }
     }

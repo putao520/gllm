@@ -282,7 +282,7 @@ pub(crate) fn build_decoder_layer_graph(
     // Multi-Head Attention (F32 activation)
     let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim },
+        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim, causal: true },
         vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
     );
 

@@ -1254,7 +1254,7 @@ pub(crate) fn launch_config_for_op(
                 shared_mem_bytes: shared,
             }
         }
-        OpKind::MultiHeadAttention { seq_len, num_heads, head_dim } => {
+        OpKind::MultiHeadAttention { seq_len, num_heads, head_dim, .. } => {
             let block = (*head_dim as u32).next_power_of_two()
                 .min(profile.max_threads_per_block);
             gllm_kernels::gpu::LaunchConfig {
@@ -1345,7 +1345,7 @@ pub(crate) fn build_kernel_params(
                 *m as u64, *n as u64, *k as u64,
             ])
         }
-        OpKind::MultiHeadAttention { seq_len, num_heads, head_dim } => {
+        OpKind::MultiHeadAttention { seq_len, num_heads, head_dim, .. } => {
             Ok(vec![
                 input_ptrs[0], input_ptrs[1], input_ptrs[2], output_ptr,
                 *seq_len as u64, *num_heads as u64, *head_dim as u64,
@@ -3121,7 +3121,9 @@ pub(crate) fn build_decoder_layer_graph(
         OpKind::MultiHeadAttention {
             seq_len: s,
             num_heads,
+            num_kv_heads: num_heads,
             head_dim,
+            causal: true,
         },
         vec![q_rope, k_rope, v_proj],
         vec![attn_out],

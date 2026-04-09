@@ -233,6 +233,7 @@ fn build_flash_attention_graph(
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
+            causal: config.causal,
         },
         vec![q, k, v],
         vec![out],
@@ -444,6 +445,7 @@ fn build_gqa_graph(
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
+            causal: true, // GQA is decoder-only, always causal
         },
         vec![q, k, v],
         vec![out],
