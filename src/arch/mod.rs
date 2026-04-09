@@ -58,11 +58,26 @@ pub fn build_executor_from_yaml(
         ))
     })?;
 
-    let ctx = crate::graph::optimizer::OptimizationContext {
+    let geometry = std::sync::Arc::new(crate::model_config::ModelGeometry {
         hidden_size: config.hidden_size,
         num_heads: config.num_attention_heads,
         num_kv_heads: config.num_key_value_heads,
         head_dim: config.head_dim,
+        num_layers: config.num_hidden_layers,
+        vocab_size: config.vocab_size,
+        intermediate_size: config.intermediate_size.unwrap_or(config.hidden_size * 4),
+        max_seq_len: 4096,
+        rope_theta: config.rope_theta,
+        rope_scale: 1.0,
+        rope_interleaved: false,
+        dtype,
+        norm_eps: 1e-5,
+        num_experts: 0,
+        moe_top_k: 0,
+        expert_intermediate_size: 0,
+    });
+    let ctx = crate::graph::optimizer::OptimizationContext {
+        geometry,
         ..Default::default()
     };
 

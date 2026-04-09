@@ -42,14 +42,14 @@ impl OptimizationPass for FlashAttentionFusionPass {
             }
 
             let config = FlashAttentionConfig {
-                num_heads: ctx.num_heads,
-                num_kv_heads: ctx.num_kv_heads,
-                head_dim: ctx.head_dim,
+                num_heads: ctx.num_heads(),
+                num_kv_heads: ctx.num_kv_heads(),
+                head_dim: ctx.head_dim(),
                 scale: qk
                     .inputs
                     .iter()
                     .find_map(|input| out.quantization_info.get(input).map(|q| q.scale))
-                    .or(Some(1.0 / (ctx.head_dim as f32).sqrt())),
+                    .or(Some(1.0 / (ctx.head_dim() as f32).sqrt())),
                 causal: true,
             };
             let mut fused = FusedNode::new(
@@ -153,9 +153,9 @@ impl OptimizationPass for FusedQkvRopeFusionPass {
             }).unwrap_or(10000.0); // LEGAL: rope_theta=10000.0 是 RoPE 的行业标准默认值
 
             let config = FusedQkvRopeConfig {
-                num_heads: _ctx.num_heads,
-                num_kv_heads: _ctx.num_kv_heads,
-                head_dim: _ctx.head_dim,
+                num_heads: _ctx.num_heads(),
+                num_kv_heads: _ctx.num_kv_heads(),
+                head_dim: _ctx.head_dim(),
                 rope_theta,
             };
 
@@ -217,7 +217,7 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
             let mut fused = FusedNode::new(
                 format!("{}_fused_rms_linear", rms.name),
                 FusedOp::FusedRMSLinear(FusedRMSLinearConfig {
-                    hidden_size: _ctx.hidden_size,
+                    hidden_size: _ctx.hidden_size(),
                     eps,
                 }),
             );
@@ -254,7 +254,7 @@ impl OptimizationPass for GQAFusionPass {
         graph: FusedGraph,
         ctx: &OptimizationContext,
     ) -> Result<FusedGraph, OptimizeError> {
-        if ctx.num_kv_heads >= ctx.num_heads || ctx.num_kv_heads == 0 {
+        if ctx.num_kv_heads() >= ctx.num_heads() || ctx.num_kv_heads() == 0 {
             return Ok(graph);
         }
 
@@ -268,10 +268,10 @@ impl OptimizationPass for GQAFusionPass {
             }
 
             let config = GQAConfig {
-                num_heads: ctx.num_heads,
-                num_kv_heads: ctx.num_kv_heads,
-                num_groups: ctx.num_heads / ctx.num_kv_heads,
-                head_dim: ctx.head_dim,
+                num_heads: ctx.num_heads(),
+                num_kv_heads: ctx.num_kv_heads(),
+                num_groups: ctx.num_heads() / ctx.num_kv_heads(),
+                head_dim: ctx.head_dim(),
             };
             let mut fused = FusedNode::new(format!("{}_gqa", q.name), FusedOp::GQA(config));
             fused.inputs = q
@@ -316,19 +316,19 @@ impl OptimizationPass for CanonicalizeAttentionPass {
                 // Determine whether to use FlashAttention or GQA
                 if ctx.supports_flash_attention() {
                     let config = FlashAttentionConfig {
-                        num_heads: ctx.num_heads,
-                        num_kv_heads: ctx.num_kv_heads,
-                        head_dim: ctx.head_dim,
-                        scale: Some(1.0 / (ctx.head_dim as f32).sqrt()),
+                        num_heads: ctx.num_heads(),
+                        num_kv_heads: ctx.num_kv_heads(),
+                        head_dim: ctx.head_dim(),
+                        scale: Some(1.0 / (ctx.head_dim() as f32).sqrt()),
                         causal: true,
                     };
                     node.op = FusedOp::FlashAttention(config);
                 } else {
                     let config = GQAConfig {
-                        num_heads: ctx.num_heads,
-                        num_kv_heads: ctx.num_kv_heads,
-                        num_groups: ctx.num_heads / ctx.num_kv_heads,
-                        head_dim: ctx.head_dim,
+                        num_heads: ctx.num_heads(),
+                        num_kv_heads: ctx.num_kv_heads(),
+                        num_groups: ctx.num_heads() / ctx.num_kv_heads(),
+                        head_dim: ctx.head_dim(),
                     };
                     node.op = FusedOp::GQA(config);
                 }
@@ -587,9 +587,16 @@ mod tests {
     #[test]
     fn gqa_fusion_detected() {
         let pass = GQAFusionPass;
-        let ctx = OptimizationContext {
+        let geometry = std::sync::Arc::new(crate::model_config::ModelGeometry {
             num_heads: 32,
             num_kv_heads: 8,
+            ..{
+                let d = OptimizationContext::default();
+                (*d.geometry).clone()
+            }
+        });
+        let ctx = OptimizationContext {
+            geometry,
             ..OptimizationContext::default()
         };
         let graph = FusedGraph {

@@ -24,9 +24,9 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
     config: &crate::engine::executor::GeneratorForwardConfig,
 ) -> CompilerGraph {
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let num_kv_heads = config.attention.num_kv_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let num_kv_heads = config.geometry.num_kv_heads;
+    let head_dim = config.geometry.head_dim;
     let eps = config.norm_eps();
     let rope_theta = config.rope.theta;
     let dtype = crate::compat::jit_helpers::computation_dtype_from_config(config);

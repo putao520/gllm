@@ -220,7 +220,7 @@ impl KvCacheState {
     }
 
     pub fn remaining(&self) -> usize {
-        self.config.max_seq_len.saturating_sub(self.used)
+        self.config.max_seq_len().saturating_sub(self.used)
     }
 
     /// For LMCache reuse we sometimes need to restore the consumed length to
@@ -228,10 +228,10 @@ impl KvCacheState {
     /// storage. This keeps zero-copy semantics while making the logical
     /// cursor reusable.
     pub fn set_used(&mut self, used: usize) -> KvCacheResult<()> {
-        if used > self.config.max_seq_len {
+        if used > self.config.max_seq_len() {
             return Err(KvCacheError::Exhausted {
                 requested: used,
-                available: self.config.max_seq_len,
+                available: self.config.max_seq_len(),
             });
         }
         self.used = used;
@@ -325,6 +325,35 @@ impl KvCacheDoubleBuffer {
 mod tests {
     use super::*;
     use gllm_kernels::types::DType;
+    use std::sync::Arc;
+
+    /// Create a test KvCacheConfig with geometry for KV cache tests.
+    fn test_kv_config(max_seq_len: usize) -> KvCacheConfig {
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 4096,
+            num_layers: 32,
+            vocab_size: 32000,
+            intermediate_size: 11008,
+            num_heads: 32,
+            num_kv_heads: 32,
+            head_dim: 128,
+            max_seq_len,
+            rope_theta: 10000.0,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            dtype: DType::F16,
+            norm_eps: 1e-5,
+            num_experts: 0,
+            moe_top_k: 0,
+            expert_intermediate_size: 0,
+        });
+        KvCacheConfig {
+            geometry,
+            kv_dtype: DType::F16,
+            page_size: 16,
+            swap_config: None,
+        }
+    }
 
     #[test]
     fn test_kv_page_header_size() {
@@ -398,15 +427,7 @@ mod tests {
     #[test]
     fn test_kv_cache_state_advance() {
         let handle = KvCacheHandle(1);
-        let config = KvCacheConfig {
-            num_layers: 32,
-            num_heads: 32,
-            head_dim: 128,
-            max_seq_len: 100,
-            kv_dtype: DType::F16,
-            page_size: 16,
-            swap_config: None,
-        };
+        let config = test_kv_config(100);
         let mut state = KvCacheState::new(handle, config);
         assert_eq!(state.used(), 0);
         assert_eq!(state.remaining(), 100);
@@ -421,15 +442,7 @@ mod tests {
     #[test]
     fn test_kv_cache_state_reset() {
         let handle = KvCacheHandle(1);
-        let config = KvCacheConfig {
-            num_layers: 32,
-            num_heads: 32,
-            head_dim: 128,
-            max_seq_len: 100,
-            kv_dtype: DType::F16,
-            page_size: 16,
-            swap_config: None,
-        };
+        let config = test_kv_config(100);
         let mut state = KvCacheState::new(handle, config);
         state.advance(50).unwrap();
         assert_eq!(state.used(), 50);
@@ -442,17 +455,10 @@ mod tests {
     fn test_kv_cache_double_buffer_swap() {
         let handle1 = KvCacheHandle(1);
         let handle2 = KvCacheHandle(2);
-        let config = KvCacheConfig {
-            num_layers: 32,
-            num_heads: 32,
-            head_dim: 128,
-            max_seq_len: 100,
-            kv_dtype: DType::F16,
-            page_size: 16,
-            swap_config: None,
-        };
-        let front = KvCacheState::new(handle1, config.clone());
-        let back = KvCacheState::new(handle2, config);
+        let config1 = test_kv_config(100);
+        let config2 = test_kv_config(100);
+        let front = KvCacheState::new(handle1, config1);
+        let back = KvCacheState::new(handle2, config2);
 
         let mut buffer = KvCacheDoubleBuffer::new(front, back);
         let front_id = buffer.front().handle();

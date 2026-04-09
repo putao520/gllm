@@ -27,6 +27,22 @@ pub struct ResolvedConfig {
 }
 
 impl ResolvedConfig {
+    /// Construct from ModelGeometry (single source of truth).
+    pub fn from_geometry(g: &crate::model_config::ModelGeometry, extra: HashMap<String, i64>) -> Self {
+        Self {
+            num_hidden_layers: g.num_layers,
+            hidden_size: g.hidden_size,
+            num_attention_heads: g.num_heads,
+            num_key_value_heads: g.num_kv_heads,
+            head_dim: g.head_dim,
+            intermediate_size: Some(g.intermediate_size),
+            vocab_size: g.vocab_size,
+            rope_theta: g.rope_theta,
+            dtype: format!("{:?}", g.dtype).to_lowercase(),
+            extra,
+        }
+    }
+
     /// 获取配置值（整数）
     pub fn get_int(&self, key: &str) -> Option<i64> {
         match key {

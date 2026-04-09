@@ -55,14 +55,14 @@ impl GpuKvCacheMeta {
     pub fn from_config(config: &KvCacheConfig, device_ptr: u64) -> Self {
         let kv_dtype = DType::F32; // KvCacheConfig.dtype_size carries raw bytes; derive DType
         let total_bytes = config.num_layers() * 2
-            * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size();
+            * config.num_heads() * config.max_seq_len() * config.head_dim() * config.dtype_size();
         Self {
             device_ptr,
             total_bytes,
             num_layers: config.num_layers(),
-            num_kv_heads: config.num_heads,
-            max_seq_len: config.max_seq_len,
-            head_dim: config.head_dim,
+            num_kv_heads: config.num_heads(),
+            max_seq_len: config.max_seq_len(),
+            head_dim: config.head_dim(),
             kv_dtype,
             page_size: config.page_size,
             seq_len: 0,
@@ -1640,8 +1640,8 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();
@@ -1796,9 +1796,9 @@ pub(super) fn cuda_decoder_forward<E: Element>(
     }
 
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let num_kv_heads = config.attention.num_kv_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let num_kv_heads = config.geometry.num_kv_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();
@@ -2583,8 +2583,8 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();
@@ -2920,8 +2920,8 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
     let seq_len = tokens.len();
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();
@@ -3497,9 +3497,9 @@ pub(super) fn hip_decoder_forward<E: Element>(
     let gfx_arch = device.gfx_arch();
 
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let num_kv_heads = config.attention.num_kv_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let num_kv_heads = config.geometry.num_kv_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();
@@ -4066,9 +4066,9 @@ pub(super) fn metal_decoder_forward<E: Element>(
     };
 
     let hidden = config.hidden_size();
-    let num_heads = config.attention.num_heads;
-    let num_kv_heads = config.attention.num_kv_heads;
-    let head_dim = config.attention.head_dim;
+    let num_heads = config.geometry.num_heads;
+    let num_kv_heads = config.geometry.num_kv_heads;
+    let head_dim = config.geometry.head_dim;
     let inter = config.intermediate_size();
     let eps = config.norm_eps();
     let num_layers = config.num_layers();

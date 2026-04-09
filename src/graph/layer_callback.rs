@@ -363,11 +363,6 @@ mod tests {
                         moe_top_k: 0,
                         expert_intermediate_size: 0,
                     }),
-                    attention: crate::engine::executor::AttentionHeadConfig {
-                        num_heads: 4,
-                        num_kv_heads: 2,
-                        head_dim: 64,
-                    },
                     rope: crate::engine::executor::RoPEConfig {
                         theta: 10000.0,
                         scale: 1.0,

@@ -50,14 +50,14 @@ impl KvCacheBuffer {
             2 => gllm_kernels::types::DType::F16, // F16 default for 2-byte; callers can override via set_cache_dtype
             _ => gllm_kernels::types::DType::F32,
         };
-        let total_bytes = config.num_layers * config.num_heads * config.max_seq_len * config.head_dim * elem_bytes;
+        let total_bytes = config.num_layers() * config.num_heads() * config.max_seq_len() * config.head_dim() * elem_bytes;
         Self {
             k: vec![0u8; total_bytes],
             v: vec![0u8; total_bytes],
-            num_layers: config.num_layers,
-            num_kv_heads: config.num_heads,
-            max_seq_len: config.max_seq_len,
-            head_dim: config.head_dim,
+            num_layers: config.num_layers(),
+            num_kv_heads: config.num_heads(),
+            max_seq_len: config.max_seq_len(),
+            head_dim: config.head_dim(),
             page_size: config.page_size,
             seq_len: 0,
             elem_bytes,

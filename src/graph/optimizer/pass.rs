@@ -32,26 +32,20 @@ pub trait OptimizationPass: Send + Sync + std::fmt::Debug {
 /// 优化上下文 - 提供硬件和配置信息
 #[derive(Debug, Clone)]
 pub struct OptimizationContext {
+    /// Model geometry (provides num_heads, num_kv_heads, head_dim, max_seq_len, hidden_size).
+    pub geometry: std::sync::Arc<crate::model_config::ModelGeometry>,
     /// 后端类型
     pub backend_type: BackendType,
     /// CUDA SM 版本（如 (8, 0) 表示 SM 8.0）
     pub cuda_sm_version: Option<(u32, u32)>,
     /// 可用显存（字节）
     pub available_memory: usize,
-    /// 数据类型
+    /// 数据类型 (optimizer-local DType, distinct from gllm_kernels::types::DType)
     pub dtype: DType,
     /// 是否启用 FlashAttention
     pub enable_flash_attention: bool,
     /// 是否启用 SwiGLU 融合
     pub enable_swiglu_fusion: bool,
-    /// 最大序列长度
-    pub max_seq_len: usize,
-    /// 注意力头数
-    pub num_heads: usize,
-    /// KV 头数
-    pub num_kv_heads: usize,
-    /// 头维度
-    pub head_dim: usize,
     /// 是否支持 VNNI 指令（x86 整数点积加速）
     pub has_vnni: bool,
     /// 是否支持原生 BF16 指令（AVX-512 BF16 / AMX）
@@ -60,28 +54,53 @@ pub struct OptimizationContext {
     pub tensor_core_gen: u8,
     /// Warp 大小（GPU 专用，CPU 填 0）
     pub warp_size: u32,
-    /// 隐藏层维度
-    pub hidden_size: usize,
+}
+
+impl OptimizationContext {
+    /// Number of query attention heads.
+    pub fn num_heads(&self) -> usize { self.geometry.num_heads }
+    /// Number of KV heads.
+    pub fn num_kv_heads(&self) -> usize { self.geometry.num_kv_heads }
+    /// Head dimension.
+    pub fn head_dim(&self) -> usize { self.geometry.head_dim }
+    /// Maximum sequence length.
+    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
+    /// Hidden layer dimension.
+    pub fn hidden_size(&self) -> usize { self.geometry.hidden_size }
 }
 
 impl Default for OptimizationContext {
     fn default() -> Self {
+        let geometry = std::sync::Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 4096,
+            num_layers: 32,
+            vocab_size: 32000,
+            intermediate_size: 11008,
+            num_heads: 32,
+            num_kv_heads: 8,
+            head_dim: 128,
+            max_seq_len: 4096,
+            rope_theta: 10000.0,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            dtype: gllm_kernels::types::DType::F32,
+            norm_eps: 1e-5,
+            num_experts: 0,
+            moe_top_k: 0,
+            expert_intermediate_size: 0,
+        });
         Self {
+            geometry,
             backend_type: BackendType::Cpu,
             cuda_sm_version: None,
             available_memory: 0,
             dtype: DType::F32,
             enable_flash_attention: true,
             enable_swiglu_fusion: true,
-            max_seq_len: 4096,
-            num_heads: 32,
-            num_kv_heads: 8,
-            head_dim: 128,
             has_vnni: false,
             has_bf16: false,
             tensor_core_gen: 0,
             warp_size: 0,
-            hidden_size: 4096,
         }
     }
 }
@@ -127,6 +146,14 @@ impl OptimizationContext {
     pub fn cpu() -> Self {
         Self {
             backend_type: BackendType::Cpu,
+            ..Default::default()
+        }
+    }
+
+    /// Create from ModelGeometry + hardware info.
+    pub fn from_geometry(geometry: std::sync::Arc<crate::model_config::ModelGeometry>) -> Self {
+        Self {
+            geometry,
             ..Default::default()
         }
     }

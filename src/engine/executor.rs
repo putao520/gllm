@@ -54,6 +54,17 @@ pub struct AttentionHeadConfig {
     pub head_dim: usize,
 }
 
+impl AttentionHeadConfig {
+    /// Construct from ModelGeometry (single source of truth).
+    pub fn from_geometry(g: &crate::model_config::ModelGeometry) -> Self {
+        Self {
+            num_heads: g.num_heads,
+            num_kv_heads: g.num_kv_heads,
+            head_dim: g.head_dim,
+        }
+    }
+}
+
 /// Paged KV cache configuration for GPU decode.
 #[derive(Debug, Clone)]
 pub struct PagedKvConfig {
@@ -66,8 +77,6 @@ pub struct PagedKvConfig {
 pub struct GeneratorForwardConfig {
     /// Model geometric constants (Arc-shared single source of truth).
     pub geometry: Arc<crate::model_config::ModelGeometry>,
-    /// Attention head config (convenience view, derived from geometry).
-    pub attention: AttentionHeadConfig,
     /// RoPE config (convenience view, derived from geometry).
     pub rope: RoPEConfig,
     pub position_encoding: PositionEncoding,
@@ -105,11 +114,15 @@ impl GeneratorForwardConfig {
     /// Backward-compatible accessor: maximum sequence length.
     pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
     /// Backward-compatible accessor: number of attention heads.
-    pub fn num_heads(&self) -> usize { self.attention.num_heads }
+    pub fn num_heads(&self) -> usize { self.geometry.num_heads }
     /// Backward-compatible accessor: number of KV heads.
-    pub fn num_kv_heads(&self) -> usize { self.attention.num_kv_heads }
+    pub fn num_kv_heads(&self) -> usize { self.geometry.num_kv_heads }
     /// Backward-compatible accessor: head dimension.
-    pub fn head_dim(&self) -> usize { self.attention.head_dim }
+    pub fn head_dim(&self) -> usize { self.geometry.head_dim }
+    /// Derive AttentionHeadConfig from geometry.
+    pub fn attention(&self) -> AttentionHeadConfig {
+        AttentionHeadConfig::from_geometry(&self.geometry)
+    }
     /// Backward-compatible accessor: RoPE theta.
     pub fn rope_theta(&self) -> f64 { self.rope.theta }
     /// Backward-compatible accessor: RoPE scale.
@@ -125,15 +138,15 @@ impl GeneratorForwardConfig {
     /// Extract attention head geometry as a grouped struct.
     #[allow(dead_code)]
     pub(crate) fn attention_geometry(&self) -> crate::compat::types::AttentionGeometry {
-        let q_dim = self.attention.num_heads * self.attention.head_dim;
-        let kv_dim = self.attention.num_kv_heads * self.attention.head_dim;
+        let q_dim = self.geometry.num_heads * self.geometry.head_dim;
+        let kv_dim = self.geometry.num_kv_heads * self.geometry.head_dim;
         crate::compat::types::AttentionGeometry {
-            num_heads: self.attention.num_heads,
-            num_kv_heads: self.attention.num_kv_heads,
-            head_dim: self.attention.head_dim,
+            num_heads: self.geometry.num_heads,
+            num_kv_heads: self.geometry.num_kv_heads,
+            head_dim: self.geometry.head_dim,
             q_dim,
             kv_dim,
-            heads_per_group: self.attention.num_heads / self.attention.num_kv_heads.max(1),
+            heads_per_group: self.geometry.num_heads / self.geometry.num_kv_heads.max(1),
         }
     }
 
@@ -158,13 +171,12 @@ pub struct SwapConfig {
 }
 
 /// KV-cache geometry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
+#[allow(clippy::derived_hash_with_manual_partial_eq)]
 pub struct KvCacheConfig {
-    pub num_layers: usize,
-    pub num_heads: usize,
-    pub head_dim: usize,
-    pub max_seq_len: usize,
-    /// KV cache element dtype.
+    /// Model geometry (provides num_layers, num_kv_heads, head_dim, max_seq_len).
+    pub geometry: Arc<crate::model_config::ModelGeometry>,
+    /// KV cache element dtype (may differ from geometry.dtype, e.g. CPU forces F32).
     pub kv_dtype: DType,
     pub page_size: usize,
     pub swap_config: Option<SwapConfig>,
@@ -173,6 +185,26 @@ pub struct KvCacheConfig {
 impl KvCacheConfig {
     /// Bytes per KV cache element.
     pub fn dtype_size(&self) -> usize { self.kv_dtype.size_bytes() }
+    /// Number of transformer layers.
+    pub fn num_layers(&self) -> usize { self.geometry.num_layers }
+    /// Number of KV attention heads.
+    pub fn num_heads(&self) -> usize { self.geometry.num_kv_heads }
+    /// Dimension of each attention head.
+    pub fn head_dim(&self) -> usize { self.geometry.head_dim }
+    /// Maximum sequence length.
+    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
+}
+
+impl PartialEq for KvCacheConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_layers() == other.num_layers()
+            && self.num_heads() == other.num_heads()
+            && self.head_dim() == other.head_dim()
+            && self.max_seq_len() == other.max_seq_len()
+            && self.kv_dtype == other.kv_dtype
+            && self.page_size == other.page_size
+            && self.swap_config == other.swap_config
+    }
 }
 
 /// Errors originating from a compute backend.
@@ -223,59 +255,64 @@ pub enum AttentionMaskType {
 /// Attention topology descriptor.
 ///
 /// Lightweight struct that captures the attention geometry for a model.
-/// Constructed from `ModelConfig` without additional I/O.
+/// Constructed from `ModelGeometry` without additional I/O.
 #[derive(Debug, Clone)]
 pub struct AttentionTopology {
-    /// Number of query attention heads.
-    pub num_heads: usize,
-    /// Number of key/value heads (for GQA; equals `num_heads` for MHA).
-    pub num_kv_heads: usize,
-    /// Dimension of each attention head.
-    pub head_dim: usize,
+    /// Model geometry (provides num_heads, num_kv_heads, head_dim, max_seq_len).
+    pub geometry: Arc<crate::model_config::ModelGeometry>,
     /// Attention mask type (bidirectional vs causal).
     pub mask_type: AttentionMaskType,
-    /// Maximum sequence length the model supports.
-    pub max_seq_len: usize,
 }
 
 impl AttentionTopology {
     /// Construct a bidirectional (encoder) topology for BERT-style models
     /// (embedding / reranker).
-    pub fn bidirectional(
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        max_seq_len: usize,
-    ) -> Self {
+    pub fn bidirectional(geometry: Arc<crate::model_config::ModelGeometry>) -> Self {
         Self {
-            num_heads,
-            num_kv_heads,
-            head_dim,
+            geometry,
             mask_type: AttentionMaskType::Bidirectional,
-            max_seq_len,
         }
     }
 
     /// Construct a causal (decoder) topology for GPT-style generator models.
-    pub fn causal(
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        max_seq_len: usize,
-    ) -> Self {
+    pub fn causal(geometry: Arc<crate::model_config::ModelGeometry>) -> Self {
         Self {
-            num_heads,
-            num_kv_heads,
-            head_dim,
+            geometry,
             mask_type: AttentionMaskType::Causal,
-            max_seq_len,
         }
     }
 
     /// Legacy compatibility constructor (minimal bidirectional topology).
     pub fn linear() -> Self {
-        Self::bidirectional(1, 1, 1, 512)
+        let geometry = Arc::new(crate::model_config::ModelGeometry {
+            hidden_size: 1,
+            num_layers: 1,
+            vocab_size: 1,
+            intermediate_size: 1,
+            num_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 1,
+            max_seq_len: 512,
+            rope_theta: 10000.0,
+            rope_scale: 1.0,
+            rope_interleaved: false,
+            dtype: DType::F32,
+            norm_eps: 1e-5,
+            num_experts: 0,
+            moe_top_k: 0,
+            expert_intermediate_size: 0,
+        });
+        Self::bidirectional(geometry)
     }
+
+    /// Number of query attention heads.
+    pub fn num_heads(&self) -> usize { self.geometry.num_heads }
+    /// Number of KV heads.
+    pub fn num_kv_heads(&self) -> usize { self.geometry.num_kv_heads }
+    /// Head dimension.
+    pub fn head_dim(&self) -> usize { self.geometry.head_dim }
+    /// Maximum sequence length.
+    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
 }
 
 /// A single sequence in a batch.
@@ -512,11 +549,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let forward_config = GeneratorForwardConfig {
             geometry: geometry.clone(),
-            attention: AttentionHeadConfig {
-                num_heads: geometry.num_heads,
-                num_kv_heads: geometry.num_kv_heads,
-                head_dim: geometry.head_dim,
-            },
             rope: RoPEConfig {
                 theta: geometry.rope_theta,
                 scale: geometry.rope_scale,
@@ -556,15 +588,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
 
         let kv_cache_config = KvCacheConfig {
-            num_layers: geometry.num_layers,
-            num_heads: geometry.num_kv_heads,
-            head_dim: geometry.head_dim,
-            max_seq_len: geometry.max_seq_len,
+            geometry: geometry.clone(),
             kv_dtype,
             page_size,
             swap_config: None,
         };
-        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &model_config)?;
+        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &geometry)?;
 
         let is_moe = geometry.is_moe();
         let tokenizer = TokenizerHandle::from_loader(loader)?;
@@ -575,18 +604,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let memory_manager =
             GlobalMemoryManager::new_with_capacities(l1_capacity, l2_capacity, l3_capacity);
         let topology = match manifest.kind {
-            ModelKind::Chat => AttentionTopology::causal(
-                geometry.num_heads,
-                geometry.num_kv_heads,
-                geometry.head_dim,
-                geometry.max_seq_len,
-            ),
-            ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(
-                geometry.num_heads,
-                geometry.num_kv_heads,
-                geometry.head_dim,
-                geometry.max_seq_len,
-            ),
+            ModelKind::Chat => AttentionTopology::causal(geometry.clone()),
+            ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(geometry.clone()),
         };
 
         // Build YAML→JIT graph executor (best-effort; None if template not registered).
@@ -594,18 +613,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let graph_executor = {
             use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template_by_arch, ResolvedConfig};
             register_builtin_templates();
-            let resolved = ResolvedConfig {
-                num_hidden_layers: geometry.num_layers,
-                hidden_size: geometry.hidden_size,
-                num_attention_heads: geometry.num_heads,
-                num_key_value_heads: geometry.num_kv_heads,
-                head_dim: geometry.head_dim,
-                intermediate_size: Some(geometry.intermediate_size),
-                vocab_size: geometry.vocab_size,
-                rope_theta: geometry.rope_theta,
-                dtype: "f32".to_string(),
-                extra: std::collections::HashMap::new(),
-            };
+            let resolved = ResolvedConfig::from_geometry(&geometry, std::collections::HashMap::new());
             let hidden = geometry.hidden_size;
             let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
             // Use "cpu" as backend identifier (REQ-JIT-CACHE-003)
@@ -813,7 +821,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     fn build_onnx_generator_plan(
         manifest: &ModelManifest,
         loader: &mut Loader,
-        model_config: &ModelConfig,
+        geometry: &Arc<crate::model_config::ModelGeometry>,
     ) -> ExecutorResult<Option<OnnxGeneratorPlan>> {
         if manifest.kind != ModelKind::Chat || loader.weight_format() != WeightFormat::Onnx {
             return Ok(None);
@@ -824,10 +832,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // Use the new GraphOptimizer to generate FusedGraph
         let ctx = OptimizationContext {
-            hidden_size: model_config.hidden_size,
-            num_heads: model_config.num_attention_heads,
-            num_kv_heads: model_config.num_key_value_heads,
-            head_dim: model_config.head_dim,
+            geometry: geometry.clone(),
             ..Default::default()
         };
         let optimizer = GraphOptimizer::new(ctx);
@@ -1153,12 +1158,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             // Validate KV cache layer count matches ONNX graph KV outputs
             if !plan.kv_outputs.is_empty() {
                 let onnx_layers = onnx_kv_layer_count(&plan.kv_outputs);
-                if onnx_layers > 0 && onnx_layers != self.kv_cache_config.num_layers {
+                if onnx_layers > 0 && onnx_layers != self.kv_cache_config.num_layers() {
                     log::warn!(
                         "ONNX KV output layers ({}) differs from model config layers ({}); \
                          KV cache managed by compat layer using model config",
                         onnx_layers,
-                        self.kv_cache_config.num_layers
+                        self.kv_cache_config.num_layers()
                     );
                 }
             }
@@ -1513,11 +1518,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // §11 TurboQuant: 记录 per-channel scales 供下一步 KV 量化使用
         if self.turboquant.is_enabled() {
-            let kv_dim = self.kv_cache_config.num_heads * self.geometry.head_dim;
+            let kv_dim = self.kv_cache_config.num_heads() * self.geometry.head_dim;
             // §11.2: 存储 per-channel scales（从 Epilogue 遥测白嫖）
             let per_ch_scale = self.telemetry_aggregator.per_channel_scale();
             if per_ch_scale > 0.0 {
-                for layer in 0..self.kv_cache_config.num_layers {
+                for layer in 0..self.kv_cache_config.num_layers() {
                     let scales = vec![per_ch_scale; kv_dim];
                     self.turboquant.store_k_scales(layer, scales);
                 }
@@ -1525,7 +1530,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             // §11.3: 存储 RaBitQ 修正因子（从 Embedding 范数白嫖）
             let embed_norm = self.telemetry_aggregator.embedding_norm();
             if embed_norm > 0.0 {
-                for layer in 0..self.kv_cache_config.num_layers {
+                for layer in 0..self.kv_cache_config.num_layers() {
                     self.turboquant.store_correction(
                         layer,
                         crate::kv_cache::quant::RabitqCorrection {

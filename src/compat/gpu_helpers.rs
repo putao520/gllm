@@ -660,8 +660,8 @@ pub(super) fn gpu_alloc_kv_cache(
 ) -> Result<KvCacheHandle, BE> {
     use gllm_kernels::gpu::GpuBuffer;
 
-    let total_bytes = config.num_layers * 2
-        * config.num_heads * config.max_seq_len * config.head_dim * config.dtype_size();
+    let total_bytes = config.num_layers() * 2
+        * config.num_heads() * config.max_seq_len() * config.head_dim() * config.dtype_size();
 
     let ptr = backend.raw_alloc(total_bytes)
         .map_err(|e| backend.gpu_error(format!("KV cache alloc failed ({} bytes): {e}", total_bytes)))?;
