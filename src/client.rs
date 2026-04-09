@@ -19,6 +19,7 @@ use arc_swap::ArcSwapOption;
 use crate::backend::{
     detect_backend, BackendContext, BackendContextError, BackendType,
 };
+use crate::engine::arbiter::InferenceMode;
 use crate::compat::{forward_to_semantic_layer, layer_target_to_idx};
 use crate::embeddings::{Embedding, EmbeddingsResponse};
 use crate::engine::executor::{BackendError, ExecutorError};
@@ -122,6 +123,7 @@ pub struct ClientState {
     pub model_id: String,
     pub manifest: Arc<ModelManifest>,
     pub backend: BackendContext,
+    pub inference_mode: InferenceMode,
 }
 
 // ============================================================================
@@ -149,6 +151,7 @@ pub struct ClientBuilder {
     model_id: Option<String>,
     kind: Option<ModelKind>,
     backend: Option<BackendType>,
+    inference_mode: InferenceMode,
 }
 
 impl ClientBuilder {
@@ -157,6 +160,7 @@ impl ClientBuilder {
             model_id: None,
             kind: None,
             backend: None,
+            inference_mode: InferenceMode::Latency,
         }
     }
 
@@ -172,6 +176,11 @@ impl ClientBuilder {
 
     pub fn backend(mut self, backend: BackendType) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    pub fn inference_mode(mut self, mode: InferenceMode) -> Self {
+        self.inference_mode = mode;
         self
     }
 
