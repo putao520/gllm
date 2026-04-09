@@ -3,7 +3,7 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 9 documents, 104+ REQs)
+- `./SPEC/` (Single Source of Truth, 10 documents, 113+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## SPEC Index
@@ -19,6 +19,7 @@
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking | ✅ |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) | ✅ |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) | ✅ |
+| `12-STRATEGY-ARBITER.md` | 策略仲裁器 (InferenceMode Latency/Throughput, GraphProfile 模型图拓扑特征, StrategyBias 成本调制, HwOptEngine 集成) | ✅ |
 | `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议 (三级缓存, SymDim 动态维度, CPU/GPU 统一) | ✅ |
 | `DOCS/scheduling/unified-jit-architecture-master.md` | 📎 索引文件（内容已迁移至 02-ARCHITECTURE.md §9-§16） | ✅ |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
