@@ -303,12 +303,12 @@ lm_head GEMM ──── logits 范数 → 采样策略调整
 |------|----------|------------|---------------|---------------|------|
 | Early Exit (PGSLE) | `EarlyExitCallback` | `post_node(exit_layers)` | `ExitEarly { logits }` | `num_simd_regs` ≥ 20; logits 概率分布集中度可检测 | Integrated |
 | Gate Skip | `GateSkipCallback` | `pre_node(ffn_nodes)` | `SkipThisNode` | `num_simd_regs` ≥ 16 + 4 scratch; 检测成本 < 脳过收益 | Integrated |
-| Late-Fusion RAG | `RagInjectCallback` | `pre_node(fusion_layer)` | `InjectHidden { data }` | — | Integrated |
-| Guardrail Probe | `GuardProbeRunner` (via GenerationHook) | `post_step()` | `Veto / Terminate` | — | Integrated |
+| Late-Fusion RAG | `RagInjectCallback` | `pre_node(fusion_layer)` | `InjectHidden { data }` | 需调用 `set_rag_system()` | Integrated |
+| Guardrail Probe | `GuardrailProbeCallback` (via Callback Chain) | `post_node(all_layers)` | `Veto / Terminate` | 需调用 `add_guardrail_runner()` | Integrated |
 | Intent NLU | `IntentRecallCallback` | `post_node(target_layer)` | Recall extraction | — | Integrated |
-| MoE Dispatch | `MoeDispatchCallback` | `pre_node(moe_layers)` | Routing setup | — | Integrated |
-| Speculative Decoding | `SpecDecodingState` | `step()` draft/verify | `draft_budget` per seq | — | Integrated |
-| Knowledge Injection | — | `pre_node(target_layer)` | `InjectHidden { data }` | — | 框架就绪 |
+| MoE Dispatch | `MoeDispatchCallback` | `pre_node(moe_layers)` | Routing setup | MoE 模型 | Integrated |
+| Speculative Decoding | `SpecDecodingState` | `step()` advice only | `should_speculate()` 建议 | — | Integrated (状态机; draft/verify 管线未实现) |
+| Knowledge Injection | `KnowledgeInjectCallback` | `pre_node(target_layer)` | `InjectHidden { data }` | 需调用 `inject_knowledge()` → `set_knowledge_payload()` | Integrated |
 | Embed+Rerank Fusion | `EmbeddingsBuilder.rerank_query()` → `Client::execute_embed_rerank_pipeline()` | `generate()` 内部 | `ReorderByScore` | 多模型管线 (02-ARCHITECTURE.md ARCH-MULTI-MODEL-PIPELINE) | Integrated |
 
 **铁律**: SPEC 审计时，任何 Not Integrated 的模块等同于未实现，不接受"逻辑正确但未接入"作为完成状态。
