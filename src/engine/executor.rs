@@ -514,6 +514,10 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     guardrail_runners: Vec<crate::guardrail::GuardProbeRunner>,
     /// §16.3 Intent recall config
     intent_config: crate::intent::IntentConfig,
+    /// §14.4 Hot JMP Patching 管理器（冷专家 NOP/Deopt + 前缀塌缩）
+    hot_patch_manager: Option<crate::moe::hot_patch::HotPatchManager>,
+    /// §9.3 残差数据总线（Injection/Recall 端口）
+    residual_bus: crate::routing::ResidualBus,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -709,7 +713,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // MoE components in a single block.
         // MoE subsystem + JitDirector: read global ExecutionPlan once, initialize all
         // MoE components and the JIT director in a single block.
-        let (moe_thermal, moe_dispatcher, moe_prefetcher, jit_director) = if is_moe {
+        let (moe_thermal, moe_dispatcher, moe_prefetcher, jit_director, hot_patch_manager) = if is_moe {
             let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
             let bias = &exec_plan.strategy_bias;
 
@@ -720,7 +724,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 geometry.num_experts,
                 geometry.moe_top_k,
             );
-            let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config);
+            let dispatcher = crate::moe::dispatch::MoeHardwareDispatcher::new(route_config.clone());
 
             let prefetcher = crate::moe::prefetch::ExpertWeightPrefetcher::new(
                 geometry.num_experts,
@@ -733,9 +737,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             };
             let director = crate::jit::director::JitDirector::spawn(director_config);
 
-            (Some(thermal), Some(dispatcher), Some(prefetcher), Some(director))
+            let patch_manager = crate::moe::hot_patch::HotPatchManager::new(route_config);
+
+            (Some(thermal), Some(dispatcher), Some(prefetcher), Some(director), Some(patch_manager))
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         let compiler_constraints = crate::jit::compiler_constraints::CompilerConstraints::default();
@@ -828,6 +834,45 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             rag_system: None,
             guardrail_runners: Vec::new(),
             intent_config: crate::intent::IntentConfig::default(),
+            hot_patch_manager,
+            residual_bus: {
+                let mut bus = crate::routing::ResidualBus::new(
+                    geometry.hidden_size,
+                    geometry.num_layers,
+                );
+                // §9.3: Register standard Injection/Recall ports
+                // RAG injection at mid-semantic layer (§16.1)
+                let rag_layer = geometry.num_layers / 2;
+                bus.register(crate::routing::BusPort::injection(
+                    rag_layer,
+                    crate::routing::BusPortTag::RagInjection,
+                ));
+                // Early exit recall at golden-ratio points (§16.2)
+                let exit_layer = (geometry.num_layers as f64 * 0.786) as usize;
+                bus.register(crate::routing::BusPort::recall(
+                    exit_layer.min(geometry.num_layers.saturating_sub(1)),
+                    crate::routing::BusPortTag::EarlyExit,
+                ));
+                // Intent recall at deep semantic layer (§16.3)
+                let intent_layer = (geometry.num_layers as f64 * 0.75) as usize;
+                bus.register(crate::routing::BusPort::recall(
+                    intent_layer.min(geometry.num_layers.saturating_sub(1)),
+                    crate::routing::BusPortTag::IntentRecall,
+                ));
+                // Guardrail injection (§16.4)
+                let guard_layer = geometry.num_layers.saturating_sub(2);
+                bus.register(crate::routing::BusPort::injection(
+                    guard_layer.min(geometry.num_layers.saturating_sub(1)),
+                    crate::routing::BusPortTag::Guardrail,
+                ));
+                log::info!(
+                    "executor: §9.3 ResidualBus initialized ({} ports, hidden_size={}, num_layers={})",
+                    bus.active_port_count(),
+                    geometry.hidden_size,
+                    geometry.num_layers,
+                );
+                bus
+            },
         })
     }
 
@@ -1123,21 +1168,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     request_ids,
                     &self.telemetry_aggregator,
                 );
-                match mega.execute(&mega_batch) {
-                    Ok(outputs) => {
-                        // 将 MegaKernel 输出转换为标准格式
-                        let logits_list: Vec<LogitsHandle> = outputs.into_iter()
-                            .map(|data| LogitsHandle { data })
-                            .collect();
-                        let sparsity = 0.0;
-                        let telemetry = vec![Default::default(); logits_list.len()];
-                        return Ok((logits_list, sparsity, telemetry));
-                    }
-                    Err(e) => {
-                        log::warn!("executor: MegaKernel execution failed, falling back: {}", e);
-                        // Fall through to standard path
-                    }
-                }
+                let outputs = mega.execute(&mega_batch)
+                    .map_err(|e| ExecutorError::Backend(BackendError::Other(
+                        format!("§9.1 MegaKernel execution failed: {}", e),
+                    )))?;
+                // 将 MegaKernel 输出转换为标准格式
+                let logits_list: Vec<LogitsHandle> = outputs.into_iter()
+                    .map(|data| LogitsHandle { data })
+                    .collect();
+                let sparsity = 0.0;
+                let telemetry = vec![Default::default(); logits_list.len()];
+                return Ok((logits_list, sparsity, telemetry));
             }
         }
 
@@ -1218,6 +1259,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         );
 
         let mut callbacks: Vec<Box<dyn crate::graph::layer_callback::LayerCallback + Send>> = Vec::new();
+
+        // §9.3 Residual Bus Bridge callback (priority 95, pre_node + post_node)
+        // Bridges all bus-based injection/recall operations into the node loop.
+        let bus_bridge = crate::engine::callbacks::ResidualBusBridgeCallback::from_bus(
+            &self.residual_bus,
+        );
+        callbacks.push(Box::new(bus_bridge));
 
         // §8.1 Knowledge Inject callback (priority 90, pre_node)
         if let Some(payload) = self.knowledge_payload.take() {
@@ -1642,6 +1690,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Some(ref director) = self.jit_director {
             let shared = director.shared();
             shared.advance_step();
+            // Feed expert hit data to Director (§9.2: expert thermal → consensus detection)
+            if let Some(ref thermal) = self.moe_thermal {
+                for expert_idx in 0..self.geometry.num_experts {
+                    if let Some(state) = thermal.state(expert_idx) {
+                        if state.hit_count > 0 {
+                            shared.record_expert_hit(expert_idx);
+                        }
+                    }
+                }
+            }
             // Feed batch-level telemetry to Director via synthetic KvPageHeaders
             for tel in &batch_telemetry {
                 let header = crate::kv_cache::KvPageHeader {
@@ -1658,7 +1716,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 };
                 self.telemetry_aggregator.ingest_from_page_header(&header);
             }
-            // Drain consensus events from Director → drive MoE thermal actions
+            // Drain consensus events from Director → drive MoE thermal + Hot JMP Patching
             for event in shared.drain_events() {
                 match &event {
                     crate::jit::director::ConsensusEvent::ExpertFrozen { expert_idx, zero_hit_steps } => {
@@ -1666,7 +1724,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         // §15.4: 触发冷专家封杀
                         if let Some(ref mut thermal) = self.moe_thermal {
                             if thermal.evict_expert(*expert_idx) {
-                                log::info!("executor: Expert {} evicted via Hot JMP Patching", expert_idx);
+                                log::info!("executor: Expert {} evicted via thermal manager", expert_idx);
+                            }
+                        }
+                        // §14.4: 生成并执行 Hot JMP Patch（NOP/DeoptJump）
+                        if let (Some(ref mut patch_mgr), Some(ref thermal)) =
+                            (&mut self.hot_patch_manager, &self.moe_thermal)
+                        {
+                            let active_requests = self.requests.len();
+                            let instructions = patch_mgr.generate_expert_patch_instructions(
+                                thermal,
+                                self.geometry.num_layers,
+                                active_requests,
+                            );
+                            for instr in &instructions {
+                                let result = patch_mgr.apply_patch(instr);
+                                if result.success {
+                                    log::info!(
+                                        "executor: §14.4 Hot JMP Patch applied: {:?} → {:?}",
+                                        instr.target, instr.operation,
+                                    );
+                                }
                             }
                         }
                     }

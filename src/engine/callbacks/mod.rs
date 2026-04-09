@@ -24,6 +24,7 @@ pub mod intent_recall;
 pub mod knowledge_inject;
 pub mod moe_dispatch;
 pub mod rag_inject;
+pub mod residual_bus_bridge;
 
 pub use early_exit::EarlyExitCallback;
 pub use gate_skip::GateSkipCallback;
@@ -32,6 +33,7 @@ pub use intent_recall::IntentRecallCallback;
 pub use knowledge_inject::KnowledgeInjectCallback;
 pub use moe_dispatch::MoeDispatchCallback;
 pub use rag_inject::RagInjectCallback;
+pub use residual_bus_bridge::ResidualBusBridgeCallback;
 
 use crate::graph::layer_callback::{CallbackChain, LayerCallback};
 
