@@ -21,7 +21,7 @@ use crate::backend::{
 };
 use crate::engine::arbiter::InferenceMode;
 use crate::compat::{forward_to_semantic_layer, layer_target_to_idx};
-use crate::embeddings::{Embedding, EmbeddingsResponse};
+use crate::embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 use crate::engine::executor::{BackendError, ExecutorError};
 use crate::generation::GenerationResponse;
 use crate::knowledge::LayerTarget;
@@ -124,6 +124,15 @@ pub struct ClientState {
     pub manifest: Arc<ModelManifest>,
     pub backend: BackendContext,
     pub inference_mode: InferenceMode,
+    pub reranker_state: Option<PipelineModelState>,
+    pub generator_state: Option<PipelineModelState>,
+}
+
+/// State for a pipeline sub-model (reranker or generator).
+pub struct PipelineModelState {
+    pub model_id: String,
+    pub manifest: Arc<ModelManifest>,
+    pub backend: BackendContext,
 }
 
 // ============================================================================
@@ -152,6 +161,8 @@ pub struct ClientBuilder {
     kind: Option<ModelKind>,
     backend: Option<BackendType>,
     inference_mode: InferenceMode,
+    reranker_model_id: Option<String>,
+    generator_model_id: Option<String>,
 }
 
 fn make_dummy_manifest(model_id: &str, arch: ModelArchitecture, kind: ModelKind) -> ModelManifest {
@@ -183,6 +194,8 @@ impl ClientBuilder {
             kind: None,
             backend: None,
             inference_mode: InferenceMode::Latency,
+            reranker_model_id: None,
+            generator_model_id: None,
         }
     }
 
@@ -206,13 +219,42 @@ impl ClientBuilder {
         self
     }
 
+    /// Add a reranker model to the pipeline.
+    ///
+    /// When set, the client can execute embed+rerank pipelines via
+    /// `EmbeddingsBuilder::rerank_query()`.
+    pub fn reranker(mut self, model_id: impl Into<String>) -> Self {
+        self.reranker_model_id = Some(model_id.into());
+        self
+    }
+
+    /// Add a generator (LLM) model to the pipeline.
+    ///
+    /// When set, the client can execute full RAG pipelines via
+    /// `EmbeddingsBuilder::generate_answer()`.
+    pub fn generator(mut self, model_id: impl Into<String>) -> Self {
+        self.generator_model_id = Some(model_id.into());
+        self
+    }
+
     /// Build the `Client` and load the model synchronously.
     pub fn build(self) -> Result<Client, ClientError> {
         let model_id = self
             .model_id
             .ok_or_else(|| ClientError::ModelNotFound("<no model id>".to_string()))?;
         let kind = self.kind.unwrap_or(ModelKind::Chat);
-        let state = Self::build_state(&model_id, kind, self.inference_mode)?;
+        let mut state = Self::build_state(&model_id, kind, self.inference_mode)?;
+
+        if let Some(ref reranker_id) = self.reranker_model_id {
+            state.reranker_state =
+                Some(Self::build_pipeline_model(reranker_id, ModelKind::Reranker)?);
+        }
+
+        if let Some(ref generator_id) = self.generator_model_id {
+            state.generator_state =
+                Some(Self::build_pipeline_model(generator_id, ModelKind::Chat)?);
+        }
+
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
         })
@@ -331,6 +373,24 @@ impl ClientBuilder {
             manifest,
             backend,
             inference_mode,
+            reranker_state: None,
+            generator_state: None,
+        })
+    }
+
+    /// Build a pipeline sub-model (reranker or generator).
+    ///
+    /// Uses the same loading logic as `build_state` but produces a
+    /// `PipelineModelState` instead of a full `ClientState`.
+    fn build_pipeline_model(
+        model_id: &str,
+        kind: ModelKind,
+    ) -> Result<PipelineModelState, ClientError> {
+        let state = Self::build_state(model_id, kind, InferenceMode::Latency)?;
+        Ok(PipelineModelState {
+            model_id: state.model_id,
+            manifest: state.manifest,
+            backend: state.backend,
         })
     }
 }
@@ -579,6 +639,7 @@ impl Client {
         }
         Ok(EmbeddingsResponse {
             embeddings,
+            rerank_scores: None,
             request_id: None,
         })
     }
