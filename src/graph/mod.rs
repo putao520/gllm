@@ -12,6 +12,7 @@
 
 pub mod executor;
 pub mod optimizer;
+pub mod profile;
 pub mod types;
 pub mod layer_callback;
 

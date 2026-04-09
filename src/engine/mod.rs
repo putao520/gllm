@@ -1,5 +1,6 @@
 //! Layer 3: Engine (skeleton).
 
+pub mod arbiter;
 pub mod attention_contracts;
 pub mod executor;
 pub mod pipeline;
