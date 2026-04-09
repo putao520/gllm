@@ -80,6 +80,18 @@ impl BasicObserver {
     pub fn update_attention_sparsity(&mut self, sparsity: f32) {
         self.last_state.attention_sparsity = sparsity;
     }
+
+    /// Update MoE fault metrics from the fault handler.
+    pub fn update_moe_fault_metrics(
+        &mut self,
+        fault_rate: f32,
+        avg_recovery_latency_us: f32,
+        working_set_size: usize,
+    ) {
+        self.last_state.moe_fault_rate = fault_rate;
+        self.last_state.moe_avg_recovery_us = avg_recovery_latency_us;
+        self.last_state.moe_working_set_size = working_set_size;
+    }
 }
 
 impl RuntimeObserver for BasicObserver {

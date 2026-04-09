@@ -20,6 +20,14 @@ pub struct SystemState {
     pub logits_entropy: f32,
     /// Phase 2: Attention weight sparsity ratio [0.0, 1.0].
     pub attention_sparsity: f32,
+
+    // MoE Fault Metrics
+    /// MoE expert fault rate (faults per decode step).
+    pub moe_fault_rate: f32,
+    /// MoE average recovery latency (microseconds).
+    pub moe_avg_recovery_us: f32,
+    /// MoE working set size (distinct experts accessed in tracking window).
+    pub moe_working_set_size: usize,
 }
 
 /// JIT Decision output.

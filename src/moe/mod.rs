@@ -9,6 +9,7 @@
 //! - `prefetch_pipeline`: §14.5 RDMA/PCIe 流水线预取编排
 
 pub mod dispatch;
+pub mod fault_handler;
 pub mod hot_patch;
 pub mod prefetch;
 pub mod prefetch_pipeline;
@@ -16,6 +17,7 @@ pub mod routing;
 pub mod thermal;
 
 pub use dispatch::{ExpertHardwareAssignment, MoeDispatchPlan, MoeHardwareDispatcher};
+pub use fault_handler::{ExpertFault, ExpertFaultHandler, FaultResolution, FaultStats};
 pub use hot_patch::{
     HotPatchManager, HotPatchSummary, PatchInstruction, PatchOperation, PatchResult,
     PatchSafetyCheck, PatchTarget,
@@ -28,5 +30,5 @@ pub use routing::{
 };
 pub use thermal::{
     DeoptHandlingResult, DeoptRequest, EvictionDecision, ExpertHeatLevel, ExpertHeatState,
-    ExpertThermalManager, ThermalSummary,
+    ExpertThermalManager, ThermalSummary, WorkingSetTracker,
 };

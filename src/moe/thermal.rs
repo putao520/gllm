@@ -105,6 +105,73 @@ pub struct DeoptRequest {
     pub step: u64,
 }
 
+/// Adaptive working set tracking for eviction threshold tuning.
+#[derive(Debug, Clone)]
+pub struct WorkingSetTracker {
+    /// Sliding window of recently accessed expert indices (bitset per step).
+    window: Vec<Vec<bool>>,
+    /// Window capacity (number of steps to track).
+    window_size: usize,
+    /// Write cursor into the ring buffer.
+    cursor: usize,
+    /// Number of experts.
+    num_experts: usize,
+    /// Base eviction threshold (before adaptive scaling).
+    base_threshold: u64,
+}
+
+impl WorkingSetTracker {
+    fn new(num_experts: usize, window_size: usize, base_threshold: u64) -> Self {
+        let window = vec![vec![false; num_experts]; window_size];
+        Self {
+            window,
+            window_size,
+            cursor: 0,
+            num_experts,
+            base_threshold,
+        }
+    }
+
+    /// Record which experts were accessed in this step.
+    fn record_step(&mut self, route_counts: &[usize]) {
+        let slot = &mut self.window[self.cursor];
+        for accessed in slot.iter_mut() {
+            *accessed = false;
+        }
+        for (idx, &count) in route_counts.iter().enumerate() {
+            if idx < self.num_experts && count > 0 {
+                slot[idx] = true;
+            }
+        }
+        self.cursor = (self.cursor + 1) % self.window_size;
+    }
+
+    /// Count distinct experts accessed in the window.
+    pub fn working_set_size(&self) -> usize {
+        let mut seen = vec![false; self.num_experts];
+        for slot in &self.window {
+            for (idx, &accessed) in slot.iter().enumerate() {
+                if accessed {
+                    seen[idx] = true;
+                }
+            }
+        }
+        seen.iter().filter(|&&s| s).count()
+    }
+
+    /// Compute adaptive eviction threshold based on memory pressure.
+    ///
+    /// Formula: `base * (num_experts / working_set_size) * headroom_factor`
+    /// where `headroom_factor = 1.0 - memory_pressure` (clamped to [0.1, 1.0]).
+    pub fn adaptive_threshold(&self, memory_pressure: f32) -> u64 {
+        let ws = self.working_set_size().max(1) as f64;
+        let headroom = (1.0 - memory_pressure as f64).clamp(0.1, 1.0);
+        let ratio = self.num_experts as f64 / ws;
+        let threshold = self.base_threshold as f64 * ratio * headroom;
+        (threshold.round() as u64).max(1)
+    }
+}
+
 /// 专家热度管理器
 ///
 /// §15.4: 管理专家的热度状态，做出封杀/恢复决策。
@@ -128,29 +195,70 @@ pub struct ExpertThermalManager {
     total_reactivations: u64,
     /// 待处理的 Deopt 请求队列
     pending_deopt_requests: Vec<DeoptRequest>,
+    /// Adaptive working set tracker for dynamic eviction thresholds.
+    working_set: WorkingSetTracker,
+    /// Whether adaptive eviction is enabled.
+    adaptive_eviction: bool,
+    /// Current memory pressure (updated externally).
+    memory_pressure: f32,
 }
 
 impl ExpertThermalManager {
     /// 创建新的专家热度管理器
     pub fn new(num_experts: usize) -> Self {
+        let base_threshold = 1_000_000u64;
         let states = (0..num_experts).map(ExpertHeatState::new).collect();
         Self {
             num_experts,
             states,
-            eviction_streak_threshold: 1_000_000, // 100 万次零命中后封杀
-            hot_threshold: 0.1,                    // > 10% 命中率 → Hot
-            cold_threshold: 0.001,                 // < 0.1% 命中率 → Cold
+            eviction_streak_threshold: base_threshold,
+            hot_threshold: 0.1,
+            cold_threshold: 0.001,
             current_step: 0,
             total_evictions: 0,
             total_reactivations: 0,
             pending_deopt_requests: Vec::new(),
+            working_set: WorkingSetTracker::new(num_experts, 100, base_threshold),
+            adaptive_eviction: false,
+            memory_pressure: 0.0,
         }
     }
 
     /// 配置封杀阈值
     pub fn with_eviction_threshold(mut self, streak_threshold: u64) -> Self {
         self.eviction_streak_threshold = streak_threshold;
+        self.working_set.base_threshold = streak_threshold;
         self
+    }
+
+    /// Enable adaptive eviction with a custom working set window size.
+    pub fn with_adaptive_eviction(mut self, window_size: usize) -> Self {
+        self.adaptive_eviction = true;
+        self.working_set = WorkingSetTracker::new(
+            self.num_experts,
+            window_size.max(1),
+            self.eviction_streak_threshold,
+        );
+        self
+    }
+
+    /// Update memory pressure for adaptive eviction threshold.
+    pub fn update_memory_pressure(&mut self, pressure: f32) {
+        self.memory_pressure = pressure.clamp(0.0, 1.0);
+    }
+
+    /// Get the current effective eviction threshold.
+    pub fn effective_eviction_threshold(&self) -> u64 {
+        if self.adaptive_eviction {
+            self.working_set.adaptive_threshold(self.memory_pressure)
+        } else {
+            self.eviction_streak_threshold
+        }
+    }
+
+    /// Get the working set size (experts accessed in the tracking window).
+    pub fn working_set_size(&self) -> usize {
+        self.working_set.working_set_size()
     }
 
     /// 配置热度阈值
@@ -166,6 +274,7 @@ impl ExpertThermalManager {
     /// * `route_counts` - 本步中每个专家被路由的 token 数
     pub fn step(&mut self, route_counts: &[usize]) {
         self.current_step += 1;
+        self.working_set.record_step(route_counts);
 
         for (idx, &count) in route_counts.iter().enumerate() {
             if idx >= self.num_experts {
@@ -218,7 +327,8 @@ impl ExpertThermalManager {
         }
 
         // 未封杀: 检查是否需要封杀
-        if state.consecutive_zero_streak >= self.eviction_streak_threshold {
+        let threshold = self.effective_eviction_threshold();
+        if state.consecutive_zero_streak >= threshold {
             return EvictionDecision::Evict;
         }
 
@@ -320,9 +430,10 @@ impl ExpertThermalManager {
 
     /// 获取所有需要封杀的专家 (供 JIT Director 批量处理)
     pub fn experts_to_evict(&self) -> Vec<usize> {
+        let threshold = self.effective_eviction_threshold();
         let mut to_evict = Vec::new();
         for state in &self.states {
-            if !state.is_evicted && state.consecutive_zero_streak >= self.eviction_streak_threshold {
+            if !state.is_evicted && state.consecutive_zero_streak >= threshold {
                 to_evict.push(state.expert_idx);
             }
         }
@@ -385,6 +496,8 @@ impl ExpertThermalManager {
             total_reactivations: self.total_reactivations,
             current_step: self.current_step,
             pending_deopt_count: self.pending_deopt_requests.len(),
+            working_set_size: self.working_set.working_set_size(),
+            effective_eviction_threshold: self.effective_eviction_threshold(),
         }
     }
 
@@ -431,6 +544,10 @@ pub struct ThermalSummary {
     pub total_reactivations: u64,
     pub current_step: u64,
     pub pending_deopt_count: usize,
+    /// Number of distinct experts accessed in the tracking window.
+    pub working_set_size: usize,
+    /// Current effective eviction threshold (adaptive or static).
+    pub effective_eviction_threshold: u64,
 }
 
 #[cfg(test)]
