@@ -461,7 +461,9 @@ impl StrategyArbiter {
 }
 ```
 
-## 5. HwOptEngine 集成
+## 5. HwOptEngine 集成 — Solver Bias-Aware 完整算法
+
+> **SSOT 声明**: 本节定义每个 Solver 的 bias-aware 完整算法。当本节与 `02-HARDWARE.md §10` 的原始 Solver 定义冲突时，以本节为准。本节是原始定义的**超集**——在原始算法的每个决策点插入 StrategyBias 调制，但不改变算法结构。
 
 ### 5.1 扩展后的 solve() 签名
 
@@ -473,100 +475,517 @@ impl HwOptEngine {
         probe: &ProbeResult,
         model: &ModelConfig,
         bias: &StrategyBias,    // 新增: Arbiter 输出
-    ) -> Result<HwOptPlan, OptError>
+    ) -> Result<HwOptPlan, OptError> {
+        // Level 0
+        let effective_m = estimate_batch_size(bias.batch_flexibility, profile, model);
+        let roofline = RooflineAnalyzer::analyze(profile, model, effective_m);
+        let cache_plan = CacheBudgetSolver::solve(profile, sensors, model, bias);
+
+        // Level 1
+        let gemm_plan = GemmSolver::solve(profile, &roofline, &cache_plan, bias);
+        let attn_plan = AttentionSolver::solve(profile, &cache_plan, &roofline);
+        // AttentionSolver 不受 bias 影响（纯硬件决策）
+
+        // Level 2
+        let fusion_plan = FusionSolver::solve(&gemm_plan, &cache_plan, &roofline, bias);
+        let parallel_plan = ParallelismSolver::solve(profile, &gemm_plan, &cache_plan, bias);
+
+        // Level 3
+        let batch_plan = BatchSolver::solve(&parallel_plan, &cache_plan, model, bias);
+
+        // Level 4
+        let feature_plan = FeatureRouter::route(
+            profile, &gemm_plan, &fusion_plan, &attn_plan,
+            &parallel_plan, &batch_plan, bias,
+        );
+
+        // Level 5: 循环依赖校正 (仅 Throughput 模式)
+        let plan = Self::maybe_correct(roofline, cache_plan, gemm_plan, ...);
+
+        Ok(plan)
+    }
 }
 ```
 
-### 5.2 CostModel 注入点
+### 5.2 RooflineAnalyzer (Level 0) — bias-aware
 
-StrategyBias 通过 CostModel 的调制系数影响所有求解器。注入方式为乘法调制——成本函数的各项开销乘以对应的 bias 系数。
+**变更**: 输入增加 `effective_m: usize`。
 
-#### 5.2.1 GemmSolver 注入
-
-```
-// 候选评估成本公式（原 §10.4）:
-cost(candidate) = max(T_compute, T_memory) + T_overhead
-
-// 注入后:
-T_overhead_pipeline = k_depth × prefetch_latency × bias.pipeline_cost_scale
-// pipeline_cost_scale < 1.0 → pipeline 开销被低估 → GemmSolver 更倾向选择深 k_depth
-
-// k_depth 候选过滤:
-if bias.k_depth_preference > 1.0:
-    k_depth 候选范围从 [1, 2] 扩展到 [1, 2, 4]（如果寄存器允许）
-if bias.k_depth_preference < 0.8:
-    k_depth 固定为 1
-
-// epilogue 深度调制:
-effective_max_epilogue = (base_max_epilogue as f64 × bias.epilogue_depth_preference) as usize
-// epilogue_depth_preference > 1.0 → 允许更深 epilogue（可能触发 NR 缩减）
+```rust
+struct RooflineInput {
+    profile: &DeviceProfile,
+    model: &ModelConfig,
+    effective_m: usize,     // 新增: 来自 estimate_batch_size()
+}
 ```
 
-#### 5.2.2 FusionSolver 注入
+**算法变更点**: 算术强度计算中所有 M 替换为 `effective_m`。
 
 ```
-// 融合收益估算（原 §10.6）:
-fusion_savings(mode, ops) = ...
+AI(GEMM) = 2 × effective_m × N × K / ((effective_m × K + K × N + effective_m × N) × elem_bytes)
 
-// 注入后:
-effective_savings = fusion_savings × (1.0 / bias.fusion_cost_scale)
-// fusion_cost_scale < 1.0 → 融合收益被放大 → FusionSolver 更倾向选择融合
-
-// TileLevelFusion vs ComputeRoot 阈值调制:
-effective_threshold = base_threshold × bias.fusion_cost_scale
-// fusion_cost_scale < 1.0 → 阈值降低 → 更多情况选择 TileLevelFusion
+// Latency: effective_m = 1 → AI ≈ 2 → MemoryBound
+// Throughput: effective_m = 64 → AI ≈ 128 → ComputeBound
 ```
 
-#### 5.2.3 CacheBudgetSolver 注入
+**输出不变**: `RooflineResult` 结构体不变。
 
-```
-// L2 预算分配（原 §10.5）:
-kv_budget     = L2 × 0.40 × bias.kv_cache_budget_scale
-weight_budget = L2 × 0.35 × bias.weight_prefetch_budget_scale
-activation    = L2 × (1.0 - kv_ratio - weight_ratio)
+### 5.3 CacheBudgetSolver (Level 0) — bias-aware
 
-// Latency mode: kv × 0.5 = 20%, weight × 1.5 = 52.5%, activation = 27.5%
-//   → 权重预取占大头（memory-bound 下权重是主要带宽消费）
-// Throughput mode: kv × 1.5 = 60%, weight × 0.8 = 28%, activation = 12%
-//   → KV cache 占大头（多序列共存）
+**变更**: 输入增加 `bias: &StrategyBias`。
 
-// 归一化: 总和超 100% 时按比例缩放
-```
-
-#### 5.2.4 ParallelismSolver 注入
-
-```
-// wave_count 候选评估（原 §10.8）:
-wave_cost = synchronization_cost(wave_count) × bias.parallelism_cost_scale
-// parallelism_cost_scale < 1.0 → 同步代价被低估 → 更倾向多 wave
+```rust
+struct CacheBudgetInput {
+    profile: &DeviceProfile,
+    sensors: &MemoryNetworkSensors,
+    model_bytes: usize,
+    kv_bytes_per_token: usize,
+    hidden_bytes: usize,
+    bias: &StrategyBias,    // 新增
+}
 ```
 
-#### 5.2.5 BatchSolver 注入
+**完整 bias-aware 算法** (替代 `02-HARDWARE.md §10.5` 的 CPU 缓存预算算法):
 
 ```
-// batch 大小约束:
-if bias.batch_flexibility == 0.0:
-    max_batch_size = 1  // Latency mode: 固定 batch=1
+// ── L1 分配 (不受 bias 影响) ──
+l1_tile_budget    = L1 × 0.75    // GEMM tile
+l1_fusion_scratch = L1 × 0.25    // TileLevelFusion scratch
+
+// ── L2 分配 (bias 调制) ──
+raw_kv     = 0.40 × bias.kv_cache_budget_scale
+raw_weight = 0.35 × bias.weight_prefetch_budget_scale
+raw_act    = 0.25  // activation 不受 bias 直接调制
+
+total = raw_kv + raw_weight + raw_act
+
+// 归一化: 总和 > 1.0 时按比例缩放; ≤ 1.0 时 activation 吃剩余
+if total > 1.0:
+    kv_ratio     = raw_kv / total
+    weight_ratio = raw_weight / total
+    act_ratio    = raw_act / total
 else:
-    max_batch_size = base_max × bias.batch_flexibility
+    kv_ratio     = raw_kv
+    weight_ratio = raw_weight
+    act_ratio    = 1.0 - raw_kv - raw_weight
 
-// decode_ratio_cap 调制:
-effective_ratio_cap = base_ratio_cap × bias.decode_ratio_scale
+l2_total = max(sensors.l2_cache_bytes, profile.cache_sizes.1)
+kv_budget     = l2_total × kv_ratio
+weight_budget = l2_total × weight_ratio
+activation    = l2_total × act_ratio
+
+// ── L3 分配 (不受 bias 影响) ──
+// 原算法不变
+
+// ── GPU HBM 分配 (不受 bias 影响) ──
+// 原算法不变
+
+// ── 动态调节: RooflineAnalyzer 结果叠加 ──
+// 原逻辑: MemoryBound 时 kv_budget 提升到 50%
+// 本调节在 bias 调制之后执行, 与 bias 效果叠加
 ```
 
-#### 5.2.6 FeatureRouter 注入
+**具体数值推演**:
 
 ```
-// Speculative Decoding 启用决策:
-spec_benefit = base_benefit × bias.speculative_decoding_value
-// speculative_decoding_value > 1.0 → 收益被放大 → 更倾向启用
+Latency mode (bias: kv=0.5, weight=1.5):
+  raw_kv     = 0.40 × 0.5  = 0.20
+  raw_weight = 0.35 × 1.5  = 0.525
+  raw_act    = 0.25
+  total = 0.975 (< 1.0)
+  → kv = 20%, weight = 52.5%, act = 1.0 - 0.20 - 0.525 = 27.5%
 
-// 量化决策:
-quant_benefit = base_benefit × bias.quantization_aggressiveness
-// quantization_aggressiveness > 1.0 → 更倾向低比特
+Throughput mode (bias: kv=1.5, weight=0.8):
+  raw_kv     = 0.40 × 1.5  = 0.60
+  raw_weight = 0.35 × 0.8  = 0.28
+  raw_act    = 0.25
+  total = 1.13 (> 1.0, 需归一化)
+  → kv = 0.60/1.13 = 53.1%, weight = 0.28/1.13 = 24.8%, act = 0.25/1.13 = 22.1%
 ```
 
-### 5.3 HwOptPlan 扩展
+### 5.4 GemmSolver (Level 1) — bias-aware
+
+**变更**: 输入增加 `bias: &StrategyBias`。
+
+```rust
+struct GemmSolverInput {
+    profile: &DeviceProfile,
+    constraints: &CompilerConstraints,
+    roofline: &RooflineClass,
+    cache_budget: &CacheBudgetPlan,
+    elem_bytes: usize,
+    bias: &StrategyBias,    // 新增
+}
+```
+
+**完整 bias-aware 算法**:
+
+```
+// ── 步骤 1: 候选枚举 (原算法不变) ──
+for mr in [4, 6, 8, 10, 12, 14, 16]:
+    for nr in [8, 12, 16, 24, 32]:
+        nr_vecs = ceil(nr / simd_width_elems)
+        acc = mr × nr_vecs
+        if acc + 2 + 2 ≤ num_simd_regs:
+            candidates.push(GemmCandidate { mr, nr, ... })
+
+// ── 步骤 2: k_depth 候选集合 (⚠️ 受 bias.k_depth_preference 影响) ──
+k_depth_candidates =
+    if bias.k_depth_preference >= 1.5:
+        [1, 2, 4]              // 强偏好 → 扩展到 4（如果寄存器允许）
+    elif bias.k_depth_preference >= 0.8:
+        [1, 2]                 // 默认范围
+    else:
+        [1]                    // 弱偏好 → 固定为 1
+
+// ── 步骤 3: 成本评估 (⚠️ T_overhead 受 bias.pipeline_cost_scale 调制) ──
+for candidate in candidates:
+    for k_depth in k_depth_candidates:
+        // 检查寄存器硬约束: k_depth > 1 需要额外 double-buffer 寄存器
+        if k_depth > 1:
+            extra_regs = k_depth  // 每级流水线需要 1 个额外 buffer 寄存器
+            if candidate.acc_regs + 2 + 2 + extra_regs > num_simd_regs:
+                continue  // 寄存器不够，跳过此 k_depth
+
+        // 成本公式 (bias-aware 版本)
+        T_compute = (2 × mr × nr × KC) / (peak_fma × simd_efficiency)
+        T_memory  = ((mr × KC + KC × nr) × elem_bytes) / peak_bw × (1 - l1_hit)
+        T_overhead = k_depth × prefetch_latency × bias.pipeline_cost_scale  // ← bias 注入点
+        cost = max(T_compute, T_memory) + T_overhead
+
+        candidates_scored.push((candidate, k_depth, cost))
+
+// ── 步骤 4: 选择最优候选 ──
+best = candidates_scored.min_by(|a, b| a.cost.partial_cmp(&b.cost))
+
+// ── 步骤 5: max_epilogue_depth 计算 (⚠️ 受 bias.epilogue_depth_preference 调制) ──
+scratch_regs = num_simd_regs - best.acc_regs - 2 - 2 - best.k_depth
+base_max_epilogue = (scratch_regs as f64 / 1.5).floor() as usize
+
+// epilogue_depth_preference > 1.0 时：允许更深 epilogue，可能导致 NR 缩减
+// epilogue_depth_preference < 1.0 时：限制 epilogue 深度，把寄存器留给其他用途
+effective_max_epilogue = ((base_max_epilogue as f64) × bias.epilogue_depth_preference)
+    .round() as usize
+effective_max_epilogue = effective_max_epilogue.max(1).min(scratch_regs)
+// 硬约束: 最小 1 (至少一层 epilogue)，最大 = scratch_regs (物理上限)
+
+// ── 步骤 6: NR 缩减决策 (如果 epilogue 需求超出 scratch) ──
+// 当 effective_max_epilogue > base_max_epilogue 且 scratch 不够时:
+//   缩减 NR → 释放累加器寄存器 → 转为 scratch
+// 原算法逻辑不变，只是 max_epilogue_depth 的值被 bias 调制了
+
+// ── 步骤 7: 策略路由 (原算法不变) ──
+strategy = select_gemm_strategy_cost_based(profile, best, ...)
+```
+
+**输出**: `GemmPlan` 结构体不变，但以下字段的数值被 bias 影响:
+
+| 字段 | 受影响的 bias | 效果 |
+|------|-------------|------|
+| `k_depth` | `k_depth_preference` | pref↑ → 更深 k_depth |
+| `pf_distance` | 间接 (通过 k_depth) | k_depth↑ → pf_distance↑ |
+| `max_epilogue_depth` | `epilogue_depth_preference` | pref↑ → 允许更深 epilogue |
+| `mr`, `nr` | `pipeline_cost_scale` | scale↓ → pipeline 便宜 → 可能选更小 tile 腾出寄存器给 pipeline |
+| `scratch_regs` | 间接 (通过 k_depth + epilogue) | |
+
+### 5.5 FusionSolver (Level 2) — bias-aware
+
+**变更**: 输入增加 `bias: &StrategyBias`。
+
+```rust
+struct FusionSolverInput {
+    gemm_plan: &GemmPlan,
+    cache_plan: &CacheBudgetPlan,
+    roofline: &RooflineResult,
+    num_simd_regs: usize,
+    l1_cache_bytes: usize,
+    bias: &StrategyBias,    // 新增
+}
+```
+
+**完整 bias-aware 算法**:
+
+```
+// ── 步骤 1: max_epilogue_depth (已被 GemmSolver 调制，直接读取) ──
+max_epilogue = gemm_plan.max_epilogue_depth  // 已含 bias 效果
+
+// ── 步骤 2: EpilogueInjection 深度决策 (原算法不变) ──
+for depth in (1..=max_epilogue).rev():
+    required = sum(TraceOp::register_cost(&epilogue_ops[..depth]))
+    if required ≤ gemm_plan.scratch_regs:
+        selected_depth = depth
+        break
+
+// ── 步骤 3: TileLevelFusion vs ComputeRoot (⚠️ 受 bias.fusion_cost_scale 调制) ──
+// 原算法: threshold = cache_plan.l1_tile_budget × 0.75
+// bias-aware: threshold 乘以 fusion_cost_scale
+effective_tile_threshold = (cache_plan.l1_tile_budget as f64 × 0.75 × bias.fusion_cost_scale) as usize
+
+predecessor_output_bytes = hidden_bytes × tile_rows
+
+if predecessor_output_bytes > effective_tile_threshold:
+    TileLevelFusion
+    // fusion_cost_scale < 1.0 → threshold 降低 → 更多情况触发 TileLevelFusion
+    // 效果: 偏好融合时，更小的输出也会嵌入 MC 循环而非 ComputeRoot
+else:
+    ComputeRoot
+
+// ── 步骤 4: FFNBlock 融合路径选择 (原算法不变) ──
+// scratch 寄存器够 → GateSiLUInject，不够 → SeparateGemm
+// 注意: scratch_regs 已被 epilogue_depth_preference 间接影响
+if gemm_plan.scratch_regs >= 1:
+    ffn_strategy = GateSiLUInject
+else:
+    ffn_strategy = SeparateGemm
+
+// ── 步骤 5: 融合收益评估 (⚠️ 受 bias.fusion_cost_scale 调制) ──
+// 对每个潜在融合点, 计算调制后的净收益
+for (producer, consumer) in fusion_candidates:
+    raw_savings = fusion_savings(mode, ops)  // 原公式: 中间 tensor 写回字节数
+    adjusted_savings = raw_savings / bias.fusion_cost_scale
+    // fusion_cost_scale < 1.0 → savings 被 1/0.5 = 2× 放大
+
+    raw_cost = fusion_overhead(mode, ops)    // 寄存器占用 + L1 压力
+    adjusted_cost = raw_cost                 // cost 侧不调制 (只调制 savings 侧)
+
+    if adjusted_savings > adjusted_cost:
+        apply fusion
+    else:
+        keep standalone
+
+// ── 步骤 6: CrossLayerResidual 和 QkvSharedInput (原算法不变) ──
+cross_layer_residual_enabled = gemm_plan.scratch_regs >= 4
+qkv_shared_input_enabled = true  // 始终启用（零额外寄存器开销）
+norm_into_gemm_enabled = true    // 始终启用
+```
+
+**输出**: `FusionPlan` 结构体不变，但以下字段的数值被 bias 影响:
+
+| 字段 | 受影响的 bias | 效果 |
+|------|-------------|------|
+| `max_epilogue_depth` | `epilogue_depth_preference` (通过 GemmPlan) | pref↑ → 更深 epilogue |
+| `tile_fusion_threshold` | `fusion_cost_scale` | scale↓ → 阈值降低 → 更多 TileFusion |
+| `ffn_strategy` | `epilogue_depth_preference` (通过 scratch_regs) | pref↑ → scratch 可能更少 → 可能 SeparateGemm |
+| `fusions[].strategy` | `fusion_cost_scale` | scale↓ → 净收益放大 → 更多融合被接受 |
+
+### 5.6 ParallelismSolver (Level 2) — bias-aware
+
+**变更**: 输入增加 `bias: &StrategyBias`。
+
+```rust
+struct ParallelismSolverInput {
+    profile: &DeviceProfile,
+    gemm_plan: &GemmPlan,
+    cache_plan: &CacheBudgetPlan,
+    bias: &StrategyBias,    // 新增
+}
+```
+
+**完整 bias-aware GPU 算法**:
+
+```
+sm_total = profile.compute_units
+wave_count_candidates = [1, 2, 4]
+best_wave = 1
+best_cost = f64::MAX
+
+for wc in wave_count_candidates:
+    if wc > sm_total / 16:  // min 16 SM per wave
+        break
+
+    sm_per = sm_total / wc
+    min_tokens = sm_per × warp_size × occupancy_target
+
+    // 同步成本: wave 越多，barrier 越贵
+    // 基础模型: 每个 wave 边界一次 barrier, 延迟 = wc × 2μs
+    sync_cost = (wc as f64) × 2.0  // 微秒
+
+    // ⚠️ bias 注入点: parallelism_cost_scale 调制同步成本
+    adjusted_sync_cost = sync_cost × bias.parallelism_cost_scale
+    // parallelism_cost_scale < 1.0 → 同步看起来更便宜 → 更倾向多 wave
+
+    // 并行收益: wave 越多，SM 利用率越高（假设 batch 足够大）
+    parallel_benefit = (wc as f64).ln() × sm_total as f64 × 0.1  // 对数收益递减
+
+    wave_score = parallel_benefit - adjusted_sync_cost
+
+    if wave_score > -best_cost:  // 注意: 最小化负 score = 最大化 score
+        best_wave = wc
+        best_cost = -wave_score
+
+// Latency mode: parallelism_cost_scale = 1.5
+//   → sync_cost × 1.5 → 同步更贵 → 倾向 wave=1
+// Throughput + MoE: parallelism_cost_scale = 0.25
+//   → sync_cost × 0.25 → 同步几乎免费 → 倾向 wave=4
+```
+
+**CPU NUMA**: 原算法不变。CPU 的 wave_count 直接等于 NUMA 节点数，不受 bias 影响（硬件物理拓扑决定）。
+
+**输出**: `ParallelPlan` 结构体不变。
+
+| 字段 | 受影响的 bias | 效果 |
+|------|-------------|------|
+| `wave_count` | `parallelism_cost_scale` | scale↓ → 更多 wave |
+| `min_batch_tokens_per_wave` | 间接 (通过 wave_count) | wave↑ → 每 wave 需要更少 tokens |
+
+### 5.7 BatchSolver (Level 3) — bias-aware
+
+**变更**: 输入增加 `bias: &StrategyBias`。
+
+```rust
+struct BatchSolverInput {
+    parallel_plan: &ParallelPlan,
+    cache_plan: &CacheBudgetPlan,
+    model: &ModelConfig,
+    bias: &StrategyBias,    // 新增
+}
+```
+
+**完整 bias-aware 算法**:
+
+```
+// ── 步骤 1: batch 大小上限 (⚠️ 受 bias.batch_flexibility 硬约束) ──
+// batch_flexibility = 0.0 是唯一的硬约束切入点（Latency mode）
+if bias.batch_flexibility == 0.0:
+    max_batch_tokens = 1                // 严格 batch=1
+    decode_slots = 1
+    max_chunks_per_batch = 1
+    → 直接返回 BatchPlan，跳过后续所有逻辑
+else:
+    // base_max 来自 KV cache 内存预算
+    base_max = cache_plan.hbm_max_pages.unwrap_or(cache_plan.l3_kv_cold_budget / kv_per_page)
+    max_batch_tokens = (base_max as f64 × bias.batch_flexibility).round() as usize
+    max_batch_tokens = max_batch_tokens.max(1)
+
+// ── 步骤 2: decode/prefill 混合比 (⚠️ 受 bias.decode_ratio_scale 调制) ──
+base_ratio_cap = 0.6  // 原算法默认值
+effective_ratio_cap = (base_ratio_cap × bias.decode_ratio_scale).min(1.0)
+// decode_ratio_scale > 1.0 → decode 可占更大比例 → prefill 进展变慢
+
+// ── 步骤 3: Chunk 大小和黄金尺寸 (原算法不变) ──
+// adaptive_chunk_size() 和同号合并策略不受 bias 影响
+// 这些决策由 ProbeResult 的黄金尺寸驱动
+
+// ── 步骤 4: decode_slots (受 max_batch_tokens 间接影响) ──
+decode_budget = min(max_batch_tokens, floor(max_batch_tokens × effective_ratio_cap))
+decode_slots = decode_budget  // 每个 decode 序列 = 1 token
+```
+
+**输出**: `BatchPlan` 结构体不变。
+
+| 字段 | 受影响的 bias | 效果 |
+|------|-------------|------|
+| `decode_ratio_cap` | `decode_ratio_scale` | scale↑ → decode 占比上限更高 |
+| `decode_slots` | `batch_flexibility` + `decode_ratio_scale` | flex=0 → 1, flex=1 → 自由 |
+| `max_chunk_size` | 不受影响 | 由 ProbeResult 驱动 |
+
+### 5.8 FeatureRouter (Level 4) — bias-aware
+
+**变更**: 输入增加 `bias: &StrategyBias`。
+
+```rust
+fn route(
+    profile: &DeviceProfile,
+    gemm_plan: &GemmPlan,
+    fusion_plan: &FusionPlan,
+    attn_plan: &AttentionPlan,
+    parallel_plan: &ParallelPlan,
+    batch_plan: &BatchPlan,
+    bias: &StrategyBias,    // 新增
+) -> FeaturePlan
+```
+
+**bias 影响的特性决策**:
+
+```
+// ── Speculative Decoding 启用决策 ──
+// 原算法: benefit = estimate_spec_benefit(model, attn_plan)
+//         cost = estimate_spec_cost(batch_plan)  // draft model 抢占 batch 容量
+//         enabled = benefit > cost
+
+// bias-aware 版本:
+raw_benefit = estimate_spec_benefit(model, attn_plan)
+adjusted_benefit = raw_benefit × bias.speculative_decoding_value
+// speculative_decoding_value = 1.5 (Latency) → 收益放大 1.5× → 更倾向启用
+// speculative_decoding_value = 0.3 (Throughput) → 收益缩小 → 不太启用
+
+raw_cost = estimate_spec_cost(batch_plan)
+// cost 不调制
+
+spec_decoding_enabled = adjusted_benefit > raw_cost
+
+// ── 量化策略决策 ──
+// 原算法: 在候选量化方案中选 cost 最优
+// bias-aware: 量化的收益乘以 quantization_aggressiveness
+
+for quant_level in [INT8, INT4, FP4]:
+    raw_quant_benefit = bandwidth_savings(quant_level)
+    adjusted_quant_benefit = raw_quant_benefit × bias.quantization_aggressiveness
+    quant_cost = precision_loss(quant_level)  // 不调制
+    quant_candidates.push((quant_level, adjusted_quant_benefit - quant_cost))
+
+selected_quant = quant_candidates.max_by(|a, b| a.1.partial_cmp(&b.1))
+
+// ── 其他特性 (不受 bias 影响) ──
+// Avx512Fma, NeonBf16, Wgmma, Tma2D 等硬件特性
+// 纯硬件决策，不受 StrategyBias 影响
+```
+
+### 5.9 MoE 模块消费 — bias-aware
+
+**ExpertThermalManager** 消费 `expert_eviction_aggressiveness`:
+
+```rust
+impl ExpertThermalManager {
+    fn effective_eviction_threshold(&self) -> u64 {
+        if self.adaptive_eviction {
+            let adaptive = self.working_set.adaptive_threshold(self.memory_pressure);
+            // ⚠️ bias 调制: aggressiveness 高 → 阈值低 → 更容易驱逐
+            let bias_factor = 1.0 / (1.0 + self.eviction_aggressiveness);
+            // aggressiveness = 0.0 → factor = 1.0 → 阈值不变（全部常驻）
+            // aggressiveness = 1.0 → factor = 0.5 → 阈值减半（更激进驱逐）
+            // aggressiveness = 2.0 → factor = 0.33 → 阈值缩到 1/3
+            (adaptive as f64 × bias_factor) as u64
+        } else {
+            self.eviction_streak_threshold
+        }
+    }
+}
+```
+
+**ExpertWeightPrefetcher** 消费 `expert_prefetch_priority`:
+
+```rust
+impl ExpertWeightPrefetcher {
+    fn proactive_warmup(&mut self, candidates: &[(usize, f64)]) {
+        // 原算法: 按 revival_probability 排序，预取 top-N
+        // bias-aware: 预取数量乘以 expert_prefetch_priority
+        let base_prefetch_count = 2;  // 默认预取 2 个候选
+        let effective_count = ((base_prefetch_count as f64) × self.prefetch_priority)
+            .round() as usize;
+        // prefetch_priority = 0.5 → 预取 1 个
+        // prefetch_priority = 2.85 → 预取 5~6 个
+
+        for (expert_idx, _prob) in candidates.iter().take(effective_count) {
+            self.initiate_async_prefetch(*expert_idx);
+        }
+    }
+}
+```
+
+**如何传递 bias 到 MoE 模块**:
+
+```rust
+// 在 Executor 初始化时:
+let moe_thermal = ExpertThermalManager::new(config)
+    .with_adaptive_eviction(window_size)
+    .with_eviction_aggressiveness(hw_opt_plan.strategy_bias.expert_eviction_aggressiveness);
+
+let moe_prefetcher = ExpertWeightPrefetcher::new(config)
+    .with_prefetch_priority(hw_opt_plan.strategy_bias.expert_prefetch_priority);
+```
+
+### 5.10 HwOptPlan 扩展
 
 ```rust
 pub struct HwOptPlan {
@@ -821,30 +1240,9 @@ fn estimate_batch_size(mode: InferenceMode, profile: &DeviceProfile, model: &Mod
 
 ## 13. CacheBudget 归一化公式
 
-当 StrategyBias 调制后 L2 三项预算（kv + weight + activation）之和超过 100% 时，按比例缩放：
+完整算法见 §5.3 CacheBudgetSolver bias-aware 算法。此处保留 REQ 索引。
 
-```
-raw_kv     = 0.40 × bias.kv_cache_budget_scale
-raw_weight = 0.35 × bias.weight_prefetch_budget_scale
-raw_act    = 0.25  // activation 不受 bias 调制
-
-total = raw_kv + raw_weight + raw_act
-
-if total > 1.0:
-    kv_ratio     = raw_kv / total
-    weight_ratio = raw_weight / total
-    act_ratio    = raw_act / total
-else:
-    kv_ratio     = raw_kv
-    weight_ratio = raw_weight
-    act_ratio    = 1.0 - raw_kv - raw_weight  // activation 吃剩余
-
-kv_budget     = L2 × kv_ratio
-weight_budget = L2 × weight_ratio
-activation    = L2 × act_ratio
-```
-
-**REQ-ARB-012**: activation 预算不受 bias 直接调制。activation 始终 = L2 × (1 - kv_ratio - weight_ratio)，作为 kv 和 weight 调制的被动结果。
+**REQ-ARB-012**: activation 预算不受 bias 直接调制。activation 始终 = L2 × (1 - kv_ratio - weight_ratio)，作为 kv 和 weight 调制的被动结果。完整公式和数值推演见 §5.3。
 
 ## 14. CostModel 注入方向规则
 
