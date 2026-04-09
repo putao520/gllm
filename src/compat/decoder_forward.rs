@@ -73,7 +73,6 @@ pub(crate) fn decoder_forward<E: Element>(
                 .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
         }
 
-
         // (c) Determine if this is an incremental decode step (position > 0 with KV cache)
         let has_kv_cache = seq_idx < kv_caches.len();
         let cached_seq_len = if has_kv_cache {

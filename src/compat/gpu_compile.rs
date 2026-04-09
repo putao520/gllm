@@ -3019,12 +3019,8 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 
 /// Build a CompilerGraph for a single decoder layer (causal attention + SwiGLU FFN).
 ///
-/// The graph is hardware-agnostic; each backend compiles it to its own ISA.
-/// Layout:
-///   input[seq, hidden]
-///   -> RmsNorm -> Q/K/V Gemm -> MultiHeadAttention -> Out Gemm -> Residual
-///   -> RmsNorm -> Gate Gemm -> Up Gemm -> SwiGLU -> Down Gemm -> Residual
-///   -> output[seq, hidden]
+/// Delegates to `gllm_kernels::compiler::CompilerGraph::decoder_layer()` — the
+/// single source of truth for decoder layer graph structure (ARCH-CPU-GPU-UNIFIED).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn build_decoder_layer_graph(
     seq_len: usize,
@@ -3037,171 +3033,15 @@ pub(crate) fn build_decoder_layer_graph(
     rope_theta: f64,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-
-    let mut g = CompilerGraph::new();
-    let dt = dtype;
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-    let kv_h = num_kv_heads * head_dim;
-
-    // ── Graph inputs ──
-    let input = g.add_tensor_concrete("input", &[s, h], dt);
-
-    // Attention weights (q_dim may differ from hidden for Qwen3 etc.)
-    let attn_norm_w = g.add_tensor_concrete("attn_norm_w", &[h], dt);
-    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
-    let w_k = g.add_tensor_concrete("w_k", &[h, kv_h], dt);
-    let w_v = g.add_tensor_concrete("w_v", &[h, kv_h], dt);
-    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
-
-    // FFN weights
-    let ffn_norm_w = g.add_tensor_concrete("ffn_norm_w", &[h], dt);
-    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
-    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
-    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
-
-    g.inputs = vec![input];
-
-    // ── Pre-attention RmsNorm ──
-    let attn_normed = g.add_tensor_concrete("attn_normed", &[s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, attn_norm_w],
-        vec![attn_normed],
-        "attn_rms_norm",
-    );
-
-    // ── Q/K/V projections ──
-    let q_proj = g.add_tensor_concrete("q_proj", &[s, q_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt },
-        vec![attn_normed, w_q],
-        vec![q_proj],
-        "q_proj",
-    );
-
-    let k_proj = g.add_tensor_concrete("k_proj", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
-        vec![attn_normed, w_k],
-        vec![k_proj],
-        "k_proj",
-    );
-
-    let v_proj = g.add_tensor_concrete("v_proj", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
-        vec![attn_normed, w_v],
-        vec![v_proj],
-        "v_proj",
-    );
-
-    // ── RoPE on Q and K ──
-    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![q_proj],
-        vec![q_rope],
-        "rope_q",
-    );
-
-    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![k_proj],
-        vec![k_rope],
-        "rope_k",
-    );
-
-    // ── Causal MultiHeadAttention ──
-    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
-    g.add_op(
-        OpKind::MultiHeadAttention {
-            seq_len: s,
-            num_heads,
-            num_kv_heads: num_heads,
-            head_dim,
-            causal: true,
-        },
-        vec![q_rope, k_rope, v_proj],
-        vec![attn_out],
-        "causal_attention",
-    );
-
-    // ── Output projection ──
-    let o_proj = g.add_tensor_concrete("o_proj", &[s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt },
-        vec![attn_out, w_o],
-        vec![o_proj],
-        "o_proj",
-    );
-
-    // ── Attention residual ──
-    let attn_residual = g.add_tensor_concrete("attn_residual", &[s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![input, o_proj],
-        vec![attn_residual],
-        "attn_residual",
-    );
-
-    // ── Pre-FFN RmsNorm ──
-    let ffn_normed = g.add_tensor_concrete("ffn_normed", &[s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![attn_residual, ffn_norm_w],
-        vec![ffn_normed],
-        "ffn_rms_norm",
-    );
-
-    // ── Gate + Up projections ──
-    let gate = g.add_tensor_concrete("gate", &[s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
-        vec![ffn_normed, w_gate],
-        vec![gate],
-        "gate_proj",
-    );
-
-    let up = g.add_tensor_concrete("up", &[s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
-        vec![ffn_normed, w_up],
-        vec![up],
-        "up_proj",
-    );
-
-    // ── SwiGLU: silu(gate) * up ──
-    let swiglu_out = g.add_tensor_concrete("swiglu_out", &[s, inter], dt);
-    g.add_op(OpKind::SwiGlu, vec![gate, up], vec![swiglu_out], "swiglu");
-
-    // ── Down projection ──
-    let down = g.add_tensor_concrete("down", &[s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: inter, dtype: dt },
-        vec![swiglu_out, w_down],
-        vec![down],
-        "down_proj",
-    );
-
-    // ── FFN residual ──
-    let output = g.add_tensor_concrete("output", &[s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![attn_residual, down],
-        vec![output],
-        "ffn_residual",
-    );
-
-    g.outputs = vec![output];
-    g
+    gllm_kernels::compiler::CompilerGraph::decoder_layer(
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, dtype,
+    )
 }
 
 /// Build a projection sub-graph for incremental decode:
 /// input[seq, hidden] → RmsNorm → Q/K/V Gemm → RoPE → outputs: [q_rope, k_rope, v_proj]
+///
+/// Delegates to `CompilerGraph::projection_subgraph()` (ARCH-CPU-GPU-UNIFIED).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn build_projection_graph(
     seq_len: usize,
@@ -3213,77 +3053,15 @@ pub(crate) fn build_projection_graph(
     rope_theta: f64,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-
-    let mut g = CompilerGraph::new();
-    let dt = dtype;
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-    let kv_h = num_kv_heads * head_dim;
-
-    let input = g.add_tensor_concrete("input", &[s, h], dt);
-    let attn_norm_w = g.add_tensor_concrete("attn_norm_w", &[h], dt);
-    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
-    let w_k = g.add_tensor_concrete("w_k", &[h, kv_h], dt);
-    let w_v = g.add_tensor_concrete("w_v", &[h, kv_h], dt);
-
-    g.inputs = vec![input];
-
-    let attn_normed = g.add_tensor_concrete("attn_normed", &[s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![input, attn_norm_w],
-        vec![attn_normed],
-        "attn_rms_norm",
-    );
-
-    let q_proj = g.add_tensor_concrete("q_proj", &[s, q_dim], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt },
-        vec![attn_normed, w_q],
-        vec![q_proj],
-        "q_proj",
-    );
-
-    let k_proj = g.add_tensor_concrete("k_proj", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
-        vec![attn_normed, w_k],
-        vec![k_proj],
-        "k_proj",
-    );
-
-    let v_proj = g.add_tensor_concrete("v_proj", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: kv_h, k: h, dtype: dt },
-        vec![attn_normed, w_v],
-        vec![v_proj],
-        "v_proj",
-    );
-
-    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![q_proj],
-        vec![q_rope],
-        "rope_q",
-    );
-
-    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_h], dt);
-    g.add_op(
-        OpKind::RoPE { head_dim, theta: rope_theta },
-        vec![k_proj],
-        vec![k_rope],
-        "rope_k",
-    );
-
-    g.outputs = vec![q_rope, k_rope, v_proj];
-    g
+    gllm_kernels::compiler::CompilerGraph::projection_subgraph(
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, dtype,
+    )
 }
 
 /// Build a post-attention sub-graph for incremental decode:
 /// (input[seq, hidden], attn_out[seq, q_dim]) → O Gemm → Residual → RmsNorm → FFN → Residual → output
+///
+/// Delegates to `CompilerGraph::post_attention_subgraph()` (ARCH-CPU-GPU-UNIFIED).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn build_post_attention_graph(
     seq_len: usize,
@@ -3294,88 +3072,14 @@ pub(crate) fn build_post_attention_graph(
     eps: f32,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-
-    let mut g = CompilerGraph::new();
-    let dt = dtype;
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-
-    let input = g.add_tensor_concrete("input", &[s, h], dt);
-    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], dt);
-    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
-    let ffn_norm_w = g.add_tensor_concrete("ffn_norm_w", &[h], dt);
-    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
-    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
-    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
-
-    g.inputs = vec![input, attn_out];
-
-    let o_proj = g.add_tensor_concrete("o_proj", &[s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt },
-        vec![attn_out, w_o],
-        vec![o_proj],
-        "o_proj",
-    );
-
-    let attn_residual = g.add_tensor_concrete("attn_residual", &[s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![input, o_proj],
-        vec![attn_residual],
-        "attn_residual",
-    );
-
-    let ffn_normed = g.add_tensor_concrete("ffn_normed", &[s, h], dt);
-    g.add_op(
-        OpKind::RmsNorm { eps },
-        vec![attn_residual, ffn_norm_w],
-        vec![ffn_normed],
-        "ffn_rms_norm",
-    );
-
-    let gate = g.add_tensor_concrete("gate", &[s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
-        vec![ffn_normed, w_gate],
-        vec![gate],
-        "gate_proj",
-    );
-
-    let up = g.add_tensor_concrete("up", &[s, inter], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: inter, k: h, dtype: dt },
-        vec![ffn_normed, w_up],
-        vec![up],
-        "up_proj",
-    );
-
-    let swiglu_out = g.add_tensor_concrete("swiglu_out", &[s, inter], dt);
-    g.add_op(OpKind::SwiGlu, vec![gate, up], vec![swiglu_out], "swiglu");
-
-    let down = g.add_tensor_concrete("down", &[s, h], dt);
-    g.add_op(
-        OpKind::Gemm { m: s, n: h, k: inter, dtype: dt },
-        vec![swiglu_out, w_down],
-        vec![down],
-        "down_proj",
-    );
-
-    let output = g.add_tensor_concrete("output", &[s, h], dt);
-    g.add_op(
-        OpKind::Residual,
-        vec![attn_residual, down],
-        vec![output],
-        "ffn_residual",
-    );
-
-    g.outputs = vec![output];
-    g
+    gllm_kernels::compiler::CompilerGraph::post_attention_subgraph(
+        seq_len, hidden, num_heads, head_dim, inter, eps, dtype,
+    )
 }
 
 /// Build a CompilerGraph for the final lm_head projection: hidden -> vocab logits.
+///
+/// Delegates to `CompilerGraph::lm_head()` (ARCH-CPU-GPU-UNIFIED).
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn build_lm_head_graph(
     seq_len: usize,
@@ -3383,25 +3087,7 @@ pub(crate) fn build_lm_head_graph(
     vocab_size: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
-
-    let mut g = CompilerGraph::new();
-    let dt = dtype;
-
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
-    let w_lm = g.add_tensor_concrete("w_lm", &[hidden, vocab_size], dt);
-    g.inputs = vec![input, w_lm];
-
-    let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], dt);
-    g.add_op(
-        OpKind::Gemm { m: seq_len, n: vocab_size, k: hidden, dtype: dt },
-        vec![input, w_lm],
-        vec![logits],
-        "lm_head",
-    );
-
-    g.outputs = vec![logits];
-    g
+    gllm_kernels::compiler::CompilerGraph::lm_head(seq_len, hidden, vocab_size, dtype)
 }
 
 /// CPU-side sampling from logits: temperature -> top-k -> top-p -> softmax -> sample.

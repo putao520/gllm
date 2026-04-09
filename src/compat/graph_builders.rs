@@ -306,6 +306,8 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
 
 /// Monolithic Attention Graph
 /// Fuses: RmsNorm1 -> QKV -> RoPE -> FlashAttn -> O_Proj -> ResAdd1
+///
+/// Delegates to `CompilerGraph::fused_attention_layer()` (ARCH-CPU-GPU-UNIFIED).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn build_fused_attention_layer_graph(
     seq_len: usize,
@@ -317,148 +319,9 @@ pub(crate) fn build_fused_attention_layer_graph(
     rope_theta: f64,
     dtype: DType,
 ) -> CompilerGraph {
-    let mut g = CompilerGraph::new();
-    let dt = dtype;     // GEMM weights
-    let ft = dtype;     // Activations
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-    let kv_dim = num_kv_heads * head_dim;
-
-    let input = g.add_tensor_concrete("input", &[s, h], ft);
-    let prev_telemetry = g.add_tensor_concrete("prev_telemetry", &[s], DType::F32);
-    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], ft);
-    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
-    let w_k = g.add_tensor_concrete("w_k", &[h, kv_dim], dt);
-    let w_v = g.add_tensor_concrete("w_v", &[h, kv_dim], dt);
-    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
-    let seq_offsets = g.add_tensor_concrete("seq_offsets", &[s], DType::F32);
-
-    g.inputs = vec![input, prev_telemetry, seq_offsets, rn1_w, w_q, w_k, w_v, w_o];
-
-    g.add_op(OpKind::VariableLengthBatch, vec![seq_offsets], vec![], "ragged_batch");
-
-    // P4/P5 Tier IV: Attention Skip Mask based on previous layer's L2-delta telemetry
-    let skip_mask = g.add_tensor_concrete("attn_skip_mask", &[s], ft);
-    g.add_op(
-        OpKind::AttentionSkipMask { seq_len: s.into(), threshold: 0.05 },
-        vec![prev_telemetry],
-        vec![skip_mask],
-        "attention_skip_mask"
-    );
-
-    let q_out = g.add_tensor_concrete("q", &[s, q_dim], ft);
-    g.add_op(OpKind::FusedRmsNormGemm { m: s.into(), n: q_dim, k: h, eps, dtype: dt }, vec![input, rn1_w, w_q], vec![q_out], "gemm_q_fused");
-    let k_out = g.add_tensor_concrete("k", &[s, kv_dim], ft);
-    g.add_op(OpKind::FusedRmsNormGemm { m: s.into(), n: kv_dim, k: h, eps, dtype: dt }, vec![input, rn1_w, w_k], vec![k_out], "gemm_k_fused");
-    let v_out = g.add_tensor_concrete("v_proj", &[s, kv_dim], ft);
-    g.add_op(OpKind::FusedRmsNormGemm { m: s.into(), n: kv_dim, k: h, eps, dtype: dt }, vec![input, rn1_w, w_v], vec![v_out], "gemm_v_fused");
-
-    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
-    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
-
-    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], ft);
-    g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim, causal: true },
-        vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
-    );
-
-    let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
-    
-    let resid1 = g.add_tensor_concrete("residual1", &[s, h], ft);
-    let tel1 = g.add_tensor_concrete("telemetry1", &[s], DType::F32);
-    g.add_op(OpKind::ResidualWithTelemetry { hidden: h }, vec![input, o_out], vec![resid1, tel1], "residual_1");
-
-    // ── Phase 29: KV Cache Extreme Squeezing (SPEC §12.9) ─────────────────
-    //
-    // §12.9.1 EntropyGate — GPU-side entropy threshold gate.
-    //   Reads post-Attention softmax probability vectors (attn_out).
-    //   Outputs write_mask[seq_len]: 1.0 = write to KV cache, 0.0 = skip ST.global.
-    //   Low-entropy tokens (filler words, conjunctions) produce write_mask=0,
-    //   directly blocking the KvScatterWrite ST.global for those token positions.
-    let write_mask = g.add_tensor_concrete("entropy_write_mask", &[s], DType::F32);
-    g.add_op(
-        OpKind::EntropyGate {
-            seq_len: s.into(),
-            vocab_size: q_dim,             // head-space distribution entropy proxy
-            entropy_threshold: 0.5_f32,    // nats; < 0.5 nat → high-confidence, skip write
-        },
-        vec![attn_out],
-        vec![write_mask],
-        "entropy_gate",
-    );
-
-    // §12.9.2 VRangeQuant — compress V projection to INT4 for narrow-range blocks.
-    //   Reads v_out (full precision). Outputs v_quantized (INT4 packed, kv_dim/2 width).
-    //   v_quantized replaces v_out as the V source for KvScatterWrite to reduce bandwidth.
-    let v_quantized = g.add_tensor_concrete("v_quantized", &[s, kv_dim / 2], ft);
-    g.add_op(
-        OpKind::VRangeQuant {
-            seq_len: s.into(),
-            kv_dim,
-            block_size: 32,
-            range_threshold: 0.1_f32,
-        },
-        vec![v_out],
-        vec![v_quantized],
-        "vrange_quant",
-    );
-
-    // §12.9 KvScatterWrite — gated KV cache write-back.
-    //   inputs[0] = k_rope  (K source, post-RoPE)
-    //   inputs[1] = v_quantized  (V source, INT4-compressed)
-    //   inputs[2] = kv_cache  (destination pointer placeholder)
-    //   inputs[3] = write_mask  (EntropyGate gate: 0.0 → skip ST.global for this token)
-    //
-    //   This is the core SPEC §12.9.1 contract: write_mask is the gate input that
-    //   prevents low-entropy tokens from ever touching GMEM KV writes.
-    let kv_cache_in = g.add_tensor_concrete("kv_cache_ptr", &[1], DType::F32); // opaque ptr
-    let kv_written  = g.add_tensor_concrete("kv_written",   &[s, kv_dim], ft);
-    g.add_op(
-        OpKind::KvScatterWrite {
-            seq_len:      s,
-            num_kv_heads,
-            head_dim,
-            kv_dim,
-            write_start:  0,
-            layer_offset: 0,
-            half_offset:  kv_dim / 2 * dtype.size_bytes(),
-            head_stride:  head_dim * dtype.size_bytes(),
-            dtype_size:   dtype.size_bytes(),
-        },
-        // inputs[3] = write_mask is the EntropyGate output — controls per-token write gates
-        vec![k_rope, v_quantized, kv_cache_in, write_mask],
-        vec![kv_written],
-        "kv_scatter_write_gated",
-    );
-
-    // §12.9.3 KvCentroidPrefetch — side-effect: async cuMemPrefetchAsync for next layer.
-    //   No output tensor consumed by downstream ops; added to g.outputs to prevent DCE.
-    let prefetch_sink = g.add_tensor_concrete("prefetch_sink", &[1], DType::F32);
-    g.add_op(
-        OpKind::KvCentroidPrefetch {
-            seq_len: s.into(),
-            num_heads,
-            head_dim,
-            prefetch_distance: 4,
-        },
-        vec![attn_out],
-        vec![prefetch_sink],
-        "kv_centroid_prefetch",
-    );
-    // ─────────────────────────────────────────────────────────────────────
-
-    // g.inputs must include kv_cache_in so the executor can bind the live KV cache ptr
-    g.inputs.push(kv_cache_in);
-
-    // All Phase 29 outputs enter g.outputs to prevent Dead-Code Elimination:
-    //   kv_written:    consumed by next-layer attention as updated KV cache reference
-    //   prefetch_sink: side-effect scheduling node, kept alive via output registration
-    g.outputs = vec![resid1, tel1, kv_written, prefetch_sink];
-    g
+    CompilerGraph::fused_attention_layer(
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, dtype,
+    )
 }
 
 

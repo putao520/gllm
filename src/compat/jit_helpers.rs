@@ -216,8 +216,11 @@ pub(crate) fn pack_weights_multi(slices_with_dtypes: &[(&[u8], DType)]) -> Vec<u
 // ---------------------------------------------------------------------------
 
 /// Build a CompilerGraph for a single decoder layer (pre-norm, RMSNorm + SwiGLU).
-/// ARCH-DTYPE-ADAPTIVE: GEMM weights use model dtype `dt`, norm weights use F32,
-/// activations/intermediates use F32 (accumulator precision).
+///
+/// Delegates to `CompilerGraph::decoder_layer()` from gllm-kernels for graph
+/// structure, then overrides `g.inputs` to include weight tensors in the order
+/// expected by `execute_jit_decoder_layer` (CPU JIT path packs weights into
+/// a contiguous buffer indexed by input position).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub(crate) fn build_decoder_layer_graph(
     seq_len: usize,
@@ -230,87 +233,37 @@ pub(crate) fn build_decoder_layer_graph(
     rope_theta: f64,
     dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::CompilerGraph;
 
-    let mut g = CompilerGraph::new();
-    let dt = dtype;           // GEMM weight dtype (model native)
-    let ft = dtype;
-    let s = seq_len;
-    let h = hidden;
-    let q_dim = num_heads * head_dim;
-    let kv_dim = num_kv_heads * head_dim;
-
-    // Input activation: F32
-    let input = g.add_tensor_concrete("input", &[s, h], ft);
-    // GEMM weights: model dtype
-    let w_q = g.add_tensor_concrete("w_q", &[h, q_dim], dt);
-    let w_k = g.add_tensor_concrete("w_k", &[h, kv_dim], dt);
-    let w_v = g.add_tensor_concrete("w_v", &[h, kv_dim], dt);
-    let w_o = g.add_tensor_concrete("w_o", &[q_dim, h], dt);
-    // Norm weights: F32
-    let rn1_w = g.add_tensor_concrete("rn1_w", &[h], ft);
-    // GEMM weights: model dtype
-    let w_gate = g.add_tensor_concrete("w_gate", &[h, inter], dt);
-    let w_up = g.add_tensor_concrete("w_up", &[h, inter], dt);
-    let w_down = g.add_tensor_concrete("w_down", &[inter, h], dt);
-    // Norm weights: F32
-    let rn2_w = g.add_tensor_concrete("rn2_w", &[h], ft);
-
-    g.inputs = vec![
-        input, w_q, w_k, w_v, w_o, rn1_w,
-        w_gate, w_up, w_down, rn2_w,
-    ];
-
-    // Pre-attention RMSNorm (activation F32)
-    let normed1 = g.add_tensor_concrete("normed1", &[s, h], ft);
-    g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed1], "rms_norm_1");
-
-    // Q/K/V Projections (GEMM: F32 activation × dt weight → F32 output)
-    let q_out = g.add_tensor_concrete("q", &[s, q_dim], ft);
-    g.add_op(OpKind::Gemm { m: s, n: q_dim, k: h, dtype: dt }, vec![normed1, w_q], vec![q_out], "gemm_q");
-    let k_out = g.add_tensor_concrete("k", &[s, kv_dim], ft);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_k], vec![k_out], "gemm_k");
-    let v_out = g.add_tensor_concrete("v", &[s, kv_dim], ft);
-    g.add_op(OpKind::Gemm { m: s, n: kv_dim, k: h, dtype: dt }, vec![normed1, w_v], vec![v_out], "gemm_v");
-
-    // RoPE (F32 activation)
-    let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![q_out], vec![q_rope], "rope_q");
-    let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta }, vec![k_out], vec![k_rope], "rope_k");
-
-    // Multi-Head Attention (F32 activation)
-    let attn_out = g.add_tensor_concrete("attn_out", &[s, q_dim], ft);
-    g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim, causal: true },
-        vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
+    let mut g = CompilerGraph::decoder_layer(
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, dtype,
     );
 
-    // Output projection + Residual 1
-    let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
-    let resid1 = g.add_tensor_concrete("residual1", &[s, h], ft);
-    g.add_op(OpKind::Residual, vec![input, o_out], vec![resid1], "residual_1");
+    // Override inputs: CPU JIT path needs all weight tensors in g.inputs so
+    // that execute_jit_decoder_layer can pack them into a contiguous buffer.
+    // The decoder_layer() builder creates tensors named:
+    //   input(0), attn_norm_w(1), w_q(2), w_k(3), w_v(4), w_o(5),
+    //   ffn_norm_w(6), w_gate(7), w_up(8), w_down(9)
+    // CPU path expects order: input, w_q, w_k, w_v, w_o, rn1_w, w_gate, w_up, w_down, rn2_w
+    let find_tensor = |name: &str| -> gllm_kernels::compiler::TensorId {
+        g.tensors.iter()
+            .find(|t| t.name == name)
+            .map(|t| t.id)
+            .unwrap_or_else(|| panic!("tensor '{}' not found in decoder_layer graph", name))
+    };
 
-    // Pre-FFN RMSNorm (F32)
-    let normed2 = g.add_tensor_concrete("normed2", &[s, h], ft);
-    g.add_op(OpKind::RmsNorm { eps }, vec![resid1, rn2_w], vec![normed2], "rms_norm_2");
+    let input = find_tensor("input");
+    let w_q = find_tensor("w_q");
+    let w_k = find_tensor("w_k");
+    let w_v = find_tensor("w_v");
+    let w_o = find_tensor("w_o");
+    let rn1_w = find_tensor("attn_norm_w");
+    let w_gate = find_tensor("w_gate");
+    let w_up = find_tensor("w_up");
+    let w_down = find_tensor("w_down");
+    let rn2_w = find_tensor("ffn_norm_w");
 
-    // SwiGLU FFN
-    let gate_out = g.add_tensor_concrete("ffn_gate", &[s, inter], ft);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
-    let up_out = g.add_tensor_concrete("ffn_up", &[s, inter], ft);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_up], vec![up_out], "gemm_up");
-    let swiglu_out = g.add_tensor_concrete("ffn_swiglu", &[s, inter], ft);
-    g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
-    let down_out = g.add_tensor_concrete("ffn_down", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
-
-    // Residual 2
-    let output = g.add_tensor_concrete("output", &[s, h], ft);
-    g.add_op(OpKind::Residual, vec![resid1, down_out], vec![output], "residual_2");
-
-    g.outputs = vec![output];
+    g.inputs = vec![input, w_q, w_k, w_v, w_o, rn1_w, w_gate, w_up, w_down, rn2_w];
     g
 }
 
