@@ -309,7 +309,7 @@ lm_head GEMM ──── logits 范数 → 采样策略调整
 | MoE Dispatch | `MoeDispatchCallback` | `pre_node(moe_layers)` | Routing setup | — | Integrated |
 | Speculative Decoding | `SpecDecodingState` | `step()` draft/verify | `draft_budget` per seq | — | Integrated |
 | Knowledge Injection | — | `pre_node(target_layer)` | `InjectHidden { data }` | — | 框架就绪 |
-| Embed+Rerank Fusion | `PipelineOrchestrator` | `post_embed()` → `pre_rerank()` | `ReorderByScore` | 多模型管线 (02-ARCHITECTURE.md ARCH-MULTI-MODEL-PIPELINE) | Not Integrated |
+| Embed+Rerank Fusion | `EmbeddingsBuilder.rerank_query()` → `Client::execute_embed_rerank_pipeline()` | `generate()` 内部 | `ReorderByScore` | 多模型管线 (02-ARCHITECTURE.md ARCH-MULTI-MODEL-PIPELINE) | Integrated |
 
 **铁律**: SPEC 审计时，任何 Not Integrated 的模块等同于未实现，不接受"逻辑正确但未接入"作为完成状态。
 
