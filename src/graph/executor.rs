@@ -2158,6 +2158,7 @@ mod tests {
             num_kv_heads: 8,
             num_groups: 4,
             head_dim: 128,
+            sliding_window: 0,
         };
         let g = build_gqa_graph(&config, 4, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // Q, K, V

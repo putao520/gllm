@@ -278,6 +278,7 @@ mod tests {
                 rope_theta: 100000.0,
                 max_seq_len: 8192,
                 interleaved: false,
+                partial_ratio: 1.0,
             }),
             visibility: VisibilityMode::Prefill { seq_len: 5 },
         };

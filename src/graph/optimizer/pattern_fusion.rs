@@ -272,6 +272,7 @@ impl OptimizationPass for GQAFusionPass {
                 num_kv_heads: ctx.num_kv_heads(),
                 num_groups: ctx.num_heads() / ctx.num_kv_heads(),
                 head_dim: ctx.head_dim(),
+                sliding_window: 0,
             };
             let mut fused = FusedNode::new(format!("{}_gqa", q.name), FusedOp::GQA(config));
             fused.inputs = q
@@ -329,6 +330,7 @@ impl OptimizationPass for CanonicalizeAttentionPass {
                         num_kv_heads: ctx.num_kv_heads(),
                         num_groups: ctx.num_heads() / ctx.num_kv_heads(),
                         head_dim: ctx.head_dim(),
+                        sliding_window: 0,
                     };
                     node.op = FusedOp::GQA(config);
                 }

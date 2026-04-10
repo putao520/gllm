@@ -204,6 +204,9 @@ pub struct RoPEConfig {
     pub rope_theta: f64,
     pub max_seq_len: usize,
     pub interleaved: bool,
+    /// 部分旋转比例 (0.0~1.0)。1.0 = 全维度旋转 (标准 RoPE)。
+    /// Gemma 4 global 层使用 0.25 (p-RoPE: 仅旋转前 25% 维度)。
+    pub partial_ratio: f32,
 }
 
 impl Default for RoPEConfig {
@@ -213,6 +216,7 @@ impl Default for RoPEConfig {
             rope_theta: 10000.0,
             max_seq_len: 4096,
             interleaved: false,
+            partial_ratio: 1.0,
         }
     }
 }
@@ -240,6 +244,9 @@ pub struct GQAConfig {
     pub num_kv_heads: usize,
     pub num_groups: usize,
     pub head_dim: usize,
+    /// Sliding-window 注意力窗口大小 (0 = global/full attention)。
+    /// Gemma 4 根据 `attention_pattern[layer_idx]` 选择 0 或 config.sliding_window。
+    pub sliding_window: usize,
 }
 
 /// MoE 路由融合配置
