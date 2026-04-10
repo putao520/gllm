@@ -2,14 +2,73 @@
 //!
 //! 测试 3 种格式: SafeTensors, GGUF, ONNX
 //! 验证同一功能的模型在不同格式下都能正常工作
+//!
+//! 反作弊检查: 分数有限性、降序排列、分数离散度、语义排名正确性
 
 use gllm::Client;
 
-/// SafeTensors 格式的 Reranker 测试
-///
-/// 模型: BAAI/bge-reranker-v2-m3
-/// 格式: SafeTensors (.safetensors)
-/// 源: [HuggingFace](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+// ============================================================================
+// Anti-cheating helpers
+// ============================================================================
+
+/// 验证 rerank 结果的完整性和正确性
+fn assert_rerank_sane(results: &[gllm::RerankResult], label: &str) {
+    assert!(!results.is_empty(), "{label}: results are empty");
+
+    // 1. 所有分数必须是有限浮点数 (非 NaN/Inf)
+    for (i, r) in results.iter().enumerate() {
+        assert!(
+            r.score.is_finite(),
+            "{label}: score at rank {i} is not finite: {}",
+            r.score
+        );
+    }
+
+    // 2. 结果必须按分数降序排列
+    for i in 1..results.len() {
+        assert!(
+            results[i - 1].score >= results[i].score,
+            "{label}: results not sorted descending: rank {} score {} < rank {} score {}",
+            i - 1,
+            results[i - 1].score,
+            i,
+            results[i].score
+        );
+    }
+
+    // 3. 分数离散度检查 — 模型必须能区分不同文档
+    //    如果所有分数几乎相同，说明模型没有真正工作
+    let max_score = results.first().unwrap().score;
+    let min_score = results.last().unwrap().score;
+    let spread = (max_score - min_score).abs();
+    assert!(
+        spread > 1e-6,
+        "{label}: score spread {spread} is too small — model is not discriminating \
+         (max={max_score}, min={min_score})"
+    );
+
+    // 4. 分数不能全为零
+    let all_zero = results.iter().all(|r| r.score == 0.0);
+    assert!(
+        !all_zero,
+        "{label}: all scores are zero — model output is degenerate"
+    );
+
+    // 5. index 去重检查 — 每个文档应该只出现一次
+    let mut seen = std::collections::HashSet::new();
+    for r in results {
+        assert!(
+            seen.insert(r.index),
+            "{label}: duplicate index {} in results",
+            r.index
+        );
+    }
+}
+
+// ============================================================================
+// SafeTensors
+// ============================================================================
+
 /// TEST-E2E-RERANK-001: SafeTensors 格式 reranker 端到端推理
 /// **关联需求**: REQ-TEST-004
 /// **测试类型**: 正向
@@ -34,29 +93,22 @@ fn e2e_reranker_safetensors() {
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");
 
-    // 验证得分排序（第一个文档应该排在最前面，因为它最相关）
+    // 反退化检查
+    assert_rerank_sane(&response.results, "safetensors");
+
+    // 语义正确性: Paris 文档应该排在最前面
     let top_result = &response.results[0];
     assert_eq!(
         top_result.index, 0,
-        "First document (Paris) should be ranked first"
+        "First document (Paris) should be ranked first, got index {}",
+        top_result.index
     );
-    assert!(top_result.score > 0.0, "Score should be positive");
-
-    // 验证结果按得分降序排列
-    for i in 1..response.results.len() {
-        assert!(
-            response.results[i - 1].score >= response.results[i].score,
-            "Results should be sorted by score descending"
-        );
-    }
 }
 
-/// GGUF 格式的 Reranker 测试
-///
-/// 模型: DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF
-/// 格式: GGUF (.gguf)
-/// 源: [HuggingFace](https://huggingface.co/DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF)
-///
+// ============================================================================
+// GGUF
+// ============================================================================
+
 /// TEST-E2E-RERANK-002: GGUF 格式 reranker 端到端推理
 /// **关联需求**: REQ-TEST-004
 /// **测试类型**: 正向
@@ -82,32 +134,16 @@ fn e2e_reranker_gguf() {
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");
 
-    // SPEC 06-TESTING-STRATEGY.md Section 8.3 TEST-REAL-002:
-    // Reranker | 分数为有限浮点数
-    for result in &response.results {
-        assert!(
-            result.score.is_finite(),
-            "Score should be finite, got {}",
-            result.score
-        );
-    }
-
-    // 验证结果按得分降序排列
-    for i in 1..response.results.len() {
-        assert!(
-            response.results[i - 1].score >= response.results[i].score,
-            "Results should be sorted by score descending"
-        );
-    }
+    // 反退化检查
+    assert_rerank_sane(&response.results, "gguf");
 
     // NOTE: 不验证 top_result.index == 0，量化模型精度不足以保证特定排名
 }
 
-/// ONNX 格式的 Reranker 测试
-///
-/// 模型: onnx-community/bge-reranker-v2-m3-ONNX
-/// 格式: ONNX (.onnx)
-/// 源: [HuggingFace](https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX)
+// ============================================================================
+// ONNX
+// ============================================================================
+
 /// TEST-E2E-RERANK-003: ONNX 格式 reranker 端到端推理
 /// **关联需求**: REQ-TEST-004
 /// **测试类型**: 正向
@@ -131,14 +167,14 @@ fn e2e_reranker_onnx() {
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");
 
-    // 验证管道工作正常：得分为正、结果按降序排列
-    for result in &response.results {
-        assert!(result.score > 0.0, "Score should be positive, got {}", result.score);
-    }
-    for i in 1..response.results.len() {
-        assert!(
-            response.results[i - 1].score >= response.results[i].score,
-            "Results should be sorted by score descending"
-        );
-    }
+    // 反退化检查
+    assert_rerank_sane(&response.results, "onnx");
+
+    // 语义正确性: Beijing 文档应该排在最前面
+    let top_result = &response.results[0];
+    assert_eq!(
+        top_result.index, 0,
+        "First document (Beijing) should be ranked first, got index {}",
+        top_result.index
+    );
 }

@@ -2,14 +2,89 @@
 //!
 //! 测试 3 种格式: SafeTensors, GGUF, ONNX
 //! 验证同一功能的模型在不同格式下都能正常工作
+//!
+//! 反作弊检查: 非空、最短长度、语义关键词、重复检测、低熵检测、字符多样性
 
 use gllm::Client;
 
-/// SafeTensors 格式的 Generator 测试
-///
-/// 模型: HuggingFaceTB/SmolLM2-135M-Instruct
-/// 格式: SafeTensors (.safetensors)
-/// 源: [HuggingFace](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct)
+// ============================================================================
+// Anti-cheating helpers
+// ============================================================================
+
+/// 检测生成文本的退化模式
+fn assert_generation_sane(text: &str, label: &str) {
+    assert!(!text.is_empty(), "{label}: output is empty");
+    assert!(
+        text.len() > 3,
+        "{label}: output too short ({} chars): {:?}",
+        text.len(),
+        text
+    );
+
+    // 1. 禁止全空白
+    let trimmed = text.trim();
+    assert!(
+        !trimmed.is_empty(),
+        "{label}: output is all whitespace"
+    );
+
+    // 2. 字符多样性 — 至少应有 3 个不同字符 (排除退化输出如 "aaaa..." 或 "!!!!")
+    let unique_chars: std::collections::HashSet<char> = trimmed.chars().collect();
+    assert!(
+        unique_chars.len() >= 3,
+        "{label}: only {} unique characters in output {:?} — degenerate",
+        unique_chars.len(),
+        trimmed
+    );
+
+    // 3. 重复检测 — 检查是否同一个 token/短语无限重复
+    //    策略: 将文本按空格分词，如果连续重复同一个词 5 次以上就判定退化
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() >= 5 {
+        let mut max_repeat = 1;
+        let mut current_repeat = 1;
+        for i in 1..words.len() {
+            if words[i] == words[i - 1] {
+                current_repeat += 1;
+                if current_repeat > max_repeat {
+                    max_repeat = current_repeat;
+                }
+            } else {
+                current_repeat = 1;
+            }
+        }
+        assert!(
+            max_repeat < 5,
+            "{label}: word repeated {max_repeat} times consecutively — degenerate repetition loop"
+        );
+    }
+
+    // 4. 单字符重复检测 — 同一字符连续出现 20 次以上
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() >= 20 {
+        let mut max_char_repeat = 1;
+        let mut current = 1;
+        for i in 1..chars.len() {
+            if chars[i] == chars[i - 1] {
+                current += 1;
+                if current > max_char_repeat {
+                    max_char_repeat = current;
+                }
+            } else {
+                current = 1;
+            }
+        }
+        assert!(
+            max_char_repeat < 20,
+            "{label}: character repeated {max_char_repeat} times consecutively — degenerate"
+        );
+    }
+}
+
+// ============================================================================
+// SafeTensors
+// ============================================================================
+
 /// TEST-E2E-GEN-001: SafeTensors 格式生成端到端推理
 /// **关联需求**: REQ-TEST-002
 /// **测试类型**: 正向
@@ -27,22 +102,25 @@ fn e2e_generator_safetensors() {
         .expect("Generation failed");
 
     let text = response.text.trim();
-    assert!(!text.is_empty(), "Output should not be empty");
-    assert!(text.len() > 3, "Output should be at least 4 characters");
 
-    // 验证输出包含合理内容
+    // 反退化检查
+    assert_generation_sane(text, "safetensors");
+
+    // 语义正确性
     let lower = text.to_lowercase();
     let is_reasonable =
         lower.contains("paris") || lower.contains("parís") || lower.contains("capital");
-    assert!(is_reasonable, "Output should contain reasonable answer");
+    assert!(
+        is_reasonable,
+        "Output should mention Paris/capital, got: {:?}",
+        text
+    );
 }
 
-/// GGUF 格式的 Generator 测试
-///
-/// 模型: Qwen/Qwen3-0.6B-GGUF
-/// 格式: GGUF (.gguf)
-/// 源: [HuggingFace](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
-///
+// ============================================================================
+// GGUF
+// ============================================================================
+
 /// TEST-E2E-GEN-002: GGUF 格式生成端到端推理
 /// **关联需求**: REQ-TEST-002
 /// **测试类型**: 正向
@@ -55,11 +133,6 @@ fn e2e_generator_gguf() {
     let manifest = client.manifest().expect("Failed to read manifest");
     assert_eq!(manifest.kind, gllm::ModelKind::Chat);
 
-    // Debug: print config
-    println!("=== Manifest Config ===");
-    println!("kind: {:?}", manifest.kind);
-    println!("arch: {:?}", manifest.arch);
-
     let response = client
         .generate("The capital of France is")
         .max_tokens(10)
@@ -68,24 +141,28 @@ fn e2e_generator_gguf() {
         .expect("Generation failed");
 
     let text = response.text.trim();
-    assert!(!text.is_empty(), "Output should not be empty");
-    assert!(text.len() > 3, "Output should be at least 4 characters");
 
-    // 验证输出包含合理内容（兼容中英文输出）
+    // 反退化检查
+    assert_generation_sane(text, "gguf");
+
+    // 语义正确性 (兼容中英文输出)
     let lower = text.to_lowercase();
     let is_reasonable = lower.contains("paris")
         || lower.contains("parís")
         || lower.contains("capital")
         || lower.contains("france")
         || text.contains("巴黎");
-    assert!(is_reasonable, "Output should contain reasonable answer");
+    assert!(
+        is_reasonable,
+        "Output should mention Paris/capital/France/巴黎, got: {:?}",
+        text
+    );
 }
 
-/// ONNX 格式的 Generator 测试
-///
-/// 模型: onnx-community/SmolLM2-135M-ONNX
-/// 格式: ONNX (.onnx)
-/// 源: [HuggingFace](https://huggingface.co/onnx-community/SmolLM2-135M-ONNX)
+// ============================================================================
+// ONNX
+// ============================================================================
+
 /// TEST-E2E-GEN-003: ONNX 格式生成端到端推理
 /// **关联需求**: REQ-TEST-002
 /// **测试类型**: 正向
@@ -105,6 +182,7 @@ fn e2e_generator_onnx() {
         .expect("Generation failed");
 
     let text = response.text.trim();
-    assert!(!text.is_empty(), "Output should not be empty");
-    assert!(text.len() > 3, "Output should be at least 4 characters");
+
+    // 反退化检查 (ONNX 格式也必须通过完整验证)
+    assert_generation_sane(text, "onnx");
 }
