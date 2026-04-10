@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn template_lookup_by_name() {
         register_builtin_templates();
-        for name in ["qwen3", "llama", "mistral3", "glm4", "phi4", "gemma2", "xlmr", "deepseek", "gpt2next"] {
+        for name in ["qwen3", "llama", "mistral3", "glm4", "phi4", "gemma2", "gemma4", "xlmr", "deepseek", "gpt2next"] {
             assert!(get_template(name).is_some(), "template '{name}' not found");
         }
         assert!(get_template("nonexistent").is_none());
@@ -248,6 +248,8 @@ mod tests {
             ("Phi4ForCausalLM", "phi4"),
             ("Phi3ForCausalLM", "phi4"),
             ("Gemma2ForCausalLM", "gemma2"),
+            ("Gemma4ForCausalLM", "gemma4"),
+            ("Gemma4ForConditionalGeneration", "gemma4"),
             ("DeepseekV3ForCausalLM", "deepseek"),
             ("SmolLM2ForCausalLM", "llama"),
             ("GPTOSSForCausalLM", "gpt2next"),
