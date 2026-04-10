@@ -324,19 +324,22 @@ fn build_swiglu_graph(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_rope_graph(
     config: &RoPEConfig,
-    seq_len: usize,
     hidden: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
 
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+    let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     g.inputs = vec![input];
 
-    let out = g.add_tensor_concrete("rope_out", &[seq_len, hidden], dt);
+    let out = g.add_tensor("rope_out", vec![seq_len_sym, SymDim::Concrete(hidden)], dt);
     g.add_op(
         OpKind::RoPE {
             head_dim: config.head_dim,
@@ -353,47 +356,52 @@ fn build_rope_graph(
 }
 
 /// Build a CompilerGraph for FusedQkvRope.
+/// Build a CompilerGraph for FusedQkvRope with symbolic seq_len.
 ///
 /// input[s,h] + w_q,w_k,w_v + cos_sin → Q/K/V Gemms + RoPE(Q) + RoPE(K) → [q_rope, k_rope, v]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_fused_qkv_rope_graph(
     config: &FusedQkvRopeConfig,
-    seq_len: usize,
     hidden: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let q_dim = config.num_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+
+    let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     let w_q = g.add_tensor_concrete("w_q", &[hidden, q_dim], dt);
     let w_k = g.add_tensor_concrete("w_k", &[hidden, kv_dim], dt);
     let w_v = g.add_tensor_concrete("w_v", &[hidden, kv_dim], dt);
     g.inputs = vec![input, w_q, w_k, w_v];
 
-    let q_out = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
+    let q_out = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: q_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: q_dim, k: hidden, dtype },
         vec![input, w_q],
         vec![q_out],
         "gemm_q",
     );
 
-    let k_out = g.add_tensor_concrete("k", &[seq_len, kv_dim], dt);
+    let k_out = g.add_tensor("k", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: kv_dim, k: hidden, dtype },
         vec![input, w_k],
         vec![k_out],
         "gemm_k",
     );
 
-    let v_out = g.add_tensor_concrete("v", &[seq_len, kv_dim], dt);
+    let v_out = g.add_tensor("v", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: kv_dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: kv_dim, k: hidden, dtype },
         vec![input, w_v],
         vec![v_out],
         "gemm_v",
@@ -401,7 +409,7 @@ fn build_fused_qkv_rope_graph(
 
     #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
     {
-        let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
+        let q_rope = g.add_tensor("q_rope", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
         g.add_op(
             OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
             vec![q_out],
@@ -409,7 +417,7 @@ fn build_fused_qkv_rope_graph(
             "rope_q",
         );
 
-        let k_rope = g.add_tensor_concrete("k_rope", &[seq_len, kv_dim], dt);
+        let k_rope = g.add_tensor("k_rope", vec![seq_len_sym, SymDim::Concrete(kv_dim)], dt);
         g.add_op(
             OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
             vec![k_out],
@@ -426,27 +434,31 @@ fn build_fused_qkv_rope_graph(
     g
 }
 
-/// Build a CompilerGraph for FusedRMSLinear: RMSNorm → Gemm.
+/// Build a CompilerGraph for FusedRMSLinear with symbolic seq_len: RMSNorm → Gemm.
 ///
 /// input[s,h] + norm_w[h] + linear_w[h,h] → RmsNorm → Gemm → out[s,h]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_fused_rms_linear_graph(
     config: &FusedRMSLinearConfig,
-    seq_len: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let h = config.hidden_size;
 
-    let input = g.add_tensor_concrete("input", &[seq_len, h], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+
+    let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
     let norm_w = g.add_tensor_concrete("norm_w", &[h], dt);
     let linear_w = g.add_tensor_concrete("linear_w", &[h, h], dt);
     g.inputs = vec![input, norm_w, linear_w];
 
-    let normed = g.add_tensor_concrete("normed", &[seq_len, h], dt);
+    let normed = g.add_tensor("normed", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
     g.add_op(
         OpKind::RmsNorm { eps: config.eps },
         vec![input, norm_w],
@@ -454,9 +466,9 @@ fn build_fused_rms_linear_graph(
         "rms_norm",
     );
 
-    let out = g.add_tensor_concrete("rms_linear_out", &[seq_len, h], dt);
+    let out = g.add_tensor("rms_linear_out", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: h, k: h, dtype },
+        OpKind::Gemm { m: seq_len_sym, n: h, k: h, dtype },
         vec![normed, linear_w],
         vec![out],
         "linear",
@@ -466,31 +478,35 @@ fn build_fused_rms_linear_graph(
     g
 }
 
-/// Build a CompilerGraph for GQA (Grouped Query Attention).
+/// Build a CompilerGraph for GQA (Grouped Query Attention) with symbolic seq_len.
 ///
 /// Q[s,q_dim], K[s,kv_dim], V[s,kv_dim] → MHA → out[s,q_dim]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_gqa_graph(
     config: &GQAConfig,
-    seq_len: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let q_dim = config.num_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
-    let q = g.add_tensor_concrete("q", &[seq_len, q_dim], dt);
-    let k = g.add_tensor_concrete("k", &[seq_len, kv_dim], dt);
-    let v = g.add_tensor_concrete("v", &[seq_len, kv_dim], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+
+    let q = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
+    let k = g.add_tensor("k", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
+    let v = g.add_tensor("v", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
     g.inputs = vec![q, k, v];
 
-    let out = g.add_tensor_concrete("gqa_out", &[seq_len, q_dim], dt);
+    let out = g.add_tensor("gqa_out", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
     g.add_op(
         OpKind::MultiHeadAttention {
-            seq_len,
+            seq_len: seq_len_sym,
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
@@ -505,35 +521,39 @@ fn build_gqa_graph(
     g
 }
 
-/// Build a CompilerGraph for MoE routing.
+/// Build a CompilerGraph for MoE routing with symbolic seq_len.
 ///
 /// input[s,h] + gate_w[h,n_experts] → Gemm → Softmax → out[s,n_experts]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_moe_routing_graph(
     config: &MoERoutingConfig,
-    seq_len: usize,
     hidden: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let n = config.num_experts;
 
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+
+    let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     let gate_w = g.add_tensor_concrete("gate_w", &[hidden, n], dt);
     g.inputs = vec![input, gate_w];
 
-    let gate_logits = g.add_tensor_concrete("gate_logits", &[seq_len, n], dt);
+    let gate_logits = g.add_tensor("gate_logits", vec![seq_len_sym.clone(), SymDim::Concrete(n)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n, k: hidden, dtype },
         vec![input, gate_w],
         vec![gate_logits],
         "gate_gemm",
     );
 
-    let routing = g.add_tensor_concrete("routing", &[seq_len, n], dt);
+    let routing = g.add_tensor("routing", vec![seq_len_sym, SymDim::Concrete(n)], dt);
     g.add_op(
         OpKind::Softmax,
         vec![gate_logits],
@@ -545,7 +565,7 @@ fn build_moe_routing_graph(
     g
 }
 
-/// Build a CompilerGraph for Per-Layer Embedding (PLE).
+/// Build a CompilerGraph for Per-Layer Embedding (PLE) with symbolic seq_len.
 ///
 /// PLE computation:
 ///   ple_token = gather_slice(ple_embed_w, layer_i)   // [seq, dim]
@@ -558,15 +578,19 @@ fn build_moe_routing_graph(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_ple_graph(
     config: &PleConfig,
-    seq_len: usize,
     hidden: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let dim = config.dim_per_layer;
+
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
 
     // Inputs:
     // 0: hidden       [seq_len, hidden]  — current hidden state
@@ -574,17 +598,17 @@ fn build_ple_graph(
     // 2: ple_slice    [seq_len, dim]     — pre-sliced PLE token embedding for this layer
     // 3: proj_w       [hidden, dim]      — context-aware projection weight
     // 4: post_mlp_w   [dim, hidden]      — post-MLP residual projection weight
-    let hidden_in = g.add_tensor_concrete("hidden", &[seq_len, hidden], dt);
-    let main_embed = g.add_tensor_concrete("main_embed", &[seq_len, hidden], dt);
-    let ple_slice = g.add_tensor_concrete("ple_slice", &[seq_len, dim], dt);
+    let hidden_in = g.add_tensor("hidden", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
+    let main_embed = g.add_tensor("main_embed", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
+    let ple_slice = g.add_tensor("ple_slice", vec![seq_len_sym.clone(), SymDim::Concrete(dim)], dt);
     let proj_w = g.add_tensor_concrete("proj_w", &[hidden, dim], dt);
     let post_mlp_w = g.add_tensor_concrete("post_mlp_w", &[dim, hidden], dt);
     g.inputs = vec![hidden_in, main_embed, ple_slice, proj_w, post_mlp_w];
 
     // ple_ctx = Gemm(main_embed, proj_w) → [seq_len, dim]
-    let ple_ctx = g.add_tensor_concrete("ple_ctx", &[seq_len, dim], dt);
+    let ple_ctx = g.add_tensor("ple_ctx", vec![seq_len_sym.clone(), SymDim::Concrete(dim)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: dim, k: hidden, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: dim, k: hidden, dtype },
         vec![main_embed, proj_w],
         vec![ple_ctx],
         "ple_proj",
@@ -597,7 +621,7 @@ fn build_ple_graph(
     // But since we only have elementwise ops, we compose them:
 
     // Step 1: scale ple_slice by √dim → scaled_token
-    let scaled_token = g.add_tensor_concrete("scaled_token", &[seq_len, dim], dt);
+    let scaled_token = g.add_tensor("scaled_token", vec![seq_len_sym.clone(), SymDim::Concrete(dim)], dt);
     g.add_op(
         OpKind::Mul, // ple_slice * sqrt_dim_constant (baked into JIT as scaling)
         vec![ple_slice, ple_ctx], // Mul of two tensors (will be scaled by constants in JIT)
@@ -608,7 +632,7 @@ fn build_ple_graph(
     // Step 2: signal = scaled_token (this represents the fused add+scale)
     // In the JIT pipeline, the actual √dim and 1/√2 scaling factors are embedded
     // as part of the fused kernel's constant parameters.
-    let signal = g.add_tensor_concrete("signal", &[seq_len, dim], dt);
+    let signal = g.add_tensor("signal", vec![seq_len_sym.clone(), SymDim::Concrete(dim)], dt);
     g.add_op(
         OpKind::Add,
         vec![ple_ctx, scaled_token],
@@ -617,16 +641,16 @@ fn build_ple_graph(
     );
 
     // post_mlp_out = Gemm(signal, post_mlp_w) → [seq_len, hidden]
-    let post_mlp_out = g.add_tensor_concrete("post_mlp_out", &[seq_len, hidden], dt);
+    let post_mlp_out = g.add_tensor("post_mlp_out", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: hidden, k: dim, dtype },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: hidden, k: dim, dtype },
         vec![signal, post_mlp_w],
         vec![post_mlp_out],
         "ple_post_mlp",
     );
 
     // hidden_out = hidden + post_mlp_out (residual)
-    let hidden_out = g.add_tensor_concrete("hidden_out", &[seq_len, hidden], dt);
+    let hidden_out = g.add_tensor("hidden_out", vec![seq_len_sym, SymDim::Concrete(hidden)], dt);
     g.add_op(
         OpKind::Add,
         vec![hidden_in, post_mlp_out],
@@ -1100,7 +1124,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::RoPE(config) => {
-                let g = build_rope_graph(config, seq_len, hidden, dtype);
+                let g = build_rope_graph(config, hidden, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -1113,7 +1137,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::FusedQkvRope(config) => {
-                let g = build_fused_qkv_rope_graph(config, seq_len, hidden, dtype);
+                let g = build_fused_qkv_rope_graph(config, hidden, dtype);
                 let q_dim = config.num_heads * config.head_dim;
                 let kv_dim = config.num_kv_heads * config.head_dim;
                 let per = vec![
@@ -1134,7 +1158,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::FusedRMSLinear(config) => {
-                let g = build_fused_rms_linear_graph(config, seq_len, dtype);
+                let g = build_fused_rms_linear_graph(config, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -1147,7 +1171,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::GQA(config) => {
-                let g = build_gqa_graph(config, seq_len, dtype);
+                let g = build_gqa_graph(config, dtype);
                 let q_dim = config.num_heads * config.head_dim;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
@@ -1161,7 +1185,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::MoERouting(config) => {
-                let g = build_moe_routing_graph(config, seq_len, hidden, dtype);
+                let g = build_moe_routing_graph(config, hidden, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -1174,7 +1198,7 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::PerLayerEmbed(config) => {
-                let g = build_ple_graph(config, seq_len, hidden, dtype);
+                let g = build_ple_graph(config, hidden, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
@@ -2389,7 +2413,7 @@ mod tests {
             head_dim: 64,
             rope_theta: 10000.0,
         };
-        let g = build_fused_qkv_rope_graph(&config, 4, 512, gllm_kernels::types::DType::F32);
+        let g = build_fused_qkv_rope_graph(&config, 512, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 4); // input, w_q, w_k, w_v
         #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
         {
@@ -2410,7 +2434,7 @@ mod tests {
             hidden_size: 512,
             eps: 1e-5,
         };
-        let g = build_fused_rms_linear_graph(&config, 4, gllm_kernels::types::DType::F32);
+        let g = build_fused_rms_linear_graph(&config, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // input, norm_w, linear_w
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 2); // RmsNorm + Gemm
@@ -2426,7 +2450,7 @@ mod tests {
             head_dim: 128,
             sliding_window: 0,
         };
-        let g = build_gqa_graph(&config, 4, gllm_kernels::types::DType::F32);
+        let g = build_gqa_graph(&config, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // Q, K, V
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 1); // MHA
@@ -2440,7 +2464,7 @@ mod tests {
             top_k: 2,
             capacity_factor: 1.0,
         };
-        let g = build_moe_routing_graph(&config, 4, 512, gllm_kernels::types::DType::F32);
+        let g = build_moe_routing_graph(&config, 512, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 2); // input, gate_w
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 2); // Gemm + Softmax
