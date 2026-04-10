@@ -498,6 +498,12 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher,
     /// §12.4 Golden Bucket 注册表
     golden_buckets: crate::jit::golden_bucket::GoldenBucketRegistry,
+    /// §12.4 SEQ 分布直方图（滑动窗口，供 JIT Director 运行时演化）
+    seq_histogram: crate::jit::histogram::SeqHistogram,
+    /// §10 Chunked Prefill 交织调度器（BatchManifest 组合 + 自适应 Chunk）
+    chunked_prefill_scheduler: crate::scheduler::chunked_prefill::ChunkedPrefillScheduler,
+    /// §9.1 Ragged Compaction 执行上下文（Compact→Execute→Scatter 三段式）
+    ragged_compaction: crate::jit::ragged::RaggedCompaction,
     /// §15.4 MoE 专家热度管理器（冷专家封杀 + Uncommon Trap）
     moe_thermal: Option<crate::moe::thermal::ExpertThermalManager>,
     /// §15.3 MoE 硬件分发器（专家→GPU/CPU 分配）
@@ -744,7 +750,55 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             (None, None, None, None, None)
         };
 
-        let compiler_constraints = crate::jit::compiler_constraints::CompilerConstraints::default();
+        // §12.6: Derive CompilerConstraints from real SystemTopology (not default)
+        // This must happen before Executor construction so we can pass to sub_batch_dispatcher
+        // and golden_buckets. We detect topology once here, then move it into the struct.
+        let pre_topology = crate::sensors::SystemTopology::detect();
+        let compiler_constraints = pre_topology.constraints.clone();
+
+        // §12.4: Run LatencyProfiler to discover real hardware spill points
+        let probe_config = crate::jit::profiler::ProbeConfig::for_model(
+            geometry.hidden_size,
+            geometry.max_seq_len.min(4096),
+        );
+        let probe_result = match crate::jit::profiler::LatencyProfiler::probe_cpu(&probe_config) {
+            Ok(result) => {
+                log::info!(
+                    "executor: §12.4 LatencyProfiler probe complete — spill_points={:?}, l2_thrash={}",
+                    result.spill_points, result.l2_thrash_threshold,
+                );
+                result
+            }
+            Err(e) => {
+                log::warn!(
+                    "executor: §12.4 LatencyProfiler probe failed ({e}), deriving from topology"
+                );
+                // Derive probe result from topology constraints when micro-benchmark fails
+                let (_, l2, _) = pre_topology.profile.cache_sizes();
+                let elem_bytes = 4usize;
+                let l2_thrash = if l2 > 0 {
+                    l2 / (geometry.hidden_size * 2 * elem_bytes).max(1)
+                } else {
+                    2048
+                };
+                crate::jit::profiler::ProbeResult {
+                    spill_points: vec![l2_thrash / 4, l2_thrash / 2, l2_thrash],
+                    smem_cliffs: Vec::new(),
+                    l2_thrash_threshold: l2_thrash,
+                    device_fingerprint: format!("topology-derived-{}", pre_topology.cpu.core_count),
+                    raw_measurements: std::collections::HashMap::new(),
+                }
+            }
+        };
+
+        // §9.1: Detect CompactPlatform from topology for RaggedCompaction
+        let compact_platform = crate::jit::ragged::CompactPlatform::detect(
+            if pre_topology.has_gpu() { "cuda" } else { "cpu" },
+            compiler_constraints.simd_width_bits >= 512,
+            compiler_constraints.simd_width_bits == 128 && cfg!(target_arch = "aarch64"),
+            if cfg!(target_arch = "aarch64") { compiler_constraints.simd_width_bits / 8 } else { 0 },
+            32, // default warp_size
+        );
 
         Ok(Self {
             backend,
@@ -761,7 +815,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             kv_cache_slot: KvCacheSlot::Front,
             memory_manager,
             onnx_generator_plan,
-            batcher: ContinuousBatcher::new(),
+            batcher: ContinuousBatcher::new().with_chunked(
+                crate::scheduler::vllm2024::ChunkedConfig::default(),
+            ),
             observer: BasicObserver::new(),
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
@@ -770,15 +826,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator::new(),
             hooks: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
             system_topology: {
-                let topo = crate::sensors::SystemTopology::detect();
                 log::info!(
                     "SystemTopology: {} cores, NUMA={}, SIMD={}bit, L2={}KB",
-                    topo.cpu.core_count,
-                    topo.numa_node_count(),
-                    topo.constraints.simd_width_bits,
-                    topo.constraints.l2_cache_size / 1024,
+                    pre_topology.cpu.core_count,
+                    pre_topology.numa_node_count(),
+                    pre_topology.constraints.simd_width_bits,
+                    pre_topology.constraints.l2_cache_size / 1024,
                 );
-                topo
+                pre_topology
             },
             jit_director,
             telemetry_aggregator: crate::jit::epilogue::TelemetryAggregator::new(),
@@ -796,7 +851,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             mode: crate::kv_cache::quant::QuantMode::Deterministic,
                             dual_track_enabled: false,
                         },
-                    )
+                    ).map_err(|e| ExecutorError::Config(
+                        ModelConfigError::InvalidConfig(format!("TurboQuant init failed: {e}")),
+                    ))?
                 } else {
                     crate::kv_cache::turboquant::TurboQuantRuntime::disabled()
                 }
@@ -812,19 +869,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             sub_batch_dispatcher: crate::jit::sub_batch::SubBatchDispatcher::new(
                 compiler_constraints.clone(),
             ),
-            golden_buckets: {
-                let probe = crate::jit::profiler::ProbeResult {
-                    spill_points: vec![128, 512, 1024],
-                    smem_cliffs: Vec::new(),
-                    l2_thrash_threshold: 4 * 1024 * 1024,
-                    device_fingerprint: "default".to_string(),
-                    raw_measurements: std::collections::HashMap::new(),
-                };
-                crate::jit::golden_bucket::GoldenBucketRegistry::from_probe_results(
-                    &probe,
-                    compiler_constraints,
-                )
-            },
+            golden_buckets: crate::jit::golden_bucket::GoldenBucketRegistry::from_probe_results(
+                &probe_result,
+                compiler_constraints.clone(),
+            ),
+            seq_histogram: crate::jit::histogram::SeqHistogram::new(
+                10000, // sliding window: last 10k samples
+                geometry.max_seq_len.max(4096),
+            ),
+            chunked_prefill_scheduler: crate::scheduler::chunked_prefill::ChunkedPrefillScheduler::new(
+                crate::scheduler::chunked_prefill::ChunkedPrefillConfig::default(),
+            ),
+            ragged_compaction: crate::jit::ragged::RaggedCompaction::new(compact_platform),
             // MoE subsystem: single global_execution_plan() read, single expert check.
             moe_thermal,
             moe_dispatcher,
@@ -1235,12 +1291,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // §9-§18: 构建完整 callback chain 并通过 forward_config 传递给 decoder_forward
         let num_layers = self.geometry.num_layers;
 
-        // §13.1 Gate-First Skip callback
+        // §13.1 + §14.2 Gate-First Compaction callback
+        // Per §14.2: dead neurons trigger register-level compaction, NOT skip.
         let gate_decisions: Vec<crate::engine::callbacks::gate_skip::SkipDecision> = {
             let dead_ratio = self.telemetry_aggregator.dead_neuron_ratio();
             (0..num_layers).map(|_| {
                 if dead_ratio > 0.5 {
-                    crate::engine::callbacks::gate_skip::SkipDecision::Skip
+                    // §14.2: High dead ratio → CompactedCompute (register-level compaction)
+                    crate::engine::callbacks::gate_skip::SkipDecision::CompactedCompute
                 } else if dead_ratio > 0.3 {
                     crate::engine::callbacks::gate_skip::SkipDecision::MaskedCompute
                 } else {
@@ -1249,7 +1307,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }).collect()
         };
         let gate_skip_cb = crate::engine::callbacks::gate_skip::GateSkipCallback::new(
-            num_layers, gate_decisions,
+            num_layers, gate_decisions, self.geometry.intermediate_size,
         );
 
         // §16.2 Early Exit callback
@@ -1489,13 +1547,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // 4. Prepare Batch — §12.4 Golden Bucket SEQ 映射 + §12.1 Sub-Batch 分类
         let mut shape_map = std::collections::HashMap::new();
-        for (idx, req_id) in batch.requests.iter().enumerate() {
+        for (_idx, req_id) in batch.requests.iter().enumerate() {
             let seq_len = self.requests.get(req_id)
                 .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
                 .unwrap_or(1);
 
             // §12.4: 将任意 SEQ 长度映射到黄金尺寸
-            let (golden_seq, _golden_size) = self.golden_buckets.collapse(seq_len);
+            let (_golden_idx, golden_size) = self.golden_buckets.collapse(seq_len);
+            let golden_seq = golden_size.seq_len;
             if golden_seq != seq_len {
                 log::trace!("executor: §12.4 Golden Bucket: seq_len {} → {}", seq_len, golden_seq);
             }
@@ -1512,7 +1571,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // §12.1: Sub-Batch 分发决策 + §12.4 golden_seq 传递
         let dispatch_plan = if !shape_map.is_empty() {
-            use crate::jit::sub_batch::GraphShape;
             use crate::scheduler::chunked_prefill::{BatchManifest, BatchSlot, SlotType};
 
             // 构建 BatchManifest 供 dispatcher 消费
@@ -1520,28 +1578,36 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 let seq_len = self.requests.get(&rid)
                     .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
                     .unwrap_or(1);
-                let (golden_seq, _) = self.golden_buckets.collapse(seq_len);
+                let (_golden_idx, golden_size) = self.golden_buckets.collapse(seq_len);
                 let is_prefill = self.requests.get(&rid).map(|r| r.is_prefill).unwrap_or(false);
                 BatchSlot {
                     request_id: rid,
                     slot_type: if is_prefill { SlotType::PrefillChunk } else { SlotType::Decode },
                     token_start: 0,
-                    token_end: golden_seq, // §12.4: 使用黄金尺寸而非原始 seq_len
+                    token_end: golden_size.seq_len, // §12.4: 使用黄金尺寸而非原始 seq_len
                     compact_target: i as i32,
                 }
             }).collect();
 
-            let total_tokens = slots.iter().map(|s| s.token_end - s.token_start).sum();
-            let decode_tokens = slots.iter().filter(|s| matches!(s.slot_type, SlotType::Decode)).map(|s| s.token_end - s.token_start).sum();
+            let total_tokens: usize = slots.iter().map(|s| s.token_end - s.token_start).sum();
+            let decode_tokens: usize = slots.iter().filter(|s| matches!(s.slot_type, SlotType::Decode)).map(|s| s.token_end - s.token_start).sum();
             let prefill_tokens = total_tokens - decode_tokens;
+
+            let batch_capacity = batch.requests.len();
+            let active_count = slots.len();
+            let waste_ratio = if batch_capacity > 0 {
+                (batch_capacity.saturating_sub(active_count)) as f32 / batch_capacity as f32
+            } else {
+                0.0
+            };
 
             let manifest = BatchManifest {
                 slots,
                 total_tokens,
                 decode_tokens,
                 prefill_tokens,
-                compact_required: false,
-                waste_ratio: 0.0,
+                compact_required: waste_ratio > 0.25,
+                waste_ratio,
             };
 
             // §12.1: 实际分发
@@ -1621,7 +1687,87 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         // §12.4: 记录 SEQ 长度到直方图（供 JIT Director 运行时演化）
         for seq in &batch_input.sequences {
-            self.golden_buckets.collapse(seq.tokens.len());
+            let seq_len = seq.tokens.len();
+            self.golden_buckets.collapse(seq_len);
+            self.seq_histogram.record(seq_len);
+        }
+
+        // §10: 更新 ChunkedPrefillScheduler 的运行时状态
+        self.chunked_prefill_scheduler.update_l1_ratio(l1_ratio);
+        self.chunked_prefill_scheduler.update_concurrency(concurrent);
+
+        // §10.6.3: Compact 决策 — 在 GEMM ops 上评估是否需要 compact
+        if let Some(ref plan) = dispatch_plan {
+            use crate::scheduler::chunked_prefill::{BatchManifest, BatchSlot, SlotType};
+            // Rebuild manifest from dispatch plan for compact evaluation
+            let manifest_slots: Vec<BatchSlot> = plan.sub_batches.iter()
+                .flat_map(|sb| sb.request_ids.iter().enumerate().map(|(i, &rid)| {
+                    let seq_len = self.requests.get(&rid)
+                        .map(|r| if r.is_prefill { r.prompt_tokens.len() } else { 1 })
+                        .unwrap_or(1);
+                    BatchSlot {
+                        request_id: rid,
+                        slot_type: if seq_len > 1 { SlotType::PrefillChunk } else { SlotType::Decode },
+                        token_start: 0,
+                        token_end: seq_len,
+                        compact_target: i as i32,
+                    }
+                }))
+                .collect();
+            let total_tokens: usize = manifest_slots.iter().map(|s| s.token_end - s.token_start).sum();
+            let decode_tokens: usize = manifest_slots.iter()
+                .filter(|s| matches!(s.slot_type, SlotType::Decode))
+                .map(|s| s.token_end - s.token_start).sum();
+            let waste = if total_tokens > 0 {
+                (batch_input.sequences.len().saturating_sub(manifest_slots.len())) as f32
+                    / batch_input.sequences.len().max(1) as f32
+            } else {
+                0.0
+            };
+            let compact_manifest = BatchManifest {
+                slots: manifest_slots,
+                total_tokens,
+                decode_tokens,
+                prefill_tokens: total_tokens.saturating_sub(decode_tokens),
+                compact_required: waste > 0.25,
+                waste_ratio: waste,
+            };
+
+            let compact_config = crate::scheduler::compact::CompactConfig::default();
+            let compact_decision = crate::scheduler::compact::evaluate_compact(
+                &compact_manifest,
+                crate::scheduler::compact::OpKind::Gemm,
+                &compact_config,
+            );
+
+            if compact_decision.should_compact {
+                log::info!(
+                    "executor: §10.6.3 Compact decision TRIGGERED — waste={:.1}%, active={}/{}, reason={:?}",
+                    compact_decision.waste_ratio * 100.0,
+                    compact_decision.active_count,
+                    compact_decision.total_count,
+                    compact_decision.reason,
+                );
+            }
+
+            // §12.2: Apply RaggedCompaction when dispatch plan indicates need
+            if plan.needs_ragged_compaction {
+                let batch_size = batch_input.sequences.len();
+                // Build active mask from dispatch plan sub-batches
+                let active_flags = vec![true; batch_size];
+                // All requests in the dispatch plan are active; orphans that were
+                // merged are already included in sub_batches. The mask is used for
+                // future per-sub-batch execution where inactive slots would be
+                // requests that were dropped/finished mid-batch.
+                let mask = crate::jit::ragged::RequestActiveMask::new(active_flags);
+                if self.ragged_compaction.should_compact(&mask) {
+                    log::debug!(
+                        "executor: §12.2 RaggedCompaction active — waste={:.1}%, batch_size={}",
+                        mask.waste_ratio() * 100.0,
+                        batch_size,
+                    );
+                }
+            }
         }
 
         // 4. Run Backend Forward

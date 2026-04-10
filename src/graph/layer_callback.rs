@@ -30,7 +30,10 @@ use crate::engine::executor::GeneratorForwardConfig;
 pub enum CallbackAction {
     /// Continue normal execution (no intervention).
     Continue,
-    /// Skip the current node entirely (used by Gate Skip, Residual Bypass).
+    /// Skip the current node entirely (used by Residual Bypass when delta_rho < threshold).
+    ///
+    /// Per SPEC §14.3: only used for per-request block-level residual bypass,
+    /// NOT for gate/FFN skip (which must use CompactMask per §14.2).
     SkipThisNode,
     /// Exit execution early with the provided logits (used by Early Exit, Guardrail).
     ///
@@ -44,6 +47,17 @@ pub enum CallbackAction {
     /// The `data` field contains the modified hidden state in the model's dtype.
     InjectHidden {
         data: Vec<u8>,
+    },
+    /// Register-level compaction: compact active neurons using hardware masks (SPEC §14.2).
+    ///
+    /// Dead neurons are compacted out via hardware predicated execution (AVX-512 vcompress,
+    /// GPU prefix sum, SVE predicate). The FFN executes on the dense compacted tensor at
+    /// full throughput, then results are scattered back to original positions.
+    ///
+    /// `active_mask` is a boolean mask per neuron: true = active, false = dead.
+    /// The executor must apply RaggedCompaction (Compact→Execute→Scatter) instead of skipping.
+    CompactMask {
+        active_mask: Vec<bool>,
     },
 }
 
@@ -260,6 +274,7 @@ fn action_variant_name(action: &CallbackAction) -> &'static str {
         CallbackAction::SkipThisNode => "SkipThisNode",
         CallbackAction::ExitEarly { .. } => "ExitEarly",
         CallbackAction::InjectHidden { .. } => "InjectHidden",
+        CallbackAction::CompactMask { .. } => "CompactMask",
     }
 }
 

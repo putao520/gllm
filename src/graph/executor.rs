@@ -1554,8 +1554,9 @@ impl FusedGraphExecutor {
                 };
                 match cb.dispatch_pre_node(&ctx) {
                     super::layer_callback::CallbackAction::SkipThisNode => {
-                        log::trace!("graph_executor: §13.1 callback skipped node {} (layer {})", node_idx, layer_idx);
-                        // 跳过此节点：将输入直接传递为输出（残差恒等映射）
+                        log::trace!("graph_executor: §14.3 residual bypass skipped node {} (layer {})", node_idx, layer_idx);
+                        // §14.3: 跳过此节点（仅用于残差旁路 delta_rho < threshold）
+                        // 将输入直接传递为输出（残差恒等映射）
                         if !cn.graph_output_names.is_empty() && !cn.graph_input_names.is_empty() {
                             if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
                                 for out_name in &cn.graph_output_names {
@@ -1564,6 +1565,45 @@ impl FusedGraphExecutor {
                             }
                         }
                         continue;
+                    }
+                    super::layer_callback::CallbackAction::CompactMask { active_mask } => {
+                        log::trace!(
+                            "graph_executor: §14.2 compact mask at node {} (layer {}), active: {}/{}",
+                            node_idx, layer_idx,
+                            active_mask.iter().filter(|&&b| b).count(),
+                            active_mask.len(),
+                        );
+                        // §14.2: Register-level compaction — compact dead neurons, execute dense.
+                        // The activation data is compacted using the mask before execution.
+                        // After execution, results are scattered back to original positions.
+                        if !cn.graph_input_names.is_empty() {
+                            if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
+                                // Compact: remove dead neuron positions from activation
+                                let element_size = 4; // f32
+                                let num_elements = input_data.len() / element_size;
+                                let mask_len = active_mask.len().min(num_elements);
+
+                                // Extract active elements into compact buffer
+                                let mut compact_data = Vec::with_capacity(input_data.len());
+                                for (i, chunk) in input_data.chunks_exact(element_size).enumerate() {
+                                    if i < mask_len && active_mask[i] {
+                                        compact_data.extend_from_slice(chunk);
+                                    } else if i >= mask_len {
+                                        // Elements beyond mask length are always active
+                                        compact_data.extend_from_slice(chunk);
+                                    }
+                                }
+                                // Store compacted data and mask for scatter-back in post_node
+                                tensors.insert(cn.graph_input_names[0].clone(), compact_data);
+                                // Store original size and mask as metadata for scatter
+                                let mask_key = format!("__compact_mask_{}", node_idx);
+                                let original_size_key = format!("__compact_orig_size_{}", node_idx);
+                                let mask_bytes: Vec<u8> = active_mask.iter().map(|&b| b as u8).collect();
+                                tensors.insert(mask_key, mask_bytes);
+                                tensors.insert(original_size_key, (input_data.len() as u64).to_le_bytes().to_vec());
+                            }
+                        }
+                        // Continue to execute the node on compacted data
                     }
                     super::layer_callback::CallbackAction::ExitEarly { logits } => {
                         log::trace!("graph_executor: §16.2 early exit at node {} (layer {})", node_idx, layer_idx);
@@ -1671,6 +1711,57 @@ impl FusedGraphExecutor {
                 )));
             }
 
+            // §14.2: Scatter-back after compacted execution
+            // If this node was compacted, scatter the output back to original positions
+            let mask_key = format!("__compact_mask_{}", node_idx);
+            let orig_size_key = format!("__compact_orig_size_{}", node_idx);
+            if let (Some(mask_bytes), Some(orig_size_bytes)) = (tensors.remove(&mask_key), tensors.remove(&orig_size_key)) {
+                let element_size = 4usize; // f32
+                let orig_size = if orig_size_bytes.len() >= 8 {
+                    u64::from_le_bytes(orig_size_bytes[..8].try_into().unwrap_or([0; 8])) as usize
+                } else {
+                    0
+                };
+                if orig_size > 0 {
+                    let active_mask: Vec<bool> = mask_bytes.iter().map(|&b| b != 0).collect();
+                    if let Some(out_name) = cn.graph_output_names.first() {
+                        if let Some(compact_output) = tensors.get(out_name).cloned() {
+                            // Scatter: expand compacted output back to original positions
+                            let mut scattered = vec![0u8; orig_size];
+                            let mut compact_idx = 0;
+                            let num_elements = orig_size / element_size;
+                            let mask_len = active_mask.len().min(num_elements);
+                            for i in 0..num_elements {
+                                if i < mask_len && active_mask[i] {
+                                    let src_start = compact_idx * element_size;
+                                    let dst_start = i * element_size;
+                                    if src_start + element_size <= compact_output.len() && dst_start + element_size <= scattered.len() {
+                                        scattered[dst_start..dst_start + element_size]
+                                            .copy_from_slice(&compact_output[src_start..src_start + element_size]);
+                                    }
+                                    compact_idx += 1;
+                                } else if i >= mask_len {
+                                    // Elements beyond mask are always active
+                                    let src_start = compact_idx * element_size;
+                                    let dst_start = i * element_size;
+                                    if src_start + element_size <= compact_output.len() && dst_start + element_size <= scattered.len() {
+                                        scattered[dst_start..dst_start + element_size]
+                                            .copy_from_slice(&compact_output[src_start..src_start + element_size]);
+                                    }
+                                    compact_idx += 1;
+                                }
+                                // Dead neurons (active_mask[i] == false): remain zero
+                            }
+                            tensors.insert(out_name.clone(), scattered);
+                            log::trace!(
+                                "graph_executor: §14.2 scatter-back at node {} (layer {}), compacted {} → {} elements",
+                                node_idx, layer_idx, compact_idx, num_elements,
+                            );
+                        }
+                    }
+                }
+            }
+
             // §9-§18: Post-node callback — Early Exit / Guardrail Probe / Intent Recall
             if let Some(ref mut cb) = callbacks {
                 let output_data = cn.graph_output_names.first()
@@ -1702,7 +1793,7 @@ impl FusedGraphExecutor {
                         }
                         return Ok(out);
                     }
-                    _ => {} // Continue / SkipThisNode / InjectHidden are no-ops in post_node
+                    _ => {} // Continue / SkipThisNode / InjectHidden / CompactMask are no-ops in post_node
                 }
             }
         }

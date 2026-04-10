@@ -122,7 +122,10 @@ pub struct TurboQuantRuntime {
 
 impl TurboQuantRuntime {
     /// Create a new TurboQuant runtime with the given configuration.
-    pub fn new(config: TurboQuantConfig) -> Self {
+    ///
+    /// # Errors
+    /// Returns error if DualTrack pool creation fails when `dual_track_enabled` is true.
+    pub fn new(config: TurboQuantConfig) -> Result<Self, super::dual_track::DualTrackError> {
         let dual_track = if config.dual_track_enabled {
             let track_config = TrackConfig {
                 quant_bits: config.bits,
@@ -133,20 +136,16 @@ impl TurboQuantRuntime {
                 track_config.xnor_capacity_bits,
                 track_config.block_size,
                 track_config.quant_bits,
-            ).unwrap_or_else(|e| {
-                log::warn!("DualTrack pool creation failed: {}, using defaults", e);
-                DualTrackMemoryPool::new(1024, 1024, 64, config.bits)
-                    .expect("DualTrack fallback allocation failed")
-            }))
+            )?)
         } else {
             None
         };
-        Self {
+        Ok(Self {
             config,
             k_corrections: std::collections::HashMap::new(),
             k_scales: std::collections::HashMap::new(),
             dual_track,
-        }
+        })
     }
 
     /// Create a disabled TurboQuant runtime (no quantization).

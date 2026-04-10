@@ -11,7 +11,7 @@
 //! | 90 | Knowledge Inject | pre_node | InjectHidden |
 //! | 80 | RAG Inject | pre_node | InjectHidden |
 //! | 70 | MoE Dispatch | pre_node | Expert routing |
-//! | 60 | Gate Skip | pre_node | SkipThisNode |
+//! | 60 | Gate Skip | pre_node | CompactMask (§14.2) |
 //! | 50 | Early Exit | post_node | ExitEarly |
 //! | 40 | Guardrail Probe | post_node | ExitEarly |
 //! | 30 | Intent Recall | post_node | Extract embedding |
