@@ -103,7 +103,10 @@ impl OptimizationPass for SwiGLUFusionPass {
 
             let mut fused = FusedNode::new(
                 format!("{}_swiglu", gate.name),
-                FusedOp::SwiGLU(SwiGLUConfig::default()),
+                FusedOp::SwiGLU(SwiGLUConfig {
+                    hidden_size: ctx.geometry.hidden_size,
+                    intermediate_size: ctx.geometry.intermediate_size,
+                }),
             );
             fused.inputs = gate.inputs.clone();
             fused.outputs = mul.outputs.clone();

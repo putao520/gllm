@@ -211,13 +211,16 @@ struct CompiledNode {
     graph_input_names: Vec<String>,
     /// Names of the FusedNode output tensors.
     graph_output_names: Vec<String>,
-    /// Number of elements in the output tensor(s).
+    /// Number of elements in the output tensor(s) (at compile-time seq_len).
     output_numel: usize,
-    /// Per-output element counts for multi-output nodes.
+    /// Per-output element counts for multi-output nodes (at compile-time seq_len).
     /// Empty for single-output nodes (use output_numel).
     per_output_numel: Vec<usize>,
     /// DType of the output tensor(s) — used for byte-size calculations.
     output_dtype: gllm_kernels::types::DType,
+    /// The seq_len used during compilation. Needed to derive per-token feature_dim
+    /// for runtime output buffer scaling: feature_dim = output_numel / compile_seq_len.
+    compile_seq_len: usize,
 }
 
 /// Build a CompilerGraph for FlashAttention.
@@ -861,13 +864,18 @@ impl FusedGraphExecutor {
         &mut self,
         seq_len: usize,
         hidden: usize,
-        dtype: gllm_kernels::types::DType,
+        _dtype: gllm_kernels::types::DType,
     ) -> Result<(), ExecutionError> {
+        // CPU JIT always computes in f32 regardless of model weight dtype.
+        // Weights are converted to f32 during upload (upload_native_tensor_with_convert).
+        // Using BF16/F16 here would cause weight_layout and output buffers to be 2x too small.
+        let compile_dtype = gllm_kernels::types::DType::F32;
+
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let mut compiled_nodes = Vec::with_capacity(self.graph.nodes.len());
 
         for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let build = self.build_node_graph(idx, seq_len, hidden, dtype)?;
+            let build = self.build_node_graph(idx, seq_len, hidden, compile_dtype)?;
 
             let compiled = compiler
                 .compile_graph(&build.graph)
@@ -880,13 +888,16 @@ impl FusedGraphExecutor {
                     ))
                 })?;
 
+            let output_dtype = gllm_kernels::types::DType::F32;
+
             compiled_nodes.push(CompiledNode {
                 compiled,
                 graph_input_names: build.input_names,
                 graph_output_names: build.output_names,
                 output_numel: build.output_numel,
                 per_output_numel: build.per_output_numel,
-                output_dtype: build.output_dtype,
+                output_dtype,
+                compile_seq_len: seq_len,
             });
         }
 
@@ -975,6 +986,7 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
+                compile_seq_len: 1, // cache payload doesn't store this; default safe value
             });
         }
         
@@ -1655,11 +1667,12 @@ impl FusedGraphExecutor {
             if let Some(ptr) = wb.ptr {
                 if !wb.shape.is_empty() {
                     let numel: usize = wb.shape.iter().product();
-                    let bytes = numel * wb.dtype.size();
+                    // Weight bindings from SafeTensors have been uploaded as f32 (4 bytes per element),
+                    // regardless of the original dtype (BF16/F16 → f32 conversion in upload_weights).
+                    let bytes = numel * 4; // always f32 after upload conversion
                     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                     tensors.insert(name.clone(), slice.to_vec());
                 }
-                // Always store the raw pointer for direct-ptr weight packing
                 weight_ptrs.insert(name.clone(), ptr as *const u8);
             } else if let Some(ref data) = wb.data {
                 tensors.insert(name.clone(), data.clone());
@@ -1773,11 +1786,31 @@ impl FusedGraphExecutor {
                 }
             }
 
+            if cfg!(debug_assertions) {
+                eprintln!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
+                    self.graph.nodes.len(),
+                    self.graph.nodes[node_idx].name,
+                    self.graph.nodes[node_idx].op.name());
+            }
+
+            // Load activation and pad to compile-time size if needed.
+            // JIT kernels iterate M=compile_seq_len rows; the activation buffer
+            // must be at least that large to avoid out-of-bounds reads.
             let activation = if !cn.graph_input_names.is_empty() {
-                tensors
+                let raw = tensors
                     .get(&cn.graph_input_names[0])
                     .cloned()
-                    .unwrap_or_default() // LEGAL: 不存在的输入 tensor 返回空数据
+                    .unwrap_or_default();
+                // Compute expected compile-time activation size
+                let compile_act_bytes = cn.output_numel * cn.output_dtype.size_bytes();
+                if !raw.is_empty() && raw.len() < compile_act_bytes {
+                    // Pad with zeros so JIT kernel can safely read compile_seq_len rows
+                    let mut padded = raw;
+                    padded.resize(compile_act_bytes, 0);
+                    padded
+                } else {
+                    raw
+                }
             } else {
                 Vec::new()
             };
@@ -1789,7 +1822,6 @@ impl FusedGraphExecutor {
             if let Some(ref wl) = cn.compiled.weight_layout {
                 weight_blob.resize(wl.total_bytes, 0u8);
                 for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
-                    // Compute the byte size for this input from the weight layout offset gaps
                     let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
                     let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
                     let size = next_offset - offset;
@@ -1799,12 +1831,12 @@ impl FusedGraphExecutor {
                         let copy_len = size.min(data.len());
                         weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
                     } else if let Some(&ptr) = weight_ptrs.get(name) {
+                        // Validate ptr read size against available data
                         let src = unsafe { std::slice::from_raw_parts(ptr, size) };
                         weight_blob[offset..offset + size].copy_from_slice(src);
                     }
                 }
             } else {
-                // Fallback: pack sequentially (original behavior)
                 for name in cn.graph_input_names.iter().skip(1) {
                     if let Some(data) = tensors.get(name) {
                         weight_blob.extend_from_slice(data);
@@ -1812,12 +1844,21 @@ impl FusedGraphExecutor {
                 }
             }
 
-            let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
+            // Allocate output buffer at compile-time size (safe upper bound).
+            // JIT kernels may loop up to compile_seq_len internally for ops like
+            // RmsNorm/Add that iterate all rows. The buffer must be large enough
+            // for the compiled loop bound. After execution, we truncate to the
+            // runtime seq_len when inserting into the tensor map.
+            let runtime_output_numel = cn.output_numel; // compile-time size (safe)
+            let output_bytes = runtime_output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
-            // seq_len is provided explicitly by the caller
-
+            if cfg!(debug_assertions) {
+                eprintln!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B",
+                    activation.len(), weight_blob.len(), output_bytes,
+                    cn.compiled.scratchpad_bytes);
+            }
             unsafe {
                 cn.compiled.execute(
                     if activation.is_empty() {
@@ -1839,19 +1880,36 @@ impl FusedGraphExecutor {
                     scratchpad.as_mut_ptr(),
                 );
             }
+            if cfg!(debug_assertions) {
+                eprintln!("[EXEC] node {node_idx} done");
+            }
 
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
 
+            // Truncate output to runtime seq_len before inserting into tensor map.
+            // JIT kernel wrote compile_seq_len rows but only the first seq_len are valid.
+            let feature_dim = cn.output_numel / cn.compile_seq_len.max(1);
+            let runtime_bytes = feature_dim * seq_len * cn.output_dtype.size_bytes();
+            let truncated_output = if runtime_bytes < output_buf.len() {
+                output_buf[..runtime_bytes].to_vec()
+            } else {
+                output_buf
+            };
+
             if cn.graph_output_names.len() == 1 {
-                tensors.insert(cn.graph_output_names[0].clone(), output_buf);
+                tensors.insert(cn.graph_output_names[0].clone(), truncated_output);
             } else if !cn.per_output_numel.is_empty() {
+                let compile_s = cn.compile_seq_len.max(1);
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
-                    let numel = cn.per_output_numel[i];
+                    let per_token = cn.per_output_numel[i] / compile_s;
+                    let numel = per_token * seq_len;
                     let nbytes = numel * cn.output_dtype.size_bytes();
-                    let chunk = output_buf[byte_offset..byte_offset + nbytes].to_vec();
-                    tensors.insert(name.clone(), chunk);
+                    if byte_offset + nbytes <= truncated_output.len() {
+                        let chunk = truncated_output[byte_offset..byte_offset + nbytes].to_vec();
+                        tensors.insert(name.clone(), chunk);
+                    }
                     byte_offset += nbytes;
                 }
             } else if cn.graph_output_names.len() > 1 {

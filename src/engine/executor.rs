@@ -686,8 +686,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     ge.graph_mut().bind_weight_shapes_fuzzy(gguf);
                 }
 
-                // Phase 3a: JIT-compile with correct weight shapes
-                let compile_ok = ge.compile_with_cache(1, hidden, geometry.dtype, model_id, jit_backend, &cache)
+                // Phase 3a: JIT-compile with correct weight shapes.
+                // Use max_seq_len as compile-time M to force BLIS 5-loop path which
+                // reads runtime seq_len from [rbp+16] for the M dimension loop.
+                // Using seq_len=1 would trigger the direct (fully-unrolled) path
+                // that hardcodes M=1 and cannot handle variable-length prefill.
+                // Use a moderate M so BLIS path is triggered (M > mc, typically mc=64-256).
+                // Runtime [rbp+16] provides actual seq_len for the M loop.
+                let compile_seq_len = 512;
+                let compile_ok = ge.compile_with_cache(compile_seq_len, hidden, geometry.dtype, model_id, jit_backend, &cache)
                     .map_err(|e| eprintln!("JIT compilation failed: {e}"))
                     .is_ok();
 
