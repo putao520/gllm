@@ -371,6 +371,8 @@ pub struct RequestData {
     pub max_new_tokens: usize,
     pub finished: bool,
     pub session_id: Option<SessionId>,
+    /// Thinking token budget: None = unlimited, Some(0) = disabled, Some(n) = max n tokens.
+    pub thinking_budget: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1121,6 +1123,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             max_new_tokens: 128, // Default
             finished: false,
             session_id: None,
+            thinking_budget: None,
         };
 
         self.requests.insert(id, request_data);
@@ -1134,6 +1137,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         prompt: impl Into<String>,
         max_new_tokens: usize,
         sampling_config: SamplingConfig,
+        thinking_budget: Option<usize>,
     ) -> ExecutorResult<RequestId> {
         let id = self.requests.len() as RequestId + 1;
         let prompt_str = prompt.into();
@@ -1148,6 +1152,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             max_new_tokens,
             finished: false,
             session_id: None,
+            thinking_budget,
         };
 
         self.requests.insert(id, request_data);
@@ -1183,8 +1188,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         max_new_tokens: usize,
         sampling_config: SamplingConfig,
         session_id: SessionId,
+        thinking_budget: Option<usize>,
     ) -> ExecutorResult<RequestId> {
-        let req_id = self.enqueue_with_config(kind, prompt, max_new_tokens, sampling_config)?;
+        let req_id = self.enqueue_with_config(kind, prompt, max_new_tokens, sampling_config, thinking_budget)?;
         self.set_session_id(req_id, session_id)?;
         Ok(req_id)
     }
@@ -2343,7 +2349,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         max_tokens: usize,
         temperature: f32,
     ) -> ExecutorResult<String> {
-        self.generate_with_sampling(prompt, max_tokens, temperature, 0, 1.0)
+        self.generate_with_sampling(prompt, max_tokens, temperature, 0, 1.0, None)
     }
 
     pub fn generate_with_sampling(
@@ -2353,6 +2359,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
         if prompt.trim().is_empty() {
             return Err(ExecutorError::EmptyPrompt);
@@ -2364,7 +2371,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
 
         let req_id =
-            self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config)?;
+            self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config, thinking_budget)?;
 
         loop {
             self.step()?;
@@ -2395,6 +2402,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         top_k: usize,
         top_p: f32,
         session_id: SessionId,
+        thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
         if prompt.trim().is_empty() {
             return Err(ExecutorError::EmptyPrompt);
@@ -2411,6 +2419,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             max_tokens,
             sampling_config,
             session_id,
+            thinking_budget,
         )?;
 
         loop {

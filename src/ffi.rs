@@ -108,6 +108,7 @@ pub unsafe extern "C" fn gllm_generate(
         top_k as usize,
         top_p,
         None,
+        None,
     );
 
     match result {

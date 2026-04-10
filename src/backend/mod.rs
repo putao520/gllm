@@ -96,12 +96,13 @@ impl DynBackendExecutor {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        thinking_budget: Option<usize>,
     ) -> Result<String, ExecutorError> {
         match self {
-            DynBackendExecutor::F32(e) => e.generate(prompt, max_tokens, temperature, top_k, top_p),
-            DynBackendExecutor::F16(e) => e.generate(prompt, max_tokens, temperature, top_k, top_p),
+            DynBackendExecutor::F32(e) => e.generate(prompt, max_tokens, temperature, top_k, top_p, thinking_budget),
+            DynBackendExecutor::F16(e) => e.generate(prompt, max_tokens, temperature, top_k, top_p, thinking_budget),
             DynBackendExecutor::BF16(e) => {
-                e.generate(prompt, max_tokens, temperature, top_k, top_p)
+                e.generate(prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
             }
         }
     }
@@ -114,16 +115,17 @@ impl DynBackendExecutor {
         top_k: usize,
         top_p: f32,
         session_id: u64,
+        thinking_budget: Option<usize>,
     ) -> Result<String, ExecutorError> {
         match self {
             DynBackendExecutor::F32(e) => {
-                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
             DynBackendExecutor::F16(e) => {
-                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
             DynBackendExecutor::BF16(e) => {
-                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                e.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
         }
     }
@@ -180,11 +182,12 @@ impl DynBackendExecutor {
         prompt: &str,
         max_new_tokens: usize,
         sampling: crate::engine::executor::SamplingConfig,
+        thinking_budget: Option<usize>,
     ) -> Result<u64, ExecutorError> {
         match self {
-            DynBackendExecutor::F32(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
-            DynBackendExecutor::F16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
-            DynBackendExecutor::BF16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling),
+            DynBackendExecutor::F32(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget),
+            DynBackendExecutor::F16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget),
+            DynBackendExecutor::BF16(e) => e.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget),
         }
     }
 
@@ -195,16 +198,17 @@ impl DynBackendExecutor {
         max_new_tokens: usize,
         sampling: crate::engine::executor::SamplingConfig,
         session_id: u64,
+        thinking_budget: Option<usize>,
     ) -> Result<u64, ExecutorError> {
         match self {
             DynBackendExecutor::F32(e) => {
-                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
             DynBackendExecutor::F16(e) => {
-                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
             DynBackendExecutor::BF16(e) => {
-                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                e.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
         }
     }
@@ -352,19 +356,20 @@ impl<E: Element> BackendExecutor<E> {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        thinking_budget: Option<usize>,
     ) -> Result<String, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => {
-                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
             }
             BackendExecutor::Rocm(exec) => {
-                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
             }
             BackendExecutor::Metal(exec) => {
-                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
             }
             BackendExecutor::Cpu(exec) => {
-                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p)
+                exec.generate_with_sampling(prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
             }
         }
     }
@@ -377,19 +382,20 @@ impl<E: Element> BackendExecutor<E> {
         top_k: usize,
         top_p: f32,
         session_id: u64,
+        thinking_budget: Option<usize>,
     ) -> Result<String, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => {
-                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
             BackendExecutor::Rocm(exec) => {
-                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
             BackendExecutor::Metal(exec) => {
-                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
             BackendExecutor::Cpu(exec) => {
-                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id)
+                exec.generate_with_session(prompt, max_tokens, temperature, top_k, top_p, session_id, thinking_budget)
             }
         }
     }
@@ -447,19 +453,20 @@ impl<E: Element> BackendExecutor<E> {
         prompt: &str,
         max_new_tokens: usize,
         sampling: crate::engine::executor::SamplingConfig,
+        thinking_budget: Option<usize>,
     ) -> Result<u64, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => {
-                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget)
             }
             BackendExecutor::Rocm(exec) => {
-                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget)
             }
             BackendExecutor::Metal(exec) => {
-                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget)
             }
             BackendExecutor::Cpu(exec) => {
-                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling)
+                exec.enqueue_with_config(kind, prompt, max_new_tokens, sampling, thinking_budget)
             }
         }
     }
@@ -471,19 +478,20 @@ impl<E: Element> BackendExecutor<E> {
         max_new_tokens: usize,
         sampling: crate::engine::executor::SamplingConfig,
         session_id: u64,
+        thinking_budget: Option<usize>,
     ) -> Result<u64, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => {
-                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
             BackendExecutor::Rocm(exec) => {
-                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
             BackendExecutor::Metal(exec) => {
-                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
             BackendExecutor::Cpu(exec) => {
-                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id)
+                exec.enqueue_with_session(kind, prompt, max_new_tokens, sampling, session_id, thinking_budget)
             }
         }
     }

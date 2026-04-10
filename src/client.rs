@@ -745,13 +745,14 @@ impl Client {
         top_k: usize,
         top_p: f32,
         session_id: Option<u64>,
+        thinking_budget: Option<usize>,
     ) -> Result<GenerationResponse, ClientError> {
         let state = self.require_state()?;
         let mut executor = state.backend.executor_mut();
         let result = if let Some(sid) = session_id {
-            executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid)
+            executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid, thinking_budget)
         } else {
-            executor.generate(&prompt, max_tokens, temperature, top_k, top_p)
+            executor.generate(&prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
         }?;
 
         let (text, thinking_content) = crate::generation::split_thinking_content(&result);
@@ -968,7 +969,7 @@ impl Client {
         // Step 4: generate answer with the pipeline generator model
         let mut gen_executor = generator.backend.executor_mut();
         let answer = gen_executor
-            .generate(&prompt, 512, 0.7, 50, 0.9)
+            .generate(&prompt, 512, 0.7, 50, 0.9, None)
             .map_err(|e| {
                 ClientError::RuntimeError(format!("pipeline generator error: {}", e))
             })?;

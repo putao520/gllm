@@ -165,6 +165,7 @@ enum StreamPhase {
         top_k: usize,
         top_p: f32,
         session_id: Option<u64>,
+        thinking_budget: Option<usize>,
     },
     /// Generation completed; yielding tokens one by one.
     Yielding {
@@ -184,6 +185,7 @@ impl GenerationStream {
         top_k: usize,
         top_p: f32,
         session_id: Option<u64>,
+        thinking_budget: Option<usize>,
     ) -> Self {
         Self {
             state: client.state_handle(),
@@ -194,6 +196,7 @@ impl GenerationStream {
                 top_k,
                 top_p,
                 session_id,
+                thinking_budget,
             },
         }
     }
@@ -212,6 +215,7 @@ impl Iterator for GenerationStream {
                     top_k,
                     top_p,
                     session_id,
+                    thinking_budget,
                 } => {
                     // Run full generation synchronously (lock-free state read)
                     let result = (|| -> Result<Vec<u32>, GllmError> {
@@ -229,6 +233,7 @@ impl Iterator for GenerationStream {
                                 *top_k,
                                 *top_p,
                                 *sid,
+                                *thinking_budget,
                             )?
                         } else {
                             executor.generate(
@@ -237,6 +242,7 @@ impl Iterator for GenerationStream {
                                 *temperature,
                                 *top_k,
                                 *top_p,
+                                *thinking_budget,
                             )?
                         };
 
@@ -386,6 +392,8 @@ pub struct GenerationBuilder<'a> {
     image_input: Option<MediaInput>,
     /// 多模态: 音频输入 (P3.2 Audio)
     audio_input: Option<MediaInput>,
+    /// Thinking token budget: None = unlimited, Some(0) = disabled, Some(n) = max n tokens.
+    thinking_budget: Option<usize>,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -401,6 +409,7 @@ impl<'a> GenerationBuilder<'a> {
             stream: false,
             image_input: None,
             audio_input: None,
+            thinking_budget: None,
         }
     }
 
@@ -468,6 +477,17 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
+    /// Set the thinking token budget.
+    ///
+    /// Controls the maximum number of thinking tokens the model may emit:
+    /// - `None` (default): No limit on thinking tokens.
+    /// - `Some(0)`: Thinking is disabled entirely.
+    /// - `Some(n)`: At most `n` thinking tokens are allowed.
+    pub fn thinking_budget(mut self, max_tokens: usize) -> Self {
+        self.thinking_budget = Some(max_tokens);
+        self
+    }
+
     /// Execute the generation (per SPEC 04-API-DESIGN §3.1 REQ-GEN-005)
     ///
     /// Returns either:
@@ -514,6 +534,7 @@ impl<'a> GenerationBuilder<'a> {
                 self.top_k,
                 self.top_p,
                 self.session_id,
+                self.thinking_budget,
             ))
         } else {
             let result = self.client.execute_generation(
@@ -523,6 +544,7 @@ impl<'a> GenerationBuilder<'a> {
                 self.top_k,
                 self.top_p,
                 self.session_id,
+                self.thinking_budget,
             );
             GenerationOutput::Response(result)
         }
