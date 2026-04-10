@@ -39,7 +39,7 @@ pub(crate) fn bert_encoder_forward<E: Element>(
     )?;
     let word_emb = typed_bytes_to_f32(&word_emb_bytes, word_emb_dtype);
     // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
     {
         let vocab = word_emb.len() / hidden;
         for (s, &tok) in tokens.iter().enumerate() {

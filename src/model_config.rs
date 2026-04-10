@@ -738,8 +738,9 @@ impl ModelConfig {
             ));
         }
 
-        // Ω1: rope_theta 必须从模型配置或 manifest 中读取，不再使用硬编码默认值
-        // 对于 Embedding 模型（没有 attention），rope_theta 可以为 0
+        // Ω1: rope_theta 从模型配置或 manifest 中读取。
+        // Encoder 模型（BERT/XLM-R）使用绝对位置编码，不含 rope_theta → 默认 0.0（表示无 RoPE）。
+        // 下游 executor 通过 PositionEncoding::None 正确处理 rope_theta == 0.0 的 encoder 模型。
         let rope_theta = if let Some(override_value) = manifest.rope_base_override {
             override_value
         } else {
@@ -747,11 +748,10 @@ impl ModelConfig {
                 .as_ref()
                 .and_then(|cfg| cfg.base)
                 .or_else(|| find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]))
-                .ok_or_else(|| {
-                    ModelConfigError::InvalidConfig(
-                        "model metadata missing: rope_theta (required for models with attention)".to_string(),
-                    )
-                })?
+                .unwrap_or_else(|| {
+                    log::debug!("rope_theta not found: defaulting to 0.0 (model uses absolute position embeddings)");
+                    0.0 // LEGAL: encoder 模型（BERT/XLM-R）无 RoPE，0.0 表示不使用旋转位置编码
+                })
         };
 
         // RoPE 缩放系数优先读取完整 rope_scaling 对象；缺失时保持无缩放 (1.0)。
@@ -806,13 +806,8 @@ impl ModelConfig {
             ));
         }
 
-        // Ω1: 对于有 attention 的模型，rope_theta 必须 > 0
-        // Embedding 模型（num_attention_heads == 0）可以有 rope_theta = 0
-        if num_attention_heads > 0 && rope_theta == 0.0 {
-            return Err(ModelConfigError::InvalidConfig(
-                "rope_theta must be > 0 for models with attention (non-embedding models)".to_string(),
-            ));
-        }
+        // Ω1: rope_theta == 0.0 合法 — encoder 模型（BERT/XLM-R）有 attention 但不使用 RoPE。
+        // 下游 executor 会根据 (ModelKind, rope_theta) 选择 PositionEncoding::None 或 Rope。
 
         let kv_cache_block_size = find_usize(
             value,

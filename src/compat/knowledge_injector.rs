@@ -76,7 +76,7 @@ pub fn inject_frozen_kv<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {

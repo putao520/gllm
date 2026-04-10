@@ -99,6 +99,7 @@ fn e2e_generator_safetensors() {
         .max_tokens(10)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("Generation failed");
 
     let text = response.text.trim();
@@ -138,6 +139,7 @@ fn e2e_generator_gguf() {
         .max_tokens(10)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("Generation failed");
 
     let text = response.text.trim();
@@ -179,6 +181,7 @@ fn e2e_generator_onnx() {
         .top_k(40)
         .top_p(0.95)
         .generate()
+        .response()
         .expect("Generation failed");
 
     let text = response.text.trim();
@@ -209,6 +212,7 @@ fn e2e_generator_gemma2_geglu() {
         .max_tokens(10)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("Generation failed");
 
     let text = response.text.trim();
@@ -249,6 +253,7 @@ fn e2e_generator_gptoss_gelu() {
         .max_tokens(10)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("Generation failed");
 
     let text = response.text.trim();

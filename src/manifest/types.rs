@@ -103,6 +103,7 @@ pub struct ModelManifest {
 impl ModelManifest {
     /// 获取架构族 (从注册表查询)
     pub fn family(&self) -> ArchFamily {
+        crate::arch::register_builtin_templates();
         crate::arch::resolve_family(&self.arch).unwrap_or(ArchFamily::Decoder)
     }
 

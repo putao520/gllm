@@ -61,7 +61,7 @@ pub(crate) fn decoder_forward<E: Element>(
 
         let embed_vocab = embed_data.len() / hidden;
         // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
-        let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+        let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
         for (s, &tok) in tokens.iter().enumerate() {
             let v = tok as usize;
             if v >= embed_vocab {
@@ -227,7 +227,7 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
 
     let embed_vocab = embed_data.len() / hidden;
     // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -329,7 +329,7 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 
     let embed_vocab = embed_data.len() / hidden;
     // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {
@@ -476,7 +476,7 @@ pub fn forward_to_layer<E: Element>(
     let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
 
     let embed_vocab = embed_data.len() / hidden;
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, config.dtype());
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
     for (s, &tok) in tokens.iter().enumerate() {
         let v = tok as usize;
         if v >= embed_vocab {

@@ -88,7 +88,6 @@ fn e2e_reranker_safetensors() {
 
     let response = client
         .rerank("What is the capital of France?", documents)
-        .generate()
         .expect("Rerank failed");
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");
@@ -129,7 +128,6 @@ fn e2e_reranker_gguf() {
 
     let response = client
         .rerank("What is the capital of France?", documents)
-        .generate()
         .expect("GGUF rerank inference failed");
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");
@@ -162,7 +160,6 @@ fn e2e_reranker_onnx() {
 
     let response = client
         .rerank("What is the capital of China?", documents)
-        .generate()
         .expect("Rerank failed");
 
     assert_eq!(response.results.len(), 3, "Should have 3 results");

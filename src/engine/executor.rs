@@ -700,8 +700,30 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     }
                 }
                 for canonical_name in expected_names {
-                    if let Some(tensor) = TensorLookup::get_tensor(&weights, &canonical_name) {
-                        let ptr = tensor.as_ref().as_ptr() as *const f32;
+                    // Try direct lookup first
+                    let found = TensorLookup::get_tensor(&weights, &canonical_name)
+                        .map(|t| t.as_ref().as_ptr() as *const f32);
+                    // If not found, try stripping known architecture prefixes
+                    // (e.g., template uses "roberta.embeddings..." but model has "embeddings...")
+                    let found = found.or_else(|| {
+                        const PREFIXES: &[&str] = &["roberta.", "bert.", "model.", "encoder."];
+                        for prefix in PREFIXES {
+                            if let Some(stripped) = canonical_name.strip_prefix(prefix) {
+                                if let Some(t) = TensorLookup::get_tensor(&weights, stripped) {
+                                    return Some(t.as_ref().as_ptr() as *const f32);
+                                }
+                            }
+                        }
+                        // Also try adding prefixes when template uses bare names
+                        for prefix in PREFIXES {
+                            let prefixed = format!("{prefix}{canonical_name}");
+                            if let Some(t) = TensorLookup::get_tensor(&weights, &prefixed) {
+                                return Some(t.as_ref().as_ptr() as *const f32);
+                            }
+                        }
+                        None
+                    });
+                    if let Some(ptr) = found {
                         ge = ge.bind(canonical_name.clone(), ptr);
                     } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
                         let ptr = q_tensor.data.as_ptr() as *const f32;

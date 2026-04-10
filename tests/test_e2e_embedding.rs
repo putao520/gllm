@@ -73,8 +73,7 @@ fn e2e_embedding_safetensors() {
 
     let client = Client::new_embedding(MODEL).expect("Failed to load SafeTensors model");
     let response = client
-        .embeddings(["Hello, world!", "Test sentence"])
-        .generate()
+        .embed(["Hello, world!", "Test sentence"])
         .expect("Embedding failed");
 
     assert_eq!(response.embeddings.len(), 2, "Should have 2 embeddings");
@@ -119,8 +118,7 @@ fn e2e_embedding_gguf() {
     assert_eq!(manifest.kind, gllm::ModelKind::Embedding);
 
     let response = client
-        .embeddings(["Hello, world!", "Rust programming language"])
-        .generate()
+        .embed(["Hello, world!", "Rust programming language"])
         .expect("GGUF embedding inference failed");
 
     assert_eq!(response.embeddings.len(), 2, "Should have 2 embeddings");
@@ -167,8 +165,7 @@ fn e2e_embedding_onnx() {
 
     let client = Client::new_embedding(MODEL).expect("Failed to load ONNX model");
     let response = client
-        .embeddings(["test query", "test document"])
-        .generate()
+        .embed(["test query", "test document"])
         .expect("Embedding failed");
 
     assert_eq!(response.embeddings.len(), 2, "Should have 2 embeddings");
