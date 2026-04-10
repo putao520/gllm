@@ -600,15 +600,18 @@ fn run_diagnosis(model_id: &str) -> Vec<Finding> {
     println!("  shape 不匹配: {mismatch_count} 个");
     println!();
 
-    // ── §4.6 buffer overflow 风险分析 ──
-    println!("=== §4.6 Buffer Overflow 风险分析 ===");
+    // ── §4.6 GEMM 维度不匹配分析 ──
+    println!("=== §4.6 GEMM 维度不匹配分析 (SIGSEGV 精确定位) ===");
 
-    // 对每个 Atomic MatMul, 计算真实 output_numel vs 默认 output_numel
+    // safetensors 权重存储为 [out_features, in_features]
+    // MatMul: activation[M, K] × weight^T[K, N] → output[M, N]
+    // 其中 weight^T 的 K = real_shape[1], N = real_shape[0]
     for (idx, node) in fused.nodes.iter().enumerate() {
         if let gllm::graph::types::FusedOp::Atomic(a) = &node.op {
             if a.op_type != "MatMul" || node.inputs.len() < 2 {
                 continue;
             }
+            let act_name = &node.inputs[0];
             let w_name = &node.inputs[1];
             let real = real_weight_shapes.get(w_name)
                 .or_else(|| {
@@ -624,28 +627,48 @@ fn run_diagnosis(model_id: &str) -> Vec<Finding> {
 
             if let Some((real_shape, _)) = real {
                 if real_shape.len() >= 2 {
-                    let real_n = real_shape[real_shape.len() - 1];
-                    let default_n = hidden; // build_node_graph 默认值
-                    let default_output_numel = seq_len * default_n;
-                    let real_output_numel = seq_len * real_n;
-                    let default_output_bytes = default_output_numel * 4;
-                    let real_output_bytes = real_output_numel * 4;
+                    // 真实 GEMM 维度 (safetensors: [out, in] → MatMul 需要 [in, out])
+                    let real_k = real_shape[1]; // in_features
+                    let real_n = real_shape[0]; // out_features
 
-                    if real_output_bytes != default_output_bytes {
-                        let overflow = if real_output_bytes > default_output_bytes {
-                            real_output_bytes - default_output_bytes
-                        } else {
-                            0
-                        };
+                    // 编译期默认维度 (build_node_graph 使用 [seq_len, hidden])
+                    let compiled_k = hidden;
+                    let compiled_n = hidden;
+
+                    // 活跃张量的真实维度
+                    let act_real_dim = tracker.get_shape(act_name)
+                        .and_then(|s| s.last().copied())
+                        .unwrap_or(hidden);
+
+                    if real_k != compiled_k {
+                        let compiled_weight_bytes = compiled_k * compiled_n * 4;
+                        let real_weight_bytes = real_k * real_n * 4;
+                        let compiled_scratchpad = compiled_k * 4; // BLIS pack 至少需要 K 个元素
+                        let real_scratchpad = real_k * 4;
+
                         findings.push(Finding {
-                            severity: if overflow > 0 { Severity::Fatal } else { Severity::Warn },
+                            severity: Severity::Fatal,
                             node_idx: Some(idx),
                             node_name: node.name.clone(),
-                            category: "BUFFER_OVERFLOW",
+                            category: "GEMM_K_MISMATCH",
                             message: format!(
-                                "JIT 分配 {default_output_bytes}B (numel={default_output_numel}, N={default_n}), \
-                                 实际需要 {real_output_bytes}B (numel={real_output_numel}, N={real_n}), \
-                                 溢出={overflow}B — SIGSEGV 根因",
+                                "GEMM K 维度不匹配: 编译期 K={compiled_k} 实际 K={real_k} (N: 编译={compiled_n} 实际={real_n})\n\
+                                 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+                                 权重 blob: 编译 {compiled_weight_bytes}B vs 实际 {real_weight_bytes}B\n\
+                                 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+                                 活跃张量 '{act_name}' 维度={act_real_dim} (应为 {real_k})\n\
+                                 \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+                                 → BLIS pack 读取 K={real_k} 但缓冲区按 K={compiled_k} 分配 → 堆越界"
+                            ),
+                        });
+                    } else if real_n != compiled_n {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            node_idx: Some(idx),
+                            node_name: node.name.clone(),
+                            category: "GEMM_N_MISMATCH",
+                            message: format!(
+                                "GEMM N 维度不匹配: 编译期 N={compiled_n} 实际 N={real_n} → 输出缓冲区大小错误"
                             ),
                         });
                     }
