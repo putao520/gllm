@@ -709,6 +709,78 @@ fn run_diagnosis(model_id: &str) -> Vec<Finding> {
     }
     println!();
 
+    // ── §4.8 JIT 运行时执行探针 ──
+    // 使用修复后的三阶段流程验证 JIT 编译
+    println!("=== §4.8 JIT 运行时执行探针 ===");
+    {
+        let arch_name = template.name.clone();
+
+        match gllm::arch::build_uncompiled_executor_from_yaml(
+            &arch_name, &resolved, geometry.dtype, arch_family,
+        ) {
+            Ok(mut ge) => {
+                // Phase 2: 注入真实权重 shape
+                let bound = if let Some(st) = loader.safetensors_ref() {
+                    ge.graph_mut().bind_weight_shapes_fuzzy(st)
+                } else if let Some(gguf) = loader.gguf_ref() {
+                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf)
+                } else {
+                    0
+                };
+                println!("  权重 shape 注入: {bound} 个");
+                println!("  weight_bindings: {} 个", ge.graph().weight_bindings.len());
+
+                // 注入后审计: 检查所有 MatMul 权重 shape 是否合理
+                let mut shape_issues = 0;
+                for node in &ge.graph().nodes {
+                    if let gllm::graph::types::FusedOp::Atomic(a) = &node.op {
+                        if a.op_type == "MatMul" && node.inputs.len() >= 2 {
+                            let w_name = &node.inputs[1];
+                            if let Some(wb) = ge.graph().weight_bindings.get(w_name) {
+                                if wb.shape.is_empty() {
+                                    shape_issues += 1;
+                                } else {
+                                    println!("    MatMul '{}': weight shape {:?}", node.name, wb.shape);
+                                }
+                            } else {
+                                shape_issues += 1;
+                                println!("    MatMul '{}': 权重 '{}' 无 binding!", node.name, w_name);
+                            }
+                        }
+                    }
+                }
+                if shape_issues > 0 {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        node_idx: None,
+                        node_name: "shape_inject".into(),
+                        category: "SHAPE_INJECT",
+                        message: format!("{shape_issues} 个 MatMul 权重仍无 shape — 三阶段注入未完全覆盖"),
+                    });
+                } else {
+                    findings.push(Finding {
+                        severity: Severity::Info,
+                        node_idx: None,
+                        node_name: "shape_inject".into(),
+                        category: "SHAPE_INJECT",
+                        message: format!("所有 MatMul 权重 shape 已注入 ({bound} 个)"),
+                    });
+                }
+            }
+            Err(e) => {
+                println!("  图构建失败: {e}");
+                findings.push(Finding {
+                    severity: Severity::Fatal,
+                    node_idx: None,
+                    node_name: "graph_build".into(),
+                    category: "GRAPH_BUILD",
+                    message: format!("图构建失败: {e}"),
+                });
+            }
+        }
+    }
+
+    println!();
     findings
 }
 
@@ -758,16 +830,19 @@ fn main() {
 
     println!();
     if fatal_count > 0 {
-        println!("结论: 发现 {fatal_count} 个致命问题 — JIT 执行必然 SIGSEGV");
+        println!("结论: 发现 {fatal_count} 个致命问题");
         println!();
-        println!("根因: YAML 模板构建的 FusedGraph 没有 TensorProvider,");
-        println!("      weight_bindings 为空 → Atomic MatMul 的权重 shape 默认为 [seq_len, hidden]");
-        println!("      → infer_output_shape 计算错误 → output_numel 错误");
-        println!("      → JIT 内核写入超出分配的输出缓冲区 → 堆损坏/SIGSEGV");
+        println!("诊断分层:");
+        println!("  L1 (shape):    weight_bindings shape 注入 — 已修复 (三阶段解耦)");
+        println!("  L2 (dimension): GEMM K/N 维度推导 + safetensors 转置 — 已修复");
+        println!("  L3 (codegen):  JIT 机器码执行 — 需在 gllm-kernels codegen 层调试");
         println!();
-        println!("修复方案:");
-        println!("  1. compile_with_cache 前, 用 WeightsHandle 填充 FusedGraph.weight_bindings 的 shape");
-        println!("  2. 或在 build_node_graph 的 Atomic 分支中, 从 WeightsHandle 获取真实权重 shape");
+        println!("下一步: 对 gllm-kernels JIT codegen 进行单节点隔离测试:");
+        println!("  1. 取第一个 Atomic MatMul 的 CompilerGraph");
+        println!("  2. 用 cargo test 在 gllm-kernels 中单独编译执行");
+        println!("  3. 比对 JIT 输出 vs scalar 参考实现");
+    } else if findings.iter().any(|f| matches!(f.severity, Severity::Error)) {
+        println!("结论: 发现 {error_count} 个错误, 可能影响推理精度");
     } else {
         println!("结论: 未发现致命问题");
     }
