@@ -99,3 +99,62 @@ pub fn build_executor_from_yaml(
         onnx_graph, seq_len, hidden, dtype, model_id, backend, cache, ctx
     )
 }
+
+/// Build an **uncompiled** `FusedGraphExecutor` from a YAML template.
+///
+/// Only runs template expansion + graph optimisation. Does NOT JIT-compile.
+/// Caller must populate weight shapes and then call `compile_with_cache()`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+pub fn build_uncompiled_executor_from_yaml(
+    arch_name: &str,
+    config: &ResolvedConfig,
+    dtype: gllm_kernels::types::DType,
+    arch_family: crate::manifest::ArchFamily,
+) -> Result<crate::graph::executor::FusedGraphExecutor, crate::graph::executor::ExecutorError> {
+    register_builtin_templates();
+
+    let template = get_template(arch_name).ok_or_else(|| {
+        crate::graph::executor::ExecutorError::CompilationFailed(format!(
+            "unknown architecture template: '{arch_name}'"
+        ))
+    })?;
+
+    let onnx_graph = template.to_onnx_graph(config).map_err(|e| {
+        crate::graph::executor::ExecutorError::CompilationFailed(format!(
+            "template expansion for '{arch_name}': {e}"
+        ))
+    })?;
+
+    let geometry = std::sync::Arc::new(crate::model_config::ModelGeometry {
+        hidden_size: config.hidden_size,
+        num_heads: config.num_attention_heads,
+        num_kv_heads: config.num_key_value_heads,
+        head_dim: config.head_dim,
+        num_layers: config.num_hidden_layers,
+        vocab_size: config.vocab_size,
+        intermediate_size: config.intermediate_size.unwrap_or(config.hidden_size * 4),
+        max_seq_len: 4096,
+        rope_theta: config.rope_theta,
+        rope_scale: 1.0,
+        rope_interleaved: false,
+        dtype,
+        norm_eps: 1e-5,
+        num_experts: 0,
+        moe_top_k: 0,
+        expert_intermediate_size: 0,
+        global_rope_theta: 0.0,
+        rope_partial_ratio: 1.0,
+        attention_pattern: vec![],
+        sliding_window: 0,
+        num_kv_shared_layers: 0,
+        global_head_dim: 0,
+        hidden_size_per_layer_input: 0,
+    });
+    let ctx = crate::graph::optimizer::OptimizationContext {
+        geometry,
+        arch_family,
+        ..Default::default()
+    };
+
+    crate::graph::executor::FusedGraphExecutor::from_graph_optimized(onnx_graph, ctx)
+}

@@ -643,100 +643,102 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(geometry.clone()),
         };
 
-        // Build YAML→JIT graph executor (best-effort; None if template not registered).
+        // Build YAML→JIT graph executor: 3-phase pipeline
+        // Phase 1: template → OnnxGraph → optimize → FusedGraph (uncompiled)
+        // Phase 2: inject real weight shapes from loaded tensors (fixes GEMM dimensions)
+        // Phase 3: JIT-compile + bind weight pointers
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         let graph_executor = {
-            use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template, ResolvedConfig};
+            use crate::arch::{build_uncompiled_executor_from_yaml, register_builtin_templates, get_template, ResolvedConfig};
+            use crate::compat::backend_trait::TensorLookup;
             register_builtin_templates();
             let resolved = ResolvedConfig::from_geometry(&geometry, std::collections::HashMap::new());
             let hidden = geometry.hidden_size;
             let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
-            // Use "cpu" as backend identifier (REQ-JIT-CACHE-003)
-            let backend = "cpu";
+            let jit_backend = "cpu";
             let model_id = &manifest.model_id;
-            // Look up template name via arch mapping, then build executor
-            get_template(&manifest.arch)
+
+            // Phase 1: build uncompiled executor (template expand + graph optimize, NO JIT)
+            let uncompiled = get_template(&manifest.arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
-                    build_executor_from_yaml(
+                    build_uncompiled_executor_from_yaml(
                         &arch_name,
                         &resolved,
-                        1,
-                        hidden,
                         geometry.dtype,
-                        model_id,
-                        backend,
-                        &cache,
                         manifest.family(),
                     ).map_err(|e| {
-                        eprintln!("Failed to build executor from yaml: {}", e);
+                        eprintln!("Failed to build uncompiled executor: {}", e);
                         e
                     }).ok()
-                })
-        };
+                });
 
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let graph_executor = {
-            use crate::compat::backend_trait::TensorLookup;
-            let mut bound_executor = graph_executor;
-            if let Some(mut ge) = bound_executor.take() {
-                // Collect all weight names: from weight_bindings AND from node inputs.
-                // YAML-template graphs only have weight names in node inputs (not in weight_bindings),
-                // while ONNX-originated graphs may have them in weight_bindings.
-                let mut expected_names = std::collections::HashSet::new();
-                for key in ge.graph().weight_bindings.keys() {
-                    expected_names.insert(key.clone());
+            if let Some(mut ge) = uncompiled {
+                // Phase 2: inject real weight shapes from loaded tensors
+                // This MUST happen BEFORE JIT compilation so that build_node_graph
+                // uses correct GEMM dimensions (K, N) instead of defaulting to hidden_size.
+                // Inject real weight shapes by trying each format's TensorProvider
+                if let Some(st) = loader.safetensors_ref() {
+                    ge.graph_mut().bind_weight_shapes_fuzzy(st);
+                } else if let Some(onnx) = loader.onnx_ref() {
+                    ge.graph_mut().bind_weight_shapes_fuzzy(onnx);
+                } else if let Some(gguf) = loader.gguf_ref() {
+                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf);
                 }
-                // Also scan node inputs — any input that looks like a model weight name
-                // (contains '.' indicating a hierarchical path like "model.layers.0.self_attn.q_proj.weight")
-                // should be bound from the loaded weights.
-                let graph_inputs: std::collections::HashSet<String> = ge.graph().inputs.iter().cloned().collect();
-                for node in &ge.graph().nodes {
-                    for input_name in &node.inputs {
-                        // Skip graph-level activation inputs (they come from upstream nodes)
-                        if !graph_inputs.contains(input_name) && input_name.contains('.') {
-                            expected_names.insert(input_name.clone());
+
+                // Phase 3a: JIT-compile with correct weight shapes
+                let compile_ok = ge.compile_with_cache(1, hidden, geometry.dtype, model_id, jit_backend, &cache)
+                    .map_err(|e| eprintln!("JIT compilation failed: {e}"))
+                    .is_ok();
+
+                if compile_ok {
+                    // Phase 3b: bind weight pointers for runtime execution
+                    let mut expected_names = std::collections::HashSet::new();
+                    for key in ge.graph().weight_bindings.keys() {
+                        expected_names.insert(key.clone());
+                    }
+                    let graph_inputs: std::collections::HashSet<String> = ge.graph().inputs.iter().cloned().collect();
+                    for node in &ge.graph().nodes {
+                        for input_name in &node.inputs {
+                            if !graph_inputs.contains(input_name) && input_name.contains('.') {
+                                expected_names.insert(input_name.clone());
+                            }
                         }
                     }
-                }
-                let _total_expected = expected_names.len();
-                let mut _bound_count = 0usize;
-                for canonical_name in expected_names {
-                    // Try direct lookup first
-                    let found = TensorLookup::get_tensor(&weights, &canonical_name)
-                        .map(|t| t.as_ref().as_ptr() as *const f32);
-                    // If not found, try stripping known architecture prefixes
-                    // (e.g., template uses "roberta.embeddings..." but model has "embeddings...")
-                    let found = found.or_else(|| {
-                        const PREFIXES: &[&str] = &["roberta.", "bert.", "model.", "encoder."];
-                        for prefix in PREFIXES {
-                            if let Some(stripped) = canonical_name.strip_prefix(prefix) {
-                                if let Some(t) = TensorLookup::get_tensor(&weights, stripped) {
+                    for canonical_name in expected_names {
+                        let found = TensorLookup::get_tensor(&weights, &canonical_name)
+                            .map(|t| t.as_ref().as_ptr() as *const f32);
+                        let found = found.or_else(|| {
+                            const PREFIXES: &[&str] = &["roberta.", "bert.", "model.", "encoder.", "transformer."];
+                            for prefix in PREFIXES {
+                                if let Some(stripped) = canonical_name.strip_prefix(prefix) {
+                                    if let Some(t) = TensorLookup::get_tensor(&weights, stripped) {
+                                        return Some(t.as_ref().as_ptr() as *const f32);
+                                    }
+                                }
+                            }
+                            for prefix in PREFIXES {
+                                let prefixed = format!("{prefix}{canonical_name}");
+                                if let Some(t) = TensorLookup::get_tensor(&weights, &prefixed) {
                                     return Some(t.as_ref().as_ptr() as *const f32);
                                 }
                             }
+                            None
+                        });
+                        if let Some(ptr) = found {
+                            ge = ge.bind(canonical_name.clone(), ptr);
+                        } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
+                            let ptr = q_tensor.data.as_ptr() as *const f32;
+                            ge = ge.bind(canonical_name.clone(), ptr);
                         }
-                        // Also try adding prefixes when template uses bare names
-                        for prefix in PREFIXES {
-                            let prefixed = format!("{prefix}{canonical_name}");
-                            if let Some(t) = TensorLookup::get_tensor(&weights, &prefixed) {
-                                return Some(t.as_ref().as_ptr() as *const f32);
-                            }
-                        }
-                        None
-                    });
-                    if let Some(ptr) = found {
-                        ge = ge.bind(canonical_name.clone(), ptr);
-                        _bound_count += 1;
-                    } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
-                        let ptr = q_tensor.data.as_ptr() as *const f32;
-                        ge = ge.bind(canonical_name.clone(), ptr);
-                        _bound_count += 1;
                     }
+                    Some(ge)
+                } else {
+                    None
                 }
-                bound_executor = Some(ge);
+            } else {
+                None
             }
-            bound_executor
         };
 
         // §9.1: 从 graph_executor 构建 MegaKernelExecutor（在 move 之前）

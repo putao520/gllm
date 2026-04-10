@@ -1155,17 +1155,46 @@ impl FusedGraphExecutor {
                         output_dtype: dtype,
                     });
                 }
-                let input_shapes: Vec<Vec<usize>> = node
+                let is_matmul = atomic.op_type == "MatMul" || atomic.op_type == "Gemm";
+
+                // First pass: collect raw shapes (weight shapes transposed for MatMul)
+                let mut input_shapes: Vec<Vec<usize>> = node
                     .inputs
                     .iter()
-                    .map(|name| {
+                    .enumerate()
+                    .map(|(i, name)| {
                         if let Some(wb) = self.graph.weight_bindings.get(name) {
-                            wb.shape.clone()
-                        } else {
-                            vec![seq_len, hidden]
+                            if !wb.shape.is_empty() {
+                                let mut shape = wb.shape.clone();
+                                // SafeTensors stores Linear weights as [out_features, in_features]
+                                // (PyTorch convention). infer_output_shape/atomic_op_to_kind use
+                                // math convention [K, N] where K=in, N=out.
+                                // Transpose weight shape for MatMul/Gemm weight inputs (index > 0).
+                                if is_matmul && i > 0 && shape.len() == 2 {
+                                    shape.swap(0, 1); // [N, K] → [K, N]
+                                }
+                                return shape;
+                            }
                         }
+                        vec![seq_len, hidden]
                     })
                     .collect();
+
+                // Second pass: for MatMul, fix activation shape using weight's K dimension.
+                // When the activation is a graph intermediate (not in weight_bindings), its shape
+                // defaults to [seq_len, hidden]. But if the weight shape is known, the activation's
+                // K dimension must match the weight's K dimension.
+                if is_matmul && input_shapes.len() >= 2 {
+                    let weight_k = input_shapes[1].first().copied().unwrap_or(0);
+                    if weight_k > 0 && input_shapes[0].len() >= 2 {
+                        let act_k = input_shapes[0][input_shapes[0].len() - 1];
+                        if act_k != weight_k && !self.graph.weight_bindings.contains_key(&node.inputs[0]) {
+                            // Activation shape was defaulted; fix K from weight
+                            let m = input_shapes[0][input_shapes[0].len() - 2];
+                            input_shapes[0] = vec![m, weight_k];
+                        }
+                    }
+                }
 
                 let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
                 let output_numel: usize = output_shape.iter().product();
@@ -1941,6 +1970,33 @@ impl FusedGraphExecutor {
     /// Returns a reference to the underlying graph.
     pub fn graph(&self) -> &FusedGraph {
         &self.graph
+    }
+
+    /// Returns a mutable reference to the underlying graph.
+    /// Use before compilation to populate weight_bindings shapes.
+    pub fn graph_mut(&mut self) -> &mut FusedGraph {
+        &mut self.graph
+    }
+
+    /// Build an uncompiled `FusedGraphExecutor` from an `OnnxGraph`.
+    ///
+    /// Only runs optimization passes (pattern fusion → hardware fusion →
+    /// constant folding → DCE). Does NOT JIT-compile.
+    ///
+    /// Caller should populate `graph_mut().bind_weights(provider)` with real
+    /// weight shapes BEFORE calling `compile_with_cache()`.
+    pub fn from_graph_optimized(
+        graph: crate::loader::onnx::OnnxGraph,
+        ctx: crate::graph::optimizer::OptimizationContext,
+    ) -> Result<Self, ExecutorError> {
+        use crate::graph::optimizer::GraphOptimizer;
+
+        let optimizer = GraphOptimizer::new(ctx);
+        let fused = optimizer
+            .optimize(&graph)
+            .map_err(|e| ExecutorError::CompilationFailed(format!("graph optimization: {e}")))?;
+
+        Ok(Self::new(fused))
     }
 
     /// Build a `FusedGraphExecutor` from an `OnnxGraph`.

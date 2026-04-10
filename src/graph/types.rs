@@ -93,6 +93,81 @@ impl FusedGraph {
 
         bound
     }
+
+    /// Bind weight shapes with fuzzy prefix matching.
+    ///
+    /// For YAML-template graphs, node inputs use canonical names (e.g.
+    /// `model.layers.0.self_attn.q_proj.weight`) but the actual tensors in
+    /// the provider may use different prefixes (or no prefix at all).
+    ///
+    /// This method tries exact match first, then strips/adds known architecture
+    /// prefixes to find the matching tensor metadata.
+    pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P) -> usize {
+        const PREFIXES: &[&str] = &["model.", "roberta.", "bert.", "encoder.", "transformer."];
+
+        let mut produced = HashSet::new();
+        for node in &self.nodes {
+            for output in &node.outputs {
+                produced.insert(output.as_str());
+            }
+        }
+        let graph_inputs: HashSet<&str> = self.inputs.iter().map(String::as_str).collect();
+        let mut bound = 0usize;
+
+        for node in &self.nodes {
+            for input in &node.inputs {
+                if input.is_empty()
+                    || produced.contains(input.as_str())
+                    || graph_inputs.contains(input.as_str())
+                {
+                    continue;
+                }
+                // Skip if already bound with a valid shape
+                if let Some(existing) = self.weight_bindings.get(input) {
+                    if !existing.shape.is_empty() {
+                        continue;
+                    }
+                }
+
+                // Try exact match
+                let meta = provider.tensor_info(input)
+                    .or_else(|| {
+                        // Try stripping prefixes
+                        for prefix in PREFIXES {
+                            if let Some(stripped) = input.strip_prefix(prefix) {
+                                if let Some(m) = provider.tensor_info(stripped) {
+                                    return Some(m);
+                                }
+                            }
+                        }
+                        // Try adding prefixes
+                        for prefix in PREFIXES {
+                            let prefixed = format!("{prefix}{input}");
+                            if let Some(m) = provider.tensor_info(&prefixed) {
+                                return Some(m);
+                            }
+                        }
+                        None
+                    });
+
+                if let Some(meta) = meta {
+                    self.weight_bindings.insert(
+                        input.clone(),
+                        WeightBinding {
+                            source_name: meta.name,
+                            shape: meta.shape,
+                            dtype: meta.dtype,
+                            data: None,
+                            ptr: None,
+                        },
+                    );
+                    bound += 1;
+                }
+            }
+        }
+
+        bound
+    }
 }
 
 impl Default for FusedGraph {
