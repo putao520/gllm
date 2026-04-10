@@ -211,16 +211,17 @@ struct CompiledNode {
     graph_input_names: Vec<String>,
     /// Names of the FusedNode output tensors.
     graph_output_names: Vec<String>,
-    /// Number of elements in the output tensor(s) (at compile-time seq_len).
+    /// Number of elements in the output tensor(s) at max_seq_len (compile-time upper bound).
+    /// Used for buffer allocation. Actual runtime size = feature_dim * actual_seq_len.
     output_numel: usize,
-    /// Per-output element counts for multi-output nodes (at compile-time seq_len).
+    /// Per-output element counts for multi-output nodes (at max_seq_len).
     /// Empty for single-output nodes (use output_numel).
     per_output_numel: Vec<usize>,
     /// DType of the output tensor(s) — used for byte-size calculations.
     output_dtype: gllm_kernels::types::DType,
-    /// The seq_len used during compilation. Needed to derive per-token feature_dim
-    /// for runtime output buffer scaling: feature_dim = output_numel / compile_seq_len.
-    compile_seq_len: usize,
+    /// Feature dimension per token (e.g., hidden_size).
+    /// Runtime output size = feature_dim * actual_seq_len * dtype.size_bytes().
+    feature_dim: usize,
 }
 
 /// Build a CompilerGraph for FlashAttention.
@@ -977,6 +978,15 @@ impl FusedGraphExecutor {
 
             let output_dtype = gllm_kernels::types::DType::F32;
 
+            // Calculate feature_dim: for most ops, it's the last dimension of output shape
+            // For ops with symbolic seq_len, output_numel = max_seq_len * feature_dim
+            // So feature_dim = output_numel / max_seq_len (where max_seq_len = 2048)
+            let feature_dim = if build.output_numel > 0 {
+                build.output_numel / 2048 // max_seq_len used in SymDim::Symbolic
+            } else {
+                hidden // fallback to hidden_size
+            };
+
             compiled_nodes.push(CompiledNode {
                 compiled,
                 graph_input_names: build.input_names,
@@ -984,7 +994,7 @@ impl FusedGraphExecutor {
                 output_numel: build.output_numel,
                 per_output_numel: build.per_output_numel,
                 output_dtype,
-                compile_seq_len: seq_len,
+                feature_dim,
             });
         }
 
@@ -1073,7 +1083,7 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
-                compile_seq_len: 1, // cache payload doesn't store this; default safe value
+                feature_dim: if p.output_numel > 0 { p.output_numel / 2048 } else { hidden },
             });
         }
         
@@ -1121,11 +1131,12 @@ impl FusedGraphExecutor {
     fn build_node_graph(
         &self,
         node_idx: usize,
-        seq_len: usize,
+        _seq_len: usize, // Deprecated: all graphs use SymDim::Symbolic now
         hidden: usize,
         dtype: gllm_kernels::types::DType,
     ) -> Result<NodeGraphBuild, ExecutionError> {
         let node = &self.graph.nodes[node_idx];
+        let max_seq_len = 2048; // SymDim::Symbolic max_value
 
         match &node.op {
             FusedOp::FlashAttention(config) => {
@@ -1136,20 +1147,20 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * h,
+                    output_numel: max_seq_len * h,
                     per_output_numel: vec![],
                     output_dtype,
                 })
             }
 
             FusedOp::SwiGLU(config) => {
-                let g = build_swiglu_graph(config, seq_len, dtype);
+                let g = build_swiglu_graph(config, dtype);
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * config.intermediate_size,
+                    output_numel: max_seq_len * config.intermediate_size,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1162,7 +1173,7 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * hidden,
+                    output_numel: max_seq_len * hidden,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1173,9 +1184,9 @@ impl FusedGraphExecutor {
                 let q_dim = config.num_heads * config.head_dim;
                 let kv_dim = config.num_kv_heads * config.head_dim;
                 let per = vec![
-                    seq_len * q_dim,
-                    seq_len * kv_dim,
-                    seq_len * kv_dim,
+                    max_seq_len * q_dim,
+                    max_seq_len * kv_dim,
+                    max_seq_len * kv_dim,
                 ];
                 let total: usize = per.iter().sum();
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
@@ -1196,7 +1207,7 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * config.hidden_size,
+                    output_numel: max_seq_len * config.hidden_size,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1210,7 +1221,7 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * q_dim,
+                    output_numel: max_seq_len * q_dim,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1223,7 +1234,7 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * config.num_experts,
+                    output_numel: max_seq_len * config.num_experts,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1236,7 +1247,7 @@ impl FusedGraphExecutor {
                     graph: g,
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
-                    output_numel: seq_len * hidden,
+                    output_numel: max_seq_len * hidden,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -1896,20 +1907,20 @@ impl FusedGraphExecutor {
                     self.graph.nodes[node_idx].op.name());
             }
 
-            // Load activation and pad to compile-time size if needed.
-            // JIT kernels iterate M=compile_seq_len rows; the activation buffer
+            // Load activation and pad to max_seq_len size if needed.
+            // JIT kernels may iterate up to max_seq_len rows internally; the activation buffer
             // must be at least that large to avoid out-of-bounds reads.
             let activation = if !cn.graph_input_names.is_empty() {
                 let raw = tensors
                     .get(&cn.graph_input_names[0])
                     .cloned()
                     .unwrap_or_default();
-                // Compute expected compile-time activation size
-                let compile_act_bytes = cn.output_numel * cn.output_dtype.size_bytes();
-                if !raw.is_empty() && raw.len() < compile_act_bytes {
-                    // Pad with zeros so JIT kernel can safely read compile_seq_len rows
+                // Compute expected max activation size (max_seq_len * feature_dim)
+                let max_act_bytes = cn.output_numel * cn.output_dtype.size_bytes();
+                if !raw.is_empty() && raw.len() < max_act_bytes {
+                    // Pad with zeros so JIT kernel can safely read max_seq_len rows
                     let mut padded = raw;
-                    padded.resize(compile_act_bytes, 0);
+                    padded.resize(max_act_bytes, 0);
                     padded
                 } else {
                     raw
@@ -1947,12 +1958,12 @@ impl FusedGraphExecutor {
                 }
             }
 
-            // Allocate output buffer at compile-time size (safe upper bound).
-            // JIT kernels may loop up to compile_seq_len internally for ops like
+            // Allocate output buffer at max_seq_len size (safe upper bound).
+            // JIT kernels may loop up to max_seq_len internally for ops like
             // RmsNorm/Add that iterate all rows. The buffer must be large enough
             // for the compiled loop bound. After execution, we truncate to the
             // runtime seq_len when inserting into the tensor map.
-            let runtime_output_numel = cn.output_numel; // compile-time size (safe)
+            let runtime_output_numel = cn.output_numel; // max_seq_len size (safe)
             let output_bytes = runtime_output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
@@ -1991,9 +2002,8 @@ impl FusedGraphExecutor {
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
 
             // Truncate output to runtime seq_len before inserting into tensor map.
-            // JIT kernel wrote compile_seq_len rows but only the first seq_len are valid.
-            let feature_dim = cn.output_numel / cn.compile_seq_len.max(1);
-            let runtime_bytes = feature_dim * seq_len * cn.output_dtype.size_bytes();
+            // JIT kernel wrote max_seq_len rows but only the first seq_len are valid.
+            let runtime_bytes = cn.feature_dim * seq_len * cn.output_dtype.size_bytes();
             let truncated_output = if runtime_bytes < output_buf.len() {
                 output_buf[..runtime_bytes].to_vec()
             } else {
@@ -2003,10 +2013,12 @@ impl FusedGraphExecutor {
             if cn.graph_output_names.len() == 1 {
                 tensors.insert(cn.graph_output_names[0].clone(), truncated_output);
             } else if !cn.per_output_numel.is_empty() {
-                let compile_s = cn.compile_seq_len.max(1);
+                // Multi-output node: split truncated_output by per_output_numel
+                // per_output_numel stores max_seq_len sizes, need to scale to runtime seq_len
+                let max_seq_len = 2048; // SymDim::Symbolic max_value
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
-                    let per_token = cn.per_output_numel[i] / compile_s;
+                    let per_token = cn.per_output_numel[i] / max_seq_len;
                     let numel = per_token * seq_len;
                     let nbytes = numel * cn.output_dtype.size_bytes();
                     if byte_offset + nbytes <= truncated_output.len() {
