@@ -47,6 +47,15 @@ pub(crate) struct KvCacheBuffer {
     /// Gemma 4 E2B 后 20 层、E4B 后 18 层使用此机制。
     /// 共享层在前向传播时从 donor 层偏移读取 KV，不分配独立存储。
     pub kv_donor_map: Vec<Option<usize>>,
+
+    /// Thinking KV 跳过: 持久化 seq_len (不含 thinking tokens)。
+    /// 思考 token 使用临时位置写入 KV（当前 step 的注意力需要），
+    /// 但 persistent_seq_len 不递增，下一个非思考 token 覆盖该位置。
+    ///
+    /// 效果: 多轮对话的 KV cache 中不含思考内容。
+    pub persistent_seq_len: usize,
+    /// 当前是否处于思考阶段 (由 ThinkingTracker 驱动)
+    pub in_thinking: bool,
 }
 
 impl KvCacheBuffer {
@@ -78,6 +87,8 @@ impl KvCacheBuffer {
             elem_bytes,
             cache_dtype,
             kv_donor_map,
+            persistent_seq_len: 0,
+            in_thinking: false,
         }
     }
 
@@ -131,6 +142,30 @@ impl KvCacheBuffer {
     /// 层 i 是否是共享层 (不计算自己的 KV)
     pub fn is_shared_kv_layer(&self, layer_i: usize) -> bool {
         self.kv_donor_map.get(layer_i).copied().flatten().is_some()
+    }
+
+    /// Thinking KV: 标记进入/退出思考阶段。
+    ///
+    /// 思考阶段中：
+    /// - `seq_len` 正常递增（当前 step 的注意力需要看到 thinking tokens）
+    /// - `persistent_seq_len` 不递增
+    ///
+    /// 退出思考时：
+    /// - `seq_len` 回退到 `persistent_seq_len`（丢弃 thinking KV 位置）
+    /// - 后续非思考 token 从 persistent_seq_len 继续写入
+    pub fn set_thinking(&mut self, thinking: bool) {
+        if self.in_thinking && !thinking {
+            // 退出思考: 回退 seq_len，丢弃临时 thinking KV
+            self.seq_len = self.persistent_seq_len;
+        }
+        self.in_thinking = thinking;
+    }
+
+    /// 非思考 token 写入后，同步 persistent_seq_len。
+    pub fn commit_position(&mut self) {
+        if !self.in_thinking {
+            self.persistent_seq_len = self.seq_len;
+        }
     }
 
     /// Number of pages currently in use (rounded up).

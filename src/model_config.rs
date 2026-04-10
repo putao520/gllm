@@ -656,6 +656,7 @@ impl ModelConfig {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            mtp_depth: None,
             vision_config: None,
         };
         apply_tensor_derived(base, derived)
@@ -874,6 +875,9 @@ impl ModelConfig {
         let global_head_dim = find_usize(value, &["global_head_dim"]);
         let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input"]);
 
+        // ── MTP (Multi-Token Prediction) ──
+        let mtp_depth = find_usize(value, &["num_nextn_predict_layers", "mtp_depth"]);
+
         // ── Multimodal: Vision Encoder (SigLIP) ──
         let vision_config = value.get("vision_config").and_then(|vc| {
             let image_size = find_usize(vc, &["image_size"])?;
@@ -926,6 +930,7 @@ impl ModelConfig {
             num_kv_shared_layers,
             global_head_dim,
             hidden_size_per_layer_input,
+            mtp_depth,
             vision_config,
         })
     }
@@ -1947,6 +1952,7 @@ mod tests {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            mtp_depth: None,
             vision_config: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
@@ -1991,6 +1997,7 @@ mod tests {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            mtp_depth: None,
             vision_config: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
