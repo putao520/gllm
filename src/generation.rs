@@ -356,6 +356,23 @@ pub struct GenerationResponse {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// 多模态媒体输入源。
+///
+/// 支持三种输入方式：
+/// - 文件路径: 从磁盘加载
+/// - Base64: API/Web 场景的内联数据
+/// - 原始字节: 内存中已解码的数据
+#[derive(Debug, Clone)]
+pub enum MediaInput {
+    /// 文件路径 (本地磁盘)
+    File(String),
+    /// Base64 编码数据 (含可选 MIME type)
+    Base64 { data: String, mime_type: Option<String> },
+    /// 原始字节 (已解码的像素/PCM 数据)
+    Raw(Vec<u8>),
+}
+
 pub struct GenerationBuilder<'a> {
     client: &'a Client,
     prompt: String,
@@ -365,10 +382,10 @@ pub struct GenerationBuilder<'a> {
     top_p: f32,
     session_id: Option<u64>,
     stream: bool,
-    /// 多模态: 图像文件路径 (P3.1 Vision)
-    image_path: Option<String>,
-    /// 多模态: 音频文件路径 (P3.2 Audio)
-    audio_path: Option<String>,
+    /// 多模态: 图像输入 (P3.1 Vision)
+    image_input: Option<MediaInput>,
+    /// 多模态: 音频输入 (P3.2 Audio)
+    audio_input: Option<MediaInput>,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -382,26 +399,36 @@ impl<'a> GenerationBuilder<'a> {
             top_p: 1.0,
             session_id: None,
             stream: false,
-            image_path: None,
-            audio_path: None,
+            image_input: None,
+            audio_input: None,
         }
     }
 
     /// 多模态: 附加图像输入 (Gemma 4 Vision)。
     ///
-    /// 图像会被 SigLIP encoder 编码为视觉 token 序列，
-    /// 插入到文本 prompt 中 image_token_id 的位置。
-    pub fn image(mut self, path: impl Into<String>) -> Self {
-        self.image_path = Some(path.into());
+    /// 支持三种输入方式:
+    /// - `MediaInput::File("/path/to/image.jpg")` — 本地文件
+    /// - `MediaInput::Base64 { data, mime_type }` — Base64 编码
+    /// - `MediaInput::Raw(bytes)` — 已解码的原始像素
+    ///
+    /// 图像由 SigLIP encoder 编码为视觉 token 序列，
+    /// 插入到 prompt 中 `image_token_id` 的位置。
+    pub fn image(mut self, input: MediaInput) -> Self {
+        self.image_input = Some(input);
         self
     }
 
     /// 多模态: 附加音频输入 (Gemma 4 Audio)。
     ///
-    /// 音频会被 USM Conformer 编码为音频 token 序列，
-    /// 插入到文本 prompt 中 audio_token_id 的位置。
-    pub fn audio(mut self, path: impl Into<String>) -> Self {
-        self.audio_path = Some(path.into());
+    /// 支持三种输入方式:
+    /// - `MediaInput::File("/path/to/audio.wav")` — 本地文件
+    /// - `MediaInput::Base64 { data, mime_type }` — Base64 编码
+    /// - `MediaInput::Raw(bytes)` — 已解码的原始 PCM
+    ///
+    /// 音频由 USM Conformer 编码为音频 token 序列，
+    /// 插入到 prompt 中 `audio_token_id` 的位置。
+    pub fn audio(mut self, input: MediaInput) -> Self {
+        self.audio_input = Some(input);
         self
     }
 

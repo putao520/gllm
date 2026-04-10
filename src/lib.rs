@@ -53,7 +53,7 @@ pub use backend::{detect_backend, BackendType};
 pub use client::{Client, GllmError, ModelInfo};
 pub use generation::{
     GenerationChunk, GenerationResponse, GenerationStream,
-    GenerationHook, HookDecision, ThresholdHook,
+    GenerationHook, HookDecision, MediaInput, ThresholdHook,
 };
 pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
