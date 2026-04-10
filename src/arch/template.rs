@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 架构模板 - 从 YAML 解析
+///
+/// YAML 模板是架构元数据的 SSOT。`aliases` 字段声明此模板匹配哪些
+/// HuggingFace architecture token（如 "LlamaForCausalLM"），`family` 字段
+/// 声明编码器/解码器族。Registry 从这些字段自动注册，无需手工映射。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchTemplate {
     /// 架构名称 (e.g., "qwen3", "llama")
@@ -11,6 +15,17 @@ pub struct ArchTemplate {
     /// 模板版本
     #[serde(default = "default_version")]
     pub version: String,
+    /// 架构族: "decoder" 或 "encoder"
+    #[serde(default = "default_family")]
+    pub family: String,
+    /// 架构别名列表 — 模型元数据中可能出现的 architecture token（已归一化小写）。
+    /// Registry 自动将这些别名映射到此模板。
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// MoE 路由器类型（仅含 MoE 算子的模板需要声明）。
+    /// 值: "deepseek" / "qwen" / "mixtral"
+    #[serde(default)]
+    pub moe_router: Option<String>,
     /// 配置占位符映射
     #[serde(default)]
     pub config: HashMap<String, ConfigValue>,
@@ -22,6 +37,10 @@ pub struct ArchTemplate {
     /// 张量名映射规则
     #[serde(default)]
     pub tensor_patterns: TensorPatterns,
+}
+
+fn default_family() -> String {
+    "decoder".to_string()
 }
 
 fn default_version() -> String {

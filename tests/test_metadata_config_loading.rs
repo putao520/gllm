@@ -5,7 +5,7 @@ use std::fs;
 use gllm::loader::onnx::proto;
 use gllm::loader::Loader;
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
+    ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::model_config::ModelConfig;
 use gllm::compat::CpuBackend;
@@ -19,7 +19,7 @@ fn test_manifest() -> ModelManifest {
     ModelManifest {
         model_id: Cow::Borrowed("test/model"),
         file_map: EMPTY_FILE_MAP,
-        arch: ModelArchitecture::Llama4,
+        arch: "llama".to_string(),
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,
@@ -247,7 +247,7 @@ fn onnx_weights_are_uploadable_for_reranker() {
     let manifest = ModelManifest {
         model_id: Cow::Borrowed("test/reranker"),
         file_map: EMPTY_FILE_MAP,
-        arch: ModelArchitecture::XlmR,
+        arch: "xlmr".to_string(),
         kind: ModelKind::Reranker,
         rope_base_override: None,
         max_context_override: None,

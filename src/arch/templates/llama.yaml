@@ -1,10 +1,17 @@
 name: llama
 version: "1.0"
-
-arch_mapping:
-  - Llama4
-  - SmolLM2
-  - InternLM3
+family: decoder
+aliases:
+  - llama
+  - llamaforcausallm
+  - smollm
+  - smollm2
+  - smollm2forcausallm
+  - internlm
+  - internlm3
+  - internlm3forcausallm
+  - internlm2
+  - internlm2forcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

@@ -826,17 +826,15 @@ impl ModelConfig {
     }
 
     /// Build MoEConfig from extracted metadata, if this is a MoE model.
-    pub fn build_moe_config(&self, arch: crate::manifest::ModelArchitecture) -> Option<crate::manifest::MoEConfig> {
+    pub fn build_moe_config(&self, arch: &str) -> Option<crate::manifest::MoEConfig> {
         let num_experts = self.num_experts?;
         if num_experts <= 1 {
             return None;
         }
         let num_experts_per_tok = self.num_experts_per_tok.unwrap_or(2); // LEGAL: num_experts_per_tok=2 是 MoE 的行业标准默认值
-        let router_type = match arch {
-            crate::manifest::ModelArchitecture::DeepSeek => crate::manifest::RouterType::DeepSeek,
-            crate::manifest::ModelArchitecture::Qwen3MoE => crate::manifest::RouterType::Qwen,
-            _ => crate::manifest::RouterType::Mixtral,
-        };
+        crate::arch::register_builtin_templates();
+        let router_type = crate::arch::resolve_moe_router(arch)
+            .unwrap_or(crate::manifest::RouterType::Mixtral);
         Some(crate::manifest::MoEConfig {
             num_experts,
             num_experts_per_tok,
@@ -1809,7 +1807,7 @@ mod tests {
 
     #[test]
     fn build_moe_config_deepseek() {
-        use crate::manifest::{ModelArchitecture, RouterType};
+        use crate::manifest::RouterType;
         let cfg = ModelConfig {
             hidden_size: 2048,
             num_attention_heads: 16,
@@ -1838,7 +1836,7 @@ mod tests {
             pad_token_id: None,
             tensor_map: HashMap::new(),
         };
-        let moe = cfg.build_moe_config(ModelArchitecture::DeepSeek).unwrap();
+        let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
         assert_eq!(moe.num_experts_per_tok, 6);
         assert_eq!(moe.router_type, RouterType::DeepSeek);
@@ -1846,7 +1844,6 @@ mod tests {
 
     #[test]
     fn build_moe_config_none_for_dense() {
-        use crate::manifest::ModelArchitecture;
         let cfg = ModelConfig {
             hidden_size: 2048,
             num_attention_heads: 16,
@@ -1875,6 +1872,6 @@ mod tests {
             pad_token_id: None,
             tensor_map: HashMap::new(),
         };
-        assert!(cfg.build_moe_config(ModelArchitecture::Llama4).is_none());
+        assert!(cfg.build_moe_config("llama").is_none());
     }
 }

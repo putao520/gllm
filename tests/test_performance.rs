@@ -6,7 +6,7 @@ use common::TestModelFiles;
 use gllm::engine::executor::Executor;
 use gllm::loader::Loader;
 use gllm::manifest::{
-    map_architecture_token, ModelArchitecture, ModelKind, ModelManifest,
+    map_architecture_token, ModelKind, ModelManifest,
     EMPTY_FILE_MAP,
 };
 use gllm::compat::CpuBackend;
@@ -33,7 +33,7 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
         .gguf_architecture()
         .ok()
         .and_then(map_architecture_token)
-        .unwrap_or(ModelArchitecture::XlmR); // BGE is XLM-R based
+        .unwrap_or_else(|| "xlmr".to_string()); // BGE is XLM-R based
 
     ModelManifest {
         model_id: Cow::Owned(alias.to_string()),

@@ -1,5 +1,15 @@
 name: glm4
 version: "1.0"
+family: decoder
+aliases:
+  - glm4
+  - glm4forcausallm
+  - chatglm
+  - chatglmforcausallm
+  - glm5
+  - glm5forcausallm
+  - glm
+  - glmforcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

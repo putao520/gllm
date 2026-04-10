@@ -3,6 +3,6 @@
 pub mod types;
 
 pub use types::{
-    map_architecture_token, ArchFamily, FileMap, MoEConfig, ModelArchitecture,
+    map_architecture_token, ArchFamily, FileMap, MoEConfig,
     ModelKind, ModelManifest, RouterType, TensorRole, EMPTY_FILE_MAP,
 };

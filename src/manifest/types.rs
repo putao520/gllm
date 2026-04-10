@@ -26,41 +26,13 @@ pub type FileMap = &'static [(&'static str, &'static str)];
 
 pub const EMPTY_FILE_MAP: FileMap = &[];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelArchitecture {
-    Qwen2_5,
-    Qwen3,
-    Qwen3MoE,
-    Llama4,
-    Mistral3,
-    Ministral,
-    GLM4,
-    GLM5,
-    Phi4,
-    Gemma2,
-    XlmR,
-    XlmRNext,
-    DeepSeek,
-    SmolLM2,
-    InternLM3,
-}
-
-/// 架构族：决定权重命名约定和推理路径
+/// 架构族：决定权重命名约定和推理路径（真正的类型约束，不随配置扩展）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArchFamily {
     /// BERT/XLM-R 编码器族：绝对位置编码，双向注意力
     Encoder,
     /// LLaMA/Qwen/GPT 解码器族：RoPE，因果注意力
     Decoder,
-}
-
-impl ModelArchitecture {
-    pub fn family(&self) -> ArchFamily {
-        match self {
-            Self::XlmR | Self::XlmRNext => ArchFamily::Encoder,
-            _ => ArchFamily::Decoder,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,8 +84,9 @@ pub struct ModelManifest {
     // Optional file rename overrides for non-standard repos.
     pub file_map: FileMap,
 
-    // Architecture
-    pub arch: ModelArchitecture,
+    // Architecture — 模板名字符串，运行时由注册表校验。
+    // 值域由 `src/arch/templates/*.yaml` 文件名决定，不硬编码。
+    pub arch: String,
     pub kind: ModelKind,
 
     // Inference overrides (None means use config.json)
@@ -128,14 +101,13 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
+    /// 获取架构族 (从注册表查询)
+    pub fn family(&self) -> ArchFamily {
+        crate::arch::resolve_family(&self.arch).unwrap_or(ArchFamily::Decoder)
+    }
+
     pub fn is_moe(&self) -> bool {
         self.moe_config.is_some()
-            || matches!(
-                self.arch,
-                ModelArchitecture::Qwen3MoE
-                    | ModelArchitecture::Llama4
-                    | ModelArchitecture::DeepSeek
-            )
     }
 }
 
@@ -144,7 +116,7 @@ impl Default for ModelManifest {
         Self {
             model_id: Cow::Borrowed("default"),
             file_map: EMPTY_FILE_MAP,
-            arch: ModelArchitecture::Llama4,
+            arch: "llama".to_string(),
             kind: ModelKind::Chat,
             rope_base_override: None,
             max_context_override: None,
@@ -154,49 +126,12 @@ impl Default for ModelManifest {
     }
 }
 
-/// Map architecture token string to ModelArchitecture enum.
+/// Map architecture token string to template name.
 ///
-/// Supports various formats from config.json (architectures field) and GGUF metadata.
-pub fn map_architecture_token(token: &str) -> Option<ModelArchitecture> {
-    match normalize_architecture_token(token).as_str() {
-        "ministral" | "ministralforcausallm" => Some(ModelArchitecture::Ministral),
-        "mistral" | "mistralforcausallm" => Some(ModelArchitecture::Mistral3),
-        "qwen3_moe" | "qwen3moe" | "qwen3moeforcausallm" => Some(ModelArchitecture::Qwen3MoE),
-        "qwen3" | "qwen3forcausallm" => Some(ModelArchitecture::Qwen3),
-        "qwen2_5" | "qwen2_5forcausallm" => Some(ModelArchitecture::Qwen2_5),
-        "qwen2" | "qwen2forcausallm" => Some(ModelArchitecture::Qwen2_5),
-        "llama" | "llamaforcausallm" => Some(ModelArchitecture::Llama4),
-        "phi3" | "phi3forcausallm" | "phi4" | "phi4forcausallm" => Some(ModelArchitecture::Phi4),
-        "gemma" | "gemmaforcausallm" | "gemma2" | "gemma2forcausallm" => {
-            Some(ModelArchitecture::Gemma2)
-        }
-        "glm5" | "glm5forcausallm" => Some(ModelArchitecture::GLM5),
-        "glm4" | "glm4forcausallm" | "chatglm" | "chatglmforcausallm" => {
-            Some(ModelArchitecture::GLM4)
-        }
-        "glm" | "glmforcausallm" => Some(ModelArchitecture::GLM5),
-        "deepseek" | "deepseekv2" | "deepseekv2forcausallm" | "deepseekv3"
-        | "deepseekv3forcausallm" => Some(ModelArchitecture::DeepSeek),
-        "smollm" | "smollm2" | "smollm2forcausallm" => Some(ModelArchitecture::SmolLM2),
-        "internlm" | "internlm3" | "internlm3forcausallm" | "internlm2" | "internlm2forcausallm" => Some(ModelArchitecture::InternLM3),
-        "xlm_roberta" | "xlm_roberta_model" | "xlmr" | "roberta" | "bert" => {
-            Some(ModelArchitecture::XlmR)
-        }
-        _ => None,
-    }
-}
-
-/// Normalize architecture token for matching.
-fn normalize_architecture_token(token: &str) -> String {
-    token
-        .trim()
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-        .map(|ch| match ch {
-            '-' | '.' => '_',
-            _ => ch.to_ascii_lowercase(),
-        })
-        .collect()
+/// 委托给 `arch::registry` 的别名查找，返回模板名字符串。
+pub fn map_architecture_token(token: &str) -> Option<String> {
+    crate::arch::register_builtin_templates();
+    crate::arch::resolve_template_name(token).map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -204,43 +139,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_architecture_token_uses_exact_normalized_matching() {
-        assert_eq!(
-            map_architecture_token("LlamaForCausalLM"),
-            Some(ModelArchitecture::Llama4)
-        );
-        assert_eq!(
-            map_architecture_token("Qwen2ForCausalLM"),
-            Some(ModelArchitecture::Qwen2_5)
-        );
-        assert_eq!(
-            map_architecture_token("Qwen2.5ForCausalLM"),
-            Some(ModelArchitecture::Qwen2_5)
-        );
-        assert_eq!(
-            map_architecture_token("MistralForCausalLM"),
-            Some(ModelArchitecture::Mistral3)
-        );
-        assert_eq!(
-            map_architecture_token("Gemma2ForCausalLM"),
-            Some(ModelArchitecture::Gemma2)
-        );
+    fn map_architecture_token_delegates_to_registry() {
+        assert_eq!(map_architecture_token("LlamaForCausalLM").as_deref(), Some("llama"));
+        assert_eq!(map_architecture_token("Qwen2ForCausalLM").as_deref(), Some("qwen3"));
+        assert_eq!(map_architecture_token("MistralForCausalLM").as_deref(), Some("mistral3"));
+        assert_eq!(map_architecture_token("Gemma2ForCausalLM").as_deref(), Some("gemma2"));
+        assert_eq!(map_architecture_token("DeepseekV3ForCausalLM").as_deref(), Some("deepseek"));
+        assert_eq!(map_architecture_token("GPTOSSForCausalLM").as_deref(), Some("gpt2next"));
         assert_eq!(map_architecture_token("custom-llama-adapter"), None);
     }
 
     #[test]
-    fn map_architecture_token_deepseek() {
-        assert_eq!(
-            map_architecture_token("DeepseekV2ForCausalLM"),
-            Some(ModelArchitecture::DeepSeek)
-        );
-        assert_eq!(
-            map_architecture_token("DeepseekV3ForCausalLM"),
-            Some(ModelArchitecture::DeepSeek)
-        );
-        assert_eq!(
-            map_architecture_token("deepseek"),
-            Some(ModelArchitecture::DeepSeek)
-        );
+    fn manifest_family_from_registry() {
+        crate::arch::register_builtin_templates();
+        let mut m = ModelManifest::default();
+        assert_eq!(m.family(), ArchFamily::Decoder);
+        m.arch = "xlmr".to_string();
+        assert_eq!(m.family(), ArchFamily::Encoder);
     }
 }

@@ -1,5 +1,11 @@
 name: gemma2
 version: "1.0"
+family: decoder
+aliases:
+  - gemma
+  - gemmaforcausallm
+  - gemma2
+  - gemma2forcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

@@ -4,7 +4,7 @@ use common::TestModelFiles;
 use gllm::engine::executor::{Executor, ExecutorError};
 use gllm::loader::{Loader, LoaderError};
 use gllm::manifest::{
-    map_architecture_token, ModelArchitecture, ModelKind, ModelManifest,
+    map_architecture_token, ModelKind, ModelManifest,
     EMPTY_FILE_MAP,
 };
 use gllm::compat::CpuBackend;
@@ -31,7 +31,7 @@ fn manifest_from_loader(alias: &str, kind: ModelKind, loader: &Loader) -> ModelM
         .gguf_architecture()
         .ok()
         .and_then(map_architecture_token)
-        .unwrap_or(ModelArchitecture::Qwen3);
+        .unwrap_or_else(|| "qwen3".to_string());
 
     ModelManifest {
         model_id: Cow::Owned(alias.to_string()),

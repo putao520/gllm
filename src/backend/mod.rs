@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::engine::executor::{Executor, ExecutorError};
 use crate::loader::{Loader, LoaderError};
-use crate::manifest::{ModelArchitecture, ModelManifest};
+use crate::manifest::ModelManifest;
 
 pub mod detection;
 
@@ -16,8 +16,8 @@ pub use detection::{
 
 #[derive(Debug, Error)]
 pub enum BackendContextError {
-    #[error("unsupported architecture: {0:?}")]
-    UnsupportedArchitecture(ModelArchitecture),
+    #[error("unsupported architecture: {0}")]
+    UnsupportedArchitecture(String),
     #[error(transparent)]
     Loader(#[from] LoaderError),
     #[error(transparent)]

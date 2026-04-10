@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use crate::manifest::types::ModelArchitecture;
 
 /// 代码段类型 — 控制指令在缓存层级中的驻留位置 (§9.6)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,7 +72,7 @@ pub enum SpecPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VariantKey {
     /// 模型架构 (决定基础图结构)
-    pub arch: ModelArchitecture,
+    pub arch: String,
     /// 是否含 MoE 层 (决定专家分发代码)
     pub moe_enabled: bool,
     /// Guardrail 是否激活 (决定 probe 代码)
@@ -92,7 +91,7 @@ impl std::fmt::Display for VariantKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?}_{}{}_{}_{}_{}",
+            "{}_{}{}_{}_{}_{}",
             self.arch,
             if self.moe_enabled { "moe_" } else { "" },
             match self.spec_phase {
@@ -220,32 +219,32 @@ impl VariantRegistry {
     /// 4. 放松 rag_enabled (false) + 全部放松
     pub fn find_closest(&self, key: &VariantKey) -> Option<&CompiledVariant> {
         // 原始约束
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
             key.spec_phase, key.rag_enabled, &key.quant_type, key.golden_size) {
             return Some(v);
         }
         // 放松 spec_phase=None
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
             None, key.rag_enabled, &key.quant_type, key.golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=original
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
             key.spec_phase, key.rag_enabled, &key.quant_type, key.golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=None
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
             None, key.rag_enabled, &key.quant_type, key.golden_size) {
             return Some(v);
         }
         // 放松 rag=false, guardrail=original, spec=original
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, key.guardrail_enabled,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
             key.spec_phase, false, &key.quant_type, key.golden_size) {
             return Some(v);
         }
         // 全部放松
-        if let Some(v) = self.try_relaxed(key.arch, key.moe_enabled, false,
+        if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
             None, false, &key.quant_type, key.golden_size) {
             return Some(v);
         }
@@ -253,11 +252,11 @@ impl VariantRegistry {
     }
 
     /// 尝试精确匹配 + golden_size 放松
-    fn try_relaxed(&self, arch: ModelArchitecture, moe: bool, guard: bool,
+    fn try_relaxed(&self, arch: &str, moe: bool, guard: bool,
                    spec: Option<SpecPhase>, rag: bool, qt: &Option<String>,
                    max_gs: usize) -> Option<&CompiledVariant> {
         let exact = VariantKey {
-            arch, moe_enabled: moe, guardrail_enabled: guard,
+            arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
             spec_phase: spec, rag_enabled: rag, golden_size: max_gs,
             quant_type: qt.clone(),
         };
@@ -276,7 +275,7 @@ impl VariantRegistry {
             .max();
         if let Some(best_gs) = best {
             let relaxed = VariantKey {
-                arch, moe_enabled: moe, guardrail_enabled: guard,
+                arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
                 spec_phase: spec, rag_enabled: rag, golden_size: best_gs,
                 quant_type: qt.clone(),
             };
@@ -315,7 +314,7 @@ impl VariantRegistry {
     ///
     /// 在 build_batch() 阶段调用，收集 batch 中所有请求属性后生成 key
     pub fn derive_key(
-        arch: ModelArchitecture,
+        arch: impl Into<String>,
         has_moe_layers: bool,
         guardrail_active: bool,
         spec_phase: Option<SpecPhase>,
@@ -324,7 +323,7 @@ impl VariantRegistry {
         quant_type: Option<String>,
     ) -> VariantKey {
         VariantKey {
-            arch,
+            arch: arch.into(),
             moe_enabled: has_moe_layers,
             guardrail_enabled: guardrail_active,
             spec_phase,
@@ -345,9 +344,9 @@ impl Default for VariantRegistry {
 mod tests {
     use super::*;
 
-    fn test_key(arch: ModelArchitecture, golden_size: usize) -> VariantKey {
+    fn test_key(arch: &str, golden_size: usize) -> VariantKey {
         VariantKey {
-            arch,
+            arch: arch.to_string(),
             moe_enabled: false,
             guardrail_enabled: false,
             spec_phase: None,
@@ -370,7 +369,7 @@ mod tests {
     #[test]
     fn test_register_and_lookup() {
         let mut registry = VariantRegistry::new();
-        let key = test_key(ModelArchitecture::Qwen3, 64);
+        let key = test_key("qwen3", 64);
         let variant = test_variant(key.clone(), 1024);
 
         registry.register(variant).unwrap();
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn test_l1i_budget_exceeded() {
         let mut registry = VariantRegistry::with_l1i_budget(1024); // tiny budget
-        let key = test_key(ModelArchitecture::Qwen3, 64);
+        let key = test_key("qwen3", 64);
         let variant = test_variant(key, 2048); // exceeds 80% of 1024
 
         let result = registry.register(variant);
@@ -397,14 +396,14 @@ mod tests {
         let mut registry = VariantRegistry::new();
 
         // Register variants for golden_size = 32, 64
-        let key32 = test_key(ModelArchitecture::Qwen3, 32);
+        let key32 = test_key("qwen3", 32);
         registry.register(test_variant(key32, 512)).unwrap();
 
-        let key64 = test_key(ModelArchitecture::Qwen3, 64);
+        let key64 = test_key("qwen3", 64);
         registry.register(test_variant(key64, 1024)).unwrap();
 
         // Look for golden_size=128 — should fall back to 64
-        let query = test_key(ModelArchitecture::Qwen3, 128);
+        let query = test_key("qwen3", 128);
         let found = registry.find_closest(&query).unwrap();
         assert_eq!(found.key.golden_size, 64);
     }
@@ -414,12 +413,12 @@ mod tests {
         let mut registry = VariantRegistry::new();
 
         // Register variant without guardrail
-        let mut key_no_guard = test_key(ModelArchitecture::Qwen3, 64);
+        let mut key_no_guard = test_key("qwen3", 64);
         key_no_guard.guardrail_enabled = false;
         registry.register(test_variant(key_no_guard, 1024)).unwrap();
 
         // Query with guardrail — should relax to non-guardrail variant
-        let mut key_guard = test_key(ModelArchitecture::Qwen3, 64);
+        let mut key_guard = test_key("qwen3", 64);
         key_guard.guardrail_enabled = true;
         let found = registry.find_closest(&key_guard).unwrap();
         assert!(!found.key.guardrail_enabled);
@@ -428,7 +427,7 @@ mod tests {
     #[test]
     fn test_derive_key() {
         let key = VariantRegistry::derive_key(
-            ModelArchitecture::Qwen3,
+            "qwen3",
             true,
             false,
             Some(SpecPhase::Draft),
@@ -436,7 +435,7 @@ mod tests {
             64,
             None,
         );
-        assert_eq!(key.arch, ModelArchitecture::Qwen3);
+        assert_eq!(key.arch, "qwen3");
         assert!(key.moe_enabled);
         assert_eq!(key.spec_phase, Some(SpecPhase::Draft));
         assert_eq!(key.golden_size, 64);
@@ -445,7 +444,7 @@ mod tests {
     #[test]
     fn test_display_key() {
         let key = VariantKey {
-            arch: ModelArchitecture::Qwen3MoE,
+            arch: "qwen3moe".to_string(),
             moe_enabled: true,
             guardrail_enabled: false,
             spec_phase: Some(SpecPhase::Draft),
@@ -454,7 +453,7 @@ mod tests {
             quant_type: None,
         };
         let s = format!("{}", key);
-        assert!(s.contains("Qwen3MoE"));
+        assert!(s.contains("qwen3moe"));
         assert!(s.contains("moe_"));
         assert!(s.contains("draft_"));
     }
@@ -463,11 +462,11 @@ mod tests {
     fn test_max_footprint_tracking() {
         let mut registry = VariantRegistry::new();
 
-        let k1 = test_key(ModelArchitecture::Qwen3, 32);
+        let k1 = test_key("qwen3", 32);
         registry.register(test_variant(k1, 512)).unwrap();
         assert_eq!(registry.max_footprint(), 512);
 
-        let k2 = test_key(ModelArchitecture::Qwen3, 64);
+        let k2 = test_key("qwen3", 64);
         registry.register(test_variant(k2, 2048)).unwrap();
         assert_eq!(registry.max_footprint(), 2048);
     }

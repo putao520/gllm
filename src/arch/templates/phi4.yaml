@@ -1,5 +1,11 @@
 name: phi4
 version: "1.0"
+family: decoder
+aliases:
+  - phi4
+  - phi4forcausallm
+  - phi3
+  - phi3forcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

@@ -27,7 +27,7 @@ use crate::generation::GenerationResponse;
 use crate::knowledge::LayerTarget;
 use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
-    map_architecture_token, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
+    map_architecture_token, MoEConfig, ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use crate::rerank::{RerankResponse, RerankResult};
 use thiserror::Error;
@@ -139,7 +139,7 @@ pub struct PipelineModelState {
     pub manifest: Arc<ModelManifest>,
     pub backend: Arc<BackendContext>,
     /// True when this pipeline model shares the primary model's encoder backend
-    /// (same `ModelArchitecture`). The reranker uses CLS→Classifier while the
+    /// (same architecture). The reranker uses CLS→Classifier while the
     /// embedder uses MeanPool→L2Norm, but the encoder forward pass is identical.
     pub shared_encoder: bool,
 }
@@ -174,20 +174,20 @@ pub struct ClientBuilder {
     generator_model_id: Option<String>,
 }
 
-fn make_dummy_manifest(model_id: &str, arch: ModelArchitecture, kind: ModelKind) -> ModelManifest {
+fn make_dummy_manifest(model_id: &str, arch: impl Into<String>, kind: ModelKind) -> ModelManifest {
     make_dummy_manifest_with_moe(model_id, arch, kind, None)
 }
 
 fn make_dummy_manifest_with_moe(
     model_id: &str,
-    arch: ModelArchitecture,
+    arch: impl Into<String>,
     kind: ModelKind,
     moe_config: Option<MoEConfig>,
 ) -> ModelManifest {
     ModelManifest {
         model_id: Cow::Owned(model_id.to_string()),
         file_map: EMPTY_FILE_MAP,
-        arch,
+        arch: arch.into(),
         kind,
         rope_base_override: None,
         max_context_override: None,
@@ -249,7 +249,7 @@ impl ClientBuilder {
     /// Build the `Client` and load the model synchronously.
     ///
     /// When both an embedder and reranker are configured with the same
-    /// `ModelArchitecture`, the encoder backend is shared (Arc clone) to
+    /// architecture, the encoder backend is shared (Arc clone) to
     /// avoid loading duplicate weights. The reranker uses CLS→Classifier
     /// while the embedder uses MeanPool→L2Norm, but the underlying
     /// encoder forward pass is identical.
@@ -303,17 +303,17 @@ impl ClientBuilder {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
                 if let Some(arch) = map_architecture_token(arch_str) {
-                    let dummy_manifest = make_dummy_manifest(model_id, arch, kind);
+                    let dummy_manifest = make_dummy_manifest(model_id, &arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
                     let moe_config = cfg_result
                         .as_ref()
                         .ok()
-                        .and_then(|cfg| cfg.build_moe_config(arch));
+                        .and_then(|cfg| cfg.build_moe_config(&arch));
                     if let Ok(cfg) = cfg_result {
                         model_config_for_arbiter = Some(cfg);
                     }
-                    make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+                    make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
                 } else {
                     return Err(ClientError::ModelNotFound(format!(
                         "Unsupported GGUF architecture: {}",
@@ -325,16 +325,16 @@ impl ClientBuilder {
                 // Ω1: Tensor-driven derivation (REQ-LOADER-022, REQ-LOADER-023)
                 loader = loader.load()?;
 
-                let dummy_manifest = make_dummy_manifest(model_id, ModelArchitecture::Llama4, kind);
+                let dummy_manifest = make_dummy_manifest(model_id, "llama", kind);
 
                 let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
 
                 let arch = loader.detect_architecture();
-                let moe_config = derived_config.build_moe_config(arch);
+                let moe_config = derived_config.build_moe_config(&arch);
                 model_config_for_arbiter = Some(derived_config);
 
-                make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+                make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
             }
         };
 
@@ -417,7 +417,7 @@ impl ClientBuilder {
     }
 
     /// Build a pipeline sub-model, sharing the primary model's encoder backend
-    /// when both models have the same `ModelArchitecture`.
+    /// when both models have the same architecture.
     ///
     /// This avoids loading duplicate encoder weights for same-architecture pairs
     /// (e.g. BAAI/bge-m3 embedder + BAAI/bge-reranker-v2-m3 reranker, both XLM-R).
@@ -438,7 +438,7 @@ impl ClientBuilder {
             // The reranker uses CLS→Classifier while the embedder uses
             // MeanPool→L2Norm, but the encoder forward pass is identical.
             log::info!(
-                "pipeline: sharing encoder weights between primary ({}) and pipeline ({}) — architecture {:?}",
+                "pipeline: sharing encoder weights between primary ({}) and pipeline ({}) — architecture {}",
                 primary_manifest.model_id, model_id, pipeline_manifest.arch,
             );
             Ok(PipelineModelState {
@@ -450,7 +450,7 @@ impl ClientBuilder {
         } else {
             // Different architecture: load independently.
             log::info!(
-                "pipeline: loading independent backend for {} (arch {:?} != primary {:?})",
+                "pipeline: loading independent backend for {} (arch {} != primary {})",
                 model_id, pipeline_manifest.arch, primary_manifest.arch,
             );
             Self::build_pipeline_model(model_id, kind)
@@ -474,14 +474,14 @@ impl ClientBuilder {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
                 if let Some(arch) = map_architecture_token(arch_str) {
-                    let dummy_manifest = make_dummy_manifest(model_id, arch, kind);
+                    let dummy_manifest = make_dummy_manifest(model_id, &arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
                     let moe_config = cfg_result
                         .as_ref()
                         .ok()
-                        .and_then(|cfg| cfg.build_moe_config(arch));
-                    make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+                        .and_then(|cfg| cfg.build_moe_config(&arch));
+                    make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
                 } else {
                     return Err(ClientError::ModelNotFound(format!(
                         "Unsupported GGUF architecture: {}",
@@ -491,12 +491,12 @@ impl ClientBuilder {
             }
             WeightFormat::SafeTensors | WeightFormat::Onnx | WeightFormat::PyTorch => {
                 loader = loader.load()?;
-                let dummy_manifest = make_dummy_manifest(model_id, ModelArchitecture::Llama4, kind);
+                let dummy_manifest = make_dummy_manifest(model_id, "llama", kind);
                 let derived_config =
                     crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader)?;
                 let arch = loader.detect_architecture();
-                let moe_config = derived_config.build_moe_config(arch);
-                make_dummy_manifest_with_moe(model_id, arch, kind, moe_config)
+                let moe_config = derived_config.build_moe_config(&arch);
+                make_dummy_manifest_with_moe(model_id, &arch, kind, moe_config)
             }
         };
 
@@ -621,7 +621,7 @@ impl Client {
     pub fn model_info(&self) -> Option<ModelInfo> {
         self.state.load().as_ref().map(|loaded| ModelInfo {
             id: loaded.model_id.clone(),
-            arch: loaded.manifest.arch,
+            arch: loaded.manifest.arch.clone(),
             kind: loaded.manifest.kind,
         })
     }
@@ -1278,6 +1278,6 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
-    pub arch: ModelArchitecture,
+    pub arch: String,
     pub kind: ModelKind,
 }

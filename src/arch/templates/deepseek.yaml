@@ -1,5 +1,13 @@
 name: deepseek
 version: "1.0"
+family: decoder
+moe_router: deepseek
+aliases:
+  - deepseek
+  - deepseekv2
+  - deepseekv2forcausallm
+  - deepseekv3
+  - deepseekv3forcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

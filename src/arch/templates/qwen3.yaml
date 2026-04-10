@@ -1,5 +1,17 @@
 name: qwen3
 version: "1.0"
+family: decoder
+moe_router: qwen
+aliases:
+  - qwen3
+  - qwen3forcausallm
+  - qwen3_moe
+  - qwen3moe
+  - qwen3moeforcausallm
+  - qwen2_5
+  - qwen2_5forcausallm
+  - qwen2
+  - qwen2forcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

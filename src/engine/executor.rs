@@ -574,7 +574,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 precompute: true,
             },
             position_encoding,
-            arch_family: manifest.arch.family(),
+            arch_family: manifest.family(),
             rerank_yes_token_id: None,
             rerank_no_token_id: None,
             moe_config: manifest.moe_config,
@@ -629,7 +629,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Build YAML→JIT graph executor (best-effort; None if template not registered).
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         let graph_executor = {
-            use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template_by_arch, ResolvedConfig};
+            use crate::arch::{build_executor_from_yaml, register_builtin_templates, get_template, ResolvedConfig};
             register_builtin_templates();
             let resolved = ResolvedConfig::from_geometry(&geometry, std::collections::HashMap::new());
             let hidden = geometry.hidden_size;
@@ -638,7 +638,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let backend = "cpu";
             let model_id = &manifest.model_id;
             // Look up template name via arch mapping, then build executor
-            get_template_by_arch(manifest.arch)
+            get_template(&manifest.arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
                     build_executor_from_yaml(
@@ -650,7 +650,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         model_id,
                         backend,
                         &cache,
-                        manifest.arch.family(),
+                        manifest.family(),
                     ).map_err(|e| {
                         eprintln!("Failed to build executor from yaml: {}", e);
                         e
@@ -947,7 +947,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Use the new GraphOptimizer to generate FusedGraph
         let ctx = OptimizationContext {
             geometry: geometry.clone(),
-            arch_family: manifest.arch.family(),
+            arch_family: manifest.family(),
             ..Default::default()
         };
         let optimizer = GraphOptimizer::new(ctx);

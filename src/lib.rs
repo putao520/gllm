@@ -39,7 +39,7 @@ pub mod routing;
 pub mod prefetch;
 
 pub use manifest::{
-    ArchFamily, FileMap, MoEConfig, ModelArchitecture, ModelKind, ModelManifest, RouterType,
+    ArchFamily, FileMap, MoEConfig, ModelKind, ModelManifest, RouterType,
 };
 
 // GGUF Loader API (API-GGUF)

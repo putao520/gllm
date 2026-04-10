@@ -15,7 +15,12 @@ mod registry;
 mod resolve;
 mod template;
 
-pub use registry::{get_template, get_template_by_arch, register_builtin_templates, ArchRegistry};
+pub use registry::{
+    get_template, register_builtin_templates,
+    resolve_template, resolve_template_name, resolve_family,
+    resolve_moe_router, is_valid_template,
+    ArchRegistry,
+};
 pub use resolve::{resolve_config, ResolvedConfig};
 pub use template::{ArchTemplate, GraphNode, NodeDef, RepeatBlock};
 

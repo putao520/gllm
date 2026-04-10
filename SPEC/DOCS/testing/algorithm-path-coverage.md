@@ -68,7 +68,7 @@
 | 路径 | 最小可用模型 | 大小 | 可行性 |
 |------|------------|------|--------|
 | **G-D** (GeGLU+Softcap) | `google/gemma-2-2b-it` | 2B | ✅ 可行，模型公开可用 |
-| **G-E** (Legacy GELU) | `openai-community/gpt2` | 124M | ✅ 极易，但需先注册 gpt2next 模板 |
+| **G-E** (Legacy GELU) | `openai/gpt-oss-1.5b` | 1.5B | ✅ 已注册，模板通过 build.rs 自动扫描 |
 
 ### 4.2 需要 GGUF 量化版的缺口 (原始模型过大)
 
@@ -84,11 +84,11 @@
 | **G-F** (DeepSeek MoE) | DeepSeek-V3 | 671B | 单元测试覆盖 MoERouter+MoEDispatch |
 | **G-G** (Qwen MoE) | Qwen3-MoE-A22B | 235B | 单元测试覆盖 MoE 路由 |
 
-### 4.4 代码缺口 (SPEC 声明但未实现)
+### 4.4 代码缺口
 
-| 问题 | 详情 |
-|------|------|
-| **GPT-2-Next 未注册** | `gpt2next.yaml` 模板存在但 `registry.rs` 中没有注册，`ModelArchitecture` 枚举中没有 `Gpt2Next` 变体 |
+| 问题 | 详情 | 状态 |
+|------|------|------|
+| ~~GPT-OSS 未注册~~ | `gpt2next.yaml` 模板已通过 build.rs 扫描自动注册 | ✅ 已修复 |
 
 ## 5. E2E 测试最终方案 (每路径一个代表)
 
@@ -98,7 +98,7 @@
 |------|---------|------|---------|
 | G-A | SmolLM2-135M / Qwen3-0.6B | ST+GGUF+ONNX | ✅ 已有 |
 | G-D | gemma-2-2b-it | ST (或 GGUF) | 🔴 需新增：GeGLU + Softcap + LogitSoftCap + 4×Norm |
-| G-E | openai-community/gpt2 (124M) | ST | 🔴 需新增：LayerNorm+Bias + GELU + AbsolutePos + FusedQKV (需先注册架构) |
+| G-E | openai/gpt-oss-1.5b | ST | 🔴 需新增：LayerNorm+Bias + GELU + AbsolutePos + FusedQKV |
 | G-B | mistral-small-3.2 Q4_K_M | GGUF | 🟡 可选：Sliding Window |
 | G-C | phi-4-mini Q4_K_M | GGUF | 🟡 可选：Partial RoPE |
 

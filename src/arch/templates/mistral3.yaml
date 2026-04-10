@@ -1,5 +1,11 @@
 name: mistral3
 version: "1.0"
+family: decoder
+aliases:
+  - mistral
+  - mistralforcausallm
+  - ministral
+  - ministralforcausallm
 
 config:
   num_layers: "${num_hidden_layers}"

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use gllm::manifest::{
-    ModelArchitecture, ModelKind, ModelManifest, EMPTY_FILE_MAP,
+    ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
 use gllm::scheduler::{GroupState, HGALConfig, HGALScheduler, SequenceGroup};
 use gllm::scheduler::PageState;
@@ -23,7 +23,7 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
     let manifest = ModelManifest {
         model_id: Cow::Borrowed("Qwen/Qwen3-235B-A22B-Instruct"),
         file_map: EMPTY_FILE_MAP,
-        arch: ModelArchitecture::Qwen3MoE,
+        arch: "qwen3moe".to_string(),
         kind: ModelKind::Chat,
         rope_base_override: None,
         max_context_override: None,
@@ -32,7 +32,7 @@ fn qwen3_moe_manifest_selects_moe_adapter() {
     };
     assert!(manifest.is_moe(), "qwen3-moe should be marked as MoE");
     // Post-REQ-REFACTOR-001: adapter removed, architecture-based routing now handled by loader
-    assert_eq!(manifest.arch, ModelArchitecture::Qwen3MoE);
+    assert_eq!(manifest.arch, "qwen3moe");
 }
 
 /// TEST-MOE-002: MoE 路由器优先驱逐冷专家

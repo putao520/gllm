@@ -1,5 +1,12 @@
 name: xlmr
 version: "1.0"
+family: encoder
+aliases:
+  - xlm_roberta
+  - xlm_roberta_model
+  - xlmr
+  - roberta
+  - bert
 
 config:
   num_layers: "${num_hidden_layers}"

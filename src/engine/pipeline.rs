@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::compat::backend_trait::{Backend, Element};
 
 use crate::arch::{
-    get_template_by_arch, register_builtin_templates, resolve_config, ArchTemplate, ResolvedConfig,
+    get_template, register_builtin_templates, resolve_config, ArchTemplate, ResolvedConfig,
 };
 use crate::graph::{
     executor::{ExecutionError, ExecutionPlan, FusedGraphExecutor},
@@ -17,7 +17,7 @@ use crate::graph::{
 };
 use crate::loader::onnx::OnnxGraph;
 use crate::loader::{Loader, LoaderError, WeightFormat, WeightsHandle};
-use crate::manifest::{ModelArchitecture, ModelManifest};
+use crate::manifest::ModelManifest;
 
 /// 统一推理管道错误
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +82,7 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         // 1. 检测架构并获取模板
         loader.set_manifest_if_missing(manifest);
         let arch = loader.detect_architecture();
-        let (template, config) = resolve_template_and_config(&loader, arch)?;
+        let (template, config) = resolve_template_and_config(&loader, &arch)?;
 
         // 2. 生成或获取 OnnxGraph
         let original_graph = build_onnx_graph(&mut loader, template, &config)?;
@@ -214,10 +214,10 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
 /// 解析模板和配置
 fn resolve_template_and_config(
     loader: &Loader,
-    arch: ModelArchitecture,
+    arch: &str,
 ) -> Result<(&'static ArchTemplate, ResolvedConfig), PipelineError> {
-    let template = get_template_by_arch(arch)
-        .ok_or_else(|| PipelineError::TemplateNotFound(format!("{arch:?}")))?;
+    let template = get_template(arch)
+        .ok_or_else(|| PipelineError::TemplateNotFound(arch.to_string()))?;
 
     // 根据格式获取 TensorProvider 并解析配置
     let config = match loader.weight_format() {

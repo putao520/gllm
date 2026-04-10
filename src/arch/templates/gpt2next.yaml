@@ -1,5 +1,11 @@
 name: gpt2next
 version: "1.0"
+family: decoder
+aliases:
+  - gpt2next
+  - gpt2nextforcausallm
+  - gptoss
+  - gptossforcausallm
 
 config:
   num_layers: "${num_hidden_layers}"
