@@ -399,3 +399,73 @@ fn e2e_fusion_consistency_with_standalone() {
         "Fusion result should have rerank_scores"
     );
 }
+
+// ============================================================================
+// TEST-E2E-FUSION-005: 跨架构 Embed+Rerank (Encoder+Decoder)
+// ============================================================================
+
+/// 验证不同架构族的模型可以在融合管线中组合使用:
+/// - Embedding: XlmR (Encoder 架构, intfloat/e5-small-v2)
+/// - Reranker: Qwen3 (Decoder 架构, DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF)
+///
+/// 跨架构组合是 gllm 融合管线的关键能力 — Encoder 产出 embedding 向量,
+/// Decoder 架构的 reranker 基于交叉注意力机制对 query-document 对进行精排。
+/// 两种架构的内部算子路径完全不同 (LayerNorm vs RMSNorm, AbsolutePos vs RoPE,
+/// GELU vs SwiGLU), 本测试验证管线能正确桥接异构模型。
+///
+/// **关联需求**: REQ-TEST-003, REQ-TEST-004
+/// **测试类型**: 正向 (跨架构融合)
+#[test]
+fn e2e_fusion_cross_arch_embed_rerank() {
+    const EMBED_MODEL: &str = "intfloat/e5-small-v2";
+    const RERANKER_MODEL: &str = "DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF";
+
+    let client = Client::builder()
+        .model(EMBED_MODEL)
+        .kind(gllm::ModelKind::Embedding)
+        .reranker(RERANKER_MODEL)
+        .build()
+        .expect("Failed to build cross-arch fusion client");
+
+    let documents = vec![
+        "Paris is the capital of France.",
+        "The Eiffel Tower is located in Paris.",
+        "Berlin is the capital of Germany.",
+        "London is the capital of England.",
+        "Tokyo is the capital of Japan.",
+    ];
+
+    let response = client
+        .embed_builder(documents.clone())
+        .rerank_query("What is the capital of France?")
+        .generate()
+        .expect("Cross-arch embed+rerank pipeline failed");
+
+    // 1. 结果数量正确
+    assert_eq!(
+        response.embeddings.len(),
+        5,
+        "Should have 5 embeddings"
+    );
+
+    // 2. rerank_scores 必须存在
+    let scores = response
+        .rerank_scores
+        .as_ref()
+        .expect("rerank_scores should be present in cross-arch fusion pipeline");
+    assert_eq!(scores.len(), 5, "Should have 5 rerank scores");
+
+    // 3. embedding 反退化检查 (Encoder 架构输出)
+    for (i, emb) in response.embeddings.iter().enumerate() {
+        assert_embedding_sane(&emb.embedding, &format!("cross_arch_embed[{i}]"));
+    }
+
+    // 4. rerank scores 反退化检查 (Decoder 架构输出)
+    assert_scores_sane(scores, "cross_arch_rerank");
+
+    // 5. 最相关文档应该排在前面 (Paris/France 相关的文档)
+    assert!(
+        scores[0] >= scores[1],
+        "First result should have highest rerank score"
+    );
+}
