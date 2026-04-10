@@ -730,6 +730,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                     return Some(t.as_ref().as_ptr() as *const f32);
                                 }
                             }
+                            // tie_word_embeddings: lm_head.weight → model.embed_tokens.weight
+                            if canonical_name == "lm_head.weight" {
+                                const EMBED_ALIASES: &[&str] = &[
+                                    "model.embed_tokens.weight", "embed_tokens.weight",
+                                    "transformer.wte.weight", "embeddings.word_embeddings.weight",
+                                ];
+                                for alias in EMBED_ALIASES {
+                                    if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
+                                        return Some(t.as_ref().as_ptr() as *const f32);
+                                    }
+                                }
+                            }
                             None
                         });
                         if let Some(ptr) = found {
