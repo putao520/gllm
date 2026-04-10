@@ -271,6 +271,10 @@ pub struct ModelConfig {
     /// PLE 每层注入维度
     pub hidden_size_per_layer_input: Option<usize>,
 
+    /// MTP (Multi-Token Prediction) 预测深度
+    /// 从 config.json 的 `num_nextn_predict_layers` 或 `mtp_depth` 解析
+    pub mtp_depth: Option<usize>,
+
     // ── Multimodal: Vision Encoder (SigLIP) ──
     /// Vision encoder configuration parsed from `"vision_config"` sub-object.
     /// Present only for multimodal models (e.g. Gemma 4).

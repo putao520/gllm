@@ -595,6 +595,120 @@ impl GenerationOutput {
     }
 }
 
+// ============================================================================
+// ThinkingTracker — 实时思考 token 标记
+// ============================================================================
+
+/// 思考状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingState {
+    /// 正常生成 (非思考阶段)
+    Normal,
+    /// 正在生成思考内容
+    Thinking,
+    /// 思考已结束
+    Done,
+    /// 思考被预算截断
+    BudgetExhausted,
+}
+
+/// 思考 token 实时追踪器。
+///
+/// 在生成循环中逐 token 追踪 `<thinking>` / `</thinking>` 标签，
+/// 标记每个 token 是否属于思考阶段。供 KV cache 跳过 (T4) 和
+/// thinking budget 截断使用。
+///
+/// 工作方式: 累积解码文本，检测标签出现。
+/// 不依赖特殊 token ID（模型可能用不同的 tokenizer 切分标签）。
+#[derive(Debug, Clone)]
+pub struct ThinkingTracker {
+    state: ThinkingState,
+    /// 已生成的思考 token 数量
+    thinking_token_count: usize,
+    /// 思考 token 上限 (None = 无限)
+    budget: Option<usize>,
+    /// 累积解码文本 (用于检测标签)
+    accumulated_text: String,
+    /// 已消费的文本位置
+    consumed_pos: usize,
+}
+
+impl ThinkingTracker {
+    pub fn new(budget: Option<usize>) -> Self {
+        // budget = Some(0) → 直接标记为 Done (禁止思考)
+        let state = if budget == Some(0) {
+            ThinkingState::Done
+        } else {
+            ThinkingState::Normal
+        };
+        Self {
+            state,
+            thinking_token_count: 0,
+            budget,
+            accumulated_text: String::new(),
+            consumed_pos: 0,
+        }
+    }
+
+    /// 喂入新的解码文本片段，更新状态。
+    /// 返回当前 token 是否属于思考阶段。
+    pub fn feed(&mut self, decoded_text: &str) -> bool {
+        if self.state == ThinkingState::Done || self.state == ThinkingState::BudgetExhausted {
+            return false;
+        }
+
+        self.accumulated_text.push_str(decoded_text);
+        let text = &self.accumulated_text[self.consumed_pos..];
+
+        match self.state {
+            ThinkingState::Normal => {
+                if let Some(pos) = text.find("<thinking>") {
+                    self.consumed_pos += pos + "<thinking>".len();
+                    self.state = ThinkingState::Thinking;
+                    self.thinking_token_count += 1;
+                    return true;
+                }
+                false
+            }
+            ThinkingState::Thinking => {
+                self.thinking_token_count += 1;
+
+                // 检查预算
+                if let Some(max) = self.budget {
+                    if self.thinking_token_count >= max {
+                        self.state = ThinkingState::BudgetExhausted;
+                        return true;
+                    }
+                }
+
+                // 检查结束标签
+                if let Some(pos) = text.find("</thinking>") {
+                    self.consumed_pos += pos + "</thinking>".len();
+                    self.state = ThinkingState::Done;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn state(&self) -> ThinkingState {
+        self.state
+    }
+
+    pub fn is_thinking(&self) -> bool {
+        self.state == ThinkingState::Thinking
+    }
+
+    pub fn thinking_token_count(&self) -> usize {
+        self.thinking_token_count
+    }
+
+    pub fn is_budget_exhausted(&self) -> bool {
+        self.state == ThinkingState::BudgetExhausted
+    }
+}
+
 /// Split thinking content from generated text (internal helper).
 pub fn split_thinking_content(text: &str) -> (String, Option<String>) {
     let start_marker = "<thinking>";
@@ -627,5 +741,44 @@ mod tests {
         let (text, thinking) = split_thinking_content("Hello world");
         assert_eq!(text, "Hello world");
         assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn test_thinking_tracker_normal_flow() {
+        let mut tracker = ThinkingTracker::new(None);
+        assert!(!tracker.feed("Hello "));
+        assert_eq!(tracker.state(), ThinkingState::Normal);
+
+        // 进入思考
+        assert!(tracker.feed("<thinking>"));
+        assert_eq!(tracker.state(), ThinkingState::Thinking);
+
+        // 思考中
+        assert!(tracker.feed("let me think..."));
+        assert!(tracker.is_thinking());
+
+        // 结束思考
+        assert!(tracker.feed("</thinking>"));
+        assert_eq!(tracker.state(), ThinkingState::Done);
+
+        // 后续 token 不是思考
+        assert!(!tracker.feed(" The answer is 42."));
+    }
+
+    #[test]
+    fn test_thinking_tracker_budget() {
+        let mut tracker = ThinkingTracker::new(Some(3));
+        assert!(tracker.feed("<thinking>"));
+        assert!(tracker.feed("tok1 ")); // count=2
+        assert!(tracker.feed("tok2 ")); // count=3, budget exhausted
+        assert!(tracker.is_budget_exhausted());
+        assert!(!tracker.feed("tok3 ")); // 超出预算，不再计为思考
+    }
+
+    #[test]
+    fn test_thinking_tracker_disabled() {
+        let mut tracker = ThinkingTracker::new(Some(0));
+        assert_eq!(tracker.state(), ThinkingState::Done);
+        assert!(!tracker.feed("<thinking>anything</thinking>"));
     }
 }

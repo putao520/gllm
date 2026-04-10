@@ -18,14 +18,18 @@
 
 pub mod adapter;
 pub mod cache;
+pub mod eagle;
 pub mod engine;
+pub mod mtp;
 pub mod tree;
 pub mod verify;
 
 // Re-export core types
 pub use adapter::{DraftAdapter, AdapterConfig};
 pub use cache::{SpeculationCache, CacheEntry, FallbackStrategy};
+pub use eagle::{EagleConfig, EagleHead};
 pub use engine::{SpecDecodingState, SpecDecodingMode};
+pub use mtp::{MtpConfig, MtpHead};
 pub use tree::{SpecTree, SpecNode, SpecTreeConfig, DraftSource, NgramIndex};
 pub use verify::{
     VerifyResult, SequenceVerifyResult, EqSpecInvariant, EqSpecCheckResult,

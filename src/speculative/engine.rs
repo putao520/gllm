@@ -31,6 +31,10 @@ pub enum SpecDecodingMode {
     Eesd,
     /// §17.10 SAGUARO: 多 GPU, 独立 draft GPU + target GPU pool
     Saguaro,
+    /// EAGLE: 训练好的轻量 draft head (1-2 层 transformer)
+    Eagle,
+    /// MTP: 模型内置多 token 预测 (DeepSeek V3, Qwen3)
+    Mtp,
     /// 标准解码 (推测解码被禁用或回退)
     Standard,
 }
