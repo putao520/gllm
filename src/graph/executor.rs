@@ -293,6 +293,7 @@ fn build_rope_graph(
         OpKind::RoPE {
             head_dim: config.head_dim,
             theta: config.rope_theta,
+            partial: 1.0,
         },
         vec![input],
         vec![out],
@@ -354,7 +355,7 @@ fn build_fused_qkv_rope_graph(
     {
         let q_rope = g.add_tensor_concrete("q_rope", &[seq_len, q_dim], dt);
         g.add_op(
-            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
+            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
             vec![q_out],
             vec![q_rope],
             "rope_q",
@@ -362,7 +363,7 @@ fn build_fused_qkv_rope_graph(
 
         let k_rope = g.add_tensor_concrete("k_rope", &[seq_len, kv_dim], dt);
         g.add_op(
-            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta },
+            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
             vec![k_out],
             vec![k_rope],
             "rope_k",
