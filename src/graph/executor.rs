@@ -226,27 +226,32 @@ struct CompiledNode {
 /// Build a CompilerGraph for FlashAttention.
 ///
 /// Q[s,h], K[s,h], V[s,h] → MultiHeadAttention → out[s,h]
+/// Build a CompilerGraph for FlashAttention with symbolic seq_len.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_flash_attention_graph(
     config: &FlashAttentionConfig,
-    seq_len: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let h = config.num_heads * config.head_dim;
 
-    let q = g.add_tensor_concrete("q", &[seq_len, h], dt);
-    let k = g.add_tensor_concrete("k", &[seq_len, h], dt);
-    let v = g.add_tensor_concrete("v", &[seq_len, h], dt);
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048),
+    };
+
+    let q = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
+    let k = g.add_tensor("k", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
+    let v = g.add_tensor("v", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
     g.inputs = vec![q, k, v];
 
-    let out = g.add_tensor_concrete("attn_out", &[seq_len, h], dt);
+    let out = g.add_tensor("attn_out", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
     g.add_op(
         OpKind::MultiHeadAttention {
-            seq_len,
+            seq_len: seq_len_sym,
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
@@ -668,10 +673,10 @@ fn build_ple_graph(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn atomic_op_to_kind(
     op_type: &str,
-    input_shapes: &[Vec<usize>],
+    input_shapes: &[Vec<gllm_kernels::compiler::SymDim>],
     dtype: gllm_kernels::types::DType,
 ) -> Result<gllm_kernels::compiler::OpKind, ExecutionError> {
-    use gllm_kernels::compiler::OpKind;
+    use gllm_kernels::compiler::{OpKind, SymDim};
 
     match op_type {
         "Add" => Ok(OpKind::Add),
@@ -682,7 +687,7 @@ fn atomic_op_to_kind(
         "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "Softmax" => {
             let vocab_size = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
-                input_shapes[0][input_shapes[0].len() - 1]
+                input_shapes[0][input_shapes[0].len() - 1].as_concrete().unwrap_or(1)
             } else {
                 1
             };
@@ -690,7 +695,7 @@ fn atomic_op_to_kind(
         }
         "Residual" => {
             let hidden = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
-                input_shapes[0][input_shapes[0].len() - 1]
+                input_shapes[0][input_shapes[0].len() - 1].as_concrete().unwrap_or(1)
             } else {
                 1
             };
@@ -708,9 +713,27 @@ fn atomic_op_to_kind(
             }
             let a = &input_shapes[0];
             let b = &input_shapes[1];
-            let m = a[a.len() - 2];
-            let k = a[a.len() - 1];
-            let n = b[b.len() - 1];
+            let m = a[a.len() - 2].clone();
+            let k_a = &a[a.len() - 1];
+            let k_b = &b[b.len() - 2];
+            let n_dim = &b[b.len() - 1];
+
+            // K dimensions must match (both Concrete with same value, or both Symbolic with same name)
+            let k = match (k_a, k_b) {
+                (SymDim::Concrete(ka), SymDim::Concrete(kb)) if ka == kb => *ka,
+                (SymDim::Concrete(ka), _) => *ka,
+                (_, SymDim::Concrete(kb)) => *kb,
+                _ => return Err(ExecutionError::ShapeMismatch(format!(
+                    "MatMul K dimension mismatch: {:?} vs {:?}", k_a, k_b
+                ))),
+            };
+
+            let n = n_dim.as_concrete().ok_or_else(|| {
+                ExecutionError::ShapeMismatch(format!(
+                    "MatMul N dimension must be Concrete, got {:?}", n_dim
+                ))
+            })?;
+
             Ok(OpKind::Gemm { m, n, k, dtype })
         }
         "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
@@ -723,12 +746,12 @@ fn atomic_op_to_kind(
     }
 }
 
-/// Build a CompilerGraph for a single atomic operation.
+/// Build a CompilerGraph for a single atomic operation with SymDim shapes.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_atomic_graph(
     op_type: &str,
-    input_shapes: &[Vec<usize>],
-    output_shape: &[usize],
+    input_shapes: &[Vec<gllm_kernels::compiler::SymDim>],
+    output_shape: &[gllm_kernels::compiler::SymDim],
     dtype: gllm_kernels::types::DType,
 ) -> Result<gllm_kernels::compiler::CompilerGraph, ExecutionError> {
     use gllm_kernels::compiler::CompilerGraph;
@@ -740,18 +763,22 @@ fn build_atomic_graph(
     let mut input_ids = Vec::new();
     for (i, shape) in input_shapes.iter().enumerate() {
         let name = format!("input_{i}");
-        let tid = g.add_tensor_concrete(&name, shape, dt);
+        let tid = g.add_tensor(&name, shape.clone(), dt);
         input_ids.push(tid);
     }
     g.inputs = input_ids.clone();
 
-    let out = g.add_tensor_concrete("output", output_shape, dt);
+    let out = g.add_tensor("output", output_shape.to_vec(), dt);
 
     match kind {
-        gllm_kernels::compiler::OpKind::SoftmaxWithEntropy { .. } 
+        gllm_kernels::compiler::OpKind::SoftmaxWithEntropy { .. }
         | gllm_kernels::compiler::OpKind::ResidualWithTelemetry { .. } => {
-            let seq_len = if !input_shapes.is_empty() { input_shapes[0][0] } else { 1 };
-            let out_telemetry = g.add_tensor_concrete("telemetry", &[seq_len], dt);
+            let seq_len_dim = if !input_shapes.is_empty() {
+                input_shapes[0][0].clone()
+            } else {
+                gllm_kernels::compiler::SymDim::Concrete(1)
+            };
+            let out_telemetry = g.add_tensor("telemetry", vec![seq_len_dim], dt);
             g.add_op(kind.clone(), input_ids.clone(), vec![out, out_telemetry], op_type);
             g.outputs = vec![out, out_telemetry];
         }
@@ -764,8 +791,13 @@ fn build_atomic_graph(
     Ok(g)
 }
 
-/// Infer output shape from op type and input shapes.
-fn infer_output_shape(op_type: &str, input_shapes: &[Vec<usize>]) -> Vec<usize> {
+/// Infer output shape from op type and input shapes (SymDim version).
+fn infer_output_shape(
+    op_type: &str,
+    input_shapes: &[Vec<gllm_kernels::compiler::SymDim>],
+) -> Vec<gllm_kernels::compiler::SymDim> {
+    use gllm_kernels::compiler::SymDim;
+
     match op_type {
         "MatMul" | "Gemm" => {
             if input_shapes.len() >= 2
@@ -774,11 +806,11 @@ fn infer_output_shape(op_type: &str, input_shapes: &[Vec<usize>]) -> Vec<usize> 
             {
                 let a = &input_shapes[0];
                 let b = &input_shapes[1];
-                vec![a[a.len() - 2], b[b.len() - 1]]
+                vec![a[a.len() - 2].clone(), b[b.len() - 1].clone()]
             } else if !input_shapes.is_empty() {
                 input_shapes[0].clone()
             } else {
-                vec![1]
+                vec![SymDim::Concrete(1)]
             }
         }
         // Elementwise ops preserve the first input's shape
@@ -786,7 +818,7 @@ fn infer_output_shape(op_type: &str, input_shapes: &[Vec<usize>]) -> Vec<usize> 
             if !input_shapes.is_empty() {
                 input_shapes[0].clone()
             } else {
-                vec![1]
+                vec![SymDim::Concrete(1)]
             }
         }
     }
@@ -1097,7 +1129,7 @@ impl FusedGraphExecutor {
 
         match &node.op {
             FusedOp::FlashAttention(config) => {
-                let g = build_flash_attention_graph(config, seq_len, dtype);
+                let g = build_flash_attention_graph(config, dtype);
                 let h = config.num_heads * config.head_dim;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
                 Ok(NodeGraphBuild {
@@ -1224,15 +1256,21 @@ impl FusedGraphExecutor {
                 }
                 let is_matmul = atomic.op_type == "MatMul" || atomic.op_type == "Gemm";
 
+                use gllm_kernels::compiler::SymDim;
+                let seq_len_sym = SymDim::Symbolic {
+                    name: "seq_len".to_string(),
+                    max_value: Some(2048),
+                };
+
                 // First pass: collect raw shapes (weight shapes transposed for MatMul)
-                let mut input_shapes: Vec<Vec<usize>> = node
+                let mut input_shapes: Vec<Vec<SymDim>> = node
                     .inputs
                     .iter()
                     .enumerate()
                     .map(|(i, name)| {
                         if let Some(wb) = self.graph.weight_bindings.get(name) {
                             if !wb.shape.is_empty() {
-                                let mut shape = wb.shape.clone();
+                                let mut shape: Vec<SymDim> = wb.shape.iter().map(|&d| SymDim::Concrete(d)).collect();
                                 // SafeTensors stores Linear weights as [out_features, in_features]
                                 // (PyTorch convention). infer_output_shape/atomic_op_to_kind use
                                 // math convention [K, N] where K=in, N=out.
@@ -1243,7 +1281,7 @@ impl FusedGraphExecutor {
                                 return shape;
                             }
                         }
-                        vec![seq_len, hidden]
+                        vec![seq_len_sym.clone(), SymDim::Concrete(hidden)]
                     })
                     .collect();
 
@@ -1252,19 +1290,29 @@ impl FusedGraphExecutor {
                 // defaults to [seq_len, hidden]. But if the weight shape is known, the activation's
                 // K dimension must match the weight's K dimension.
                 if is_matmul && input_shapes.len() >= 2 {
-                    let weight_k = input_shapes[1].first().copied().unwrap_or(0);
-                    if weight_k > 0 && input_shapes[0].len() >= 2 {
-                        let act_k = input_shapes[0][input_shapes[0].len() - 1];
-                        if act_k != weight_k && !self.graph.weight_bindings.contains_key(&node.inputs[0]) {
-                            // Activation shape was defaulted; fix K from weight
-                            let m = input_shapes[0][input_shapes[0].len() - 2];
-                            input_shapes[0] = vec![m, weight_k];
+                    if let Some(weight_k_dim) = input_shapes[1].first() {
+                        if let SymDim::Concrete(weight_k) = weight_k_dim {
+                            if input_shapes[0].len() >= 2 {
+                                let act_k_dim = &input_shapes[0][input_shapes[0].len() - 1];
+                                let needs_fix = match act_k_dim {
+                                    SymDim::Concrete(act_k) => act_k != weight_k,
+                                    _ => false,
+                                };
+                                if needs_fix && !self.graph.weight_bindings.contains_key(&node.inputs[0]) {
+                                    // Activation shape was defaulted; fix K from weight
+                                    let m = input_shapes[0][input_shapes[0].len() - 2].clone();
+                                    input_shapes[0] = vec![m, SymDim::Concrete(*weight_k)];
+                                }
+                            }
                         }
                     }
                 }
 
                 let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
-                let output_numel: usize = output_shape.iter().product();
+
+                // Calculate output_numel: use max_for_allocation for Symbolic dims
+                let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(2048)).product();
+
                 let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape, dtype)?;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
 
@@ -2385,7 +2433,7 @@ mod tests {
             scale: None,
             causal: true,
         };
-        let g = build_flash_attention_graph(&config, 4, gllm_kernels::types::DType::F32);
+        let g = build_flash_attention_graph(&config, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // Q, K, V
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 1); // MHA
