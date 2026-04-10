@@ -49,7 +49,7 @@ graph:
       nodes:
         - name: "layer_${i}_ln1"
           op_type: LayerNormalization
-          inputs: ["hidden_${i}", "transformer.h.${i}.ln_1.weight", "transformer.h.${i}.ln_1.bias"]
+          inputs: ["hidden_0", "transformer.h.${i}.ln_1.weight", "transformer.h.${i}.ln_1.bias"]
           outputs: ["layer_${i}_normed"]
 
         - name: "layer_${i}_c_attn"
@@ -84,7 +84,7 @@ graph:
 
         - name: "layer_${i}_residual_add"
           op_type: Add
-          inputs: ["hidden_${i}", "layer_${i}_attn_biased"]
+          inputs: ["hidden_0", "layer_${i}_attn_biased"]
           outputs: ["layer_${i}_residual"]
 
         - name: "layer_${i}_ln2"
@@ -120,7 +120,7 @@ graph:
         - name: "layer_${i}_output_add"
           op_type: Add
           inputs: ["layer_${i}_residual", "layer_${i}_mlp_out"]
-          outputs: ["hidden_${i}"]
+          outputs: ["hidden_0"]
 
     - name: final_norm
       op_type: LayerNormalization

@@ -37,7 +37,7 @@ graph:
       shape: [batch, seq_len]
 
   outputs:
-    - name: hidden_out
+    - name: hidden_0
       dtype: "${dtype}"
       shape: [batch, seq_len, "${hidden_size}"]
 
@@ -77,7 +77,7 @@ graph:
       nodes:
         - name: "layer_${i}_q_proj"
           op_type: MatMul
-          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.query.weight"]
+          inputs: ["hidden_0", "roberta.encoder.layer.${i}.attention.self.query.weight"]
           outputs: ["layer_${i}_q"]
 
         - name: "layer_${i}_q_bias"
@@ -87,7 +87,7 @@ graph:
 
         - name: "layer_${i}_k_proj"
           op_type: MatMul
-          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.key.weight"]
+          inputs: ["hidden_0", "roberta.encoder.layer.${i}.attention.self.key.weight"]
           outputs: ["layer_${i}_k"]
 
         - name: "layer_${i}_k_bias"
@@ -97,7 +97,7 @@ graph:
 
         - name: "layer_${i}_v_proj"
           op_type: MatMul
-          inputs: ["hidden_${i}", "roberta.encoder.layer.${i}.attention.self.value.weight"]
+          inputs: ["hidden_0", "roberta.encoder.layer.${i}.attention.self.value.weight"]
           outputs: ["layer_${i}_v"]
 
         - name: "layer_${i}_v_bias"
@@ -124,7 +124,7 @@ graph:
 
         - name: "layer_${i}_residual_add"
           op_type: Add
-          inputs: ["hidden_${i}", "layer_${i}_attn_biased"]
+          inputs: ["hidden_0", "layer_${i}_attn_biased"]
           outputs: ["layer_${i}_attn_residual"]
 
         - name: "layer_${i}_attn_norm"
@@ -165,7 +165,7 @@ graph:
         - name: "layer_${i}_output_norm"
           op_type: LayerNormalization
           inputs: ["layer_${i}_ffn_residual_out", "roberta.encoder.layer.${i}.output.LayerNorm.weight", "roberta.encoder.layer.${i}.output.LayerNorm.bias"]
-          outputs: ["hidden_${i}"]
+          outputs: ["hidden_0"]
 
 fusion_hints:
   - pattern: [q_proj, q_bias, k_proj, k_bias, v_proj, v_bias]

@@ -618,8 +618,8 @@ fn atomic_op_to_kind(
     match op_type {
         "Add" => Ok(OpKind::Add),
         "Mul" => Ok(OpKind::Mul),
-        "Silu" | "Swish" => Ok(OpKind::Silu),
-        "Gelu" => Ok(OpKind::Gelu),
+        "Silu" | "SiLU" | "Swish" => Ok(OpKind::Silu),
+        "Gelu" | "GELU" => Ok(OpKind::Gelu),
         "SimplifiedLayerNormalization" => Ok(OpKind::RmsNorm { eps: 1e-6 }),
         "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "Softmax" => {

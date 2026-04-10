@@ -699,6 +699,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         }
                     }
                 }
+                let _total_expected = expected_names.len();
+                let mut _bound_count = 0usize;
                 for canonical_name in expected_names {
                     // Try direct lookup first
                     let found = TensorLookup::get_tensor(&weights, &canonical_name)
@@ -725,9 +727,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     });
                     if let Some(ptr) = found {
                         ge = ge.bind(canonical_name.clone(), ptr);
+                        _bound_count += 1;
                     } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
                         let ptr = q_tensor.data.as_ptr() as *const f32;
                         ge = ge.bind(canonical_name.clone(), ptr);
+                        _bound_count += 1;
                     }
                 }
                 bound_executor = Some(ge);

@@ -55,7 +55,7 @@ graph:
       nodes:
         - name: "layer_${i}_input_norm"
           op_type: SimplifiedLayerNormalization
-          inputs: ["hidden_${i}", "model.layers.${i}.input_layernorm.weight"]
+          inputs: ["hidden_0", "model.layers.${i}.input_layernorm.weight"]
           outputs: ["layer_${i}_normed"]
 
         - name: "layer_${i}_q_proj"
@@ -92,7 +92,7 @@ graph:
 
         - name: "layer_${i}_residual_add"
           op_type: Add
-          inputs: ["hidden_${i}", "layer_${i}_attn_proj"]
+          inputs: ["hidden_0", "layer_${i}_attn_proj"]
           outputs: ["layer_${i}_residual"]
 
         - name: "layer_${i}_post_norm"
@@ -145,7 +145,7 @@ graph:
         - name: "layer_${i}_output_add"
           op_type: Add
           inputs: ["layer_${i}_residual", "layer_${i}_mlp_out"]
-          outputs: ["hidden_${i}"]
+          outputs: ["hidden_0"]
 
     - name: final_norm
       op_type: SimplifiedLayerNormalization
