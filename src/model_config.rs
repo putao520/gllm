@@ -35,6 +35,34 @@ pub struct ModelGeometry {
     pub rope_scale: f64,
     pub rope_interleaved: bool,
 
+    // ── Gemma 4: Dual RoPE ──
+    /// Global attention 层的 RoPE θ (Gemma 4: 1,000,000)。
+    /// 为 0 时表示不使用 dual RoPE (所有层使用 rope_theta)。
+    pub global_rope_theta: f64,
+    /// Global attention 层的 RoPE partial 旋转比例 (Gemma 4: 0.25 = p-RoPE)。
+    /// 1.0 表示全维度旋转 (标准 RoPE)。
+    pub rope_partial_ratio: f32,
+
+    // ── Gemma 4: Per-layer attention pattern ──
+    /// 每层注意力类型: 0=sliding-window, 1=global。
+    /// 空 Vec 表示所有层使用同一类型。
+    pub attention_pattern: Vec<u8>,
+    /// Sliding-window 注意力的窗口大小 (token 数)。
+    pub sliding_window: usize,
+
+    // ── Gemma 4: Shared KV ──
+    /// 后 N 层复用前一个非共享层的 KV cache。0 = 不共享。
+    pub num_kv_shared_layers: usize,
+
+    // ── Gemma 4: Global attention head_dim ──
+    /// Global attention 层的 head_dim (Gemma 4: 512，sliding 用 256)。
+    /// 0 表示与 head_dim 相同。
+    pub global_head_dim: usize,
+
+    // ── Gemma 4: PLE ──
+    /// Per-Layer Embedding 每层注入维度。0 = 不使用 PLE。
+    pub hidden_size_per_layer_input: usize,
+
     // ── Precision ──
     pub dtype: DType,
     pub norm_eps: f32,
@@ -66,6 +94,13 @@ impl ModelGeometry {
             rope_theta: config.rope_theta as f64,
             rope_scale: config.rope_scale as f64,
             rope_interleaved: config.rope_interleaved,
+            global_rope_theta: config.global_rope_theta.unwrap_or(0.0) as f64,
+            rope_partial_ratio: config.rope_partial_ratio.unwrap_or(1.0),
+            attention_pattern: config.attention_pattern.clone().unwrap_or_default(),
+            sliding_window: config.sliding_window.unwrap_or(0),
+            num_kv_shared_layers: config.num_kv_shared_layers.unwrap_or(0),
+            global_head_dim: config.global_head_dim.unwrap_or(0),
+            hidden_size_per_layer_input: config.hidden_size_per_layer_input.unwrap_or(0),
             dtype: config.dtype,
             norm_eps: config.layer_norm_epsilon.unwrap_or(1e-12),
             num_experts,
@@ -219,6 +254,22 @@ pub struct ModelConfig {
     pub eos_token_id: Option<u32>,
     pub pad_token_id: Option<u32>,
     pub tensor_map: HashMap<TensorRole, String>,
+
+    // ── Gemma 4 specific ──
+    /// Global attention 层的 RoPE θ (Gemma 4: 1e6)
+    pub global_rope_theta: Option<f32>,
+    /// Global attention 层的 RoPE partial 旋转比例 (Gemma 4: 0.25)
+    pub rope_partial_ratio: Option<f32>,
+    /// 每层注意力类型: 0=sliding, 1=global
+    pub attention_pattern: Option<Vec<u8>>,
+    /// Sliding-window 注意力窗口大小
+    pub sliding_window: Option<usize>,
+    /// 后 N 层共享 KV cache
+    pub num_kv_shared_layers: Option<usize>,
+    /// Global 层 head_dim (Gemma 4: 512)
+    pub global_head_dim: Option<usize>,
+    /// PLE 每层注入维度
+    pub hidden_size_per_layer_input: Option<usize>,
 }
 
 impl ModelConfig {
@@ -589,6 +640,13 @@ impl ModelConfig {
             eos_token_id,
             pad_token_id,
             tensor_map: HashMap::new(),
+            global_rope_theta: None,
+            rope_partial_ratio: None,
+            attention_pattern: None,
+            sliding_window: None,
+            num_kv_shared_layers: None,
+            global_head_dim: None,
+            hidden_size_per_layer_input: None,
         };
         apply_tensor_derived(base, derived)
     }
@@ -795,6 +853,17 @@ impl ModelConfig {
         )
         .filter(|v| v.is_finite() && *v > 0.0);
 
+        // ── Gemma 4 specific fields ──
+        let global_rope_theta = find_f32(value, &["global_rope_theta"]);
+        let rope_partial_ratio = find_f32(value, &["rope_partial_ratio", "global_rope_partial"]);
+        let attention_pattern = value.get("attention_pattern")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
+        let sliding_window = find_usize(value, &["sliding_window", "sliding_window_size"]);
+        let num_kv_shared_layers = find_usize(value, &["num_kv_shared_layers"]);
+        let global_head_dim = find_usize(value, &["global_head_dim"]);
+        let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input"]);
+
         Ok(Self {
             hidden_size,
             num_attention_heads,
@@ -822,6 +891,13 @@ impl ModelConfig {
             eos_token_id: find_u32(value, &["eos_token_id"]),
             pad_token_id: find_u32(value, &["pad_token_id"]),
             tensor_map: manifest.tensor_map.clone(),
+            global_rope_theta,
+            rope_partial_ratio,
+            attention_pattern,
+            sliding_window,
+            num_kv_shared_layers,
+            global_head_dim,
+            hidden_size_per_layer_input,
         })
     }
 
@@ -1835,6 +1911,13 @@ mod tests {
             eos_token_id: None,
             pad_token_id: None,
             tensor_map: HashMap::new(),
+            global_rope_theta: None,
+            rope_partial_ratio: None,
+            attention_pattern: None,
+            sliding_window: None,
+            num_kv_shared_layers: None,
+            global_head_dim: None,
+            hidden_size_per_layer_input: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -1871,6 +1954,13 @@ mod tests {
             eos_token_id: None,
             pad_token_id: None,
             tensor_map: HashMap::new(),
+            global_rope_theta: None,
+            rope_partial_ratio: None,
+            attention_pattern: None,
+            sliding_window: None,
+            num_kv_shared_layers: None,
+            global_head_dim: None,
+            hidden_size_per_layer_input: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }

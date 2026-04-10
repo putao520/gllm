@@ -22,6 +22,20 @@ pub struct ResolvedConfig {
     pub vocab_size: usize,
     pub rope_theta: f64,
     pub dtype: String,
+
+    // ── Gemma 4: Dual RoPE ──
+    pub global_rope_theta: f64,
+    pub rope_partial_ratio: f32,
+
+    // ── Gemma 4: Per-layer attention ──
+    pub attention_pattern: Vec<u8>,
+    pub sliding_window: usize,
+
+    // ── Gemma 4: Shared KV + PLE ──
+    pub num_kv_shared_layers: usize,
+    pub global_head_dim: usize,
+    pub hidden_size_per_layer_input: usize,
+
     /// 额外的自定义配置
     pub extra: HashMap<String, i64>,
 }
@@ -39,6 +53,13 @@ impl ResolvedConfig {
             vocab_size: g.vocab_size,
             rope_theta: g.rope_theta,
             dtype: format!("{:?}", g.dtype).to_lowercase(),
+            global_rope_theta: g.global_rope_theta,
+            rope_partial_ratio: g.rope_partial_ratio,
+            attention_pattern: g.attention_pattern.clone(),
+            sliding_window: g.sliding_window,
+            num_kv_shared_layers: g.num_kv_shared_layers,
+            global_head_dim: g.global_head_dim,
+            hidden_size_per_layer_input: g.hidden_size_per_layer_input,
             extra,
         }
     }
@@ -61,6 +82,7 @@ impl ResolvedConfig {
     pub fn get_float(&self, key: &str) -> Option<f64> {
         match key {
             "rope_theta" => Some(self.rope_theta),
+            "global_rope_theta" => Some(self.global_rope_theta),
             _ => None,
         }
     }
@@ -298,8 +320,12 @@ pub fn substitute_placeholders(template: &str, config: &ResolvedConfig) -> Strin
         result = result.replace("${intermediate_size}", &v.to_string());
     }
 
+    // Gemma 4 整数占位符
+    result = result.replace("${sliding_window}", &config.sliding_window.to_string());
+
     // 浮点占位符
     result = result.replace("${rope_theta}", &config.rope_theta.to_string());
+    result = result.replace("${global_rope_theta}", &config.global_rope_theta.to_string());
 
     // 字符串占位符
     result = result.replace("${dtype}", &config.dtype);
@@ -323,6 +349,13 @@ mod tests {
             vocab_size: 32000,
             rope_theta: 10000.0,
             dtype: "f16".to_string(),
+            global_rope_theta: 0.0,
+            rope_partial_ratio: 1.0,
+            attention_pattern: vec![],
+            sliding_window: 0,
+            num_kv_shared_layers: 0,
+            global_head_dim: 0,
+            hidden_size_per_layer_input: 0,
             extra: HashMap::new(),
         };
 

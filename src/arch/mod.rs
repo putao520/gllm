@@ -81,6 +81,13 @@ pub fn build_executor_from_yaml(
         num_experts: 0,
         moe_top_k: 0,
         expert_intermediate_size: 0,
+        global_rope_theta: 0.0,
+        rope_partial_ratio: 1.0,
+        attention_pattern: vec![],
+        sliding_window: 0,
+        num_kv_shared_layers: 0,
+        global_head_dim: 0,
+        hidden_size_per_layer_input: 0,
     });
     let ctx = crate::graph::optimizer::OptimizationContext {
         geometry,
