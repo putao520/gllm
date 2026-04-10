@@ -43,8 +43,29 @@
 > 1.  **Accuracy > Throughput**: TurboQuant 2.0 通过数学级静态湮灭（而非运行时分支）保证量化精度。
 > 2.  **Reliability First**: Memory management (PagedAttention) must have strict boundary checks and error recovery. Prefer OOM rejection over returning corrupted results. JIT must emit hardware Trap on Out-of-Bounds memory without CPU fallback.
 > 3.  **JIT Hot-Repair & Block Routing (物理核内调度)**: 摒弃主机层面的复杂分流切换，一切交由运行时 JIT 发射的原子擦写指令 (Hot JMP Patching / DCE) 及根据 `SystemTopology` 切割的物理块式异构动态图处理。
+> 4.  **NO PRAGMATIC HACKS (禁止务实方案)**: 所有实现必须遵循 SPEC 设计，追求最完美的架构。禁止使用 `unwrap_or(default)` 等 fallback、禁止硬编码魔法数字、禁止临时 workaround。宁可重构整个模块，也不接受技术债。
 >
 > **已废弃**: ARCH-ACCURACY-SCHED（规范序）、ARCH-ACCURACY-EXEC（串行微批次）、ARCH-ACCURACY-ISOLATION（阶段隔离）—— 三项均被 §9 Mega-Kernel 块级路由和 §10 Chunked Prefill 交织调度完全覆盖。
+
+### 0.1 SymDim 动态维度铁律 (ARCH-SYMDIM-CODEGEN)
+> **关联**: SPEC-archive/02-ARCHITECTURE.md §5.3, jit-cache-protocol.md
+> **状态**: 🔴 IN PROGRESS (重构中)
+
+**问题**: 当前 JIT codegen 假设所有维度在编译时已知（`m: usize`），导致动态 seq_len 需要 hack（硬编码 compile_seq_len=512 + 运行时 `[rbp+16]` 读取）。
+
+**正确设计**:
+1. **图层面**: 所有动态维度（seq_len、batch_size、total_seq）用 `SymDim::Symbolic("name")`
+2. **JIT codegen**: 检测 `SymDim::Symbolic` 时，生成从 ShapeBinding 读取的通用循环
+3. **执行时**: 通过 `ShapeBinding { "seq_len": actual_value }` 传递运行时值
+4. **禁止**: `m.as_concrete().unwrap_or(512)` 等 fallback
+
+**实现路径**:
+- Phase 1: 所有 `build_*_graph` 的 seq_len 用 `SymDim::Symbolic`
+- Phase 2: JIT codegen 支持 Symbolic（GEMM/elementwise/norm 全部）
+- Phase 3: Executor 传递 ShapeBinding
+- Phase 4: 清理所有 compile_seq_len hack
+
+**承诺**: 完全符合 SPEC §5.3 铁律，零妥协。
 
 ### 1. Backend Constraints (from gllm-kernels)
 - **Quantization**: Template-based kernels (1/2/4/8-bit unified)

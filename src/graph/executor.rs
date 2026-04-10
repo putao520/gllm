@@ -265,6 +265,7 @@ fn build_flash_attention_graph(
 ///
 /// input[s,h], w_gate[h,inter], w_up[h,inter] →
 ///   gate = input × w_gate → silu(gate) × (input × w_up) → out[s,inter]
+/// Build a CompilerGraph for SwiGLU fusion with symbolic seq_len.
 ///
 /// Follows the FusedQkvRope pattern: weights are graph inputs consumed
 /// by internal Gemm ops. The JIT kernel receives activation + weight_blob
@@ -272,42 +273,45 @@ fn build_flash_attention_graph(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_swiglu_graph(
     config: &SwiGLUConfig,
-    seq_len: usize,
     dtype: gllm_kernels::types::DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
-    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let hidden = config.hidden_size;
     let inter = config.intermediate_size;
 
-    // Inputs: activation + 2 weight matrices (WII pattern)
-    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    // Inputs: activation (symbolic seq_len) + 2 weight matrices (WII pattern)
+    let seq_len_sym = SymDim::Symbolic {
+        name: "seq_len".to_string(),
+        max_value: Some(2048), // Conservative upper bound for buffer allocation
+    };
+    let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     let w_gate = g.add_tensor_concrete("w_gate", &[hidden, inter], dt);
     let w_up = g.add_tensor_concrete("w_up", &[hidden, inter], dt);
     g.inputs = vec![input, w_gate, w_up];
 
     // gate = input × w_gate  [seq_len, inter]
-    let gate_out = g.add_tensor_concrete("gate_proj", &[seq_len, inter], dt);
+    let gate_out = g.add_tensor("gate_proj", vec![seq_len_sym.clone(), SymDim::Concrete(inter)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: inter, k: hidden, dtype: dt },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: inter, k: hidden, dtype: dt },
         vec![input, w_gate],
         vec![gate_out],
         "gate_gemm",
     );
 
     // up = input × w_up  [seq_len, inter]
-    let up_out = g.add_tensor_concrete("up_proj", &[seq_len, inter], dt);
+    let up_out = g.add_tensor("up_proj", vec![seq_len_sym.clone(), SymDim::Concrete(inter)], dt);
     g.add_op(
-        OpKind::Gemm { m: seq_len, n: inter, k: hidden, dtype: dt },
+        OpKind::Gemm { m: seq_len_sym.clone(), n: inter, k: hidden, dtype: dt },
         vec![input, w_up],
         vec![up_out],
         "up_gemm",
     );
 
     // silu(gate) * up → out
-    let out = g.add_tensor_concrete("swiglu_out", &[seq_len, inter], dt);
+    let out = g.add_tensor("swiglu_out", vec![seq_len_sym, SymDim::Concrete(inter)], dt);
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![out], "swiglu");
 
     g.outputs = vec![out];
