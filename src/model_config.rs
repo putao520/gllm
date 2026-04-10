@@ -270,6 +270,11 @@ pub struct ModelConfig {
     pub global_head_dim: Option<usize>,
     /// PLE 每层注入维度
     pub hidden_size_per_layer_input: Option<usize>,
+
+    // ── Multimodal: Vision Encoder (SigLIP) ──
+    /// Vision encoder configuration parsed from `"vision_config"` sub-object.
+    /// Present only for multimodal models (e.g. Gemma 4).
+    pub vision_config: Option<crate::compat::vision_forward::VisionConfig>,
 }
 
 impl ModelConfig {
@@ -647,6 +652,7 @@ impl ModelConfig {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            vision_config: None,
         };
         apply_tensor_derived(base, derived)
     }
@@ -864,6 +870,24 @@ impl ModelConfig {
         let global_head_dim = find_usize(value, &["global_head_dim"]);
         let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input"]);
 
+        // ── Multimodal: Vision Encoder (SigLIP) ──
+        let vision_config = value.get("vision_config").and_then(|vc| {
+            let image_size = find_usize(vc, &["image_size"])?;
+            let patch_size = find_usize(vc, &["patch_size"])?;
+            let vis_hidden = find_usize(vc, &["hidden_size"])?;
+            let num_layers = find_usize(vc, &["num_hidden_layers", "num_layers"])?;
+            let num_heads = find_usize(vc, &["num_attention_heads", "num_heads"])?;
+            let vis_intermediate = find_usize(vc, &["intermediate_size"])?;
+            Some(crate::compat::vision_forward::VisionConfig {
+                image_size,
+                patch_size,
+                hidden_size: vis_hidden,
+                num_layers,
+                num_heads,
+                intermediate_size: vis_intermediate,
+            })
+        });
+
         Ok(Self {
             hidden_size,
             num_attention_heads,
@@ -898,6 +922,7 @@ impl ModelConfig {
             num_kv_shared_layers,
             global_head_dim,
             hidden_size_per_layer_input,
+            vision_config,
         })
     }
 
@@ -1918,6 +1943,7 @@ mod tests {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            vision_config: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -1961,6 +1987,7 @@ mod tests {
             num_kv_shared_layers: None,
             global_head_dim: None,
             hidden_size_per_layer_input: None,
+            vision_config: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }

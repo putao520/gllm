@@ -238,3 +238,50 @@ pub fn moe_expert_aliases(layer: usize, expert: usize, suffix: &str) -> Vec<Stri
     out.push(format!("blk.{layer}.ffn_gate_exps.{expert}.{suffix}"));
     out
 }
+
+// ---------------------------------------------------------------------------
+// PLE (Per-Layer Embedding) weight name aliases — Gemma 4 E2B/E4B
+// ---------------------------------------------------------------------------
+
+/// Per-Layer Embedding token weight: `model.per_layer_embedding.embed_tokens.weight`
+/// Shape: [vocab_size, num_layers × dim_per_layer]
+pub const PLE_EMBED_TOKENS: &str = "model.per_layer_embedding.embed_tokens.weight";
+
+/// Per-Layer Embedding context-aware projection: `model.per_layer_embedding.per_layer_projection.weight`
+pub const PLE_PROJECTION: &str = "model.per_layer_embedding.per_layer_projection.weight";
+
+/// Per-Layer Embedding post-MLP projection prefix: `model.layers.{i}.post_mlp_projection.weight`
+pub const PLE_POST_MLP_PROJ_PREFIX: &str = "post_mlp_projection.weight";
+
+/// Generate alias names for PLE embed_tokens weight.
+pub fn ple_embed_tokens_aliases() -> Vec<String> {
+    let mut out = Vec::new();
+    for &prefix in DECODER_PREFIXES {
+        if prefix.is_empty() {
+            out.push("per_layer_embedding.embed_tokens.weight".to_string());
+        } else {
+            out.push(format!("{prefix}.per_layer_embedding.embed_tokens.weight"));
+        }
+    }
+    out
+}
+
+/// Generate alias names for PLE per_layer_projection weight.
+pub fn ple_projection_aliases() -> Vec<String> {
+    let mut out = Vec::new();
+    for &prefix in DECODER_PREFIXES {
+        if prefix.is_empty() {
+            out.push("per_layer_embedding.per_layer_projection.weight".to_string());
+        } else {
+            out.push(format!("{prefix}.per_layer_embedding.per_layer_projection.weight"));
+        }
+    }
+    out
+}
+
+/// Generate alias names for the per-layer post_mlp_projection weight.
+///
+/// `layer`: layer index (0-based)
+pub fn ple_post_mlp_proj_aliases(layer: usize) -> Vec<String> {
+    decoder_layer_aliases(layer, PLE_POST_MLP_PROJ_PREFIX, None)
+}

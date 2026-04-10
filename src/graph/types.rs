@@ -155,6 +155,8 @@ pub enum FusedOp {
     GQA(GQAConfig),
     /// MoE routing 融合
     MoERouting(MoERoutingConfig),
+    /// Per-Layer Embedding 融合 (Gemma 4 E2B/E4B)
+    PerLayerEmbed(PleConfig),
     /// 原子操作（未融合）
     Atomic(AtomicOp),
 }
@@ -175,6 +177,7 @@ impl FusedOp {
             FusedOp::FusedRMSLinear(_) => "FusedRMSLinear",
             FusedOp::GQA(_) => "GQA",
             FusedOp::MoERouting(_) => "MoERouting",
+            FusedOp::PerLayerEmbed(_) => "PerLayerEmbed",
             FusedOp::Atomic(op) => &op.op_type,
         }
     }
@@ -265,6 +268,23 @@ impl Default for MoERoutingConfig {
             capacity_factor: 1.0,
         }
     }
+}
+
+/// Per-Layer Embedding (PLE) 配置 — Gemma 4 E2B/E4B
+///
+/// PLE 在每个 transformer 层后注入条件信号:
+/// ```text
+/// ple_token = per_layer_embed_weight[:, layer_i * dim : (layer_i+1) * dim]
+/// ple_ctx   = linear_proj(main_embedding)
+/// signal    = (ple_ctx + ple_token × √dim) / √2
+/// hidden    = hidden + post_mlp_proj(signal)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct PleConfig {
+    /// 每层注入的 embedding 维度
+    pub dim_per_layer: usize,
+    /// 模型总层数 (用于 slice per_layer_embed_weight)
+    pub num_layers: usize,
 }
 
 /// 原子操作（未融合的 ONNX 算子）
@@ -366,6 +386,8 @@ pub struct OptimizationStats {
     pub gqa_fusions: usize,
     /// MoE routing 融合数
     pub moe_routing_fusions: usize,
+    /// PLE 融合数
+    pub ple_fusions: usize,
     /// 常量折叠节点数
     pub constant_folded_nodes: usize,
     /// 消除的死代码节点数
@@ -382,6 +404,7 @@ impl OptimizationStats {
             + self.rms_linear_fusions
             + self.gqa_fusions
             + self.moe_routing_fusions
+            + self.ple_fusions
     }
 
     /// 节点减少率
@@ -413,6 +436,7 @@ mod tests {
         );
         assert_eq!(FusedOp::SwiGLU(Default::default()).name(), "SwiGLU");
         assert_eq!(FusedOp::GQA(Default::default()).name(), "GQA");
+        assert_eq!(FusedOp::PerLayerEmbed(PleConfig { dim_per_layer: 128, num_layers: 26 }).name(), "PerLayerEmbed");
         assert_eq!(FusedOp::Atomic(AtomicOp::new("MatMul")).name(), "MatMul");
     }
 

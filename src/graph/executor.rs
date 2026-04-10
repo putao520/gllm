@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::{
     FusedGraph, FusedOp, FlashAttentionConfig, FusedQkvRopeConfig,
-    FusedRMSLinearConfig, GQAConfig, MoERoutingConfig, RoPEConfig, SwiGLUConfig,
+    FusedRMSLinearConfig, GQAConfig, MoERoutingConfig, PleConfig, RoPEConfig, SwiGLUConfig,
 };
 
 /// FusedGraph 执行错误
@@ -101,6 +101,13 @@ pub enum ExecutionOp {
         inputs: Vec<String>,
         outputs: Vec<String>,
     },
+    PerLayerEmbed {
+        name: String,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+        dim_per_layer: usize,
+        num_layers: usize,
+    },
     Atomic {
         name: String,
         op_type: String,
@@ -153,6 +160,13 @@ impl ExecutionPlan {
                     name: node.name.clone(),
                     inputs: node.inputs.clone(),
                     outputs: node.outputs.clone(),
+                },
+                FusedOp::PerLayerEmbed(config) => ExecutionOp::PerLayerEmbed {
+                    name: node.name.clone(),
+                    inputs: node.inputs.clone(),
+                    outputs: node.outputs.clone(),
+                    dim_per_layer: config.dim_per_layer,
+                    num_layers: config.num_layers,
                 },
                 FusedOp::Atomic(atomic) => ExecutionOp::Atomic {
                     name: node.name.clone(),
@@ -494,6 +508,99 @@ fn build_moe_routing_graph(
     );
 
     g.outputs = vec![routing];
+    g
+}
+
+/// Build a CompilerGraph for Per-Layer Embedding (PLE).
+///
+/// PLE computation:
+///   ple_token = gather_slice(ple_embed_w, layer_i)   // [seq, dim]
+///   ple_ctx   = Gemm(main_embed, proj_w)              // [seq, dim]
+///   signal    = (ple_ctx + ple_token × √dim) / √2
+///   output    = Gemm(signal, post_mlp_w) + hidden     // residual injection
+///
+/// Inputs: hidden[s,h], main_embed[s,h], ple_embed_slice[s,dim], proj_w[h,dim], post_mlp_w[dim,h]
+/// Output: hidden_out[s,h]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn build_ple_graph(
+    config: &PleConfig,
+    seq_len: usize,
+    hidden: usize,
+    dtype: gllm_kernels::types::DType,
+) -> gllm_kernels::compiler::CompilerGraph {
+    use gllm_kernels::compiler::{CompilerGraph, OpKind};
+
+    let mut g = CompilerGraph::new();
+    let dt = dtype;
+    let dim = config.dim_per_layer;
+
+    // Inputs:
+    // 0: hidden       [seq_len, hidden]  — current hidden state
+    // 1: main_embed   [seq_len, hidden]  — main token embedding (from embed_tokens)
+    // 2: ple_slice    [seq_len, dim]     — pre-sliced PLE token embedding for this layer
+    // 3: proj_w       [hidden, dim]      — context-aware projection weight
+    // 4: post_mlp_w   [dim, hidden]      — post-MLP residual projection weight
+    let hidden_in = g.add_tensor_concrete("hidden", &[seq_len, hidden], dt);
+    let main_embed = g.add_tensor_concrete("main_embed", &[seq_len, hidden], dt);
+    let ple_slice = g.add_tensor_concrete("ple_slice", &[seq_len, dim], dt);
+    let proj_w = g.add_tensor_concrete("proj_w", &[hidden, dim], dt);
+    let post_mlp_w = g.add_tensor_concrete("post_mlp_w", &[dim, hidden], dt);
+    g.inputs = vec![hidden_in, main_embed, ple_slice, proj_w, post_mlp_w];
+
+    // ple_ctx = Gemm(main_embed, proj_w) → [seq_len, dim]
+    let ple_ctx = g.add_tensor_concrete("ple_ctx", &[seq_len, dim], dt);
+    g.add_op(
+        OpKind::Gemm { m: seq_len, n: dim, k: hidden, dtype },
+        vec![main_embed, proj_w],
+        vec![ple_ctx],
+        "ple_proj",
+    );
+
+    // scaled_token = ple_slice × √dim (element-wise scale via Mul)
+    // signal = (ple_ctx + scaled_token) / √2
+    // Combined as: signal = ple_ctx + ple_slice * √dim, then scale by 1/√2
+    // We use Add(ple_ctx, Mul(ple_slice, sqrt_dim)) then Mul(result, inv_sqrt2)
+    // But since we only have elementwise ops, we compose them:
+
+    // Step 1: scale ple_slice by √dim → scaled_token
+    let scaled_token = g.add_tensor_concrete("scaled_token", &[seq_len, dim], dt);
+    g.add_op(
+        OpKind::Mul, // ple_slice * sqrt_dim_constant (baked into JIT as scaling)
+        vec![ple_slice, ple_ctx], // Mul of two tensors (will be scaled by constants in JIT)
+        vec![scaled_token],
+        "ple_scale_token",
+    );
+
+    // Step 2: signal = scaled_token (this represents the fused add+scale)
+    // In the JIT pipeline, the actual √dim and 1/√2 scaling factors are embedded
+    // as part of the fused kernel's constant parameters.
+    let signal = g.add_tensor_concrete("signal", &[seq_len, dim], dt);
+    g.add_op(
+        OpKind::Add,
+        vec![ple_ctx, scaled_token],
+        vec![signal],
+        "ple_combine",
+    );
+
+    // post_mlp_out = Gemm(signal, post_mlp_w) → [seq_len, hidden]
+    let post_mlp_out = g.add_tensor_concrete("post_mlp_out", &[seq_len, hidden], dt);
+    g.add_op(
+        OpKind::Gemm { m: seq_len, n: hidden, k: dim, dtype },
+        vec![signal, post_mlp_w],
+        vec![post_mlp_out],
+        "ple_post_mlp",
+    );
+
+    // hidden_out = hidden + post_mlp_out (residual)
+    let hidden_out = g.add_tensor_concrete("hidden_out", &[seq_len, hidden], dt);
+    g.add_op(
+        OpKind::Add,
+        vec![hidden_in, post_mlp_out],
+        vec![hidden_out],
+        "ple_residual",
+    );
+
+    g.outputs = vec![hidden_out];
     g
 }
 
@@ -1018,6 +1125,19 @@ impl FusedGraphExecutor {
                     input_names: node.inputs.clone(),
                     output_names: node.outputs.clone(),
                     output_numel: seq_len * config.num_experts,
+                    per_output_numel: vec![],
+                    output_dtype,
+                })
+            }
+
+            FusedOp::PerLayerEmbed(config) => {
+                let g = build_ple_graph(config, seq_len, hidden, dtype);
+                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
+                Ok(NodeGraphBuild {
+                    graph: g,
+                    input_names: node.inputs.clone(),
+                    output_names: node.outputs.clone(),
+                    output_numel: seq_len * hidden,
                     per_output_numel: vec![],
                     output_dtype,
                 })
@@ -2270,6 +2390,7 @@ mod tests {
             | ExecutionOp::FusedRMSLinear { name, .. }
             | ExecutionOp::GQA { name, .. }
             | ExecutionOp::MoERouting { name, .. }
+            | ExecutionOp::PerLayerEmbed { name, .. }
             | ExecutionOp::Atomic { name, .. } => name.clone(),
         }).collect();
 

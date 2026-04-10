@@ -382,6 +382,7 @@ struct OnnxFusedKernelStats {
     gqa: usize,
     moe_routing: usize,
     fused_rms_linear: usize,
+    ple: usize,
     atomic: usize,
 }
 
@@ -394,6 +395,7 @@ impl OnnxFusedKernelStats {
             + self.gqa
             + self.moe_routing
             + self.fused_rms_linear
+            + self.ple
     }
 
     fn from_fused_graph(fused_graph: &crate::graph::FusedGraph) -> Self {
@@ -407,6 +409,7 @@ impl OnnxFusedKernelStats {
                 FusedOp::GQA(_) => stats.gqa += 1,
                 FusedOp::MoERouting(_) => stats.moe_routing += 1,
                 FusedOp::FusedRMSLinear(_) => stats.fused_rms_linear += 1,
+                FusedOp::PerLayerEmbed(_) => stats.ple += 1,
                 FusedOp::Atomic(_) => stats.atomic += 1,
             }
         }
@@ -431,6 +434,7 @@ enum OnnxKernelExecutionOp {
     Gqa,
     MoERouting,
     FusedRMSLinear,
+    PerLayerEmbed,
     Atomic,
 }
 
@@ -978,6 +982,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 FusedOp::GQA(_) => OnnxKernelExecutionOp::Gqa,
                 FusedOp::MoERouting(_) => OnnxKernelExecutionOp::MoERouting,
                 FusedOp::FusedRMSLinear(_) => OnnxKernelExecutionOp::FusedRMSLinear,
+                FusedOp::PerLayerEmbed(_) => OnnxKernelExecutionOp::PerLayerEmbed,
                 FusedOp::Atomic(_) => OnnxKernelExecutionOp::Atomic,
             })
             .collect::<Vec<_>>();

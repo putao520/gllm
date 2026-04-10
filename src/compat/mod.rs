@@ -32,6 +32,9 @@ mod cuda_backend;
 mod hip_backend;
 mod metal_backend;
 mod memory;
+pub mod audio_forward;
+pub mod multimodal;
+pub mod vision_forward;
 
 // Re-export the *real* Element trait from gllm-kernels.
 pub use gllm_kernels::traits::Element;

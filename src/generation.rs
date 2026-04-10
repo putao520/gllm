@@ -365,6 +365,10 @@ pub struct GenerationBuilder<'a> {
     top_p: f32,
     session_id: Option<u64>,
     stream: bool,
+    /// 多模态: 图像文件路径 (P3.1 Vision)
+    image_path: Option<String>,
+    /// 多模态: 音频文件路径 (P3.2 Audio)
+    audio_path: Option<String>,
 }
 
 impl<'a> GenerationBuilder<'a> {
@@ -378,7 +382,27 @@ impl<'a> GenerationBuilder<'a> {
             top_p: 1.0,
             session_id: None,
             stream: false,
+            image_path: None,
+            audio_path: None,
         }
+    }
+
+    /// 多模态: 附加图像输入 (Gemma 4 Vision)。
+    ///
+    /// 图像会被 SigLIP encoder 编码为视觉 token 序列，
+    /// 插入到文本 prompt 中 image_token_id 的位置。
+    pub fn image(mut self, path: impl Into<String>) -> Self {
+        self.image_path = Some(path.into());
+        self
+    }
+
+    /// 多模态: 附加音频输入 (Gemma 4 Audio)。
+    ///
+    /// 音频会被 USM Conformer 编码为音频 token 序列，
+    /// 插入到文本 prompt 中 audio_token_id 的位置。
+    pub fn audio(mut self, path: impl Into<String>) -> Self {
+        self.audio_path = Some(path.into());
+        self
     }
 
     /// Set maximum tokens to generate.
