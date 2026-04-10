@@ -2,16 +2,11 @@ name: qwen3
 version: "1.0"
 family: decoder
 moe_router: qwen
-aliases:
-  - qwen3
-  - qwen3forcausallm
-  - qwen3_moe
-  - qwen3moe
-  - qwen3moeforcausallm
-  - qwen2_5
-  - qwen2_5forcausallm
-  - qwen2
-  - qwen2forcausallm
+# qwen3 / qwen3ForCausalLM 由模板名自动派生
+extra_aliases:
+  - qwen3moe        # Qwen3-MoE 共用同一模板
+  - qwen2_5         # Qwen2.5 架构向前兼容
+  - qwen2           # Qwen2 架构向前兼容
 
 config:
   num_layers: "${num_hidden_layers}"

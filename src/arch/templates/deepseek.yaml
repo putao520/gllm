@@ -2,12 +2,10 @@ name: deepseek
 version: "1.0"
 family: decoder
 moe_router: deepseek
-aliases:
-  - deepseek
-  - deepseekv2
-  - deepseekv2forcausallm
-  - deepseekv3
-  - deepseekv3forcausallm
+# deepseek / deepseekForCausalLM 由模板名自动派生
+extra_aliases:
+  - deepseekv2        # DeepSeek-V2 共用同一模板
+  - deepseekv3        # DeepSeek-V3 共用同一模板
 
 config:
   num_layers: "${num_hidden_layers}"

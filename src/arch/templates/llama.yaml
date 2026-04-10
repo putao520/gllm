@@ -1,17 +1,13 @@
 name: llama
 version: "1.0"
 family: decoder
-aliases:
-  - llama
-  - llamaforcausallm
-  - smollm
+# llama / llamaForCausalLM 由模板名自动派生
+extra_aliases:
+  - smollm           # SmolLM 系列共用 Llama 架构
   - smollm2
-  - smollm2forcausallm
-  - internlm
-  - internlm3
-  - internlm3forcausallm
+  - internlm         # InternLM 系列共用 Llama 架构
   - internlm2
-  - internlm2forcausallm
+  - internlm3
 
 config:
   num_layers: "${num_hidden_layers}"

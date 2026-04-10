@@ -1,11 +1,9 @@
 name: gpt2next
 version: "1.0"
 family: decoder
-aliases:
-  - gpt2next
-  - gpt2nextforcausallm
-  - gptoss
-  - gptossforcausallm
+# gpt2next / gpt2nextForCausalLM 由模板名自动派生
+extra_aliases:
+  - gptoss            # GPT-OSS 使用 GPT-2-Next 架构
 
 config:
   num_layers: "${num_hidden_layers}"

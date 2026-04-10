@@ -1,12 +1,12 @@
 name: xlmr
 version: "1.0"
 family: encoder
-aliases:
-  - xlm_roberta
+# xlmr / xlmrForCausalLM 由模板名自动派生
+extra_aliases:
+  - xlm_roberta       # HuggingFace XLM-RoBERTa token
   - xlm_roberta_model
-  - xlmr
-  - roberta
-  - bert
+  - roberta           # RoBERTa 共用 XLM-R 架构
+  - bert              # BERT 共用 XLM-R 架构
 
 config:
   num_layers: "${num_hidden_layers}"

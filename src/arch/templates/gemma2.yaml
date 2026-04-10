@@ -1,11 +1,9 @@
 name: gemma2
 version: "1.0"
 family: decoder
-aliases:
-  - gemma
-  - gemmaforcausallm
-  - gemma2
-  - gemma2forcausallm
+# gemma2 / gemma2ForCausalLM 由模板名自动派生
+extra_aliases:
+  - gemma             # HuggingFace 使用 "GemmaForCausalLM"
 
 config:
   num_layers: "${num_hidden_layers}"

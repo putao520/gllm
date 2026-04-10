@@ -1,15 +1,11 @@
 name: glm4
 version: "1.0"
 family: decoder
-aliases:
-  - glm4
-  - glm4forcausallm
-  - chatglm
-  - chatglmforcausallm
-  - glm5
-  - glm5forcausallm
-  - glm
-  - glmforcausallm
+# glm4 / glm4ForCausalLM 由模板名自动派生
+extra_aliases:
+  - chatglm           # ChatGLM 系列的 HuggingFace token
+  - glm5              # GLM-5 共用 GLM4 架构
+  - glm               # 通用 GLM 别名
 
 config:
   num_layers: "${num_hidden_layers}"

@@ -1,7 +1,7 @@
 name: qwen3-embed
 version: "1.0"
 family: decoder
-aliases: []
+extra_aliases: []
 
 config:
   num_layers: "${num_hidden_layers}"

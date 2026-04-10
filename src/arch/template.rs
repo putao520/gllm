@@ -18,10 +18,14 @@ pub struct ArchTemplate {
     /// 架构族: "decoder" 或 "encoder"
     #[serde(default = "default_family")]
     pub family: String,
-    /// 架构别名列表 — 模型元数据中可能出现的 architecture token（已归一化小写）。
-    /// Registry 自动将这些别名映射到此模板。
+    /// 例外别名 — 无法从模板名自动推导的架构 token。
+    ///
+    /// 标准别名（`{name}` 和 `{name}ForCausalLM`）由 Registry 自动派生，无需声明。
+    /// 此字段仅用于跨代/跨厂商的映射例外，如：
+    /// - `qwen2` → qwen3 模板（Qwen2 使用同一架构）
+    /// - `chatglm` → glm4 模板（ChatGLM 是 GLM4 的别名）
     #[serde(default)]
-    pub aliases: Vec<String>,
+    pub extra_aliases: Vec<String>,
     /// MoE 路由器类型（仅含 MoE 算子的模板需要声明）。
     /// 值: "deepseek" / "qwen" / "mixtral"
     #[serde(default)]

@@ -1,11 +1,10 @@
 name: mistral3
 version: "1.0"
 family: decoder
-aliases:
-  - mistral
-  - mistralforcausallm
-  - ministral
-  - ministralforcausallm
+# mistral3 / mistral3ForCausalLM 由模板名自动派生
+extra_aliases:
+  - mistral           # HuggingFace 使用 "MistralForCausalLM"
+  - ministral         # Ministral 共用 Mistral3 架构
 
 config:
   num_layers: "${num_hidden_layers}"

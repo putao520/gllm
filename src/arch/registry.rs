@@ -34,17 +34,30 @@ impl ArchRegistry {
         Self::default()
     }
 
-    /// 注册模板：按 name 存储，按 aliases 建索引
+    /// 注册模板：自动派生标准别名 + 注册例外别名
+    ///
+    /// 自动派生规则（从模板名 `name` 生成）：
+    /// - `{name}` — 模板名本身
+    /// - `{name}forcausallm` — HuggingFace `architectures` 字段标准格式
+    ///
+    /// `extra_aliases` 仅用于声明无法从模板名推导的例外映射
+    /// （如 `chatglm` → `glm4`，`qwen2` → `qwen3`）。
     pub fn register(&mut self, template: ArchTemplate) {
-        // 模板名本身也是别名
-        self.alias_map
-            .insert(template.name.clone(), template.name.clone());
-        // 注册所有声明的别名
-        for alias in &template.aliases {
-            self.alias_map
-                .insert(alias.clone(), template.name.clone());
+        let name = &template.name;
+        // 自动派生标准别名
+        self.insert_with_suffix(name, name);
+        // 对每个例外别名也派生标准后缀
+        for alias in &template.extra_aliases {
+            let normalized = normalize_token(alias);
+            self.insert_with_suffix(&normalized, name);
         }
-        self.templates.insert(template.name.clone(), template);
+        self.templates.insert(name.clone(), template);
+    }
+
+    /// 插入别名及其 `{alias}ForCausalLM` 派生形式
+    fn insert_with_suffix(&mut self, alias: &str, template_name: &str) {
+        self.alias_map.insert(alias.to_string(), template_name.to_string());
+        self.alias_map.insert(format!("{alias}forcausallm"), template_name.to_string());
     }
 
     /// 按模板名精确查找

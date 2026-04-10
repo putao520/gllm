@@ -1,11 +1,9 @@
 name: phi4
 version: "1.0"
 family: decoder
-aliases:
-  - phi4
-  - phi4forcausallm
-  - phi3
-  - phi3forcausallm
+# phi4 / phi4ForCausalLM 由模板名自动派生
+extra_aliases:
+  - phi3              # Phi-3 共用 Phi4 架构
 
 config:
   num_layers: "${num_hidden_layers}"
