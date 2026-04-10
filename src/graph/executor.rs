@@ -261,9 +261,14 @@ fn build_flash_attention_graph(
     g
 }
 
-/// Build a CompilerGraph for SwiGLU: silu(gate) * up.
+/// Build a CompilerGraph for SwiGLU with projection (WII architecture).
 ///
-/// gate[s,inter], up[s,inter] → SwiGlu → out[s,inter]
+/// input[s,h], w_gate[h,inter], w_up[h,inter] →
+///   gate = input × w_gate → silu(gate) × (input × w_up) → out[s,inter]
+///
+/// Follows the FusedQkvRope pattern: weights are graph inputs consumed
+/// by internal Gemm ops. The JIT kernel receives activation + weight_blob
+/// and does the full gate/up projection + SwiGLU computation internally.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn build_swiglu_graph(
     config: &SwiGLUConfig,
@@ -274,14 +279,36 @@ fn build_swiglu_graph(
 
     let mut g = CompilerGraph::new();
     let dt = dtype;
+    let hidden = config.hidden_size;
     let inter = config.intermediate_size;
 
-    let gate = g.add_tensor_concrete("gate", &[seq_len, inter], dt);
-    let up = g.add_tensor_concrete("up", &[seq_len, inter], dt);
-    g.inputs = vec![gate, up];
+    // Inputs: activation + 2 weight matrices (WII pattern)
+    let input = g.add_tensor_concrete("input", &[seq_len, hidden], dt);
+    let w_gate = g.add_tensor_concrete("w_gate", &[hidden, inter], dt);
+    let w_up = g.add_tensor_concrete("w_up", &[hidden, inter], dt);
+    g.inputs = vec![input, w_gate, w_up];
 
+    // gate = input × w_gate  [seq_len, inter]
+    let gate_out = g.add_tensor_concrete("gate_proj", &[seq_len, inter], dt);
+    g.add_op(
+        OpKind::Gemm { m: seq_len, n: inter, k: hidden, dtype: dt },
+        vec![input, w_gate],
+        vec![gate_out],
+        "gate_gemm",
+    );
+
+    // up = input × w_up  [seq_len, inter]
+    let up_out = g.add_tensor_concrete("up_proj", &[seq_len, inter], dt);
+    g.add_op(
+        OpKind::Gemm { m: seq_len, n: inter, k: hidden, dtype: dt },
+        vec![input, w_up],
+        vec![up_out],
+        "up_gemm",
+    );
+
+    // silu(gate) * up → out
     let out = g.add_tensor_concrete("swiglu_out", &[seq_len, inter], dt);
-    g.add_op(OpKind::SwiGlu, vec![gate, up], vec![out], "swiglu");
+    g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![out], "swiglu");
 
     g.outputs = vec![out];
     g
@@ -2344,9 +2371,9 @@ mod tests {
             intermediate_size: 1024,
         };
         let g = build_swiglu_graph(&config, 4, gllm_kernels::types::DType::F32);
-        assert_eq!(g.inputs.len(), 2); // gate, up
+        assert_eq!(g.inputs.len(), 3); // input, w_gate, w_up (WII architecture)
         assert_eq!(g.outputs.len(), 1);
-        assert_eq!(g.ops.len(), 1); // SwiGlu
+        assert_eq!(g.ops.len(), 3); // 2×Gemm + SwiGlu
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]

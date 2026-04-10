@@ -101,6 +101,9 @@ impl OptimizationPass for SwiGLUFusionPass {
                 return None;
             }
 
+            // WII (Weight-in-Inputs) architecture — same pattern as FusedQkvRope:
+            // inputs = [activation, gate_proj.weight, up_proj.weight]
+            // The build_fused_swiglu_graph will create 2×Gemm + Silu + Mul internally.
             let mut fused = FusedNode::new(
                 format!("{}_swiglu", gate.name),
                 FusedOp::SwiGLU(SwiGLUConfig {
@@ -108,7 +111,18 @@ impl OptimizationPass for SwiGLUFusionPass {
                     intermediate_size: ctx.geometry.intermediate_size,
                 }),
             );
-            fused.inputs = gate.inputs.clone();
+            // gate.inputs = [activation, gate_weight]
+            // up.inputs   = [activation, up_weight]
+            // Merged: [activation, gate_weight, up_weight]
+            let mut inputs = Vec::with_capacity(3);
+            inputs.push(gate.inputs[0].clone()); // activation (shared)
+            if gate.inputs.len() > 1 {
+                inputs.push(gate.inputs[1].clone()); // gate_proj.weight
+            }
+            if up.inputs.len() > 1 {
+                inputs.push(up.inputs[1].clone()); // up_proj.weight
+            }
+            fused.inputs = inputs;
             fused.outputs = mul.outputs.clone();
             Some(fused)
         });
