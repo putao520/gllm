@@ -41,20 +41,35 @@ pub(crate) struct KvCacheBuffer {
     /// Cache dtype for F16/BF16 distinction (ARCH-DTYPE-FULLCHAIN-ORCH)
     #[allow(dead_code)]
     pub cache_dtype: gllm_kernels::types::DType,
+
+    /// SharedKvRef: 共享层的 KV donor 映射。
+    /// `kv_donor_map[layer_i] = Some(donor_layer)` 表示 layer_i 共享 donor_layer 的 KV。
+    /// Gemma 4 E2B 后 20 层、E4B 后 18 层使用此机制。
+    /// 共享层在前向传播时从 donor 层偏移读取 KV，不分配独立存储。
+    pub kv_donor_map: Vec<Option<usize>>,
 }
 
 impl KvCacheBuffer {
     fn new(config: &KvCacheConfig) -> Self {
         let elem_bytes = config.dtype_size().max(1);
         let cache_dtype = match elem_bytes {
-            2 => gllm_kernels::types::DType::F16, // F16 default for 2-byte; callers can override via set_cache_dtype
+            2 => gllm_kernels::types::DType::F16,
             _ => gllm_kernels::types::DType::F32,
         };
-        let total_bytes = config.num_layers() * config.num_heads() * config.max_seq_len() * config.head_dim() * elem_bytes;
+        let num_layers = config.num_layers();
+
+        // SharedKvRef: 计算 donor 映射
+        let (effective_layers, kv_donor_map) = Self::build_kv_donor_map(
+            num_layers,
+            config.num_kv_shared_layers(),
+            config.attention_pattern(),
+        );
+
+        let total_bytes = effective_layers * config.num_heads() * config.max_seq_len() * config.head_dim() * elem_bytes;
         Self {
             k: vec![0u8; total_bytes],
             v: vec![0u8; total_bytes],
-            num_layers: config.num_layers(),
+            num_layers,
             num_kv_heads: config.num_heads(),
             max_seq_len: config.max_seq_len(),
             head_dim: config.head_dim(),
@@ -62,7 +77,60 @@ impl KvCacheBuffer {
             seq_len: 0,
             elem_bytes,
             cache_dtype,
+            kv_donor_map,
         }
+    }
+
+    /// 构建 KV donor 映射。
+    ///
+    /// 返回 (effective_layers, donor_map):
+    /// - effective_layers: 实际需要 KV 存储的层数 (= num_layers - num_kv_shared)
+    /// - donor_map[i] = Some(donor) 表示层 i 共享 donor 层的 KV
+    ///
+    /// 共享规则: 后 N 层共享同类型 (sliding/global) 的最近非共享层。
+    fn build_kv_donor_map(
+        num_layers: usize,
+        num_kv_shared: usize,
+        attention_pattern: &[u8],
+    ) -> (usize, Vec<Option<usize>>) {
+        if num_kv_shared == 0 || num_layers == 0 {
+            return (num_layers, vec![None; num_layers]);
+        }
+
+        let shared_start = num_layers.saturating_sub(num_kv_shared);
+        let mut donor_map = vec![None; num_layers];
+
+        for layer_i in shared_start..num_layers {
+            // 找到同类型的最近非共享层
+            let layer_type = attention_pattern.get(layer_i).copied().unwrap_or(0);
+            let mut donor = None;
+            for j in (0..shared_start).rev() {
+                let j_type = attention_pattern.get(j).copied().unwrap_or(0);
+                if j_type == layer_type {
+                    donor = Some(j);
+                    break;
+                }
+            }
+            donor_map[layer_i] = donor;
+        }
+
+        let effective = num_layers - num_kv_shared;
+        (effective, donor_map)
+    }
+
+    /// 获取层 i 的 KV 存储偏移 (字节)。
+    /// 共享层返回 donor 层的偏移。
+    pub fn layer_kv_offset(&self, layer_i: usize) -> usize {
+        let effective_layer = match self.kv_donor_map.get(layer_i).copied().flatten() {
+            Some(donor) => donor,
+            None => layer_i,
+        };
+        effective_layer * self.num_kv_heads * self.max_seq_len * self.head_dim * self.elem_bytes
+    }
+
+    /// 层 i 是否是共享层 (不计算自己的 KV)
+    pub fn is_shared_kv_layer(&self, layer_i: usize) -> bool {
+        self.kv_donor_map.get(layer_i).copied().flatten().is_some()
     }
 
     /// Number of pages currently in use (rounded up).

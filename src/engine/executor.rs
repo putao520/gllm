@@ -193,6 +193,10 @@ impl KvCacheConfig {
     pub fn head_dim(&self) -> usize { self.geometry.head_dim }
     /// Maximum sequence length.
     pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
+    /// SharedKvRef: 后 N 层共享 KV cache.
+    pub fn num_kv_shared_layers(&self) -> usize { self.geometry.num_kv_shared_layers }
+    /// Per-layer attention pattern (0=sliding, 1=global).
+    pub fn attention_pattern(&self) -> &[u8] { &self.geometry.attention_pattern }
 }
 
 impl PartialEq for KvCacheConfig {

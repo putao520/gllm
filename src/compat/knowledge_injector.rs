@@ -253,6 +253,7 @@ pub fn inject_frozen_kv_from_bytes<E: Element>(
             seq_len: 0,
             elem_bytes: kv_elem_bytes,
             cache_dtype: gllm_kernels::types::DType::F32,
+            kv_donor_map: vec![None; num_layers],
         }
     });
 
