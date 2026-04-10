@@ -264,23 +264,29 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             return Err(BE::Cpu("empty logits in sample_from_tensor".into()));
         }
 
-        // Apply temperature scaling
-        let temperature = if sampling.temperature <= 0.0 { 1e-8 } else { sampling.temperature };
-        let scaled: Vec<f32> = data.iter().map(|&x| x / temperature).collect();
+        // ── Greedy path: temperature == 0 → argmax on raw logits ──
+        if sampling.temperature <= 0.0 {
+            let best = data.iter().enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i as u32)
+                .unwrap_or(0);
+            return Ok(vec![best]);
+        }
 
-        // Top-k filtering: keep only top_k largest logits
+        // ── Stochastic path: temperature > 0 → top-k/top-p + multinomial ──
+        let scaled: Vec<f32> = data.iter().map(|&x| x / sampling.temperature).collect();
+
+        // Top-k filtering
         let mut indices: Vec<usize> = (0..scaled.len()).collect();
         let effective_k = if sampling.top_k > 0 && sampling.top_k < scaled.len() {
             sampling.top_k
         } else {
             scaled.len()
         };
-
-        // Partial sort to find top-k
-        indices.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
+        indices.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
         indices.truncate(effective_k);
 
-        // Softmax over selected tokens
+        // Softmax
         let max_val = scaled[indices[0]];
         let mut probs: Vec<f32> = indices.iter().map(|&i| (scaled[i] - max_val).exp()).collect();
         let sum: f32 = probs.iter().sum();
@@ -296,11 +302,10 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
 
         // Top-p (nucleus) filtering
         if sampling.top_p < 1.0 && sampling.top_p > 0.0 {
-            // Sort by descending probability
             let mut sorted_pairs: Vec<(usize, f32)> = indices.iter().copied()
                 .zip(probs.iter().copied())
                 .collect();
-            sorted_pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
+            sorted_pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             let mut cumulative = 0.0f32;
             let mut cutoff = sorted_pairs.len();
@@ -313,21 +318,49 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             }
             sorted_pairs.truncate(cutoff);
 
-            // Re-normalize
             let new_sum: f32 = sorted_pairs.iter().map(|(_, p)| p).sum();
             indices = sorted_pairs.iter().map(|(i, _)| *i).collect();
             probs = sorted_pairs.iter().map(|(_, p)| p / new_sum).collect();
         }
 
-        // Greedy selection (deterministic): pick the highest probability token.
-        // For stochastic sampling we'd use a RNG, but deterministic is safer
-        // for accuracy-first design and test reproducibility.
-        let best = probs.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) // LEGAL: NaN 比较的标准 Rust 模式
-            .map(|(i, _)| indices[i] as u32)
-            .unwrap_or(0); // LEGAL: 空 probs 时默认 token 0（不应发生，前面已检查）
+        // Multinomial sampling: 按概率分布随机抽样
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
-        Ok(vec![best])
+        // 使用 logits 内容 + 系统时间作为 seed 生成伪随机数
+        let mut hasher = DefaultHasher::new();
+        data.len().hash(&mut hasher);
+        // 浮点位模式作为熵源
+        for &v in data.iter().take(8) {
+            v.to_bits().hash(&mut hasher);
+        }
+        // 高精度时间戳作为不确定性源
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        nanos.hash(&mut hasher);
+        let seed = hasher.finish();
+
+        // xorshift64 快速 PRNG
+        let mut rng_state = seed | 1; // 确保非零
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        let rand_f32 = (rng_state & 0xFFFFFF) as f32 / 0xFFFFFF as f32; // [0, 1]
+
+        // 累积分布采样
+        let mut cumulative = 0.0f32;
+        let mut selected = indices[0] as u32;
+        for (i, &prob) in probs.iter().enumerate() {
+            cumulative += prob;
+            if rand_f32 <= cumulative {
+                selected = indices[i] as u32;
+                break;
+            }
+        }
+
+        Ok(vec![selected])
     }
 
     fn embedding_forward_gpu_pure(
