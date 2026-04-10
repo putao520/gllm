@@ -84,6 +84,8 @@ pub unsafe extern "C" fn gllm_generate(
     temperature: f32,
     top_k: u32,
     top_p: f32,
+    // thinking_budget: 0 = disabled, negative = unlimited, positive = max tokens
+    thinking_budget: i32,
 ) -> GllmGenerateResult {
     let err_result = |msg: &str| -> GllmGenerateResult {
         GllmGenerateResult {
@@ -101,6 +103,7 @@ pub unsafe extern "C" fn gllm_generate(
     };
 
     // Sync call — no tokio runtime needed
+    let tb = if thinking_budget < 0 { None } else { Some(thinking_budget as usize) };
     let result = ctx.client.execute_generation(
         prompt_str,
         max_tokens as usize,
@@ -108,7 +111,7 @@ pub unsafe extern "C" fn gllm_generate(
         top_k as usize,
         top_p,
         None,
-        None,
+        tb,
     );
 
     match result {
