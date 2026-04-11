@@ -1147,115 +1147,47 @@ impl FusedGraphExecutor {
             FusedOp::FlashAttention(config) => {
                 let g = build_flash_attention_graph(config, dtype);
                 let h = config.num_heads * config.head_dim;
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * h,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * h, vec![]))
             }
 
             FusedOp::SwiGLU(config) => {
                 let g = build_swiglu_graph(config, dtype);
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * config.intermediate_size,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * config.intermediate_size, vec![]))
             }
 
             FusedOp::RoPE(config) => {
                 let g = build_rope_graph(config, hidden, dtype);
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * hidden,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * hidden, vec![]))
             }
 
             FusedOp::FusedQkvRope(config) => {
                 let g = build_fused_qkv_rope_graph(config, hidden, dtype);
                 let q_dim = config.num_heads * config.head_dim;
                 let kv_dim = config.num_kv_heads * config.head_dim;
-                let per = vec![
-                    max_seq_len * q_dim,
-                    max_seq_len * kv_dim,
-                    max_seq_len * kv_dim,
-                ];
+                let per = vec![max_seq_len * q_dim, max_seq_len * kv_dim, max_seq_len * kv_dim];
                 let total: usize = per.iter().sum();
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: total,
-                    per_output_numel: per,
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, total, per))
             }
 
             FusedOp::FusedRMSLinear(config) => {
                 let g = build_fused_rms_linear_graph(config, dtype);
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * config.hidden_size,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * config.hidden_size, vec![]))
             }
 
             FusedOp::GQA(config) => {
                 let g = build_gqa_graph(config, dtype);
                 let q_dim = config.num_heads * config.head_dim;
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * q_dim,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * q_dim, vec![]))
             }
 
             FusedOp::MoERouting(config) => {
                 let g = build_moe_routing_graph(config, hidden, dtype);
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * config.num_experts,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * config.num_experts, vec![]))
             }
 
             FusedOp::PerLayerEmbed(config) => {
                 let g = build_ple_graph(config, hidden, dtype);
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel: max_seq_len * hidden,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, max_seq_len * hidden, vec![]))
             }
 
             FusedOp::Atomic(atomic) => {
@@ -1330,16 +1262,7 @@ impl FusedGraphExecutor {
                 let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(SYMDIM_MAX_SEQ_LEN)).product();
 
                 let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape, dtype)?;
-                let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
-
-                Ok(NodeGraphBuild {
-                    graph: g,
-                    input_names: node.inputs.clone(),
-                    output_names: node.outputs.clone(),
-                    output_numel,
-                    per_output_numel: vec![],
-                    output_dtype,
-                })
+                Ok(make_node_build(g, node, output_numel, vec![]))
             }
         }
     }
@@ -2519,6 +2442,25 @@ impl FusedGraphExecutor {
 
 /// Internal helper: result of building a CompilerGraph for one node.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+/// Construct a `NodeGraphBuild` from a compiled graph, node I/O names, and output sizing.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn make_node_build(
+    graph: gllm_kernels::compiler::CompilerGraph,
+    node: &super::types::FusedNode,
+    output_numel: usize,
+    per_output_numel: Vec<usize>,
+) -> NodeGraphBuild {
+    let output_dtype = graph.tensors[graph.outputs[0].0 as usize].dtype;
+    NodeGraphBuild {
+        graph,
+        input_names: node.inputs.clone(),
+        output_names: node.outputs.clone(),
+        output_numel,
+        per_output_numel,
+        output_dtype,
+    }
+}
+
 struct NodeGraphBuild {
     graph: gllm_kernels::compiler::CompilerGraph,
     input_names: Vec<String>,
