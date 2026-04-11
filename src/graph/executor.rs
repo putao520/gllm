@@ -6,6 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// SymDim::Symbolic 编译时上界，用于 scratchpad/buffer 分配。非运行时限制。
+const SYMDIM_MAX_SEQ_LEN: usize = 2048;
+
 use super::types::{
     FusedGraph, FusedOp, FlashAttentionConfig, FusedQkvRopeConfig,
     FusedRMSLinearConfig, GQAConfig, MoERoutingConfig, PleConfig, RoPEConfig, SwiGLUConfig,
@@ -241,7 +244,7 @@ fn build_flash_attention_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     let q = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
@@ -291,7 +294,7 @@ fn build_swiglu_graph(
     // Inputs: activation (symbolic seq_len) + 2 weight matrices (WII pattern)
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048), // Conservative upper bound for buffer allocation
+        max_value: Some(SYMDIM_MAX_SEQ_LEN), // Conservative upper bound for buffer allocation
     };
     let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     let w_gate = g.add_tensor_concrete("w_gate", &[hidden, inter], dt);
@@ -340,7 +343,7 @@ fn build_rope_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
     let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
     g.inputs = vec![input];
@@ -380,7 +383,7 @@ fn build_fused_qkv_rope_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
@@ -456,7 +459,7 @@ fn build_fused_rms_linear_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(h)], dt);
@@ -501,7 +504,7 @@ fn build_gqa_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     let q = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
@@ -544,7 +547,7 @@ fn build_moe_routing_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     let input = g.add_tensor("input", vec![seq_len_sym.clone(), SymDim::Concrete(hidden)], dt);
@@ -595,7 +598,7 @@ fn build_ple_graph(
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(2048),
+        max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
     // Inputs:
@@ -981,9 +984,9 @@ impl FusedGraphExecutor {
 
             // Calculate feature_dim: for most ops, it's the last dimension of output shape
             // For ops with symbolic seq_len, output_numel = max_seq_len * feature_dim
-            // So feature_dim = output_numel / max_seq_len (where max_seq_len = 2048)
+            // So feature_dim = output_numel / max_seq_len (where max_seq_len = SYMDIM_MAX_SEQ_LEN)
             let feature_dim = if build.output_numel > 0 {
-                build.output_numel / 2048 // max_seq_len used in SymDim::Symbolic
+                build.output_numel / SYMDIM_MAX_SEQ_LEN // max_seq_len used in SymDim::Symbolic
             } else {
                 hidden // fallback to hidden_size
             };
@@ -1085,7 +1088,7 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
-                feature_dim: if p.output_numel > 0 { p.output_numel / 2048 } else { 0 },
+                feature_dim: if p.output_numel > 0 { p.output_numel / SYMDIM_MAX_SEQ_LEN } else { 0 },
             });
         }
         
@@ -1138,7 +1141,7 @@ impl FusedGraphExecutor {
         dtype: gllm_kernels::types::DType,
     ) -> Result<NodeGraphBuild, ExecutionError> {
         let node = &self.graph.nodes[node_idx];
-        let max_seq_len = 2048; // SymDim::Symbolic max_value
+        let max_seq_len = SYMDIM_MAX_SEQ_LEN; // SymDim::Symbolic max_value
 
         match &node.op {
             FusedOp::FlashAttention(config) => {
@@ -1272,7 +1275,7 @@ impl FusedGraphExecutor {
                 use gllm_kernels::compiler::SymDim;
                 let seq_len_sym = SymDim::Symbolic {
                     name: "seq_len".to_string(),
-                    max_value: Some(2048),
+                    max_value: Some(SYMDIM_MAX_SEQ_LEN),
                 };
 
                 // First pass: collect raw shapes (weight shapes transposed for MatMul)
@@ -1324,7 +1327,7 @@ impl FusedGraphExecutor {
                 let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
 
                 // Calculate output_numel: use max_for_allocation for Symbolic dims
-                let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(2048)).product();
+                let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(SYMDIM_MAX_SEQ_LEN)).product();
 
                 let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape, dtype)?;
                 let output_dtype = g.tensors[g.outputs[0].0 as usize].dtype;
@@ -1575,32 +1578,31 @@ impl FusedGraphExecutor {
         Ok(out)
     }
 
-    /// Execute the compiled JIT kernels in topological order.
-    ///
-    /// graph.nodes is already in topological order. For each node:
-    /// 1. The first input tensor is passed as the activation input
-    /// 2. Remaining input tensors are packed into a contiguous weight blob
-    /// 3. The compiled kernel is executed
-    /// 4. Output data is stored for downstream nodes
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    fn run_compiled(
-        &self,
-        inputs: &HashMap<String, Vec<u8>>,
-    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
-        let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
+    // -----------------------------------------------------------------------
+    // Shared execution helpers (used by run_compiled and run_with_kv_cache)
+    // -----------------------------------------------------------------------
 
-        // Seed with graph inputs
+    /// Initialize tensor map from graph inputs and weight bindings.
+    /// Returns (tensors, weight_ptrs) where weight_ptrs maps names to raw pointers
+    /// for weights that have a runtime pointer but no shape (direct-ptr weights).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn seed_tensors_and_weight_ptrs(
+        inputs: &HashMap<String, Vec<u8>>,
+        weight_bindings: &HashMap<String, crate::graph::types::WeightBinding>,
+    ) -> (HashMap<String, Vec<u8>>, HashMap<String, *const u8>) {
+        let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
         for (name, data) in inputs {
             tensors.insert(name.clone(), data.clone());
         }
 
-        // Seed with weight binding data — prefer runtime ptr over embedded bytes
         let mut weight_ptrs: HashMap<String, *const u8> = HashMap::new();
-        for (name, wb) in &self.graph.weight_bindings {
+        for (name, wb) in weight_bindings {
             if let Some(ptr) = wb.ptr {
                 if !wb.shape.is_empty() {
                     let numel: usize = wb.shape.iter().product();
-                    let bytes = numel * wb.dtype.size();
+                    // Weight bindings uploaded as f32 (4 bytes per element),
+                    // regardless of original dtype (BF16/F16 → f32 conversion).
+                    let bytes = numel * 4;
                     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                     tensors.insert(name.clone(), slice.to_vec());
                 }
@@ -1609,83 +1611,317 @@ impl FusedGraphExecutor {
                 tensors.insert(name.clone(), data.clone());
             }
         }
+        (tensors, weight_ptrs)
+    }
 
-        // Execute each node
+    /// Load activation tensor for a compiled node.
+    /// When `pad_to_max` is true, pads the activation buffer to max_seq_len size
+    /// so JIT kernels can safely iterate up to the compiled loop bound.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn load_activation(
+        cn: &CompiledNode,
+        tensors: &HashMap<String, Vec<u8>>,
+        pad_to_max: bool,
+    ) -> Vec<u8> {
+        if cn.graph_input_names.is_empty() {
+            return Vec::new();
+        }
+        let raw = tensors
+            .get(&cn.graph_input_names[0])
+            .cloned()
+            .unwrap_or_default();
+        if pad_to_max && !raw.is_empty() {
+            let max_act_bytes = cn.output_numel * cn.output_dtype.size_bytes();
+            if raw.len() < max_act_bytes {
+                let mut padded = raw;
+                padded.resize(max_act_bytes, 0);
+                return padded;
+            }
+        }
+        raw
+    }
+
+    /// Pack weight tensors into a contiguous blob using the compiled weight_layout.
+    /// graph_input_names[1..] are the weight tensors in order.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn pack_weight_blob(
+        cn: &CompiledNode,
+        tensors: &HashMap<String, Vec<u8>>,
+        weight_ptrs: &HashMap<String, *const u8>,
+    ) -> Vec<u8> {
+        let mut weight_blob = Vec::new();
+        if let Some(ref wl) = cn.compiled.weight_layout {
+            weight_blob.resize(wl.total_bytes, 0u8);
+            for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
+                let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
+                let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
+                let size = next_offset - offset;
+                if size == 0 { continue; }
+                if let Some(data) = tensors.get(name) {
+                    let copy_len = size.min(data.len());
+                    weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+                } else if let Some(&ptr) = weight_ptrs.get(name) {
+                    let src = unsafe { std::slice::from_raw_parts(ptr, size) };
+                    weight_blob[offset..offset + size].copy_from_slice(src);
+                }
+            }
+        } else {
+            for name in cn.graph_input_names.iter().skip(1) {
+                if let Some(data) = tensors.get(name) {
+                    weight_blob.extend_from_slice(data);
+                }
+            }
+        }
+        weight_blob
+    }
+
+    /// Check if a node's outputs are already present in the tensor map.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn is_node_computed(cn: &CompiledNode, tensors: &HashMap<String, Vec<u8>>) -> bool {
+        !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name))
+    }
+
+    /// Collect graph-level output tensors from the tensor map.
+    fn collect_graph_outputs(
+        graph: &FusedGraph,
+        tensors: &mut HashMap<String, Vec<u8>>,
+    ) -> HashMap<String, Vec<u8>> {
+        let mut out = HashMap::new();
+        for name in &graph.outputs {
+            let data = tensors.remove(name).unwrap_or_default();
+            out.insert(name.clone(), data);
+        }
+        out
+    }
+
+    /// Expand K/V tensors for GQA head repetition.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn expand_gqa_heads(
+        cn: &CompiledNode,
+        node_op: &FusedOp,
+        tensors: &mut HashMap<String, Vec<u8>>,
+        mha_kv_seq_len: usize,
+    ) {
+        let expand = match node_op {
+            FusedOp::GQA(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
+                Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
+            }
+            FusedOp::FlashAttention(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
+                Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
+            }
+            _ => None,
+        };
+        let Some((repeat, num_heads, num_kv_heads, head_dim)) = expand else { return };
+
+        let kv_names: Vec<&String> = cn.graph_input_names.iter().skip(1).take(2).collect();
+        for &kv_name in &kv_names {
+            let Some(kv_data) = tensors.get(kv_name).cloned() else { continue };
+            let kv_dim = num_kv_heads * head_dim;
+            let q_dim = num_heads * head_dim;
+            let elem_bytes = 4usize; // f32
+            let kv_bytes = kv_data.len();
+            let kv_tokens = kv_bytes / (kv_dim * elem_bytes);
+
+            if kv_tokens > 0 && kv_dim < q_dim {
+                let mut expanded = vec![0u8; mha_kv_seq_len * q_dim * elem_bytes];
+                for t in 0..kv_tokens.min(mha_kv_seq_len) {
+                    for kv_h in 0..num_kv_heads {
+                        let src_off = (t * kv_dim + kv_h * head_dim) * elem_bytes;
+                        for r in 0..repeat {
+                            let q_h = kv_h * repeat + r;
+                            let dst_off = (t * q_dim + q_h * head_dim) * elem_bytes;
+                            let copy_len = head_dim * elem_bytes;
+                            if src_off + copy_len <= kv_data.len() && dst_off + copy_len <= expanded.len() {
+                                expanded[dst_off..dst_off + copy_len]
+                                    .copy_from_slice(&kv_data[src_off..src_off + copy_len]);
+                            }
+                        }
+                    }
+                }
+                tensors.insert(kv_name.clone(), expanded);
+            }
+        }
+    }
+
+    /// Merge KV cache entries for decode step MHA.
+    ///
+    /// Returns `mha_kv_seq_len` (total_seq if merged, seq_len otherwise).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn merge_kv_cache_for_decode(
+        cn: &CompiledNode,
+        node_op: &FusedOp,
+        node_name: &str,
+        tensors: &mut HashMap<String, Vec<u8>>,
+        kv_cache_k: *mut f32,
+        kv_cache_v: *mut f32,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+        total_seq: usize,
+        seq_len: usize,
+    ) -> usize {
+        if total_seq <= seq_len || kv_cache_k.is_null() { return seq_len; }
+
+        let (num_kv_heads, head_dim) = match node_op {
+            FusedOp::GQA(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
+            FusedOp::FlashAttention(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
+            _ => return seq_len,
+        };
+        if num_kv_heads == 0 || head_dim == 0 { return seq_len; }
+
+        let Some(kv_layer) = Self::extract_layer_index(node_name) else { return seq_len; };
+
+        let kv_dim = num_kv_heads * head_dim;
+        let elem_bytes = 4usize; // f32
+        let cached_len = total_seq - seq_len;
+        let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
+        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
+
+        // Build merged K and V: [total_seq, kv_dim]
+        let merged_row_bytes = kv_dim * elem_bytes;
+        let mut merged_k = vec![0u8; total_seq * merged_row_bytes];
+        let mut merged_v = vec![0u8; total_seq * merged_row_bytes];
+
+        unsafe {
+            let k_base = kv_cache_k as *const u8;
+            let v_base = kv_cache_v as *const u8;
+            for h in 0..num_kv_heads {
+                let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim * elem_bytes;
+                for s in 0..cached_len {
+                    let cache_row_off = head_byte_offset + s * head_dim * elem_bytes;
+                    let merge_row_off = (s * kv_dim + h * head_dim) * elem_bytes;
+                    std::ptr::copy_nonoverlapping(
+                        k_base.add(cache_row_off),
+                        merged_k.as_mut_ptr().add(merge_row_off),
+                        head_dim * elem_bytes,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        v_base.add(cache_row_off),
+                        merged_v.as_mut_ptr().add(merge_row_off),
+                        head_dim * elem_bytes,
+                    );
+                }
+            }
+        }
+
+        // Append current step's K/V from tensor map
+        let k_name = cn.graph_input_names.get(1);
+        let v_name = cn.graph_input_names.get(2);
+        if let (Some(k_name), Some(v_name)) = (k_name, v_name) {
+            if let (Some(cur_k), Some(cur_v)) = (tensors.get(k_name), tensors.get(v_name)) {
+                let dst_offset = cached_len * merged_row_bytes;
+                let copy_bytes = cur_k.len().min(merged_row_bytes * seq_len);
+                merged_k[dst_offset..dst_offset + copy_bytes]
+                    .copy_from_slice(&cur_k[..copy_bytes]);
+                let copy_bytes_v = cur_v.len().min(merged_row_bytes * seq_len);
+                merged_v[dst_offset..dst_offset + copy_bytes_v]
+                    .copy_from_slice(&cur_v[..copy_bytes_v]);
+            }
+        }
+
+        // Pad Q to [total_seq, q_dim]: zeros for cached positions, current Q at end
+        if let Some(q_name) = cn.graph_input_names.get(0).cloned() {
+            if let Some(cur_q) = tensors.get(&q_name).cloned() {
+                let q_row_bytes = cur_q.len() / seq_len.max(1);
+                let mut padded_q = vec![0u8; total_seq * q_row_bytes];
+                let dst_off = cached_len * q_row_bytes;
+                let copy_bytes = cur_q.len().min(q_row_bytes * seq_len);
+                padded_q[dst_off..dst_off + copy_bytes]
+                    .copy_from_slice(&cur_q[..copy_bytes]);
+                tensors.insert(q_name, padded_q);
+            }
+        }
+
+        if let Some(kn) = k_name { tensors.insert(kn.clone(), merged_k); }
+        if let Some(vn) = v_name { tensors.insert(vn.clone(), merged_v); }
+
+        total_seq
+    }
+
+    /// Write K/V from FusedQkvRope output into the KV cache buffer.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn perform_kv_cache_write(
+        cn: &CompiledNode,
+        config: &FusedQkvRopeConfig,
+        node_name: &str,
+        tensors: &HashMap<String, Vec<u8>>,
+        kv_cache_k: *mut f32,
+        kv_cache_v: *mut f32,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+        total_seq: usize,
+        seq_len: usize,
+    ) {
+        if kv_cache_k.is_null() || kv_cache_v.is_null() || cn.per_output_numel.len() != 3 {
+            return;
+        }
+        let Some(kv_layer) = Self::extract_layer_index(node_name) else { return };
+
+        let num_kv_heads = config.num_kv_heads;
+        let head_dim = config.head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+
+        let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
+        let write_start = total_seq.saturating_sub(seq_len);
+
+        let k_name = cn.graph_output_names.get(1).cloned();
+        let v_name = cn.graph_output_names.get(2).cloned();
+
+        let (Some(k_name), Some(v_name)) = (k_name, v_name) else { return };
+        let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) else { return };
+
+        let elem_bytes = 4usize;
+        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
+
+        unsafe {
+            let k_base = kv_cache_k as *mut u8;
+            let v_base = kv_cache_v as *mut u8;
+
+            for h in 0..num_kv_heads {
+                let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim * elem_bytes;
+                for s in 0..seq_len {
+                    let cache_row_offset = head_byte_offset + (write_start + s) * head_dim * elem_bytes;
+                    let src_row_offset = (s * kv_dim + h * head_dim) * elem_bytes;
+
+                    let k_src = k_data.as_ptr().add(src_row_offset);
+                    let k_dst = k_base.add(cache_row_offset);
+                    std::ptr::copy_nonoverlapping(k_src, k_dst, head_dim * elem_bytes);
+
+                    let v_src = v_data.as_ptr().add(src_row_offset);
+                    let v_dst = v_base.add(cache_row_offset);
+                    std::ptr::copy_nonoverlapping(v_src, v_dst, head_dim * elem_bytes);
+                }
+            }
+        }
+    }
+
+    /// Execute the compiled JIT kernels in topological order (no KV cache).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn run_compiled(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
+
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
+            if Self::is_node_computed(cn, &tensors) { continue; }
 
-            if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
-                continue;
-            }
+            let activation = Self::load_activation(cn, &tensors, false);
+            let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
 
-            // Activation input = first graph input tensor
-            let activation = if !cn.graph_input_names.is_empty() {
-                tensors
-                    .get(&cn.graph_input_names[0])
-                    .cloned()
-                    .unwrap_or_default() // LEGAL: 不存在的 tensor 返回空数据
-            } else {
-                Vec::new()
-            };
-
-            // Pack weight blob using weight_layout if available
-            let mut weight_blob = Vec::new();
-            if let Some(ref wl) = cn.compiled.weight_layout {
-                weight_blob.resize(wl.total_bytes, 0u8);
-                for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
-                    let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
-                    let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
-                    let size = next_offset - offset;
-                    if size == 0 { continue; }
-                    if let Some(data) = tensors.get(name) {
-                        let copy_len = size.min(data.len());
-                        weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
-                    } else if let Some(&ptr) = weight_ptrs.get(name) {
-                        let src = unsafe { std::slice::from_raw_parts(ptr, size) };
-                        weight_blob[offset..offset + size].copy_from_slice(src);
-                    }
-                }
-            } else {
-                for name in cn.graph_input_names.iter().skip(1) {
-                    if let Some(data) = tensors.get(name) {
-                        weight_blob.extend_from_slice(data);
-                    }
-                }
-            }
-
-            // Allocate output buffer (dtype-aware)
             let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
-
-            // Allocate scratchpad
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
-            // Compute seq_len from activation size: activation is [seq_len, hidden],
-            // stored with the node's output dtype, so seq_len = num_elements / hidden.
-            // Fall back to 1 if we cannot determine it.
             let activation_elems = activation.len() / cn.output_dtype.size_bytes();
-            let seq_len = if activation_elems > 0 {
-                activation_elems
-            } else {
-                1
-            };
+            let seq_len = if activation_elems > 0 { activation_elems } else { 1 };
 
             unsafe {
                 cn.compiled.execute(
-                    if activation.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        activation.as_ptr()
-                    },
-                    if weight_blob.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        weight_blob.as_ptr()
-                    },
-                    std::ptr::null_mut(), // no KV cache
-                    std::ptr::null(),     // no positions
-                    std::ptr::null(),     // no seq_lens
-                    1,                    // batch_size = 1
+                    if activation.is_empty() { std::ptr::null() } else { activation.as_ptr() },
+                    if weight_blob.is_empty() { std::ptr::null() } else { weight_blob.as_ptr() },
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
                     seq_len,
                     output_buf.as_mut_ptr(),
                     scratchpad.as_mut_ptr(),
@@ -1696,7 +1932,6 @@ impl FusedGraphExecutor {
             if cn.graph_output_names.len() == 1 {
                 tensors.insert(cn.graph_output_names[0].clone(), output_buf);
             } else if !cn.per_output_numel.is_empty() {
-                // Multi-output: split by per_output_numel
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
                     let numel = cn.per_output_numel[i];
@@ -1706,7 +1941,6 @@ impl FusedGraphExecutor {
                     byte_offset += nbytes;
                 }
             } else if cn.graph_output_names.len() > 1 {
-                // Multi-output node without per_output_numel is a compile-time bug.
                 return Err(ExecutionError::Compilation(format!(
                     "node has {} outputs but no per_output_numel — compile() should have set this",
                     cn.graph_output_names.len(),
@@ -1714,13 +1948,7 @@ impl FusedGraphExecutor {
             }
         }
 
-        // Collect graph outputs
-        let mut out = HashMap::new();
-        for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
-            out.insert(name.clone(), data);
-        }
-        Ok(out)
+        Ok(Self::collect_graph_outputs(&self.graph, &mut tensors))
     }
 
     /// Execute the compiled JIT kernels with KV cache support.
@@ -1771,31 +1999,7 @@ impl FusedGraphExecutor {
 
         log::debug!("[EXEC-ENTER] run_with_kv_cache layer={} total_seq={} seq_len={} nodes={}", layer, total_seq, seq_len, self.compiled_nodes.len());
 
-        let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
-
-        // Seed with graph inputs
-        for (name, data) in inputs {
-            tensors.insert(name.clone(), data.clone());
-        }
-
-        // Seed with weight bindings — prefer runtime ptr over embedded bytes.
-        // Also build a raw-pointer map for direct-ptr weights (where we may not know shape).
-        let mut weight_ptrs: HashMap<String, *const u8> = HashMap::new();
-        for (name, wb) in &self.graph.weight_bindings {
-            if let Some(ptr) = wb.ptr {
-                if !wb.shape.is_empty() {
-                    let numel: usize = wb.shape.iter().product();
-                    // Weight bindings from SafeTensors have been uploaded as f32 (4 bytes per element),
-                    // regardless of the original dtype (BF16/F16 → f32 conversion in upload_weights).
-                    let bytes = numel * 4; // always f32 after upload conversion
-                    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
-                    tensors.insert(name.clone(), slice.to_vec());
-                }
-                weight_ptrs.insert(name.clone(), ptr as *const u8);
-            } else if let Some(ref data) = wb.data {
-                tensors.insert(name.clone(), data.clone());
-            }
-        }
+        let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
 
         // Build unified KV cache pointer for the compiled kernel.
         // gllm KV cache layout: [K_all_layers | V_all_layers], each half is
@@ -1812,7 +2016,7 @@ impl FusedGraphExecutor {
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
 
-            if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
+            if Self::is_node_computed(cn, &tensors) {
                 log::trace!("[SKIP] node {node_idx} '{}' outputs already present", self.graph.nodes[node_idx].name);
                 continue;
             }
@@ -1920,105 +2124,11 @@ impl FusedGraphExecutor {
             );
 
             // ── KV cache merge for decode step MHA ──
-            // On decode (total_seq > seq_len), the MHA node needs to see all cached
-            // K/V tokens, not just the current step's. We:
-            // 1. Read cached K/V from KV cache buffer for this layer
-            // 2. Append current step's K/V (from FusedQkvRope output in tensor map)
-            // 3. Replace tensor map entries with merged [total_seq, kv_dim] tensors
-            // 4. Pad Q to [total_seq, q_dim] (zeros for cached positions)
-            // 5. Override MHA's seq_len parameter to total_seq
-            let mha_kv_seq_len = if is_mha_node && total_seq > seq_len && !kv_cache_k.is_null() {
-                // Extract GQA config for geometry info
-                let (num_kv_heads, head_dim_cache) = match &self.graph.nodes[node_idx].op {
-                    FusedOp::GQA(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
-                    FusedOp::FlashAttention(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
-                    _ => (0, 0),
-                };
-                // Extract layer index from node name: "layer_X_attn" → X
-                let kv_layer = Self::extract_layer_index(&self.graph.nodes[node_idx].name);
-                // Get cache geometry
-                let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(2048);
-
-                if num_kv_heads > 0 && head_dim_cache > 0 {
-                    if let Some(kv_layer) = kv_layer {
-                        let kv_dim = num_kv_heads * head_dim_cache;
-                        let elem_bytes = 4usize; // f32
-                        let cached_len = total_seq - seq_len;
-                        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim_cache * elem_bytes;
-
-                        // Build merged K and V: [total_seq, kv_dim]
-                        let merged_row_bytes = kv_dim * elem_bytes;
-                        let mut merged_k = vec![0u8; total_seq * merged_row_bytes];
-                        let mut merged_v = vec![0u8; total_seq * merged_row_bytes];
-
-                        unsafe {
-                            let k_base = kv_cache_k as *const u8;
-                            let v_base = kv_cache_v as *const u8;
-
-                            // Copy cached K/V rows from KV cache
-                            for h in 0..num_kv_heads {
-                                let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim_cache * elem_bytes;
-                                for s in 0..cached_len {
-                                    let cache_row_off = head_byte_offset + s * head_dim_cache * elem_bytes;
-                                    let merge_row_off = (s * kv_dim + h * head_dim_cache) * elem_bytes;
-                                    // K
-                                    std::ptr::copy_nonoverlapping(
-                                        k_base.add(cache_row_off),
-                                        merged_k.as_mut_ptr().add(merge_row_off),
-                                        head_dim_cache * elem_bytes,
-                                    );
-                                    // V
-                                    std::ptr::copy_nonoverlapping(
-                                        v_base.add(cache_row_off),
-                                        merged_v.as_mut_ptr().add(merge_row_off),
-                                        head_dim_cache * elem_bytes,
-                                    );
-                                }
-                            }
-                        }
-
-                        // Append current step's K/V from tensor map
-                        let k_name = cn.graph_input_names.get(1);
-                        let v_name = cn.graph_input_names.get(2);
-                        if let (Some(k_name), Some(v_name)) = (k_name, v_name) {
-                            if let (Some(cur_k), Some(cur_v)) = (tensors.get(k_name), tensors.get(v_name)) {
-                                // cur_k is [seq_len * kv_dim] bytes, copy to position cached_len
-                                let dst_offset = cached_len * merged_row_bytes;
-                                let copy_bytes = cur_k.len().min(merged_row_bytes * seq_len);
-                                merged_k[dst_offset..dst_offset + copy_bytes]
-                                    .copy_from_slice(&cur_k[..copy_bytes]);
-                                let copy_bytes_v = cur_v.len().min(merged_row_bytes * seq_len);
-                                merged_v[dst_offset..dst_offset + copy_bytes_v]
-                                    .copy_from_slice(&cur_v[..copy_bytes_v]);
-                            }
-                        }
-
-                        // Pad Q to [total_seq, q_dim]: zeros for cached positions, current Q at end
-                        let q_name = cn.graph_input_names.get(0).cloned();
-                        if let Some(q_name) = q_name {
-                            if let Some(cur_q) = tensors.get(&q_name).cloned() {
-                                let q_row_bytes = cur_q.len() / seq_len.max(1);
-                                let mut padded_q = vec![0u8; total_seq * q_row_bytes];
-                                let dst_off = cached_len * q_row_bytes;
-                                let copy_bytes = cur_q.len().min(q_row_bytes * seq_len);
-                                padded_q[dst_off..dst_off + copy_bytes]
-                                    .copy_from_slice(&cur_q[..copy_bytes]);
-                                tensors.insert(q_name, padded_q);
-                            }
-                        }
-
-                        // Replace K/V in tensor map with merged versions
-                        if let Some(kn) = k_name { tensors.insert(kn.clone(), merged_k); }
-                        if let Some(vn) = v_name { tensors.insert(vn.clone(), merged_v); }
-
-                        // Return total_seq to override MHA's seq_len
-                        total_seq
-                    } else {
-                        seq_len
-                    }
-                } else {
-                    seq_len
-                }
+            let mha_kv_seq_len = if is_mha_node {
+                Self::merge_kv_cache_for_decode(
+                    cn, &self.graph.nodes[node_idx].op, &self.graph.nodes[node_idx].name,
+                    &mut tensors, kv_cache_k, kv_cache_v, forward_config, total_seq, seq_len,
+                )
             } else {
                 seq_len
             };
@@ -2035,107 +2145,14 @@ impl FusedGraphExecutor {
             }
 
             // Load activation and pad to max_seq_len size if needed.
-            // JIT kernels may iterate up to max_seq_len rows internally; the activation buffer
-            // must be at least that large to avoid out-of-bounds reads.
-            let activation = if !cn.graph_input_names.is_empty() {
-                let raw = tensors
-                    .get(&cn.graph_input_names[0])
-                    .cloned()
-                    .unwrap_or_default();
-                // Compute expected max activation size (max_seq_len * feature_dim)
-                let max_act_bytes = cn.output_numel * cn.output_dtype.size_bytes();
-                if !raw.is_empty() && raw.len() < max_act_bytes {
-                    // Pad with zeros so JIT kernel can safely read max_seq_len rows
-                    let mut padded = raw;
-                    padded.resize(max_act_bytes, 0);
-                    padded
-                } else {
-                    raw
-                }
-            } else {
-                Vec::new()
-            };
+            let activation = Self::load_activation(cn, &tensors, true);
 
             // Pack weight blob using the compiled weight_layout for size info.
-            // The weight_layout maps tensor IDs to byte offsets within the blob.
-            // graph_input_names[1..] are the weight tensors in order.
-            let mut weight_blob = Vec::new();
-            if let Some(ref wl) = cn.compiled.weight_layout {
-                weight_blob.resize(wl.total_bytes, 0u8);
-                for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
-                    let offset = if i < wl.offsets.len() { wl.offsets[i].1 } else { continue };
-                    let next_offset = if i + 1 < wl.offsets.len() { wl.offsets[i + 1].1 } else { wl.total_bytes };
-                    let size = next_offset - offset;
-                    if size == 0 { continue; }
-
-                    if let Some(data) = tensors.get(name) {
-                        let copy_len = size.min(data.len());
-                        weight_blob[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
-                    } else if let Some(&ptr) = weight_ptrs.get(name) {
-                        // Validate ptr read size against available data
-                        let src = unsafe { std::slice::from_raw_parts(ptr, size) };
-                        weight_blob[offset..offset + size].copy_from_slice(src);
-                    }
-                }
-            } else {
-                for name in cn.graph_input_names.iter().skip(1) {
-                    if let Some(data) = tensors.get(name) {
-                        weight_blob.extend_from_slice(data);
-                    }
-                }
-            }
+            let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
 
             // ── GQA head expansion for MHA ──
-            // MHA JIT codegen assumes Q/K/V all have the same hidden dimension (num_heads * head_dim).
-            // For GQA (num_kv_heads < num_heads), K/V have smaller kv_dim. We must expand K/V
-            // by repeating each kv head (num_heads / num_kv_heads) times to match q_dim.
-            let gqa_expand_factor = if is_mha_node {
-                match &self.graph.nodes[node_idx].op {
-                    FusedOp::GQA(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
-                        Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
-                    }
-                    FusedOp::FlashAttention(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
-                        Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            if let Some((repeat, num_heads, num_kv_heads, head_dim)) = gqa_expand_factor {
-                let kv_names: Vec<&String> = cn.graph_input_names.iter().skip(1).take(2).collect();
-                for &kv_name in &kv_names {
-                    if let Some(kv_data) = tensors.get(kv_name).cloned() {
-                        let kv_dim = num_kv_heads * head_dim;
-                        let q_dim = num_heads * head_dim;
-                        let elem_bytes = 4usize; // f32
-                        let actual_seq = mha_kv_seq_len;
-                        let kv_bytes = kv_data.len();
-                        let kv_tokens = kv_bytes / (kv_dim * elem_bytes);
-
-                        if kv_tokens > 0 && kv_dim < q_dim {
-                            // Expand [tokens, kv_dim] → [tokens, q_dim] by repeating kv heads
-                            let mut expanded = vec![0u8; actual_seq * q_dim * elem_bytes];
-                            for t in 0..kv_tokens.min(actual_seq) {
-                                for kv_h in 0..num_kv_heads {
-                                    let src_off = (t * kv_dim + kv_h * head_dim) * elem_bytes;
-                                    // Copy this kv head to all corresponding q heads
-                                    for r in 0..repeat {
-                                        let q_h = kv_h * repeat + r;
-                                        let dst_off = (t * q_dim + q_h * head_dim) * elem_bytes;
-                                        let copy_len = head_dim * elem_bytes;
-                                        if src_off + copy_len <= kv_data.len() && dst_off + copy_len <= expanded.len() {
-                                            expanded[dst_off..dst_off + copy_len]
-                                                .copy_from_slice(&kv_data[src_off..src_off + copy_len]);
-                                        }
-                                    }
-                                }
-                            }
-                            tensors.insert(kv_name.clone(), expanded);
-                        }
-                    }
-                }
+            if is_mha_node {
+                Self::expand_gqa_heads(cn, &self.graph.nodes[node_idx].op, &mut tensors, mha_kv_seq_len);
             }
 
             // Allocate output buffer at max_seq_len size (safe upper bound).
@@ -2270,7 +2287,7 @@ impl FusedGraphExecutor {
             } else if !cn.per_output_numel.is_empty() {
                 // Multi-output node: split truncated_output by per_output_numel
                 // per_output_numel stores max_seq_len sizes, need to scale to runtime seq_len
-                let max_seq_len = 2048; // SymDim::Symbolic max_value
+                let max_seq_len = SYMDIM_MAX_SEQ_LEN; // SymDim::Symbolic max_value
                 let mut byte_offset = 0;
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
                     let per_token = cn.per_output_numel[i] / max_seq_len;
@@ -2290,67 +2307,11 @@ impl FusedGraphExecutor {
             }
 
             // ── KV cache write: after FusedQkvRope, copy K/V to KV cache buffer ──
-            // FusedQkvRope outputs: [Q_rope, K_rope, V] — multi-output with per_output_numel.
-            // Layout: outputs[0]=Q, outputs[1]=K, outputs[2]=V.
-            // We write K and V into the flat KV cache buffer at the correct layer offset.
             if let FusedOp::FusedQkvRope(ref config) = self.graph.nodes[node_idx].op {
-                if !kv_cache_k.is_null() && !kv_cache_v.is_null() && cn.per_output_numel.len() == 3 {
-                    // Extract layer index from node name: "layer_X_q_proj_fused_qkv_rope" → X
-                    let node_layer = Self::extract_layer_index(&self.graph.nodes[node_idx].name);
-                    if let Some(kv_layer) = node_layer {
-                        let num_kv_heads = config.num_kv_heads;
-                        let head_dim = config.head_dim;
-                        let kv_dim = num_kv_heads * head_dim;
-
-                        // Get cache geometry from forward_config
-                        let cache_max_seq = if let Some(fc) = forward_config {
-                            fc.max_seq_len()
-                        } else {
-                            2048
-                        };
-
-                        // Compute write start position: where to write new K/V in the cache
-                        // total_seq = cached_seq_len + seq_len, so cached = total_seq - seq_len
-                        let write_start = total_seq.saturating_sub(seq_len);
-
-                        // Get K_rope and V data from tensor map
-                        let k_name = cn.graph_output_names.get(1).cloned();
-                        let v_name = cn.graph_output_names.get(2).cloned();
-
-                        if let (Some(k_name), Some(v_name)) = (k_name, v_name) {
-                            if let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) {
-                                // KV cache layout: [num_layers, num_kv_heads, max_seq_len, head_dim] flat f32
-                                // Element size = 4 (f32)
-                                let elem_bytes = 4usize;
-                                // Per-layer offset in the flat buffer
-                                let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
-
-                                unsafe {
-                                    let k_base = kv_cache_k as *mut u8;
-                                    let v_base = kv_cache_v as *mut u8;
-
-                                    for h in 0..num_kv_heads {
-                                        let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim * elem_bytes;
-                                        for s in 0..seq_len {
-                                            let cache_row_offset = head_byte_offset + (write_start + s) * head_dim * elem_bytes;
-                                            let src_row_offset = (s * kv_dim + h * head_dim) * elem_bytes;
-
-                                            // Copy K row (head_dim f32 elements)
-                                            let k_src = k_data.as_ptr().add(src_row_offset);
-                                            let k_dst = k_base.add(cache_row_offset);
-                                            std::ptr::copy_nonoverlapping(k_src, k_dst, head_dim * elem_bytes);
-
-                                            // Copy V row (head_dim f32 elements)
-                                            let v_src = v_data.as_ptr().add(src_row_offset);
-                                            let v_dst = v_base.add(cache_row_offset);
-                                            std::ptr::copy_nonoverlapping(v_src, v_dst, head_dim * elem_bytes);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Self::perform_kv_cache_write(
+                    cn, config, &self.graph.nodes[node_idx].name, &tensors,
+                    kv_cache_k, kv_cache_v, forward_config, total_seq, seq_len,
+                );
             }
 
             // §14.2: Scatter-back after compacted execution
@@ -2440,12 +2401,7 @@ impl FusedGraphExecutor {
             }
         }
 
-        let mut out = HashMap::new();
-        for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
-            out.insert(name.clone(), data);
-        }
-        Ok(out)
+        Ok(Self::collect_graph_outputs(&self.graph, &mut tensors))
     }
 
     /// Returns true if the executor has been compiled (CPU JIT).
