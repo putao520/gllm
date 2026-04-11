@@ -954,7 +954,7 @@ impl FusedGraphExecutor {
         hidden: usize,
         _dtype: gllm_kernels::types::DType,
     ) -> Result<(), ExecutionError> {
-        eprintln!("[COMPILE] start: seq_len={} hidden={} nodes={}", seq_len, hidden, self.graph.nodes.len());
+        log::debug!("[COMPILE] start: seq_len={} hidden={} nodes={}", seq_len, hidden, self.graph.nodes.len());
         // CPU JIT always computes in f32 regardless of model weight dtype.
         // Weights are converted to f32 during upload (upload_native_tensor_with_convert).
         // Using BF16/F16 here would cause weight_layout and output buffers to be 2x too small.
@@ -1001,7 +1001,7 @@ impl FusedGraphExecutor {
 
         self.compiled_nodes = compiled_nodes;
         self.is_compiled = true;
-        eprintln!("[COMPILE] done: {} nodes compiled", self.compiled_nodes.len());
+        log::debug!("[COMPILE] done: {} nodes compiled", self.compiled_nodes.len());
         Ok(())
     }
 
@@ -1769,7 +1769,7 @@ impl FusedGraphExecutor {
             return Err(ExecutionError::NotCompiled);
         }
 
-        eprintln!("[EXEC-ENTER] run_with_kv_cache layer={} total_seq={} seq_len={} nodes={}", layer, total_seq, seq_len, self.compiled_nodes.len());
+        log::debug!("[EXEC-ENTER] run_with_kv_cache layer={} total_seq={} seq_len={} nodes={}", layer, total_seq, seq_len, self.compiled_nodes.len());
 
         let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
 
@@ -1813,8 +1813,13 @@ impl FusedGraphExecutor {
             let cn = &self.compiled_nodes[node_idx];
 
             if !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
+                log::trace!("[SKIP] node {node_idx} '{}' outputs already present", self.graph.nodes[node_idx].name);
                 continue;
             }
+
+            log::trace!("[EXEC] node {node_idx} '{}' ({})",
+                self.graph.nodes[node_idx].name,
+                self.graph.nodes[node_idx].op.name());
 
             // §9-§18: Pre-node callback — Gate-First Skip / Residual Bypass / Early Exit
             let layer_idx = node_idx / 2; // 每层约 2 个 FusedNode (Attention + FFN)
@@ -2019,12 +2024,12 @@ impl FusedGraphExecutor {
             };
 
             if cfg!(debug_assertions) {
-                eprintln!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
+                log::trace!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
                     self.graph.nodes.len(),
                     self.graph.nodes[node_idx].name,
                     self.graph.nodes[node_idx].op.name());
                 if self.graph.nodes[node_idx].op.name() == "GQA" || self.graph.nodes[node_idx].op.name() == "Attention" {
-                    eprintln!("[EXEC-ABI] GQA node inputs: {:?}, outputs: {:?}, graph_inputs: {:?}",
+                    log::trace!("[EXEC-ABI] GQA node inputs: {:?}, outputs: {:?}, graph_inputs: {:?}",
                         cn.graph_input_names, cn.graph_output_names, self.graph.inputs);
                 }
             }
@@ -2080,6 +2085,59 @@ impl FusedGraphExecutor {
                 }
             }
 
+            // ── GQA head expansion for MHA ──
+            // MHA JIT codegen assumes Q/K/V all have the same hidden dimension (num_heads * head_dim).
+            // For GQA (num_kv_heads < num_heads), K/V have smaller kv_dim. We must expand K/V
+            // by repeating each kv head (num_heads / num_kv_heads) times to match q_dim.
+            let gqa_expand_factor = if is_mha_node {
+                match &self.graph.nodes[node_idx].op {
+                    FusedOp::GQA(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
+                        Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
+                    }
+                    FusedOp::FlashAttention(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
+                        Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some((repeat, num_heads, num_kv_heads, head_dim)) = gqa_expand_factor {
+                let kv_names: Vec<&String> = cn.graph_input_names.iter().skip(1).take(2).collect();
+                for &kv_name in &kv_names {
+                    if let Some(kv_data) = tensors.get(kv_name).cloned() {
+                        let kv_dim = num_kv_heads * head_dim;
+                        let q_dim = num_heads * head_dim;
+                        let elem_bytes = 4usize; // f32
+                        let actual_seq = mha_kv_seq_len;
+                        let kv_bytes = kv_data.len();
+                        let kv_tokens = kv_bytes / (kv_dim * elem_bytes);
+
+                        if kv_tokens > 0 && kv_dim < q_dim {
+                            // Expand [tokens, kv_dim] → [tokens, q_dim] by repeating kv heads
+                            let mut expanded = vec![0u8; actual_seq * q_dim * elem_bytes];
+                            for t in 0..kv_tokens.min(actual_seq) {
+                                for kv_h in 0..num_kv_heads {
+                                    let src_off = (t * kv_dim + kv_h * head_dim) * elem_bytes;
+                                    // Copy this kv head to all corresponding q heads
+                                    for r in 0..repeat {
+                                        let q_h = kv_h * repeat + r;
+                                        let dst_off = (t * q_dim + q_h * head_dim) * elem_bytes;
+                                        let copy_len = head_dim * elem_bytes;
+                                        if src_off + copy_len <= kv_data.len() && dst_off + copy_len <= expanded.len() {
+                                            expanded[dst_off..dst_off + copy_len]
+                                                .copy_from_slice(&kv_data[src_off..src_off + copy_len]);
+                                        }
+                                    }
+                                }
+                            }
+                            tensors.insert(kv_name.clone(), expanded);
+                        }
+                    }
+                }
+            }
+
             // Allocate output buffer at max_seq_len size (safe upper bound).
             // JIT kernels may loop up to max_seq_len internally for ops like
             // RmsNorm/Add that iterate all rows. The buffer must be large enough
@@ -2090,29 +2148,57 @@ impl FusedGraphExecutor {
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
-            if cfg!(debug_assertions) {
-                eprintln!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B seq_len={}",
-                    activation.len(), weight_blob.len(), output_bytes,
-                    cn.compiled.scratchpad_bytes, seq_len);
-            }
+            log::debug!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B seq_len={}",
+                activation.len(), weight_blob.len(), output_bytes,
+                cn.compiled.scratchpad_bytes, seq_len);
             unsafe {
                 if is_mha_node {
                     // MHA JIT ABI: rdi=Q, rsi=K, rdx=V, r8=output_ptr
                     // This differs from standard CompiledLayerFn where r8=seq_lens.
                     // MHA stores r8 as [rsp+24] = output base for scatter_head.
                     // Load Q, K, V from tensor map (produced by preceding FusedQkvRope).
-                    let q_ptr = cn.graph_input_names.get(0)
+                    let (q_ptr, q_len) = cn.graph_input_names.get(0)
                         .and_then(|name| tensors.get(name))
-                        .map(|v| v.as_ptr() as *const u8)
-                        .unwrap_or(std::ptr::null());
-                    let k_ptr = cn.graph_input_names.get(1)
+                        .map(|v| (v.as_ptr() as *const u8, v.len()))
+                        .unwrap_or((std::ptr::null(), 0));
+                    let (k_ptr, k_len) = cn.graph_input_names.get(1)
                         .and_then(|name| tensors.get(name))
-                        .map(|v| v.as_ptr() as *const u8)
-                        .unwrap_or(std::ptr::null());
-                    let v_ptr = cn.graph_input_names.get(2)
+                        .map(|v| (v.as_ptr() as *const u8, v.len()))
+                        .unwrap_or((std::ptr::null(), 0));
+                    let (v_ptr, v_len) = cn.graph_input_names.get(2)
                         .and_then(|name| tensors.get(name))
-                        .map(|v| v.as_ptr() as *const u8)
-                        .unwrap_or(std::ptr::null());
+                        .map(|v| (v.as_ptr() as *const u8, v.len()))
+                        .unwrap_or((std::ptr::null(), 0));
+
+                    log::debug!("[MHA-EXEC] node {node_idx} kv_seq={mha_kv_seq_len} Q={q_ptr:?}({q_len}B) K={k_ptr:?}({k_len}B) V={v_ptr:?}({v_len}B) scratch={scratch_len}B out={output_bytes}B",
+                        scratch_len = cn.compiled.scratchpad_bytes);
+
+                    // Validate Q/K/V buffer sizes: MHA extract_heads reads up to
+                    // mha_kv_seq_len rows of hidden_bytes each. Buffer must be large enough.
+                    let q_hidden = if let FusedOp::GQA(ref cfg) = self.graph.nodes[node_idx].op {
+                        cfg.num_heads * cfg.head_dim * 4
+                    } else if let FusedOp::FlashAttention(ref cfg) = self.graph.nodes[node_idx].op {
+                        cfg.num_heads * cfg.head_dim * 4
+                    } else {
+                        cn.feature_dim * cn.output_dtype.size_bytes()
+                    };
+                    let kv_hidden = if let FusedOp::GQA(ref cfg) = self.graph.nodes[node_idx].op {
+                        cfg.num_kv_heads * cfg.head_dim * 4
+                    } else if let FusedOp::FlashAttention(ref cfg) = self.graph.nodes[node_idx].op {
+                        cfg.num_kv_heads * cfg.head_dim * 4
+                    } else {
+                        cn.feature_dim * cn.output_dtype.size_bytes()
+                    };
+                    let min_q_bytes = mha_kv_seq_len * q_hidden;
+                    let min_kv_bytes = mha_kv_seq_len * kv_hidden;
+                    if q_len < min_q_bytes || k_len < min_kv_bytes || v_len < min_kv_bytes {
+                        log::error!(
+                            "[EXEC-MHA] node {node_idx} buffer too small: Q={q_len}<{min_q_bytes} K={k_len}<{min_kv_bytes} V={v_len}<{min_kv_bytes} seq={mha_kv_seq_len}"
+                        );
+                        return Err(ExecutionError::ShapeMismatch(format!(
+                            "MHA node {node_idx}: Q/K/V buffer too small for seq_len={mha_kv_seq_len}"
+                        )));
+                    }
 
                     cn.compiled.execute(
                         q_ptr,                                    // rdi = Q
@@ -2148,9 +2234,7 @@ impl FusedGraphExecutor {
                     );
                 }
             }
-            if cfg!(debug_assertions) {
-                eprintln!("[EXEC] node {node_idx} done");
-            }
+            log::debug!("[EXEC] node {node_idx} done");
 
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
