@@ -1914,6 +1914,110 @@ impl FusedGraphExecutor {
                 "GQA" | "Attention" | "MultiHeadAttention"
             );
 
+            // ── KV cache merge for decode step MHA ──
+            // On decode (total_seq > seq_len), the MHA node needs to see all cached
+            // K/V tokens, not just the current step's. We:
+            // 1. Read cached K/V from KV cache buffer for this layer
+            // 2. Append current step's K/V (from FusedQkvRope output in tensor map)
+            // 3. Replace tensor map entries with merged [total_seq, kv_dim] tensors
+            // 4. Pad Q to [total_seq, q_dim] (zeros for cached positions)
+            // 5. Override MHA's seq_len parameter to total_seq
+            let mha_kv_seq_len = if is_mha_node && total_seq > seq_len && !kv_cache_k.is_null() {
+                // Extract GQA config for geometry info
+                let (num_kv_heads, head_dim_cache) = match &self.graph.nodes[node_idx].op {
+                    FusedOp::GQA(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
+                    FusedOp::FlashAttention(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
+                    _ => (0, 0),
+                };
+                // Extract layer index from node name: "layer_X_attn" → X
+                let kv_layer = Self::extract_layer_index(&self.graph.nodes[node_idx].name);
+                // Get cache geometry
+                let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(2048);
+
+                if num_kv_heads > 0 && head_dim_cache > 0 {
+                    if let Some(kv_layer) = kv_layer {
+                        let kv_dim = num_kv_heads * head_dim_cache;
+                        let elem_bytes = 4usize; // f32
+                        let cached_len = total_seq - seq_len;
+                        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim_cache * elem_bytes;
+
+                        // Build merged K and V: [total_seq, kv_dim]
+                        let merged_row_bytes = kv_dim * elem_bytes;
+                        let mut merged_k = vec![0u8; total_seq * merged_row_bytes];
+                        let mut merged_v = vec![0u8; total_seq * merged_row_bytes];
+
+                        unsafe {
+                            let k_base = kv_cache_k as *const u8;
+                            let v_base = kv_cache_v as *const u8;
+
+                            // Copy cached K/V rows from KV cache
+                            for h in 0..num_kv_heads {
+                                let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim_cache * elem_bytes;
+                                for s in 0..cached_len {
+                                    let cache_row_off = head_byte_offset + s * head_dim_cache * elem_bytes;
+                                    let merge_row_off = (s * kv_dim + h * head_dim_cache) * elem_bytes;
+                                    // K
+                                    std::ptr::copy_nonoverlapping(
+                                        k_base.add(cache_row_off),
+                                        merged_k.as_mut_ptr().add(merge_row_off),
+                                        head_dim_cache * elem_bytes,
+                                    );
+                                    // V
+                                    std::ptr::copy_nonoverlapping(
+                                        v_base.add(cache_row_off),
+                                        merged_v.as_mut_ptr().add(merge_row_off),
+                                        head_dim_cache * elem_bytes,
+                                    );
+                                }
+                            }
+                        }
+
+                        // Append current step's K/V from tensor map
+                        let k_name = cn.graph_input_names.get(1);
+                        let v_name = cn.graph_input_names.get(2);
+                        if let (Some(k_name), Some(v_name)) = (k_name, v_name) {
+                            if let (Some(cur_k), Some(cur_v)) = (tensors.get(k_name), tensors.get(v_name)) {
+                                // cur_k is [seq_len * kv_dim] bytes, copy to position cached_len
+                                let dst_offset = cached_len * merged_row_bytes;
+                                let copy_bytes = cur_k.len().min(merged_row_bytes * seq_len);
+                                merged_k[dst_offset..dst_offset + copy_bytes]
+                                    .copy_from_slice(&cur_k[..copy_bytes]);
+                                let copy_bytes_v = cur_v.len().min(merged_row_bytes * seq_len);
+                                merged_v[dst_offset..dst_offset + copy_bytes_v]
+                                    .copy_from_slice(&cur_v[..copy_bytes_v]);
+                            }
+                        }
+
+                        // Pad Q to [total_seq, q_dim]: zeros for cached positions, current Q at end
+                        let q_name = cn.graph_input_names.get(0).cloned();
+                        if let Some(q_name) = q_name {
+                            if let Some(cur_q) = tensors.get(&q_name).cloned() {
+                                let q_row_bytes = cur_q.len() / seq_len.max(1);
+                                let mut padded_q = vec![0u8; total_seq * q_row_bytes];
+                                let dst_off = cached_len * q_row_bytes;
+                                let copy_bytes = cur_q.len().min(q_row_bytes * seq_len);
+                                padded_q[dst_off..dst_off + copy_bytes]
+                                    .copy_from_slice(&cur_q[..copy_bytes]);
+                                tensors.insert(q_name, padded_q);
+                            }
+                        }
+
+                        // Replace K/V in tensor map with merged versions
+                        if let Some(kn) = k_name { tensors.insert(kn.clone(), merged_k); }
+                        if let Some(vn) = v_name { tensors.insert(vn.clone(), merged_v); }
+
+                        // Return total_seq to override MHA's seq_len
+                        total_seq
+                    } else {
+                        seq_len
+                    }
+                } else {
+                    seq_len
+                }
+            } else {
+                seq_len
+            };
+
             if cfg!(debug_assertions) {
                 eprintln!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
                     self.graph.nodes.len(),
@@ -2017,7 +2121,7 @@ impl FusedGraphExecutor {
                         positions,                                // rcx = positions (unused by MHA)
                         output_buf.as_ptr() as *const usize,      // r8 = output ptr (in seq_lens slot!)
                         1,                                        // r9 = batch_size
-                        seq_len,                                  // [rbp+16] = seq_len
+                        mha_kv_seq_len,                           // [rbp+16] = seq_len (total_seq for decode)
                         output_buf.as_mut_ptr(),                  // [rbp+24] = output (standard slot)
                         scratchpad.as_mut_ptr(),                  // [rbp+32] = scratchpad
                     );
@@ -2053,8 +2157,25 @@ impl FusedGraphExecutor {
 
             // Truncate output to runtime seq_len before inserting into tensor map.
             // JIT kernel wrote max_seq_len rows but only the first seq_len are valid.
-            let runtime_bytes = cn.feature_dim * seq_len * cn.output_dtype.size_bytes();
-            let truncated_output = if runtime_bytes < output_buf.len() {
+            // For MHA decode (mha_kv_seq_len > seq_len), the output is [total_seq, hidden]
+            // and we only need the last token's row.
+            let effective_trunc_len = if is_mha_node && mha_kv_seq_len > seq_len {
+                // MHA decode: output has total_seq rows, take only the last row
+                seq_len // just 1 row for decode
+            } else {
+                seq_len
+            };
+            let runtime_bytes = cn.feature_dim * effective_trunc_len * cn.output_dtype.size_bytes();
+            let truncated_output = if is_mha_node && mha_kv_seq_len > seq_len {
+                // MHA decode: extract last token's output from [total_seq, hidden]
+                let row_bytes = cn.feature_dim * cn.output_dtype.size_bytes();
+                let offset = (mha_kv_seq_len - 1) * row_bytes;
+                if offset + row_bytes <= output_buf.len() {
+                    output_buf[offset..offset + row_bytes].to_vec()
+                } else {
+                    output_buf[..row_bytes.min(output_buf.len())].to_vec()
+                }
+            } else if runtime_bytes < output_buf.len() {
                 output_buf[..runtime_bytes].to_vec()
             } else {
                 output_buf
@@ -2082,6 +2203,70 @@ impl FusedGraphExecutor {
                     "node has {} outputs but no per_output_numel",
                     cn.graph_output_names.len(),
                 )));
+            }
+
+            // ── KV cache write: after FusedQkvRope, copy K/V to KV cache buffer ──
+            // FusedQkvRope outputs: [Q_rope, K_rope, V] — multi-output with per_output_numel.
+            // Layout: outputs[0]=Q, outputs[1]=K, outputs[2]=V.
+            // We write K and V into the flat KV cache buffer at the correct layer offset.
+            if let FusedOp::FusedQkvRope(ref config) = self.graph.nodes[node_idx].op {
+                if !kv_cache_k.is_null() && !kv_cache_v.is_null() && cn.per_output_numel.len() == 3 {
+                    // Extract layer index from node name: "layer_X_q_proj_fused_qkv_rope" → X
+                    let node_layer = Self::extract_layer_index(&self.graph.nodes[node_idx].name);
+                    if let Some(kv_layer) = node_layer {
+                        let num_kv_heads = config.num_kv_heads;
+                        let head_dim = config.head_dim;
+                        let kv_dim = num_kv_heads * head_dim;
+
+                        // Get cache geometry from forward_config
+                        let cache_max_seq = if let Some(fc) = forward_config {
+                            fc.max_seq_len()
+                        } else {
+                            2048
+                        };
+
+                        // Compute write start position: where to write new K/V in the cache
+                        // total_seq = cached_seq_len + seq_len, so cached = total_seq - seq_len
+                        let write_start = total_seq.saturating_sub(seq_len);
+
+                        // Get K_rope and V data from tensor map
+                        let k_name = cn.graph_output_names.get(1).cloned();
+                        let v_name = cn.graph_output_names.get(2).cloned();
+
+                        if let (Some(k_name), Some(v_name)) = (k_name, v_name) {
+                            if let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) {
+                                // KV cache layout: [num_layers, num_kv_heads, max_seq_len, head_dim] flat f32
+                                // Element size = 4 (f32)
+                                let elem_bytes = 4usize;
+                                // Per-layer offset in the flat buffer
+                                let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
+
+                                unsafe {
+                                    let k_base = kv_cache_k as *mut u8;
+                                    let v_base = kv_cache_v as *mut u8;
+
+                                    for h in 0..num_kv_heads {
+                                        let head_byte_offset = layer_byte_offset + h * cache_max_seq * head_dim * elem_bytes;
+                                        for s in 0..seq_len {
+                                            let cache_row_offset = head_byte_offset + (write_start + s) * head_dim * elem_bytes;
+                                            let src_row_offset = (s * kv_dim + h * head_dim) * elem_bytes;
+
+                                            // Copy K row (head_dim f32 elements)
+                                            let k_src = k_data.as_ptr().add(src_row_offset);
+                                            let k_dst = k_base.add(cache_row_offset);
+                                            std::ptr::copy_nonoverlapping(k_src, k_dst, head_dim * elem_bytes);
+
+                                            // Copy V row (head_dim f32 elements)
+                                            let v_src = v_data.as_ptr().add(src_row_offset);
+                                            let v_dst = v_base.add(cache_row_offset);
+                                            std::ptr::copy_nonoverlapping(v_src, v_dst, head_dim * elem_bytes);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // §14.2: Scatter-back after compacted execution
@@ -2188,6 +2373,13 @@ impl FusedGraphExecutor {
     #[cfg(feature = "cuda")]
     pub fn is_gpu_compiled(&self) -> bool {
         self.is_gpu_compiled
+    }
+
+    /// Extract layer index from a node name like "layer_3_q_proj_fused_qkv_rope" → Some(3).
+    fn extract_layer_index(name: &str) -> Option<usize> {
+        let rest = name.strip_prefix("layer_")?;
+        let end = rest.find('_')?;
+        rest[..end].parse().ok()
     }
 
     /// Returns a reference to the underlying graph.

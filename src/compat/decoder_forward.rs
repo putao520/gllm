@@ -159,6 +159,17 @@ pub(crate) fn decoder_forward<E: Element>(
             Some(config),
         ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
+        // Update KV cache seq_len after successful execution.
+        // The executor has written K/V data for all layers into the cache buffer.
+        if has_kv_cache && seq_idx < kv_caches.len() {
+            let mut store = backend.kv_store().lock().map_err(|e| {
+                BE::Cpu(format!("KV store lock poisoned: {e}"))
+            })?;
+            if let Some(buf) = store.get_mut(&kv_caches[seq_idx].0) {
+                buf.seq_len = total_seq;
+            }
+        }
+
         // Extract logits from graph output
         if let Some(logits_bytes) = output.get("logits").or_else(|| output.values().next()) {
             let logits: Vec<f32> = logits_bytes
