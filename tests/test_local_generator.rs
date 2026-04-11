@@ -20,6 +20,7 @@ fn test_smollm2_generate() {
         .max_tokens(10)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("generate");
 
     let text = response.text.trim();
@@ -38,12 +39,14 @@ fn test_smollm2_deterministic() {
         .max_tokens(5)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("gen1");
     let r2 = client
         .generate("Hello world")
         .max_tokens(5)
         .temperature(0.0)
         .generate()
+        .response()
         .expect("gen2");
     assert_eq!(r1.text, r2.text, "deterministic output mismatch");
 }

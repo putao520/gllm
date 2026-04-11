@@ -33,7 +33,7 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic("seq_len".into());
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: None };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -74,12 +74,12 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
 
     let attn_out = g.add_tensor("attn_out", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: s, num_heads, num_kv_heads, head_dim, causal: true },
+        OpKind::MultiHeadAttention { seq_len: sym_s.clone(), num_heads, num_kv_heads, head_dim, causal: true },
         vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
     );
 
     let o_out = g.add_tensor("o_proj", vec![sym_s.clone(), SymDim::Concrete(h)], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: sym_s.clone(), n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
 
     let resid1 = g.add_tensor("residual1", vec![sym_s.clone(), SymDim::Concrete(h)], ft);
     let tel1 = g.add_tensor("telemetry1", vec![sym_s.clone()], DType::F32);
@@ -165,7 +165,7 @@ pub(crate) fn build_fused_ffn_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic("seq_len".into());
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: None };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
 
@@ -192,7 +192,7 @@ pub(crate) fn build_fused_ffn_layer_graph_symbolic(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn2_w], vec![normed2], "rms_norm_2");
 
     let gate_out = g.add_tensor("ffn_gate", vec![sym_s.clone(), SymDim::Concrete(inter)], ft);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: sym_s.clone(), n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
 
     let mask_out = g.add_tensor("gate_mask", vec![sym_s.clone(), SymDim::Concrete(inter)], ft);
     g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], "gate_mask");
@@ -204,7 +204,7 @@ pub(crate) fn build_fused_ffn_layer_graph_symbolic(
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
 
     let down_out = g.add_tensor("ffn_down", vec![sym_s.clone(), SymDim::Concrete(h)], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: sym_s.clone(), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     let output = g.add_tensor("output", vec![sym_s.clone(), SymDim::Concrete(h)], ft);
     let tel2 = g.add_tensor("telemetry2", vec![sym_s.clone()], DType::F32);
@@ -231,7 +231,7 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic("seq_len".into());
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: None };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
 
@@ -272,7 +272,7 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
 
     for i in 0..num_experts {
         let gate_out = g.add_tensor(&format!("ffn_gate_{}", i), vec![sym_s.clone(), SymDim::Concrete(inter)], ft);
-        g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
+        g.add_op(OpKind::Gemm { m: sym_s.clone(), n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
 
         let mask_out = g.add_tensor(&format!("gate_mask_{}", i), vec![sym_s.clone(), SymDim::Concrete(inter)], ft);
         g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], &format!("gate_mask_{}", i));
@@ -284,7 +284,7 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
         g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("swiglu_{}", i));
 
         let down_out = g.add_tensor(&format!("ffn_down_{}", i), vec![sym_s.clone(), SymDim::Concrete(h)], ft);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
+        g.add_op(OpKind::Gemm { m: sym_s.clone(), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
 
         let next_acc = g.add_tensor(&format!("acc_after_{}", i), vec![sym_s.clone(), SymDim::Concrete(h)], ft);
         g.add_op(
@@ -367,7 +367,7 @@ pub(crate) fn build_fused_ffn_layer_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn2_w], vec![normed2], "rms_norm_2");
 
     let gate_out = g.add_tensor_concrete("ffn_gate", &[s, inter], ft);
-    g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
+    g.add_op(OpKind::Gemm { m: SymDim::Concrete(s), n: inter, k: h, dtype: dt }, vec![normed2, w_gate], vec![gate_out], "gemm_gate");
     
     let mask_out = g.add_tensor_concrete("gate_mask", &[s, inter], ft);
     g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], "gate_mask");
@@ -379,7 +379,7 @@ pub(crate) fn build_fused_ffn_layer_graph(
     g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], "swiglu");
     
     let down_out = g.add_tensor_concrete("ffn_down", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
+    g.add_op(OpKind::Gemm { m: SymDim::Concrete(s), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_down], vec![down_out], "gemm_down");
 
     let output = g.add_tensor_concrete("output", &[s, h], ft);
     let tel2 = g.add_tensor_concrete("telemetry2", &[s], DType::F32);
@@ -459,7 +459,7 @@ pub(crate) fn build_fused_moe_layer_graph(
 
     for i in 0..num_experts {
         let gate_out = g.add_tensor_concrete(&format!("ffn_gate_{}", i), &[s, inter], ft);
-        g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
+        g.add_op(OpKind::Gemm { m: SymDim::Concrete(s), n: inter, k: h, dtype: dt }, vec![normed2, w_gates[i]], vec![gate_out], &format!("gemm_gate_{}", i));
         
         let mask_out = g.add_tensor_concrete(&format!("gate_mask_{}", i), &[s, inter], ft);
         g.add_op(OpKind::GateMask { hidden: inter }, vec![gate_out], vec![mask_out], &format!("gate_mask_{}", i));
@@ -471,7 +471,7 @@ pub(crate) fn build_fused_moe_layer_graph(
         g.add_op(OpKind::SwiGlu, vec![gate_out, up_out], vec![swiglu_out], &format!("swiglu_{}", i));
         
         let down_out = g.add_tensor_concrete(&format!("ffn_down_{}", i), &[s, h], ft);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
+        g.add_op(OpKind::Gemm { m: SymDim::Concrete(s), n: h, k: inter, dtype: dt }, vec![swiglu_out, w_downs[i]], vec![down_out], &format!("gemm_down_{}", i));
         
         let next_acc = g.add_tensor_concrete(&format!("acc_after_{}", i), &[s, h], ft);
         g.add_op(
