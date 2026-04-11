@@ -954,6 +954,7 @@ impl FusedGraphExecutor {
         hidden: usize,
         _dtype: gllm_kernels::types::DType,
     ) -> Result<(), ExecutionError> {
+        eprintln!("[COMPILE] start: seq_len={} hidden={} nodes={}", seq_len, hidden, self.graph.nodes.len());
         // CPU JIT always computes in f32 regardless of model weight dtype.
         // Weights are converted to f32 during upload (upload_native_tensor_with_convert).
         // Using BF16/F16 here would cause weight_layout and output buffers to be 2x too small.
@@ -1000,6 +1001,7 @@ impl FusedGraphExecutor {
 
         self.compiled_nodes = compiled_nodes;
         self.is_compiled = true;
+        eprintln!("[COMPILE] done: {} nodes compiled", self.compiled_nodes.len());
         Ok(())
     }
 
@@ -1083,7 +1085,7 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
-                feature_dim: if p.output_numel > 0 { p.output_numel / 2048 } else { hidden },
+                feature_dim: if p.output_numel > 0 { p.output_numel / 2048 } else { 0 },
             });
         }
         
@@ -1767,6 +1769,8 @@ impl FusedGraphExecutor {
             return Err(ExecutionError::NotCompiled);
         }
 
+        eprintln!("[EXEC-ENTER] run_with_kv_cache layer={} total_seq={} seq_len={} nodes={}", layer, total_seq, seq_len, self.compiled_nodes.len());
+
         let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
 
         // Seed with graph inputs
@@ -1900,11 +1904,25 @@ impl FusedGraphExecutor {
                 }
             }
 
+            // ── Detect MHA/GQA attention nodes that need special ABI mapping ──
+            // MHA JIT codegen expects: rdi=Q, rsi=K, rdx=V, r8=output,
+            // which differs from the standard CompiledLayerFn ABI.
+            // We must pass Q/K/V from the tensor map instead of the default
+            // activation/weights/kv_cache pointers.
+            let is_mha_node = matches!(
+                self.graph.nodes[node_idx].op.name(),
+                "GQA" | "Attention" | "MultiHeadAttention"
+            );
+
             if cfg!(debug_assertions) {
                 eprintln!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
                     self.graph.nodes.len(),
                     self.graph.nodes[node_idx].name,
                     self.graph.nodes[node_idx].op.name());
+                if self.graph.nodes[node_idx].op.name() == "GQA" || self.graph.nodes[node_idx].op.name() == "Attention" {
+                    eprintln!("[EXEC-ABI] GQA node inputs: {:?}, outputs: {:?}, graph_inputs: {:?}",
+                        cn.graph_input_names, cn.graph_output_names, self.graph.inputs);
+                }
             }
 
             // Load activation and pad to max_seq_len size if needed.
@@ -1969,30 +1987,62 @@ impl FusedGraphExecutor {
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
             if cfg!(debug_assertions) {
-                eprintln!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B",
+                eprintln!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B seq_len={}",
                     activation.len(), weight_blob.len(), output_bytes,
-                    cn.compiled.scratchpad_bytes);
+                    cn.compiled.scratchpad_bytes, seq_len);
             }
             unsafe {
-                cn.compiled.execute(
-                    if activation.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        activation.as_ptr()
-                    },
-                    if weight_blob.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        weight_blob.as_ptr()
-                    },
-                    kv_cache_ptr,
-                    positions,
-                    kv_cache_v_ptr as *const usize,
-                    1,
-                    seq_len,
-                    output_buf.as_mut_ptr(),
-                    scratchpad.as_mut_ptr(),
-                );
+                if is_mha_node {
+                    // MHA JIT ABI: rdi=Q, rsi=K, rdx=V, r8=output_ptr
+                    // This differs from standard CompiledLayerFn where r8=seq_lens.
+                    // MHA stores r8 as [rsp+24] = output base for scatter_head.
+                    // Load Q, K, V from tensor map (produced by preceding FusedQkvRope).
+                    let q_ptr = cn.graph_input_names.get(0)
+                        .and_then(|name| tensors.get(name))
+                        .map(|v| v.as_ptr() as *const u8)
+                        .unwrap_or(std::ptr::null());
+                    let k_ptr = cn.graph_input_names.get(1)
+                        .and_then(|name| tensors.get(name))
+                        .map(|v| v.as_ptr() as *const u8)
+                        .unwrap_or(std::ptr::null());
+                    let v_ptr = cn.graph_input_names.get(2)
+                        .and_then(|name| tensors.get(name))
+                        .map(|v| v.as_ptr() as *const u8)
+                        .unwrap_or(std::ptr::null());
+
+                    cn.compiled.execute(
+                        q_ptr,                                    // rdi = Q
+                        k_ptr,                                    // rsi = K
+                        v_ptr as *mut u8,                         // rdx = V
+                        positions,                                // rcx = positions (unused by MHA)
+                        output_buf.as_ptr() as *const usize,      // r8 = output ptr (in seq_lens slot!)
+                        1,                                        // r9 = batch_size
+                        seq_len,                                  // [rbp+16] = seq_len
+                        output_buf.as_mut_ptr(),                  // [rbp+24] = output (standard slot)
+                        scratchpad.as_mut_ptr(),                  // [rbp+32] = scratchpad
+                    );
+                } else {
+                    // Standard ABI: rdi=input, rsi=weights, rdx=kv_cache, ...
+                    cn.compiled.execute(
+                        if activation.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            activation.as_ptr()
+                        },
+                        if weight_blob.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            weight_blob.as_ptr()
+                        },
+                        kv_cache_ptr,
+                        positions,
+                        kv_cache_v_ptr as *const usize,
+                        1,
+                        seq_len,
+                        output_buf.as_mut_ptr(),
+                        scratchpad.as_mut_ptr(),
+                    );
+                }
             }
             if cfg!(debug_assertions) {
                 eprintln!("[EXEC] node {node_idx} done");
@@ -2348,7 +2398,7 @@ impl GraphExecutorContext {
     ) -> Result<usize, ExecutorError> {
         match dim {
             gllm_kernels::compiler::SymDim::Concrete(n) => Ok(*n),
-            gllm_kernels::compiler::SymDim::Symbolic(name) => self
+            gllm_kernels::compiler::SymDim::Symbolic { name, .. } => self
                 .shape_binding
                 .get(name)
                 .copied()
@@ -2458,7 +2508,7 @@ mod tests {
             hidden_size: 512,
             intermediate_size: 1024,
         };
-        let g = build_swiglu_graph(&config, 4, gllm_kernels::types::DType::F32);
+        let g = build_swiglu_graph(&config, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 3); // input, w_gate, w_up (WII architecture)
         assert_eq!(g.outputs.len(), 1);
         assert_eq!(g.ops.len(), 3); // 2×Gemm + SwiGlu
@@ -2532,22 +2582,34 @@ mod tests {
 
     #[test]
     fn infer_output_shape_matmul() {
-        let shapes = vec![vec![4, 512], vec![512, 1024]];
+        use gllm_kernels::compiler::SymDim;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(4), SymDim::Concrete(512)],
+            vec![SymDim::Concrete(512), SymDim::Concrete(1024)],
+        ];
         let out = infer_output_shape("MatMul", &shapes);
-        assert_eq!(out, vec![4, 1024]);
+        assert_eq!(out, vec![SymDim::Concrete(4), SymDim::Concrete(1024)]);
     }
 
     #[test]
     fn infer_output_shape_add() {
-        let shapes = vec![vec![4, 512], vec![4, 512]];
+        use gllm_kernels::compiler::SymDim;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(4), SymDim::Concrete(512)],
+            vec![SymDim::Concrete(4), SymDim::Concrete(512)],
+        ];
         let out = infer_output_shape("Add", &shapes);
-        assert_eq!(out, vec![4, 512]);
+        assert_eq!(out, vec![SymDim::Concrete(4), SymDim::Concrete(512)]);
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     #[test]
     fn atomic_op_to_kind_known_ops() {
-        let shapes = vec![vec![4, 512], vec![512, 1024]];
+        use gllm_kernels::compiler::SymDim;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(4), SymDim::Concrete(512)],
+            vec![SymDim::Concrete(512), SymDim::Concrete(1024)],
+        ];
         assert!(atomic_op_to_kind("Add", &shapes, gllm_kernels::types::DType::F32).is_ok());
         assert!(atomic_op_to_kind("Mul", &shapes, gllm_kernels::types::DType::F32).is_ok());
         assert!(atomic_op_to_kind("Silu", &shapes, gllm_kernels::types::DType::F32).is_ok());
@@ -2558,7 +2620,8 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     #[test]
     fn atomic_op_to_kind_unknown_returns_err() {
-        let shapes = vec![vec![4, 512]];
+        use gllm_kernels::compiler::SymDim;
+        let shapes: Vec<Vec<SymDim>> = vec![vec![SymDim::Concrete(4), SymDim::Concrete(512)]];
         let result = atomic_op_to_kind("UnknownOp", &shapes, gllm_kernels::types::DType::F32);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2753,7 +2816,7 @@ mod tests {
             kv_layer_offset: None,
         };
         let result = ctx.resolve_sym_dim(
-            &gllm_kernels::compiler::SymDim::Symbolic("total_seq".to_string()),
+            &gllm_kernels::compiler::SymDim::Symbolic { name: "total_seq".to_string(), max_value: None },
         );
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -2785,7 +2848,7 @@ mod tests {
                 .bind("total_seq", 17),
             kv_layer_offset: None,
         };
-        let dim = gllm_kernels::compiler::SymDim::Symbolic("total_seq".to_string());
+        let dim = gllm_kernels::compiler::SymDim::Symbolic { name: "total_seq".to_string(), max_value: None };
         assert_eq!(ctx.resolve_sym_dim(&dim).unwrap(), 17);
     }
 
@@ -2867,11 +2930,11 @@ mod tests {
         assert_eq!(ctx.resolve_sym_dim(&concrete).unwrap(), 99);
 
         // Bound symbolic dim resolves to its value
-        let sym = gllm_kernels::compiler::SymDim::Symbolic("total_seq".to_string());
+        let sym = gllm_kernels::compiler::SymDim::Symbolic { name: "total_seq".to_string(), max_value: None };
         assert_eq!(ctx.resolve_sym_dim(&sym).unwrap(), 32);
 
         // Unbound symbolic dim returns ShapeNotBound error
-        let unbound = gllm_kernels::compiler::SymDim::Symbolic("unbound_dim".to_string());
+        let unbound = gllm_kernels::compiler::SymDim::Symbolic { name: "unbound_dim".to_string(), max_value: None };
         let err = ctx.resolve_sym_dim(&unbound).unwrap_err();
         assert!(
             matches!(err, ExecutorError::ShapeNotBound(ref n) if n == "unbound_dim"),
