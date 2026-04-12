@@ -1523,9 +1523,7 @@ impl FusedGraphExecutor {
             if let Some(ptr) = wb.ptr {
                 if !wb.shape.is_empty() {
                     let numel: usize = wb.shape.iter().product();
-                    // Weight bindings uploaded as f32 (4 bytes per element),
-                    // regardless of original dtype (BF16/F16 → f32 conversion).
-                    let bytes = numel * 4;
+                    let bytes = numel * wb.dtype.size();
                     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                     tensors.insert(name.clone(), slice.to_vec());
                 }
