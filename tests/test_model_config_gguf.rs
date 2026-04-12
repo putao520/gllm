@@ -8,7 +8,7 @@ use gllm::loader::Loader;
 use gllm::manifest::{
     ModelKind, ModelManifest, EMPTY_FILE_MAP,
 };
-use gllm::model_config::{ModelConfig, ModelConfigError, RopeScalingType};
+use gllm::model_config::{HiddenAct, ModelConfig, ModelConfigError, RopeScalingType};
 use tempfile::TempDir;
 
 #[derive(Debug, Clone)]
@@ -329,11 +329,11 @@ fn model_config_reads_from_gguf_metadata_without_config_json() {
     assert_eq!(rope_scaling.beta_fast, Some(32.0));
     assert_eq!(rope_scaling.beta_slow, Some(1.0));
     assert_eq!(config.head_dim, 128);
-    assert_eq!(config.dtype_size, 2);
+    assert_eq!(config.dtype.size_bytes(), 2);
     assert_eq!(config.use_cache, None);
     assert_eq!(config.tie_word_embeddings, None);
     assert_eq!(config.attention_dropout, Some(0.1));
-    assert_eq!(config.hidden_act.as_deref(), Some("silu"));
+    assert_eq!(config.hidden_act, Some(HiddenAct::Silu));
     assert_eq!(config.layer_norm_epsilon, Some(1e-5));
     assert_eq!(config.bos_token_id, Some(1));
     assert_eq!(config.eos_token_id, Some(2));
@@ -518,6 +518,6 @@ fn model_config_reads_full_rope_scaling_and_runtime_flags_from_config_json() {
     assert_eq!(config.num_experts, Some(64));
     assert_eq!(config.expert_intermediate_size, Some(14336));
     assert_eq!(config.attention_dropout, Some(0.2));
-    assert_eq!(config.hidden_act.as_deref(), Some("silu"));
+    assert_eq!(config.hidden_act, Some(HiddenAct::Silu));
     assert_eq!(config.layer_norm_epsilon, Some(1e-5));
 }

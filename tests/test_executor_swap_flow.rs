@@ -58,7 +58,7 @@ fn test_executor_swap_flow_under_pressure() -> Result<(), Box<dyn std::error::Er
         use gllm::scheduler::types::RequestKind;
         // Max 20 new tokens
         let config = gllm::engine::SamplingConfig::default();
-        let id = executor.enqueue_with_config(RequestKind::Chat, *p, 20, config)?;
+        let id = executor.enqueue_with_config(RequestKind::Chat, *p, 20, config, None)?;
         req_ids.push(id);
     }
 

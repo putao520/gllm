@@ -18,8 +18,10 @@ use gllm::{Client, ModelKind};
 use gllm::compat::backend_trait::Backend;
 use gllm::compat::CpuBackend;
 use gllm::engine::KvCacheConfig;
+use gllm::model_config::ModelGeometry;
 use hf_hub::api::sync::ApiBuilder;
 use safetensors::SafeTensors;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Test configuration for a single model
@@ -193,6 +195,7 @@ fn test_generator_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
             .max_tokens(50)
             .temperature(0.7)
             .generate()
+            .response()
         {
             Ok(r) => r,
             Err(e) => {
@@ -249,8 +252,7 @@ fn test_embedding_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
         };
 
         let embeddings = match client
-            .embeddings(vec![test.test_prompt.to_string()])
-            .generate()
+            .embed(vec![test.test_prompt.to_string()])
         {
             Ok(e) => e,
             Err(e) => {
@@ -320,7 +322,7 @@ fn test_rerank_model(test: &ModelTest, _use_cuda: bool) -> TestResult {
             "The sky is blue during the day.".to_string(),
         ];
 
-        let results = match client.rerank(test.test_prompt, documents).generate() {
+        let results = match client.rerank(test.test_prompt, documents) {
             Ok(r) => r,
             Err(e) => {
                 return TestResult {
@@ -540,12 +542,34 @@ fn scheduler_check() -> InternalCheck {
 fn kv_cache_check() -> InternalCheck {
     let name = "KV cache double buffer";
     let backend = CpuBackend::<f32>::new();
-    let config = KvCacheConfig {
+    let geometry = Arc::new(ModelGeometry {
+        hidden_size: 1,
         num_layers: 1,
+        vocab_size: 1,
+        intermediate_size: 1,
         num_heads: 1,
+        num_kv_heads: 1,
         head_dim: 1,
         max_seq_len: 4,
-        dtype_size: std::mem::size_of::<f32>(),
+        rope_theta: 0.0,
+        rope_scale: 1.0,
+        rope_interleaved: false,
+        global_rope_theta: 0.0,
+        rope_partial_ratio: 1.0,
+        attention_pattern: Vec::new(),
+        sliding_window: 0,
+        num_kv_shared_layers: 0,
+        global_head_dim: 0,
+        hidden_size_per_layer_input: 0,
+        dtype: gllm_kernels::types::DType::F32,
+        norm_eps: 1e-5,
+        num_experts: 0,
+        moe_top_k: 0,
+        expert_intermediate_size: 0,
+    });
+    let config = KvCacheConfig {
+        geometry,
+        kv_dtype: gllm_kernels::types::DType::F32,
         page_size: 0,
         swap_config: None,
     };

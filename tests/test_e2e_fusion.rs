@@ -332,8 +332,7 @@ fn e2e_fusion_consistency_with_standalone() {
     let embed_client =
         Client::new_embedding(EMBED_MODEL).expect("Failed to load embedding model");
     let standalone = embed_client
-        .embeddings(["Paris is the capital of France.", "Berlin is the capital of Germany."])
-        .generate()
+        .embed(["Paris is the capital of France.", "Berlin is the capital of Germany."])
         .expect("Standalone embedding failed");
 
     // 融合管线 embedding

@@ -54,8 +54,6 @@ fn run_reranker(path: &str, label: &str) {
 
     let response = client
         .rerank(QUERY, documents())
-        .top_n(3)
-        .generate()
         .unwrap_or_else(|e| panic!("{label}: rerank failed: {e}"));
 
     assert_rerank_sane(&response.results, label);
@@ -95,13 +93,9 @@ fn test_reranker_cross_format_consistency() {
 
     let st_results = st_client
         .rerank(QUERY, documents())
-        .top_n(3)
-        .generate()
         .expect("st rerank");
     let onnx_results = onnx_client
         .rerank(QUERY, documents())
-        .top_n(3)
-        .generate()
         .expect("onnx rerank");
 
     // 排序顺序必须一致
@@ -135,13 +129,9 @@ fn test_reranker_deterministic() {
 
     let r1 = client
         .rerank(QUERY, documents())
-        .top_n(3)
-        .generate()
         .expect("rerank 1");
     let r2 = client
         .rerank(QUERY, documents())
-        .top_n(3)
-        .generate()
         .expect("rerank 2");
 
     for i in 0..3 {

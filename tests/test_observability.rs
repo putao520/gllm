@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::sync::Arc;
 use gllm::scheduler::{
     observer::{BasicObserver, ObserverError, RuntimeObserver},
     policy::{AbsolutePolicy, PolicyConfig, PolicyVariant, SchedulingPolicy},
@@ -13,6 +14,41 @@ use gllm::scheduler::{
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheSlot, KvCacheState};
 use gllm::engine::executor::{KvCacheHandle, KvCacheConfig};
 use gllm::backend::detection::{detect_backend, BackendType};
+use gllm::model_config::ModelGeometry;
+
+fn make_kv_config(max_seq_len: usize) -> KvCacheConfig {
+    let geometry = Arc::new(ModelGeometry {
+        hidden_size: 4096,
+        num_layers: 32,
+        vocab_size: 32000,
+        intermediate_size: 11008,
+        num_heads: 32,
+        num_kv_heads: 32,
+        head_dim: 128,
+        max_seq_len,
+        rope_theta: 10000.0,
+        rope_scale: 1.0,
+        rope_interleaved: false,
+        global_rope_theta: 0.0,
+        rope_partial_ratio: 1.0,
+        attention_pattern: Vec::new(),
+        sliding_window: 0,
+        num_kv_shared_layers: 0,
+        global_head_dim: 0,
+        hidden_size_per_layer_input: 0,
+        dtype: gllm_kernels::types::DType::F32,
+        norm_eps: 1e-5,
+        num_experts: 0,
+        moe_top_k: 0,
+        expert_intermediate_size: 0,
+    });
+    KvCacheConfig {
+        geometry,
+        kv_dtype: gllm_kernels::types::DType::F32,
+        page_size: 512,
+        swap_config: None,
+    }
+}
 
 // ============================================================================
 // TEST-OBS-001: Epilogue 物理页头写入完整性测试
@@ -341,15 +377,7 @@ fn observer_capture_after_error() {
 /// **期望结果**: 返回明确的 `KvCacheError::Exhausted` 错误，禁止任何降级
 #[test]
 fn kv_cache_exhausted_halt() {
-    let config = KvCacheConfig {
-        num_layers: 32,
-        num_heads: 32,
-        head_dim: 128,
-        max_seq_len: 100,
-        dtype_size: 4,
-        page_size: 512,
-        swap_config: None,
-    };
+    let config = make_kv_config(100);
     let handle = KvCacheHandle(1000);
     let mut state = KvCacheState::new(handle, config);
 
@@ -383,15 +411,7 @@ fn kv_cache_exhausted_halt() {
 /// **期望结果**: 返回 Exhausted 错误
 #[test]
 fn kv_cache_set_used_exhausted() {
-    let config = KvCacheConfig {
-        num_layers: 32,
-        num_heads: 32,
-        head_dim: 128,
-        max_seq_len: 100,
-        dtype_size: 4,
-        page_size: 512,
-        swap_config: None,
-    };
+    let config = make_kv_config(100);
     let handle = KvCacheHandle(1000);
     let mut state = KvCacheState::new(handle, config);
 
@@ -418,15 +438,7 @@ fn kv_cache_set_used_exhausted() {
 /// **期望结果**: swap 正确工作
 #[test]
 fn kv_cache_double_buffer_swap() {
-    let config = KvCacheConfig {
-        num_layers: 32,
-        num_heads: 32,
-        head_dim: 128,
-        max_seq_len: 100,
-        dtype_size: 4,
-        page_size: 512,
-        swap_config: None,
-    };
+    let config = make_kv_config(100);
     let front_handle = KvCacheHandle(1000);
     let back_handle = KvCacheHandle(2000);
 
@@ -531,15 +543,7 @@ fn backend_detection_generic_no_panic() {
 /// **期望结果**: 槽位访问正确
 #[test]
 fn kv_cache_slot_operations() {
-    let config = KvCacheConfig {
-        num_layers: 32,
-        num_heads: 32,
-        head_dim: 128,
-        max_seq_len: 100,
-        dtype_size: 4,
-        page_size: 512,
-        swap_config: None,
-    };
+    let config = make_kv_config(100);
     let front_handle = KvCacheHandle(1000);
     let back_handle = KvCacheHandle(2000);
 
@@ -563,15 +567,7 @@ fn kv_cache_slot_operations() {
 
     // 验证 overwrite_slot
     let new_handle = KvCacheHandle(3000);
-    let new_config = KvCacheConfig {
-        num_layers: 32,
-        num_heads: 32,
-        head_dim: 128,
-        max_seq_len: 200,
-        dtype_size: 4,
-        page_size: 512,
-        swap_config: None,
-    };
+    let new_config = make_kv_config(200);
     let new_state = KvCacheState::new(new_handle, new_config);
     buffer.overwrite_slot(KvCacheSlot::Back, new_state);
     assert_eq!(buffer.back().used(), 0);

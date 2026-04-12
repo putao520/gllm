@@ -389,10 +389,10 @@ fn test_gguf_010_quantized_type_mapping() {
     let adapter = GgufAdapter::new(reader);
 
     let q4 = adapter.tensor_for_kernel("q4").expect("map q4");
-    assert!(matches!(q4.dtype, DType::PackedU8(PackedBits::Int4)));
+    assert!(matches!(q4.storage_format, DType::PackedU8(PackedBits::Int4)));
 
     let f32 = adapter.tensor_for_kernel("f32").expect("map f32");
-    assert!(matches!(f32.dtype, DType::F32));
+    assert!(matches!(f32.storage_format, DType::F32));
 
     let err = adapter
         .tensor_for_kernel("q5")
@@ -417,7 +417,7 @@ fn test_gguf_011_generic_constraint_verification() {
     let adapter = GgufAdapter::new(reader);
     let kernel = adapter.tensor_for_kernel("q8").expect("tensor for kernel");
 
-    assert!(matches!(kernel.dtype, DType::U8));
+    assert!(matches!(kernel.storage_format, DType::U8));
     assert_eq!(kernel.data.len(), bytes_len);
 }
 
@@ -590,5 +590,5 @@ fn test_gguf_012_metadata_helper_accessors() {
     );
 
     assert!(reader.get("general.architecture").is_some());
-    assert_eq!(reader.floating_point_dtype_size(), Some(2));
+    assert_eq!(reader.floating_point_dtype().map(|d| d.size_bytes()), Some(2));
 }

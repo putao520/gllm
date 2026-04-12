@@ -1,15 +1,39 @@
+use std::sync::Arc;
 use gllm::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use gllm::compat::backend_trait::Backend;
 use gllm::compat::CpuBackend;
 use gllm::engine::KvCacheConfig;
+use gllm::model_config::ModelGeometry;
 
 fn make_state(backend: &CpuBackend<f32>, max_seq_len: usize) -> KvCacheState {
-    let config = KvCacheConfig {
+    let geometry = Arc::new(ModelGeometry {
+        hidden_size: 1,
         num_layers: 1,
+        vocab_size: 1,
+        intermediate_size: 1,
         num_heads: 1,
+        num_kv_heads: 1,
         head_dim: 1,
         max_seq_len,
-        dtype_size: std::mem::size_of::<f32>(),
+        rope_theta: 0.0,
+        rope_scale: 1.0,
+        rope_interleaved: false,
+        global_rope_theta: 0.0,
+        rope_partial_ratio: 1.0,
+        attention_pattern: Vec::new(),
+        sliding_window: 0,
+        num_kv_shared_layers: 0,
+        global_head_dim: 0,
+        hidden_size_per_layer_input: 0,
+        dtype: gllm_kernels::types::DType::F32,
+        norm_eps: 1e-5,
+        num_experts: 0,
+        moe_top_k: 0,
+        expert_intermediate_size: 0,
+    });
+    let config = KvCacheConfig {
+        geometry,
+        kv_dtype: gllm_kernels::types::DType::F32,
         page_size: 0,
         swap_config: None,
     };

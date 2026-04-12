@@ -17,7 +17,7 @@ fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>>
 
     // 3. Generate with Model 1
     let prompt = "Hello";
-    let response = client.generate(prompt).max_tokens(10).generate()?;
+    let response = client.generate(prompt).max_tokens(10).generate().response()?;
     println!("Response 1: {:?}", response.text);
     assert!(!response.text.is_empty());
 
@@ -27,10 +27,8 @@ fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>>
 
     // 5. Verify Unloaded State
     // Attempting to generate should fail
-    let result = client.generate("Should fail").max_tokens(5).generate();
+    let result = client.generate("Should fail").max_tokens(5).generate().response();
     assert!(result.is_err());
-    // Error should be NoModelLoaded
-    // We can't easily match the enum variant without importing it, but checking is_err is good enough for now.
     println!(
         "Generation after unload failed as expected: {:?}",
         result.err()
@@ -41,7 +39,7 @@ fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>>
     client.load_model(model_id, ModelKind::Chat)?;
 
     // 7. Generate with Reloaded Model
-    let response2 = client.generate("Hi again").max_tokens(10).generate()?;
+    let response2 = client.generate("Hi again").max_tokens(10).generate().response()?;
     println!("Response 2: {:?}", response2.text);
     assert!(!response2.text.is_empty());
 
@@ -50,7 +48,7 @@ fn test_client_lifecycle_load_unload() -> Result<(), Box<dyn std::error::Error>>
     // For test speed we use the same model, but logically it's a swap
     client.swap_model(model_id)?;
 
-    let response3 = client.generate("Third time").max_tokens(10).generate()?;
+    let response3 = client.generate("Third time").max_tokens(10).generate().response()?;
     println!("Response 3: {:?}", response3.text);
     assert!(!response3.text.is_empty());
 

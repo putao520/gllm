@@ -77,7 +77,7 @@ fn safetensors_gllm_config_metadata_is_used() {
     assert_eq!(config.num_attention_heads, 8);
     assert_eq!(config.num_key_value_heads, 4);
     assert_eq!(config.head_dim, 32);
-    assert_eq!(config.dtype_size, 2);
+    assert_eq!(config.dtype.size_bytes(), 2);
     assert_eq!(config.num_experts, Some(16));
     assert_eq!(config.expert_intermediate_size, Some(2048));
 }
@@ -201,7 +201,7 @@ fn onnx_dtype_metadata_is_used_for_model_config_dtype_size() {
     // The builder `with_weights` calls `detect_format`, so we should be good.
 
     let config = ModelConfig::from_loader(&manifest, &mut loader).expect("model config");
-    assert_eq!(config.dtype_size, 2);
+    assert_eq!(config.dtype.size_bytes(), 2);
 }
 
 /// TEST-LOADER-007: ONNX 权重可上传用于 reranker
