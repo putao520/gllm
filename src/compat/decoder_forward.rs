@@ -331,79 +331,12 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
         return Err(BE::Other("empty token sequence for decoder rerank".into()));
     }
 
-    // (a) Token embedding lookup
-    let (embed_bytes, embed_dtype) = get_typed_data(
-        weights, backend,
-        &crate::weight_names::decoder_embed_aliases(),
-    )?;
-    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
-
-    let embed_vocab = embed_data.len() / hidden;
-    // P3: TypedBuffer 替换 vec![0.0f32]，使用 config.dtype() 初始化
-    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
-    for (s, &tok) in tokens.iter().enumerate() {
-        let v = tok as usize;
-        if v >= embed_vocab {
-            return Err(BE::Other(format!(
-                "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
-            )));
-        }
-        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
-            .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
-    }
-
-    if config.graph_executor_ptr.is_null() {
-        return Err(BE::Other(
-            "CPU rerank forward requires the unified GraphExecutor (ARCH-CPU-GPU-UNIFIED). \
-            Legacy operator-level JIT has been removed. Please ensure YAML graph template exists for this architecture."
-            .into()
-        ));
-    }
-
-    let ge = unsafe { &mut *config.graph_executor_ptr };
-    if ge.graph().nodes.is_empty() {
-        return Err(BE::Other("GraphExecutor has empty nodes. Stub architecture templates are not runnable.".into()));
-    }
-
-    let mut inputs = std::collections::HashMap::new();
-    // P3: 直接使用 TypedBuffer 的字节切片
-    let hs_bytes: Vec<u8> = hidden_state.as_bytes().to_vec();
-    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
-        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
-            first_node.outputs.first().unwrap().clone()
-        } else {
-            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string()) // LEGAL: 默认输入名称 "hidden_state"
-        }
-    } else {
-        "hidden_state".to_string()
-    };
-    inputs.insert(input_name, hs_bytes);
-
-    let positions: Vec<u32> = (0..seq_len as u32).collect();
-
-    let output = ge.run_with_kv_cache_and_callbacks(
-        &inputs,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-        seq_len,
-        seq_len,
-        positions.as_ptr(),
-        None,
-        None,
-    ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
-
-    if let Some(out_bytes) = output.get("score").or_else(|| output.values().next()) {
-        if out_bytes.len() < 4 {
-            return Err(BE::Other("Invalid score bytes length from GraphExecutor".into()));
-        }
-        let arr: [u8; 4] = out_bytes[0..4].try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，前面已检查 len >= 4
-        let logit = f32::from_le_bytes(arr);
-        let score = 1.0 / (1.0 + (-logit).exp());
-        Ok(vec![score])
-    } else {
-        Err(BE::Other("GraphExecutor produced no score output".into()))
-    }
+    // Delegate to bert_encoder_forward which handles the full embedding pipeline
+    // (token + position + type embedding + LayerNorm) and correctly seeds the
+    // graph executor with all embedding sub-graph output names.
+    // Reranker cross-encoder models use the same XLM-R/BRRT architecture.
+    super::bert_forward::bert_encoder_forward(
+        backend, tokens, weights, config, super::PoolingMode::ClsClassifier)
 }
 
 // ---------------------------------------------------------------------------
