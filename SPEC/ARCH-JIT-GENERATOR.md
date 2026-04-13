@@ -809,3 +809,138 @@ fn emit_gemm<B: BackendEmitter>(gen: &mut CodeGenerator<B>, layout: &GemmLayout,
     emit_blis_gemm(gen, layout, epilogue)
 }
 ```
+
+## 14. SPEC 优化算法 → 生成器映射
+
+> 将 02-ARCHITECTURE.md §9-§16 中规划的全部优化算法映射到生成器架构的三层中。
+
+### 14.1 §9 Mega-Kernel 块级路由 (ARCH-MEGA-KERNEL)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **单一 Kernel Launch** | Layer 3 | `emit_mega_kernel()` 将全层算法链（RmsNorm→QKV→RoPE→MHA→FFN→Residual）打包为单一 `CodeGenerator::emit_plan()` |
+| **Thread Block 独立路由** | Layer 1 GPU | `BackendSpecialized::cooperative_dispatch()` 生成 per-block Request_State_Table 查表指令 |
+| **Hot JMP Patching** | Layer 2 | `KernelState::hotpatch_points` 记录可热修补位置；`CodeGenerator::emit_hotpatch_nop_sled()` 在关键决策点生成 5-byte NOP sled |
+| **JIT Director Daemon** | Layer 3 | 外部系统，不在 codegen 内。但 codegen 在 Epilogue 中写入 telemetry 供 daemon 消费 |
+
+### 14.2 §10 Chunked Prefill 交织调度 (ARCH-CHUNKED-PREFILL)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **Prefill Chunk + Decode 交织** | Layer 3 | `emit_mha()` 根据 `LoopBound::Runtime("total_seq")` 动态处理混合序列 |
+| **Decode 零等待** | Layer 3 | `emit_gemm()` 的 MC loop 用 `LoopBound::Runtime("seq_len")` 而非编译时常量 |
+| **AdaptiveChunkPolicy** | Layer 3 | 根据 `BackendCapabilities::cache.l2_size` 和运行时序列长度计算最优 chunk 大小 |
+
+### 14.3 §11 TurboQuant 2.0 (ARCH-TURBOQUANT)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **在线 FWHT 旋转** | Layer 3 + TraceOp | 新增 `TraceOp::FWHT { dim }` 表达 Walsh-Hadamard 变换语义；Layer 3 在 3 个白嫖点（Attention Epilogue、SwiGLU Epilogue、KV Write）调用 `gen.emit_trace(&[fwht_body])` |
+| **KV 非对称量化** | Layer 3 + TraceOp | `TraceOp::QuantFma` 表达混合精度 K per-channel / V per-token 量化；`gen.emit_kv_write()` 内联量化指令 |
+| **RaBitQ 无偏修正** | Layer 3 | `gen.emit_trace(&[fma_correction])` 在 Attention QK^T 计算后追加 1 条 FMA |
+| **双轨显存池** | Layer 2 | `KernelState::memory_map` 追踪主池（3-4bit）和 QJL 校验池（1bit）的地址绑定 |
+| **Block Scaling** | TraceOp + Layer 1 | `TraceOp::BlockScale` → AMD gfx950 `mfma_scale` / NVIDIA tcgen05 / Intel AMX-FP8 |
+
+### 14.4 §12 空间异构 (ARCH-SPATIAL-DISAGGREGATION)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **动态块式计算图** | Layer 3 | `emit_plan()` 接收 `FusionPlan` 中的 `SystemTopology` 切割信息，按物理块分发不同子图 |
+| **NUMA 感知** | Layer 1 | `BackendCapabilities::topology` 包含 NUMA 节点信息；Layer 3 据此决定内存分配亲和性 |
+| **PCIe/RDMA 边界** | Layer 2 | `KernelState::memory_map` 区分本地显存和远程显存地址空间 |
+
+### 14.5 §13 Epilogue 白嫖网络 (ARCH-EPILOGUE-FUSIONS)
+
+**这是生成器架构最核心的消费者——11 个白嫖点全部通过 Layer 3 的 Epilogue injection 实现。**
+
+| 白嫖点 | Layer 3 emit 调用 | TraceOp 扩展 |
+|--------|-------------------|-------------|
+| §13.1 Gate-First Skip | `gen.emit_gemm(layout, epilogue=[silu_body + dead_neuron_mask])` | `TraceOp::Compare` + `TraceOp::MaskedOp` |
+| §13.2 Centroid 预取 | `gen.emit_softmax(layout, epilogue=[centroid_extract])` → `gen.emit_prefetch(centroid_addr, L2)` | `TraceOp::HReduce { op: ArgMax }` + `TraceOp::Prefetch { L2 }` |
+| §13.3 残差旁路 | `gen.emit_elementwise(layout, [add_body + delta_rho])` → 条件 `gen.emit_jump(END_OF_LAYER)` | `TraceOp::Compare` 生成 $\Delta\rho < \varepsilon$ 判断 |
+| §13.4 FWHT 旋转 | `gen.emit_kv_write(layout, epilogue=[fwht_body])` | `TraceOp::FWHT { dim }` |
+| §13.5 死神经元掩码 | GEMM epilogue 内追加 `[Compare(sigmoid, eps), HReduce(mask, Count)]` | `TraceOp::Compare` + `TraceOp::HReduce` |
+| §13.6 MoE 命中计数 | TopK epilogue 内追加 `[AtomicAdd(expert_counter, 1)]` | 新增 `TraceOp::AtomicAdd` |
+| §13.7 行级激活统计 | GEMM epilogue 内追加 `[HReduce(row, Sum), HReduce(row, Max)]` | `TraceOp::HReduce` |
+| §13.8 RmsNorm Scale | Norm reduce 阶段追加 `[Max(channel_abs)]` | 复用 `TraceOp::Max` |
+| §13.9 Softmax 锐度 | Softmax epilogue 内追加 `[Div(max, sum)]` | 复用 `TraceOp::Div` |
+| §13.10 Embedding 范数 | Embedding copy 阶段追加 `[HReduce(sq, Sum), Sqrt]` | `TraceOp::HReduce` + `TraceOp::Sqrt` |
+| §13.11 残差余弦 | Residual epilogue 追加 `[Fma(dot), Div, Compare]` | 复用现有 TraceOp |
+
+### 14.6 §14 旧世代优化突变 (ARCH-LEGACY-METAMORPHOSIS)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **Static KV Cache → Paged** | Layer 2 | `KernelState::memory_map` 追踪页表映射 |
+| **Token-level → Block-level** | Layer 3 | `emit_mha()` 的 K/V 访问通过 `gen.paged_load()` 替代连续 load |
+| **Greedy Sampling → Speculative** | Layer 3 外部 | 不在 codegen 内 |
+
+### 14.7 §15 MoE 异构专家 (ARCH-MOE-EXTREME)
+
+| 优化 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **冷板凳 Deopt** | Layer 3 + Hot Patch | §13.6 命中计数 → JIT Director → `hotpatch_nop_sled` 封杀冷专家路径 |
+| **异步预取掩蔽** | Layer 1 GPU | `AsyncPipeline::async_copy()` 预取下一专家权重 |
+| **容错降级** | Layer 3 | 专家执行失败时 `gen.emit_expert_fallback()` 用次优专家替代 |
+
+### 14.8 §16 残差总线四大应用 (ARCH-RESIDUAL-BUS-APPLICATIONS)
+
+| 应用 | 生成器层级 | 实现机制 |
+|------|-----------|---------|
+| **KV 侧载注入** | Layer 2 | `KernelState::memory_map` 将外部 KV 页表映射到注意力计算路径 |
+| **晚期特征融合** | Layer 3 | `gen.emit_residual_add()` 在指定层注入外部特征向量 |
+| **LoRA 运行时挂载** | Layer 3 | `gen.emit_gemm()` 的 epilogue 追加 LoRA delta 矩阵乘 |
+| **安全探针 (GuardProbe)** | Layer 3 | `gen.emit_guard_probe()` 在目标层 Epilogue 插入线性分类器 |
+
+### 14.9 新增 TraceOp 完整清单（含 §9-§16 需求）
+
+上述优化需要的 TraceOp 扩展汇总：
+
+```rust
+// §11 TurboQuant
+TraceOp::FWHT { dim: usize },              // Fast Walsh-Hadamard Transform
+TraceOp::BlockScale { data, scale, block_size }, // Block exponent scaling
+
+// §13 Epilogue 白嫖网络
+TraceOp::AtomicAdd { addr: u32, val: u32 },      // 原子加（MoE 命中计数）
+TraceOp::Prefetch { level: CacheLevel },          // 预取（质心引导）
+TraceOp::NonTemporalStore,                         // 绕过缓存写（KV 大量写入）
+
+// §12 量化混合精度（跨 §11 + §13）
+TraceOp::QuantFma { acc, act, weight, act_dtype, weight_dtype },
+TraceOp::Cast { src, from, to },
+
+// §14 通用增强
+TraceOp::HReduce { src, op: ReduceKind },         // 水平归约（sum/max/count）
+TraceOp::Compare { a, b, op: CmpOp },             // 比较生成掩码
+TraceOp::MaskedOp { op: Box<TraceOp>, mask },     // 掩码操作
+TraceOp::BitExtract { src, offset, width },        // 位域提取（量化解包）
+TraceOp::Permute { src, indices },                 // 排列/洗牌
+```
+
+### 14.10 优化覆盖验证矩阵
+
+| 优化 (SPEC §) | TraceOp 覆盖 | Layer 3 Driver | Layer 1 特化 | 状态 |
+|---------------|-------------|----------------|-------------|------|
+| §9 Mega-Kernel | ✅ hotpatch NOP sled | ✅ emit_mega_kernel | ✅ cooperative_dispatch | 设计完成 |
+| §10 Chunked Prefill | ✅ Runtime LoopBound | ✅ emit_mha dynamic seq | N/A | 设计完成 |
+| §11.1 FWHT | 🆕 TraceOp::FWHT | ✅ 3 个白嫖点内联 | 各后端多项式/查表 | 设计完成 |
+| §11.2 KV 非对称量化 | ✅ QuantFma + Cast | ✅ emit_kv_write | ✅ TileCompute 混合精度 | 设计完成 |
+| §11.3 RaBitQ | ✅ FMA | ✅ Attention epilogue | N/A | 设计完成 |
+| §11.5 双轨池 | N/A (内存管理) | ✅ memory_map | N/A | 设计完成 |
+| §12 空间异构 | N/A | ✅ topology-aware emit | ✅ NUMA/RDMA | 设计完成 |
+| §13.1 Gate-First Skip | ✅ Compare + MaskedOp | ✅ GEMM epilogue | N/A | 设计完成 |
+| §13.2 Centroid 预取 | 🆕 Prefetch | ✅ Softmax epilogue | ✅ prefetch 指令 | 设计完成 |
+| §13.3 残差旁路 | ✅ Compare | ✅ Residual epilogue | N/A | 设计完成 |
+| §13.4 FWHT 旋转 | 🆕 FWHT | ✅ KV Write epilogue | N/A | 设计完成 |
+| §13.5 死神经元 | ✅ Compare + HReduce | ✅ SiLU epilogue | N/A | 设计完成 |
+| §13.6 MoE 命中 | 🆕 AtomicAdd | ✅ TopK epilogue | ✅ 原子指令 | 设计完成 |
+| §13.7 行级统计 | ✅ HReduce | ✅ GEMM epilogue | N/A | 设计完成 |
+| §13.8 RmsNorm Scale | ✅ Max | ✅ Norm epilogue | N/A | 设计完成 |
+| §13.9 Softmax 锐度 | ✅ Div | ✅ Softmax epilogue | N/A | 设计完成 |
+| §13.10 Embedding 范数 | ✅ HReduce + Sqrt | ✅ Embedding epilogue | N/A | 设计完成 |
+| §13.11 残差余弦 | ✅ FMA + Div | ✅ Residual epilogue | N/A | 设计完成 |
+| §13.12 硬件拓扑 | N/A | ✅ topology-aware fusion | ✅ 12 Profile | 设计完成 |
+| §14 旧代突变 | N/A | ✅ Paged attention | N/A | 设计完成 |
+| §15 MoE 极致 | ✅ AtomicAdd | ✅ expert dispatch | ✅ async_copy | 设计完成 |
+| §16 残差总线 | ✅ FMA (LoRA delta) | ✅ residual injection | N/A | 设计完成 |
