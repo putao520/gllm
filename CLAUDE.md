@@ -168,6 +168,7 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 src/
 ├── lib.rs                 # Library entry & public API re-exports
 ├── client.rs              # Client / AsyncClient (sync/async inference API)
+├── classify.rs            # Classify API (sequence classification)
 ├── embeddings.rs          # Embeddings API
 ├── rerank.rs              # Rerank API
 ├── generation.rs          # Generation loop

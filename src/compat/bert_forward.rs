@@ -216,3 +216,86 @@ pub(crate) fn bert_encoder_forward<E: Element>(
         }
     }
 }
+
+/// BERT/XLM-R encoder-based classifier forward pass.
+///
+/// Flow:
+/// 1. Full encoder forward (same as `bert_encoder_forward`)
+/// 2. Extract CLS token hidden state
+/// 3. Apply pooler dense + tanh (if weights exist)
+/// 4. Apply classifier head (dense → logits)
+/// 5. Return raw logits (caller applies softmax/argmax)
+pub(crate) fn bert_classifier_forward<E: Element>(
+    backend: &CpuBackend<E>,
+    tokens: &[u32],
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    config: &GeneratorForwardConfig,
+) -> Result<Vec<f32>, BE> {
+    // Step 1: Run encoder and get CLS token hidden state
+    let cls_hidden = bert_encoder_forward(backend, tokens, weights, config, PoolingMode::ClsClassifier)?;
+    let hidden = config.hidden_size();
+
+    let _kern = gllm_kernels::cpu_kernels::CpuKernels::<f32>::new();
+
+    // Step 2: Apply pooler dense + tanh (optional — some models don't have a pooler)
+    let pooled = match (
+        get_typed_data(weights, backend, &crate::weight_names::pooler_aliases("weight")),
+        get_bias_data_typed(weights, &crate::weight_names::pooler_aliases("bias"), hidden),
+    ) {
+        (Ok((pw_bytes, pw_dtype)), (pb_bytes, pb_dtype)) => {
+            let pw = typed_bytes_to_f32(&pw_bytes, pw_dtype);
+            let pb = typed_bytes_to_f32(&pb_bytes, pb_dtype);
+            // pooler dense: out = tanh(cls @ W^T + b)
+            // W shape: [hidden, hidden], cls shape: [hidden]
+            let out_dim = if !pw.is_empty() && hidden > 0 { pw.len() / hidden } else { hidden };
+            let mut pooled_out = vec![0.0f32; out_dim];
+            for o in 0..out_dim {
+                let mut sum = pb.get(o).copied().unwrap_or(0.0);
+                for i in 0..hidden {
+                    sum += cls_hidden.get(i).copied().unwrap_or(0.0) * pw.get(o * hidden + i).copied().unwrap_or(0.0);
+                }
+                pooled_out[o] = sum.tanh();
+            }
+            pooled_out
+        }
+        _ => cls_hidden,
+    };
+
+    // Step 3: Apply classifier head (dense → logits)
+    // Try classifier.weight first, then classifier.dense.weight
+    let (cw_bytes, cw_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::classifier_aliases("weight"),
+    ).map_err(|_| BE::Other(
+        "classifier head weight not found. Model may not have a classification head. \
+         Expected: classifier.weight, classifier.dense.weight, or pre_classifier.weight".into()
+    ))?;
+    let cw = typed_bytes_to_f32(&cw_bytes, cw_dtype);
+    let (cb_bytes, cb_dtype) = get_bias_data_typed(
+        weights,
+        &crate::weight_names::classifier_aliases("bias"),
+        0,
+    );
+    let cb = typed_bytes_to_f32(&cb_bytes, cb_dtype);
+
+    let pooled_dim = pooled.len();
+    let num_labels = if pooled_dim > 0 { cw.len() / pooled_dim } else { 0 };
+    if num_labels == 0 {
+        return Err(BE::Other(format!(
+            "classifier weight dimension mismatch: weight has {} elements, pooled dim is {}",
+            cw.len(), pooled_dim
+        )));
+    }
+
+    // logits = pooled @ classifier_W^T + classifier_b
+    let mut logits = vec![0.0f32; num_labels];
+    for l in 0..num_labels {
+        let mut sum = cb.get(l).copied().unwrap_or(0.0);
+        for i in 0..pooled_dim {
+            sum += pooled[i] * cw.get(l * pooled_dim + i).copied().unwrap_or(0.0);
+        }
+        logits[l] = sum;
+    }
+
+    Ok(logits)
+}

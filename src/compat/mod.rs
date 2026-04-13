@@ -101,6 +101,16 @@ pub mod backend_trait {
         where
             Self: Sized;
 
+        fn classify_forward_gpu_pure(
+            &self,
+            tokens: &[u32],
+            topology: &AttentionTopology,
+            weights: &dyn TensorLookup<E, Self>,
+            config: &GeneratorForwardConfig,
+        ) -> Result<Vec<f32>, BackendError>
+        where
+            Self: Sized;
+
         fn get_memory_pressure(&self) -> Result<f32, BackendError>;
 
         fn swap_out_pages(

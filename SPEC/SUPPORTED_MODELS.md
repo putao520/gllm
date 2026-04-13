@@ -1,7 +1,7 @@
 # Supported Models (SSOT) - 2026 SOTA Edition
 
 > **📌 SSOT**: 本文档是 `gllm` 支持的所有模型的唯一真源。
-> **关联需求**: REQ-MODEL-001 (Generator 架构覆盖), REQ-MODEL-002 (Embedding 模型), REQ-MODEL-003 (Reranker 模型), REQ-MODEL-004 (MoE 架构), REQ-MODEL-005 (Thinking Head)
+> **关联需求**: REQ-MODEL-001 (Generator 架构覆盖), REQ-MODEL-002 (Embedding 模型), REQ-MODEL-003 (Reranker 模型), REQ-MODEL-004 (MoE 架构), REQ-MODEL-005 (Thinking Head), REQ-MODEL-006 (Classifier 模型)
 > **Constraint**: 严格遵循 **"Latest Version Only"** 策略。
 > **Strategy**: 同一系列出新版后，立即废弃旧版（e.g., Qwen3 发布即删除 Qwen2.5）。
 > **Exception (REQ-MODEL-LATEST)**: 仅允许在本表中**显式标注**的 Legacy Exception。
@@ -128,7 +128,18 @@
 | `bge-reranker-v2-m3` | XlmR | `BAAI/bge-reranker-v2-m3` | - | 轻量级中文重排序 |
 | `bge-rerank-v3` | XLM-R-Next | `BAAI/bge-reranker-v3` | `Xorbits/bge-reranker-v3` | V2 升级版 |
 
-## 4. Weight Loading Specs (Next-Gen)
+## 4. Classifier Models (文本分类)
+
+支持带有 classifier head / score head 的序列分类模型。包含 encoder-based (BERT/XLM-R + classifier) 和 decoder-based (LLM + score head) 两种架构。
+
+| Model ID | Architecture | Head | HF Repo | 说明 |
+|----------|--------------|------|---------|------|
+| `bge-reranker-v2-m3` | XlmR | classifier.weight | `BAAI/bge-reranker-v2-m3` | 可作为 2 分类使用 |
+| `bge-reranker-v3` | XLM-R-Next | classifier.weight | `BAAI/bge-reranker-v3` | V2 升级版 |
+
+> **NOTE**: 任何带有 `classifier.weight` / `classifier.dense.weight` / `score.weight` / `pre_classifier.weight` 权重的 HuggingFace 模型都可以通过 `Client::new_classifier()` 加载。用户自训练的分类模型也完全支持。
+
+## 5. Weight Loading Specs (Next-Gen)
 
 针对 2026 年新架构的适配规范：
 

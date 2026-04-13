@@ -40,6 +40,7 @@ pub enum ModelKind {
     Chat,
     Embedding,
     Reranker,
+    Classifier,
 }
 
 impl ModelKind {
@@ -48,6 +49,8 @@ impl ModelKind {
             "chat" | "generation" | "generator" | "text-generation" => Some(Self::Chat),
             "embedding" | "embeddings" | "embed" => Some(Self::Embedding),
             "rerank" | "reranker" | "re-ranker" | "re-rank" => Some(Self::Reranker),
+            "classifier" | "classification" | "classify" | "sequence-classification"
+            | "text-classification" => Some(Self::Classifier),
             _ => None,
         }
     }

@@ -20,6 +20,7 @@ pub mod knowledge;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
+pub mod classify;
 pub mod rerank;
 pub mod tokenizer;
 pub mod weight_loader;
@@ -57,6 +58,7 @@ pub use generation::{
 };
 pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
+pub use classify::{ClassifyResponse, ClassificationResult};
 pub use rerank::{RerankResponse, RerankResult};
 pub use intent::{
     GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,

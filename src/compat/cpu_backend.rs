@@ -436,6 +436,23 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         }
     }
 
+    fn classify_forward_gpu_pure(
+        &self,
+        tokens: &[u32],
+        _topology: &AttentionTopology,
+        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        config: &GeneratorForwardConfig,
+    ) -> Result<Vec<f32>, BE> {
+        match config.arch_family {
+            crate::manifest::ArchFamily::Decoder => {
+                super::decoder_forward::decoder_classifier_forward(self, tokens, weights, config)
+            }
+            crate::manifest::ArchFamily::Encoder => {
+                super::bert_forward::bert_classifier_forward(self, tokens, weights, config)
+            }
+        }
+    }
+
     fn get_memory_pressure(&self) -> Result<f32, BE> {
         get_system_memory_pressure()
     }

@@ -157,6 +157,15 @@ impl DynBackendExecutor {
         }
     }
 
+    /// Classify text: run encoder/decoder + classifier head, return raw logits
+    pub fn classify(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.classify(input),
+            DynBackendExecutor::F16(e) => e.classify(input),
+            DynBackendExecutor::BF16(e) => e.classify(input),
+        }
+    }
+
     /// Returns the element type name for debugging/logging
     pub fn dtype_name(&self) -> &'static str {
         match self {
@@ -424,6 +433,15 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Rocm(exec) => exec.rerank_pair(query, document),
             BackendExecutor::Metal(exec) => exec.rerank_pair(query, document),
             BackendExecutor::Cpu(exec) => exec.rerank_pair(query, document),
+        }
+    }
+
+    pub fn classify(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.classify(input),
+            BackendExecutor::Rocm(exec) => exec.classify(input),
+            BackendExecutor::Metal(exec) => exec.classify(input),
+            BackendExecutor::Cpu(exec) => exec.classify(input),
         }
     }
 

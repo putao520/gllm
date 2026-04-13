@@ -562,6 +562,11 @@ impl Client {
         Self::new(model_id, ModelKind::Embedding)
     }
 
+    /// Create a new client with a classifier model (sync, blocking).
+    pub fn new_classifier(model_id: &str) -> Result<Self, ClientError> {
+        Self::new(model_id, ModelKind::Classifier)
+    }
+
     /// Create a new client with the specified model and kind (sync, blocking).
     pub fn new(model_id: &str, kind: ModelKind) -> Result<Self, ClientError> {
         let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency)?;
@@ -713,6 +718,34 @@ impl Client {
         self.execute_rerank(query, documents, usize::MAX)
     }
 
+    /// Classify texts into categories (sync).
+    ///
+    /// Returns raw logits for each input text. The number of logits per text
+    /// depends on the model's classifier head (num_labels).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use gllm::Client;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::new_classifier("model-id")?;
+    /// let result = client.classify(["This is positive", "This is negative"])?;
+    /// for pred in &result.predictions {
+    ///     println!("label={} score={:.4}", pred.label_id, pred.score);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn classify<I, S>(&self, inputs: I) -> Result<crate::classify::ClassifyResponse, ClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let texts: Vec<String> = inputs.into_iter().map(Into::into).collect();
+        self.execute_classify(texts)
+    }
+
     // -----------------------------------------------------------------
     // Internal Methods
     // -----------------------------------------------------------------
@@ -823,6 +856,43 @@ impl Client {
             results,
             request_id: None,
         })
+    }
+
+    pub(crate) fn execute_classify(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<crate::classify::ClassifyResponse, ClientError> {
+        let state = self.require_state()?;
+        let mut executor = state.backend.executor_mut();
+        let mut predictions = Vec::with_capacity(texts.len());
+
+        for (index, text) in texts.iter().enumerate() {
+            let logits = executor.classify(text).map_err(|e| {
+                ClientError::RuntimeError(format!("classify error: {}", e))
+            })?;
+
+            // softmax to get probabilities
+            let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exp_logits: Vec<f32> = logits.iter().map(|&l| (l - max_logit).exp()).collect();
+            let sum_exp: f32 = exp_logits.iter().sum();
+            let probs: Vec<f32> = exp_logits.iter().map(|e| e / sum_exp).collect();
+
+            // argmax
+            let (label_id, &score) = probs
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, &0.0));
+
+            predictions.push(crate::classify::ClassificationResult {
+                index,
+                label_id,
+                score,
+                logits,
+            });
+        }
+
+        Ok(crate::classify::ClassifyResponse { predictions })
     }
 
     // -----------------------------------------------------------------

@@ -102,7 +102,49 @@ let scores = client.rerank(
 )?;
 ```
 
-### 3.4 Embed+Rerank 融合管线 (REQ-PIPELINE-004)
+### 3.4 文本分类 (Classify)
+
+支持 encoder-based (BERT/XLM-R + classifier head) 和 decoder-based (LLM + score head) 的序列分类模型。
+
+```rust
+// 快捷方式
+let client = Client::new_classifier("model-with-classifier-head")?;
+
+// 分类
+let result = client.classify(["Positive review!", "Terrible product."])?;
+
+for pred in &result.predictions {
+    println!("text[{}]: label={} score={:.4}", pred.index, pred.label_id, pred.score);
+    // pred.logits — 原始 logits（所有标签）
+}
+```
+
+**Encoder 分类流程**:
+```
+tokens → BERT Encoder → CLS hidden → Pooler Dense (tanh) → Classifier Head → logits
+```
+
+**Decoder 分类流程**:
+```
+tokens → Decoder Layers → Last Token Hidden → Score Head → logits
+```
+
+**Response 类型**:
+```rust
+pub struct ClassifyResponse {
+    pub predictions: Vec<ClassificationResult>,
+}
+
+pub struct ClassificationResult {
+    pub index: usize,       // 输入文本索引
+    pub label_id: usize,    // 预测标签 ID (argmax)
+    pub score: f32,          // 预测标签的 softmax 概率
+    pub logits: Vec<f32>,    // 原始 logits（所有标签）
+}
+```
+
+### 3.5 Embed+Rerank 融合管线 (REQ-PIPELINE-004)
+
 
 当 Client 挂载了 reranker 模型时，embed API 支持透明内部 rerank。用户体验与普通 embed 完全一致，但返回结果已按 query 相关性重排序。
 
@@ -143,7 +185,7 @@ embed(texts).rerank_query(query).generate()
   → 返回 EmbeddingsResponse { embeddings, rerank_scores }
 ```
 
-### 3.5 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-005)
+### 3.6 Embed+Rerank+LLM 完整 RAG 管线 (REQ-PIPELINE-005)
 
 当 Client 同时挂载了 reranker 和 generator 时，支持一体化 RAG：embed → rerank → LLM 生成。
 

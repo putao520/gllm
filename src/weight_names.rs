@@ -86,11 +86,29 @@ pub fn has_any_intermediate_weight(checker: impl Fn(&str) -> bool) -> bool {
         .any(|n| checker(n))
 }
 
-/// Classifier head weight aliases for reranker models.
+/// Classifier head weight aliases for encoder-based classification/reranker models.
 /// Returns aliases for the classifier dense layer and output projection.
+///
+/// Common HuggingFace patterns:
+/// - `classifier.dense.weight` / `classifier.dense.bias` (BERT-style pooler→dense)
+/// - `classifier.out_proj.weight` / `classifier.out_proj.bias` (final projection)
+/// - `classifier.weight` / `classifier.bias` (single-layer classifier)
+/// - `pre_classifier.weight` / `pre_classifier.bias` (DistilBERT-style)
 pub fn classifier_aliases(suffix: &str) -> Vec<String> {
     vec![
         format!("classifier.{suffix}"),
+        format!("classifier.dense.{suffix}"),
+        format!("classifier.out_proj.{suffix}"),
+        format!("pre_classifier.{suffix}"),
+    ]
+}
+
+/// Pooler (CLS → dense) weight aliases for encoder-based classifier models.
+/// The pooler transforms CLS token hidden state before the classifier head.
+pub fn pooler_aliases(suffix: &str) -> Vec<String> {
+    vec![
+        format!("pooler.dense.{suffix}"),
+        format!("pooler.{suffix}"),
     ]
 }
 

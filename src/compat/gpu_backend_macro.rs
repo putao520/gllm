@@ -131,6 +131,24 @@ macro_rules! impl_gpu_backend {
                 }
             }
 
+            fn classify_forward_gpu_pure(
+                &self,
+                tokens: &[u32],
+                _topology: &AttentionTopology,
+                weights: &dyn backend_trait::TensorLookup<E, Self>,
+                config: &GeneratorForwardConfig,
+            ) -> Result<Vec<f32>, BE> {
+                #[cfg( $($cfg_pred)+ )]
+                {
+                    super::gpu_compile::$bert_forward_fn(self, tokens, weights, config)
+                }
+                #[cfg(not( $($cfg_pred)+ ))]
+                {
+                    let _ = (tokens, weights, config);
+                    Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
+                }
+            }
+
             fn get_memory_pressure(&self) -> Result<f32, BE> {
                 #[cfg( $($cfg_pred)+ )]
                 {

@@ -513,6 +513,144 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
 }
 
 // ---------------------------------------------------------------------------
+// Decoder-based Classifier Forward
+// ---------------------------------------------------------------------------
+
+/// Decoder-based classifier forward pass (for models like Qwen3ForSequenceClassification).
+///
+/// Flow:
+/// 1. Token embedding lookup (embed_tokens.weight)
+/// 2. Per-layer JIT decoder execution via GraphExecutor (no KV cache)
+/// 3. Final RMSNorm
+/// 4. Score head projection → logits (num_labels vector)
+///
+/// The score head weight is found via `decoder_score_aliases()`.
+/// Returns raw logits (caller applies softmax/argmax).
+pub(crate) fn decoder_classifier_forward<E: Element>(
+    backend: &CpuBackend<E>,
+    tokens: &[u32],
+    weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
+    config: &GeneratorForwardConfig,
+) -> Result<Vec<f32>, BE> {
+    if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
+        return Err(BE::Other("Decoder classifier forward only supports f32".into()));
+    }
+
+    let hidden = config.hidden_size();
+    let seq_len = tokens.len();
+
+    if seq_len == 0 {
+        return Err(BE::Other("empty token sequence for decoder classifier".into()));
+    }
+
+    // (a) Token embedding lookup
+    let (embed_bytes, embed_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::decoder_embed_aliases(),
+    )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
+    let embed_vocab = embed_data.len() / hidden;
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
+    for (s, &tok) in tokens.iter().enumerate() {
+        let v = tok as usize;
+        if v >= embed_vocab {
+            return Err(BE::Other(format!(
+                "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
+            )));
+        }
+        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
+            .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
+    }
+
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "CPU decoder classifier forward requires the unified GraphExecutor."
+            .into()
+        ));
+    }
+
+    let ge = unsafe { &mut *config.graph_executor_ptr };
+    if ge.graph().nodes.is_empty() {
+        return Err(BE::Other("GraphExecutor has empty nodes.".into()));
+    }
+
+    let mut inputs = std::collections::HashMap::new();
+    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+            first_node.outputs.first().unwrap().clone()
+        } else {
+            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string())
+        }
+    } else {
+        "hidden_state".to_string()
+    };
+    inputs.insert(input_name, hidden_state.as_bytes().to_vec());
+
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    let output = ge.run_with_kv_cache_and_callbacks(
+        &inputs,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+        seq_len,
+        seq_len,
+        positions.as_ptr(),
+        None,
+        None,
+    ).map_err(|e| BE::Other(format!("graph executor (classifier): {e}")))?;
+
+    // Get the hidden state output
+    let hidden_bytes = output.get("hidden_final")
+        .or_else(|| output.values().next())
+        .ok_or_else(|| BE::Other("GraphExecutor produced no output for classifier".into()))?;
+
+    let all_hidden: Vec<f32> = hidden_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0; 4])))
+        .collect();
+
+    // Take last token hidden state (causal decoder: last token sees all context)
+    let last_hidden = if hidden > 0 && all_hidden.len() > hidden && all_hidden.len() % hidden == 0 {
+        let n_tokens = all_hidden.len() / hidden;
+        &all_hidden[(n_tokens - 1) * hidden..]
+    } else {
+        &all_hidden[..]
+    };
+
+    // Apply score head: logits = last_hidden @ score_W^T
+    let (sw_bytes, sw_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::decoder_score_aliases(),
+    ).map_err(|_| BE::Other(
+        "score head weight not found. Model may not have a classification head. \
+         Expected: score.weight, classifier.weight, or cls.weight".into()
+    ))?;
+    let sw = typed_bytes_to_f32(&sw_bytes, sw_dtype);
+
+    let last_dim = last_hidden.len().min(hidden);
+    let num_labels = if last_dim > 0 { sw.len() / last_dim } else { 0 };
+    if num_labels == 0 {
+        return Err(BE::Other(format!(
+            "score weight dimension mismatch: weight has {} elements, hidden dim is {}",
+            sw.len(), last_dim
+        )));
+    }
+
+    // logits = last_hidden @ score_W^T (no bias for decoder score heads typically)
+    let mut logits = vec![0.0f32; num_labels];
+    for l in 0..num_labels {
+        let mut sum = 0.0f32;
+        for i in 0..last_dim {
+            sum += last_hidden[i] * sw.get(l * last_dim + i).copied().unwrap_or(0.0);
+        }
+        logits[l] = sum;
+    }
+
+    Ok(logits)
+}
+
+// ---------------------------------------------------------------------------
 // Truncated forward pass (for encode_intent, guardrails, etc.)
 // ---------------------------------------------------------------------------
 

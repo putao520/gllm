@@ -29,6 +29,7 @@ fn kind_from_u32(kind: u32) -> ModelKind {
     match kind {
         1 => ModelKind::Embedding,
         2 => ModelKind::Reranker,
+        3 => ModelKind::Classifier,
         _ => ModelKind::Chat,
     }
 }

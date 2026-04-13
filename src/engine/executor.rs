@@ -564,7 +564,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let position_encoding = match manifest.kind {
             // Encoder-style embedding/reranker models (e.g. XLM-R/BERT) usually do not expose RoPE.
             // When rope_theta is absent/invalid, skip positional rotation instead of forcing RoPE.
-            ModelKind::Embedding | ModelKind::Reranker if model_config.rope_theta <= 0.0 => {
+            ModelKind::Embedding | ModelKind::Reranker | ModelKind::Classifier if model_config.rope_theta <= 0.0 => {
                 PositionEncoding::None
             }
             _ => PositionEncoding::Rope,
@@ -640,7 +640,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             GlobalMemoryManager::new_with_capacities(l1_capacity, l2_capacity, l3_capacity);
         let topology = match manifest.kind {
             ModelKind::Chat => AttentionTopology::causal(geometry.clone()),
-            ModelKind::Embedding | ModelKind::Reranker => AttentionTopology::bidirectional(geometry.clone()),
+            ModelKind::Embedding | ModelKind::Reranker | ModelKind::Classifier => AttentionTopology::bidirectional(geometry.clone()),
         };
 
         // Build YAML→JIT graph executor: 3-phase pipeline
@@ -2675,6 +2675,26 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             &self.forward_config,
         )?;
         Ok(scores)
+    }
+
+    /// Classify text: run encoder/decoder + classifier head, return raw logits.
+    pub fn classify(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {
+        let tokens = self.encode_prompt(input)?;
+        if tokens.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        let logits = self.backend.classify_forward_gpu_pure(
+            &tokens,
+            &self.topology,
+            &self.weights,
+            &self.forward_config,
+        )?;
+        Ok(logits)
     }
 
     pub fn is_finished(&self, request_id: RequestId) -> bool {
