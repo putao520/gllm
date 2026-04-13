@@ -2135,8 +2135,12 @@ impl FusedGraphExecutor {
             let scratch_size = cn.compiled.scratchpad_bytes.max(64);
             if cfg!(debug_assertions) {
                 let op_name = self.graph.nodes[node_idx].op.name();
-                eprintln!("[BUF-ALLOC] node {node_idx} op={op_name}: output={}B scratchpad={}B act={}B",
-                    output_bytes, scratch_size, activation.len());
+                let msg = format!("[BUF-ALLOC] node {node_idx} op={op_name}: output={}B scratchpad={}B act={}B wt={}B\n",
+                    output_bytes, scratch_size, activation.len(), weight_blob.len());
+                eprint!("{}", msg);
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("/tmp/gllm_exec_audit.log")
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
             }
             let mut scratchpad = vec![0u8; scratch_size];
 
