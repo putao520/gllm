@@ -2132,7 +2132,13 @@ impl FusedGraphExecutor {
             let runtime_output_numel = cn.output_numel; // max_seq_len size (safe)
             let output_bytes = runtime_output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
-            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
+            let scratch_size = cn.compiled.scratchpad_bytes.max(64);
+            if cfg!(debug_assertions) {
+                let op_name = self.graph.nodes[node_idx].op.name();
+                eprintln!("[BUF-ALLOC] node {node_idx} op={op_name}: output={}B scratchpad={}B act={}B",
+                    output_bytes, scratch_size, activation.len());
+            }
+            let mut scratchpad = vec![0u8; scratch_size];
 
             // Effective seq_len passed to the JIT kernel: for MHA nodes the kernel
             // must iterate over the full KV sequence (prefill + cached), not just the
