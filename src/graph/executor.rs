@@ -416,30 +416,23 @@ fn build_fused_qkv_rope_graph(
         "gemm_v",
     );
 
-    #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
-    {
-        let q_rope = g.add_tensor("q_rope", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
-        g.add_op(
-            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
-            vec![q_out],
-            vec![q_rope],
-            "rope_q",
-        );
+    let q_rope = g.add_tensor("q_rope", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        vec![q_out],
+        vec![q_rope],
+        "rope_q",
+    );
 
-        let k_rope = g.add_tensor("k_rope", vec![seq_len_sym, SymDim::Concrete(kv_dim)], dt);
-        g.add_op(
-            OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
-            vec![k_out],
-            vec![k_rope],
-            "rope_k",
-        );
+    let k_rope = g.add_tensor("k_rope", vec![seq_len_sym, SymDim::Concrete(kv_dim)], dt);
+    g.add_op(
+        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        vec![k_out],
+        vec![k_rope],
+        "rope_k",
+    );
 
-        g.outputs = vec![q_rope, k_rope, v_out];
-    }
-    #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
-    {
-        g.outputs = vec![q_out, k_out, v_out];
-    }
+    g.outputs = vec![q_rope, k_rope, v_out];
     g
 }
 
@@ -2781,16 +2774,8 @@ mod tests {
         };
         let g = build_fused_qkv_rope_graph(&config, 512, gllm_kernels::types::DType::F32);
         assert_eq!(g.inputs.len(), 4); // input, w_q, w_k, w_v
-        #[cfg(any(feature = "cuda", feature = "hip", feature = "metal"))]
-        {
-            assert_eq!(g.outputs.len(), 3); // q_rope, k_rope, v
-            assert_eq!(g.ops.len(), 5); // 3 Gemms + 2 RoPEs
-        }
-        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
-        {
-            assert_eq!(g.outputs.len(), 3); // q_out, k_out, v
-            assert_eq!(g.ops.len(), 3); // 3 Gemms
-        }
+        assert_eq!(g.outputs.len(), 3); // q_rope, k_rope, v (CPU and GPU both apply RoPE)
+        assert_eq!(g.ops.len(), 5); // 3 Gemms + 2 RoPEs
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
