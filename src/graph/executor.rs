@@ -2221,10 +2221,54 @@ impl FusedGraphExecutor {
             }
 
             if cfg!(debug_assertions) {
+                let op_name = self.graph.nodes[node_idx].op.name();
+                // Full output scan for FusedQkvRope to detect partial writes
+                if op_name == "FusedQkvRope" {
+                    let total_f32 = output_buf.len() / 4;
+                    let all_f32: Vec<f32> = output_buf.chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                    let total_nz = all_f32.iter().filter(|&&v| v != 0.0).count();
+                    // Per-output scan
+                    let mut offset = 0;
+                    for (oi, oname) in cn.graph_output_names.iter().enumerate() {
+                        let n = if oi < cn.per_output_numel.len() { cn.per_output_numel[oi] } else { 0 };
+                        let nbytes = n * cn.output_dtype.size_bytes();
+                        if nbytes > 0 && offset + nbytes <= output_buf.len() {
+                            let sub: Vec<f32> = output_buf[offset..offset+nbytes].chunks_exact(4)
+                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                            let nz = sub.iter().filter(|&&v| v != 0.0).count();
+                            eprintln!("[QKV-OUT] output[{oi}] '{oname}': nz={nz}/{} ({}B at offset {offset})",
+                                sub.len(), nbytes, );
+                            // Sample first/last token
+                            if sub.len() >= 8 {
+                                eprintln!("[QKV-OUT]   first8={:?}", &sub[..8]);
+                            }
+                        }
+                        offset += nbytes;
+                    }
+                    // Per-token non-zero scan for first output (Q_rope)
+                    if !cn.per_output_numel.is_empty() {
+                        let q_numel = cn.per_output_numel[0];
+                        let q_bytes = q_numel * cn.output_dtype.size_bytes();
+                        let q_dim = if effective_seq > 0 { q_numel / (SYMDIM_MAX_SEQ_LEN.max(1)) } else { 0 };
+                        if q_dim > 0 {
+                            let q_f32: Vec<f32> = output_buf[..q_bytes].chunks_exact(4)
+                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                            for tok in 0..effective_seq.min(8) {
+                                let start = tok * q_dim;
+                                let end = start + q_dim;
+                                if end <= q_f32.len() {
+                                    let nz = q_f32[start..end].iter().filter(|&&v| v != 0.0).count();
+                                    eprintln!("[QKV-OUT]   Q tok[{tok}] nz={nz}/{q_dim}");
+                                }
+                            }
+                        }
+                    }
+                    eprintln!("[QKV-OUT] total nz={total_nz}/{total_f32} seq={effective_seq}");
+                }
                 let check: Vec<f32> = output_buf[..output_buf.len().min(32)].chunks_exact(4)
                     .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
                 let nonzero = check.iter().filter(|&&v| v != 0.0).count();
-                let op_name = self.graph.nodes[node_idx].op.name();
                 if nonzero == 0 {
                     eprintln!("[ZERO-OUT] node {node_idx} op={op_name} ALL ZEROS act={}B wt={}B out={}B seq={}",
                         activation.len(), weight_blob.len(), output_buf.len(), effective_seq);
