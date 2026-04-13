@@ -475,3 +475,337 @@ CodeGenerator::finalize()
 5. **特化是优化不是必须**: `BackendSpecialized` 的每个方法默认返回 `Err`。移除任何特化后，通用 TraceOp 路径必须产生正确结果。
 
 6. **状态机不可跳过**: 每条指令的发射必须经过 `CodeGenerator`，由 `KernelState` 追踪。直接操作 `asm` 绕过生成器 = 违规。
+
+## 11. 三代硬件能力矩阵
+
+> 生成器和优化器必须覆盖以下所有硬件代际的指令和机制。
+
+### 11.1 NVIDIA (SM90 → SM100 → SM130)
+
+| 能力 | Hopper SM90 (H100) | Blackwell SM100 (B200) | Blackwell SM120 (GB10) | Rubin SM130 (R100, 2026Q4) |
+|------|---------------------|------------------------|------------------------|---------------------------|
+| **矩阵指令** | `wgmma.mma_async` (warp group MMA) | `tcgen05.mma` (单线程发射，7 条新指令，2-4x wgmma) | `mma.sync` 扩展版 (无 tcgen05) | 预计继承 tcgen05 + 新一代 |
+| **精度** | FP16/BF16/FP8/INT8/TF32 | + FP4/FP6 原生 | + FP4/FP6 原生 | + 预计更多微精度格式 |
+| **专用内存** | 无 | **TMEM** (256KB/SM, tensor core 专用) | 无 TMEM | 预计扩展 TMEM |
+| **异步机制** | TMA (Tensor Memory Accelerator) | TMA + tcgen05 async pipeline | TMA (无 tcgen05) | TMA 增强 |
+| **线程模型** | warp 同步 (32 线程协作) | 单线程 MMA (去 warp 同步) | warp 同步 mma.sync | 预计继承单线程 |
+| **互连** | NVLink 4 | NVLink 5 | 无 NVLink | NVLink 6 (NVL576) |
+| **HBM** | HBM3 80GB 3.35TB/s | HBM3E 192GB 8TB/s | LPDDR5X | HBM4 288GB |
+
+#### 生成器影响
+- `BackendSpecialized::TensorCoreMMA` 必须区分 wgmma (SM90) vs tcgen05 (SM100) vs mma.sync (SM120)
+- `TraceOp` 需要 `QuantFMA { act_bits, weight_bits }` 表达 FP4×FP8 混合精度
+- TMEM 引入新的内存层级：`MemRegion::TensorMem` (仅 SM100)
+- 异步流水线需要 `AsyncPipeline` trait 区分 TMA vs tcgen05 async
+
+### 11.2 AMD (CDNA3 → CDNA4 → CDNA5)
+
+| 能力 | CDNA3 gfx942 (MI300) | CDNA4 gfx950 (MI325) | CDNA5 (MI400, 2026) |
+|------|----------------------|----------------------|---------------------|
+| **矩阵指令** | `v_mfma_f32_*` (wave64 协作) | `v_mfma_*` + **block exponent scaling** | 预计增强 MFMA |
+| **精度** | FP16/BF16/FP8/INT8 | + FP6(E2M3/E3M2)/FP4(E2M1) 原生 | + FP4/FP6/BF16 增强 |
+| **Scaling 指令** | 无 | `__builtin_amdgcn_mfma_scale_f32_*` (block-scaled MMA) | 预计增强 block scaling |
+| **Wave 模式** | wave64 | wave64 | 预计 wave64 |
+| **HBM** | HBM3 192GB | HBM3E | HBM4 432GB 19.6TB/s |
+| **FLOPS** | 1.3 PFLOPS FP8 | ~2.6 PFLOPS FP8 | 40 PFLOPS FP4 / 20 PFLOPS FP8 |
+
+#### RDNA4 (消费级 gfx1200)
+
+| 能力 | RDNA3 gfx1100 | RDNA4 gfx1200 |
+|------|---------------|---------------|
+| **矩阵指令** | WMMA 16×16 (wave32) | WMMA 16×16 增强 + FP8/BF8 |
+| **性能** | 基准 | 16-bit 2x, 8-bit/4-bit 4x |
+| **寄存器** | 全宽 VGPR | **半宽 VGPR** (布局不兼容 RDNA3) |
+
+#### 生成器影响
+- `BackendSpecialized::MatrixFMA` 必须支持 block-scaled 模式 (`mfma_scale`)
+- RDNA4 WMMA 的 VGPR 布局变化需要 **Layout Algebra 感知**（半宽映射）
+- `MixedPrecision` 需要支持 FP6/FP4/BF8 等微精度
+- wave64 vs wave32 影响 tile 大小和协作模式
+
+### 11.3 Intel (Sapphire Rapids → Granite Rapids → Diamond Rapids)
+
+| 能力 | Sapphire Rapids | Granite Rapids (2024) | Diamond Rapids (2026H2) |
+|------|-----------------|----------------------|------------------------|
+| **AMX** | AMX-BF16, AMX-INT8 | AMX 增强 | **AMX-FP8, AMX-TF32, AMX-TRANSPOSE, AMX-MOVRS, AMX-AVX512** |
+| **AVX** | AVX-512 | AVX10.1/256 | **AVX10.2** (全新指令集) |
+| **新指令** | VNNI | + AVX-VNNI-INT8 | + **MOVRS** (read-shared hint), SHA512, SM3/SM4, VNNI-INT16 |
+| **Tile** | TILECFG + TDPBF16PS | + 增强 | + **TDPFP8PS** (FP8 tile dot product) |
+| **核心** | 最多 60 核 | 最多 128 核 | 最多 **256 P-cores** |
+
+#### Panther Lake (2025Q4 客户端)
+
+| 能力 | Arrow Lake | Panther Lake |
+|------|------------|-------------|
+| **ISA** | AVX10.1 | AVX10.2 (Panther Cove 微架构) |
+| **AI** | 基础 NPU | 增强 NPU + AVX10.2 AI 指令 |
+| **制程** | Intel 20A | **Intel 18A** |
+
+#### 生成器影响
+- `BackendSpecialized::AmxTileGemm` 必须区分 BF16/INT8 (SPR) vs FP8/TF32 (DMR)
+- AMX-TRANSPOSE 允许 tile 内转置，影响 pack_b 策略
+- AMX-MOVRS 提供 read-shared memory hint，影响预取策略
+- AVX10.2 新指令需要扩展 TraceOp→x86 映射表
+- AMX-AVX512 桥接指令允许 AVX-512 和 AMX 混用
+
+### 11.4 ARM (Neoverse V2 → V3 → V4)
+
+| 能力 | Neoverse V2 (Grace) | Neoverse V3 / Cortex-X5 | Neoverse V4 / C1 (2025) |
+|------|---------------------|--------------------------|-------------------------|
+| **向量** | SVE2 (128-bit fixed) | SVE2 (256-bit) | SVE2 |
+| **矩阵** | 无 SME | SME2 | **SME2** (full ZA array) |
+| **矩阵指令** | N/A | SMOPA/SMOPS (outer product) | SMOPA/SMOPS 增强 |
+| **流模式** | N/A | SMSTART/SMSTOP streaming mode | SMSTART/SMSTOP |
+| **精度** | FP16/BF16/INT8 | + FP8 (FEAT_FP8) | + FP8 |
+| **ZA 存储** | N/A | 二维矩阵寄存器 | 增强 ZA |
+
+#### 生成器影响
+- `BackendSpecialized::SmeOuterProduct` 需要 SMSTART/SMSTOP 生命周期管理
+- SVE 的可伸缩宽度需要 **predicated loop**（不是固定宽度 unroll）
+- SME2 的 ZA array 是独立于 NEON/SVE 的第三寄存器文件
+- streaming mode 和 non-streaming mode 之间切换有开销，需要优化器决策
+
+## 12. TraceOp 扩展清单
+
+基于三代硬件调研，`TraceOp` 需要以下扩展：
+
+### 12.1 计算语义扩展
+
+```rust
+pub enum TraceOp {
+    // ── 现有（保留不变）──
+    Input(u32), Const(f64),
+    Add(u32, u32), Sub(u32, u32), Mul(u32, u32), Div(u32, u32),
+    Fma(u32, u32, u32),
+    Neg(u32), Abs(u32), Exp(u32), Sqrt(u32), Rsqrt(u32),
+    Tanh(u32), Recip(u32), Log(u32),
+    Max(u32, u32), Min(u32, u32),
+    ConditionalBranch(u32, u32, u32),
+
+    // ── 量化混合精度（gfx950 mfma_scale / SM100 tcgen05 / AMX-FP8）──
+    /// 混合精度 FMA：不同位宽的 activation × weight → 累加器
+    QuantFma {
+        acc: u32,
+        act: u32,
+        weight: u32,
+        act_dtype: QuantPrecision,
+        weight_dtype: QuantPrecision,
+    },
+    /// Block exponent scaling（CDNA4 mfma_scale 原生支持）
+    BlockScale {
+        data: u32,
+        scale: u32,
+        block_size: usize,
+    },
+
+    // ── 类型转换（F16C / fcvtl / cvt.f32.f16）──
+    Cast { src: u32, from: QuantPrecision, to: QuantPrecision },
+
+    // ── 水平归约（vhaddps / faddp / shfl.sync）──
+    HReduce { src: u32, op: ReduceKind },
+
+    // ── 内存层级控制 ──
+    /// Prefetch hint（prefetcht0 / prfm / prefetch.global）
+    Prefetch { level: CacheLevel },
+    /// Non-temporal store（vmovntps / stnp / st.cs）
+    NonTemporalStore,
+
+    // ── 位操作（量化解包）──
+    /// 位域提取（ubfx / bfe / shift+mask）
+    BitExtract { src: u32, offset: u32, width: u32 },
+    /// Permute/shuffle（vpshufb / tbl / prmt）
+    Permute { src: u32, indices: u32 },
+
+    // ── 比较和掩码 ──
+    /// 比较生成掩码（vcmpps→kmask / fcmgt→pred / setp）
+    Compare { a: u32, b: u32, op: CmpOp },
+    /// 掩码应用（后端自动选择 k-mask / SVE predicate / GPU predicate）
+    MaskedOp { op: Box<TraceOp>, mask: u32 },
+}
+
+/// 量化精度描述
+enum QuantPrecision {
+    F32, F16, BF16,
+    FP8_E4M3, FP8_E5M2,           // NVIDIA/AMD FP8
+    FP6_E2M3, FP6_E3M2,           // AMD CDNA4 FP6
+    FP4_E2M1,                      // AMD CDNA4/NVIDIA Blackwell FP4
+    INT8, INT4,
+    TF32,                           // Intel AMX-TF32
+}
+
+enum ReduceKind { Sum, Max, Min, Prod }
+enum CacheLevel { L1, L2, L3, NonTemporal }
+enum CmpOp { Eq, Ne, Lt, Le, Gt, Ge }
+```
+
+### 12.2 硬件机制扩展（非 TraceOp，通过 BackendSpecialized）
+
+```rust
+/// Tile/Matrix 计算原语
+trait TileCompute: BackendSpecialized {
+    /// 配置 tile 寄存器
+    /// - Intel AMX: TILECFG（指定 tile 行列数和类型）
+    /// - ARM SME: SMSTART（进入 streaming SVE mode）
+    /// - GPU: 无显式配置
+    fn tile_configure(&mut self, config: TileConfig) -> Result<()>;
+
+    /// Tile 矩阵乘法
+    /// - Intel AMX: TDPBF16PS / TDPFP8PS (Diamond Rapids)
+    /// - AMD CDNA: v_mfma_f32_32x32x64 / v_mfma_scale (gfx950)
+    /// - ARM SME: FMOPA / SMOPA
+    /// - NVIDIA SM100: tcgen05.mma
+    /// - NVIDIA SM120: mma.sync (扩展)
+    fn tile_gemm(&mut self, config: TileGemmConfig) -> Result<()>;
+
+    /// Tile 转置（Intel AMX-TRANSPOSE, Diamond Rapids）
+    fn tile_transpose(&mut self, tile: TileId) -> Result<()> {
+        Err("tile transpose not supported".into())
+    }
+
+    /// 释放 tile 资源
+    fn tile_release(&mut self) -> Result<()>;
+}
+
+struct TileGemmConfig {
+    m: usize, n: usize, k: usize,
+    precision: MixedPrecision,
+    /// Block scaling（CDNA4 gfx950 特有）
+    block_scaling: Option<BlockScaleConfig>,
+}
+
+struct BlockScaleConfig {
+    scale_format: QuantPrecision,
+    block_size: usize,
+}
+
+/// 异步内存流水线
+trait AsyncPipeline: BackendSpecialized {
+    /// 异步全局→共享内存拷贝
+    /// - NVIDIA: TMA (cp.async.bulk)
+    /// - AMD: 异步 global→LDS
+    fn async_copy(&mut self, dst: MemRegion, src: MemRegion, size: usize) -> Result<AsyncHandle>;
+
+    /// 异步等待
+    fn async_wait(&mut self, handle: AsyncHandle) -> Result<()>;
+
+    /// 流水线阶段屏障
+    /// - NVIDIA SM100: arrive.expect_tx + barrier.wait
+    fn pipeline_barrier(&mut self, stage: PipelineStage) -> Result<()>;
+
+    /// Warp/Wave 协作同步
+    /// - NVIDIA: __syncwarp / bar.sync
+    /// - AMD: s_barrier
+    fn cooperative_sync(&mut self, scope: SyncScope) -> Result<()>;
+}
+
+/// 专用内存层级
+trait SpecializedMemory: BackendSpecialized {
+    /// NVIDIA SM100 TMEM（Tensor Memory, 256KB/SM）
+    fn tmem_store(&mut self, offset: usize, data: VReg) -> Result<()> {
+        Err("TMEM not supported".into())
+    }
+    fn tmem_load(&mut self, dst: VReg, offset: usize) -> Result<()> {
+        Err("TMEM not supported".into())
+    }
+
+    /// ARM SME ZA Array（二维矩阵寄存器）
+    fn za_store(&mut self, tile: u32, row: usize, src: VReg) -> Result<()> {
+        Err("ZA not supported".into())
+    }
+    fn za_load(&mut self, dst: VReg, tile: u32, row: usize) -> Result<()> {
+        Err("ZA not supported".into())
+    }
+}
+
+/// 高级向量操作
+trait AdvancedVector: BackendSpecialized {
+    /// SVE predicated loop（可伸缩宽度，不需要标量 tail）
+    fn predicated_loop(&mut self, len: usize, body: &[TraceOp]) -> Result<()> {
+        Err("predicated loop not supported".into())
+    }
+
+    /// 整数点积（VNNI / sdot / dp4a）
+    fn integer_dot_product(&mut self, a: VReg, b: VReg, acc: VReg, bits: u8) -> Result<()> {
+        Err("integer dot product not supported".into())
+    }
+
+    /// Read-shared memory hint（Intel MOVRS, Diamond Rapids）
+    fn read_shared_hint(&mut self, addr: VReg) -> Result<()> {
+        Err("MOVRS not supported".into())
+    }
+}
+
+enum MemRegion {
+    Global,
+    Shared,           // GPU shared memory / CPU L1
+    TensorMem,        // NVIDIA SM100 TMEM (256KB/SM)
+    ZaArray,          // ARM SME ZA matrix storage
+    Register,
+}
+
+enum SyncScope {
+    Warp,             // NVIDIA warp (32 threads)
+    Wave,             // AMD wave (64 threads)
+    Workgroup,        // GPU workgroup / block
+    Device,
+}
+```
+
+## 13. 优化器影响
+
+硬件代际特性不仅影响 Layer 1 的指令选择，还影响 Phase 2 的融合决策：
+
+### 13.1 融合策略的硬件自适应
+
+| 决策 | SM90 | SM100 | CDNA4 | Diamond Rapids | ARM SME2 |
+|------|------|-------|-------|----------------|----------|
+| **GEMM 分块** | wgmma tile (64×128×16) | tcgen05 tile (可变) | mfma tile (32×32×K) | AMX tile (16×16) | ZA outer product |
+| **Epilogue 融合深度** | 受 warp 同步限制 | 单线程发射→更深融合 | wave64 限制 | AVX10.2 寄存器充裕 | streaming mode 切换开销 |
+| **内存预取** | TMA 自动 | TMA + TMEM staging | LDS prefetch | MOVRS read-shared | SVE gather-prefetch |
+| **量化 GEMM** | FP8 WGMMA | FP4×FP8 tcgen05 一条指令 | mfma_scale block-scaled | AMX-FP8 tile dot | 无原生量化矩阵 |
+| **Pack 策略** | 全局→shared→register | 全局→TMEM→register (新路径) | 全局→LDS→VGPR | RAM→L1→tile regs | RAM→ZA array |
+
+### 13.2 Layer 3 Algorithm Driver 的硬件感知
+
+```rust
+fn emit_gemm<B: BackendEmitter>(gen: &mut CodeGenerator<B>, layout: &GemmLayout, ...) {
+    let caps = gen.backend.capabilities();
+
+    // 优先级 1: Tile/Matrix 硬件
+    if let Some(tile) = gen.backend.tile_compute() {
+        let config = TileGemmConfig::from_layout_and_caps(layout, &caps);
+
+        // SM100: tcgen05 + TMEM staging
+        if caps.has_tmem() {
+            return emit_tcgen05_gemm_with_tmem(gen, tile, layout);
+        }
+        // SM90: wgmma + TMA
+        if caps.has_async_pipeline() {
+            return emit_wgmma_gemm_pipelined(gen, tile, layout);
+        }
+        // AMX: tile GEMM + AVX-512 epilogue
+        if caps.has_amx() {
+            return emit_amx_tile_gemm(gen, tile, layout);
+        }
+        // SME: outer product + ZA accumulate
+        if caps.has_sme() {
+            return emit_sme_outer_product_gemm(gen, tile, layout);
+        }
+        // CDNA: v_mfma + block scaling
+        if let Some(block_scale) = config.block_scaling {
+            return emit_mfma_scaled_gemm(gen, tile, layout, block_scale);
+        }
+        return emit_tile_gemm_generic(gen, tile, config);
+    }
+
+    // 优先级 2: SVE predicated（ARM without SME）
+    if let Some(adv) = gen.backend.advanced_vector() {
+        if caps.has_sve() {
+            return emit_sve_gemm(gen, adv, layout);
+        }
+    }
+
+    // 优先级 3: 通用 BLIS + TraceOp FMA
+    emit_blis_gemm(gen, layout, epilogue)
+}
+```
