@@ -135,6 +135,41 @@ pub fn map_architecture_token(token: &str) -> Option<String> {
     crate::arch::resolve_template_name(token).map(|s| s.to_string())
 }
 
+/// Model-kind-specific template override table.
+///
+/// When a GGUF architecture token resolves to a generative template but the
+/// `ModelKind` requires a different specialised template, we reroute to the
+/// matching template here. This is necessary because GGUF stores the same
+/// `general.architecture` value for generative, embedding, and reranker
+/// variants (e.g. all Qwen3 variants report `general.architecture = qwen3`).
+///
+/// Entry format: (base_template, model_kind, override_template)
+static KIND_TEMPLATE_OVERRIDE: &[(&str, ModelKind, &str)] = &[
+    ("qwen3", ModelKind::Embedding, "qwen3-embed"),
+    ("qwen3", ModelKind::Reranker, "qwen3-reranker"),
+];
+
+/// Map architecture token string to template name, respecting model kind.
+///
+/// For specialised `ModelKind` variants (Embedding, Reranker), applies
+/// kind-specific template overrides so that (for example) `qwen3` with
+/// `ModelKind::Embedding` → `qwen3-embed` instead of the generative `qwen3`
+/// template, and `qwen3` with `ModelKind::Reranker` → `qwen3-reranker`.
+pub fn map_architecture_token_for_kind(token: &str, kind: ModelKind) -> Option<String> {
+    crate::arch::register_builtin_templates();
+    let base = crate::arch::resolve_template_name(token)?.to_string();
+    if let Some(&(_, _, override_template)) = KIND_TEMPLATE_OVERRIDE
+        .iter()
+        .find(|&&(t, k, _)| t == base && k == kind)
+    {
+        // Only override if the specialised template is registered.
+        if crate::arch::is_valid_template(override_template) {
+            return Some(override_template.to_string());
+        }
+    }
+    Some(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -917,6 +917,28 @@ impl FusedGraphExecutor {
         }
     }
 
+    /// Bind a named weight as pre-materialized f32 bytes.
+    ///
+    /// Used when weights are dequantized on the host before binding.
+    /// The bytes are stored in `WeightBinding::data` and are used directly
+    /// by `seed_tensors_and_weight_ptrs` without any further ptr indirection.
+    pub fn bind_bytes(mut self, name: String, f32_bytes: Vec<u8>) -> Self {
+        if let Some(mut meta) = self.graph.weight_bindings.remove(&name) {
+            meta.data = Some(f32_bytes);
+            meta.ptr = None;
+            self.graph.weight_bindings.insert(name, meta);
+        } else {
+            self.graph.weight_bindings.insert(name, crate::graph::types::WeightBinding {
+                source_name: String::new(),
+                shape: vec![],
+                dtype: safetensors::Dtype::F32,
+                data: Some(f32_bytes),
+                ptr: None,
+            });
+        }
+        self
+    }
+
     /// Bind a named weight to a raw pointer.
     ///
     /// If a WeightBinding entry already exists for `name`, updates its `ptr`.
@@ -968,7 +990,6 @@ impl FusedGraphExecutor {
 
         for (idx, node) in self.graph.nodes.iter().enumerate() {
             let build = self.build_node_graph(idx, seq_len, hidden, compile_dtype)?;
-
             let compiled = compiler
                 .compile_graph(&build.graph)
                 .map_err(|e| {
@@ -1696,10 +1717,23 @@ impl FusedGraphExecutor {
         let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
         let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
-        // Build merged K and V: [total_seq, kv_dim]
+        // Build merged K and V padded to SYMDIM_MAX_SEQ_LEN rows.
+        //
+        // CRITICAL: emit_multi_head_attention computes the V pointer as:
+        //   V_ptr = rsi + compile_seq_len * kv_dim * 4
+        // where compile_seq_len == SYMDIM_MAX_SEQ_LEN (2048).
+        //
+        // pack_weight_blob concatenates K and V bytes sequentially. If K is only
+        // total_seq rows (e.g. 5 rows), the JIT looks for V at byte offset
+        // 2048 * kv_dim * 4, which is far beyond the K data → reads garbage → NaN.
+        //
+        // Fix: always allocate merged_k/merged_v at SYMDIM_MAX_SEQ_LEN rows so
+        // that pack_weight_blob produces [K_2048rows | V_2048rows] and V starts
+        // at exactly the offset the JIT kernel expects.
         let merged_row_bytes = kv_dim * elem_bytes;
-        let mut merged_k = vec![0u8; total_seq * merged_row_bytes];
-        let mut merged_v = vec![0u8; total_seq * merged_row_bytes];
+        let alloc_rows = SYMDIM_MAX_SEQ_LEN;
+        let mut merged_k = vec![0u8; alloc_rows * merged_row_bytes];
+        let mut merged_v = vec![0u8; alloc_rows * merged_row_bytes];
 
         unsafe {
             let k_base = kv_cache_k as *const u8;
@@ -2041,7 +2075,7 @@ impl FusedGraphExecutor {
             // activation/weights/kv_cache pointers.
             let is_mha_node = matches!(
                 self.graph.nodes[node_idx].op.name(),
-                "GQA" | "Attention" | "MultiHeadAttention"
+                "GQA" | "Attention" | "MultiHeadAttention" | "FlashAttention"
             );
 
             // ── KV cache merge for decode step MHA ──
@@ -2059,22 +2093,43 @@ impl FusedGraphExecutor {
                     self.graph.nodes.len(),
                     self.graph.nodes[node_idx].name,
                     self.graph.nodes[node_idx].op.name());
-                if self.graph.nodes[node_idx].op.name() == "GQA" || self.graph.nodes[node_idx].op.name() == "Attention" {
+                if matches!(self.graph.nodes[node_idx].op.name(), "GQA" | "Attention" | "FlashAttention" | "MultiHeadAttention") {
                     log::trace!("[EXEC-ABI] GQA node inputs: {:?}, outputs: {:?}, graph_inputs: {:?}",
                         cn.graph_input_names, cn.graph_output_names, self.graph.inputs);
+                    // First GQA node only: check K/V presence
+                    if node_idx < 20 {
+                        let k_name = cn.graph_input_names.get(1).map(|s| s.as_str()).unwrap_or("?");
+                        let v_name = cn.graph_input_names.get(2).map(|s| s.as_str()).unwrap_or("?");
+                        let k_data = tensors.get(k_name);
+                        let v_data = tensors.get(v_name);
+                        eprintln!("[GQA-DIAG] node {} k='{}' v='{}' k_bytes={:?} v_bytes={:?}",
+                            node_idx, k_name, v_name,
+                            k_data.map(|d| d.len()), v_data.map(|d| d.len()));
+                        if let Some(kd) = k_data {
+                            let k_f32: Vec<f32> = kd[..kd.len().min(16)].chunks_exact(4)
+                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                            let k_nz = k_f32.iter().filter(|&&x| x != 0.0).count();
+                            eprintln!("[GQA-DIAG] k_nz={}/{} sample={:?}", k_nz, k_f32.len(), &k_f32[..4.min(k_f32.len())]);
+                        }
+                    }
                 }
             }
+
+            // NOTE: expand_gqa_heads is intentionally NOT called here.
+            // The JIT MHA attention kernel (emit_multi_head_attention) handles GQA
+            // natively via (num_heads / num_kv_heads) head grouping. K/V are passed
+            // with kv_dim stride and kv_head indexing is done inside the kernel.
+            // Expanding K/V from kv_dim to q_dim before packing would corrupt the
+            // row stride expected by the JIT kernel.
 
             // Load activation and pad to max_seq_len size if needed.
             let activation = Self::load_activation(cn, &tensors, true);
 
             // Pack weight blob using the compiled weight_layout for size info.
+            // For MHA nodes this packs the expanded K/V tensors (written above by
+            // expand_gqa_heads) so weight_blob[K_offset..] and weight_blob[V_offset..]
+            // are correctly populated before the JIT kernel runs.
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
-
-            // ── GQA head expansion for MHA ──
-            if is_mha_node {
-                Self::expand_gqa_heads(cn, &self.graph.nodes[node_idx].op, &mut tensors, mha_kv_seq_len);
-            }
 
             // Allocate output buffer at max_seq_len size (safe upper bound).
             // JIT kernels may loop up to max_seq_len internally for ops like
@@ -2086,93 +2141,119 @@ impl FusedGraphExecutor {
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
 
-            log::debug!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B seq_len={}",
+            // Effective seq_len passed to the JIT kernel: for MHA nodes the kernel
+            // must iterate over the full KV sequence (prefill + cached), not just the
+            // current step's tokens.
+            let effective_seq = if is_mha_node { mha_kv_seq_len } else { seq_len };
+
+            log::debug!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B eff_seq={}",
                 activation.len(), weight_blob.len(), output_bytes,
-                cn.compiled.scratchpad_bytes, seq_len);
+                cn.compiled.scratchpad_bytes, effective_seq);
+
+            // Unified execute path: standard CompiledLayerFn ABI for all nodes.
+            // rdi=activation (Q for MHA), rsi=weight_blob (packed K/V for MHA),
+            // rdx=kv_cache, rcx=positions, r8=seq_lens, r9=batch_size,
+            // [rbp+16]=seq_len, [rbp+24]=output, [rbp+32]=scratchpad.
+            let out_ptr_before = output_buf.as_mut_ptr();
+            let scratch_ptr_before = scratchpad.as_mut_ptr();
+            if cfg!(debug_assertions) && is_mha_node {
+                eprintln!("[MHA-EXEC] node {node_idx} out_ptr={:p} scratch_ptr={:p} out_len={} scratch_len={} eff_seq={}",
+                    out_ptr_before, scratch_ptr_before, output_buf.len(), scratchpad.len(), effective_seq);
+                // Pre-execution: check K at expected scratchpad location and in weight_blob
+                // For Qwen3-0.6B: kv_head 7 (h=15), row 0 starts at weight_blob[1792..2048]
+                let k_src_off = 1792usize;
+                let wb_k_data: Vec<f32> = if weight_blob.len() >= k_src_off + 128 {
+                    weight_blob[k_src_off..k_src_off+128].chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect()
+                } else { vec![] };
+                let wb_k_nz = wb_k_data.iter().filter(|&&v| v != 0.0).count();
+                eprintln!("[MHA-EXEC] weight_blob[1792..1920] nz={}/{} first={:?}", wb_k_nz, wb_k_data.len(), &wb_k_data[..4.min(wb_k_data.len())]);
+            }
             unsafe {
-                if is_mha_node {
-                    // MHA JIT ABI: rdi=Q, rsi=K, rdx=V, r8=output_ptr
-                    // This differs from standard CompiledLayerFn where r8=seq_lens.
-                    // MHA stores r8 as [rsp+24] = output base for scatter_head.
-                    // Load Q, K, V from tensor map (produced by preceding FusedQkvRope).
-                    let (q_ptr, q_len) = cn.graph_input_names.get(0)
-                        .and_then(|name| tensors.get(name))
-                        .map(|v| (v.as_ptr() as *const u8, v.len()))
-                        .unwrap_or((std::ptr::null(), 0));
-                    let (k_ptr, k_len) = cn.graph_input_names.get(1)
-                        .and_then(|name| tensors.get(name))
-                        .map(|v| (v.as_ptr() as *const u8, v.len()))
-                        .unwrap_or((std::ptr::null(), 0));
-                    let (v_ptr, v_len) = cn.graph_input_names.get(2)
-                        .and_then(|name| tensors.get(name))
-                        .map(|v| (v.as_ptr() as *const u8, v.len()))
-                        .unwrap_or((std::ptr::null(), 0));
-
-                    log::debug!("[MHA-EXEC] node {node_idx} kv_seq={mha_kv_seq_len} Q={q_ptr:?}({q_len}B) K={k_ptr:?}({k_len}B) V={v_ptr:?}({v_len}B) scratch={scratch_len}B out={output_bytes}B",
-                        scratch_len = cn.compiled.scratchpad_bytes);
-
-                    // Validate Q/K/V buffer sizes: MHA extract_heads reads up to
-                    // mha_kv_seq_len rows of hidden_bytes each. Buffer must be large enough.
-                    let q_hidden = if let FusedOp::GQA(ref cfg) = self.graph.nodes[node_idx].op {
-                        cfg.num_heads * cfg.head_dim * 4
-                    } else if let FusedOp::FlashAttention(ref cfg) = self.graph.nodes[node_idx].op {
-                        cfg.num_heads * cfg.head_dim * 4
+                cn.compiled.execute(
+                    if activation.is_empty() {
+                        std::ptr::null()
                     } else {
-                        cn.feature_dim * cn.output_dtype.size_bytes()
-                    };
-                    let kv_hidden = if let FusedOp::GQA(ref cfg) = self.graph.nodes[node_idx].op {
-                        cfg.num_kv_heads * cfg.head_dim * 4
-                    } else if let FusedOp::FlashAttention(ref cfg) = self.graph.nodes[node_idx].op {
-                        cfg.num_kv_heads * cfg.head_dim * 4
+                        activation.as_ptr()
+                    },
+                    if weight_blob.is_empty() {
+                        std::ptr::null()
                     } else {
-                        cn.feature_dim * cn.output_dtype.size_bytes()
-                    };
-                    let min_q_bytes = mha_kv_seq_len * q_hidden;
-                    let min_kv_bytes = mha_kv_seq_len * kv_hidden;
-                    if q_len < min_q_bytes || k_len < min_kv_bytes || v_len < min_kv_bytes {
-                        log::error!(
-                            "[EXEC-MHA] node {node_idx} buffer too small: Q={q_len}<{min_q_bytes} K={k_len}<{min_kv_bytes} V={v_len}<{min_kv_bytes} seq={mha_kv_seq_len}"
-                        );
-                        return Err(ExecutionError::ShapeMismatch(format!(
-                            "MHA node {node_idx}: Q/K/V buffer too small for seq_len={mha_kv_seq_len}"
-                        )));
-                    }
-
-                    cn.compiled.execute(
-                        q_ptr,                                    // rdi = Q
-                        k_ptr,                                    // rsi = K
-                        v_ptr as *mut u8,                         // rdx = V
-                        positions,                                // rcx = positions (unused by MHA)
-                        output_buf.as_ptr() as *const usize,      // r8 = output ptr (in seq_lens slot!)
-                        1,                                        // r9 = batch_size
-                        mha_kv_seq_len,                           // [rbp+16] = seq_len (total_seq for decode)
-                        output_buf.as_mut_ptr(),                  // [rbp+24] = output (standard slot)
-                        scratchpad.as_mut_ptr(),                  // [rbp+32] = scratchpad
-                    );
-                } else {
-                    // Standard ABI: rdi=input, rsi=weights, rdx=kv_cache, ...
-                    cn.compiled.execute(
-                        if activation.is_empty() {
-                            std::ptr::null()
-                        } else {
-                            activation.as_ptr()
-                        },
-                        if weight_blob.is_empty() {
-                            std::ptr::null()
-                        } else {
-                            weight_blob.as_ptr()
-                        },
-                        kv_cache_ptr,
-                        positions,
-                        kv_cache_v_ptr as *const usize,
-                        1,
-                        seq_len,
-                        output_buf.as_mut_ptr(),
-                        scratchpad.as_mut_ptr(),
-                    );
-                }
+                        weight_blob.as_ptr()
+                    },
+                    kv_cache_ptr,
+                    positions,
+                    kv_cache_v_ptr as *const usize,
+                    1,
+                    effective_seq,
+                    out_ptr_before,
+                    scratch_ptr_before,
+                );
             }
             log::debug!("[EXEC] node {node_idx} done");
+            // Debug: check if scratchpad was written (non-zero)
+            if cfg!(debug_assertions) && is_mha_node {
+                let sc_check: Vec<f32> = scratchpad[..scratchpad.len().min(128)].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                let sc_nz = sc_check.iter().filter(|&&v| v != 0.0).count();
+                // For E5/BERT: head_dim=64, seq=2048, elem=4
+                // head_mat_size = 2048*64*4 = 524288
+                // k_off = 524288, v_off = 1048576, sc_off = 1572864
+                // scores_size = 2048*2048*4 = 16777216
+                // out_off = 1572864 + 16777216 = 18350080
+                let k_off: usize = 524288;
+                let v_off: usize = 1048576;
+                let sc_off: usize = 1572864;
+                let out_off: usize = 18350080;
+                let sc_k: Vec<f32> = scratchpad[k_off..k_off+128].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                let sc_v: Vec<f32> = scratchpad[v_off..v_off+128].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                let sc_scores: Vec<f32> = scratchpad[sc_off..sc_off+128].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                let sc_out: Vec<f32> = if scratchpad.len() > out_off + 128 {
+                    scratchpad[out_off..out_off+128].chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect()
+                } else { vec![] };
+                let op_name = self.graph.nodes[node_idx].op.name();
+                eprintln!("[MHA-EXEC] op={op_name} after: q_nz={}/{} k_nz={}/{} v_nz={}/{} sc_nz={}/{} out_h_nz={}/{} out[0..4]={:?}",
+                    sc_nz, sc_check.len(),
+                    sc_k.iter().filter(|&&v| v != 0.0).count(), sc_k.len(),
+                    sc_v.iter().filter(|&&v| v != 0.0).count(), sc_v.len(),
+                    sc_scores.iter().filter(|&&v| v != 0.0).count(), sc_scores.len(),
+                    sc_out.iter().filter(|&&v| v != 0.0).count(), sc_out.len(),
+                    &output_buf[..output_buf.len().min(16)].chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4])))
+                        .collect::<Vec<_>>()[..4.min(output_buf.len()/4)]);
+            }
+
+            if cfg!(debug_assertions) {
+                let check: Vec<f32> = output_buf[..output_buf.len().min(32)].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                let nonzero = check.iter().filter(|&&v| v != 0.0).count();
+                let op_name = self.graph.nodes[node_idx].op.name();
+                if nonzero == 0 {
+                    eprintln!("[ZERO-OUT] node {node_idx} op={op_name} ALL ZEROS act={}B wt={}B out={}B seq={}",
+                        activation.len(), weight_blob.len(), output_buf.len(), effective_seq);
+                    let act_check: Vec<f32> = activation[..activation.len().min(32)].chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                    let act_nz = act_check.iter().filter(|&&v| v != 0.0).count();
+                    let wt_check: Vec<f32> = weight_blob[..weight_blob.len().min(32)].chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+                    let wt_nz = wt_check.iter().filter(|&&v| v != 0.0).count();
+                    eprintln!("[ZERO-OUT] act_nz={}/{} wt_nz={}/{}", act_nz, act_check.len(), wt_nz, wt_check.len());
+                    eprintln!("[ZERO-OUT] act[0..8]={:?}", &act_check[..8.min(act_check.len())]);
+                    eprintln!("[ZERO-OUT] wt[0..8]={:?}", &wt_check[..8.min(wt_check.len())]);
+                    // Print weight names being looked up for this node
+                    eprintln!("[ZERO-OUT] input_names={:?}", &cn.graph_input_names);
+                    // Check which names are found in tensors vs weight_ptrs
+                    for wname in cn.graph_input_names.iter().skip(1) {
+                        let in_tensors = tensors.contains_key(wname);
+                        let in_wptrs = weight_ptrs.contains_key(wname);
+                        eprintln!("[ZERO-OUT]   weight '{}': tensors={} wptrs={}", wname, in_tensors, in_wptrs);
+                    }
+                }
+            }
 
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
@@ -2181,44 +2262,47 @@ impl FusedGraphExecutor {
             // JIT kernel wrote max_seq_len rows but only the first seq_len are valid.
             // For MHA decode (mha_kv_seq_len > seq_len), the output is [total_seq, hidden]
             // and we only need the last token's row.
-            let effective_trunc_len = if is_mha_node && mha_kv_seq_len > seq_len {
-                // MHA decode: output has total_seq rows, take only the last row
-                seq_len // just 1 row for decode
-            } else {
-                seq_len
-            };
-            let runtime_bytes = cn.feature_dim * effective_trunc_len * cn.output_dtype.size_bytes();
-            let truncated_output = if is_mha_node && mha_kv_seq_len > seq_len {
-                // MHA decode: extract last token's output from [total_seq, hidden]
-                let row_bytes = cn.feature_dim * cn.output_dtype.size_bytes();
-                let offset = (mha_kv_seq_len - 1) * row_bytes;
-                if offset + row_bytes <= output_buf.len() {
-                    output_buf[offset..offset + row_bytes].to_vec()
-                } else {
-                    output_buf[..row_bytes.min(output_buf.len())].to_vec()
-                }
-            } else if runtime_bytes < output_buf.len() {
-                output_buf[..runtime_bytes].to_vec()
-            } else {
-                output_buf
-            };
-
             if cn.graph_output_names.len() == 1 {
+                // Single-output node: truncate to runtime seq_len.
+                let effective_trunc_len = if is_mha_node && mha_kv_seq_len > seq_len {
+                    seq_len
+                } else {
+                    seq_len
+                };
+                let runtime_bytes = cn.feature_dim * effective_trunc_len * cn.output_dtype.size_bytes();
+                let truncated_output = if is_mha_node && mha_kv_seq_len > seq_len {
+                    let row_bytes = cn.feature_dim * cn.output_dtype.size_bytes();
+                    let offset = (mha_kv_seq_len - 1) * row_bytes;
+                    if offset + row_bytes <= output_buf.len() {
+                        output_buf[offset..offset + row_bytes].to_vec()
+                    } else {
+                        output_buf[..row_bytes.min(output_buf.len())].to_vec()
+                    }
+                } else if runtime_bytes < output_buf.len() {
+                    output_buf[..runtime_bytes].to_vec()
+                } else {
+                    output_buf
+                };
                 tensors.insert(cn.graph_output_names[0].clone(), truncated_output);
             } else if !cn.per_output_numel.is_empty() {
-                // Multi-output node: split truncated_output by per_output_numel
-                // per_output_numel stores max_seq_len sizes, need to scale to runtime seq_len
-                let max_seq_len = SYMDIM_MAX_SEQ_LEN; // SymDim::Symbolic max_value
-                let mut byte_offset = 0;
+                // Multi-output node: the JIT writes each output at a different base offset
+                // within output_buf. Output i starts at byte_start_i where:
+                //   byte_start_0 = 0
+                //   byte_start_i = sum(per_output_numel[0..i]) * dtype_size
+                // For each output i, only the first (per_token_i * seq_len) elements are valid.
+                // We must read from output_buf (not truncated_output) using these offsets.
+                let dtype_bytes = cn.output_dtype.size_bytes();
+                let max_seq_len = SYMDIM_MAX_SEQ_LEN;
+                let mut jit_byte_offset: usize = 0; // cumulative offset in output_buf
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
                     let per_token = cn.per_output_numel[i] / max_seq_len;
-                    let numel = per_token * seq_len;
-                    let nbytes = numel * cn.output_dtype.size_bytes();
-                    if byte_offset + nbytes <= truncated_output.len() {
-                        let chunk = truncated_output[byte_offset..byte_offset + nbytes].to_vec();
+                    let valid_nbytes = per_token * seq_len * dtype_bytes;
+                    let max_nbytes = cn.per_output_numel[i] * dtype_bytes; // full block in output_buf
+                    if jit_byte_offset + valid_nbytes <= output_buf.len() {
+                        let chunk = output_buf[jit_byte_offset..jit_byte_offset + valid_nbytes].to_vec();
                         tensors.insert(name.clone(), chunk);
                     }
-                    byte_offset += nbytes;
+                    jit_byte_offset += max_nbytes;
                 }
             } else if cn.graph_output_names.len() > 1 {
                 return Err(ExecutionError::Compilation(format!(

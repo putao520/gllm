@@ -731,10 +731,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 }
                             }
                             // tie_word_embeddings: lm_head.weight → model.embed_tokens.weight
+                            // (also handles GGUF weight tying via token_embd.weight)
                             if canonical_name == "lm_head.weight" {
                                 const EMBED_ALIASES: &[&str] = &[
                                     "model.embed_tokens.weight", "embed_tokens.weight",
                                     "transformer.wte.weight", "embeddings.word_embeddings.weight",
+                                    "token_embd.weight", // GGUF tied embedding
                                 ];
                                 for alias in EMBED_ALIASES {
                                     if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
@@ -742,13 +744,114 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                     }
                                 }
                             }
+                            // Decoder layer HF → GGUF name translation.
+                            // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
+                            for alias in crate::weight_names::all_decoder_weight_aliases(&canonical_name) {
+                                if let Some(t) = TensorLookup::get_tensor(&weights, &alias) {
+                                    return Some(t.as_ref().as_ptr() as *const f32);
+                                }
+                            }
+                            // Global decoder weight aliases (final norm, lm_head, embedding).
+                            // E.g. model.norm.weight → output_norm.weight (GGUF)
+                            //      lm_head.weight   → token_embd.weight (tied embedding)
+                            let global_alias_groups: &[&dyn Fn() -> Vec<String>] = &[
+                                &crate::weight_names::decoder_final_norm_aliases,
+                                &crate::weight_names::lm_head_aliases,
+                                &crate::weight_names::decoder_embed_aliases,
+                            ];
+                            for alias_fn in global_alias_groups {
+                                let aliases = alias_fn();
+                                if aliases.contains(&canonical_name) {
+                                    for alias in &aliases {
+                                        if alias != &canonical_name {
+                                            if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
+                                                return Some(t.as_ref().as_ptr() as *const f32);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             None
                         });
+                        // Dequantize a QuantizedTensor to f32 bytes using the backend.
+                        let dequant = |q_tensor: &crate::loader::QuantizedTensor| -> Option<Vec<u8>> {
+                            let numel: usize = q_tensor.shape.iter().product();
+                            let mut f32_out = vec![0.0f32; numel];
+                            backend.dequantize(&q_tensor.data, &mut f32_out, q_tensor.quant_type)
+                                .ok()?;
+                            // Transpose: GGUF/HF store Linear weights as [out_features, in_features]
+                            // (row-major). The JIT GEMM (A=[seq,K], B=[K,N]) expects B in
+                            // column-major / transposed-row-major → [K, N]. We must transpose here.
+                            let shape = &q_tensor.shape;
+                            let f32_to_bytes = |v: &[f32]| -> Vec<u8> {
+                                v.iter().flat_map(|f| f.to_le_bytes()).collect()
+                            };
+                            if shape.len() == 2 {
+                                let rows = shape[0]; // out_features = N
+                                let cols = shape[1]; // in_features = K
+                                let mut transposed = vec![0.0f32; numel];
+                                for r in 0..rows {
+                                    for c in 0..cols {
+                                        transposed[c * rows + r] = f32_out[r * cols + c];
+                                    }
+                                }
+                                Some(f32_to_bytes(&transposed))
+                            } else {
+                                Some(f32_to_bytes(&f32_out))
+                            }
+                        };
                         if let Some(ptr) = found {
                             ge = ge.bind(canonical_name.clone(), ptr);
                         } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
-                            let ptr = q_tensor.data.as_ptr() as *const f32;
-                            ge = ge.bind(canonical_name.clone(), ptr);
+                            if let Some(f32_bytes) = dequant(q_tensor) {
+                                ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
+                            }
+                        } else {
+                            // Try decoder layer GGUF aliases for quantized tensors.
+                            // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
+                            let mut bound_alias = false;
+                            for alias in crate::weight_names::all_decoder_weight_aliases(&canonical_name) {
+                                if let Some(t) = TensorLookup::get_tensor(&weights, &alias) {
+                                    ge = ge.bind(canonical_name.clone(), t.as_ref().as_ptr() as *const f32);
+                                    bound_alias = true;
+                                    break;
+                                }
+                                if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &alias) {
+                                    if let Some(f32_bytes) = dequant(q_tensor) {
+                                        ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
+                                        bound_alias = true;
+                                    }
+                                    break;
+                                }
+                            }
+                            // Try global decoder weight aliases (final norm, lm_head, embedding).
+                            // E.g. model.norm.weight → output_norm.weight (GGUF)
+                            if !bound_alias {
+                                let global_alias_groups: &[&dyn Fn() -> Vec<String>] = &[
+                                    &crate::weight_names::decoder_final_norm_aliases,
+                                    &crate::weight_names::lm_head_aliases,
+                                    &crate::weight_names::decoder_embed_aliases,
+                                ];
+                                'outer: for alias_fn in global_alias_groups {
+                                    let aliases = alias_fn();
+                                    if aliases.contains(&canonical_name) {
+                                        for alias in &aliases {
+                                            if alias != &canonical_name {
+                                                if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
+                                                    ge = ge.bind(canonical_name.clone(), t.as_ref().as_ptr() as *const f32);
+                                                    break 'outer;
+                                                }
+                                                if let Some(q_tensor) = TensorLookup::get_quantized(&weights, alias) {
+                                                    if let Some(f32_bytes) = dequant(q_tensor) {
+                                                        ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
+                                                    }
+                                                    break 'outer;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(ge)

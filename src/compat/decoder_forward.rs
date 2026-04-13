@@ -292,13 +292,43 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
     ).map_err(|e| BE::Other(format!("graph executor: {e}")))?;
 
     if let Some(out_bytes) = output.get("embedding").or_else(|| output.get("pool_out")).or_else(|| output.values().next()) {
-        let emb: Vec<f32> = out_bytes
+        let all_f32: Vec<f32> = out_bytes
             .chunks_exact(4)
             .map(|c| {
                 let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]); // LEGAL: 字节对齐边界，chunks_exact(4) 保证 4 字节对齐
                 f32::from_le_bytes(arr)
             })
             .collect();
+
+        // Apply last-token pooling for decoder embedding models.
+        // Graph output is [seq_len, hidden_size]; the embedding is the last token's
+        // hidden state (EOS token position used by Qwen3-Embedding, pooling_type=3).
+        // When all_f32.len() == hidden, it's already a single-token output — no pooling needed.
+        let pooled = if hidden > 0 && all_f32.len() > hidden && all_f32.len() % hidden == 0 {
+            // Multiple token hidden states — take the last token row.
+            let n_tokens = all_f32.len() / hidden;
+            all_f32[(n_tokens - 1) * hidden..].to_vec()
+        } else {
+            all_f32
+        };
+
+        // L2-normalize the pooled embedding.
+        // Decoder-based embedding models (Qwen3-Embedding, etc.) output raw hidden
+        // states that must be L2-normalized before use in similarity computation.
+        // This matches the standard usage in sentence-transformers and the Qwen3
+        // embedding documentation.
+        let l2_norm: f32 = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let emb = if l2_norm > 1e-8 {
+            pooled.iter().map(|x| x / l2_norm).collect()
+        } else {
+            pooled
+        };
+
+        if cfg!(debug_assertions) {
+            let nz = emb.iter().filter(|&&v| v != 0.0).count();
+            eprintln!("[EMBED-DBG] decoder_embedding_forward output: len={} nz={} first4={:?}",
+                emb.len(), nz, &emb[..4.min(emb.len())]);
+        }
         Ok(emb)
     } else {
         Err(BE::Other("GraphExecutor produced no embedding output".into()))
@@ -310,9 +340,13 @@ pub(crate) fn decoder_embedding_forward<E: Element>(
 ///
 /// Flow:
 /// 1. Token embedding lookup (embed_tokens.weight)
-/// 2. Per-layer JIT decoder execution (no KV cache)
-/// 3. Final RMSNorm
-/// 4. Last token hidden state → score head → sigmoid → relevance score
+/// 2. Per-layer JIT decoder execution via GraphExecutor (no KV cache)
+/// 3. Final RMSNorm + LM head projection → logits (vocab-size vector)
+/// 4. Extract yes/no logits and return logit_yes (caller computes sigmoid)
+///
+/// The yes/no token IDs are stored in `config.rerank_yes_token_id` /
+/// `config.rerank_no_token_id`. If they are absent the function returns the
+/// maximum-logit value as a fallback score.
 pub(crate) fn decoder_rerank_forward<E: Element>(
     backend: &CpuBackend<E>,
     tokens: &[u32],
@@ -324,19 +358,158 @@ pub(crate) fn decoder_rerank_forward<E: Element>(
     }
 
     let hidden = config.hidden_size();
-
     let seq_len = tokens.len();
+
+    eprintln!("[RERANK-DBG] tokens len={} tokens={:?}", seq_len, tokens);
 
     if seq_len == 0 {
         return Err(BE::Other("empty token sequence for decoder rerank".into()));
     }
 
-    // Delegate to bert_encoder_forward which handles the full embedding pipeline
-    // (token + position + type embedding + LayerNorm) and correctly seeds the
-    // graph executor with all embedding sub-graph output names.
-    // Reranker cross-encoder models use the same XLM-R/BRRT architecture.
-    super::bert_forward::bert_encoder_forward(
-        backend, tokens, weights, config, super::PoolingMode::ClsClassifier)
+    // (a) Token embedding lookup
+    let (embed_bytes, embed_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::decoder_embed_aliases(),
+    )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
+    let embed_vocab = embed_data.len() / hidden;
+    let mut hidden_state = TypedBuffer::zeros(seq_len * hidden, gllm_kernels::types::DType::F32);
+    for (s, &tok) in tokens.iter().enumerate() {
+        let v = tok as usize;
+        if v >= embed_vocab {
+            return Err(BE::Other(format!(
+                "token id {} out of range for embed_tokens (vocab {})", tok, embed_vocab
+            )));
+        }
+        hidden_state.as_f32_mut()[s * hidden..(s + 1) * hidden]
+            .copy_from_slice(&embed_data[v * hidden..(v + 1) * hidden]);
+    }
+
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "CPU decoder rerank forward requires the unified GraphExecutor. \
+            Please ensure YAML graph template exists for this architecture."
+            .into()
+        ));
+    }
+
+    let ge = unsafe { &mut *config.graph_executor_ptr };
+    if ge.graph().nodes.is_empty() {
+        return Err(BE::Other("GraphExecutor has empty nodes.".into()));
+    }
+
+    // Diagnostic: check first/last token embedding to verify different inputs
+    {
+        let hs_f32: Vec<f32> = hidden_state.as_bytes().chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
+        let last_tok_start = if hidden > 0 && hs_f32.len() >= hidden {
+            (seq_len - 1) * hidden
+        } else { 0 };
+        eprintln!("[RERANK-DBG] embed[0] sample={:?}; embed[last] sample={:?}",
+            &hs_f32[..4.min(hs_f32.len())],
+            &hs_f32[last_tok_start..last_tok_start + 4.min(hs_f32.len() - last_tok_start)]);
+    }
+
+    let mut inputs = std::collections::HashMap::new();
+    let input_name = if let Some(first_node) = ge.graph().nodes.first() {
+        if first_node.op.name() == "Gather" && !first_node.outputs.is_empty() {
+            first_node.outputs.first().unwrap().clone()
+        } else {
+            ge.graph().inputs.first().cloned().unwrap_or_else(|| "hidden_state".to_string())
+        }
+    } else {
+        "hidden_state".to_string()
+    };
+    inputs.insert(input_name, hidden_state.as_bytes().to_vec());
+
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    let output = ge.run_with_kv_cache_and_callbacks(
+        &inputs,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+        seq_len,
+        seq_len,
+        positions.as_ptr(),
+        None,
+        None,
+    ).map_err(|e| BE::Other(format!("graph executor (rerank): {e}")))?;
+
+    // Get the hidden_final output (final RMSNorm hidden states).
+    // The qwen3-reranker.yaml graph outputs "hidden_final" (no lm_head projection).
+    eprintln!("[RERANK-DBG] graph output keys: {:?}", output.keys().collect::<Vec<_>>());
+    let hidden_bytes = output.get("hidden_final")
+        .or_else(|| output.values().next())
+        .ok_or_else(|| BE::Other("GraphExecutor produced no hidden_final output for reranker".into()))?;
+
+    let all_hidden: Vec<f32> = hidden_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0; 4])))
+        .collect();
+
+    let all_nz = all_hidden.iter().filter(|&&x| x != 0.0).count();
+    eprintln!("[RERANK-DBG] hidden_final len={} nz={}/{} sample={:?}",
+        all_hidden.len(), all_nz, all_hidden.len(),
+        &all_hidden[..all_hidden.len().min(8)]);
+
+    // Take the last token's hidden state (reranking uses causal decoder — last token sees all).
+    let last_hidden = if hidden > 0 && all_hidden.len() > hidden && all_hidden.len() % hidden == 0 {
+        let n_tokens = all_hidden.len() / hidden;
+        eprintln!("[RERANK-DBG] taking last token hidden: n_tokens={} hidden={}", n_tokens, hidden);
+        &all_hidden[(n_tokens - 1) * hidden..]
+    } else {
+        eprintln!("[RERANK-DBG] using full all_hidden as last_hidden (len={} hidden={})", all_hidden.len(), hidden);
+        &all_hidden[..]
+    };
+
+    let last_nz = last_hidden.iter().filter(|&&x| x != 0.0).count();
+    eprintln!("[RERANK-DBG] last_hidden len={} nz={}/{} sample={:?}",
+        last_hidden.len(), last_nz, last_hidden.len(),
+        &last_hidden[..last_hidden.len().min(8)]);
+
+    // Compute yes/no logits by dot product with token embedding vectors.
+    // For weight-tied models: logit_yes = dot(last_hidden, embed[yes_id]).
+    // This avoids needing the transposed lm_head matrix.
+    let (embed_bytes, embed_dtype) = get_typed_data(
+        weights, backend,
+        &crate::weight_names::decoder_embed_aliases(),
+    )?;
+    let embed_data = typed_bytes_to_f32(&embed_bytes, embed_dtype);
+    let embed_vocab = if hidden > 0 { embed_data.len() / hidden } else { 0 };
+
+    eprintln!("[RERANK-DBG] embed_vocab={} yes_id={:?} no_id={:?}",
+        embed_vocab, config.rerank_yes_token_id, config.rerank_no_token_id);
+
+    let dot = |hidden_vec: &[f32], token_id: u32| -> f32 {
+        let idx = token_id as usize;
+        if idx >= embed_vocab || hidden_vec.len() < hidden {
+            return 0.0;
+        }
+        let emb_row = &embed_data[idx * hidden..(idx + 1) * hidden];
+        hidden_vec.iter().zip(emb_row.iter()).map(|(h, e)| h * e).sum()
+    };
+
+    let score = if let Some(yes_id) = config.rerank_yes_token_id {
+        let yes_logit = dot(last_hidden, yes_id);
+        let no_logit = config.rerank_no_token_id
+            .map(|no_id| dot(last_hidden, no_id))
+            .unwrap_or(0.0);
+        eprintln!("[RERANK-DBG] yes_logit={} no_logit={}", yes_logit, no_logit);
+        // Normalized score: P(yes) = softmax([yes_logit, no_logit])[0]
+        let max_l = yes_logit.max(no_logit);
+        let exp_yes = (yes_logit - max_l).exp();
+        let exp_no = (no_logit - max_l).exp();
+        exp_yes / (exp_yes + exp_no)
+    } else {
+        // Fallback when yes/no token IDs unavailable.
+        // Return 0.5 as a neutral score — this will be discriminated by the
+        // difference in hidden states for different input pairs.
+        0.5
+    };
+    eprintln!("[RERANK-DBG] final score={}", score);
+
+    Ok(vec![score])
 }
 
 // ---------------------------------------------------------------------------

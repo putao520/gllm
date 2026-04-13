@@ -166,10 +166,15 @@ pub fn decoder_final_norm_bias_aliases() -> Vec<String> {
 }
 
 /// Generate alias names for the lm_head weight in decoder models.
+///
+/// `token_embd.weight` is included as a GGUF weight-tying fallback:
+/// many GGUF models omit `output.weight` and instead tie the lm_head
+/// to the token embedding (llama.cpp convention).
 pub fn lm_head_aliases() -> Vec<String> {
     vec![
         "lm_head.weight".to_string(),
         "output.weight".to_string(),
+        "token_embd.weight".to_string(), // GGUF weight-tying: lm_head == token_embd
     ]
 }
 
@@ -237,6 +242,81 @@ pub fn moe_expert_aliases(layer: usize, expert: usize, suffix: &str) -> Vec<Stri
     }
     out.push(format!("blk.{layer}.ffn_gate_exps.{expert}.{suffix}"));
     out
+}
+
+// ---------------------------------------------------------------------------
+// HF → GGUF decoder layer name translation
+// ---------------------------------------------------------------------------
+
+/// Mapping from HuggingFace-style decoder layer weight suffix to GGUF llama.cpp suffix.
+///
+/// Key: HF suffix (e.g. `"self_attn.q_proj.weight"`)
+/// Value: GGUF suffix (e.g. `"attn_q.weight"`)
+static HF_TO_GGUF_LAYER_SUFFIX: &[(&str, &str)] = &[
+    ("self_attn.q_proj.weight",          "attn_q.weight"),
+    ("self_attn.k_proj.weight",          "attn_k.weight"),
+    ("self_attn.v_proj.weight",          "attn_v.weight"),
+    ("self_attn.o_proj.weight",          "attn_output.weight"),
+    ("self_attn.q_proj.bias",            "attn_q.bias"),
+    ("self_attn.k_proj.bias",            "attn_k.bias"),
+    ("self_attn.v_proj.bias",            "attn_v.bias"),
+    ("self_attn.o_proj.bias",            "attn_output.bias"),
+    ("mlp.gate_proj.weight",             "ffn_gate.weight"),
+    ("mlp.up_proj.weight",               "ffn_up.weight"),
+    ("mlp.down_proj.weight",             "ffn_down.weight"),
+    ("mlp.gate_proj.bias",               "ffn_gate.bias"),
+    ("mlp.up_proj.bias",                 "ffn_up.bias"),
+    ("mlp.down_proj.bias",               "ffn_down.bias"),
+    ("input_layernorm.weight",           "attn_norm.weight"),
+    ("input_layernorm.bias",             "attn_norm.bias"),
+    ("post_attention_layernorm.weight",  "ffn_norm.weight"),
+    ("post_attention_layernorm.bias",    "ffn_norm.bias"),
+    // Qwen3/Llama norm variants
+    ("post_feedforward_layernorm.weight","post_ffw_norm.weight"),
+    ("pre_feedforward_layernorm.weight", "pre_ffw_norm.weight"),
+    // Attention norm (Qwen2.5 etc.)
+    ("self_attn.q_norm.weight",          "attn_q_norm.weight"),
+    ("self_attn.k_norm.weight",          "attn_k_norm.weight"),
+];
+
+/// Given a canonical weight name (HuggingFace or GGUF style), generate all possible
+/// aliases: every HF prefix variant plus the GGUF `blk.{N}.xxx` name.
+///
+/// Returns an empty Vec if the name does not match a recognized decoder layer pattern.
+pub fn all_decoder_weight_aliases(name: &str) -> Vec<String> {
+    // Parse `{optional_model_prefix}.layers.{N}.{suffix}`
+    // Accepted leading segments: "" | "model" | "layers" directly
+    let layers_part = {
+        let mut found = None;
+        for &prefix in DECODER_PREFIXES {
+            let expected = if prefix.is_empty() {
+                format!("layers.")
+            } else {
+                format!("{prefix}.layers.")
+            };
+            if let Some(rest) = name.strip_prefix(&expected) {
+                found = Some(rest);
+                break;
+            }
+        }
+        found
+    };
+    let Some(layers_rest) = layers_part else { return vec![] };
+
+    // Parse `{N}.{suffix}`
+    let Some(dot_pos) = layers_rest.find('.') else { return vec![] };
+    let layer_str = &layers_rest[..dot_pos];
+    let suffix = &layers_rest[dot_pos + 1..];
+    let Ok(layer) = layer_str.parse::<usize>() else { return vec![] };
+
+    // Generate all HF variants via decoder_layer_aliases
+    // Then look up GGUF suffix
+    let gguf_suffix = HF_TO_GGUF_LAYER_SUFFIX
+        .iter()
+        .find(|&&(hf, _)| hf == suffix)
+        .map(|&(_, gg)| gg);
+
+    decoder_layer_aliases(layer, suffix, gguf_suffix)
 }
 
 // ---------------------------------------------------------------------------

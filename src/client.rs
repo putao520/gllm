@@ -27,7 +27,8 @@ use crate::generation::GenerationResponse;
 use crate::knowledge::LayerTarget;
 use crate::loader::{Loader, LoaderConfig, LoaderError, WeightFormat};
 use crate::manifest::{
-    map_architecture_token, MoEConfig, ModelKind, ModelManifest, EMPTY_FILE_MAP,
+    map_architecture_token_for_kind, MoEConfig, ModelKind, ModelManifest,
+    EMPTY_FILE_MAP,
 };
 use crate::rerank::{RerankResponse, RerankResult};
 use thiserror::Error;
@@ -302,7 +303,7 @@ impl ClientBuilder {
             WeightFormat::Gguf => {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
-                if let Some(arch) = map_architecture_token(arch_str) {
+                if let Some(arch) = map_architecture_token_for_kind(arch_str, kind) {
                     let dummy_manifest = make_dummy_manifest(model_id, &arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);
@@ -473,7 +474,7 @@ impl ClientBuilder {
             WeightFormat::Gguf => {
                 loader = loader.load()?;
                 let arch_str = loader.gguf_architecture()?;
-                if let Some(arch) = map_architecture_token(arch_str) {
+                if let Some(arch) = map_architecture_token_for_kind(arch_str, kind) {
                     let dummy_manifest = make_dummy_manifest(model_id, &arch, kind);
                     let cfg_result =
                         crate::model_config::ModelConfig::from_loader(&dummy_manifest, &mut loader);

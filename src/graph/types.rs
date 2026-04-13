@@ -147,6 +147,33 @@ impl FusedGraph {
                                 return Some(m);
                             }
                         }
+                        // Decoder layer HF → GGUF name translation.
+                        // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
+                        for alias in crate::weight_names::all_decoder_weight_aliases(input) {
+                            if let Some(m) = provider.tensor_info(&alias) {
+                                return Some(m);
+                            }
+                        }
+                        // Decoder global weight aliases (final norm, lm_head, embedding).
+                        // These are not layer-indexed and don't fit the layer alias table.
+                        let global_aliases: &[&dyn Fn() -> Vec<String>] = &[
+                            &crate::weight_names::decoder_final_norm_aliases,
+                            &crate::weight_names::lm_head_aliases,
+                            &crate::weight_names::decoder_embed_aliases,
+                        ];
+                        for alias_fn in global_aliases {
+                            let aliases = alias_fn();
+                            if aliases.contains(input) {
+                                // `input` is one of the canonical names; try all siblings.
+                                for alias in &aliases {
+                                    if alias != input {
+                                        if let Some(m) = provider.tensor_info(alias) {
+                                            return Some(m);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         None
                     });
 
