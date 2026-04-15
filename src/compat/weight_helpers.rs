@@ -341,7 +341,12 @@ pub(crate) fn f32_to_typed_bytes(data: &[f32], dtype: DType) -> Vec<u8> {
                 out[i * 2 + 1] = b[1];
             }
         }
-        DType::U8 => {
+        DType::U8
+        | DType::F8E4M3
+        | DType::F8E5M2
+        | DType::F6E3M2
+        | DType::F6E2M3
+        | DType::F4E2M1 => {
             for (i, &v) in data.iter().enumerate() {
                 out[i] = v.round().clamp(0.0, 255.0) as u8;
             }

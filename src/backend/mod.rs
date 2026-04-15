@@ -895,7 +895,12 @@ impl DynBackendContext {
                 gllm_kernels::types::DType::F32 => DetectedDtype::F32,
                 gllm_kernels::types::DType::F16 => DetectedDtype::F16,
                 gllm_kernels::types::DType::BF16 => DetectedDtype::BF16,
-                gllm_kernels::types::DType::U8 => DetectedDtype::F32, // U8 不适用于推理，降级到 F32
+                gllm_kernels::types::DType::U8
+                | gllm_kernels::types::DType::F8E4M3
+                | gllm_kernels::types::DType::F8E5M2
+                | gllm_kernels::types::DType::F6E3M2
+                | gllm_kernels::types::DType::F6E2M3
+                | gllm_kernels::types::DType::F4E2M1 => DetectedDtype::F32,
             });
         }
 

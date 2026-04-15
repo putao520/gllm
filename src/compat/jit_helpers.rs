@@ -142,7 +142,12 @@ pub(crate) fn kernels_dtype_to_compat(dt: DType) -> crate::compat::DType {
         DType::F16 => crate::compat::DType::F16,
         DType::BF16 => crate::compat::DType::BF16,
         DType::F32 => crate::compat::DType::F32,
-        gllm_kernels::types::DType::U8 => panic!("U8 unsupported as compat DataType"),
+        DType::U8
+        | DType::F8E4M3
+        | DType::F8E5M2
+        | DType::F6E3M2
+        | DType::F6E2M3
+        | DType::F4E2M1 => crate::compat::DType::U8,
     }
 }
 
@@ -165,7 +170,12 @@ pub(crate) fn pack_weights_typed(slices: &[&[f32]], dtype: DType) -> Vec<u8> {
     for slice in slices {
         let bytes = slice.len() * elem_bytes;
         match dtype {
-            DType::U8 => panic!("U8 unsupported"),
+            DType::U8
+            | DType::F8E4M3
+            | DType::F8E5M2
+            | DType::F6E3M2
+            | DType::F6E2M3
+            | DType::F4E2M1 => panic!("sub-byte/U8 dtype unsupported for weight packing"),
             DType::F32 => {
                 buf[offset..offset + bytes].copy_from_slice(unsafe {
                     std::slice::from_raw_parts(slice.as_ptr() as *const u8, bytes)
@@ -370,7 +380,12 @@ pub(crate) fn write_kv_to_cache_typed<E: Element>(
                         DType::BF16 => half::bf16::from_le_bytes([
                             k_data[s_off], k_data[s_off+1]
                         ]).to_f32(),
-                        gllm_kernels::types::DType::U8 => panic!("U8 unsupported"),
+                        DType::U8
+                        | DType::F8E4M3
+                        | DType::F8E5M2
+                        | DType::F6E3M2
+                        | DType::F6E2M3
+                        | DType::F4E2M1 => panic!("sub-byte/U8 dtype unsupported for KV cache cross-dtype conversion"),
                     };
                     let v_val = match src_dtype {
                         DType::F32 => f32::from_le_bytes([
@@ -382,7 +397,12 @@ pub(crate) fn write_kv_to_cache_typed<E: Element>(
                         DType::BF16 => half::bf16::from_le_bytes([
                             v_data[s_off], v_data[s_off+1]
                         ]).to_f32(),
-                        gllm_kernels::types::DType::U8 => panic!("U8 unsupported"),
+                        DType::U8
+                        | DType::F8E4M3
+                        | DType::F8E5M2
+                        | DType::F6E3M2
+                        | DType::F6E2M3
+                        | DType::F4E2M1 => panic!("sub-byte/U8 dtype unsupported for KV cache cross-dtype conversion"),
                     };
                     // Write to cache in cache dtype
                     match cache_eb {
