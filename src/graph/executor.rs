@@ -1898,10 +1898,13 @@ impl FusedGraphExecutor {
 
             let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
-            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(64)];
+            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
-            let activation_elems = activation.len() / cn.output_dtype.size_bytes();
+            let activation_elems = activation.len() / cn.output_dtype.size_bytes().max(1);
             let seq_len = if activation_elems > 0 { activation_elems } else { 1 };
+
+            eprintln!("[EXEC-NODE] idx={node_idx} op={} out_bytes={output_bytes} scratch_bytes={} act_bytes={} wt_bytes={} seq_len={seq_len} code_size={}",
+                _node.op.name(), cn.compiled.scratchpad_bytes, activation.len(), weight_blob.len(), cn.compiled.code_size());
 
             unsafe {
                 cn.compiled.execute(
@@ -2173,7 +2176,10 @@ impl FusedGraphExecutor {
             let runtime_output_numel = cn.output_numel; // max_seq_len size (safe)
             let output_bytes = runtime_output_numel * cn.output_dtype.size_bytes();
             let mut output_buf = vec![0u8; output_bytes];
-            let scratch_size = cn.compiled.scratchpad_bytes.max(64);
+            // scratchpad 必须足够容纳 JIT 内核的所有中间数据。
+            // compiled.scratchpad_bytes 可能偏小（BufferAllocation 未充分估算 MHA 暂存）。
+            // 安全下界：max(compiled, output_bytes)，确保至少能容纳一整个输出大小的中间矩阵。
+            let scratch_size = cn.compiled.scratchpad_bytes.max(output_bytes).max(64);
             if cfg!(debug_assertions) {
                 let op_name = self.graph.nodes[node_idx].op.name();
                 let msg = format!("[BUF-ALLOC] node {node_idx} op={op_name}: output={}B scratchpad={}B act={}B wt={}B\n",
@@ -2200,6 +2206,9 @@ impl FusedGraphExecutor {
             // [rbp+16]=seq_len, [rbp+24]=output, [rbp+32]=scratchpad.
             let out_ptr_before = output_buf.as_mut_ptr();
             let scratch_ptr_before = scratchpad.as_mut_ptr();
+            eprintln!("[EXEC] node {node_idx} op={} out_bytes={} scratch_bytes={} act_bytes={} wt_bytes={} eff_seq={effective_seq} code={}B",
+                self.graph.nodes[node_idx].op.name(), output_buf.len(), scratchpad.len(),
+                activation.len(), weight_blob.len(), cn.compiled.code_size());
             if cfg!(debug_assertions) && is_mha_node {
                 eprintln!("[MHA-EXEC] node {node_idx} out_ptr={:p} scratch_ptr={:p} out_len={} scratch_len={} eff_seq={}",
                     out_ptr_before, scratch_ptr_before, output_buf.len(), scratchpad.len(), effective_seq);
