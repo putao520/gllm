@@ -543,11 +543,15 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
         // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
+        eprintln!("[EMB-FWD] enter: tokens={} hidden={}", tokens.len(), config.hidden_size());
         let executor = get_graph_executor(config)?;
+        eprintln!("[EMB-FWD] executor OK, nodes={}", executor.graph().nodes.len());
         let inputs = prepare_encoder_inputs(tokens, config);
+        eprintln!("[EMB-FWD] inputs prepared, calling run()...");
         let outputs = executor.run(&inputs).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor embedding run failed: {e}"))
         })?;
+        eprintln!("[EMB-FWD] run() done, outputs={}", outputs.len());
         // 提取最终 hidden state → mean pool over seq dim → embedding 向量
         let hidden = extract_final_hidden(&outputs, executor)?;
         let hidden_size = config.hidden_size();
