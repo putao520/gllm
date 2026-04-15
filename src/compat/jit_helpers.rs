@@ -701,13 +701,27 @@ pub(crate) fn build_cached_gqa_graph(
     dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
-    use gllm_kernels::compiler::codegen::attention_strategy::select_attention_strategy;
+    use gllm_kernels::compiler::graph::AttentionStrategy;
 
+    // Derive attention strategy from HwOptEngine's AttentionPlan (§10.7)
     let exec_plan = gllm_kernels::compiler::planner::global_execution_plan();
-    let strategy = select_attention_strategy(
-        seq_len, total_seq, head_dim, num_heads,
-        dtype, &exec_plan, None, None,
-    );
+    let strategy = match exec_plan.attention_plan.variant {
+        gllm_kernels::compiler::planner::AttentionVariant::FA4BlockScaled
+        | gllm_kernels::compiler::planner::AttentionVariant::FA3Pipeline
+        | gllm_kernels::compiler::planner::AttentionVariant::FA2Tiled => {
+            AttentionStrategy::FlashV2 {
+                block_m: exec_plan.attention_plan.tile_q,
+                block_n: exec_plan.attention_plan.tile_kv,
+            }
+        }
+        _ => {
+            if total_seq > 1024 {
+                AttentionStrategy::FlashV2 { block_m: 64, block_n: 64 }
+            } else {
+                AttentionStrategy::Naive
+            }
+        }
+    };
 
     let mut g = CompilerGraph::new();
     let ft = dtype;

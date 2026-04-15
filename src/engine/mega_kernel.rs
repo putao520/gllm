@@ -406,6 +406,121 @@ impl CompactScatterPipeline {
 }
 
 // ============================================================================
+// MegaKernelObservation — Type-Safe Telemetry Interface (SPEC §9.5)
+// ============================================================================
+
+/// Structured observation extracted from Mega-Kernel epilogue telemetry buffer.
+///
+/// All signals are collected via zero-cost piggybacking in JIT-compiled
+/// kernels (§13 Epilogue 白嫖). This struct provides type-safe access
+/// to raw telemetry bytes written to KV Page Header padding.
+///
+/// Consumed by:
+/// - JitDirector daemon (§9.2) for adaptive recompilation triggers
+/// - ExpertThermalManager (§15.4) for MoE cold expert detection
+/// - EpilogueSubsystem for aggregated decision making
+#[derive(Debug, Clone, Copy)]
+pub struct MegaKernelObservation {
+    /// Layer index this observation was collected from
+    pub layer_idx: usize,
+
+    /// §13.9: Softmax sharpness (max/sum of softmax probabilities)
+    /// Range: [0, 1]. High (>0.8) = focused attention (confident).
+    pub entropy: f32,
+
+    /// §13.11: Residual energy ratio (||x_out|| / ||x_in||)
+    /// Near 1.0 = stable; >1.5 = amplification; <0.5 = attenuation.
+    pub residual_delta: f32,
+
+    /// §13.11: Direction alignment between residual input/output
+    /// Near 1.0 = aligned (redundant layer); near 0.0 = orthogonal.
+    pub cosine_similarity: f32,
+
+    /// §13.5: Number of FFN gate neurons with sigmoid(x) < 0.01
+    pub dead_neuron_count: u32,
+
+    /// §13.9: True if softmax_max > 0.5 (BOS token absorbing excess attention)
+    pub is_attention_sink: bool,
+
+    /// §13.8: Per-channel max absolute value from RmsNorm (KIVI K量化 scale)
+    pub per_channel_scale: f32,
+
+    /// §13.7: Row-level L1 norm from GEMM output
+    pub row_l1_norm: f32,
+
+    /// §13.7: Row-level max value from GEMM output
+    pub row_max: f32,
+}
+
+impl MegaKernelObservation {
+    /// Extract structured observation from raw telemetry buffer bytes.
+    ///
+    /// Buffer layout follows `gllm_kernels::compiler::graph::telemetry_offsets`.
+    pub fn from_buffer(layer_idx: usize, buffer: &[u8]) -> Self {
+        use gllm_kernels::compiler::graph::telemetry_offsets;
+
+        let read_f32 = |offset: usize| -> f32 {
+            if offset + 4 <= buffer.len() {
+                f32::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ])
+            } else {
+                0.0
+            }
+        };
+        let read_u32 = |offset: usize| -> u32 {
+            if offset + 4 <= buffer.len() {
+                u32::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ])
+            } else {
+                0
+            }
+        };
+
+        let entropy = read_f32(telemetry_offsets::SOFTMAX_SHARPNESS_OFFSET);
+        let residual_delta = read_f32(telemetry_offsets::RESIDUAL_DELTA_OFFSET);
+        let cosine_similarity = read_f32(telemetry_offsets::COSINE_SIMILARITY_OFFSET);
+        let dead_neuron_count = read_u32(telemetry_offsets::SILU_DEAD_NEURON_MASK_OFFSET);
+        let is_attention_sink = read_u32(telemetry_offsets::IS_ATTENTION_SINK_OFFSET) != 0;
+        let per_channel_scale = read_f32(telemetry_offsets::CHANNEL_SCALE_PTR_OFFSET);
+        let row_l1_norm = read_f32(telemetry_offsets::GEMM_ROW_NORM_L1_OFFSET);
+        let row_max = read_f32(telemetry_offsets::GEMM_ROW_MAX_OFFSET);
+
+        Self {
+            layer_idx,
+            entropy,
+            residual_delta,
+            cosine_similarity,
+            dead_neuron_count,
+            is_attention_sink,
+            per_channel_scale,
+            row_l1_norm,
+            row_max,
+        }
+    }
+
+    /// Dead neuron ratio (0.0-1.0) relative to a given hidden size.
+    pub fn dead_neuron_ratio(&self, hidden_size: usize) -> f32 {
+        if hidden_size == 0 { return 0.0; }
+        self.dead_neuron_count as f32 / hidden_size as f32
+    }
+
+    /// Whether this layer is a candidate for residual bypass (§13.3).
+    ///
+    /// Criteria: energy ratio near 1.0 AND direction strongly aligned.
+    pub fn is_bypass_candidate(&self, delta_threshold: f32, cosine_threshold: f32) -> bool {
+        self.residual_delta < delta_threshold && self.cosine_similarity > cosine_threshold
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
