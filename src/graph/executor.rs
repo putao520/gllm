@@ -2240,35 +2240,7 @@ impl FusedGraphExecutor {
                 let sc_check: Vec<f32> = scratchpad[..scratchpad.len().min(128)].chunks_exact(4)
                     .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
                 let sc_nz = sc_check.iter().filter(|&&v| v != 0.0).count();
-                // For E5/BERT: head_dim=64, seq=2048, elem=4
-                // head_mat_size = 2048*64*4 = 524288
-                // k_off = 524288, v_off = 1048576, sc_off = 1572864
-                // scores_size = 2048*2048*4 = 16777216
-                // out_off = 1572864 + 16777216 = 18350080
-                let k_off: usize = 524288;
-                let v_off: usize = 1048576;
-                let sc_off: usize = 1572864;
-                let out_off: usize = 18350080;
-                let sc_k: Vec<f32> = scratchpad[k_off..k_off+128].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                let sc_v: Vec<f32> = scratchpad[v_off..v_off+128].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                let sc_scores: Vec<f32> = scratchpad[sc_off..sc_off+128].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                let sc_out: Vec<f32> = if scratchpad.len() > out_off + 128 {
-                    scratchpad[out_off..out_off+128].chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect()
-                } else { vec![] };
-                let op_name = self.graph.nodes[node_idx].op.name();
-                eprintln!("[MHA-EXEC] op={op_name} after: q_nz={}/{} k_nz={}/{} v_nz={}/{} sc_nz={}/{} out_h_nz={}/{} out[0..4]={:?}",
-                    sc_nz, sc_check.len(),
-                    sc_k.iter().filter(|&&v| v != 0.0).count(), sc_k.len(),
-                    sc_v.iter().filter(|&&v| v != 0.0).count(), sc_v.len(),
-                    sc_scores.iter().filter(|&&v| v != 0.0).count(), sc_scores.len(),
-                    sc_out.iter().filter(|&&v| v != 0.0).count(), sc_out.len(),
-                    &output_buf[..output_buf.len().min(16)].chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4])))
-                        .collect::<Vec<_>>()[..4.min(output_buf.len()/4)]);
+                // MHA 诊断代码已清理 (ARCH-FULL-JIT: 不保留硬编码偏移的调试代码)
             }
 
             if cfg!(debug_assertions) {
