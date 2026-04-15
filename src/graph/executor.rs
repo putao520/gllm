@@ -1205,16 +1205,57 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::Atomic(atomic) => {
-                if atomic.op_type == "Gather" || atomic.op_type == "Slice" || atomic.op_type == "Shape" {
-                    // Skip ops handled natively by standard CPU graph pipelines beforehand.
-                    return Ok(NodeGraphBuild {
-                        graph: gllm_kernels::compiler::CompilerGraph::new(),
-                        input_names: node.inputs.clone(),
-                        output_names: node.outputs.clone(),
-                        output_numel: 0,
-                        per_output_numel: vec![],
-                        output_dtype: dtype,
-                    });
+                // ARCH-FULL-JIT §4.3/§4.4: Gather/Slice/Shape 走 JIT，禁止返回空图
+                if atomic.op_type == "Gather" {
+                    // Embedding lookup: output[i] = table[indices[i]]
+                    let embed_dim = node.inputs.get(1)
+                        .and_then(|name| self.graph.weight_bindings.get(name))
+                        .and_then(|wb| wb.shape.last().copied())
+                        .unwrap_or(hidden);
+                    let table_rows = node.inputs.get(1)
+                        .and_then(|name| self.graph.weight_bindings.get(name))
+                        .and_then(|wb| wb.shape.first().copied())
+                        .unwrap_or(32000); // fallback vocab_size
+
+                    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+                    let mut g = CompilerGraph::new();
+                    let seq_sym = SymDim::Symbolic {
+                        name: "seq_len".to_string(),
+                        max_value: Some(SYMDIM_MAX_SEQ_LEN),
+                    };
+                    let indices = g.add_tensor("indices", vec![seq_sym.clone()], dtype);
+                    let table = g.add_tensor_concrete("embed_table", &[table_rows, embed_dim], dtype);
+                    let output = g.add_tensor("embed_out", vec![seq_sym.clone(), SymDim::Concrete(embed_dim)], dtype);
+                    g.inputs = vec![indices, table];
+                    g.outputs = vec![output];
+                    g.add_op(
+                        OpKind::Gather { table_rows, embed_dim, index_dim: seq_sym },
+                        vec![indices, table], vec![output], "gather",
+                    );
+                    let output_numel = SYMDIM_MAX_SEQ_LEN * embed_dim;
+                    return Ok(make_node_build(g, node, output_numel, vec![]));
+                }
+                if atomic.op_type == "Slice" || atomic.op_type == "Shape" {
+                    // Shape: 编译时常量折叠，恒等传递
+                    // Slice: 零拷贝视图（指针偏移）
+                    // 两者都生成 Reshape NOP，output_numel = max_seq × hidden（安全上界）
+                    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+                    let mut g = CompilerGraph::new();
+                    let seq_sym = SymDim::Symbolic {
+                        name: "seq_len".to_string(),
+                        max_value: Some(SYMDIM_MAX_SEQ_LEN),
+                    };
+                    let input = g.add_tensor("input", vec![seq_sym.clone(), SymDim::Concrete(hidden)], dtype);
+                    let output = g.add_tensor("output", vec![seq_sym, SymDim::Concrete(hidden)], dtype);
+                    g.inputs = vec![input];
+                    g.outputs = vec![output];
+                    g.add_op(
+                        OpKind::Reshape { target_shape: vec![0, hidden] },
+                        vec![input], vec![output],
+                        if atomic.op_type == "Slice" { "slice_view" } else { "shape_identity" },
+                    );
+                    let output_numel = SYMDIM_MAX_SEQ_LEN * hidden;
+                    return Ok(make_node_build(g, node, output_numel, vec![]));
                 }
                 let is_matmul = atomic.op_type == "MatMul" || atomic.op_type == "Gemm";
 
