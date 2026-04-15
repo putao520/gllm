@@ -10,6 +10,101 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
+// ARCH-FULL-JIT: FusedGraphExecutor 接入辅助函数
+// ---------------------------------------------------------------------------
+
+/// 从 GeneratorForwardConfig 中安全获取 FusedGraphExecutor 引用。
+fn get_graph_executor(config: &GeneratorForwardConfig) -> Result<&crate::graph::executor::FusedGraphExecutor, BE> {
+    if config.graph_executor_ptr.is_null() {
+        return Err(BE::Other(
+            "ARCH-FULL-JIT: graph_executor_ptr is null — model was not JIT-compiled".into(),
+        ));
+    }
+    // SAFETY: graph_executor_ptr 生命周期由 Executor 管理，在 forward 调用期间始终有效。
+    // Executor 的 Mutex 保证单线程访问。
+    Ok(unsafe { &*config.graph_executor_ptr })
+}
+
+/// 为 encoder 模型（embedding/rerank/classify）准备 FusedGraphExecutor 输入。
+///
+/// 将 tokens (u32) 转换为图需要的输入格式：
+/// - input_ids: f32 字节流（Gather 节点的 index）
+/// - position_ids: 0..seq_len 递增序列
+/// - token_type_ids: 全 0（单段输入）
+fn prepare_encoder_inputs(tokens: &[u32], _config: &GeneratorForwardConfig) -> HashMap<String, Vec<u8>> {
+    let seq_len = tokens.len();
+    let mut inputs = HashMap::new();
+
+    // input_ids: u32 token → f32（JIT kernel 处理 f32 字节流）
+    let token_f32: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
+    inputs.insert("input_ids".to_string(), f32_to_bytes(&token_f32));
+
+    // position_ids: 0, 1, 2, ..., seq_len-1
+    // RoBERTa: position offset = 2 (padding_idx=1, starts at 2)
+    let position_ids: Vec<f32> = (0..seq_len).map(|i| (i + 2) as f32).collect();
+    inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
+
+    // token_type_ids: 全 0（单段）
+    let token_type_ids: Vec<f32> = vec![0.0f32; seq_len];
+    inputs.insert("token_type_ids".to_string(), f32_to_bytes(&token_type_ids));
+
+    inputs
+}
+
+/// 从 FusedGraphExecutor 输出中提取最终 hidden state (f32 切片)。
+fn extract_final_hidden(
+    outputs: &HashMap<String, Vec<u8>>,
+    executor: &crate::graph::executor::FusedGraphExecutor,
+) -> Result<Vec<f32>, BE> {
+    // 尝试按图的输出名找
+    for output_name in &executor.graph().outputs {
+        if let Some(data) = outputs.get(output_name) {
+            if data.len() >= 4 {
+                return Ok(bytes_to_f32(data));
+            }
+        }
+    }
+    // 回退: 取任何非空输出
+    for (name, data) in outputs {
+        if data.len() >= 4 {
+            log::debug!("[ARCH-FULL-JIT] using fallback output '{name}' ({} bytes)", data.len());
+            return Ok(bytes_to_f32(data));
+        }
+    }
+    Err(BE::Other("FusedGraphExecutor produced no output tensors".into()))
+}
+
+/// Mean pool over sequence dimension: [seq_len, hidden_size] → [hidden_size]
+fn mean_pool_hidden(hidden: &[f32], seq_len: usize, hidden_size: usize) -> Vec<f32> {
+    if seq_len == 0 || hidden_size == 0 || hidden.len() < seq_len * hidden_size {
+        return hidden.to_vec();
+    }
+    let mut pooled = vec![0.0f32; hidden_size];
+    let scale = 1.0 / seq_len as f32;
+    for row in 0..seq_len {
+        let offset = row * hidden_size;
+        for col in 0..hidden_size {
+            pooled[col] += hidden[offset + col] * scale;
+        }
+    }
+    pooled
+}
+
+/// f32 切片 → 字节 Vec
+fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
+    let byte_len = data.len() * std::mem::size_of::<f32>();
+    let ptr = data.as_ptr() as *const u8;
+    unsafe { std::slice::from_raw_parts(ptr, byte_len) }.to_vec()
+}
+
+/// 字节 Vec → f32 Vec
+fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
+    let count = data.len() / std::mem::size_of::<f32>();
+    let ptr = data.as_ptr() as *const f32;
+    unsafe { std::slice::from_raw_parts(ptr, count) }.to_vec()
+}
+
+// ---------------------------------------------------------------------------
 // KV Cache storage
 // ---------------------------------------------------------------------------
 
@@ -266,13 +361,67 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
     fn batch_forward_gpu_pure(
         &self,
         input: &BatchInput,
-        topology: &AttentionTopology,
-        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        _topology: &AttentionTopology,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
     ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
-        let _ = (input, topology, weights, kv_caches, config);
-        Err(BE::Other("ARCH-FULL-JIT: hand-written decoder_forward deleted, use FusedGraphExecutor".into()))
+        // ARCH-FULL-JIT: decoder forward 通过 FusedGraphExecutor JIT 路径执行
+        let executor = get_graph_executor(config)?;
+
+        // Decoder batch forward: 逐序列执行 (continuous batching 由调度器处理)
+        let mut logits_handles = Vec::with_capacity(input.sequences.len());
+        let mut total_compute_ms = 0.0f32;
+        let mut telemetry = Vec::with_capacity(input.sequences.len());
+
+        for (seq_idx, seq) in input.sequences.iter().enumerate() {
+            let tokens = &seq.tokens;
+            let seq_len = tokens.len();
+            let position = seq.position;
+
+            let mut inputs = HashMap::new();
+            let token_f32: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
+            inputs.insert("input_ids".to_string(), f32_to_bytes(&token_f32));
+
+            let position_ids: Vec<f32> = (position..position + seq_len).map(|p| p as f32).collect();
+            inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
+
+            let kv_handle = &mut kv_caches[seq_idx];
+            let store = self.kv_store.lock().map_err(|e| BE::Cpu(format!("KV lock: {e}")))?;
+            let has_kv = store.contains_key(&kv_handle.0);
+            drop(store);
+
+            let start = std::time::Instant::now();
+            let total_seq = position + seq_len;
+            let result = if has_kv {
+                let store = self.kv_store.lock().map_err(|e| BE::Cpu(format!("KV lock: {e}")))?;
+                let buf = store.get(&kv_handle.0).ok_or_else(|| {
+                    BE::Cpu("KV cache buffer not found".into())
+                })?;
+                let k_ptr = buf.k.as_ptr() as *mut f32;
+                let v_ptr = buf.v.as_ptr() as *mut f32;
+                drop(store);
+
+                let positions_u32: Vec<u32> = (position..position + seq_len).map(|p| p as u32).collect();
+                executor.run_with_kv_cache(
+                    &inputs, k_ptr, v_ptr,
+                    0, total_seq, seq_len, positions_u32.as_ptr(),
+                ).map_err(|e| BE::Other(format!("FusedGraphExecutor decoder run failed: {e}")))
+            } else {
+                executor.run(&inputs).map_err(|e| {
+                    BE::Other(format!("FusedGraphExecutor decoder run failed: {e}"))
+                })
+            };
+            let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+            total_compute_ms += elapsed;
+
+            let outputs = result?;
+            let logits_data = extract_final_hidden(&outputs, executor)?;
+            logits_handles.push(LogitsHandle { data: logits_data });
+            telemetry.push(crate::scheduler::SequenceTelemetry::new());
+        }
+
+        Ok((logits_handles, total_compute_ms, telemetry))
     }
 
     fn sample_from_tensor(
@@ -390,33 +539,59 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         &self,
         tokens: &[u32],
         _topology: &AttentionTopology,
-        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        let _ = (tokens, weights, config);
-        Err(BE::Other("ARCH-FULL-JIT: hand-written embedding forward deleted, use FusedGraphExecutor".into()))
+        // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let outputs = executor.run(&inputs).map_err(|e| {
+            BE::Other(format!("FusedGraphExecutor embedding run failed: {e}"))
+        })?;
+        // 提取最终 hidden state → mean pool over seq dim → embedding 向量
+        let hidden = extract_final_hidden(&outputs, executor)?;
+        let hidden_size = config.hidden_size();
+        let seq_len = tokens.len();
+        Ok(mean_pool_hidden(&hidden, seq_len, hidden_size))
     }
 
     fn rerank_forward_gpu_pure(
         &self,
         tokens: &[u32],
         _topology: &AttentionTopology,
-        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        let _ = (tokens, weights, config);
-        Err(BE::Other("ARCH-FULL-JIT: hand-written rerank forward deleted, use FusedGraphExecutor".into()))
+        // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let outputs = executor.run(&inputs).map_err(|e| {
+            BE::Other(format!("FusedGraphExecutor rerank run failed: {e}"))
+        })?;
+        // Rerank: 提取 [CLS] token (第 0 行) 的 hidden state 作为分数
+        let hidden = extract_final_hidden(&outputs, executor)?;
+        let hidden_size = config.hidden_size();
+        // 使用第一个 token 的表示作为分数
+        Ok(hidden[..hidden_size].to_vec())
     }
 
     fn classify_forward_gpu_pure(
         &self,
         tokens: &[u32],
         _topology: &AttentionTopology,
-        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        let _ = (tokens, weights, config);
-        Err(BE::Other("ARCH-FULL-JIT: hand-written classify forward deleted, use FusedGraphExecutor".into()))
+        // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let outputs = executor.run(&inputs).map_err(|e| {
+            BE::Other(format!("FusedGraphExecutor classify run failed: {e}"))
+        })?;
+        let hidden = extract_final_hidden(&outputs, executor)?;
+        let hidden_size = config.hidden_size();
+        // 分类: [CLS] token 表示
+        Ok(hidden[..hidden_size].to_vec())
     }
 
     fn get_memory_pressure(&self) -> Result<f32, BE> {

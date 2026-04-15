@@ -1899,6 +1899,17 @@ impl FusedGraphExecutor {
             let cn = &self.compiled_nodes[node_idx];
             if Self::is_node_computed(cn, &tensors) { continue; }
 
+            // Gather 节点: CPU 索引查找 → 直接产出输出
+            // Gather 是内存索引操作（非计算），在 CPU 上执行索引选择，
+            // 后续的计算节点（Add、Norm、GEMM 等）仍走 JIT 路径。
+            if _node.op.name() == "Gather" {
+                let gathered = Self::execute_gather_cpu(cn, &tensors, &weight_ptrs)?;
+                if cn.graph_output_names.len() == 1 {
+                    tensors.insert(cn.graph_output_names[0].clone(), gathered);
+                }
+                continue;
+            }
+
             let activation = Self::load_activation(cn, &tensors, false);
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
 
@@ -1947,6 +1958,88 @@ impl FusedGraphExecutor {
         }
 
         Ok(Self::collect_graph_outputs(&self.graph, &mut tensors))
+    }
+
+    /// Gather 节点 CPU 执行: 按 index 从 embedding table 选取行。
+    ///
+    /// input_names[0] = embedding table (weight)
+    /// input_names[1] = indices (f32 编码的 token IDs)
+    /// output = table[index[0]], table[index[1]], ...
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn execute_gather_cpu(
+        cn: &CompiledNode,
+        tensors: &HashMap<String, Vec<u8>>,
+        weight_ptrs: &HashMap<String, *const u8>,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        if cn.graph_input_names.len() < 2 {
+            return Err(ExecutionError::Compilation(
+                "Gather node requires 2 inputs (table, indices)".into(),
+            ));
+        }
+
+        let table_name = &cn.graph_input_names[0];
+        let indices_name = &cn.graph_input_names[1];
+
+        // 加载 embedding table
+        let table_bytes = if let Some(ptr) = weight_ptrs.get(table_name) {
+            // 从绑定的权重指针读取
+            if let Some(wb) = tensors.get(table_name) {
+                wb.clone()
+            } else {
+                return Err(ExecutionError::MissingWeight(table_name.clone()));
+            }
+        } else if let Some(data) = tensors.get(table_name) {
+            data.clone()
+        } else {
+            return Err(ExecutionError::MissingWeight(table_name.clone()));
+        };
+
+        // 加载 indices
+        let indices_bytes = tensors.get(indices_name).ok_or_else(|| {
+            ExecutionError::MissingInput(indices_name.clone())
+        })?;
+
+        let table: &[f32] = unsafe {
+            std::slice::from_raw_parts(
+                table_bytes.as_ptr() as *const f32,
+                table_bytes.len() / 4,
+            )
+        };
+        let indices: &[f32] = unsafe {
+            std::slice::from_raw_parts(
+                indices_bytes.as_ptr() as *const f32,
+                indices_bytes.len() / 4,
+            )
+        };
+
+        let seq_len = indices.len();
+        // embed_dim = feature_dim (computed during compile)
+        let embed_dim = cn.feature_dim;
+        if embed_dim == 0 {
+            return Err(ExecutionError::Compilation("Gather: embed_dim is 0".into()));
+        }
+        let table_rows = table.len() / embed_dim;
+
+        // 执行 gather: output[i] = table[index[i]]
+        let mut output = vec![0.0f32; seq_len * embed_dim];
+        for i in 0..seq_len {
+            let idx = indices[i] as usize;
+            if idx >= table_rows {
+                return Err(ExecutionError::Compilation(format!(
+                    "Gather: index {} out of bounds (table_rows={})", idx, table_rows,
+                )));
+            }
+            let src_offset = idx * embed_dim;
+            let dst_offset = i * embed_dim;
+            output[dst_offset..dst_offset + embed_dim]
+                .copy_from_slice(&table[src_offset..src_offset + embed_dim]);
+        }
+
+        // 转换为字节
+        let output_bytes = unsafe {
+            std::slice::from_raw_parts(output.as_ptr() as *const u8, output.len() * 4)
+        };
+        Ok(output_bytes.to_vec())
     }
 
     /// Execute the compiled JIT kernels with KV cache support.
@@ -2109,6 +2202,15 @@ impl FusedGraphExecutor {
                     }
                     super::layer_callback::CallbackAction::Continue => {}
                 }
+            }
+
+            // Gather 节点: CPU 索引查找（同 run_compiled）
+            if self.graph.nodes[node_idx].op.name() == "Gather" {
+                let gathered = Self::execute_gather_cpu(cn, &tensors, &weight_ptrs)?;
+                if cn.graph_output_names.len() == 1 {
+                    tensors.insert(cn.graph_output_names[0].clone(), gathered);
+                }
+                continue;
             }
 
             // ── Detect MHA/GQA attention nodes that need special ABI mapping ──
