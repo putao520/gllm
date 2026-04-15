@@ -1917,11 +1917,16 @@ impl FusedGraphExecutor {
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
+            // seq_len = activation 的行数（总元素 / feature_dim）
+            // JIT GEMM Symbolic M 循环从 seq_len 参数读取运行时值
             let activation_elems = activation.len() / cn.output_dtype.size_bytes().max(1);
-            let seq_len = if activation_elems > 0 { activation_elems } else { 1 };
-
-            eprintln!("[EXEC-NODE] idx={node_idx} op={} out_bytes={output_bytes} scratch_bytes={} act_bytes={} wt_bytes={} seq_len={seq_len} code_size={}",
-                _node.op.name(), cn.compiled.scratchpad_bytes, activation.len(), weight_blob.len(), cn.compiled.code_size());
+            let seq_len = if cn.feature_dim > 0 && activation_elems >= cn.feature_dim {
+                activation_elems / cn.feature_dim
+            } else if activation_elems > 0 {
+                activation_elems
+            } else {
+                1
+            };
 
             unsafe {
                 cn.compiled.execute(
@@ -1981,7 +1986,7 @@ impl FusedGraphExecutor {
         let indices_name = &cn.graph_input_names[1];
 
         // 加载 embedding table
-        let table_bytes = if let Some(ptr) = weight_ptrs.get(table_name) {
+        let table_bytes = if let Some(_ptr) = weight_ptrs.get(table_name) {
             // 从绑定的权重指针读取
             if let Some(wb) = tensors.get(table_name) {
                 wb.clone()
