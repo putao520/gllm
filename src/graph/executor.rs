@@ -1942,6 +1942,13 @@ impl FusedGraphExecutor {
                 );
             }
 
+            // 截断输出到实际 seq_len 大小 (JIT Const bound 按 max_seq_len 写满)
+            // 后续节点只需处理 seq_len × feature_dim 有效数据
+            let runtime_bytes = seq_len * cn.feature_dim * cn.output_dtype.size_bytes();
+            if runtime_bytes > 0 && runtime_bytes < output_buf.len() {
+                output_buf.truncate(runtime_bytes);
+            }
+
             // Store output(s)
             if cn.graph_output_names.len() == 1 {
                 tensors.insert(cn.graph_output_names[0].clone(), output_buf);
