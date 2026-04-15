@@ -27,7 +27,7 @@ impl ArtifactCache {
             p
         });
         
-        let ac = Self { cache_dir: dir };
+        let mut ac = Self { cache_dir: dir };
         
         #[cfg(not(debug_assertions))]
         let _ = ac.cleanup_ttl_cache(Duration::from_secs(7 * 24 * 3600)); // 7 days TTL

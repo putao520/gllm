@@ -683,16 +683,22 @@ fn atomic_op_to_kind(
         "SimplifiedLayerNormalization" => Ok(OpKind::RmsNorm { eps: 1e-6 }),
         "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "Softmax" => {
+            // ARCH-SYMDIM-OUTER-ONLY: vocab_size 是内层维度，必须 Concrete
             let vocab_size = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
-                input_shapes[0][input_shapes[0].len() - 1].as_concrete().unwrap_or(1)
+                let dim = &input_shapes[0][input_shapes[0].len() - 1];
+                debug_assert!(!dim.is_symbolic(), "Softmax vocab_size should be Concrete");
+                dim.as_concrete().unwrap_or(dim.max_for_allocation(32000))
             } else {
                 1
             };
             Ok(OpKind::SoftmaxWithEntropy { vocab_size })
         }
         "Residual" => {
+            // ARCH-SYMDIM-OUTER-ONLY: hidden 是内层维度，必须 Concrete
             let hidden = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
-                input_shapes[0][input_shapes[0].len() - 1].as_concrete().unwrap_or(1)
+                let dim = &input_shapes[0][input_shapes[0].len() - 1];
+                debug_assert!(!dim.is_symbolic(), "Residual hidden should be Concrete");
+                dim.as_concrete().unwrap_or(dim.max_for_allocation(4096))
             } else {
                 1
             };
