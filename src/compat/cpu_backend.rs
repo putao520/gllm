@@ -1,6 +1,6 @@
 use super::backend_trait::{self, Backend};
 use super::memory::get_system_memory_pressure;
-use super::{Element, PoolingMode};
+use super::Element;
 use crate::engine::executor::{
     AttentionTopology, BackendError as BE, BatchInput, GeneratorForwardConfig, KvCacheConfig,
     KvCacheHandle, LogitsHandle, SamplingConfig,
@@ -271,20 +271,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         kv_caches: &mut [KvCacheHandle],
         config: &GeneratorForwardConfig,
     ) -> Result<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>), BE> {
-        use crate::engine::executor::AttentionMaskType;
-        match topology.mask_type {
-            AttentionMaskType::Causal => {
-                super::decoder_forward::decoder_forward(self, input, weights, kv_caches, config)
-                    .map(|(logits, sparsity)| {
-                        let telemetry = vec![crate::scheduler::SequenceTelemetry::default(); logits.len()];
-                        (logits, sparsity, telemetry)
-                    })
-            }
-            AttentionMaskType::Bidirectional => {
-                // BERT-style encoder: handled by embedding/rerank paths, not batch_forward
-                Err(BE::Other("batch_forward_gpu_pure does not support bidirectional attention; use embedding_forward_gpu_pure".into()))
-            }
-        }
+        let _ = (input, topology, weights, kv_caches, config);
+        Err(BE::Other("ARCH-FULL-JIT: hand-written decoder_forward deleted, use FusedGraphExecutor".into()))
     }
 
     fn sample_from_tensor(
@@ -405,16 +393,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        match config.arch_family {
-            crate::manifest::ArchFamily::Decoder => {
-                // Decoder-based embedding model (Qwen3-Embedding, etc.)
-                super::decoder_forward::decoder_embedding_forward(self, tokens, weights, config)
-            }
-            crate::manifest::ArchFamily::Encoder => {
-                // BERT-style embedding model (e5-small, XLM-R, etc.)
-                super::bert_forward::bert_encoder_forward(self, tokens, weights, config, PoolingMode::MeanPool)
-            }
-        }
+        let _ = (tokens, weights, config);
+        Err(BE::Other("ARCH-FULL-JIT: hand-written embedding forward deleted, use FusedGraphExecutor".into()))
     }
 
     fn rerank_forward_gpu_pure(
@@ -424,16 +404,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        match config.arch_family {
-            crate::manifest::ArchFamily::Decoder => {
-                // Decoder-based reranker (Qwen3-Reranker, etc.)
-                super::decoder_forward::decoder_rerank_forward(self, tokens, weights, config)
-            }
-            crate::manifest::ArchFamily::Encoder => {
-                // BERT-style reranker (bge-reranker, etc.)
-                super::bert_forward::bert_encoder_forward(self, tokens, weights, config, PoolingMode::ClsClassifier)
-            }
-        }
+        let _ = (tokens, weights, config);
+        Err(BE::Other("ARCH-FULL-JIT: hand-written rerank forward deleted, use FusedGraphExecutor".into()))
     }
 
     fn classify_forward_gpu_pure(
@@ -443,14 +415,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
-        match config.arch_family {
-            crate::manifest::ArchFamily::Decoder => {
-                super::decoder_forward::decoder_classifier_forward(self, tokens, weights, config)
-            }
-            crate::manifest::ArchFamily::Encoder => {
-                super::bert_forward::bert_classifier_forward(self, tokens, weights, config)
-            }
-        }
+        let _ = (tokens, weights, config);
+        Err(BE::Other("ARCH-FULL-JIT: hand-written classify forward deleted, use FusedGraphExecutor".into()))
     }
 
     fn get_memory_pressure(&self) -> Result<f32, BE> {

@@ -7,7 +7,6 @@
 
 use super::backend_trait;
 use super::cpu_backend::CpuBackend;
-use super::decoder_forward;
 use super::jit_helpers::TypedBuffer;
 use super::weight_helpers::get_typed_data;
 use super::jit_helpers::typed_bytes_to_f32;
@@ -316,14 +315,11 @@ pub fn inject_late_fusion<E: Element>(
         ));
     }
 
-    // Use forward_to_semantic_layer to get hidden state at target layer
-    decoder_forward::forward_to_semantic_layer(
-        backend,
-        tokens,
-        weights,
-        config,
-        target,
-    ).map_err(|e| KnowledgeError::DataFormatError(format!("forward_to_semantic_layer failed: {e}")))
+    // ARCH-FULL-JIT: hand-written forward passes deleted, use FusedGraphExecutor
+    let _ = (backend, tokens, weights, config, target);
+    Err(KnowledgeError::DataFormatError(
+        "ARCH-FULL-JIT: hand-written forward_to_semantic_layer deleted, use FusedGraphExecutor".into(),
+    ))
 }
 
 // ---------------------------------------------------------------------------

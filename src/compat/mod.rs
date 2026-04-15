@@ -7,9 +7,6 @@
 //! - Backward-compatible re-export modules (`kernel_types`, `backend_trait`, `cpu_backend`)
 
 mod weight_helpers;
-mod bert_forward;
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-mod decoder_forward;
 mod knowledge_injector;
 pub(crate) mod artifact_cache;
 
@@ -224,7 +221,48 @@ pub use knowledge_injector::{
     LoRAAdapter, register_kv_pages,
 };
 
-// Re-export forward_to_layer API (per SPEC 04-API-DESIGN §7.3)
-pub use decoder_forward::{
-    forward_to_layer, forward_to_semantic_layer, layer_target_to_idx,
-};
+// ARCH-FULL-JIT: forward_to_layer / forward_to_semantic_layer / layer_target_to_idx
+// formerly in decoder_forward.rs — now provided as stubs returning errors.
+// The real execution path is FusedGraphExecutor.
+
+/// Convert a semantic `LayerTarget` to a physical layer index.
+pub fn layer_target_to_idx(target: crate::knowledge::LayerTarget, num_layers: usize) -> usize {
+    use crate::knowledge::LayerTarget;
+    match target {
+        LayerTarget::ShallowSyntax => num_layers / 4,
+        LayerTarget::MidSemantic => num_layers / 2,
+        LayerTarget::DeepLogic => (num_layers * 3) / 4,
+    }
+}
+
+/// Run a truncated forward pass up to a specific layer index.
+///
+/// ARCH-FULL-JIT: hand-written forward passes have been deleted.
+/// Use `FusedGraphExecutor` for real execution.
+pub fn forward_to_layer<E: Element>(
+    _backend: &cpu_backend::CpuBackend<E>,
+    _tokens: &[u32],
+    _weights: &dyn backend_trait::TensorLookup<E, cpu_backend::CpuBackend<E>>,
+    _config: &crate::engine::executor::GeneratorForwardConfig,
+    _target_layer: usize,
+) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
+    Err(crate::engine::executor::BackendError::Other(
+        "ARCH-FULL-JIT: hand-written forward_to_layer deleted, use FusedGraphExecutor".into(),
+    ))
+}
+
+/// Run a truncated forward pass up to a semantic layer target.
+///
+/// ARCH-FULL-JIT: hand-written forward passes have been deleted.
+/// Use `FusedGraphExecutor` for real execution.
+pub fn forward_to_semantic_layer<E: Element>(
+    _backend: &cpu_backend::CpuBackend<E>,
+    _tokens: &[u32],
+    _weights: &dyn backend_trait::TensorLookup<E, cpu_backend::CpuBackend<E>>,
+    _config: &crate::engine::executor::GeneratorForwardConfig,
+    _target: crate::knowledge::LayerTarget,
+) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
+    Err(crate::engine::executor::BackendError::Other(
+        "ARCH-FULL-JIT: hand-written forward_to_semantic_layer deleted, use FusedGraphExecutor".into(),
+    ))
+}

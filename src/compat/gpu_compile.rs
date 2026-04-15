@@ -6,8 +6,6 @@ use super::cuda_backend::CudaBackend;
 use super::hip_backend::HipBackend;
 #[cfg(any(feature = "cuda", feature = "hip"))]
 use gllm_kernels::gpu::GpuBuffer;
-#[cfg(any(feature = "cuda", feature = "hip"))]
-use super::bert_forward::build_mean_pool_graph;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use super::Element;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
@@ -1618,7 +1616,7 @@ pub(super) fn cuda_bert_encoder_forward<E: Element>(
 ) -> Result<Vec<f32>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
     use gllm_kernels::compiler::TensorId;
-    use super::bert_forward::build_bert_layer_graph;
+    // ARCH-FULL-JIT: bert_forward deleted — build_bert_layer_graph no longer available
 
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
         return Err(BE::Other("BERT encoder only supports f32 element type".into()));
@@ -2570,7 +2568,7 @@ pub(super) fn hip_bert_encoder_forward<E: Element>(
 ) -> Result<Vec<f32>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
     use gllm_kernels::compiler::TensorId;
-    use super::bert_forward::build_bert_layer_graph;
+    // ARCH-FULL-JIT: bert_forward deleted — build_bert_layer_graph no longer available
 
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
         return Err(BE::Other("BERT encoder only supports f32 element type".into()));
@@ -2898,7 +2896,7 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
 ) -> Result<Vec<f32>, BE> {
     use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
     use gllm_kernels::compiler::TensorId;
-    use super::bert_forward::build_bert_layer_graph;
+    // ARCH-FULL-JIT: bert_forward deleted — build_bert_layer_graph no longer available
 
     if std::any::TypeId::of::<E>() != std::any::TypeId::of::<f32>() {
         return Err(BE::Other("BERT encoder only supports f32 element type".into()));
@@ -2988,7 +2986,10 @@ pub(super) fn metal_bert_encoder_forward<E: Element>(
     }
 
     // ── Mean pooling (GPU) — gpu_hidden already on device, no CPU round-trip ──
-    let pool_graph = super::bert_forward::build_mean_pool_graph(seq_len, hidden, comp_dtype);
+    // ARCH-FULL-JIT: bert_forward deleted — build_mean_pool_graph no longer available
+    return Err(BE::Metal("ARCH-FULL-JIT: bert_forward deleted, use FusedGraphExecutor for mean pooling".into()));
+    #[allow(unreachable_code)]
+    let pool_graph: gllm_kernels::compiler::CompilerGraph = unreachable!();
     let pool_entries = metal_compile_graph(device, gpu_profile, gpu_family, &pool_graph)?;
 
     let gpu_output = device.alloc(hidden * elem_bytes)
