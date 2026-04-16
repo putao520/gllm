@@ -224,9 +224,13 @@ struct CompiledNode {
     per_output_numel: Vec<usize>,
     /// DType of the output tensor(s) — used for byte-size calculations.
     output_dtype: gllm_kernels::types::DType,
-    /// Feature dimension per token (e.g., hidden_size).
-    /// Runtime output size = feature_dim * actual_seq_len * dtype.size_bytes().
+    /// Feature dimension per token (e.g., hidden_size) for primary output.
+    /// Extracted from graph metadata Concrete dims (ARCH-SYMDIM-NO-CONST-DEGRADE).
     feature_dim: usize,
+    /// Per-output feature dimensions for multi-output nodes.
+    /// Each entry = product of Concrete (non-Symbolic) dims for that output tensor.
+    /// Empty for single-output nodes (use feature_dim).
+    per_output_feature_dims: Vec<usize>,
 }
 
 /// Build a CompilerGraph for FlashAttention.
@@ -353,6 +357,7 @@ fn build_rope_graph(
     let out = g.add_tensor("rope_out", vec![seq_len_sym, SymDim::Concrete(hidden)], dt);
     g.add_op(
         OpKind::RoPE {
+            num_heads: hidden / config.head_dim,
             head_dim: config.head_dim,
             theta: config.rope_theta,
             partial: 1.0,
@@ -420,7 +425,7 @@ fn build_fused_qkv_rope_graph(
 
     let q_rope = g.add_tensor("q_rope", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
     g.add_op(
-        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        OpKind::RoPE { num_heads: config.num_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
         vec![q_out],
         vec![q_rope],
         "rope_q",
@@ -428,7 +433,7 @@ fn build_fused_qkv_rope_graph(
 
     let k_rope = g.add_tensor("k_rope", vec![seq_len_sym, SymDim::Concrete(kv_dim)], dt);
     g.add_op(
-        OpKind::RoPE { head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        OpKind::RoPE { num_heads: config.num_kv_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
         vec![k_out],
         vec![k_rope],
         "rope_k",
@@ -881,12 +886,16 @@ struct NodePayload {
     config_hash: u64,
     weight_layout_offsets: Option<Vec<(u32, usize)>>,
     weight_layout_total_bytes: Option<usize>,
-    
+
     graph_input_names: Vec<String>,
     graph_output_names: Vec<String>,
     output_numel: usize,
     per_output_numel: Vec<usize>,
     output_dtype_id: u8,
+    /// Feature dimension per token (product of Concrete output dims).
+    feature_dim: usize,
+    /// Per-output feature dimensions for multi-output nodes.
+    per_output_feature_dims: Vec<usize>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1004,18 +1013,6 @@ impl FusedGraphExecutor {
 
             let output_dtype = gllm_kernels::types::DType::F32;
 
-            // Calculate feature_dim: for most ops, it's the last dimension of output shape
-            // For ops with symbolic seq_len, output_numel = max_seq_len * feature_dim
-            // So feature_dim = output_numel / max_seq_len (where max_seq_len = SYMDIM_MAX_SEQ_LEN)
-            // NOTE: This is a buffer-allocation inverse operation — output_numel was computed as
-            // SYMDIM_MAX_SEQ_LEN * feature_dim during graph construction, so dividing back recovers
-            // the per-token feature dimension. This is NOT an inference-time parameter.
-            let feature_dim = if build.output_numel > 0 {
-                build.output_numel / SYMDIM_MAX_SEQ_LEN
-            } else {
-                hidden // fallback to hidden_size
-            };
-
             compiled_nodes.push(CompiledNode {
                 compiled,
                 graph_input_names: build.input_names,
@@ -1023,7 +1020,8 @@ impl FusedGraphExecutor {
                 output_numel: build.output_numel,
                 per_output_numel: build.per_output_numel,
                 output_dtype,
-                feature_dim,
+                feature_dim: build.feature_dim,
+                per_output_feature_dims: build.per_output_feature_dims,
             });
         }
 
@@ -1113,8 +1111,8 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
-                // NOTE: Buffer-allocation inverse — see compile_nodes() for rationale.
-                feature_dim: if p.output_numel > 0 { p.output_numel / SYMDIM_MAX_SEQ_LEN } else { 0 },
+                feature_dim: p.feature_dim,
+                per_output_feature_dims: p.per_output_feature_dims,
             });
         }
         
@@ -1151,6 +1149,8 @@ impl FusedGraphExecutor {
                 output_numel: node.output_numel,
                 per_output_numel: node.per_output_numel.clone(),
                 output_dtype_id: node.output_dtype.elem_id(),
+                feature_dim: node.feature_dim,
+                per_output_feature_dims: node.per_output_feature_dims.clone(),
             });
         }
         
@@ -1710,7 +1710,7 @@ impl FusedGraphExecutor {
             let Some(kv_data) = tensors.get(kv_name).cloned() else { continue };
             let kv_dim = num_kv_heads * head_dim;
             let q_dim = num_heads * head_dim;
-            let elem_bytes = 4usize; // f32
+            let elem_bytes = cn.output_dtype.size_bytes();
             let kv_bytes = kv_data.len();
             let kv_tokens = kv_bytes / (kv_dim * elem_bytes);
 
@@ -1762,9 +1762,9 @@ impl FusedGraphExecutor {
         let Some(kv_layer) = Self::extract_layer_index(node_name) else { return seq_len; };
 
         let kv_dim = num_kv_heads * head_dim;
-        let elem_bytes = std::mem::size_of::<f32>();
+        let elem_bytes = gllm_kernels::types::DType::F32.size_bytes();
         let cached_len = total_seq - seq_len;
-        let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
+        let cache_max_seq = forward_config.expect("KV cache operation requires forward_config").max_seq_len();
         let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
         // Build merged K and V padded to SYMDIM_MAX_SEQ_LEN rows.
@@ -1863,7 +1863,7 @@ impl FusedGraphExecutor {
         let head_dim = config.head_dim;
         let kv_dim = num_kv_heads * head_dim;
 
-        let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
+        let cache_max_seq = forward_config.expect("KV cache operation requires forward_config").max_seq_len();
         let write_start = total_seq.saturating_sub(seq_len);
 
         let k_name = cn.graph_output_names.get(1).cloned();
@@ -1872,7 +1872,7 @@ impl FusedGraphExecutor {
         let (Some(k_name), Some(v_name)) = (k_name, v_name) else { return };
         let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) else { return };
 
-        let elem_bytes = std::mem::size_of::<f32>();
+        let elem_bytes = gllm_kernels::types::DType::F32.size_bytes();
         let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
         unsafe {
@@ -1918,7 +1918,8 @@ impl FusedGraphExecutor {
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
             // ARCH-SYMDIM-NO-CONST-DEGRADE: seq_len 从 shape_bindings 正向传递
-            let seq_len = *shape_bindings.get("seq_len").unwrap_or(&1);
+            let seq_len = *shape_bindings.get("seq_len")
+                .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
 
             unsafe {
                 cn.compiled.execute(
@@ -2032,9 +2033,12 @@ impl FusedGraphExecutor {
                 self.graph.nodes[node_idx].op.name());
 
             // §9-§18: Pre-node callback — Gate-First Skip / Residual Bypass / Early Exit
-            let layer_idx = node_idx / 2; // 每层约 2 个 FusedNode (Attention + FFN)
+            let layer_idx = Self::extract_layer_index(&self.graph.nodes[node_idx].name).unwrap_or(node_idx);
             if let Some(ref mut cb) = callbacks {
-                let hidden_state = tensors.values().next().map(|v| v.as_slice()).unwrap_or(&[]);
+                let hidden_state = cn.graph_input_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 let ctx = super::layer_callback::LayerContext {
                     node_idx,
                     layer_idx,
@@ -2075,7 +2079,7 @@ impl FusedGraphExecutor {
                         if !cn.graph_input_names.is_empty() {
                             if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
                                 // Compact: remove dead neuron positions from activation
-                                let element_size = 4; // f32
+                                let element_size = cn.output_dtype.size_bytes();
                                 let num_elements = input_data.len() / element_size;
                                 let mask_len = active_mask.len().min(num_elements);
 
@@ -2139,32 +2143,10 @@ impl FusedGraphExecutor {
                 seq_len
             };
 
-            if cfg!(debug_assertions) {
-                log::trace!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
-                    self.graph.nodes.len(),
-                    self.graph.nodes[node_idx].name,
-                    self.graph.nodes[node_idx].op.name());
-                if matches!(self.graph.nodes[node_idx].op.name(), "GQA" | "Attention" | "FlashAttention" | "MultiHeadAttention") {
-                    log::trace!("[EXEC-ABI] GQA node inputs: {:?}, outputs: {:?}, graph_inputs: {:?}",
-                        cn.graph_input_names, cn.graph_output_names, self.graph.inputs);
-                    // First GQA node only: check K/V presence
-                    if node_idx < 20 {
-                        let k_name = cn.graph_input_names.get(1).map(|s| s.as_str()).unwrap_or("?");
-                        let v_name = cn.graph_input_names.get(2).map(|s| s.as_str()).unwrap_or("?");
-                        let k_data = tensors.get(k_name);
-                        let v_data = tensors.get(v_name);
-                        eprintln!("[GQA-DIAG] node {} k='{}' v='{}' k_bytes={:?} v_bytes={:?}",
-                            node_idx, k_name, v_name,
-                            k_data.map(|d| d.len()), v_data.map(|d| d.len()));
-                        if let Some(kd) = k_data {
-                            let k_f32: Vec<f32> = kd[..kd.len().min(16)].chunks_exact(4)
-                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                            let k_nz = k_f32.iter().filter(|&&x| x != 0.0).count();
-                            eprintln!("[GQA-DIAG] k_nz={}/{} sample={:?}", k_nz, k_f32.len(), &k_f32[..4.min(k_f32.len())]);
-                        }
-                    }
-                }
-            }
+            log::trace!("[EXEC] node {node_idx}/{} '{}' ({}) prep",
+                self.graph.nodes.len(),
+                self.graph.nodes[node_idx].name,
+                self.graph.nodes[node_idx].op.name());
 
             // NOTE: expand_gqa_heads is intentionally NOT called here.
             // The JIT MHA attention kernel (emit_multi_head_attention) handles GQA
@@ -2194,15 +2176,6 @@ impl FusedGraphExecutor {
             // compiled.scratchpad_bytes 可能偏小（BufferAllocation 未充分估算 MHA 暂存）。
             // 安全下界：max(compiled, output_bytes)，确保至少能容纳一整个输出大小的中间矩阵。
             let scratch_size = cn.compiled.scratchpad_bytes.max(output_bytes).max(64);
-            if cfg!(debug_assertions) {
-                let op_name = self.graph.nodes[node_idx].op.name();
-                let msg = format!("[BUF-ALLOC] node {node_idx} op={op_name}: output={}B scratchpad={}B act={}B wt={}B\n",
-                    output_bytes, scratch_size, activation.len(), weight_blob.len());
-                eprint!("{}", msg);
-                let _ = std::fs::OpenOptions::new().create(true).append(true)
-                    .open("/tmp/gllm_exec_audit.log")
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
-            }
             let mut scratchpad = vec![0u8; scratch_size];
 
             // Effective seq_len passed to the JIT kernel: for MHA nodes the kernel
@@ -2220,22 +2193,6 @@ impl FusedGraphExecutor {
             // [rbp+16]=seq_len, [rbp+24]=output, [rbp+32]=scratchpad.
             let out_ptr_before = output_buf.as_mut_ptr();
             let scratch_ptr_before = scratchpad.as_mut_ptr();
-            eprintln!("[EXEC] node {node_idx} op={} out_bytes={} scratch_bytes={} act_bytes={} wt_bytes={} eff_seq={effective_seq} code={}B",
-                self.graph.nodes[node_idx].op.name(), output_buf.len(), scratchpad.len(),
-                activation.len(), weight_blob.len(), cn.compiled.code_size());
-            if cfg!(debug_assertions) && is_mha_node {
-                eprintln!("[MHA-EXEC] node {node_idx} out_ptr={:p} scratch_ptr={:p} out_len={} scratch_len={} eff_seq={}",
-                    out_ptr_before, scratch_ptr_before, output_buf.len(), scratchpad.len(), effective_seq);
-                // Pre-execution: check K at expected scratchpad location and in weight_blob
-                // For Qwen3-0.6B: kv_head 7 (h=15), row 0 starts at weight_blob[1792..2048]
-                let k_src_off = 1792usize;
-                let wb_k_data: Vec<f32> = if weight_blob.len() >= k_src_off + 128 {
-                    weight_blob[k_src_off..k_src_off+128].chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect()
-                } else { vec![] };
-                let wb_k_nz = wb_k_data.iter().filter(|&&v| v != 0.0).count();
-                eprintln!("[MHA-EXEC] weight_blob[1792..1920] nz={}/{} first={:?}", wb_k_nz, wb_k_data.len(), &wb_k_data[..4.min(wb_k_data.len())]);
-            }
             unsafe {
                 cn.compiled.execute(
                     if activation.is_empty() {
@@ -2258,88 +2215,6 @@ impl FusedGraphExecutor {
                 );
             }
             log::debug!("[EXEC] node {node_idx} done");
-            // Debug: check if scratchpad was written (non-zero)
-            if cfg!(debug_assertions) && is_mha_node {
-                let sc_check: Vec<f32> = scratchpad[..scratchpad.len().min(128)].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                let sc_nz = sc_check.iter().filter(|&&v| v != 0.0).count();
-                // MHA 诊断代码已清理 (ARCH-FULL-JIT: 不保留硬编码偏移的调试代码)
-            }
-
-            if cfg!(debug_assertions) {
-                let op_name = self.graph.nodes[node_idx].op.name();
-                // Full output scan for FusedQkvRope to detect partial writes
-                if op_name == "FusedQkvRope" {
-                    let total_f32 = output_buf.len() / std::mem::size_of::<f32>();
-                    let all_f32: Vec<f32> = output_buf.chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                    let total_nz = all_f32.iter().filter(|&&v| v != 0.0).count();
-                    // Per-output scan
-                    let mut offset = 0;
-                    for (oi, oname) in cn.graph_output_names.iter().enumerate() {
-                        let n = if oi < cn.per_output_numel.len() { cn.per_output_numel[oi] } else { 0 };
-                        let nbytes = n * cn.output_dtype.size_bytes();
-                        if nbytes > 0 && offset + nbytes <= output_buf.len() {
-                            let sub: Vec<f32> = output_buf[offset..offset+nbytes].chunks_exact(4)
-                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                            let nz = sub.iter().filter(|&&v| v != 0.0).count();
-                            eprintln!("[QKV-OUT] output[{oi}] '{oname}': nz={nz}/{} ({}B at offset {offset})",
-                                sub.len(), nbytes, );
-                            // Sample first/last token
-                            if sub.len() >= 8 {
-                                eprintln!("[QKV-OUT]   first8={:?}", &sub[..8]);
-                            }
-                        }
-                        offset += nbytes;
-                    }
-                    // Per-token non-zero scan for first output (Q_rope)
-                    if !cn.per_output_numel.is_empty() {
-                        let q_numel = cn.per_output_numel[0];
-                        let q_bytes = q_numel * cn.output_dtype.size_bytes();
-                        // NOTE: Buffer-allocation inverse — q_numel was computed as
-                        // SYMDIM_MAX_SEQ_LEN * q_dim during graph construction; dividing back
-                        // recovers the per-token Q dimension for debug diagnostics.
-                        let q_dim = if effective_seq > 0 { q_numel / (SYMDIM_MAX_SEQ_LEN.max(1)) } else { 0 };
-                        if q_dim > 0 {
-                            let q_f32: Vec<f32> = output_buf[..q_bytes].chunks_exact(4)
-                                .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                            for tok in 0..effective_seq.min(8) {
-                                let start = tok * q_dim;
-                                let end = start + q_dim;
-                                if end <= q_f32.len() {
-                                    let nz = q_f32[start..end].iter().filter(|&&v| v != 0.0).count();
-                                    eprintln!("[QKV-OUT]   Q tok[{tok}] nz={nz}/{q_dim}");
-                                }
-                            }
-                        }
-                    }
-                    eprintln!("[QKV-OUT] total nz={total_nz}/{total_f32} seq={effective_seq}");
-                }
-                let check: Vec<f32> = output_buf[..output_buf.len().min(32)].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                let nonzero = check.iter().filter(|&&v| v != 0.0).count();
-                if nonzero == 0 {
-                    eprintln!("[ZERO-OUT] node {node_idx} op={op_name} ALL ZEROS act={}B wt={}B out={}B seq={}",
-                        activation.len(), weight_blob.len(), output_buf.len(), effective_seq);
-                    let act_check: Vec<f32> = activation[..activation.len().min(32)].chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                    let act_nz = act_check.iter().filter(|&&v| v != 0.0).count();
-                    let wt_check: Vec<f32> = weight_blob[..weight_blob.len().min(32)].chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
-                    let wt_nz = wt_check.iter().filter(|&&v| v != 0.0).count();
-                    eprintln!("[ZERO-OUT] act_nz={}/{} wt_nz={}/{}", act_nz, act_check.len(), wt_nz, wt_check.len());
-                    eprintln!("[ZERO-OUT] act[0..8]={:?}", &act_check[..8.min(act_check.len())]);
-                    eprintln!("[ZERO-OUT] wt[0..8]={:?}", &wt_check[..8.min(wt_check.len())]);
-                    // Print weight names being looked up for this node
-                    eprintln!("[ZERO-OUT] input_names={:?}", &cn.graph_input_names);
-                    // Check which names are found in tensors vs weight_ptrs
-                    for wname in cn.graph_input_names.iter().skip(1) {
-                        let in_tensors = tensors.contains_key(wname);
-                        let in_wptrs = weight_ptrs.contains_key(wname);
-                        eprintln!("[ZERO-OUT]   weight '{}': tensors={} wptrs={}", wname, in_tensors, in_wptrs);
-                    }
-                }
-            }
 
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
@@ -2378,10 +2253,10 @@ impl FusedGraphExecutor {
                 // For each output i, only the first (per_token_i * seq_len) elements are valid.
                 // We must read from output_buf (not truncated_output) using these offsets.
                 let dtype_bytes = cn.output_dtype.size_bytes();
-                let max_seq_len = SYMDIM_MAX_SEQ_LEN;
                 let mut jit_byte_offset: usize = 0; // cumulative offset in output_buf
                 for (i, name) in cn.graph_output_names.iter().enumerate() {
-                    let per_token = cn.per_output_numel[i] / max_seq_len;
+                    // per_token dim extracted from graph metadata (ARCH-SYMDIM-NO-CONST-DEGRADE)
+                    let per_token = cn.per_output_feature_dims[i];
                     let valid_nbytes = per_token * seq_len * dtype_bytes;
                     let max_nbytes = cn.per_output_numel[i] * dtype_bytes; // full block in output_buf
                     if jit_byte_offset + valid_nbytes <= output_buf.len() {
@@ -2410,7 +2285,7 @@ impl FusedGraphExecutor {
             let mask_key = format!("__compact_mask_{}", node_idx);
             let orig_size_key = format!("__compact_orig_size_{}", node_idx);
             if let (Some(mask_bytes), Some(orig_size_bytes)) = (tensors.remove(&mask_key), tensors.remove(&orig_size_key)) {
-                let element_size = 4usize; // f32
+                let element_size = cn.output_dtype.size_bytes();
                 let orig_size = if orig_size_bytes.len() >= 8 {
                     u64::from_le_bytes(orig_size_bytes[..8].try_into().unwrap_or([0; 8])) as usize
                 } else {
@@ -2612,13 +2487,29 @@ impl FusedGraphExecutor {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 /// Construct a `NodeGraphBuild` from a compiled graph, node I/O names, and output sizing.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn extract_tensor_feature_dim(graph: &gllm_kernels::compiler::CompilerGraph, tid: gllm_kernels::compiler::TensorId) -> usize {
+    graph.tensors[tid.0 as usize].shape.iter()
+        .filter(|d| !d.is_symbolic())
+        .map(|d| d.as_concrete().expect("ARCH-SYMDIM-OUTER-ONLY: non-symbolic dim must be Concrete"))
+        .product::<usize>()
+        .max(1)
+}
+
 fn make_node_build(
     graph: gllm_kernels::compiler::CompilerGraph,
     node: &super::types::FusedNode,
     output_numel: usize,
     per_output_numel: Vec<usize>,
 ) -> NodeGraphBuild {
-    let output_dtype = graph.tensors[graph.outputs[0].0 as usize].dtype;
+    let out_tid = graph.outputs[0];
+    let output_dtype = graph.tensors[out_tid.0 as usize].dtype;
+    // Extract feature_dim directly from graph metadata Concrete dims
+    // (ARCH-SYMDIM-NO-CONST-DEGRADE: no SYMDIM_MAX_SEQ_LEN division).
+    let feature_dim = extract_tensor_feature_dim(&graph, out_tid);
+    // Per-output feature dims for multi-output nodes
+    let per_output_feature_dims: Vec<usize> = graph.outputs.iter()
+        .map(|&tid| extract_tensor_feature_dim(&graph, tid))
+        .collect();
     NodeGraphBuild {
         graph,
         input_names: node.inputs.clone(),
@@ -2626,6 +2517,8 @@ fn make_node_build(
         output_numel,
         per_output_numel,
         output_dtype,
+        feature_dim,
+        per_output_feature_dims,
     }
 }
 
@@ -2638,6 +2531,11 @@ struct NodeGraphBuild {
     per_output_numel: Vec<usize>,
     /// DType of the output tensor(s).
     output_dtype: gllm_kernels::types::DType,
+    /// Feature dimension per token — product of all Concrete (non-Symbolic) output dims.
+    /// Directly extracted from CompilerGraph output tensor shape metadata.
+    feature_dim: usize,
+    /// Per-output feature dimensions for multi-output nodes.
+    per_output_feature_dims: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------

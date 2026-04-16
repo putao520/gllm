@@ -68,9 +68,9 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
     g.add_op(OpKind::FusedRmsNormGemm { m: sym_s.clone(), n: kv_dim, k: h, eps, dtype: dt }, vec![input, rn1_w, w_v], vec![v_out], "gemm_v_fused");
 
     let q_rope = g.add_tensor("q_rope", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta, partial: 1.0 }, vec![q_out], vec![q_rope], "rope_q");
+    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![q_out], vec![q_rope], "rope_q");
     let k_rope = g.add_tensor("k_rope", vec![sym_s.clone(), SymDim::Concrete(kv_dim)], ft);
-    g.add_op(OpKind::RoPE { head_dim, theta: rope_theta, partial: 1.0 }, vec![k_out], vec![k_rope], "rope_k");
+    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![k_out], vec![k_rope], "rope_k");
 
     let attn_out = g.add_tensor("attn_out", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
     g.add_op(
@@ -261,7 +261,7 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn2_w], vec![normed2], "rms_norm_2");
 
     let gate_probs = g.add_tensor("gate_probs", vec![sym_s.clone(), SymDim::Concrete(num_experts)], ft);
-    g.add_op(OpKind::MoEGate { seq_len: s, num_experts, hidden: h }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
+    g.add_op(OpKind::MoEGate { seq_len: s, num_experts, hidden: h, top_k }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
 
     let topk_idx = g.add_tensor("topk_idx", vec![sym_s.clone(), SymDim::Concrete(top_k)], DType::F32);
     let topk_w = g.add_tensor("topk_w", vec![sym_s.clone(), SymDim::Concrete(top_k)], DType::F32);
@@ -441,7 +441,7 @@ pub(crate) fn build_fused_moe_layer_graph(
 
     // 2. Router Path
     let gate_probs = g.add_tensor_concrete("gate_probs", &[s, num_experts], ft);
-    g.add_op(OpKind::MoEGate { seq_len: s, num_experts, hidden: h }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
+    g.add_op(OpKind::MoEGate { seq_len: s, num_experts, hidden: h, top_k }, vec![normed2, w_router], vec![gate_probs], "moe_gate");
 
     let topk_idx = g.add_tensor_concrete("topk_idx", &[s, top_k], DType::F32);
     let topk_w = g.add_tensor_concrete("topk_w", &[s, top_k], DType::F32);

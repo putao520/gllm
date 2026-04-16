@@ -24,6 +24,7 @@
 | `DOCS/scheduling/unified-jit-architecture-master.md` | 📎 索引文件（内容已迁移至 02-ARCHITECTURE.md §9-§16） | ✅ |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 | ✅ |
+| `../gllm-kernels/SPEC/ARCH-DATA-FLOW-CONTRACT.md` | **数据流唯一来源契约** — lower/executor 每个值的唯一数据源映射表，禁止独立计算/反推/硬编码 | ✅ |
 
 ## Technology Stack
 
