@@ -148,7 +148,7 @@ impl<B: Backend<E>, E: Element> UnifiedPipeline<B, E> {
         if !self.executor.is_compiled() {
             return Err(PipelineError::NotCompiled);
         }
-        let outputs = self.executor.run(inputs)?;
+        let outputs = self.executor.run(inputs, &std::collections::HashMap::new())?;
         Ok(outputs)
     }
 
