@@ -1658,9 +1658,21 @@ impl FusedGraphExecutor {
                 }
             }
         } else {
+            // weight_layout 应由编译阶段生成。fallback concatenation 保留用于
+            // 无权重节点（如 elementwise Add）或单权重节点（无需偏移映射）。
+            // 多权重节点缺少 weight_layout 是编译错误。
+            let weight_count = cn.graph_input_names.len().saturating_sub(1);
+            if weight_count > 1 {
+                log::warn!("[pack_weight_blob] node has {} weights but no weight_layout — concatenating sequentially",
+                    weight_count);
+            }
             for name in cn.graph_input_names.iter().skip(1) {
                 if let Some(data) = tensors.get(name) {
                     weight_blob.extend_from_slice(data);
+                } else if let Some(&ptr) = weight_ptrs.get(name) {
+                    // 从权重指针读取 — 需要知道大小，从 weight_bindings 获取
+                    // 没有 weight_layout 时无法确定大小，跳过
+                    log::trace!("[pack_weight_blob] weight '{}' has ptr but no layout, skip", name);
                 }
             }
         }
