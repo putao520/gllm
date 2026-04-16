@@ -255,7 +255,11 @@ impl MegaKernelExecutor {
 
         // 权重已通过 FusedGraphExecutor::bind() 绑定，无需再传入
 
-        let results = self.graph_executor.run(&inputs)?;
+        // shape_bindings: seq_len 从外部传入（当前使用 inputs 的 batch 维度）
+        let shape_bindings = std::collections::HashMap::from([
+            ("seq_len".to_string(), 1usize), // MegaKernel 通常处理单 token
+        ]);
+        let results = self.graph_executor.run(&inputs, &shape_bindings)?;
 
         // Phase 3: Scatter — 将输出 bytes 转回 f32，按原始偏移回写
         // 提取所有输出张量，转为 Vec<Vec<f32>>

@@ -108,7 +108,9 @@ impl ModelGeometry {
             hidden_size_per_layer_input: config.hidden_size_per_layer_input.unwrap_or(0),
             dtype: config.dtype,
             norm_eps: config.layer_norm_epsilon.unwrap_or(1e-12),
-            position_offset: None,
+            // position_offset = pad_token_id + 1 (RoBERTa: pad=1→offset=2, BERT: pad=0→offset=1)
+            // None 表示模型不需要 position offset（GPT-style decoder 从 0 开始）
+            position_offset: config.pad_token_id.map(|pad| (pad + 1) as usize),
             num_experts,
             moe_top_k,
             expert_intermediate_size,

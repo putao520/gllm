@@ -89,6 +89,20 @@ fn mean_pool_hidden(hidden: &[f32], seq_len: usize, hidden_size: usize) -> Vec<f
     pooled
 }
 
+/// 从 token 数组构建 shape bindings（seq_len = tokens.len()）
+fn shape_bindings_from_tokens(tokens: &[u32]) -> HashMap<String, usize> {
+    let mut bindings = HashMap::new();
+    bindings.insert("seq_len".to_string(), tokens.len());
+    bindings
+}
+
+/// 从 seq_len 直接构建 shape bindings
+fn shape_bindings_from_seq(seq_len: usize) -> HashMap<String, usize> {
+    let mut bindings = HashMap::new();
+    bindings.insert("seq_len".to_string(), seq_len);
+    bindings
+}
+
 /// f32 切片 → 字节 Vec
 fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
     let byte_len = data.len() * std::mem::size_of::<f32>();
@@ -407,7 +421,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                     0, total_seq, seq_len, positions_u32.as_ptr(),
                 ).map_err(|e| BE::Other(format!("FusedGraphExecutor decoder run failed: {e}")))
             } else {
-                executor.run(&inputs).map_err(|e| {
+                let bindings = shape_bindings_from_seq(seq_len);
+                executor.run(&inputs, &bindings).map_err(|e| {
                     BE::Other(format!("FusedGraphExecutor decoder run failed: {e}"))
                 })
             };
@@ -542,15 +557,12 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
         // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
-        eprintln!("[EMB-FWD] enter: tokens={} hidden={}", tokens.len(), config.hidden_size());
         let executor = get_graph_executor(config)?;
-        eprintln!("[EMB-FWD] executor OK, nodes={}", executor.graph().nodes.len());
         let inputs = prepare_encoder_inputs(tokens, config);
-        eprintln!("[EMB-FWD] inputs prepared, calling run()...");
-        let outputs = executor.run(&inputs).map_err(|e| {
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = executor.run(&inputs, &bindings).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor embedding run failed: {e}"))
         })?;
-        eprintln!("[EMB-FWD] run() done, outputs={}", outputs.len());
         // 提取最终 hidden state → mean pool over seq dim → embedding 向量
         let hidden = extract_final_hidden(&outputs, executor)?;
         let hidden_size = config.hidden_size();
@@ -568,7 +580,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
         let executor = get_graph_executor(config)?;
         let inputs = prepare_encoder_inputs(tokens, config);
-        let outputs = executor.run(&inputs).map_err(|e| {
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = executor.run(&inputs, &bindings).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor rerank run failed: {e}"))
         })?;
         // Rerank: 提取 [CLS] token (第 0 行) 的 hidden state 作为分数
@@ -588,7 +601,8 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
         let executor = get_graph_executor(config)?;
         let inputs = prepare_encoder_inputs(tokens, config);
-        let outputs = executor.run(&inputs).map_err(|e| {
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = executor.run(&inputs, &bindings).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor classify run failed: {e}"))
         })?;
         let hidden = extract_final_hidden(&outputs, executor)?;

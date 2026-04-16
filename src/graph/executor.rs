@@ -1385,9 +1385,13 @@ impl FusedGraphExecutor {
     ///
     /// Runs the JIT-compiled kernels in topological order.
     /// Returns `NotCompiled` error if `compile()` was not called first.
+    ///
+    /// `shape_bindings`: 运行时 SymDim 绑定值（如 `{"seq_len": 6}`）。
+    /// JIT kernel 的 BoundExpr::Symbolic 从 CompiledLayerFn 第 7 参数 [rbp+16] 读取 seq_len。
     pub fn run(
         &self,
         inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         // Dependency validation pass (always runs)
         let mut available: HashSet<String> = inputs.keys().cloned().collect();
@@ -1420,7 +1424,7 @@ impl FusedGraphExecutor {
         // JIT execution path
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         if self.is_compiled {
-            return self.run_compiled(inputs);
+            return self.run_compiled(inputs, shape_bindings);
         }
 
         // No compiled kernels available — refuse to return dummy results.
@@ -1894,6 +1898,7 @@ impl FusedGraphExecutor {
     fn run_compiled(
         &self,
         inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
 
@@ -1908,9 +1913,8 @@ impl FusedGraphExecutor {
             let mut output_buf = vec![0u8; output_bytes];
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
-            // seq_len: 从图的 SymDim 元数据正向传递，禁止从字节数反推
-            // TODO(ARCH-SYMDIM-NO-CONST-DEGRADE): 实现 SymDim 运行时绑定
-            let seq_len = 1; // placeholder — 需要从 ShapeBinding 获取
+            // ARCH-SYMDIM-NO-CONST-DEGRADE: seq_len 从 shape_bindings 正向传递
+            let seq_len = *shape_bindings.get("seq_len").unwrap_or(&1);
 
             unsafe {
                 cn.compiled.execute(
@@ -2795,7 +2799,7 @@ mod tests {
         };
 
         let executor = FusedGraphExecutor::new(graph);
-        let result = executor.run(&HashMap::from([("x".to_string(), vec![0u8; 4])]));
+        let result = executor.run(&HashMap::from([("x".to_string(), vec![0u8; 4])]), &HashMap::new());
         // run() without compile() must return an error, never dummy results
         assert!(result.is_err());
     }
