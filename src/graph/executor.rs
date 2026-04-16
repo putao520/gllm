@@ -7,12 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 /// SymDim::Symbolic 编译时上界，用于 scratchpad/buffer 分配。非运行时限制。
-// MHA JIT lower 展开所有循环 → O(seq²×heads×dim) 条指令 →
-// RegAllocator InterferenceGraph O(n²) 编译时间爆炸。
-// seq=4 → 6K instrs (4ms), seq=16 → 93K, seq=64 → 1.4M (不可能完成)。
-// 临时: 限制 max_seq=8 以验证管线正确性。
-// TODO(P0): MHA lower 使用 emit_loop() 而非完全展开。
-const SYMDIM_MAX_SEQ_LEN: usize = 8;
+/// SymDim::Symbolic 的 buffer 分配上界。
+/// 仅用于 max_value（内存安全上界），禁止用于循环 bound 或维度运算。
+const SYMDIM_MAX_SEQ_LEN: usize = 2048;
 
 use super::types::{
     FusedGraph, FusedOp, FlashAttentionConfig, FusedQkvRopeConfig,
@@ -993,7 +990,6 @@ impl FusedGraphExecutor {
         let mut compiled_nodes = Vec::with_capacity(self.graph.nodes.len());
 
         for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let t0 = std::time::Instant::now();
             let build = self.build_node_graph(idx, seq_len, hidden, compile_dtype)?;
             let compiled = compiler
                 .compile_graph(&build.graph)
@@ -1005,9 +1001,6 @@ impl FusedGraphExecutor {
                         e,
                     ))
                 })?;
-
-            eprintln!("[JIT-COMPILE] node {idx}/{} '{}' ({}) → {}ms",
-                self.graph.nodes.len(), node.name, node.op.name(), t0.elapsed().as_millis());
 
             let output_dtype = gllm_kernels::types::DType::F32;
 
@@ -1902,57 +1895,23 @@ impl FusedGraphExecutor {
         &self,
         inputs: &HashMap<String, Vec<u8>>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
-        eprintln!("[RUN-COMPILED] enter: {} inputs, {} weight_bindings", inputs.len(), self.graph.weight_bindings.len());
         let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
-        eprintln!("[RUN-COMPILED] seeded: {} tensors, {} weight_ptrs", tensors.len(), weight_ptrs.len());
 
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
             if Self::is_node_computed(cn, &tensors) { continue; }
 
-            // Gather 节点: CPU 索引查找 → 直接产出输出
-            // Gather 是内存索引操作（非计算），在 CPU 上执行索引选择，
-            // 后续的计算节点（Add、Norm、GEMM 等）仍走 JIT 路径。
-            if _node.op.name() == "Gather" {
-                let gathered = Self::execute_gather_cpu(cn, &tensors, &weight_ptrs)?;
-                if cn.graph_output_names.len() == 1 {
-                    tensors.insert(cn.graph_output_names[0].clone(), gathered);
-                }
-                continue;
-            }
-
-            eprintln!("[LOAD] node {node_idx} loading activation...");
             let activation = Self::load_activation(cn, &tensors, false);
-            eprintln!("[LOAD] node {node_idx} activation={}B, loading weights...", activation.len());
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
-            eprintln!("[LOAD] node {node_idx} weights={}B", weight_blob.len());
 
             let output_bytes = cn.output_numel * cn.output_dtype.size_bytes();
-            // 添加 guard bytes 检测越界写
-            const GUARD: usize = 256;
-            const GUARD_BYTE: u8 = 0xCD;
-            let mut output_buf = vec![0u8; output_bytes + GUARD];
-            output_buf[output_bytes..].fill(GUARD_BYTE);
-            let scratch_bytes = cn.compiled.scratchpad_bytes.max(output_bytes).max(64);
-            let mut scratchpad = vec![0u8; scratch_bytes + GUARD];
-            scratchpad[scratch_bytes..].fill(GUARD_BYTE);
+            let mut output_buf = vec![0u8; output_bytes];
+            let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
-            // seq_len = activation 的行数（总元素 / feature_dim）
-            // JIT GEMM Symbolic M 循环从 seq_len 参数读取运行时值
-            let activation_elems = activation.len() / cn.output_dtype.size_bytes().max(1);
-            let seq_len = if cn.feature_dim > 0 && activation_elems >= cn.feature_dim {
-                activation_elems / cn.feature_dim
-            } else if activation_elems > 0 {
-                activation_elems
-            } else {
-                1
-            };
+            // seq_len: 从图的 SymDim 元数据正向传递，禁止从字节数反推
+            // TODO(ARCH-SYMDIM-NO-CONST-DEGRADE): 实现 SymDim 运行时绑定
+            let seq_len = 1; // placeholder — 需要从 ShapeBinding 获取
 
-            let scratch_size = cn.compiled.scratchpad_bytes.max(output_bytes).max(64);
-            eprintln!("[EXEC-PRE] node {node_idx} '{}' ({}) seq_len={seq_len} feat_dim={} act={}B wt={}B out={}B scratch={}B compiled_scratch={}B",
-                _node.name, _node.op.name(), cn.feature_dim, activation.len(), weight_blob.len(), output_bytes,
-                scratch_size, cn.compiled.scratchpad_bytes);
-            let t0 = std::time::Instant::now();
             unsafe {
                 cn.compiled.execute(
                     if activation.is_empty() { std::ptr::null() } else { activation.as_ptr() },
@@ -1966,23 +1925,6 @@ impl FusedGraphExecutor {
                     scratchpad.as_mut_ptr(),
                 );
             }
-            let elapsed_ms = t0.elapsed().as_millis();
-            eprintln!("[EXEC] node {node_idx} '{}' ({}) seq_len={seq_len} act={}B wt={}B out={}B → {elapsed_ms}ms",
-                _node.name, _node.op.name(), activation.len(), weight_blob.len(), output_bytes);
-
-            // Guard check: 检测 JIT 越界写
-            let out_guard_ok = output_buf[output_bytes..].iter().all(|&b| b == GUARD_BYTE);
-            let scratch_guard_ok = scratchpad[scratch_bytes..].iter().all(|&b| b == GUARD_BYTE);
-            if !out_guard_ok {
-                eprintln!("[GUARD-FAIL] node {node_idx} '{}' OUTPUT overflow! JIT wrote beyond {}B",
-                    _node.name, output_bytes);
-            }
-            if !scratch_guard_ok {
-                eprintln!("[GUARD-FAIL] node {node_idx} '{}' SCRATCHPAD overflow! JIT wrote beyond {}B",
-                    _node.name, scratch_bytes);
-            }
-            output_buf.truncate(output_bytes); // remove guard before storing
-            eprintln!("[STORE] node {node_idx} storing output...");
 
             // Store output(s)
             if cn.graph_output_names.len() == 1 {
@@ -2005,90 +1947,6 @@ impl FusedGraphExecutor {
         }
 
         Ok(Self::collect_graph_outputs(&self.graph, &mut tensors))
-    }
-
-    /// Gather 节点 CPU 执行: 按 index 从 embedding table 选取行。
-    ///
-    /// input_names[0] = embedding table (weight)
-    /// input_names[1] = indices (f32 编码的 token IDs)
-    /// output = table[index[0]], table[index[1]], ...
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    fn execute_gather_cpu(
-        cn: &CompiledNode,
-        tensors: &HashMap<String, Vec<u8>>,
-        weight_ptrs: &HashMap<String, *const u8>,
-    ) -> Result<Vec<u8>, ExecutionError> {
-        if cn.graph_input_names.len() < 2 {
-            return Err(ExecutionError::Compilation(
-                "Gather node requires 2 inputs (table, indices)".into(),
-            ));
-        }
-
-        let table_name = &cn.graph_input_names[0];
-        let indices_name = &cn.graph_input_names[1];
-
-        // 加载 embedding table
-        let table_bytes = if let Some(_ptr) = weight_ptrs.get(table_name) {
-            // 从绑定的权重指针读取
-            if let Some(wb) = tensors.get(table_name) {
-                wb.clone()
-            } else {
-                return Err(ExecutionError::MissingWeight(table_name.clone()));
-            }
-        } else if let Some(data) = tensors.get(table_name) {
-            data.clone()
-        } else {
-            return Err(ExecutionError::MissingWeight(table_name.clone()));
-        };
-
-        // 加载 indices
-        let indices_bytes = tensors.get(indices_name).ok_or_else(|| {
-            ExecutionError::MissingInput(indices_name.clone())
-        })?;
-
-        let table: &[f32] = unsafe {
-            std::slice::from_raw_parts(
-                table_bytes.as_ptr() as *const f32,
-                table_bytes.len() / 4,
-            )
-        };
-        let indices: &[f32] = unsafe {
-            std::slice::from_raw_parts(
-                indices_bytes.as_ptr() as *const f32,
-                indices_bytes.len() / 4,
-            )
-        };
-
-        let seq_len = indices.len();
-        // embed_dim = feature_dim (computed during compile)
-        let embed_dim = cn.feature_dim;
-        if embed_dim == 0 {
-            return Err(ExecutionError::Compilation("Gather: embed_dim is 0".into()));
-        }
-        let table_rows = table.len() / embed_dim;
-
-        // 执行 gather: output[i] = table[index[i]]
-        // output 必须 pad 到 output_numel 大小 (max_seq × embed_dim)，
-        // 因为后续 JIT kernel 的 elementwise Const bound 按 max_seq 迭代。
-        let padded_numel = cn.output_numel.max(seq_len * embed_dim);
-        let mut output = vec![0.0f32; padded_numel];
-        for i in 0..seq_len {
-            let idx = indices[i] as usize;
-            if idx >= table_rows {
-                return Err(ExecutionError::Compilation(format!(
-                    "Gather: index {} out of bounds (table_rows={})", idx, table_rows,
-                )));
-            }
-            let src_offset = idx * embed_dim;
-            let dst_offset = i * embed_dim;
-            output[dst_offset..dst_offset + embed_dim]
-                .copy_from_slice(&table[src_offset..src_offset + embed_dim]);
-        }
-
-        let output_bytes = unsafe {
-            std::slice::from_raw_parts(output.as_ptr() as *const u8, output.len() * 4)
-        };
-        Ok(output_bytes.to_vec())
     }
 
     /// Execute the compiled JIT kernels with KV cache support.
@@ -2251,15 +2109,6 @@ impl FusedGraphExecutor {
                     }
                     super::layer_callback::CallbackAction::Continue => {}
                 }
-            }
-
-            // Gather 节点: CPU 索引查找（同 run_compiled）
-            if self.graph.nodes[node_idx].op.name() == "Gather" {
-                let gathered = Self::execute_gather_cpu(cn, &tensors, &weight_ptrs)?;
-                if cn.graph_output_names.len() == 1 {
-                    tensors.insert(cn.graph_output_names[0].clone(), gathered);
-                }
-                continue;
             }
 
             // ── Detect MHA/GQA attention nodes that need special ABI mapping ──

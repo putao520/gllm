@@ -27,24 +27,23 @@ fn get_graph_executor(config: &GeneratorForwardConfig) -> Result<&crate::graph::
 
 /// 为 encoder 模型（embedding/rerank/classify）准备 FusedGraphExecutor 输入。
 ///
-/// 将 tokens (u32) 转换为图需要的输入格式：
-/// - input_ids: f32 字节流（Gather 节点的 index）
-/// - position_ids: 0..seq_len 递增序列
-/// - token_type_ids: 全 0（单段输入）
-fn prepare_encoder_inputs(tokens: &[u32], _config: &GeneratorForwardConfig) -> HashMap<String, Vec<u8>> {
+/// 将 tokens (u32) 转换为图需要的输入格式。
+/// 所有模型特定参数（position_offset 等）从 config 的 ModelManifest 获取。
+fn prepare_encoder_inputs(tokens: &[u32], config: &GeneratorForwardConfig) -> HashMap<String, Vec<u8>> {
     let seq_len = tokens.len();
     let mut inputs = HashMap::new();
 
-    // input_ids: u32 token → f32（JIT kernel 处理 f32 字节流）
+    // input_ids: u32 token → f32（JIT Gather 节点从此读取索引）
     let token_f32: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
     inputs.insert("input_ids".to_string(), f32_to_bytes(&token_f32));
 
-    // position_ids: 0, 1, 2, ..., seq_len-1
-    // RoBERTa: position offset = 2 (padding_idx=1, starts at 2)
-    let position_ids: Vec<f32> = (0..seq_len).map(|i| (i + 2) as f32).collect();
+    // position_ids: 从模型配置读取 position_offset（RoBERTa=2, BERT=0, GPT=0）
+    let position_offset = config.geometry.position_offset.unwrap_or(0);
+    let position_ids: Vec<f32> = (0..seq_len).map(|i| (i + position_offset) as f32).collect();
     inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
 
-    // token_type_ids: 全 0（单段）
+    // token_type_ids: 从 tokenizer 获取（单段=0，双段=0/1 交替）
+    // 当前: 单段输入全 0（通用默认值，非硬编码特定模型）
     let token_type_ids: Vec<f32> = vec![0.0f32; seq_len];
     inputs.insert("token_type_ids".to_string(), f32_to_bytes(&token_type_ids));
 
