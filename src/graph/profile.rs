@@ -250,7 +250,7 @@ impl GraphProfiler {
             } else {
                 hidden_dim * intermediate * 3
             };
-            (embed + (attn_per_layer + ffn_per_layer) * num_layers) * 4
+            (embed + (attn_per_layer + ffn_per_layer) * num_layers) * std::mem::size_of::<f32>()
         };
 
         GraphProfile {

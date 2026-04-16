@@ -81,9 +81,9 @@ impl CompactPlatform {
             Self::X86Avx2 => 32,         // 256-bit = 32 bytes
             Self::Aarch64Neon => 16,     // 128-bit = 16 bytes
             Self::Aarch64Sve { vl_bytes } => *vl_bytes,
-            Self::GpuCuda { warp_size } => (*warp_size as usize) * 4, // 32 threads × 4 bytes
-            Self::GpuHip { wavefront_size } => (*wavefront_size as usize) * 4,
-            Self::GpuMetal => 128,       // SIMD group = 32 threads × 4 bytes
+            Self::GpuCuda { warp_size } => (*warp_size as usize) * std::mem::size_of::<f32>(), // 32 threads × sizeof(f32)
+            Self::GpuHip { wavefront_size } => (*wavefront_size as usize) * std::mem::size_of::<f32>(),
+            Self::GpuMetal => 128,       // SIMD group = 32 threads × sizeof(f32)
         }
     }
 }

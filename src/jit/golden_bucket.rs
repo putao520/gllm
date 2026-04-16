@@ -106,7 +106,7 @@ impl GoldenBucketRegistry {
             let smem_efficiency = if let Some(smem) = constraints.smem_size {
                 // 估算 SMEM 利用率
                 let tile = &constraints.optimal_tile_bits;
-                let tile_bytes = tile.tile_m * tile.tile_n * 4; // f32
+                let tile_bytes = tile.tile_m * tile.tile_n * std::mem::size_of::<f32>();
                 (tile_bytes as f32 / smem as f32).min(1.0)
             } else {
                 0.8 // CPU 无 SMEM，给默认值

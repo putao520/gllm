@@ -425,7 +425,7 @@ pub fn inject_dynamic_lora<E: Element>(
     }
 
     // Flatten LoRA weights into a single byte vector
-    let mut data = Vec::with_capacity((adapter.lora_a.len() + adapter.lora_b.len()) * 4);
+    let mut data = Vec::with_capacity((adapter.lora_a.len() + adapter.lora_b.len()) * std::mem::size_of::<f32>());
     for &val in &adapter.lora_a {
         data.extend_from_slice(&val.to_le_bytes());
     }

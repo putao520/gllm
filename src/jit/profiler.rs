@@ -251,14 +251,15 @@ impl LatencyProfiler {
         // 推导 SMEM cliffs: 当 tile 占用超过 SMEM 80% 时 occupancy 下降
         let mut smem_cliffs = Vec::new();
         if smem_size > 0 {
-            // 典型 GEMM tile: 16x16 f32 = 1024 bytes
-            let default_tile_bytes = 16 * 16 * 4; // f32
+            // 典型 GEMM tile: 16x16 f32
+            let f32_bytes = std::mem::size_of::<f32>();
+            let default_tile_bytes = 16 * 16 * f32_bytes;
             let occupancy_ratio = default_tile_bytes as f32 / smem_size as f32;
             if occupancy_ratio > 0.8 {
                 smem_cliffs.push((16, occupancy_ratio));
             }
-            // 大 tile: 32x32 f32 = 4096 bytes
-            let large_tile_bytes = 32 * 32 * 4;
+            // 大 tile: 32x32 f32
+            let large_tile_bytes = 32 * 32 * f32_bytes;
             let large_ratio = large_tile_bytes as f32 / smem_size as f32;
             if large_ratio > 0.8 {
                 smem_cliffs.push((32, large_ratio));
@@ -491,8 +492,8 @@ impl LatencyProfiler {
 
             // 如果性能下降超过 20%，认为 L2 开始颠簸
             if tpe2 > tpe1 * 1.2 {
-                // 估算工作集大小（seq × hidden × 4 字节）
-                let working_set = *seq2 * 1024 * 4; // 假设 hidden=1024
+                // 估算工作集大小（seq × hidden × sizeof(f32)）
+                let working_set = *seq2 * 1024 * std::mem::size_of::<f32>(); // 假设 hidden=1024
                 if working_set > estimated_l2 {
                     return *seq2;
                 }
@@ -500,7 +501,7 @@ impl LatencyProfiler {
         }
 
         // 默认返回 L2 大小对应的 seq_len
-        estimated_l2 / (1024 * 4)
+        estimated_l2 / (1024 * std::mem::size_of::<f32>())
     }
 }
 
