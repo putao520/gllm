@@ -186,7 +186,7 @@ impl GraphProfiler {
         let kv_q_head_ratio = num_kv_heads as f64 / num_attn_heads.max(1) as f64;
 
         // 2 tensors (K+V) * num_kv_heads * head_dim * num_layers * 4 bytes (f32)
-        let kv_bytes_per_token = 2 * num_kv_heads * head_dim * num_layers * 4;
+        let kv_bytes_per_token = 2 * num_kv_heads * head_dim * num_layers * std::mem::size_of::<f32>();
 
         let is_moe = num_experts > 0;
 

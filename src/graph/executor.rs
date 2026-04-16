@@ -689,7 +689,7 @@ fn atomic_op_to_kind(
             let vocab_size = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
                 let dim = &input_shapes[0][input_shapes[0].len() - 1];
                 debug_assert!(!dim.is_symbolic(), "Softmax vocab_size should be Concrete");
-                dim.as_concrete().unwrap_or(dim.max_for_allocation(32000))
+                dim.as_concrete().expect("ARCH-SYMDIM-OUTER-ONLY: Softmax vocab_size must be Concrete")
             } else {
                 1
             };
@@ -700,7 +700,7 @@ fn atomic_op_to_kind(
             let hidden = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
                 let dim = &input_shapes[0][input_shapes[0].len() - 1];
                 debug_assert!(!dim.is_symbolic(), "Residual hidden should be Concrete");
-                dim.as_concrete().unwrap_or(dim.max_for_allocation(4096))
+                dim.as_concrete().expect("ARCH-SYMDIM-OUTER-ONLY: Residual hidden_size must be Concrete")
             } else {
                 1
             };
@@ -1007,8 +1007,11 @@ impl FusedGraphExecutor {
             // Calculate feature_dim: for most ops, it's the last dimension of output shape
             // For ops with symbolic seq_len, output_numel = max_seq_len * feature_dim
             // So feature_dim = output_numel / max_seq_len (where max_seq_len = SYMDIM_MAX_SEQ_LEN)
+            // NOTE: This is a buffer-allocation inverse operation — output_numel was computed as
+            // SYMDIM_MAX_SEQ_LEN * feature_dim during graph construction, so dividing back recovers
+            // the per-token feature dimension. This is NOT an inference-time parameter.
             let feature_dim = if build.output_numel > 0 {
-                build.output_numel / SYMDIM_MAX_SEQ_LEN // max_seq_len used in SymDim::Symbolic
+                build.output_numel / SYMDIM_MAX_SEQ_LEN
             } else {
                 hidden // fallback to hidden_size
             };
@@ -1110,6 +1113,7 @@ impl FusedGraphExecutor {
                 output_numel: p.output_numel,
                 per_output_numel: p.per_output_numel,
                 output_dtype,
+                // NOTE: Buffer-allocation inverse — see compile_nodes() for rationale.
                 feature_dim: if p.output_numel > 0 { p.output_numel / SYMDIM_MAX_SEQ_LEN } else { 0 },
             });
         }
@@ -1223,7 +1227,7 @@ impl FusedGraphExecutor {
                     let table_rows = node.inputs.get(1)
                         .and_then(|name| self.graph.weight_bindings.get(name))
                         .and_then(|wb| wb.shape.first().copied())
-                        .unwrap_or(32000); // fallback vocab_size
+                        .expect("Gather: weight shape must be known for table_rows");
 
                     use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
                     let mut g = CompilerGraph::new();
@@ -1758,7 +1762,7 @@ impl FusedGraphExecutor {
         let Some(kv_layer) = Self::extract_layer_index(node_name) else { return seq_len; };
 
         let kv_dim = num_kv_heads * head_dim;
-        let elem_bytes = 4usize; // f32
+        let elem_bytes = std::mem::size_of::<f32>();
         let cached_len = total_seq - seq_len;
         let cache_max_seq = forward_config.map(|fc| fc.max_seq_len()).unwrap_or(SYMDIM_MAX_SEQ_LEN);
         let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
@@ -1868,7 +1872,7 @@ impl FusedGraphExecutor {
         let (Some(k_name), Some(v_name)) = (k_name, v_name) else { return };
         let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) else { return };
 
-        let elem_bytes = 4usize;
+        let elem_bytes = std::mem::size_of::<f32>();
         let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
         unsafe {
@@ -2266,7 +2270,7 @@ impl FusedGraphExecutor {
                 let op_name = self.graph.nodes[node_idx].op.name();
                 // Full output scan for FusedQkvRope to detect partial writes
                 if op_name == "FusedQkvRope" {
-                    let total_f32 = output_buf.len() / 4;
+                    let total_f32 = output_buf.len() / std::mem::size_of::<f32>();
                     let all_f32: Vec<f32> = output_buf.chunks_exact(4)
                         .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0;4]))).collect();
                     let total_nz = all_f32.iter().filter(|&&v| v != 0.0).count();
@@ -2292,6 +2296,9 @@ impl FusedGraphExecutor {
                     if !cn.per_output_numel.is_empty() {
                         let q_numel = cn.per_output_numel[0];
                         let q_bytes = q_numel * cn.output_dtype.size_bytes();
+                        // NOTE: Buffer-allocation inverse — q_numel was computed as
+                        // SYMDIM_MAX_SEQ_LEN * q_dim during graph construction; dividing back
+                        // recovers the per-token Q dimension for debug diagnostics.
                         let q_dim = if effective_seq > 0 { q_numel / (SYMDIM_MAX_SEQ_LEN.max(1)) } else { 0 };
                         if q_dim > 0 {
                             let q_f32: Vec<f32> = output_buf[..q_bytes].chunks_exact(4)
