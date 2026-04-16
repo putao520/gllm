@@ -63,6 +63,11 @@ pub struct ModelGeometry {
     /// Per-Layer Embedding 每层注入维度。0 = 不使用 PLE。
     pub hidden_size_per_layer_input: usize,
 
+    // ── Tokenizer/Embedding ──
+    /// Position ID 偏移量 (RoBERTa=2, BERT=0, GPT=0)。
+    /// 从 tokenizer_config.json 的 pad_token_id + 1 推导，或模型 config 显式指定。
+    pub position_offset: Option<usize>,
+
     // ── Precision ──
     pub dtype: DType,
     pub norm_eps: f32,
@@ -103,6 +108,7 @@ impl ModelGeometry {
             hidden_size_per_layer_input: config.hidden_size_per_layer_input.unwrap_or(0),
             dtype: config.dtype,
             norm_eps: config.layer_norm_epsilon.unwrap_or(1e-12),
+            position_offset: None,
             num_experts,
             moe_top_k,
             expert_intermediate_size,
