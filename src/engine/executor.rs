@@ -697,7 +697,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 // seq_len 参数仅用于 buffer 分配上界
                 let max_seq_for_alloc = geometry.max_seq_len;
                 let compile_ok = ge.compile_with_cache(max_seq_for_alloc, hidden, geometry.dtype, model_id, jit_backend, &cache)
-                    .map_err(|e| log::error!("JIT compilation failed: {e}"))
+                    .map_err(|e| { eprintln!("[JIT-COMPILE-FAIL] {e}"); log::error!("JIT compilation failed: {e}"); })
                     .is_ok();
 
                 if compile_ok {

@@ -1219,15 +1219,25 @@ impl FusedGraphExecutor {
             FusedOp::Atomic(atomic) => {
                 // ARCH-FULL-JIT §4.3/§4.4: Gather/Slice/Shape 走 JIT，禁止返回空图
                 if atomic.op_type == "Gather" {
-                    // Embedding lookup: output[i] = table[indices[i]]
-                    let embed_dim = node.inputs.get(1)
-                        .and_then(|name| self.graph.weight_bindings.get(name))
-                        .and_then(|wb| wb.shape.last().copied())
-                        .unwrap_or(hidden);
-                    let table_rows = node.inputs.get(1)
-                        .and_then(|name| self.graph.weight_bindings.get(name))
-                        .and_then(|wb| wb.shape.first().copied())
-                        .expect("Gather: weight shape must be known for table_rows");
+                    // ONNX Gather inputs: (data=table, indices). data is the embedding table
+                    // registered in weight_bindings; indices is a runtime input (input_ids, etc.).
+                    let table_name = node.inputs.iter()
+                        .find(|name| self.graph.weight_bindings.contains_key(*name))
+                        .ok_or_else(|| ExecutionError::MissingWeight(format!(
+                            "Gather node '{}' has no weight input in weight_bindings (inputs={:?})",
+                            node.name, node.inputs
+                        )))?;
+                    let wb = &self.graph.weight_bindings[table_name];
+                    let embed_dim = wb.shape.last().copied().ok_or_else(|| {
+                        ExecutionError::MissingWeight(format!(
+                            "Gather weight '{}' has empty shape", table_name
+                        ))
+                    })?;
+                    let table_rows = wb.shape.first().copied().ok_or_else(|| {
+                        ExecutionError::MissingWeight(format!(
+                            "Gather weight '{}' has empty shape", table_name
+                        ))
+                    })?;
 
                     use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
                     let mut g = CompilerGraph::new();

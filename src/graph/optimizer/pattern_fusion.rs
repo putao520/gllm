@@ -331,8 +331,11 @@ impl OptimizationPass for CanonicalizeAttentionPass {
 
         for node in &mut out.nodes {
             if is_attention(node) {
-                // Determine whether to use FlashAttention or GQA
-                if ctx.supports_flash_attention() {
+                // GQA 的 FusedOp 定义隐式假设 causal=true (decoder-only)，对 encoder
+                // 模型错误。因此 encoder 无论是否支持硬件 FlashAttention，都统一走
+                // FlashAttention(causal=false) 分支，让 JIT 在 lower_mha 里用 causal
+                // 参数控制 attention mask (ARCH-ENCODER-ATTENTION-NOCAUSAL)。
+                if ctx.supports_flash_attention() || ctx.is_encoder() {
                     let config = FlashAttentionConfig {
                         num_heads: ctx.num_heads(),
                         num_kv_heads: ctx.num_kv_heads(),
