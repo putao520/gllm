@@ -1708,10 +1708,21 @@ impl FusedGraphExecutor {
         weight_blob
     }
 
-    /// Check if a node's outputs are already present in the tensor map.
+    /// Check if a node's outputs are all provided externally (by seeded inputs).
+    ///
+    /// 唯一合法的跳过场景: 上游通过 `inputs` 传入已计算的 hidden state
+    /// (e.g. inject_knowledge 注入、Gather bypass)。此时节点输出已在 seed
+    /// 阶段注入 `seeded_outputs`，无需重新执行。
+    ///
+    /// ⚠ 禁止基于 `tensors.contains_key` 判断跳过——YAML 架构中 `hidden_0`
+    /// 被每层 `layer_${i}_output_norm` 覆盖写入，从 layer_1 起所有 output_norm
+    /// 的输出 `hidden_0` 在 tensor map 已存在，按 tensor map 判断会错误跳过
+    /// 所有后续层的 output_norm → encoder 实际只执行 layer_0 → 不同文档看到
+    /// 相同 hidden → reranker 退化为恒定 logit。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    fn is_node_computed(cn: &CompiledNode, tensors: &HashMap<String, Vec<u8>>) -> bool {
-        !cn.graph_output_names.is_empty() && cn.graph_output_names.iter().all(|name| tensors.contains_key(name))
+    fn is_node_computed(cn: &CompiledNode, seeded_outputs: &HashSet<String>) -> bool {
+        !cn.graph_output_names.is_empty()
+            && cn.graph_output_names.iter().all(|name| seeded_outputs.contains(name))
     }
 
     /// Collect graph-level output tensors from the tensor map.
@@ -1946,10 +1957,14 @@ impl FusedGraphExecutor {
         shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
+        // 仅 seed 阶段提供的 input 名字视为"外部已计算", 其余节点必须按拓扑顺序
+        // 执行。禁止基于运行时 tensors map 判断跳过 (overwrite tensor 会导致
+        // 错误跳过, 例如 xlmr hidden_0 每层 overwrite)。
+        let seeded_outputs: HashSet<String> = inputs.keys().cloned().collect();
 
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
-            if Self::is_node_computed(cn, &tensors) { continue; }
+            if Self::is_node_computed(cn, &seeded_outputs) { continue; }
 
             let activation = Self::load_activation(cn, &tensors, false);
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
@@ -2048,6 +2063,7 @@ impl FusedGraphExecutor {
         log::debug!("[EXEC-ENTER] run_with_kv_cache layer={} total_seq={} seq_len={} nodes={}", layer, total_seq, seq_len, self.compiled_nodes.len());
 
         let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
+        let seeded_outputs: HashSet<String> = inputs.keys().cloned().collect();
 
         // Build unified KV cache pointer for the compiled kernel.
         // gllm KV cache layout: [K_all_layers | V_all_layers], each half is
@@ -2064,8 +2080,8 @@ impl FusedGraphExecutor {
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
 
-            if Self::is_node_computed(cn, &tensors) {
-                log::trace!("[SKIP] node {node_idx} '{}' outputs already present", self.graph.nodes[node_idx].name);
+            if Self::is_node_computed(cn, &seeded_outputs) {
+                log::trace!("[SKIP] node {node_idx} '{}' outputs seeded externally", self.graph.nodes[node_idx].name);
                 continue;
             }
 
