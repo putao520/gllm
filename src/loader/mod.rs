@@ -840,21 +840,22 @@ impl Loader {
         &mut self,
         backend: &B,
     ) -> Result<WeightsHandle<B, E>> {
-        match self.format {
+        let format = self.format;
+        match format {
             WeightFormat::SafeTensors => {
                 let provider = self
                     .safetensors
                     .as_ref()
                     .ok_or(LoaderError::MissingWeights)?;
-                self.upload_provider(provider, backend)
+                self.upload_provider(provider, backend, format)
             }
             WeightFormat::Gguf => {
                 let provider = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
-                self.upload_provider(provider, backend)
+                self.upload_provider(provider, backend, format)
             }
             WeightFormat::Onnx => {
                 let provider = self.onnx.as_ref().ok_or(LoaderError::MissingWeights)?;
-                self.upload_provider(provider, backend)
+                self.upload_provider(provider, backend, format)
             }
             _ => unreachable!("PyTorch is converted to SafeTensors by load()"),
         }
@@ -864,6 +865,7 @@ impl Loader {
         &self,
         provider: &P,
         backend: &B,
+        format: WeightFormat,
     ) -> Result<WeightsHandle<B, E>> {
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
@@ -897,7 +899,7 @@ impl Loader {
                 Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
                     let data = provider.load_tensor_data(&meta.name)?;
                     let (cloned_meta, tensor, sp_meta_opt) =
-                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref())?;
+                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref(), format)?;
 
                     tensors.insert(meta.name.clone(), tensor);
                     shapes.insert(cloned_meta.name.clone(), cloned_meta.shape.clone());
@@ -966,6 +968,7 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     backend: &B,
     meta: &TensorMeta,
     data: &[u8],
+    format: WeightFormat,
 ) -> Result<(TensorMeta, B::Tensor, Option<Vec<Vec<u16>>>)> {
     let is_f32_backend = std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>();
 
@@ -1029,7 +1032,12 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     // [K=in, N=out] row-major (ONNX MatMul 语义)。方阵下只是语义反 (y=x@W 而非
     // y=x@W.T), 非方阵时会越界。统一在加载边界做 physical transpose → [in, out],
     // 内部 op 只需处理 canonical layout。
-    normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
+    //
+    // 仅对 SafeTensors / PyTorch 路径激活。ONNX export 的 MatMul weight 已经是
+    // canonical [K, N] layout; GGUF 的量化权重走独立 dequant 路径, 不走此函数。
+    if matches!(format, WeightFormat::SafeTensors | WeightFormat::PyTorch) {
+        normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
+    }
 
     if is_f32_backend {
         // Safety: we know E is f32 here
