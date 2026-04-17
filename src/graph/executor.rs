@@ -1227,8 +1227,16 @@ impl FusedGraphExecutor {
                         .ok_or_else(|| ExecutionError::MissingWeight(format!(
                             "Gather node '{}' has no weight input in weight_bindings (inputs={:?})",
                             node.name, node.inputs
-                        )))?;
-                    let wb = &self.graph.weight_bindings[table_name];
+                        )))?
+                        .clone();
+                    let indices_name = node.inputs.iter()
+                        .find(|name| *name != &table_name)
+                        .ok_or_else(|| ExecutionError::MissingInput(format!(
+                            "Gather node '{}' has no indices input (inputs={:?})",
+                            node.name, node.inputs
+                        )))?
+                        .clone();
+                    let wb = &self.graph.weight_bindings[&table_name];
                     let embed_dim = wb.shape.last().copied().ok_or_else(|| {
                         ExecutionError::MissingWeight(format!(
                             "Gather weight '{}' has empty shape", table_name
@@ -1256,7 +1264,17 @@ impl FusedGraphExecutor {
                         vec![indices, table], vec![output], "gather",
                     );
                     let output_numel = SYMDIM_MAX_SEQ_LEN * embed_dim;
-                    return Ok(make_node_build(g, node, output_numel, vec![]));
+
+                    // ARCH-GATHER-ABI-ORDER: JIT Gather 期望 ABI arg 0 = indices,
+                    // arg 1 = table (CompilerGraph g.inputs 顺序)。但 YAML 原节点
+                    // inputs 顺序是 ONNX 规范的 [data=table, indices] — 若直接用
+                    // node.inputs.clone(), load_activation 会把 table 当 activation
+                    // (input_ptr), pack_weight_blob 把 indices 当 weight → JIT 读错
+                    // 数据源, output 会广播成 input_ids bits。必须重排成 [indices, table]
+                    // 让 graph_input_names 与 JIT ABI 一致。
+                    let mut nb = make_node_build(g, node, output_numel, vec![]);
+                    nb.input_names = vec![indices_name, table_name];
+                    return Ok(nb);
                 }
                 if atomic.op_type == "Slice" || atomic.op_type == "Shape" {
                     // Shape: 编译时常量折叠，恒等传递
