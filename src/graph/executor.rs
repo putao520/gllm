@@ -7,9 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 /// SymDim::Symbolic 编译时上界，用于 scratchpad/buffer 分配。非运行时限制。
-/// SymDim::Symbolic 的 buffer 分配上界。
+/// SymDim::Symbolic 的 buffer 分配上界（SSOT 位于 gllm_kernels::compiler::graph）。
 /// 仅用于 max_value（内存安全上界），禁止用于循环 bound 或维度运算。
-const SYMDIM_MAX_SEQ_LEN: usize = 2048;
+use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
 
 use super::types::{
     FusedGraph, FusedOp, FlashAttentionConfig, FusedQkvRopeConfig,

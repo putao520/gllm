@@ -33,7 +33,7 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph_builders::SYMDIM_MAX_SEQ_LEN) };
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN) };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
     let q_dim = num_heads * head_dim;
@@ -165,7 +165,7 @@ pub(crate) fn build_fused_ffn_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph_builders::SYMDIM_MAX_SEQ_LEN) };
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN) };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
 
@@ -231,7 +231,7 @@ pub(crate) fn build_fused_moe_layer_graph_symbolic(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let ft = dtype;
-    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph_builders::SYMDIM_MAX_SEQ_LEN) };
+    let sym_s = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN) };
     let s = 1; // placeholder for OpKind fields (actual seq_len from tensor shapes)
     let h = hidden;
 
