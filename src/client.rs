@@ -825,7 +825,7 @@ impl Client {
         let state = self.require_state()?;
         let mut executor = state.backend.executor_mut();
         let mut scores = Vec::with_capacity(documents.len());
-        for (i, doc) in documents.iter().enumerate() {
+        for doc in documents.iter() {
             let score = executor.rerank_pair(&query, doc).map_err(|e| {
                 ClientError::RuntimeError(format!("rerank_pair error: {}", e))
             })?;
@@ -834,9 +834,6 @@ impl Client {
                     "rerank_pair returned empty scores for query/doc pair".to_string(),
                 )
             })?;
-            if std::env::var("GLLM_DUMP_RERANK").is_ok() {
-                eprintln!("[RERANK] doc[{i}] score={} snippet={:.40?}", val, doc);
-            }
             scores.push(val);
         }
 

@@ -999,8 +999,13 @@ impl FusedGraphExecutor {
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let mut compiled_nodes = Vec::with_capacity(self.graph.nodes.len());
 
+        // Pre-scan: 按拓扑顺序建立每个 tensor 的 shape 表。下游 node 查这个表
+        // 替代 default [seq, hidden], 正确处理 FFN intermediate_size ≠ hidden_size
+        // 等跨节点 feature_dim 变化场景。
+        let tensor_shapes = self.build_tensor_shape_map(hidden);
+
         for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let build = self.build_node_graph(idx, seq_len, hidden, compile_dtype)?;
+            let build = self.build_node_graph_with_shapes(idx, seq_len, hidden, compile_dtype, &tensor_shapes)?;
             let compiled = compiler
                 .compile_graph(&build.graph)
                 .map_err(|e| {
@@ -1160,12 +1165,149 @@ impl FusedGraphExecutor {
 
     /// Result of building a CompilerGraph for one FusedNode.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    /// 按拓扑顺序 pre-scan 每个 tensor 的 shape。key = tensor name (node output
+    /// 或 graph input / weight), value = SymDim shape。下游 node 的
+    /// build_node_graph 查此表替代 default [seq, hidden]。
+    ///
+    /// ARCH-TENSOR-SHAPE-PRE-SCAN: 修复 FFN intermediate_size (4096) 与 hidden_size
+    /// (1024) 不同时, GELU/Add/etc 节点 feature_dim 被错误默认为 hidden 导致
+    /// output 只写部分元素, 下游 MatMul 读未初始化内存产生 NaN/Inf。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn build_tensor_shape_map(&self, hidden: usize) -> HashMap<String, Vec<gllm_kernels::compiler::SymDim>> {
+        use gllm_kernels::compiler::SymDim;
+        let mut shapes: HashMap<String, Vec<SymDim>> = HashMap::new();
+        let seq_sym = SymDim::Symbolic { name: "seq_len".to_string(), max_value: Some(SYMDIM_MAX_SEQ_LEN) };
+
+        // 1. Graph inputs (input_ids / position_ids / token_type_ids) = [seq]
+        for name in &self.graph.inputs {
+            shapes.insert(name.clone(), vec![seq_sym.clone()]);
+        }
+
+        // 2. Weight bindings: 读 shape 直接存。注意 MatMul weight 在 build_node_graph
+        //    中会被 swap 到 [K, N], 这里存原 [out, in] 原样, 由调用方决定是否 swap。
+        for (name, wb) in &self.graph.weight_bindings {
+            if !wb.shape.is_empty() {
+                let shape: Vec<SymDim> = wb.shape.iter().map(|&d| SymDim::Concrete(d)).collect();
+                shapes.insert(name.clone(), shape);
+            }
+        }
+
+        // 3. 按拓扑顺序 (FusedGraph.nodes 已是拓扑序) 推每个 node 的 output shape
+        for node in &self.graph.nodes {
+            if let super::types::FusedOp::Atomic(atomic) = &node.op {
+                let out_shape = Self::infer_atomic_output_shape(
+                    &atomic.op_type, &node.inputs, &shapes, hidden, &seq_sym,
+                );
+                for out_name in &node.outputs {
+                    shapes.insert(out_name.clone(), out_shape.clone());
+                }
+            } else {
+                // FusedOp (FlashAttention/SwiGLU/RoPE 等): 用 hidden 作为 feature_dim
+                // 的保守推测。这些 op 有自己的 build_*_graph, 不依赖此表。
+                for out_name in &node.outputs {
+                    shapes.insert(out_name.clone(), vec![seq_sym.clone(), SymDim::Concrete(hidden)]);
+                }
+            }
+        }
+        shapes
+    }
+
+    /// 根据 atomic op 类型和 input shapes 推导 output shape。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn infer_atomic_output_shape(
+        op_type: &str,
+        input_names: &[String],
+        shape_map: &HashMap<String, Vec<gllm_kernels::compiler::SymDim>>,
+        hidden: usize,
+        seq_sym: &gllm_kernels::compiler::SymDim,
+    ) -> Vec<gllm_kernels::compiler::SymDim> {
+        use gllm_kernels::compiler::SymDim;
+        let default_act = vec![seq_sym.clone(), SymDim::Concrete(hidden)];
+
+        let get_shape = |name: &str| -> Vec<SymDim> {
+            shape_map.get(name).cloned().unwrap_or_else(|| default_act.clone())
+        };
+
+        match op_type {
+            "MatMul" | "Gemm" => {
+                // output = [M, weight_N]. weight SafeTensors [out=N, in=K] → N is shape[0]
+                if input_names.len() < 2 { return default_act; }
+                let act_shape = get_shape(&input_names[0]);
+                let w_shape = get_shape(&input_names[1]);
+                if w_shape.len() != 2 { return default_act; }
+                // weight shape 来自 weight_bindings, 是 HF [out, in] 布局 (Linear 权重)。
+                // MatMul(activation [M, K], weight [out=N, in=K]) → [M, N]
+                // N = w_shape[0]
+                let m = if act_shape.len() >= 2 { act_shape[act_shape.len() - 2].clone() } else { seq_sym.clone() };
+                let n = w_shape[0].clone();
+                vec![m, n]
+            }
+            "Gather" => {
+                // embed_table [vocab, hidden], indices [seq] → output [seq, hidden]
+                let table_shape = input_names.iter()
+                    .find_map(|n| {
+                        let s = get_shape(n);
+                        if s.len() == 2 { Some(s) } else { None }
+                    });
+                if let Some(t) = table_shape {
+                    vec![seq_sym.clone(), t[1].clone()]
+                } else {
+                    default_act
+                }
+            }
+            "LayerNormalization" | "SimplifiedLayerNormalization" | "LayerNorm" | "RMSNorm" | "RmsNorm"
+            | "Silu" | "SiLU" | "Swish" | "Gelu" | "GELU" | "Tanh" | "Softmax" => {
+                // unary: 继承 input[0] 的 shape
+                if !input_names.is_empty() {
+                    get_shape(&input_names[0])
+                } else { default_act }
+            }
+            "Add" | "Mul" | "Residual" | "Sub" => {
+                // binary: 取非 1D (非 bias) 的 input 作为基准; 否则 input[0]
+                if input_names.is_empty() { return default_act; }
+                let s0 = get_shape(&input_names[0]);
+                if input_names.len() >= 2 {
+                    let s1 = get_shape(&input_names[1]);
+                    if s0.len() >= 2 { return s0; }
+                    if s1.len() >= 2 { return s1; }
+                }
+                s0
+            }
+            _ => {
+                if !input_names.is_empty() { get_shape(&input_names[0]) } else { default_act }
+            }
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn build_node_graph_with_shapes(
+        &self,
+        node_idx: usize,
+        seq_len: usize,
+        hidden: usize,
+        dtype: gllm_kernels::types::DType,
+        shape_map: &HashMap<String, Vec<gllm_kernels::compiler::SymDim>>,
+    ) -> Result<NodeGraphBuild, ExecutionError> {
+        self.build_node_graph_inner(node_idx, seq_len, hidden, dtype, Some(shape_map))
+    }
+
     fn build_node_graph(
         &self,
         node_idx: usize,
-        _seq_len: usize, // Deprecated: all graphs use SymDim::Symbolic now
+        seq_len: usize,
         hidden: usize,
         dtype: gllm_kernels::types::DType,
+    ) -> Result<NodeGraphBuild, ExecutionError> {
+        self.build_node_graph_inner(node_idx, seq_len, hidden, dtype, None)
+    }
+
+    fn build_node_graph_inner(
+        &self,
+        node_idx: usize,
+        _seq_len: usize,
+        hidden: usize,
+        dtype: gllm_kernels::types::DType,
+        shape_map: Option<&HashMap<String, Vec<gllm_kernels::compiler::SymDim>>>,
     ) -> Result<NodeGraphBuild, ExecutionError> {
         let node = &self.graph.nodes[node_idx];
         let max_seq_len = SYMDIM_MAX_SEQ_LEN; // SymDim::Symbolic max_value
@@ -1325,6 +1467,14 @@ impl FusedGraphExecutor {
                                 return shape;
                             }
                         }
+                        // ARCH-TENSOR-SHAPE-PRE-SCAN: 查 pre-scan 构建的 shape map,
+                        // 覆盖 default [seq, hidden] 对 FFN intermediate (4096) 等
+                        // 非 hidden 维度的场景。
+                        if let Some(map) = shape_map {
+                            if let Some(s) = map.get(name) {
+                                return s.clone();
+                            }
+                        }
                         vec![seq_len_sym.clone(), SymDim::Concrete(hidden)]
                     })
                     .collect();
@@ -1346,6 +1496,41 @@ impl FusedGraphExecutor {
                                     // Activation shape was defaulted; fix K from weight
                                     let m = input_shapes[0][input_shapes[0].len() - 2].clone();
                                     input_shapes[0] = vec![m, SymDim::Concrete(*weight_k)];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Elementwise op (Add/Mul): 若某个 input 是 1D bias 而另一个 activation
+                // 被默认为 [seq, hidden=1024], 用 bias 的唯一维度修正 activation 的
+                // feature_dim。典型场景: FFN intermediate_bias 的 bias shape=[4096],
+                // activation 实际 [seq, 4096] 但被默认成 [seq, 1024] → Add JIT 只写前
+                // 1024 列, 后 3072 列未初始化 → 下游 MatMul 读垃圾 NaN/Inf。
+                //
+                // 此启发式修正仅覆盖 Add/Mul 二元 elementwise, 不影响 MatMul/LayerNorm。
+                let is_elementwise_binary = matches!(
+                    atomic.op_type.as_str(),
+                    "Add" | "Mul" | "Residual"
+                );
+                if is_elementwise_binary && input_shapes.len() == 2 {
+                    // 找 1D bias input
+                    let (bias_idx, bias_dim) = if input_shapes[0].len() == 1 {
+                        (0usize, input_shapes[0][0].clone())
+                    } else if input_shapes[1].len() == 1 {
+                        (1usize, input_shapes[1][0].clone())
+                    } else {
+                        (usize::MAX, SymDim::Concrete(0))
+                    };
+                    if bias_idx != usize::MAX {
+                        if let SymDim::Concrete(bias_feat) = bias_dim {
+                            let act_idx = 1 - bias_idx;
+                            if input_shapes[act_idx].len() >= 2 {
+                                let last = input_shapes[act_idx].len() - 1;
+                                let act_feat = &input_shapes[act_idx][last];
+                                let needs_fix = matches!(act_feat, SymDim::Concrete(f) if *f != bias_feat);
+                                if needs_fix && !self.graph.weight_bindings.contains_key(&node.inputs[act_idx]) {
+                                    input_shapes[act_idx][last] = SymDim::Concrete(bias_feat);
                                 }
                             }
                         }
@@ -1989,6 +2174,24 @@ impl FusedGraphExecutor {
                     output_buf.as_mut_ptr(),
                     scratchpad.as_mut_ptr(),
                 );
+            }
+
+            // Debug: GLLM_DUMP_LAYERS=/path/to/dir 时 dump 每个节点 output (仅
+            // live 部分 seq_len*feature_dim)。格式: 4B u32 seq_len + 4B u32
+            // feature_dim + seq*feat*4B f32 raw。
+            if let Ok(dump_dir) = std::env::var("GLLM_DUMP_LAYERS") {
+                use std::io::Write;
+                let _ = std::fs::create_dir_all(&dump_dir);
+                let node_name = &self.graph.nodes[node_idx].name;
+                let path = format!("{}/{:03}_{}.bin", dump_dir, node_idx, node_name);
+                if let Ok(mut f) = std::fs::File::create(&path) {
+                    let feat = cn.feature_dim.max(1) as u32;
+                    let sl = seq_len as u32;
+                    f.write_all(&sl.to_le_bytes()).ok();
+                    f.write_all(&feat.to_le_bytes()).ok();
+                    let live_bytes = (seq_len * cn.feature_dim.max(1) * cn.output_dtype.size_bytes()).min(output_buf.len());
+                    f.write_all(&output_buf[..live_bytes]).ok();
+                }
             }
 
             // Store output(s)
