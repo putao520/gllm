@@ -687,6 +687,7 @@ fn atomic_op_to_kind(
         "Mul" => Ok(OpKind::Mul),
         "Silu" | "SiLU" | "Swish" => Ok(OpKind::Silu),
         "Gelu" | "GELU" => Ok(OpKind::Gelu),
+        "Tanh" => Ok(OpKind::Tanh),
         "SimplifiedLayerNormalization" => Ok(OpKind::RmsNorm { eps: 1e-6 }),
         "LayerNormalization" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "Softmax" => {

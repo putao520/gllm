@@ -150,6 +150,10 @@ pub fn map_architecture_token(token: &str) -> Option<String> {
 static KIND_TEMPLATE_OVERRIDE: &[(&str, ModelKind, &str)] = &[
     ("qwen3", ModelKind::Embedding, "qwen3-embed"),
     ("qwen3", ModelKind::Reranker, "qwen3-reranker"),
+    // XLM-R / BERT / RoBERTa 架构的 reranker (如 bge-reranker-v2-m3) 在
+    // encoder 之后附加 RobertaClassificationHead (dense + tanh + out_proj)，
+    // 使用独立模板 xlmr-reranker 表达完整图，不能用 encoder-only 的 xlmr。
+    ("xlmr", ModelKind::Reranker, "xlmr-reranker"),
 ];
 
 /// Map architecture token string to template name, respecting model kind.
@@ -171,6 +175,25 @@ pub fn map_architecture_token_for_kind(token: &str, kind: ModelKind) -> Option<S
         }
     }
     Some(base)
+}
+
+/// 按 ModelKind 对已解析的 template name 做 override (SafeTensors/ONNX 路径)。
+///
+/// `map_architecture_token_for_kind` 从 HF token 解析，适用于 GGUF;
+/// 本函数从**已确定的模板名**做 kind override，适用于 SafeTensors/ONNX/PyTorch
+/// 路径 (loader.detect_architecture 返回 template name 时)。
+///
+/// 返回 None 表示无需 override，调用方应保持原模板名。
+pub fn map_kind_template(template_name: &str, kind: ModelKind) -> Option<String> {
+    crate::arch::register_builtin_templates();
+    let (_, _, override_template) = KIND_TEMPLATE_OVERRIDE
+        .iter()
+        .find(|&&(t, k, _)| t == template_name && k == kind)?;
+    if crate::arch::is_valid_template(override_template) {
+        Some(override_template.to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

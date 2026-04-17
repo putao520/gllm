@@ -660,7 +660,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let model_id = &manifest.model_id;
 
             // Phase 1: build uncompiled executor (template expand + graph optimize, NO JIT)
-            let uncompiled = get_template(&manifest.arch)
+            // ARCH-TEMPLATE-KIND-OVERRIDE: manifest.arch 是 encoder/decoder 基础模板,
+            // ModelKind (Reranker/Embedding) 可能需要专用模板 (如 xlmr → xlmr-reranker
+            // 加 classifier head)。先走 KIND 查找, 未命中回落到基础模板。
+            let effective_arch = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
+                .unwrap_or_else(|| manifest.arch.clone());
+            let uncompiled = get_template(&effective_arch)
                 .map(|tmpl| tmpl.name.clone())
                 .and_then(|arch_name| {
                     build_uncompiled_executor_from_yaml(

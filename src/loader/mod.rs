@@ -1024,6 +1024,13 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
     deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
+    // ARCH-WEIGHT-CANONICAL-LAYOUT: HF SafeTensors/PyTorch 的 Linear 权重存储为
+    // [out_features, in_features] row-major, 但 gllm-kernels JIT GEMM 约定 B 是
+    // [K=in, N=out] row-major (ONNX MatMul 语义)。方阵下只是语义反 (y=x@W 而非
+    // y=x@W.T), 非方阵时会越界。统一在加载边界做 physical transpose → [in, out],
+    // 内部 op 只需处理 canonical layout。
+    normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
+
     if is_f32_backend {
         // Safety: we know E is f32 here
         let as_e: &[E] =
@@ -1038,6 +1045,72 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
         "backend dtype {} not fully supported for zero-copy upload after heuristics",
         std::any::type_name::<E>()
     )))
+}
+
+/// HF SafeTensors/PyTorch 的 Linear 权重 layout 归一化。
+///
+/// 问题: HF `nn.Linear.weight` 的内存布局是 `[out_features, in_features]` row-major,
+/// 前向为 `y = x @ W.T`。但 gllm-kernels JIT GEMM 的 B 输入约定是 `[K, N]` row-major
+/// (ONNX MatMul 语义, `y = x @ B`)。直接用 HF 布局会得到错误结果 (方阵下 shape 一致
+/// 但数值错误), 非方阵时 N ≠ K 还会越界 SIGSEGV。
+///
+/// 根治: 加载边界统一把 HF `[out, in]` 物理转置成 canonical `[in, out]` 布局并更新
+/// meta.shape。内部 op 只处理 canonical layout (ARCH-WEIGHT-CANONICAL-LAYOUT)。
+///
+/// 只对真正的 Linear 权重生效 — 排除 embedding / LayerNorm / bias / 非 2D tensor。
+fn normalize_linear_weight_layout(meta: &mut TensorMeta, data: &mut Vec<f32>) {
+    if !is_linear_weight(&meta.name, &meta.shape) {
+        return;
+    }
+    let rows = meta.shape[0]; // out_features (HF)
+    let cols = meta.shape[1]; // in_features (HF)
+    if rows * cols != data.len() {
+        log::warn!(
+            "normalize_linear_weight_layout: '{}' shape {:?} does not match data len {}, skip",
+            meta.name, meta.shape, data.len()
+        );
+        return;
+    }
+    // Row-major [rows, cols] → [cols, rows] in-place via new buffer (transpose).
+    let mut out = vec![0.0f32; data.len()];
+    for r in 0..rows {
+        for c in 0..cols {
+            out[c * rows + r] = data[r * cols + c];
+        }
+    }
+    *data = out;
+    meta.shape = vec![cols, rows]; // canonical [in, out] = [K, N]
+}
+
+/// Heuristic: 判断一个 2D tensor 是否是 Linear 权重 (需要 canonical layout 归一化)。
+fn is_linear_weight(name: &str, shape: &[usize]) -> bool {
+    if shape.len() != 2 {
+        return false;
+    }
+    if !name.ends_with(".weight") {
+        return false;
+    }
+    // Embedding weight 是 [vocab, hidden], 用于 Gather 不是 MatMul, 不能转置。
+    let excluded_substrings = [
+        "embeddings.word_embeddings",
+        "embeddings.position_embeddings",
+        "embeddings.token_type_embeddings",
+        "wte.",                 // GPT-style word/token embedding
+        "wpe.",                 // GPT-style position embedding
+        "embed_tokens",         // Llama/Qwen/Mistral token embedding
+        "token_embd",           // GGUF token embedding
+        "LayerNorm",            // LayerNorm.weight (1D 已在 shape 检查排除, 双保险)
+        "layer_norm",
+        "RMSNorm",
+        "rms_norm",
+        ".norm.",
+    ];
+    for ex in &excluded_substrings {
+        if name.contains(ex) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Applies Tier II structural sparsity heuristic on FFN matrices.

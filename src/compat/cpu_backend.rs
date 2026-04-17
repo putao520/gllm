@@ -584,11 +584,16 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let outputs = executor.run(&inputs, &bindings).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor rerank run failed: {e}"))
         })?;
-        // Rerank: 提取 [CLS] token (第 0 行) 的 hidden state 作为分数
+        // Rerank JIT 图: xlmr-reranker 模板已把 classifier head 编织进图,
+        // 输出 rerank_logit 的 shape 是 [batch, seq_len, 1] (每个 token 一个 logit,
+        // Linear 对 token 独立作用)。CLS token (position 0) 的 logit 是最终相关性分数。
+        // 对非 reranker 模板 (encoder-only), 输出仍是 [batch, seq_len, hidden] —
+        // 取前 1 个值作为兜底 (CLS 的第 0 个特征), 但应优先配 xlmr-reranker 模板。
         let hidden = extract_final_hidden(&outputs, executor)?;
-        let hidden_size = config.hidden_size();
-        // 使用第一个 token 的表示作为分数
-        Ok(hidden[..hidden_size].to_vec())
+        if hidden.is_empty() {
+            return Err(BE::Other("rerank forward produced empty output tensor".into()));
+        }
+        Ok(vec![hidden[0]])
     }
 
     fn classify_forward_gpu_pure(
