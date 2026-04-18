@@ -307,6 +307,12 @@ impl ArchTemplate {
                             if node_def.op_type == "DualRotaryEmbedding" {
                                 let expanded = self.expand_dual_rope(node_def, config, &repeat_block.var, i)?;
                                 nodes.extend(expanded);
+                            } else if node_def.op_type == "QkNorm" {
+                                // QkNorm op 单 input 单 output,但 YAML 常写成 (q, k) → (q_normed, k_normed)
+                                // 的高级抽象。展开为两个独立 QkNorm 节点,注入 head_dim (从
+                                // ResolvedConfig) 供 atomic_op_to_kind 按 require_usize 读取。
+                                let expanded = self.expand_qk_norm(node_def, config, &repeat_block.var, i)?;
+                                nodes.extend(expanded);
                             } else {
                                 nodes.push(self.node_def_to_onnx(
                                     node_def,
@@ -517,6 +523,74 @@ impl ArchTemplate {
             attributes: mk_attrs(),
         };
 
+        Ok(vec![q_node, k_node])
+    }
+
+    /// 把 YAML 里高级 `QkNorm` 节点(2 输入 2 输出, q/k 同时 L2 归一化)
+    /// 展开为两个独立 `QkNorm` OnnxNode,每个 1 input 1 output,并注入
+    /// `head_dim` 属性(从 `ResolvedConfig`)。
+    ///
+    /// 跟 expand_dual_rope 同模式: YAML 保持高层意图,模板引擎做语义展开。
+    /// `OpKind::QkNorm { head_dim }` 只接受单路输入,atomic_op_to_kind 要求
+    /// `head_dim` 属性强制存在 (require_usize)。
+    fn expand_qk_norm(
+        &self,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        var: &str,
+        layer_idx: usize,
+    ) -> Result<Vec<crate::loader::onnx::OnnxNode>, TemplateError> {
+        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
+
+        let substitute = |s: &str| -> String {
+            let mut result = super::resolve::substitute_placeholders(s, config);
+            result = result.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+            result = result.replace(&format!("${}$", var), &layer_idx.to_string());
+            result
+        };
+
+        if node_def.inputs.len() != 2 || node_def.outputs.len() != 2 {
+            return Err(TemplateError::Invalid(format!(
+                "QkNorm '{}' 必须有 2 个输入 (q, k) 和 2 个输出 (q_normed, k_normed), 实际 inputs={} outputs={}",
+                node_def.name, node_def.inputs.len(), node_def.outputs.len(),
+            )));
+        }
+
+        let head_dim = config.get_int("head_dim").ok_or_else(|| TemplateError::Invalid(
+            "QkNorm 展开时配置缺少 head_dim".into()))? as i64;
+
+        let base_name = substitute(&node_def.name);
+        let q_in  = substitute(&node_def.inputs[0]);
+        let k_in  = substitute(&node_def.inputs[1]);
+        let q_out = substitute(&node_def.outputs[0]);
+        let k_out = substitute(&node_def.outputs[1]);
+
+        let mk_attrs = || -> std::collections::HashMap<String, OnnxAttribute> {
+            let mut attrs = std::collections::HashMap::new();
+            attrs.insert("head_dim".into(), OnnxAttribute {
+                name: "head_dim".into(),
+                value: OnnxAttributeValue::Int(head_dim),
+                doc_string: String::new(), ref_attr_name: None, attr_type: None,
+            });
+            attrs
+        };
+
+        let q_node = OnnxNode {
+            name: format!("{}_q", base_name),
+            op_type: "QkNorm".into(),
+            domain: String::new(),
+            inputs: vec![q_in],
+            outputs: vec![q_out],
+            attributes: mk_attrs(),
+        };
+        let k_node = OnnxNode {
+            name: format!("{}_k", base_name),
+            op_type: "QkNorm".into(),
+            domain: String::new(),
+            inputs: vec![k_in],
+            outputs: vec![k_out],
+            attributes: mk_attrs(),
+        };
         Ok(vec![q_node, k_node])
     }
 
@@ -843,6 +917,57 @@ graph:
         for node_idx in [6, 7] {
             assert!((read_f32(&graph.nodes[node_idx].attributes, "theta") - 1_000_000.0).abs() < 1e-2);
             assert!((read_f32(&graph.nodes[node_idx].attributes, "partial") - 0.25).abs() < 1e-6);
+        }
+    }
+
+    /// QkNorm YAML 节点 (2in2out) 展开为两个独立 1in1out QkNorm 节点,
+    /// 每个带 head_dim 属性。
+    #[test]
+    fn qk_norm_expands_to_two_nodes_with_head_dim() {
+        use crate::loader::onnx::OnnxAttributeValue;
+
+        let yaml = r#"
+name: gemma4_qk_test
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+  outputs:
+    - name: logits
+      dtype: f32
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_qk_norm"
+          op_type: QkNorm
+          inputs: ["q_${i}", "k_${i}"]
+          outputs: ["q_normed_${i}", "k_normed_${i}"]
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 2;
+        config.head_dim = 128;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        assert_eq!(graph.nodes.len(), 4, "2 层 × 2 节点 = 4 个 QkNorm");
+
+        for i in 0..2 {
+            let q = &graph.nodes[i * 2];
+            let k = &graph.nodes[i * 2 + 1];
+            assert_eq!(q.op_type, "QkNorm");
+            assert_eq!(k.op_type, "QkNorm");
+            assert_eq!(q.name, format!("layer_{i}_qk_norm_q"));
+            assert_eq!(k.name, format!("layer_{i}_qk_norm_k"));
+            assert_eq!(q.inputs, vec![format!("q_{i}")]);
+            assert_eq!(q.outputs, vec![format!("q_normed_{i}")]);
+            assert_eq!(k.inputs, vec![format!("k_{i}")]);
+            assert_eq!(k.outputs, vec![format!("k_normed_{i}")]);
+            match q.attributes.get("head_dim").map(|a| &a.value) {
+                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 128),
+                other => panic!("head_dim 属性缺失或类型错误: {:?}", other),
+            }
         }
     }
 

@@ -107,6 +107,10 @@ graph:
           inputs: ["layer_${i}_q_rope", "layer_${i}_k_rope", "layer_${i}_v_normed"]
           outputs: ["layer_${i}_attn_out"]
           attributes:
+            num_heads: "${num_attention_heads}"
+            num_kv_heads: "${num_key_value_heads}"
+            head_dim: "${head_dim}"
+            causal: 1
             sliding_window: "${sliding_window}"
             per_layer_type: 1
 
