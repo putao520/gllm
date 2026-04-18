@@ -525,8 +525,12 @@ impl GgufReader {
 impl TensorProvider for GgufReader {
     fn tensor_info(&self, name: &str) -> Option<TensorMeta> {
         let info = self.tensor_info(name).ok()?;
+        // GGUF 的 ne[0] 是 innermost (row length), [ne0, ne1, ...] 对应 HF 的
+        // [..., ne1, ne0] (row-major)。整个项目其他位置 (resolve.rs / executor Gather
+        // / weight_helpers) 都假定 HF 顺序 [outer, ..., inner], 在 TensorProvider
+        // 边界反转一次,保证下游语义统一 (ARCH-WEIGHT-CANONICAL-LAYOUT)。
         let mut shape = Vec::with_capacity(info.shape.len());
-        for &dim in &info.shape {
+        for &dim in info.shape.iter().rev() {
             shape.push(usize::try_from(dim).ok()?);
         }
         Some(TensorMeta {
@@ -539,7 +543,8 @@ impl TensorProvider for GgufReader {
     fn iter_tensors(&self) -> impl Iterator<Item = TensorMeta> {
         self.tensors.iter().filter_map(|info| {
             let mut shape = Vec::with_capacity(info.shape.len());
-            for &dim in &info.shape {
+            // 同 tensor_info: GGUF→HF shape 顺序反转。
+            for &dim in info.shape.iter().rev() {
                 match usize::try_from(dim) {
                     Ok(d) => shape.push(d),
                     Err(_) => {
