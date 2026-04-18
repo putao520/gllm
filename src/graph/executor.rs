@@ -556,16 +556,22 @@ fn build_gqa_graph(
     let mut g = CompilerGraph::new();
     let dt = dtype;
     let q_dim = config.num_heads * config.head_dim;
-    let kv_dim = config.num_kv_heads * config.head_dim;
 
     let seq_len_sym = SymDim::Symbolic {
         name: "seq_len".to_string(),
         max_value: Some(SYMDIM_MAX_SEQ_LEN),
     };
 
+    // ARCH-GQA-RESHAPE (SPEC 01-JIT-PIPELINE.md §437): GQA 展开含 Reshape(K/V)。
+    // gllm caller 端 (FusedGraphExecutor::expand_gqa_heads) 把 K/V 从
+    // [seq, num_kv_heads*head_dim] 按 group_size 复制扩展为 [seq, num_heads*head_dim]
+    // → JIT kernel 里 Q/K/V 三者 head 数对齐,lower_mha 走对称 MHA 路径 (h_off
+    // 同时索引 Q/K/V),避免在 attention kernel 内部做 GQA 分组映射时遭遇
+    // ARCH-REGALLOC-COUNTER-NOSPILL 嵌套循环限制。因此 CompilerGraph 中 K/V
+    // 声明为 q_dim (广播后的目标宽度),与 caller 提供的 expanded 张量一致。
     let q = g.add_tensor("q", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
-    let k = g.add_tensor("k", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
-    let v = g.add_tensor("v", vec![seq_len_sym.clone(), SymDim::Concrete(kv_dim)], dt);
+    let k = g.add_tensor("k", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
+    let v = g.add_tensor("v", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
     g.inputs = vec![q, k, v];
 
     let out = g.add_tensor("gqa_out", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
@@ -573,7 +579,11 @@ fn build_gqa_graph(
         OpKind::MultiHeadAttention {
             seq_len: seq_len_sym,
             num_heads: config.num_heads,
-            num_kv_heads: config.num_kv_heads,
+            // num_kv_heads 传 num_heads:JIT kernel 看到对称 MHA 语义。
+            // 原始 GQAConfig.num_kv_heads 仍保留在 config 里供 KV cache 写入等其他
+            // 逻辑使用 (cache 按真实 kv_head 布局,expand 仅发生在 per-step 喂给
+            // JIT 的临时 tensor 上)。
+            num_kv_heads: config.num_heads,
             head_dim: config.head_dim,
             causal: true, // GQA is decoder-only, always causal
         },
@@ -2536,12 +2546,16 @@ impl FusedGraphExecutor {
                 self.graph.nodes[node_idx].name,
                 self.graph.nodes[node_idx].op.name());
 
-            // NOTE: expand_gqa_heads is intentionally NOT called here.
-            // The JIT MHA attention kernel (emit_multi_head_attention) handles GQA
-            // natively via (num_heads / num_kv_heads) head grouping. K/V are passed
-            // with kv_dim stride and kv_head indexing is done inside the kernel.
-            // Expanding K/V from kv_dim to q_dim before packing would corrupt the
-            // row stride expected by the JIT kernel.
+            // ARCH-GQA-RESHAPE (SPEC 01-JIT-PIPELINE.md §437): GQA 展开含 Reshape(K/V)。
+            // expand_gqa_heads 把 K/V 从 [seq, num_kv_heads*head_dim] broadcast
+            // 到 [seq, num_heads*head_dim],对应 SPEC §437 的 Reshape(K/V) 步骤。
+            // JIT MHA kernel (lower_mha_with_hook) 因此看到对称 MHA 语义,
+            // h_off 同时正确索引 Q/K/V,不需要在 attention kernel 内做 GQA 分组
+            // 映射 (嵌套循环层数会违反 ARCH-REGALLOC-COUNTER-NOSPILL)。
+            // build_gqa_graph 中 K/V 已声明为 q_dim 以匹配 expanded 张量布局。
+            if is_mha_node {
+                Self::expand_gqa_heads(cn, &self.graph.nodes[node_idx].op, &mut tensors, mha_kv_seq_len);
+            }
 
             // Load activation and pad to max_seq_len size if needed.
             let activation = Self::load_activation(cn, &tensors, true);
