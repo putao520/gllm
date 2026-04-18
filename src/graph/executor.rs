@@ -4058,28 +4058,20 @@ mod tests {
         //     YAML 经 substitute_placeholders 时未被替换 (substitute_placeholders
         //     未注册该键),导致属性保留为 String → require_usize 失败。
         //     修复方向: 在 resolve.rs::substitute_placeholders 增加该键的占位符替换
-        //     (与 T33 PLE 5-input signature 根治一并推进)。
+        //     (已由 T33 PLE 5-input signature 根治补齐, 白名单清空)。
         //
-        // 允许但不要求 PerLayerEmbed 此刻失败: 一旦 `dim_per_layer` 占位符修复,
-        // 本断言自动转为"全部必须成功"。不使用 #[should_panic] (不希望吞其他 Err)。
-        const EXPECTED_FAILURE_OPS: &[&str] = &["PerLayerEmbed"];
-
-        let (expected_fail, unexpected_fail): (Vec<_>, Vec<_>) = errors
-            .iter()
-            .partition(|(op, _, _)| EXPECTED_FAILURE_OPS.contains(&op.as_str()));
-
-        if !unexpected_fail.is_empty() {
+        // 严格契约: 所有节点必须映射成功。任何 op_type → OpKind Err 立即 panic。
+        if !errors.is_empty() {
             let mut by_op: std::collections::BTreeMap<String, Vec<(String, String)>> =
                 std::collections::BTreeMap::new();
-            for (op, name, err) in &unexpected_fail {
-                by_op.entry((*op).clone()).or_default().push(((*name).clone(), (*err).clone()));
+            for (op, name, err) in &errors {
+                by_op.entry(op.clone()).or_default().push((name.clone(), err.clone()));
             }
             let mut report = String::from(
-                "Gemma 4 YAML → atomic_op_to_kind 契约错配 (非预期) — 以下节点映射失败:\n"
+                "Gemma 4 YAML → atomic_op_to_kind 契约错配 — 以下节点映射失败:\n"
             );
             for (op, items) in &by_op {
                 report.push_str(&format!("  [{}] x {} 个节点:\n", op, items.len()));
-                // 打印前 3 个样例即可, 便于定位
                 for (name, err) in items.iter().take(3) {
                     report.push_str(&format!("    - {name}: {err}\n"));
                 }
@@ -4089,11 +4081,6 @@ mod tests {
             }
             panic!("{}", report);
         }
-
-        // PerLayerEmbed 当前被允许失败, 但一旦其全部成功, 说明底层修复完成 ——
-        // 应移除 EXPECTED_FAILURE_OPS 中的 "PerLayerEmbed" 以回归严格契约。
-        // 这里不 assert 失败数 > 0, 因为允许它"先修好"而不破坏本测试。
-        let _ = expected_fail;
     }
 
     #[test]
