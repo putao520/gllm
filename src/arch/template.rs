@@ -313,6 +313,15 @@ impl ArchTemplate {
                                 // ResolvedConfig) 供 atomic_op_to_kind 按 require_usize 读取。
                                 let expanded = self.expand_qk_norm(node_def, config, &repeat_block.var, i)?;
                                 nodes.extend(expanded);
+                            } else if node_def.op_type == "PerLayerEmbed" {
+                                // T33: PerLayerEmbed JIT op 需要 5 inputs
+                                // [hidden, main_embed, ple_slice, proj_w, post_mlp_w]。
+                                // YAML 保持 4 inputs (隐藏 main_embed, ple_slice 用 ple_full 引用),
+                                // 本 expander:
+                                //  1) 插入 PleSlice 节点将 ple_full 切出当前层 ple_slice
+                                //  2) 重写 PLE 节点为 5 inputs
+                                let expanded = self.expand_per_layer_embed(node_def, config, &repeat_block.var, i)?;
+                                nodes.extend(expanded);
                             } else {
                                 nodes.push(self.node_def_to_onnx(
                                     node_def,
@@ -592,6 +601,144 @@ impl ArchTemplate {
             attributes: mk_attrs(),
         };
         Ok(vec![q_node, k_node])
+    }
+
+    /// T33 展开 PerLayerEmbed 逻辑节点:
+    ///
+    /// YAML 输入 (4 inputs):
+    ///   inputs  = [hidden, ple_full, proj_w, post_mlp_w]
+    ///   outputs = [hidden_next]
+    ///   attributes: layer_idx, dim_per_layer, num_layers, hidden
+    ///
+    /// 展开后 (2 个 OnnxNode):
+    ///   1. PleSlice("{name}_slice"):  inputs=[ple_full], outputs=[layer_{i}_ple_slice]
+    ///      attributes = { layer_idx, dim_per_layer, num_layers }
+    ///   2. PerLayerEmbed("{name}"):   inputs=[hidden, main_embed, layer_{i}_ple_slice, proj_w, post_mlp_w]
+    ///                                  outputs=[hidden_next]
+    ///      attributes = 原 attributes
+    ///
+    /// main_embed 是 graph 层面的共享张量 (由顶层 embed_main Gather 节点产出,跨层保持不变)。
+    /// ple_slice 是每层独立的窄切片,从 ple_full [seq, num_layers*dim] 按 layer_idx 切出 [seq, dim]。
+    ///
+    /// PleSlice 作为 atomic op 在 gllm/executor.rs 的 FusedOp::Atomic 路径处理:
+    /// 按 layer_idx × dim_per_layer × elem_bytes 的列偏移从 ple_full 逐行拷贝 dim_per_layer
+    /// 个 f32 到独立的输出 buffer (紧凑 [seq, dim] 布局)。
+    fn expand_per_layer_embed(
+        &self,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        var: &str,
+        layer_idx: usize,
+    ) -> Result<Vec<crate::loader::onnx::OnnxNode>, TemplateError> {
+        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
+
+        let substitute = |s: &str| -> String {
+            let mut result = super::resolve::substitute_placeholders(s, config);
+            result = result.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+            result = result.replace(&format!("${}$", var), &layer_idx.to_string());
+            result
+        };
+
+        if node_def.inputs.len() != 4 {
+            return Err(TemplateError::Invalid(format!(
+                "PerLayerEmbed '{}' 必须有 4 个 YAML 输入 [hidden, ple_full, proj_w, post_mlp_w], 实际 {}",
+                node_def.name,
+                node_def.inputs.len(),
+            )));
+        }
+        if node_def.outputs.len() != 1 {
+            return Err(TemplateError::Invalid(format!(
+                "PerLayerEmbed '{}' 必须有 1 个输出, 实际 {}",
+                node_def.name,
+                node_def.outputs.len(),
+            )));
+        }
+
+        // 展开占位符: YAML 写成 ${hidden_size_per_layer_input} / ${num_hidden_layers} / ${i}
+        // → AttributeValue::String 需要替换, AttributeValue::Int 直接取。
+        let read_usize = |key: &str| -> Result<i64, TemplateError> {
+            match node_def.attributes.get(key) {
+                Some(AttributeValue::Int(v)) => Ok(*v),
+                Some(AttributeValue::String(s)) => {
+                    let resolved = substitute(s);
+                    resolved.parse::<i64>().map_err(|_| TemplateError::Invalid(format!(
+                        "PerLayerEmbed '{}' attr '{}' 无法解析为 int: {}",
+                        node_def.name, key, resolved,
+                    )))
+                }
+                _ => Err(TemplateError::Invalid(format!(
+                    "PerLayerEmbed '{}' 缺少属性 '{}' (应为 Int 或 String 占位符)",
+                    node_def.name, key,
+                ))),
+            }
+        };
+
+        let resolved_layer_idx = read_usize("layer_idx")?;
+        let dim_per_layer = read_usize("dim_per_layer")?;
+        let num_layers = read_usize("num_layers")?;
+        let hidden = read_usize("hidden")?;
+
+        let base_name = substitute(&node_def.name);
+        let hidden_in = substitute(&node_def.inputs[0]);
+        let ple_full_in = substitute(&node_def.inputs[1]);
+        let proj_w_in = substitute(&node_def.inputs[2]);
+        let post_mlp_w_in = substitute(&node_def.inputs[3]);
+        let hidden_out = substitute(&node_def.outputs[0]);
+
+        // ── Node 1: PleSlice ──
+        // 切片输出 tensor 名按层命名 (e.g. "layer_0_ple_slice"),保持跨层唯一。
+        let slice_output = format!("layer_{}_ple_slice", layer_idx);
+        let mk_attr = |name: &str, v: OnnxAttributeValue| OnnxAttribute {
+            name: name.to_string(), value: v,
+            doc_string: String::new(), ref_attr_name: None, attr_type: None,
+        };
+        let mut slice_attrs = std::collections::HashMap::new();
+        slice_attrs.insert("layer_idx".into(),
+            mk_attr("layer_idx", OnnxAttributeValue::Int(resolved_layer_idx)));
+        slice_attrs.insert("dim_per_layer".into(),
+            mk_attr("dim_per_layer", OnnxAttributeValue::Int(dim_per_layer)));
+        slice_attrs.insert("num_layers".into(),
+            mk_attr("num_layers", OnnxAttributeValue::Int(num_layers)));
+
+        let slice_node = OnnxNode {
+            name: format!("layer_{}_ple_slice", layer_idx),
+            op_type: "PleSlice".into(),
+            domain: String::new(),
+            inputs: vec![ple_full_in],
+            outputs: vec![slice_output.clone()],
+            attributes: slice_attrs,
+        };
+
+        // ── Node 2: PerLayerEmbed with 5 inputs ──
+        // main_embed 是顶层 Gather 节点 `embed_main` 的输出 (固定名字)。
+        let ple_inputs = vec![
+            hidden_in,
+            "main_embed".into(),
+            slice_output,
+            proj_w_in,
+            post_mlp_w_in,
+        ];
+
+        let mut ple_attrs = std::collections::HashMap::new();
+        ple_attrs.insert("layer_idx".into(),
+            mk_attr("layer_idx", OnnxAttributeValue::Int(resolved_layer_idx)));
+        ple_attrs.insert("dim_per_layer".into(),
+            mk_attr("dim_per_layer", OnnxAttributeValue::Int(dim_per_layer)));
+        ple_attrs.insert("num_layers".into(),
+            mk_attr("num_layers", OnnxAttributeValue::Int(num_layers)));
+        ple_attrs.insert("hidden".into(),
+            mk_attr("hidden", OnnxAttributeValue::Int(hidden)));
+
+        let ple_node = OnnxNode {
+            name: base_name,
+            op_type: "PerLayerEmbed".into(),
+            domain: String::new(),
+            inputs: ple_inputs,
+            outputs: vec![hidden_out],
+            attributes: ple_attrs,
+        };
+
+        Ok(vec![slice_node, ple_node])
     }
 
     /// 求值 `only_if` 条件表达式 (节点级展开守卫)。
@@ -1048,6 +1195,9 @@ graph:
     }
 
     /// `has_per_layer_embedding = true` 时 only_if 节点正常展开。
+    ///
+    /// T33: PerLayerEmbed 现在要求 4 输入 [hidden, ple_full, proj_w, post_mlp_w],
+    /// 并且会被 `expand_per_layer_embed` 展开为 PleSlice + 5-input PerLayerEmbed 两个节点。
     #[test]
     fn only_if_expands_node_when_true() {
         use crate::loader::onnx::OnnxAttributeValue;
@@ -1068,7 +1218,7 @@ graph:
         - name: "layer_${i}_ple"
           op_type: PerLayerEmbed
           only_if: has_per_layer_embedding
-          inputs: ["y_${i}"]
+          inputs: ["y_${i}", "ple_full", "proj_w", "post_mlp_w_${i}"]
           outputs: ["z_${i}"]
           attributes:
             layer_idx: "${i}"
@@ -1088,12 +1238,16 @@ graph:
         config.has_per_layer_embedding = true;
 
         let graph = template.to_onnx_graph(&config).unwrap();
-        // 每层 core + ple = 2 节点, 2 层共 4 节点
-        assert_eq!(graph.nodes.len(), 4);
+        // 每层: core + (PleSlice + PerLayerEmbed) = 3 节点, 2 层共 6 节点
+        assert_eq!(graph.nodes.len(), 6);
         assert_eq!(graph.nodes[0].name, "layer_0_core");
-        assert_eq!(graph.nodes[1].name, "layer_0_ple");
-        assert_eq!(graph.nodes[2].name, "layer_1_core");
-        assert_eq!(graph.nodes[3].name, "layer_1_ple");
+        assert_eq!(graph.nodes[1].name, "layer_0_ple_slice");
+        assert_eq!(graph.nodes[1].op_type, "PleSlice");
+        assert_eq!(graph.nodes[2].name, "layer_0_ple");
+        assert_eq!(graph.nodes[2].op_type, "PerLayerEmbed");
+        assert_eq!(graph.nodes[3].name, "layer_1_core");
+        assert_eq!(graph.nodes[4].name, "layer_1_ple_slice");
+        assert_eq!(graph.nodes[5].name, "layer_1_ple");
 
         // layer_idx / num_layers 占位符替换后必须以 Int 形式发射 (否则下游
         // atomic_op_to_kind::require_usize 会因 AttrValue::String 失败)。
@@ -1103,9 +1257,9 @@ graph:
                 other => panic!("属性 {key} 期望 Int, 实际: {:?}", other),
             }
         };
-        assert_eq!(read_int(&graph.nodes[1].attributes, "layer_idx"), 0);
-        assert_eq!(read_int(&graph.nodes[1].attributes, "num_layers"), 2);
-        assert_eq!(read_int(&graph.nodes[3].attributes, "layer_idx"), 1);
+        assert_eq!(read_int(&graph.nodes[2].attributes, "layer_idx"), 0);
+        assert_eq!(read_int(&graph.nodes[2].attributes, "num_layers"), 2);
+        assert_eq!(read_int(&graph.nodes[5].attributes, "layer_idx"), 1);
     }
 
     /// 三段比较语法 `field op value` 按整数比较求值。
@@ -1174,6 +1328,91 @@ graph:
         let msg = format!("{err}");
         assert!(msg.contains("typo_field_that_does_not_exist"),
             "错误消息应包含未知字段名, 实际: {msg}");
+    }
+
+    /// T33: expand_per_layer_embed 将 4-input YAML 节点拆成 PleSlice + 5-input PerLayerEmbed。
+    #[test]
+    fn expand_per_layer_embed_injects_slice_node_and_main_embed() {
+        use crate::loader::onnx::OnnxAttributeValue;
+
+        let yaml = r#"
+name: gemma4_ple_test
+graph:
+  inputs:
+    - name: input_ids
+      dtype: int64
+  outputs:
+    - name: logits
+      dtype: f32
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_ple"
+          op_type: PerLayerEmbed
+          inputs:
+            - "hidden_0"
+            - "ple_full"
+            - "model.per_layer_embedding.per_layer_projection.weight"
+            - "model.layers.${i}.post_mlp_projection.weight"
+          outputs: ["hidden_0"]
+          attributes:
+            layer_idx: "${i}"
+            dim_per_layer: 256
+            num_layers: "${num_hidden_layers}"
+            hidden: 1024
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 3;
+        config.hidden_size = 1024;
+        config.num_attention_heads = 8;
+        config.head_dim = 128;
+        config.vocab_size = 32000;
+        config.hidden_size_per_layer_input = 256;
+        config.has_per_layer_embedding = true;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // 每层展开为 2 节点 (PleSlice + PerLayerEmbed), 3 层共 6 节点
+        assert_eq!(graph.nodes.len(), 6, "PerLayerEmbed 展开后每层 2 节点");
+
+        for layer in 0..3 {
+            let slice_node = &graph.nodes[layer * 2];
+            let ple_node = &graph.nodes[layer * 2 + 1];
+
+            // PleSlice 节点
+            assert_eq!(slice_node.op_type, "PleSlice");
+            assert_eq!(slice_node.name, format!("layer_{layer}_ple_slice"));
+            assert_eq!(slice_node.inputs, vec!["ple_full".to_string()]);
+            assert_eq!(slice_node.outputs, vec![format!("layer_{layer}_ple_slice")]);
+            // layer_idx 属性必须是 Int(layer), 非 String("{layer}")
+            match slice_node.attributes.get("layer_idx").map(|a| &a.value) {
+                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, layer as i64),
+                other => panic!("layer_idx expected Int, got {:?}", other),
+            }
+            match slice_node.attributes.get("dim_per_layer").map(|a| &a.value) {
+                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 256),
+                other => panic!("dim_per_layer expected Int 256, got {:?}", other),
+            }
+            match slice_node.attributes.get("num_layers").map(|a| &a.value) {
+                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 3),
+                other => panic!("num_layers expected Int 3, got {:?}", other),
+            }
+
+            // PerLayerEmbed 节点
+            assert_eq!(ple_node.op_type, "PerLayerEmbed");
+            assert_eq!(ple_node.name, format!("layer_{layer}_ple"));
+            // 5 inputs: [hidden_0, main_embed, layer_{i}_ple_ple_slice, proj_w, post_mlp_w]
+            assert_eq!(ple_node.inputs.len(), 5, "PerLayerEmbed 必须有 5 inputs");
+            assert_eq!(ple_node.inputs[0], "hidden_0");
+            assert_eq!(ple_node.inputs[1], "main_embed",
+                "input[1] 必须是 main_embed (顶层 embed_main Gather 的输出)");
+            assert_eq!(ple_node.inputs[2], format!("layer_{layer}_ple_slice"),
+                "input[2] 必须是当前层切片 layer_{layer}_ple_slice");
+            assert_eq!(ple_node.inputs[3], "model.per_layer_embedding.per_layer_projection.weight");
+            assert_eq!(ple_node.inputs[4], format!("model.layers.{layer}.post_mlp_projection.weight"));
+        }
     }
 
     /// 现有无 only_if 的节点始终展开 (向前兼容验证)。

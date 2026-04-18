@@ -49,6 +49,24 @@ graph:
       inputs: [model.embed_tokens.weight, input_ids]
       outputs: [hidden_0]
 
+    # T33 (PLE 5-input signature 根治): main_embed 是 "token embedding 原始输出"
+    # 的别名,跨 transformer 层保持不变(hidden_0 会被每层重写)。通过
+    # 在 repeat 块外用额外 Gather 节点单独产出,保证后续所有层读到的都是
+    # 未被修改的初始 embedding。only_if 守卫避免无 PLE 的变体白付计算。
+    - name: embed_main
+      op_type: Gather
+      only_if: has_per_layer_embedding
+      inputs: [model.embed_tokens.weight, input_ids]
+      outputs: [main_embed]
+
+    # T33: ple_full [seq, num_layers * dim_per_layer] 是所有层共享的 PLE
+    # lookup 结果,每个 transformer 层在 repeat 展开时切出自己那段列区段。
+    - name: ple_embed_full
+      op_type: Gather
+      only_if: has_per_layer_embedding
+      inputs: [model.per_layer_embedding.embed_tokens.weight, input_ids]
+      outputs: [ple_full]
+
     - repeat: "${num_hidden_layers}"
       var: i
       nodes:
@@ -154,8 +172,17 @@ graph:
           outputs: ["hidden_0"]
 
         # ── PerLayerEmbedding (仅 E2B / E4B 启用, 31B Dense / 26B MoE 跳过) ──
-        # PerLayerEmbed 是复合 op, JIT 侧已建立 5-input trace (T28);
-        # YAML 只需声明一个节点, codegen 层负责展开为原语图。
+        # T33 (5-input signature 根治): PerLayerEmbed JIT op 需要 5 inputs
+        # [hidden_0, main_embed, ple_slice, proj_w, post_mlp_w], 其中:
+        #   - main_embed: 初始 token embedding (graph 级别一次性产出, 见顶部 embed_main 节点)
+        #   - ple_slice:  当前层的 PLE token, 由模板 `expand_per_layer_embed` 从
+        #                 ple_full 切出 (列区段 [layer_idx*dim, (layer_idx+1)*dim))
+        #   - proj_w / post_mlp_w: 每层独立的投影权重
+        #
+        # YAML 此节点保持"逻辑 4 输入"(省略 main_embed, ple_slice 用 ple_full
+        # 引用), 由 `expand_per_layer_embed` 在模板展开时:
+        #   1) 插入 `layer_${i}_ple_slice = PleSlice(ple_full, layer_idx, dim_per_layer)` 节点
+        #   2) 改写本节点输入为 [hidden_0, main_embed, layer_${i}_ple_slice, proj_w, post_mlp_w]
         #
         # only_if 表达式来自 ResolvedConfig::has_per_layer_embedding (由
         # hidden_size_per_layer_input > 0 推导)。E2B/E4B 此值 > 0, 31B/26B 为 0。
@@ -164,7 +191,7 @@ graph:
           only_if: has_per_layer_embedding
           inputs:
             - "hidden_0"
-            - "model.per_layer_embedding.embed_tokens.weight"
+            - "ple_full"
             - "model.per_layer_embedding.per_layer_projection.weight"
             - "model.layers.${i}.post_mlp_projection.weight"
           outputs: ["hidden_0"]

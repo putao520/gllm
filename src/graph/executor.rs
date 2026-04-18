@@ -1034,6 +1034,21 @@ fn atomic_op_to_kind(
         }
         "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
+        "PleSlice" => {
+            // T33: PleSlice 是 PerLayerEmbed expander 引入的"列切片"伪 op ——
+            // 作用: 从 ple_full [seq, num_layers * dim_per_layer] 按
+            // layer_idx 切出当前层的 [seq, dim_per_layer] 子视图。
+            //
+            // 此处返回 Reshape NOP 以通过 atomic_op_to_kind 契约校验 (op_type 可识别);
+            // 实际执行由 `FusedOp::Atomic("PleSlice")` 在 graph/executor.rs 的 build 路径
+            // 特判处理 (runtime memcpy, 类似现有 "Slice" / "Shape" 分支)。
+            //
+            // 必需 attributes: layer_idx / dim_per_layer / num_layers (由 expand_per_layer_embed 注入)。
+            let _layer_idx = require_usize(attributes, "layer_idx", "PleSlice")?;
+            let _dim_per_layer = require_usize(attributes, "dim_per_layer", "PleSlice")?;
+            let _num_layers = require_usize(attributes, "num_layers", "PleSlice")?;
+            Ok(OpKind::Reshape { target_shape: vec![] })
+        }
         "PerLayerEmbed" => {
             // Gemma 4 E2B/E4B PLE 算子 (task #28)。YAML 模板必须显式提供:
             //   - layer_idx / num_layers: 用于 ple_slice 切片 (由上游预切或 JIT 切片)

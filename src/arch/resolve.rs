@@ -338,6 +338,8 @@ pub fn substitute_placeholders(template: &str, config: &ResolvedConfig) -> Strin
 
     // Gemma 4 整数占位符
     result = result.replace("${sliding_window}", &config.sliding_window.to_string());
+    result = result.replace("${hidden_size_per_layer_input}",
+                            &config.hidden_size_per_layer_input.to_string());
 
     // 浮点占位符
     result = result.replace("${rope_theta}", &config.rope_theta.to_string());
