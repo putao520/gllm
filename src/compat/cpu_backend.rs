@@ -590,7 +590,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         &self,
         tokens: &[u32],
         _topology: &AttentionTopology,
-        _weights: &dyn backend_trait::TensorLookup<E, Self>,
+        weights: &dyn backend_trait::TensorLookup<E, Self>,
         config: &GeneratorForwardConfig,
     ) -> Result<Vec<f32>, BE> {
         // ARCH-FULL-JIT: 通过 FusedGraphExecutor JIT 路径执行
@@ -600,15 +600,88 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let outputs = executor.run(&inputs, &bindings).map_err(|e| {
             BE::Other(format!("FusedGraphExecutor rerank run failed: {e}"))
         })?;
-        // Rerank JIT 图: xlmr-reranker 模板已把 classifier head 编织进图,
-        // 输出 rerank_logit 的 shape 是 [batch, seq_len, 1] (每个 token 一个 logit,
-        // Linear 对 token 独立作用)。CLS token (position 0) 的 logit 是最终相关性分数。
-        // 对非 reranker 模板 (encoder-only), 输出仍是 [batch, seq_len, hidden] —
-        // 取前 1 个值作为兜底 (CLS 的第 0 个特征), 但应优先配 xlmr-reranker 模板。
         let hidden = extract_final_hidden(&outputs, executor)?;
         if hidden.is_empty() {
             return Err(BE::Other("rerank forward produced empty output tensor".into()));
         }
+
+        use crate::manifest::ArchFamily;
+        let is_decoder = config.arch_family == ArchFamily::Decoder;
+        // ARCH-RERANK-DECODER (SPEC 01-REQUIREMENTS REQ-TEST-004):
+        // Decoder-based rerankers (Qwen3-Reranker) 生成 "yes"/"no" token,
+        // 分数 = logits[yes_id] - logits[no_id]。YAML 不包含 lm_head (共享
+        // embed_tokens), 这里 post-graph 做一次 last-token × embed.T 的 matmul
+        // 只计算 yes/no 两个 vocab 位置, 避开完整 vocab 投影。
+        if is_decoder {
+            let yes_id = config.rerank_yes_token_id.map(|v| v as usize);
+            let no_id = config.rerank_no_token_id.map(|v| v as usize);
+            let hidden_size = config.hidden_size();
+            let seq_len = tokens.len();
+            if seq_len > 0 && hidden.len() >= seq_len * hidden_size {
+                let last_start = (seq_len - 1) * hidden_size;
+                let last_hidden = &hidden[last_start..last_start + hidden_size];
+                // 取 embed_tokens 权重 (tied lm_head)
+                const EMBED_ALIASES: &[&str] = &[
+                    "model.embed_tokens.weight",
+                    "embed_tokens.weight",
+                    "transformer.wte.weight",
+                    "embeddings.word_embeddings.weight",
+                    "token_embd.weight",
+                ];
+                let mut embed_data: Option<(&[E], Vec<usize>)> = None;
+                for alias in EMBED_ALIASES {
+                    if let Some(t) = weights.get_tensor(alias) {
+                        let shape = weights.tensor_shape(alias).map(|s| s.to_vec()).unwrap_or_default();
+                        if shape.len() == 2 {
+                            embed_data = Some((t.as_ref(), shape));
+                            break;
+                        }
+                    }
+                }
+                if let (Some((data_e, shape)), Some(yes), Some(no)) = (embed_data, yes_id, no_id) {
+                    // CPU 后端固定 f32
+                    if std::mem::size_of::<E>() != std::mem::size_of::<f32>() {
+                        return Err(BE::Other("rerank decoder path 仅支持 f32 backend".into()));
+                    }
+                    let data: &[f32] = unsafe {
+                        std::slice::from_raw_parts(data_e.as_ptr() as *const f32, data_e.len())
+                    };
+                    let vocab = shape[0];
+                    let hidden_dim = shape[1];
+                    if hidden_dim != hidden_size {
+                        return Err(BE::Other(format!(
+                            "rerank embed shape mismatch: expected hidden={hidden_size}, got {hidden_dim}")));
+                    }
+                    let row_dot = |row_idx: usize| -> f32 {
+                        let row = &data[row_idx * hidden_dim..(row_idx + 1) * hidden_dim];
+                        let mut s = 0.0f64;
+                        for i in 0..hidden_dim {
+                            s += last_hidden[i] as f64 * row[i] as f64;
+                        }
+                        s as f32
+                    };
+                    if yes >= vocab || no >= vocab {
+                        return Err(BE::Other(format!(
+                            "rerank yes/no token id out of vocab: yes={yes} no={no} vocab={vocab}")));
+                    }
+                    let logit_yes = row_dot(yes);
+                    let logit_no = row_dot(no);
+                    // softmax(yes, no) 的 log-ratio 提供 [0,1] 风格分数。
+                    // 直接 yes - no 是 log-odds;此处返回 softmax(yes) over {yes, no}。
+                    let maxv = logit_yes.max(logit_no);
+                    let ey = (logit_yes - maxv).exp();
+                    let en = (logit_no - maxv).exp();
+                    let score = ey / (ey + en);
+                    return Ok(vec![score]);
+                }
+                // Fallback:无 embed 权重或 token id,返回 last token hidden[0]
+                return Ok(vec![last_hidden.get(0).copied().unwrap_or(0.0)]);
+            }
+        }
+
+        // Encoder reranker (xlmr-reranker 等) 已把 classifier 编织进图,
+        // 输出 rerank_logit 的 shape 是 [batch, seq_len, 1] (每 token 一个 logit,
+        // Linear 对 token 独立作用)。CLS token (position 0) 的 logit 是最终相关性分数。
         Ok(vec![hidden[0]])
     }
 
