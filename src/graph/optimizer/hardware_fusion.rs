@@ -42,7 +42,7 @@ impl OptimizationPass for HardwareFusionPass {
                 FusedOp::FlashAttention(_) => OpTag::FlashAttention,
                 FusedOp::GQA(c) => OpTag::GQA { sliding_window: c.sliding_window },
                 FusedOp::SwiGLU(_) => OpTag::Epilogue,
-                FusedOp::FusedQkvRope(_) => OpTag::QkvRope,
+                FusedOp::FusedQkvRope(_) | FusedOp::FusedQkvNormRope(_) => OpTag::QkvRope,
                 FusedOp::MoERouting(c) => OpTag::MoE { num_experts: c.num_experts },
                 FusedOp::FusedRMSLinear(_) => OpTag::Epilogue,
                 FusedOp::RoPE(_) | FusedOp::PerLayerEmbed(_) | FusedOp::Atomic(_) => OpTag::Noop,

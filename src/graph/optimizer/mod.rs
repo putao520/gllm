@@ -54,6 +54,7 @@ impl GraphOptimizer {
         self.register_pass(Box::new(pattern_fusion::CanonicalizeAttentionPass));
         self.register_pass(Box::new(pattern_fusion::FlashAttentionFusionPass));
         self.register_pass(Box::new(pattern_fusion::GQAFusionPass));
+        self.register_pass(Box::new(pattern_fusion::FusedQkvNormRopeFusionPass));
         self.register_pass(Box::new(pattern_fusion::FusedQkvRopeFusionPass));
         self.register_pass(Box::new(pattern_fusion::SwiGLUFusionPass));
         self.register_pass(Box::new(pattern_fusion::FusedRMSLinearFusionPass));

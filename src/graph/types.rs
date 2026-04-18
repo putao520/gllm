@@ -34,6 +34,7 @@ pub(crate) fn is_linear_matmul_weight(
             FusedOp::FlashAttention(_)
             | FusedOp::SwiGLU(_)
             | FusedOp::FusedQkvRope(_)
+            | FusedOp::FusedQkvNormRope(_)
             | FusedOp::FusedRMSLinear(_)
             | FusedOp::GQA(_)
             | FusedOp::MoERouting(_)
@@ -339,6 +340,8 @@ pub enum FusedOp {
     RoPE(RoPEConfig),
     /// QKV + RoPE 融合
     FusedQkvRope(FusedQkvRopeConfig),
+    /// QKV + QkNorm + ValueNorm + RoPE 融合 (Gemma 4 pattern)
+    FusedQkvNormRope(FusedQkvNormRopeConfig),
     /// RMSNorm + Linear 融合
     FusedRMSLinear(FusedRMSLinearConfig),
     /// GQA 融合
@@ -364,6 +367,7 @@ impl FusedOp {
             FusedOp::SwiGLU(_) => "SwiGLU",
             FusedOp::RoPE(_) => "RoPE",
             FusedOp::FusedQkvRope(_) => "FusedQkvRope",
+            FusedOp::FusedQkvNormRope(_) => "FusedQkvNormRope",
             FusedOp::FusedRMSLinear(_) => "FusedRMSLinear",
             FusedOp::GQA(_) => "GQA",
             FusedOp::MoERouting(_) => "MoERouting",
@@ -421,6 +425,23 @@ pub struct FusedQkvRopeConfig {
     pub num_kv_heads: usize,
     pub head_dim: usize,
     pub rope_theta: f64,
+}
+
+/// QKV + QkNorm + ValueNorm + RoPE 融合配置 (Gemma 4 pattern)
+///
+/// 对应 gllm-kernels `FusionMode::FusedQkvNormRope`:
+///   Gemm(Q) + Gemm(K) + Gemm(V) + QkNorm(Q,K) + ValueNorm(V) + RoPE(Q) + RoPE(K)
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FusedQkvNormRopeConfig {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    /// RoPE base frequency (对应 Q/K 两次 RoPE 的 theta, Gemma 4 同层两个 RoPE 共享参数)
+    pub rope_theta: f64,
+    /// RoPE partial rotation ratio (Gemma 4 global 层 = 0.25, sliding 层 = 1.0)
+    pub rope_partial: f32,
+    /// QkNorm / ValueNorm 的 RMSNorm epsilon
+    pub norm_eps: f32,
 }
 
 /// RMSNorm + Linear 融合配置
@@ -579,6 +600,8 @@ pub struct OptimizationStats {
     pub rope_fusions: usize,
     /// QKV+RoPE 融合数
     pub qkv_rope_fusions: usize,
+    /// QKV+QkNorm+ValueNorm+RoPE 融合数 (Gemma 4)
+    pub qkv_norm_rope_fusions: usize,
     /// RMSNorm+Linear 融合数
     pub rms_linear_fusions: usize,
     /// GQA 融合数
@@ -600,6 +623,7 @@ impl OptimizationStats {
             + self.swiglu_fusions
             + self.rope_fusions
             + self.qkv_rope_fusions
+            + self.qkv_norm_rope_fusions
             + self.rms_linear_fusions
             + self.gqa_fusions
             + self.moe_routing_fusions

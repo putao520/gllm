@@ -5,8 +5,8 @@
 use super::pass::{OptimizationContext, OptimizationPass};
 use super::OptimizeError;
 use crate::graph::types::{
-    FlashAttentionConfig, FusedGraph, FusedNode, FusedOp, FusedQkvRopeConfig,
-    FusedRMSLinearConfig, GQAConfig, MoERoutingConfig, SwiGLUConfig,
+    FlashAttentionConfig, FusedGraph, FusedNode, FusedOp, FusedQkvNormRopeConfig,
+    FusedQkvRopeConfig, FusedRMSLinearConfig, GQAConfig, MoERoutingConfig, SwiGLUConfig,
 };
 #[cfg(test)]
 use crate::graph::types::AtomicOp;
@@ -138,6 +138,157 @@ impl OptimizationPass for SwiGLUFusionPass {
 
     fn priority(&self) -> i32 {
         20
+    }
+}
+
+/// Gemma 4 pattern: QKV projection + QkNorm(Q,K) + ValueNorm(V) + RoPE(Q) + RoPE(K)
+///
+/// 识别窗口 (7 个节点, 严格顺序):
+/// ```text
+/// q_proj : MatMul  (inputs=[act, w_q])  -> q
+/// k_proj : MatMul  (inputs=[act, w_k])  -> k
+/// v_proj : MatMul  (inputs=[act, w_v])  -> v
+/// qk_norm: QkNorm  (inputs=[q, k])      -> q_normed, k_normed
+/// v_norm : ValueNorm (inputs=[v])       -> v_normed
+/// rope_q : RotaryEmbedding (inputs=[q_normed], ...) -> q_rope
+/// rope_k : RotaryEmbedding (inputs=[k_normed], ...) -> k_rope
+/// ```
+///
+/// 对应 gllm-kernels `FusionMode::FusedQkvNormRope`。仅在 QkNorm / ValueNorm
+/// 同时出现且 Q/K RoPE 分别消费 Q-normed/K-normed 时才触发融合 (标准 QKV 无
+/// norm 的模型走 `FusedQkvRopeFusionPass` 或保持 atomic)。
+///
+/// 优先级 12: 早于 FusedQkvRope(15), 因为 FusedQkvNormRope 是更严格的超集,
+/// 必须先尝试匹配, 否则前三个 MatMul 会被 FusedQkvRope 抢占。
+#[derive(Debug)]
+pub struct FusedQkvNormRopeFusionPass;
+
+impl OptimizationPass for FusedQkvNormRopeFusionPass {
+    fn name(&self) -> &'static str {
+        "FusedQkvNormRopeFusion"
+    }
+
+    fn run(
+        &self,
+        graph: FusedGraph,
+        ctx: &OptimizationContext,
+    ) -> Result<FusedGraph, OptimizeError> {
+        let mut out = graph;
+        let (nodes, fusions) = fuse_window(std::mem::take(&mut out.nodes), 7, |window| {
+            let [q, k, v, qk_norm, v_norm, rope_q, rope_k] = window else {
+                return None;
+            };
+
+            // 1. 前三个节点必须是 Q/K/V MatMul, 共享同一个激活输入
+            if !is_q_proj(q) || !is_k_proj(k) || !is_v_proj(v) {
+                return None;
+            }
+            if q.inputs.len() < 2 || k.inputs.len() < 2 || v.inputs.len() < 2 {
+                return None;
+            }
+            let activation = &q.inputs[0];
+            if k.inputs[0] != *activation || v.inputs[0] != *activation {
+                return None;
+            }
+
+            // 2. QkNorm: inputs=[q_out, k_out], outputs=[q_normed, k_normed]
+            if !is_atomic_op(qk_norm, "QkNorm") {
+                return None;
+            }
+            if qk_norm.inputs.len() != 2 || qk_norm.outputs.len() != 2 {
+                return None;
+            }
+            if qk_norm.inputs[0] != q.outputs[0] || qk_norm.inputs[1] != k.outputs[0] {
+                return None;
+            }
+
+            // 3. ValueNorm: inputs=[v_out], outputs=[v_normed]
+            if !is_atomic_op(v_norm, "ValueNorm") {
+                return None;
+            }
+            if v_norm.inputs.len() != 1 || v_norm.outputs.len() != 1 {
+                return None;
+            }
+            if v_norm.inputs[0] != v.outputs[0] {
+                return None;
+            }
+
+            // 4. Q-RoPE: inputs=[q_normed], outputs=[q_rope]
+            if !is_rope(rope_q) || rope_q.inputs.is_empty() {
+                return None;
+            }
+            if rope_q.inputs[0] != qk_norm.outputs[0] {
+                return None;
+            }
+
+            // 5. K-RoPE: inputs=[k_normed], outputs=[k_rope]
+            if !is_rope(rope_k) || rope_k.inputs.is_empty() {
+                return None;
+            }
+            if rope_k.inputs[0] != qk_norm.outputs[1] {
+                return None;
+            }
+
+            // ── 配置读取 ──
+            // rope_theta / rope_partial 从 rope_q 读取 (Q/K 两个 RoPE 同层共享参数,
+            // 取 Q 的即可; template.rs::expand_dual_rope 保证了这一点)。
+            let rope_theta = rope_q.attributes.get("theta").and_then(|val| match val {
+                crate::graph::types::AttrValue::Float(f) => Some(*f as f64),
+                crate::graph::types::AttrValue::Int(i) => Some(*i as f64),
+                _ => None,
+            }).unwrap_or(10000.0); // LEGAL: rope_theta=10000.0 是 RoPE 的行业标准默认值
+
+            let rope_partial = rope_q.attributes.get("partial").and_then(|val| match val {
+                crate::graph::types::AttrValue::Float(f) => Some(*f),
+                crate::graph::types::AttrValue::Int(i) => Some(*i as f32),
+                _ => None,
+            }).unwrap_or(1.0); // LEGAL: partial=1.0 是标准 RoPE (全维度旋转)
+
+            // norm_eps 优先从 v_norm 节点 attributes 读 (ValueNorm 可能显式指定 eps),
+            // 缺省使用 ModelGeometry.norm_eps (来自模型配置)。
+            let norm_eps = v_norm.attributes.get("eps").and_then(|val| match val {
+                crate::graph::types::AttrValue::Float(f) => Some(*f),
+                crate::graph::types::AttrValue::Int(i) => Some(*i as f32),
+                _ => None,
+            }).unwrap_or(ctx.geometry.norm_eps as f32);
+
+            let config = FusedQkvNormRopeConfig {
+                num_heads: ctx.num_heads(),
+                num_kv_heads: ctx.num_kv_heads(),
+                head_dim: ctx.head_dim(),
+                rope_theta,
+                rope_partial,
+                norm_eps,
+            };
+
+            // ── 构造融合节点 ──
+            // inputs: [activation, w_q, w_k, w_v]
+            // outputs: [q_rope, k_rope, v_normed]
+            let mut fused = FusedNode::new(
+                format!("{}_fused_qkv_norm_rope", q.name),
+                FusedOp::FusedQkvNormRope(config),
+            );
+            fused.inputs = vec![
+                activation.clone(),
+                q.inputs[1].clone(),
+                k.inputs[1].clone(),
+                v.inputs[1].clone(),
+            ];
+            fused.outputs = vec![
+                rope_q.outputs[0].clone(),
+                rope_k.outputs[0].clone(),
+                v_norm.outputs[0].clone(),
+            ];
+            Some(fused)
+        });
+
+        out.nodes = nodes;
+        out.stats.qkv_norm_rope_fusions = fusions;
+        Ok(out)
+    }
+
+    fn priority(&self) -> i32 {
+        12
     }
 }
 
@@ -596,6 +747,188 @@ mod tests {
         let fused = pass.run(graph, &ctx).unwrap();
         assert_eq!(fused.stats.swiglu_fusions, 1);
         assert!(matches!(fused.nodes[0].op, FusedOp::SwiGLU(_)));
+    }
+
+    #[test]
+    fn fused_qkv_norm_rope_detected() {
+        // Gemma 4 pattern: QKV + QkNorm + ValueNorm + Q-RoPE + K-RoPE 融合识别。
+        // 构造节点时所有 input/output 名严格对齐,模拟 template.rs::expand_dual_rope
+        // 已把 DualRotaryEmbedding 拆成独立 Q/K RoPE 后的图形态。
+        let pass = FusedQkvNormRopeFusionPass;
+        let ctx = OptimizationContext::default();
+
+        let mk = |name: &str,
+                  op_type: &str,
+                  inputs: Vec<&str>,
+                  outputs: Vec<&str>,
+                  attrs: Vec<(&str, crate::graph::types::AttrValue)>| {
+            let mut node = FusedNode::new(name, FusedOp::Atomic(AtomicOp::new(op_type)))
+                .with_inputs(inputs.into_iter().map(String::from).collect())
+                .with_outputs(outputs.into_iter().map(String::from).collect());
+            for (k, v) in attrs {
+                node.attributes.insert(k.to_string(), v);
+            }
+            node
+        };
+
+        let graph = FusedGraph {
+            nodes: vec![
+                mk("layer_0_q_proj", "MatMul", vec!["hidden", "w_q"], vec!["q"], vec![]),
+                mk("layer_0_k_proj", "MatMul", vec!["hidden", "w_k"], vec!["k"], vec![]),
+                mk("layer_0_v_proj", "MatMul", vec!["hidden", "w_v"], vec!["v"], vec![]),
+                mk("layer_0_qk_norm", "QkNorm",
+                    vec!["q", "k"], vec!["q_normed", "k_normed"], vec![]),
+                mk("layer_0_v_norm", "ValueNorm",
+                    vec!["v"], vec!["v_normed"], vec![]),
+                mk("layer_0_rope_q", "RotaryEmbedding",
+                    vec!["q_normed"], vec!["q_rope"], vec![
+                        ("theta", crate::graph::types::AttrValue::Float(1_000_000.0)),
+                        ("partial", crate::graph::types::AttrValue::Float(0.25)),
+                    ]),
+                mk("layer_0_rope_k", "RotaryEmbedding",
+                    vec!["k_normed"], vec!["k_rope"], vec![
+                        ("theta", crate::graph::types::AttrValue::Float(1_000_000.0)),
+                        ("partial", crate::graph::types::AttrValue::Float(0.25)),
+                    ]),
+            ],
+            ..FusedGraph::new()
+        };
+
+        let fused = pass.run(graph, &ctx).unwrap();
+        assert_eq!(fused.stats.qkv_norm_rope_fusions, 1,
+            "应识别出 1 个 FusedQkvNormRope 融合");
+        assert_eq!(fused.nodes.len(), 1, "7 个 atomic 节点应被融合为 1 个 FusedQkvNormRope 节点");
+
+        match &fused.nodes[0].op {
+            FusedOp::FusedQkvNormRope(cfg) => {
+                assert!((cfg.rope_theta - 1_000_000.0).abs() < 1e-3);
+                assert!((cfg.rope_partial - 0.25).abs() < 1e-6);
+            }
+            other => panic!("期望 FusedQkvNormRope, 实际 {other:?}"),
+        }
+
+        // 融合节点 inputs 应为 [activation, w_q, w_k, w_v]
+        assert_eq!(fused.nodes[0].inputs, vec!["hidden", "w_q", "w_k", "w_v"]);
+        // 输出为 [q_rope, k_rope, v_normed]
+        assert_eq!(fused.nodes[0].outputs, vec!["q_rope", "k_rope", "v_normed"]);
+    }
+
+    #[test]
+    fn fused_qkv_norm_rope_rejects_when_norm_missing() {
+        // 没有 QkNorm/ValueNorm 的标准 QKV+RoPE 序列不应触发 FusedQkvNormRope
+        // (交给下游 FusedQkvRopeFusionPass 处理)。
+        let pass = FusedQkvNormRopeFusionPass;
+        let ctx = OptimizationContext::default();
+
+        let graph = FusedGraph {
+            nodes: vec![
+                make_linear_node("layer_0_q_proj", "MatMul", "hidden", "w_q"),
+                make_linear_node("layer_0_k_proj", "MatMul", "hidden", "w_k"),
+                make_linear_node("layer_0_v_proj", "MatMul", "hidden", "w_v"),
+                make_atomic_node("layer_0_rope", "RotaryEmbedding"),
+            ],
+            ..FusedGraph::new()
+        };
+
+        let fused = pass.run(graph, &ctx).unwrap();
+        assert_eq!(fused.stats.qkv_norm_rope_fusions, 0,
+            "不含 QkNorm/ValueNorm 的序列不应触发 FusedQkvNormRope");
+        // 节点全部保持 atomic
+        assert_eq!(fused.nodes.len(), 4);
+        for node in &fused.nodes {
+            assert!(matches!(node.op, FusedOp::Atomic(_)),
+                "不匹配时应保持 atomic 形态: {:?}", node.op);
+        }
+    }
+
+    #[test]
+    fn fused_qkv_norm_rope_detected_via_graph_optimizer() {
+        // 集成测试: 通过 GraphOptimizer 真实调用路径验证 pass 已被 register 并生效
+        // (非孤岛模块铁律 NO_ISLAND_MODULE)。
+        use crate::graph::optimizer::GraphOptimizer;
+        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxGraph, OnnxNode};
+
+        let mk_node = |name: &str,
+                       op_type: &str,
+                       inputs: Vec<&str>,
+                       outputs: Vec<&str>,
+                       attrs: Vec<(&str, OnnxAttributeValue)>| {
+            let mut attributes = std::collections::HashMap::new();
+            for (k, v) in attrs {
+                attributes.insert(
+                    k.to_string(),
+                    OnnxAttribute {
+                        name: k.to_string(),
+                        value: v,
+                        doc_string: String::new(),
+                        ref_attr_name: None,
+                        attr_type: None,
+                    },
+                );
+            }
+            OnnxNode {
+                name: name.to_string(),
+                op_type: op_type.to_string(),
+                domain: String::new(),
+                inputs: inputs.into_iter().map(String::from).collect(),
+                outputs: outputs.into_iter().map(String::from).collect(),
+                attributes,
+            }
+        };
+
+        // graph.outputs 必须声明 q_rope/k_rope/v_normed, 否则 DeadCodeElimination
+        // pass 会删除融合节点 (其输出不在 graph.outputs 中视为死代码)。
+        let mk_value_info = |name: &str| crate::loader::onnx::OnnxValueInfo {
+            name: name.to_string(),
+            value_type: None,
+            doc_string: String::new(),
+            metadata_props: std::collections::HashMap::new(),
+        };
+
+        let onnx_graph = OnnxGraph {
+            name: "gemma4_layer".to_string(),
+            doc_string: String::new(),
+            nodes: vec![
+                mk_node("layer_0_q_proj", "MatMul", vec!["hidden", "w_q"], vec!["q"], vec![]),
+                mk_node("layer_0_k_proj", "MatMul", vec!["hidden", "w_k"], vec!["k"], vec![]),
+                mk_node("layer_0_v_proj", "MatMul", vec!["hidden", "w_v"], vec!["v"], vec![]),
+                mk_node("layer_0_qk_norm", "QkNorm",
+                    vec!["q", "k"], vec!["q_normed", "k_normed"], vec![]),
+                mk_node("layer_0_v_norm", "ValueNorm",
+                    vec!["v"], vec!["v_normed"], vec![]),
+                mk_node("layer_0_rope_q", "RotaryEmbedding",
+                    vec!["q_normed"], vec!["q_rope"], vec![
+                        ("theta", OnnxAttributeValue::Float(10000.0)),
+                        ("partial", OnnxAttributeValue::Float(1.0)),
+                    ]),
+                mk_node("layer_0_rope_k", "RotaryEmbedding",
+                    vec!["k_normed"], vec!["k_rope"], vec![
+                        ("theta", OnnxAttributeValue::Float(10000.0)),
+                        ("partial", OnnxAttributeValue::Float(1.0)),
+                    ]),
+            ],
+            inputs: vec![],
+            outputs: vec![
+                mk_value_info("q_rope"),
+                mk_value_info("k_rope"),
+                mk_value_info("v_normed"),
+            ],
+            value_info: vec![],
+            initializers: std::collections::HashMap::new(),
+            sparse_initializers: vec![],
+            quantization_annotation: vec![],
+            metadata_props: std::collections::HashMap::new(),
+        };
+
+        let optimizer = GraphOptimizer::new(OptimizationContext::default());
+        let fused = optimizer.optimize(&onnx_graph).unwrap();
+
+        assert_eq!(fused.stats.qkv_norm_rope_fusions, 1,
+            "GraphOptimizer 注册路径必须触发 FusedQkvNormRope 融合");
+        assert!(
+            fused.nodes.iter().any(|n| matches!(n.op, FusedOp::FusedQkvNormRope(_))),
+            "融合后应存在 FusedQkvNormRope 节点"
+        );
     }
 
     #[test]
