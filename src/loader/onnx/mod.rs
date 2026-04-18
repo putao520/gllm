@@ -41,6 +41,13 @@ pub struct OnnxLoader {
     model: OnnxModel,
     alias_map: HashMap<String, String>,     // semantic_name → onnx_name
     reverse_alias: HashMap<String, String>,  // onnx_name → semantic_name
+    /// ARCH-WEIGHT-CANONICAL-LAYOUT: per-weight transpose hint from ONNX node
+    /// attributes. Key = onnx tensor name (initializer name), value = whether
+    /// the shape is HF [out, in] and needs transpose to canonical [K, N].
+    ///   - Gemm with transB=1 → true  (HF layout)
+    ///   - Gemm with transB=0 or MatMul → false  (already canonical)
+    /// Indexed by onnx_name; queried via tensor_info / alias resolution.
+    layout_hints: HashMap<String, bool>,
 }
 
 
@@ -54,25 +61,42 @@ pub struct OnnxLoader {
 /// - Gemm: input[1] → ".weight"
 /// - Gather: input[0] → ".weight"
 /// - Mul: whichever input is an onnx:: initializer → ".weight"
-fn build_alias_map(graph: &OnnxGraph) -> (HashMap<String, String>, HashMap<String, String>) {
+fn build_alias_map(graph: &OnnxGraph) -> (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, bool>,
+) {
     let mut alias_map = HashMap::new(); // semantic → onnx
     let mut reverse_alias = HashMap::new(); // onnx → semantic
+    let mut layout_hints: HashMap<String, bool> = HashMap::new(); // onnx_name → needs_transpose
 
     for node in &graph.nodes {
-        // Determine which input index holds the weight and what suffix to use
-        let candidates: Vec<(usize, &str)> = match node.op_type.as_str() {
-            "MatMul" => vec![(1, ".weight")],
-            "Gemm" => vec![(1, ".weight")],
-            "Gather" => vec![(0, ".weight")],
+        // Determine which input index holds the weight and what suffix to use.
+        // Also record per-weight layout hint by node op_type + attributes:
+        //   MatMul: input[1] is canonical [K, N] (transpose=false)
+        //   Gemm:  input[1] is HF [out, in] if transB attribute == 1 (transpose=true),
+        //          otherwise canonical [K, N] (transpose=false)
+        //   Gather: input[0] is embedding table (no transpose semantics)
+        let (candidates, weight_transpose): (Vec<(usize, &str)>, Option<bool>) = match node.op_type.as_str() {
+            "MatMul" => (vec![(1, ".weight")], Some(false)),
+            "Gemm" => {
+                let trans_b = node.attributes.get("transB")
+                    .and_then(|a| match &a.value {
+                        OnnxAttributeValue::Int(v) => Some(*v != 0),
+                        _ => None,
+                    })
+                    .unwrap_or(false); // ONNX Gemm default transB = 0
+                (vec![(1, ".weight")], Some(trans_b))
+            }
+            "Gather" => (vec![(0, ".weight")], None),
             "Mul" => {
-                // For Mul, find whichever input is an onnx:: initializer
                 let mut v = Vec::new();
                 for (i, input) in node.inputs.iter().enumerate() {
                     if input.starts_with("onnx::") && graph.initializers.contains_key(input) {
                         v.push((i, ".weight"));
                     }
                 }
-                v
+                (v, None)
             }
             _ => continue,
         };
@@ -81,6 +105,15 @@ fn build_alias_map(graph: &OnnxGraph) -> (HashMap<String, String>, HashMap<Strin
             let Some(onnx_name) = node.inputs.get(input_idx) else {
                 continue;
             };
+
+            // Record layout hint for MatMul/Gemm weights regardless of naming
+            if let Some(trans) = weight_transpose {
+                if graph.initializers.contains_key(onnx_name.as_str())
+                    || onnx_name.starts_with("onnx::")
+                {
+                    layout_hints.entry(onnx_name.clone()).or_insert(trans);
+                }
+            }
 
             // Only alias anonymous onnx:: names
             if !onnx_name.starts_with("onnx::") {
@@ -92,20 +125,16 @@ fn build_alias_map(graph: &OnnxGraph) -> (HashMap<String, String>, HashMap<Strin
                 continue;
             }
 
-            // Derive semantic name from node.name:
-            //   "/encoder/layer.0/attention/self/query/MatMul"
-            //   → "encoder.layer.0.attention.self.query" + ".weight"
+            // Derive semantic name from node.name
             let semantic = derive_semantic_name(&node.name, &node.op_type, suffix);
             if semantic.is_empty() {
                 continue;
             }
 
-            // Don't overwrite if this semantic name already exists as a real initializer
             if graph.initializers.contains_key(&semantic) {
                 continue;
             }
 
-            // Don't overwrite existing aliases (first match wins)
             if alias_map.contains_key(&semantic) {
                 continue;
             }
@@ -115,7 +144,7 @@ fn build_alias_map(graph: &OnnxGraph) -> (HashMap<String, String>, HashMap<Strin
         }
     }
 
-    (alias_map, reverse_alias)
+    (alias_map, reverse_alias, layout_hints)
 }
 
 /// Derive a semantic tensor name from an ONNX node name.
@@ -147,12 +176,13 @@ impl OnnxLoader {
         let model_proto = decode_model(path)?;
         let mut resolver = ExternalDataResolver::new(path);
         let model = OnnxModel::from_proto(model_proto, &mut resolver)?;
-        let (alias_map, reverse_alias) = build_alias_map(&model.graph);
+        let (alias_map, reverse_alias, layout_hints) = build_alias_map(&model.graph);
         Ok(Self {
             path: path.to_path_buf(),
             model,
             alias_map,
             reverse_alias,
+            layout_hints,
         })
     }
 
@@ -280,6 +310,12 @@ impl super::TensorProvider for OnnxLoader {
     fn load_tensor_data(&self, name: &str) -> super::Result<Cow<'_, [u8]>> {
         let tensor = self.tensor(name)?;
         Ok(Cow::Borrowed(tensor.data))
+    }
+
+    fn weight_layout_hint(&self, name: &str) -> Option<bool> {
+        // 先按 semantic name 查 alias, 得到 onnx initializer name, 再查 hint。
+        let onnx_name = self.resolve(name)?;
+        self.layout_hints.get(onnx_name).copied()
     }
 }
 

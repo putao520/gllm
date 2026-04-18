@@ -377,6 +377,22 @@ pub trait TensorProvider {
     fn ggml_dtype(&self, _name: &str) -> Option<GgmlDType> {
         None
     }
+
+    /// ARCH-WEIGHT-CANONICAL-LAYOUT: Returns an explicit per-tensor hint about
+    /// whether the stored 2D shape is HF [out, in] (needs transpose to canonical
+    /// [K, N]) or already canonical.
+    ///
+    /// `Some(true)` — tensor shape is HF [out, in], downstream must transpose.
+    /// `Some(false)` — tensor shape is canonical [K, N].
+    /// `None` — no per-tensor hint; caller falls back to format-level default.
+    ///
+    /// Typical implementations:
+    ///   - SafeTensors / PyTorch: return None (caller uses format default = true).
+    ///   - ONNX: return Some based on Gemm `transB` attribute or MatMul semantics.
+    ///   - GGUF: return None (format default = false).
+    fn weight_layout_hint(&self, _name: &str) -> Option<bool> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -898,8 +914,14 @@ impl Loader {
             match meta.dtype {
                 Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
                     let data = provider.load_tensor_data(&meta.name)?;
+                    // ARCH-WEIGHT-CANONICAL-LAYOUT: loader-provided per-tensor
+                    // hint overrides format default. For ONNX this reads the
+                    // Gemm transB attribute; for SafeTensors/GGUF None falls
+                    // back to format default (SafeTensors/PyTorch always need
+                    // transpose on Linear weights).
+                    let explicit_hint = provider.weight_layout_hint(&meta.name);
                     let (cloned_meta, tensor, sp_meta_opt) =
-                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref(), format)?;
+                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref(), format, explicit_hint)?;
 
                     tensors.insert(meta.name.clone(), tensor);
                     shapes.insert(cloned_meta.name.clone(), cloned_meta.shape.clone());
@@ -969,6 +991,7 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     meta: &TensorMeta,
     data: &[u8],
     format: WeightFormat,
+    explicit_transpose_hint: Option<bool>,
 ) -> Result<(TensorMeta, B::Tensor, Option<Vec<Vec<u16>>>)> {
     let is_f32_backend = std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>();
 
@@ -1027,15 +1050,21 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
     deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
-    // ARCH-WEIGHT-CANONICAL-LAYOUT: HF SafeTensors/PyTorch 的 Linear 权重存储为
-    // [out_features, in_features] row-major, 但 gllm-kernels JIT GEMM 约定 B 是
-    // [K=in, N=out] row-major (ONNX MatMul 语义)。方阵下只是语义反 (y=x@W 而非
-    // y=x@W.T), 非方阵时会越界。统一在加载边界做 physical transpose → [in, out],
-    // 内部 op 只需处理 canonical layout。
+    // ARCH-WEIGHT-CANONICAL-LAYOUT: 统一把 HF `[out, in]` Linear 权重物理转置
+    // 到 canonical `[K=in, N=out]` 布局, 内部 op 只需处理 canonical layout。
     //
-    // 仅对 SafeTensors / PyTorch 路径激活。ONNX export 的 MatMul weight 已经是
-    // canonical [K, N] layout; GGUF 的量化权重走独立 dequant 路径, 不走此函数。
-    if matches!(format, WeightFormat::SafeTensors | WeightFormat::PyTorch) {
+    // 决定是否转置的优先级:
+    //   1. explicit_transpose_hint (loader 按 op attribute 给出): ONNX 的 Gemm
+    //      transB=1 → Some(true), MatMul/Gemm(transB=0) → Some(false)。
+    //   2. format 默认: SafeTensors / PyTorch → true (HF layout), 其他 → false。
+    //
+    // ONNX 可能混用 Gemm transB=1 (HF 原样) 和 MatMul (canonical), 所以按
+    // per-tensor hint 而非 format-level 判断。
+    let should_transpose = match explicit_transpose_hint {
+        Some(h) => h,
+        None => matches!(format, WeightFormat::SafeTensors | WeightFormat::PyTorch),
+    };
+    if should_transpose {
         normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
     }
 

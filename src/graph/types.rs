@@ -135,9 +135,14 @@ impl FusedGraph {
                     continue;
                 }
                 if let Some(meta) = provider.tensor_info(input) {
-                    let needs_transpose = format_needs_transpose
-                        && meta.shape.len() == 2
-                        && is_linear_matmul_weight(input.as_str(), &role_map);
+                    // Priority: loader-provided per-weight hint > role-based inference.
+                    // ONNX loader reads Gemm transB attribute; SafeTensors/GGUF return None.
+                    let needs_transpose = match provider.weight_layout_hint(input) {
+                        Some(hint) => hint,
+                        None => format_needs_transpose
+                            && meta.shape.len() == 2
+                            && is_linear_matmul_weight(input.as_str(), &role_map),
+                    };
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
@@ -251,14 +256,15 @@ impl FusedGraph {
                     });
 
                 if let Some(meta) = meta {
-                    // ARCH-WEIGHT-CANONICAL-LAYOUT: shape_needs_transpose 只对
-                    // Linear (2D MatMul/Gemm 权重) 生效。Embedding 表 (Gather weight)
-                    // 的 shape [vocab, hidden] 不走 MatMul 语义, 不能 transpose,
-                    // 否则 vocab 和 hidden 被互换 → Gather 输出 shape 爆炸/错位。
-                    // LayerNorm / bias / 1D 参数已通过 shape.len()==2 过滤。
-                    let needs_transpose = format_needs_transpose
-                        && meta.shape.len() == 2
-                        && is_linear_matmul_weight(input.as_str(), &role_map);
+                    // ARCH-WEIGHT-CANONICAL-LAYOUT: 优先级 loader hint > role 推断
+                    // > format 默认。ONNX loader 按 Gemm transB / MatMul 语义给
+                    // per-weight hint; SafeTensors/GGUF 返回 None 走 role 逻辑。
+                    let needs_transpose = match provider.weight_layout_hint(input) {
+                        Some(h) => h,
+                        None => format_needs_transpose
+                            && meta.shape.len() == 2
+                            && is_linear_matmul_weight(input.as_str(), &role_map),
+                    };
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
