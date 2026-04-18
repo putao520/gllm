@@ -2619,6 +2619,38 @@ impl FusedGraphExecutor {
             }
             log::debug!("[EXEC] node {node_idx} done");
 
+            // ARCH-NODE-STATS: 每节点输出 norm/max/min/nan_count probe, 在 decode
+            // 链路上逐节点定位数值退化来源。GLLM_NODE_STATS=1 开启;
+            // GLLM_NODE_STATS_FROM=<step> 从第 N 步 decode 开始 (prefill=0)。
+            if std::env::var("GLLM_NODE_STATS").is_ok() {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static STEP: AtomicUsize = AtomicUsize::new(0);
+                let cur_step = if node_idx == 0 { STEP.fetch_add(1, Ordering::SeqCst) } else { STEP.load(Ordering::SeqCst).saturating_sub(1) };
+                let from_step = std::env::var("GLLM_NODE_STATS_FROM").ok()
+                    .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                if cur_step >= from_step {
+                    let bytes_len = (seq_len * cn.feature_dim.max(1) * 4).min(output_buf.len());
+                    if bytes_len >= 4 {
+                        let data: &[f32] = unsafe {
+                            std::slice::from_raw_parts(
+                                output_buf.as_ptr() as *const f32, bytes_len / 4)
+                        };
+                        let (mut vmin, mut vmax, mut nan, mut zero) = (f32::INFINITY, f32::NEG_INFINITY, 0usize, 0usize);
+                        let mut sum_sq = 0.0f64;
+                        for &x in data {
+                            if x.is_nan() { nan += 1; continue; }
+                            if x == 0.0 { zero += 1; }
+                            if x < vmin { vmin = x; }
+                            if x > vmax { vmax = x; }
+                            sum_sq += (x as f64) * (x as f64);
+                        }
+                        let rms = (sum_sq / data.len().max(1) as f64).sqrt();
+                        eprintln!("[NODE step={cur_step} {node_idx:03} {:<40} len={} rms={:.4e} min={:.3e} max={:.3e} nan={} zero={}/{}]",
+                            self.graph.nodes[node_idx].name, data.len(), rms, vmin, vmax, nan, zero, data.len());
+                    }
+                }
+            }
+
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
 
