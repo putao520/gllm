@@ -10,7 +10,7 @@
 
 - **JIT-First Architecture** — All operators compiled via 4-stage pipeline (Scalar → SymExec → IR → ISA Lowering), no precompiled libraries
 - **Accuracy > Throughput** — Deterministic scheduling, strict causal ordering, phase-isolated prefill/decode
-- **20+ Model Architectures** — Qwen3, Llama 4, GLM-5, Mistral 3, GPT-OSS, Phi-4, Gemma2, and more
+- **20+ Model Architectures** — Qwen3, Llama 4, GLM-5, Mistral 3, GPT-OSS, Phi-4, Gemma 4, and more
 - **Multi-Format Loader** — SafeTensors (zero-copy), GGUF (21 quantization types), ONNX, PyTorch
 - **Multi-Source Download** — HuggingFace with automatic ModelScope fallback
 - **Fused Kernels** — FlashAttention, SwiGLU, FusedQkvRope, MoE routing, FusedRMSLinear
@@ -101,7 +101,7 @@ Latest generation only. See [SPEC/SUPPORTED_MODELS.md](SPEC/SUPPORTED_MODELS.md)
 
 | Category | Models | Architecture |
 |----------|--------|--------------|
-| **Generator** | Qwen3 (7B, MoE 235B, Thinking 32B), Llama 4 (8B MoE, Scout 17B), Mistral 3 (14B), GLM-4.7/5, GPT-OSS (1.5B/12B), Phi-4 (14B), SmolLM, InternLM3, Gemma2 | Dense / MoE / Thinking |
+| **Generator** | Qwen3 (7B, MoE 235B, Thinking 32B), Llama 4 (8B MoE, Scout 17B), Mistral 3 (14B), GLM-4.7/5, GPT-OSS (1.5B/12B), Phi-4 (14B), SmolLM, InternLM3, Gemma 4 (E2B/E4B/31B/26B-A4B) | Dense / MoE / Thinking |
 | **Embedding** | Qwen3-Embed (2048D), BGE-M3 (1024D), BGE-M4 (1536D), E5 (384/768/1024D), M3E, Jina v2/v4 | Bi-encoder |
 | **Reranker** | Qwen3-Rerank, BGE-Reranker-v2-m3, BGE-Rerank-v3 | Cross-encoder |
 

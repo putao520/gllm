@@ -43,27 +43,18 @@
 
 ## P1 — 架构模板扩展 + 观测性完善
 
-### P1-1: 架构模板补全（11 个缺失架构） ✅ 已完成
+### P1-1: 架构模板补全 ✅ 已完成
 
-**问题**: 仅 Qwen3 和 Llama 有 YAML 模板，其余 11 个架构只在 manifest 中识别。
+**问题**: 仅 Qwen3 / Llama 有 YAML 模板,其他架构只在 manifest 中识别。
 
-**完成状态**: 9 个 YAML 模板全部就绪（qwen3, llama, mistral3, glm4, phi4, gemma2, gpt2next, xlmr, deepseek），6 个架构映射到已有模板（Ministral→mistral3, GLM5→glm4, XlmRNext→xlmr, Qwen3MoE→qwen3, SmolLM2→llama, InternLM3→llama）。
-
-**按优先级分批**:
-
-| 批次 | 架构 | 理由 |
-|------|------|------|
-| P1-1a | Mistral3, Ministral | SUPPORTED_MODELS.md 列出，用户需求高 |
-| P1-1b | GLM4, GLM5 | 中文生态重要模型 |
-| P1-1c | Phi4 | 轻量级端侧模型 |
-| P1-1d | Gemma2 | Google 生态 |
-| P1-1e | GPT2Next (GPT-OSS) | OpenAI 开源模型 |
-| P1-1f | XlmR, XlmRNext | Embedding/Reranker 架构（BERT-like） |
-| P1-1g | DeepSeek (REQ-LOADER-020) ✅ | MoE 671B，DeepSeekAdapter + MoEConfig 元数据提取 |
+**完成状态**: 核心架构模板全部就绪并采用 `build.rs` 扫描 + YAML SSOT 模型。
+注册表自动发现 `src/arch/templates/*.yaml`,每个 YAML 声明 `name` /
+`extra_aliases` / `family`,无硬编码映射。具体已支持架构清单以目录
+`src/arch/templates/` 为真源(SPEC 不再复制名单,避免双 SSOT 失同步)。
 
 **每个模板需要**:
-1. `src/arch/templates/{arch}.yaml` — 层定义
-2. `src/arch/registry.rs` — 注册映射
+1. `src/arch/templates/{arch}.yaml` — 层定义 + `extra_aliases`
+2. (无需再改 `registry.rs`) — YAML 扫描自动注册
 3. E2E 测试验证
 
 ### P1-2: Observer Phase 2 指标采集 (07-OBSERVABILITY §2, §7 Phase 2) ✅ 已完成

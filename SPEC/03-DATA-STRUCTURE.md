@@ -184,7 +184,7 @@ pub struct QuantizedTensor {
 | Qwen2/Qwen2.5 | `qwen2`, `qwen2_5` | `qwen2.vocab_size`, `qwen2.rope.alpha` |
 | Qwen3 | `qwen3` | 待定义 |
 | Mistral | `mistral` | `mistral.sliding_window` |
-| Gemma/Gemma2 | `gemma`, `gemma2` | `gemma.attention_logit_softcapping` |
+| Gemma4 | `gemma4` | `gemma4.sliding_window`, `gemma4.global_rope_theta`, `gemma4.per_layer_embedding` |
 | DeepSeek | `deepseek` | `deepseek.moe` 相关 keys |
 | GPT-2/GPT-OSS | `gpt2`, `gpt_neox` | `c_attn`, `c_proj` 融合权重 |
 

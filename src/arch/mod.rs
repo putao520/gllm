@@ -19,7 +19,7 @@ pub use registry::{
     get_template, register_builtin_templates,
     resolve_template, resolve_template_name, resolve_family,
     resolve_moe_router, is_valid_template,
-    ArchRegistry,
+    ArchRegistry, REGISTRY as ARCH_REGISTRY,
 };
 pub use resolve::{resolve_config, ResolvedConfig};
 pub use template::{ArchTemplate, GraphNode, NodeDef, RepeatBlock};

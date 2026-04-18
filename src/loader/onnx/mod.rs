@@ -32,6 +32,7 @@ pub use model::{
     OnnxFunction, OnnxGraph, OnnxModel, OnnxNode, OnnxQuantizationAnnotation, OnnxValueInfo,
 };
 pub use tensor::{OnnxSparseFormat, OnnxSparseTensor, OnnxTensor};
+pub use types::{OnnxDim, OnnxMapType, OnnxTensorShape, OnnxTensorType, OnnxType};
 
 use external::ExternalDataResolver;
 

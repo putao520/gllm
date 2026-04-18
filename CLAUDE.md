@@ -225,15 +225,8 @@ src/
 │   ├── registry.rs        # Architecture registry
 │   ├── resolve.rs         # Architecture resolution from metadata
 │   ├── template.rs        # YAML → OnnxGraph parser
-│   └── templates/         # Model architecture YAML definitions
-│       ├── deepseek.yaml
-│       ├── gemma2.yaml
-│       ├── glm4.yaml
-│       ├── gpt2next.yaml
-│       ├── mistral3.yaml
-│       ├── phi4.yaml
-│       ├── qwen3.yaml
-│       └── xlmr.yaml
+│   └── templates/         # YAML 模板目录 (build.rs 扫描自动注册,SSOT)
+│                          # 新增架构 = 扔 YAML 进此目录,无需改任何 Rust 代码
 ├── graph/                 # DAG optimizer (unified representation)
 │   ├── mod.rs
 │   ├── types.rs           # OnnxGraph extended types

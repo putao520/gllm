@@ -306,6 +306,7 @@ mod tests {
                     dtype: safetensors::Dtype::F32,
                     data: None,
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             )]),
             quantization_info: HashMap::new(),

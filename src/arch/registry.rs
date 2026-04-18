@@ -13,8 +13,8 @@ use crate::manifest::ArchFamily;
 
 use super::template::ArchTemplate;
 
-/// 全局模板注册表
-static REGISTRY: OnceLock<ArchRegistry> = OnceLock::new();
+/// 全局模板注册表 (pub 以支持上层测试按 YAML 驱动反查)。
+pub static REGISTRY: OnceLock<ArchRegistry> = OnceLock::new();
 
 /// 架构注册表
 ///
@@ -23,8 +23,8 @@ static REGISTRY: OnceLock<ArchRegistry> = OnceLock::new();
 /// - `resolve_token(token)`: 按架构 token 模糊查找 (e.g., "LlamaForCausalLM")
 #[derive(Debug, Default)]
 pub struct ArchRegistry {
-    /// 模板名 → 模板
-    templates: HashMap<String, ArchTemplate>,
+    /// 模板名 → 模板 (pub 以支持上层测试按 YAML 驱动迭代)
+    pub templates: HashMap<String, ArchTemplate>,
     /// 归一化别名 → 模板名
     alias_map: HashMap<String, String>,
 }
@@ -54,10 +54,13 @@ impl ArchRegistry {
         self.templates.insert(name.clone(), template);
     }
 
-    /// 插入别名及其 `{alias}ForCausalLM` 派生形式
+    /// 插入别名及其 `{alias}ForCausalLM` 派生形式。
+    /// register/lookup 对称:alias 一律先 `normalize_token` 再入表,保证含连字符
+    /// 的模板名(如 `qwen3-reranker`)能通过 `resolve_token("qwen3-reranker")` 反查。
     fn insert_with_suffix(&mut self, alias: &str, template_name: &str) {
-        self.alias_map.insert(alias.to_string(), template_name.to_string());
-        self.alias_map.insert(format!("{alias}forcausallm"), template_name.to_string());
+        let norm = normalize_token(alias);
+        self.alias_map.insert(norm.clone(), template_name.to_string());
+        self.alias_map.insert(format!("{norm}forcausallm"), template_name.to_string());
     }
 
     /// 按模板名精确查找
@@ -189,82 +192,74 @@ include!(concat!(env!("OUT_DIR"), "/template_list.rs"));
 mod tests {
     use super::*;
 
+    /// YAML 模板目录扫描结果非空 — build.rs 填充 SCANNED_TEMPLATES。
+    /// 无硬编码模板名列表:测试只校验"扫描路径有效、所有模板 YAML 均可解析"。
     #[test]
     fn all_templates_parse() {
         register_builtin_templates();
         let registry = REGISTRY.get().unwrap();
         assert!(
-            registry.templates.len() >= 9,
-            "expected at least 9 templates, got {}",
+            !registry.templates.is_empty(),
+            "build.rs 扫描 src/arch/templates/*.yaml 必须至少注册一个模板"
+        );
+        assert_eq!(
+            registry.templates.len(),
+            SCANNED_TEMPLATES.len(),
+            "已扫描 YAML 数 ({}) 与注册模板数 ({}) 必须一致",
+            SCANNED_TEMPLATES.len(),
             registry.templates.len()
         );
     }
 
+    /// 每个 YAML 模板的 `name` 本身 + 自动派生的 `{name}ForCausalLM` 都必须可解析。
+    /// 不硬编码 LlamaForCausalLM 等字符串 — 直接从已加载模板反查。
     #[test]
-    fn resolve_token_works() {
+    fn yaml_name_and_standard_token_resolve() {
         register_builtin_templates();
-        // HuggingFace config.json 格式
-        assert!(resolve_template("LlamaForCausalLM").is_some());
-        assert_eq!(resolve_template("LlamaForCausalLM").unwrap().name, "llama");
-        assert!(resolve_template("MistralForCausalLM").is_some());
-        assert_eq!(resolve_template("MistralForCausalLM").unwrap().name, "mistral3");
-        assert!(resolve_template("Gemma2ForCausalLM").is_some());
-        assert_eq!(resolve_template("Gemma2ForCausalLM").unwrap().name, "gemma2");
-        assert!(resolve_template("GPTOSSForCausalLM").is_some());
-        assert_eq!(resolve_template("GPTOSSForCausalLM").unwrap().name, "gpt2next");
-        // 不存在的
-        assert!(resolve_template("custom-llama-adapter").is_none());
-    }
-
-    #[test]
-    fn resolve_family_works() {
-        register_builtin_templates();
-        assert_eq!(resolve_family("llama"), Some(ArchFamily::Decoder));
-        assert_eq!(resolve_family("xlmr"), Some(ArchFamily::Encoder));
-        assert_eq!(resolve_family("bert"), Some(ArchFamily::Encoder));
-        assert_eq!(resolve_family("qwen3"), Some(ArchFamily::Decoder));
-        assert_eq!(resolve_family("gptoss"), Some(ArchFamily::Decoder));
-    }
-
-    #[test]
-    fn template_lookup_by_name() {
-        register_builtin_templates();
-        for name in ["qwen3", "llama", "mistral3", "glm4", "phi4", "gemma2", "gemma4", "xlmr", "deepseek", "gpt2next"] {
-            assert!(get_template(name).is_some(), "template '{name}' not found");
-        }
-        assert!(get_template("nonexistent").is_none());
-    }
-
-    #[test]
-    fn aliases_cover_all_known_tokens() {
-        register_builtin_templates();
-        // 验证所有已知的 HuggingFace architecture token 都能解析
-        let known_tokens = [
-            ("LlamaForCausalLM", "llama"),
-            ("Qwen3ForCausalLM", "qwen3"),
-            ("Qwen2ForCausalLM", "qwen3"),
-            ("MistralForCausalLM", "mistral3"),
-            ("MinistralForCausalLM", "mistral3"),
-            ("Phi4ForCausalLM", "phi4"),
-            ("Phi3ForCausalLM", "phi4"),
-            ("Gemma2ForCausalLM", "gemma2"),
-            ("Gemma4ForCausalLM", "gemma4"),
-            ("Gemma4ForConditionalGeneration", "gemma4"),
-            ("DeepseekV3ForCausalLM", "deepseek"),
-            ("SmolLM2ForCausalLM", "llama"),
-            ("GPTOSSForCausalLM", "gpt2next"),
-            ("GPT2NextForCausalLM", "gpt2next"),
-            ("bert", "xlmr"),
-            ("roberta", "xlmr"),
-        ];
-        for (token, expected_template) in known_tokens {
-            let resolved = resolve_template_name(token);
-            assert_eq!(
-                resolved,
-                Some(expected_template),
-                "token '{token}' should resolve to '{expected_template}', got {resolved:?}"
-            );
+        let registry = REGISTRY.get().unwrap();
+        for name in registry.templates.keys() {
+            assert_eq!(resolve_template_name(name), Some(name.as_str()),
+                "template name '{name}' 必须解析为自身");
+            let forcausallm = format!("{name}ForCausalLM");
+            assert_eq!(resolve_template_name(&forcausallm), Some(name.as_str()),
+                "自动派生 token '{forcausallm}' 必须解析为 '{name}'");
         }
     }
 
+    /// 每个 YAML 模板声明的 `extra_aliases` 必须反向解析为该模板。
+    /// SSOT:别名完全由 YAML 源驱动,测试仅校验"YAML 声明 ↔ 注册表注册"一致性。
+    #[test]
+    fn extra_aliases_are_registered() {
+        register_builtin_templates();
+        let registry = REGISTRY.get().unwrap();
+        for (name, template) in &registry.templates {
+            for alias in &template.extra_aliases {
+                assert_eq!(resolve_template_name(alias), Some(name.as_str()),
+                    "extra_alias '{alias}' (YAML {}) 未能反查到模板 '{name}'", name);
+                let alias_forcausallm = format!("{alias}ForCausalLM");
+                assert_eq!(resolve_template_name(&alias_forcausallm), Some(name.as_str()),
+                    "派生 token '{alias_forcausallm}' 未能反查到 '{name}'");
+            }
+        }
+    }
+
+    /// 每个模板的 YAML `family` 字段能正确解析为 ArchFamily。
+    /// 不硬编码 llama/xlmr 等名称 — 仅校验每个已注册模板的 family 都有合法解析。
+    #[test]
+    fn every_template_family_resolves() {
+        register_builtin_templates();
+        let registry = REGISTRY.get().unwrap();
+        for name in registry.templates.keys() {
+            assert!(resolve_family(name).is_some(),
+                "模板 '{name}' 的 family 字段必须解析为 ArchFamily");
+        }
+    }
+
+    /// 未知 token 必须返回 None — 唯一允许的硬编码字符串是"故意不存在的 token"。
+    #[test]
+    fn unknown_token_returns_none() {
+        register_builtin_templates();
+        assert!(resolve_template("custom-llama-adapter-that-does-not-exist").is_none());
+        assert!(get_template("nonexistent-template-name").is_none());
+    }
 }

@@ -28,7 +28,7 @@
 | **G-A** | SwiGLU | Standard | Full RoPE | RMSNorm | — | qwen3, llama, glm4 |
 | **G-B** | SwiGLU | **Sliding Window** | Full RoPE | RMSNorm | — | mistral3 |
 | **G-C** | SwiGLU | Standard | **Partial RoPE** | RMSNorm | — | phi4 |
-| **G-D** | **GeGLU** | **Softcap** | Full RoPE | RMSNorm (×4) | **LogitSoftCap** | gemma2 |
+| **G-D** | **Std GELU** (non-gated) | **Sliding+Global 交替** | **Dual RoPE (sliding θ=10K / global θ=1M+p-RoPE partial=0.25)** | RMSNorm + **QkNorm** + **ValueNorm** | **Per-Layer Embeddings (PLE)** | gemma4 |
 | **G-E** | **Std GELU** | Standard | **Absolute** | **LayerNorm+Bias** | Bias throughout | gpt2next |
 | **G-F** | SwiGLU+**MoE** | Standard | Full RoPE | RMSNorm | **Router+SharedExperts+Dispatch** | deepseek |
 | **G-G** | SwiGLU+**MoE** | Standard | Full RoPE | RMSNorm | **QwenRouter** | qwen3 (MoE variant) |
@@ -40,8 +40,8 @@
 | G-A | Qwen3, Qwen2.5, Llama4, SmolLM2, SmolLM3, InternLM3, GLM4, GLM5 | **SmolLM2-135M** (ST) + **Qwen3-0.6B** (GGUF) | ✅ 已覆盖 |
 | G-B | Mistral3, Ministral | — | ❌ 未覆盖 |
 | G-C | Phi4, Phi4-mini | — | ❌ 未覆盖 |
-| G-D | Gemma2-2B, Gemma2-9B, Gemma2-27B | — | ❌ 未覆盖 |
-| G-E | GPT-OSS-1.5B, GPT-OSS-12B | — | ❌ **未覆盖 + 代码未注册** |
+| G-D | Gemma4-E2B/E4B/31B/26B-A4B | — | 🟡 测试接入 `google/gemma-4-E2B`,待 E2E 数值对齐 |
+| G-E | GPT-OSS-1.5B, GPT-OSS-12B | — | ❌ 未覆盖 |
 | G-F | DeepSeek | — | ❌ 未覆盖 (模型过大) |
 | G-G | Qwen3MoE (235B), Llama4-Scout, Llama4-8B | — | ❌ 未覆盖 (模型过大) |
 
@@ -67,7 +67,7 @@
 
 | 路径 | 最小可用模型 | 大小 | 可行性 |
 |------|------------|------|--------|
-| **G-D** (GeGLU+Softcap) | `google/gemma-2-2b-it` | 2B | ✅ 可行，模型公开可用 |
+| **G-D** (Gemma4 Dual RoPE + QkNorm) | `google/gemma-4-E2B` | Effective 2B | ✅ 可行，模型公开可用 |
 | **G-E** (Legacy GELU) | `openai/gpt-oss-1.5b` | 1.5B | ✅ 已注册，模板通过 build.rs 自动扫描 |
 
 ### 4.2 需要 GGUF 量化版的缺口 (原始模型过大)
@@ -97,7 +97,7 @@
 | 路径 | 代表模型 | 格式 | 测试内容 |
 |------|---------|------|---------|
 | G-A | SmolLM2-135M / Qwen3-0.6B | ST+GGUF+ONNX | ✅ 已有 |
-| G-D | gemma-2-2b-it | ST (或 GGUF) | 🔴 需新增：GeGLU + Softcap + LogitSoftCap + 4×Norm |
+| G-D | gemma-4-E2B | ST (或 GGUF) | 🔴 需新增：QkNorm + ValueNorm + DualRoPE (sliding+global p-RoPE) + PLE + Sliding-window/Global 交替 attention |
 | G-E | openai/gpt-oss-1.5b | ST | 🔴 需新增：LayerNorm+Bias + GELU + AbsolutePos + FusedQKV |
 | G-B | mistral-small-3.2 Q4_K_M | GGUF | 🟡 可选：Sliding Window |
 | G-C | phi-4-mini Q4_K_M | GGUF | 🟡 可选：Partial RoPE |

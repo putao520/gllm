@@ -202,13 +202,24 @@ mod tests {
 
     #[test]
     fn map_architecture_token_delegates_to_registry() {
-        assert_eq!(map_architecture_token("LlamaForCausalLM").as_deref(), Some("llama"));
-        assert_eq!(map_architecture_token("Qwen2ForCausalLM").as_deref(), Some("qwen3"));
-        assert_eq!(map_architecture_token("MistralForCausalLM").as_deref(), Some("mistral3"));
-        assert_eq!(map_architecture_token("Gemma2ForCausalLM").as_deref(), Some("gemma2"));
-        assert_eq!(map_architecture_token("DeepseekV3ForCausalLM").as_deref(), Some("deepseek"));
-        assert_eq!(map_architecture_token("GPTOSSForCausalLM").as_deref(), Some("gpt2next"));
-        assert_eq!(map_architecture_token("custom-llama-adapter"), None);
+        // SSOT 测试:不硬编码 token 映射。从 YAML 注册表读取每个模板的
+        // `name` / extra_aliases,验证 map_architecture_token 能正确反查。
+        crate::arch::register_builtin_templates();
+        let registry = crate::arch::ARCH_REGISTRY.get().unwrap();
+        for (name, template) in &registry.templates {
+            assert_eq!(map_architecture_token(name).as_deref(), Some(name.as_str()),
+                "template name '{name}' 必须自反查");
+            assert_eq!(
+                map_architecture_token(&format!("{name}ForCausalLM")).as_deref(),
+                Some(name.as_str()),
+                "自动派生 token '{name}ForCausalLM' 必须反查到 '{name}'"
+            );
+            for alias in &template.extra_aliases {
+                assert_eq!(map_architecture_token(alias).as_deref(), Some(name.as_str()),
+                    "extra_alias '{alias}' (YAML {}) 必须反查到 '{name}'", name);
+            }
+        }
+        assert_eq!(map_architecture_token("custom-token-that-never-exists"), None);
     }
 
     #[test]

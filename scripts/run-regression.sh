@@ -50,7 +50,7 @@ case "${1:-arch}" in
         echo "  matrix   - 虚拟模型矩阵测试"
         echo ""
         echo "公开模型覆盖 (无需 token):"
-        echo "  Generator: Qwen3-1.7B, SmolLM, Phi4, Gemma2, InternLM3"
+        echo "  Generator: Qwen3-1.7B, SmolLM, Phi4, Gemma4, InternLM3"
         echo "  Embedding: BGE-M3, E5-Small, M3E"
         echo ""
         echo "Gated 模型 (需要 HF_TOKEN):"

@@ -66,8 +66,8 @@ const MODEL_TESTS: &[ModelTest] = &[
         min_tokens: 5,
     },
     ModelTest {
-        alias: "google/gemma-2-2b-it",
-        model_id: "gemma-2-2b-it",
+        alias: "google/gemma-4-E2B",
+        model_id: "gemma-4-e2b",
         model_type: ModelType::Generator,
         test_prompt: "Hello, how are you?",
         min_tokens: 10,

@@ -73,15 +73,14 @@
 | `internlm3-8b` | Llama4 | 8B | `internlm/internlm3-8b-instruct` | - | 高效推理 |
 
 ### Gemma Series (Google)
-> Status: **Gemma 4 (Apr 2026)** is the current standard. Gemma 2 is deprecated (Legacy Exception).
+> Status: Gemma 4 是当前唯一支持的 Gemma 世代(Apr 2026 发布),Gemma 2/3 已全面下线。
 
 | Model ID | Architecture | Specs | HF Repo | ModelScope Repo | 特性 |
 |----------|--------------|-------|---------|-----------------|------|
-| `gemma-4-e2b` | Gemma4 | 2.3B effective | `google/gemma-4-E2B-it` | - | 多模态轻量，128K 上下文 |
-| `gemma-4-e4b` | Gemma4 | 4.5B effective | `google/gemma-4-E4B-it` | - | 多模态标准，128K 上下文 |
-| `gemma-4-27b` | Gemma4 | 27B dense | `google/gemma-4-27B-it` | - | 大模型多模态 |
-| `gemma-4-moe` | Gemma4 | 26B (A4B) MoE | `google/gemma-4-26B-A4B-it` | - | MoE 多模态旗舰 |
-| `gemma-2-2b-it` | Gemma2 | 2B | `google/gemma-2-2b-it` | - | **Legacy Exception**: GeGLU 路径测试保留 |
+| `gemma-4-e2b` | Gemma4 | Effective 2B (PLE) | `google/gemma-4-E2B` | - | 轻量设备端对话 / 长上下文 |
+| `gemma-4-e4b` | Gemma4 | Effective 4B (PLE) | `google/gemma-4-E4B` | - | 设备端多模态对话 |
+| `gemma-4-26b-a4b` | Gemma4 | 26B MoE (4B Active) | `google/gemma-4-26B-A4B-it` | - | MoE 多模态对话 |
+| `gemma-4-31b` | Gemma4 | 31B Dense | `google/gemma-4-31B-IT` | - | 旗舰多模态(文本+图像+视频帧+音频) |
 
 ## 2. Embedding Models (文本向量化)
 

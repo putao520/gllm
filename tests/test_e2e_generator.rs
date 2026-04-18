@@ -191,22 +191,24 @@ fn e2e_generator_onnx() {
 }
 
 // ============================================================================
-// G-D 路径: GeGLU + Softcap + LogitSoftCap (Gemma2 架构)
+// G-D 路径: QkNorm + ValueNorm + DualRoPE (sliding/global) + p-RoPE (Gemma 4 架构)
 // ============================================================================
 
-/// TEST-E2E-GEN-004: Gemma2 架构 GeGLU 激活路径端到端推理
+/// TEST-E2E-GEN-004: Gemma 4 架构 QkNorm + DualRoPE 路径端到端推理
 /// **关联需求**: REQ-TEST-002
 /// **测试类型**: 正向
-/// **算法路径差异**: G-D 路径覆盖 GeGLU 激活函数、Softcap 注意力缩放、
-/// LogitSoftCap logit 截断 — 区别于 G-A 路径 (SwiGLU+RMSNorm+RoPE)。
-/// Gemma2 使用 sliding window + global attention 交替层、
-/// pre/post-RMSNorm 双归一化，以及 query pre-attention scalar。
-/// **期望结果**: 成功加载 Gemma2 SafeTensors 模型并生成语义正确的 token 序列
+/// **算法路径差异**: G-D 路径覆盖 QkNorm (替代 softcap)、ValueNorm、
+/// DualRotaryEmbedding (sliding θ=10K / global θ=1M+partial=0.25 即 p-RoPE)、
+/// 以及 sliding-window / global attention 交替层 — 区别于
+/// G-A 路径 (SwiGLU+RMSNorm+单 RoPE) 和 G-E 路径 (LayerNorm+AbsolutePos)。
+/// Gemma 4 采用 Per-Layer Embeddings (PLE) + Standard GELU (非 gated),
+/// global 层 K/V 统一。本测试覆盖文本单模态路径 (gemma-4-E2B)。
+/// **期望结果**: 成功加载 Gemma 4 E2B SafeTensors 模型并生成语义正确的 token 序列
 #[test]
-fn e2e_generator_gemma2_geglu() {
-    const MODEL: &str = "google/gemma-2-2b-it";
+fn e2e_generator_gemma4_qknorm() {
+    const MODEL: &str = "google/gemma-4-E2B";
 
-    let client = Client::new_chat(MODEL).expect("Failed to load Gemma2 model");
+    let client = Client::new_chat(MODEL).expect("Failed to load Gemma 4 model");
     let response = client
         .generate("The capital of France is")
         .max_tokens(10)
@@ -218,7 +220,7 @@ fn e2e_generator_gemma2_geglu() {
     let text = response.text.trim();
 
     // 反退化检查
-    assert_generation_sane(text, "gemma2_geglu");
+    assert_generation_sane(text, "gemma4_qknorm");
 
     // 语义正确性
     let lower = text.to_lowercase();
