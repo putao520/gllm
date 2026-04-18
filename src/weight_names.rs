@@ -392,3 +392,120 @@ pub fn ple_projection_aliases() -> Vec<String> {
 pub fn ple_post_mlp_proj_aliases(layer: usize) -> Vec<String> {
     decoder_layer_aliases(layer, PLE_POST_MLP_PROJ_PREFIX, None)
 }
+
+/// 给定 **任意** canonical PLE 权重名 (global 两种 / per-layer post_mlp_projection),
+/// 返回其所有等价别名 (含 HF `model.` 前缀 / 裸前缀 / decoder layer 不同前缀)。
+///
+/// 语义对齐 `all_decoder_weight_aliases`: 由 `bind_weight_shapes_fuzzy` 在 exact
+/// match 失败后调用, 用于把 YAML template 侧的 canonical 名字桥接到 provider 实际
+/// 存储的名字。不匹配任何 PLE 模式时返回空 Vec, 保持调用方的回退链行为。
+pub fn all_ple_weight_aliases(name: &str) -> Vec<String> {
+    // Global PLE embed table: `model.per_layer_embedding.embed_tokens.weight` / 裸前缀。
+    let ple_embed = ple_embed_tokens_aliases();
+    if ple_embed.iter().any(|a| a == name) {
+        return ple_embed;
+    }
+
+    // Global PLE projection: `model.per_layer_embedding.per_layer_projection.weight` / 裸前缀。
+    let ple_proj = ple_projection_aliases();
+    if ple_proj.iter().any(|a| a == name) {
+        return ple_proj;
+    }
+
+    // Per-layer `post_mlp_projection.weight`: 形如
+    //   `model.layers.{N}.post_mlp_projection.weight` 或 `layers.{N}.post_mlp_projection.weight`
+    // 复用 `decoder_layer_aliases` 统一生成所有前缀变体 (含 GGUF `blk.{N}.`)。
+    for &prefix in DECODER_PREFIXES {
+        let base = if prefix.is_empty() {
+            "layers.".to_string()
+        } else {
+            format!("{prefix}.layers.")
+        };
+        if let Some(rest) = name.strip_prefix(&base) {
+            // `{N}.post_mlp_projection.weight`
+            let Some(dot_pos) = rest.find('.') else { continue; };
+            let layer_str = &rest[..dot_pos];
+            let suffix = &rest[dot_pos + 1..];
+            if suffix != PLE_POST_MLP_PROJ_PREFIX {
+                continue;
+            }
+            let Ok(layer) = layer_str.parse::<usize>() else { continue; };
+            return ple_post_mlp_proj_aliases(layer);
+        }
+    }
+
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ple_embed_tokens_aliases_contains_canonical_and_bare() {
+        let aliases = ple_embed_tokens_aliases();
+        assert!(aliases.iter().any(|a| a == "per_layer_embedding.embed_tokens.weight"));
+        assert!(aliases.iter().any(|a| a == "model.per_layer_embedding.embed_tokens.weight"));
+        assert_eq!(aliases.len(), DECODER_PREFIXES.len());
+    }
+
+    #[test]
+    fn ple_projection_aliases_contains_canonical_and_bare() {
+        let aliases = ple_projection_aliases();
+        assert!(aliases.iter().any(|a| a == "per_layer_embedding.per_layer_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "model.per_layer_embedding.per_layer_projection.weight"));
+        assert_eq!(aliases.len(), DECODER_PREFIXES.len());
+    }
+
+    #[test]
+    fn ple_post_mlp_proj_aliases_covers_all_prefixes() {
+        let aliases = ple_post_mlp_proj_aliases(5);
+        assert!(aliases.iter().any(|a| a == "layers.5.post_mlp_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "model.layers.5.post_mlp_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "h.5.post_mlp_projection.weight"));
+    }
+
+    #[test]
+    fn all_ple_weight_aliases_global_embed() {
+        let from_canonical =
+            all_ple_weight_aliases("model.per_layer_embedding.embed_tokens.weight");
+        assert!(from_canonical.iter().any(|a| a == "per_layer_embedding.embed_tokens.weight"));
+        assert!(from_canonical
+            .iter()
+            .any(|a| a == "model.per_layer_embedding.embed_tokens.weight"));
+
+        let from_bare = all_ple_weight_aliases("per_layer_embedding.embed_tokens.weight");
+        assert!(from_bare
+            .iter()
+            .any(|a| a == "model.per_layer_embedding.embed_tokens.weight"));
+    }
+
+    #[test]
+    fn all_ple_weight_aliases_global_projection() {
+        let aliases =
+            all_ple_weight_aliases("model.per_layer_embedding.per_layer_projection.weight");
+        assert!(aliases.iter().any(|a| a == "per_layer_embedding.per_layer_projection.weight"));
+        assert!(aliases
+            .iter()
+            .any(|a| a == "model.per_layer_embedding.per_layer_projection.weight"));
+    }
+
+    #[test]
+    fn all_ple_weight_aliases_per_layer() {
+        let aliases = all_ple_weight_aliases("model.layers.3.post_mlp_projection.weight");
+        assert!(aliases.iter().any(|a| a == "layers.3.post_mlp_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "model.layers.3.post_mlp_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "h.3.post_mlp_projection.weight"));
+
+        let bare = all_ple_weight_aliases("layers.7.post_mlp_projection.weight");
+        assert!(bare.iter().any(|a| a == "model.layers.7.post_mlp_projection.weight"));
+    }
+
+    #[test]
+    fn all_ple_weight_aliases_non_ple_returns_empty() {
+        // Regular decoder weights must not be intercepted by the PLE matcher.
+        assert!(all_ple_weight_aliases("model.layers.0.self_attn.q_proj.weight").is_empty());
+        assert!(all_ple_weight_aliases("lm_head.weight").is_empty());
+        assert!(all_ple_weight_aliases("model.embed_tokens.weight").is_empty());
+    }
+}

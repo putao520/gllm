@@ -243,6 +243,16 @@ impl FusedGraph {
                                 return Some(m);
                             }
                         }
+                        // PLE (Gemma 4) weight aliases — both global (embed_tokens /
+                        // per_layer_projection) and per-layer post_mlp_projection. Covers
+                        // HF `model.` prefix ↔ bare prefix ↔ GGUF `blk.{N}.` forms.
+                        for alias in crate::weight_names::all_ple_weight_aliases(input) {
+                            if &alias != input {
+                                if let Some(m) = provider.tensor_info(&alias) {
+                                    return Some(m);
+                                }
+                            }
+                        }
                         // Decoder global weight aliases (final norm, lm_head, embedding).
                         // These are not layer-indexed and don't fit the layer alias table.
                         let global_aliases: &[&dyn Fn() -> Vec<String>] = &[
@@ -653,6 +663,8 @@ impl OptimizationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::TensorMeta;
+    use std::borrow::Cow;
 
     #[test]
     fn fused_graph_default() {
@@ -684,6 +696,184 @@ mod tests {
         };
         assert_eq!(stats.total_fusions(), 15);
         assert!((stats.reduction_ratio() - 0.4).abs() < 0.01);
+    }
+
+    // ---- PLE weight binding tests -------------------------------------------------
+
+    #[derive(Debug)]
+    struct MockProvider {
+        tensors: Vec<TensorMeta>,
+        layout_hints: HashMap<String, bool>,
+    }
+
+    impl MockProvider {
+        fn new(tensors: Vec<TensorMeta>) -> Self {
+            Self { tensors, layout_hints: HashMap::new() }
+        }
+        fn with_hint(mut self, name: &str, hint: bool) -> Self {
+            self.layout_hints.insert(name.to_string(), hint);
+            self
+        }
+    }
+
+    impl crate::loader::TensorProvider for MockProvider {
+        fn tensor_info(&self, name: &str) -> Option<TensorMeta> {
+            self.tensors.iter().find(|t| t.name == name).cloned()
+        }
+        fn iter_tensors(&self) -> impl Iterator<Item = TensorMeta> {
+            self.tensors.clone().into_iter()
+        }
+        fn load_tensor_data(&self, _name: &str) -> crate::loader::Result<Cow<'_, [u8]>> {
+            Ok(Cow::Owned(Vec::new()))
+        }
+        fn weight_layout_hint(&self, name: &str) -> Option<bool> {
+            self.layout_hints.get(name).copied()
+        }
+    }
+
+    fn mk_tensor(name: &str, shape: &[usize]) -> TensorMeta {
+        TensorMeta {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            dtype: safetensors::Dtype::F32,
+        }
+    }
+
+    /// PLE 融合节点的输入顺序 (与 `build_ple_graph` 对齐):
+    ///   [0] hidden (activation)
+    ///   [1] main_embed (activation)
+    ///   [2] ple_slice (activation, 上游 Gather 的 output)
+    ///   [3] proj_w (**Linear weight**)
+    ///   [4] post_mlp_w (**Linear weight**)
+    ///
+    /// 另外 PLE 的 Gather 节点 (非 fused op) 把 embed_tokens table 作为 input[1]。
+    /// 我们单独建一个 Atomic("Gather") 节点来覆盖这个 case。
+    fn build_ple_test_graph() -> FusedGraph {
+        let mut g = FusedGraph::new();
+        g.inputs = vec!["hidden".to_string(), "main_embed".to_string(), "indices".to_string()];
+        g.outputs = vec!["hidden_out".to_string()];
+
+        // Gather(ple_embed_table, indices) → ple_slice
+        g.nodes.push(FusedNode {
+            name: "ple_gather".into(),
+            op: FusedOp::Atomic(AtomicOp::new("Gather")),
+            inputs: vec![
+                "indices".to_string(),
+                "model.per_layer_embedding.embed_tokens.weight".to_string(),
+            ],
+            outputs: vec!["ple_slice".to_string()],
+            attributes: HashMap::new(),
+        });
+
+        // PerLayerEmbed(hidden, main_embed, ple_slice, proj_w, post_mlp_w) → hidden_out
+        g.nodes.push(FusedNode {
+            name: "ple_fused".into(),
+            op: FusedOp::PerLayerEmbed(PleConfig { dim_per_layer: 128, num_layers: 26 }),
+            inputs: vec![
+                "hidden".to_string(),
+                "main_embed".to_string(),
+                "ple_slice".to_string(),
+                "model.per_layer_embedding.per_layer_projection.weight".to_string(),
+                "model.layers.3.post_mlp_projection.weight".to_string(),
+            ],
+            outputs: vec!["hidden_out".to_string()],
+            attributes: HashMap::new(),
+        });
+
+        g
+    }
+
+    /// HF SafeTensors 场景: provider 用 bare 前缀 (`per_layer_embedding.embed_tokens.weight`),
+    /// 但 YAML template 输入了 `model.` 前缀版。`bind_weight_shapes_fuzzy` 必须能找到。
+    #[test]
+    fn ple_weights_bind_via_alias_resolution_safetensors() {
+        let provider = MockProvider::new(vec![
+            // HF bare-prefix 保存 (去 `model.` 前缀)。
+            mk_tensor("per_layer_embedding.embed_tokens.weight", &[32000, 3328]),
+            mk_tensor("per_layer_embedding.per_layer_projection.weight", &[2048, 128]),
+            mk_tensor("layers.3.post_mlp_projection.weight", &[2048, 128]),
+        ]);
+
+        let mut graph = build_ple_test_graph();
+        let bound = graph.bind_weight_shapes_fuzzy(&provider, /* format_needs_transpose = */ true);
+        assert_eq!(bound, 3, "three PLE weights must bind via alias resolution");
+
+        // Global PLE embed table: Gather 的 weight input, **不** transpose。
+        let embed = graph
+            .weight_bindings
+            .get("model.per_layer_embedding.embed_tokens.weight")
+            .expect("embed_tokens.weight binding missing");
+        assert_eq!(embed.source_name, "per_layer_embedding.embed_tokens.weight");
+        assert_eq!(embed.shape, vec![32000, 3328]);
+        assert!(!embed.shape_needs_transpose,
+            "Gather 的 embedding table 不是 MatMul/Gemm weight, 不应 transpose");
+
+        // per_layer_projection: PerLayerEmbed fused op 的 input[3] → Linear weight,
+        // HF SafeTensors 格式默认需要 transpose。
+        let proj = graph
+            .weight_bindings
+            .get("model.per_layer_embedding.per_layer_projection.weight")
+            .expect("per_layer_projection binding missing");
+        assert_eq!(proj.source_name, "per_layer_embedding.per_layer_projection.weight");
+        assert!(proj.shape_needs_transpose,
+            "per_layer_projection 是 Linear weight, HF SafeTensors 默认需要 transpose");
+
+        // post_mlp_projection: PerLayerEmbed fused op 的 input[4] → Linear weight。
+        let post = graph
+            .weight_bindings
+            .get("model.layers.3.post_mlp_projection.weight")
+            .expect("post_mlp_projection binding missing");
+        assert_eq!(post.source_name, "layers.3.post_mlp_projection.weight");
+        assert!(post.shape_needs_transpose,
+            "post_mlp_projection 是 Linear weight, HF SafeTensors 默认需要 transpose");
+    }
+
+    /// ONNX 场景: loader 通过 `weight_layout_hint` 显式标注 `Some(false)` (canonical layout),
+    /// 该 hint 必须覆盖 role-based 推断。
+    #[test]
+    fn ple_weights_onnx_hint_false_overrides_role() {
+        let provider = MockProvider::new(vec![
+            mk_tensor("model.per_layer_embedding.per_layer_projection.weight", &[128, 2048]),
+        ])
+        .with_hint("model.per_layer_embedding.per_layer_projection.weight", false);
+
+        let mut graph = build_ple_test_graph();
+        // Drop 其他节点, 只保留 PerLayerEmbed 来简化测试 (让 per_layer_projection 只被 fused op 使用)。
+        graph.nodes.retain(|n| matches!(n.op, FusedOp::PerLayerEmbed(_)));
+
+        let bound = graph.bind_weight_shapes_fuzzy(&provider, /* format_needs_transpose = */ true);
+        assert!(bound >= 1);
+
+        let proj = graph
+            .weight_bindings
+            .get("model.per_layer_embedding.per_layer_projection.weight")
+            .expect("projection must bind");
+        assert!(!proj.shape_needs_transpose,
+            "ONNX weight_layout_hint=Some(false) 必须覆盖 HF 格式默认");
+    }
+
+    /// GGUF 格式: `format_needs_transpose=false`, 所有 PLE 权重都不应 transpose。
+    #[test]
+    fn ple_weights_bind_gguf_layout_no_transpose() {
+        let provider = MockProvider::new(vec![
+            mk_tensor("model.per_layer_embedding.embed_tokens.weight", &[32000, 3328]),
+            mk_tensor("model.per_layer_embedding.per_layer_projection.weight", &[128, 2048]),
+            mk_tensor("model.layers.3.post_mlp_projection.weight", &[128, 2048]),
+        ]);
+
+        let mut graph = build_ple_test_graph();
+        let bound = graph.bind_weight_shapes_fuzzy(&provider, /* format_needs_transpose = */ false);
+        assert_eq!(bound, 3);
+
+        for name in [
+            "model.per_layer_embedding.embed_tokens.weight",
+            "model.per_layer_embedding.per_layer_projection.weight",
+            "model.layers.3.post_mlp_projection.weight",
+        ] {
+            let wb = graph.weight_bindings.get(name).unwrap();
+            assert!(!wb.shape_needs_transpose,
+                "GGUF format_needs_transpose=false → {} 不应 transpose", name);
+        }
     }
 }
 
