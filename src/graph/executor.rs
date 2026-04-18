@@ -2335,6 +2335,22 @@ impl FusedGraphExecutor {
         self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, None)
     }
 
+    /// Variant that accepts `forward_config` (ARCH-ROPE-CACHE + KV write 需要 max_seq_len)。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn run_with_kv_cache_with_config(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        kv_cache_k: *mut f32,
+        kv_cache_v: *mut f32,
+        layer: usize,
+        total_seq: usize,
+        seq_len: usize,
+        positions: *const u32,
+        forward_config: &crate::engine::executor::GeneratorForwardConfig,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, Some(forward_config))
+    }
+
     /// §9-§18: run_with_kv_cache with optional callback chain for Gate-First Skip / Residual Bypass / Early Exit.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn run_with_kv_cache_and_callbacks(

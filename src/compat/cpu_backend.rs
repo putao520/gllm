@@ -416,9 +416,9 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
                 drop(store);
 
                 let positions_u32: Vec<u32> = (position..position + seq_len).map(|p| p as u32).collect();
-                executor.run_with_kv_cache(
+                executor.run_with_kv_cache_with_config(
                     &inputs, k_ptr, v_ptr,
-                    0, total_seq, seq_len, positions_u32.as_ptr(),
+                    0, total_seq, seq_len, positions_u32.as_ptr(), config,
                 ).map_err(|e| BE::Other(format!("FusedGraphExecutor decoder run failed: {e}")))
             } else {
                 let bindings = shape_bindings_from_seq(seq_len);
