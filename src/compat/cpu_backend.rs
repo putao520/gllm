@@ -430,7 +430,23 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             total_compute_ms += elapsed;
 
             let outputs = result?;
-            let logits_data = extract_final_hidden(&outputs, executor)?;
+            let full_logits = extract_final_hidden(&outputs, executor)?;
+            // SPEC 01-REQUIREMENTS REQ-KV-005 + autoregressive decoding 语义:
+            // prefill 阶段 logits 是 [seq_len, vocab] 多行矩阵,只有最后一个位置的
+            // logits 对"下一个 token 预测"有意义。flat argmax 会跨 seq 选到 vocab 外
+            // 的位置 (token id > vocab_size) 导致生成乱码。decode 阶段 seq_len=1,
+            // 天然就是 single-row logits, 不需裁剪。
+            let vocab = config.vocab_size();
+            let logits_data = if vocab > 0 && full_logits.len() >= vocab && full_logits.len() % vocab == 0 {
+                let rows = full_logits.len() / vocab;
+                if rows > 1 {
+                    full_logits[(rows - 1) * vocab..].to_vec()
+                } else {
+                    full_logits
+                }
+            } else {
+                full_logits
+            };
             logits_handles.push(LogitsHandle { data: logits_data });
             telemetry.push(crate::scheduler::SequenceTelemetry::new());
         }
