@@ -1885,8 +1885,16 @@ impl FusedGraphExecutor {
         for (name, wb) in weight_bindings {
             if let Some(ptr) = wb.ptr {
                 if !wb.shape.is_empty() {
+                    // ARCH-WEIGHT-F32-CANONICAL (SPEC REQ-LOADER-016): CPU 后端在
+                    // upload_native_tensor_with_convert 中已把所有权重物理转换为
+                    // f32(F16/BF16/F64 源统一为 f32), device buffer 按 f32 布局
+                    // 写入。因此按 ptr 读回原始字节流必须用 f32 size,而非 wb.dtype
+                    // (可能是 BF16 等 pre-conversion dtype) 的 size,否则只读取到
+                    // 转换前字节数的数据,后半部分留在 0 初始化状态 → downstream
+                    // kernel 处理半个权重 → 模型输出严重偏离 (e.g. SmolLM2 decoder
+                    // layer_0_input_norm 后半 288 维全零 → generator 输出乱码)。
                     let numel: usize = wb.shape.iter().product();
-                    let bytes = numel * wb.dtype.size();
+                    let bytes = numel * std::mem::size_of::<f32>();
                     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes) };
                     tensors.insert(name.clone(), slice.to_vec());
                 }
@@ -2667,6 +2675,55 @@ impl FusedGraphExecutor {
 
             // NO_SCALAR: FusedQkvRope is fully handled by JIT codegen (RoPE is applied
             // within the fused QKV+RoPE kernel). No post-hoc scalar fallback needed.
+
+            // GLLM_DUMP_CODE=<dir>: dump raw machine code for offline objdump analysis
+            if let Ok(code_dir) = std::env::var("GLLM_DUMP_CODE") {
+                if seq_len >= 2 {
+                    use std::io::Write;
+                    let _ = std::fs::create_dir_all(&code_dir);
+                    let node_name = &self.graph.nodes[node_idx].name;
+                    let path = format!("{}/{:03}_{}.bin", code_dir, node_idx, node_name);
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let _ = f.write_all(cn.compiled.code_bytes());
+                    }
+                }
+            }
+            // GLLM_DUMP_LAYERS=<dir>: 每节点输出 dump (seq × feature_dim f32 raw),
+            if let Ok(dump_dir) = std::env::var("GLLM_DUMP_LAYERS") {
+                if seq_len >= 2 {
+                    use std::io::Write;
+                    let _ = std::fs::create_dir_all(&dump_dir);
+                    let node_name = &self.graph.nodes[node_idx].name;
+                    let path = format!("{}/{:03}_{}.bin", dump_dir, node_idx, node_name);
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let feat = cn.feature_dim.max(1) as u32;
+                        let sl = seq_len as u32;
+                        let _ = f.write_all(&sl.to_le_bytes());
+                        let _ = f.write_all(&feat.to_le_bytes());
+                        let live_bytes = (seq_len * cn.feature_dim.max(1) * cn.output_dtype.size_bytes()).min(output_buf.len());
+                        let _ = f.write_all(&output_buf[..live_bytes]);
+                    }
+                }
+                // GLLM_DUMP_FULL_BUF=1: 额外 dump 完整 output_buf 的前 `feature_dim * 3` f32,
+                // 检查 JIT 是否写入超出 cn.feature_dim 范围的数据 (multi-output 或 bug 调试)
+                if std::env::var("GLLM_DUMP_FULL_BUF").is_ok() && seq_len >= 2 {
+                    let node_name = &self.graph.nodes[node_idx].name;
+                    eprintln!("[FULL-BUF {node_name}] buf.len={} feature_dim={} seq_len={}",
+                        output_buf.len(), cn.feature_dim, seq_len);
+                    let as_f32: &[f32] = unsafe {
+                        std::slice::from_raw_parts(output_buf.as_ptr() as *const f32,
+                            (output_buf.len() / 4).min(cn.feature_dim * 3))
+                    };
+                    for row in 0..3.min(as_f32.len() / cn.feature_dim.max(1)) {
+                        let off = row * cn.feature_dim;
+                        if off + 8 < as_f32.len() {
+                            let nz = as_f32[off..off + cn.feature_dim].iter().filter(|&&x| x != 0.0).count();
+                            eprintln!("  row {}: first8={:?} nonzeros={}/{}",
+                                row, &as_f32[off..off+8.min(cn.feature_dim)], nz, cn.feature_dim);
+                        }
+                    }
+                }
+            }
 
             // Truncate output to runtime seq_len before inserting into tensor map.
             // JIT kernel wrote max_seq_len rows but only the first seq_len are valid.
