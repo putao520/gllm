@@ -5,6 +5,49 @@ use std::collections::HashSet;
 
 use crate::loader::TensorProvider;
 
+/// 判断一个 tensor 是否作为 MatMul/Gemm 节点的 weight (input index 1) 使用。
+///
+/// ARCH-WEIGHT-ROLE-BY-NODE: 权重角色 (Linear weight / Embedding table / bias /
+/// Norm param) 由节点 op_type 和 input 位置确定, **不按 tensor 名字 grep**。
+/// 这避免与具体模型命名约定 (XLM-R 的 `embeddings.word_embeddings`, LLaMA 的
+/// `embed_tokens`, GGUF 的 `token_embd` 等) 耦合。
+///
+/// 对 Linear weight → true (HF SafeTensors 需要 transpose 到 canonical [K, N])。
+/// 对 Gather table / bias / norm param → false (不 transpose)。
+/// FusedOp (FlashAttention/SwiGLU/RoPE 等) 携带多个权重, 当前保守处理: 若任意
+/// 使用点是 MatMul-like fused op 且 input index > 0, 视为 Linear weight。
+pub(crate) fn is_linear_matmul_weight(
+    input_name: &str,
+    role_map: &HashMap<&str, Vec<(&FusedOp, usize)>>,
+) -> bool {
+    let Some(roles) = role_map.get(input_name) else { return false; };
+    for (op, idx) in roles {
+        let is_linear_role = match op {
+            // Atomic MatMul/Gemm: input[1] 是 Linear weight。
+            FusedOp::Atomic(atomic) if *idx > 0 => {
+                matches!(atomic.op_type.as_str(), "MatMul" | "Gemm")
+            }
+            // Fused ops 携带多个 Linear 权重 (qkv_proj / gate_proj / up_proj / down_proj
+            // 等)。保守认为 idx > 0 的 input 都是 Linear weight。
+            // 注: 这些 fused op 目前也会带 bias 参数, bias 在 shape.len()==2 过滤中
+            // 已被排除, 故此处无需进一步细分。
+            FusedOp::FlashAttention(_)
+            | FusedOp::SwiGLU(_)
+            | FusedOp::FusedQkvRope(_)
+            | FusedOp::FusedRMSLinear(_)
+            | FusedOp::GQA(_)
+            | FusedOp::MoERouting(_)
+            | FusedOp::PerLayerEmbed(_)
+                if *idx > 0 => true,
+            _ => false,
+        };
+        if is_linear_role {
+            return true;
+        }
+    }
+    false
+}
+
 /// 融合后的图 - 优化器输出
 #[derive(Debug, Clone, PartialEq)]
 pub struct FusedGraph {
@@ -54,11 +97,12 @@ impl FusedGraph {
     ///
     /// 仅记录图输入中“需要作为权重”的张量名与元信息，不复制任何权重字节。
     ///
-    /// `shape_needs_transpose`: HF SafeTensors/PyTorch 的 Linear weight shape
-    /// 是 `[out, in]`, 需要在 shape 推导时语义转置到 `[K, N]`。ONNX 原生是
-    /// `[K, N]` 传 false, GGUF 走独立路径也传 false。调用方 (loader) 按实际
-    /// WeightFormat 传递此参数。
-    pub fn bind_weights<P: TensorProvider>(&mut self, provider: &P, shape_needs_transpose: bool) -> usize {
+    /// `format_needs_transpose`: 该格式的 Linear weight 是否需要语义转置到 `[K, N]`
+    /// (SafeTensors/PyTorch: true, ONNX/GGUF: false)。该 flag 只对在 **MatMul/Gemm
+    /// 节点作为 weight 角色** 的 2D 参数生效; Gather 表 / bias / LayerNorm 参数
+    /// 不转置。角色识别**按 node.op 的 op_type 和 input 位置** (架构元数据),
+    /// **不按 tensor 名字 grep** (避免与具体模型命名约定耦合)。
+    pub fn bind_weights<P: TensorProvider>(&mut self, provider: &P, format_needs_transpose: bool) -> usize {
         let mut produced = HashSet::new();
         for node in &self.nodes {
             for output in &node.outputs {
@@ -67,6 +111,16 @@ impl FusedGraph {
         }
 
         let graph_inputs: HashSet<&str> = self.inputs.iter().map(String::as_str).collect();
+
+        // Pass 1: 建立 input_name → Vec<(node_op_kind, input_index)> 映射,
+        // 让 bind 阶段能按语义角色 (Linear weight / embedding table / bias) 决定 transpose。
+        let mut role_map: HashMap<&str, Vec<(&FusedOp, usize)>> = HashMap::new();
+        for node in &self.nodes {
+            for (i, input) in node.inputs.iter().enumerate() {
+                role_map.entry(input.as_str()).or_default().push((&node.op, i));
+            }
+        }
+
         let mut bound = 0usize;
 
         for node in &self.nodes {
@@ -81,14 +135,9 @@ impl FusedGraph {
                     continue;
                 }
                 if let Some(meta) = provider.tensor_info(input) {
-                    let is_embedding = meta.name.contains("embeddings.word_embeddings")
-                        || meta.name.contains("embeddings.position_embeddings")
-                        || meta.name.contains("embeddings.token_type_embeddings")
-                        || meta.name.ends_with(".embed_tokens.weight")
-                        || meta.name.contains("wte.")
-                        || meta.name.contains("wpe.")
-                        || meta.name == "token_embd.weight";
-                    let needs_transpose = shape_needs_transpose && meta.shape.len() == 2 && !is_embedding;
+                    let needs_transpose = format_needs_transpose
+                        && meta.shape.len() == 2
+                        && is_linear_matmul_weight(input.as_str(), &role_map);
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
@@ -116,7 +165,7 @@ impl FusedGraph {
     ///
     /// This method tries exact match first, then strips/adds known architecture
     /// prefixes to find the matching tensor metadata.
-    pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P, shape_needs_transpose: bool) -> usize {
+    pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P, format_needs_transpose: bool) -> usize {
         const PREFIXES: &[&str] = &["model.", "roberta.", "bert.", "encoder.", "transformer."];
 
         let mut produced = HashSet::new();
@@ -127,6 +176,16 @@ impl FusedGraph {
         }
         let graph_inputs: HashSet<&str> = self.inputs.iter().map(String::as_str).collect();
         let mut bound = 0usize;
+
+        // 建立 input_name → Vec<(node_op, input_index)> 映射,
+        // bind 阶段按 node 语义角色 (MatMul weight / Gather table / bias / norm)
+        // 决定是否 transpose。
+        let mut role_map: HashMap<&str, Vec<(&FusedOp, usize)>> = HashMap::new();
+        for node in &self.nodes {
+            for (i, input) in node.inputs.iter().enumerate() {
+                role_map.entry(input.as_str()).or_default().push((&node.op, i));
+            }
+        }
 
         for node in &self.nodes {
             for input in &node.inputs {
@@ -197,14 +256,9 @@ impl FusedGraph {
                     // 的 shape [vocab, hidden] 不走 MatMul 语义, 不能 transpose,
                     // 否则 vocab 和 hidden 被互换 → Gather 输出 shape 爆炸/错位。
                     // LayerNorm / bias / 1D 参数已通过 shape.len()==2 过滤。
-                    let is_embedding = meta.name.contains("embeddings.word_embeddings")
-                        || meta.name.contains("embeddings.position_embeddings")
-                        || meta.name.contains("embeddings.token_type_embeddings")
-                        || meta.name.ends_with(".embed_tokens.weight")
-                        || meta.name.contains("wte.")
-                        || meta.name.contains("wpe.")
-                        || meta.name == "token_embd.weight";
-                    let needs_transpose = shape_needs_transpose && meta.shape.len() == 2 && !is_embedding;
+                    let needs_transpose = format_needs_transpose
+                        && meta.shape.len() == 2
+                        && is_linear_matmul_weight(input.as_str(), &role_map);
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
