@@ -742,18 +742,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 }
                             }
                             // tie_word_embeddings: lm_head.weight → model.embed_tokens.weight
-                            // (also handles GGUF weight tying via token_embd.weight)
+                            // (也处理 GGUF weight tying via token_embd.weight)
+                            //
+                            // ARCH-TIED-EMBED-TRANSPOSE: embed_tokens 作为 Gather 的 table
+                            // 被加载为 [vocab, hidden] (HF 原始 layout, shape_needs_transpose=false)。
+                            // 但 lm_head 是 MatMul 权重 (shape_needs_transpose=true),
+                            // 需要 canonical [hidden, vocab]。
+                            // 直接把 embed_tokens 的 ptr 绑给 lm_head.weight 会让 MatMul
+                            // 按 [hidden, vocab] 解读 [vocab, hidden] 字节流 → logits 完全错误。
+                            // 正确做法: 同一块数据需要两份视图 — 原样给 Gather,
+                            // 转置后给 lm_head。这里返回 None 让下方的专门处理分支
+                            // 通过 bind_bytes 材化出 transpose 后的字节。
                             if canonical_name == "lm_head.weight" {
-                                const EMBED_ALIASES: &[&str] = &[
-                                    "model.embed_tokens.weight", "embed_tokens.weight",
-                                    "transformer.wte.weight", "embeddings.word_embeddings.weight",
-                                    "token_embd.weight", // GGUF tied embedding
-                                ];
-                                for alias in EMBED_ALIASES {
-                                    if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
-                                        return Some(t.as_ref().as_ptr() as *const f32);
-                                    }
-                                }
+                                return None;  // 交给下方 lm_head 专用转置分支处理
                             }
                             // Decoder layer HF → GGUF name translation.
                             // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
@@ -811,7 +812,58 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 Some(f32_to_bytes(&f32_out))
                             }
                         };
-                        if let Some(ptr) = found {
+                        // ARCH-TIED-EMBED-TRANSPOSE: lm_head.weight 在 tied-embed 情况下
+                        // 需从 embed_tokens [vocab, hidden] 转置到 canonical [hidden, vocab]。
+                        let lm_head_tied_bytes: Option<Vec<u8>> = if found.is_none()
+                            && canonical_name == "lm_head.weight"
+                        {
+                            const EMBED_ALIASES: &[&str] = &[
+                                "model.embed_tokens.weight", "embed_tokens.weight",
+                                "transformer.wte.weight", "embeddings.word_embeddings.weight",
+                                "token_embd.weight",
+                            ];
+                            let mut result: Option<Vec<u8>> = None;
+                            for alias in EMBED_ALIASES {
+                                if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
+                                    // E 可能是 f32/f16/bf16; CPU backend 实际是 f32。
+                                    // 用 ptr 强转为 &[f32] — 条件: E size == f32 size (CPU 路径).
+                                    let data_slice_e: &[E] = t.as_ref();
+                                    if std::mem::size_of::<E>() != std::mem::size_of::<f32>() {
+                                        continue;
+                                    }
+                                    let data: &[f32] = unsafe {
+                                        std::slice::from_raw_parts(
+                                            data_slice_e.as_ptr() as *const f32,
+                                            data_slice_e.len(),
+                                        )
+                                    };
+                                    let shape = TensorLookup::tensor_shape(&weights, alias).unwrap_or(&[][..]);
+                                    if shape.len() == 2 {
+                                        let vocab = shape[0];
+                                        let hidden = shape[1];
+                                        if data.len() == vocab * hidden {
+                                            // Transpose [vocab, hidden] → [hidden, vocab]
+                                            let mut transposed = vec![0.0f32; vocab * hidden];
+                                            for v in 0..vocab {
+                                                for h in 0..hidden {
+                                                    transposed[h * vocab + v] = data[v * hidden + h];
+                                                }
+                                            }
+                                            let bytes: Vec<u8> = transposed.iter()
+                                                .flat_map(|f| f.to_le_bytes())
+                                                .collect();
+                                            result = Some(bytes);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            result
+                        } else { None };
+
+                        if let Some(bytes) = lm_head_tied_bytes {
+                            ge = ge.bind_bytes(canonical_name.clone(), bytes);
+                        } else if let Some(ptr) = found {
                             ge = ge.bind(canonical_name.clone(), ptr);
                         } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
                             if let Some(f32_bytes) = dequant(q_tensor) {

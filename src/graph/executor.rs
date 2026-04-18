@@ -2640,6 +2640,29 @@ impl FusedGraphExecutor {
                 );
             }
             log::debug!("[EXEC] node {node_idx} done");
+            // DEBUG: dump lm_head weight data
+            if self.graph.nodes[node_idx].name == "lm_head"
+                && std::env::var("GLLM_DEBUG_LM").is_ok()
+            {
+                eprintln!("[LM-DUMP] act.len={} weight_blob.len={} out.len={}",
+                    activation.len(), weight_blob.len(), output_bytes);
+                let wf32: &[f32] = unsafe {
+                    std::slice::from_raw_parts(weight_blob.as_ptr() as *const f32,
+                        weight_blob.len() / 4)
+                };
+                eprintln!("  weight[0..8]={:?}", &wf32[..8.min(wf32.len())]);
+                eprintln!("  weight[49152..49160]={:?}", &wf32[49152.min(wf32.len())..49160.min(wf32.len())]);
+                // Layout: if [K=576, N=49152] canonical, weight[k*N+n] = W[k][n]
+                // Let's sample position k=0, n=7042 (Paris), n=24247 (hints)
+                let n_paris = 7042usize;
+                let n_hints = 24247usize;
+                if wf32.len() >= 576 * 49152 {
+                    eprintln!("  W[k=0, Paris=7042] = {:.6}", wf32[0 * 49152 + n_paris]);
+                    eprintln!("  W[k=0, hints=24247] = {:.6}", wf32[0 * 49152 + n_hints]);
+                }
+                let nz = wf32.iter().filter(|&&x| x != 0.0).count();
+                eprintln!("  weight total={} nonzeros={}", wf32.len(), nz);
+            }
 
             // ARCH-NODE-STATS: 每节点输出 norm/max/min/nan_count probe, 在 decode
             // 链路上逐节点定位数值退化来源。GLLM_NODE_STATS=1 开启;
@@ -2767,6 +2790,21 @@ impl FusedGraphExecutor {
                     let max_nbytes = cn.per_output_numel[i] * dtype_bytes; // full block in output_buf
                     if jit_byte_offset + valid_nbytes <= output_buf.len() {
                         let chunk = output_buf[jit_byte_offset..jit_byte_offset + valid_nbytes].to_vec();
+                        // DEBUG: dump multi-outputs
+                        if let Ok(dir) = std::env::var("GLLM_DUMP_KV_TENSORS") {
+                            if seq_len >= 2 {
+                                use std::io::Write;
+                                let _ = std::fs::create_dir_all(&dir);
+                                let path = format!("{}/{}.bin", dir, name);
+                                if let Ok(mut f) = std::fs::File::create(&path) {
+                                    let feat = per_token as u32;
+                                    let sl = seq_len as u32;
+                                    let _ = f.write_all(&sl.to_le_bytes());
+                                    let _ = f.write_all(&feat.to_le_bytes());
+                                    let _ = f.write_all(&chunk);
+                                }
+                            }
+                        }
                         tensors.insert(name.clone(), chunk);
                     }
                     jit_byte_offset += max_nbytes;
