@@ -1034,6 +1034,27 @@ fn atomic_op_to_kind(
         }
         "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
+        "PerLayerEmbed" => {
+            // Gemma 4 E2B/E4B PLE 算子 (task #28)。YAML 模板必须显式提供:
+            //   - layer_idx / num_layers: 用于 ple_slice 切片 (由上游预切或 JIT 切片)
+            //   - dim_per_layer: 每层 PLE 维度
+            //   - hidden: 主 hidden 维度 (与 main_embed 一致)
+            // seq_len 从 inputs[0] = hidden state 的倒数第 2 维推导 (保留 Symbolic)。
+            //
+            // 注意: 此 OpKind 是 opaque 复合算子, JIT lower 会 Err — 仅用于标注意图。
+            // 实际执行走 FusedOp::PerLayerEmbed → build_ple_graph (已分解的 5 原语)。
+            let layer_idx = require_usize(attributes, "layer_idx", "PerLayerEmbed")?;
+            let num_layers = require_usize(attributes, "num_layers", "PerLayerEmbed")?;
+            let dim_per_layer = require_usize(attributes, "dim_per_layer", "PerLayerEmbed")?;
+            let hidden = require_usize(attributes, "hidden", "PerLayerEmbed")?;
+            let seq_len = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
+                input_shapes[0][input_shapes[0].len() - 2].clone()
+            } else {
+                return Err(ExecutionError::ShapeMismatch(
+                    "atomic op 'PerLayerEmbed' 需要 inputs[0] (hidden) 至少 2D".into()));
+            };
+            Ok(OpKind::PerLayerEmbed { seq_len, layer_idx, dim_per_layer, num_layers, hidden })
+        }
         _ => Err(ExecutionError::UnsupportedOp(format!(
             "atomic op '{}' has no CompilerGraph mapping — \
              JIT codegen not implemented for this op type",
@@ -3748,6 +3769,57 @@ mod tests {
             }
             other => panic!("expected Gather, got {other:?}"),
         }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_per_layer_embed_from_attrs() {
+        // Gemma 4 E2B/E4B PLE 算子 (task #28): atomic "PerLayerEmbed" YAML 节点
+        // → OpKind::PerLayerEmbed { seq_len, layer_idx, dim_per_layer, num_layers, hidden }
+        use gllm_kernels::compiler::{OpKind, SymDim};
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            // inputs[0] = hidden state [seq_sym, hidden=512]
+            vec![SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) }, SymDim::Concrete(512)],
+            // inputs[1] = main_embed [seq_sym, hidden=512]
+            vec![SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) }, SymDim::Concrete(512)],
+            // inputs[2] = ple_slice [seq_sym, dim=128]
+            vec![SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) }, SymDim::Concrete(128)],
+        ];
+        let mut attrs = HashMap::new();
+        attrs.insert("layer_idx".to_string(), AttrValue::Int(3));
+        attrs.insert("num_layers".to_string(), AttrValue::Int(26));
+        attrs.insert("dim_per_layer".to_string(), AttrValue::Int(128));
+        attrs.insert("hidden".to_string(), AttrValue::Int(512));
+        let kind = atomic_op_to_kind("PerLayerEmbed", &attrs, &shapes, gllm_kernels::types::DType::F32).unwrap();
+        match kind {
+            OpKind::PerLayerEmbed { seq_len, layer_idx, dim_per_layer, num_layers, hidden } => {
+                assert!(seq_len.is_symbolic(), "seq_len 保留 Symbolic");
+                assert_eq!(layer_idx, 3);
+                assert_eq!(num_layers, 26);
+                assert_eq!(dim_per_layer, 128);
+                assert_eq!(hidden, 512);
+            }
+            other => panic!("expected PerLayerEmbed, got {other:?}"),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_per_layer_embed_missing_attr_errors() {
+        use gllm_kernels::compiler::SymDim;
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) }, SymDim::Concrete(512)],
+        ];
+        // 缺少所有必需属性
+        let no_attrs: HashMap<String, AttrValue> = HashMap::new();
+        let err = atomic_op_to_kind("PerLayerEmbed", &no_attrs, &shapes, gllm_kernels::types::DType::F32)
+            .unwrap_err();
+        let msg = format!("{err}");
+        // 应该报告缺少第一个读到的属性 (layer_idx)
+        assert!(msg.contains("layer_idx") || msg.contains("PerLayerEmbed"),
+            "error should name missing attribute or op: got {msg:?}");
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
