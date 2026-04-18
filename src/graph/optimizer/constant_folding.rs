@@ -132,6 +132,7 @@ fn fold_binary_numeric(
         dtype: lhs.dtype,
         data: Some(out),
         ptr: None,
+                    shape_needs_transpose: false,
     })
 }
 
@@ -154,6 +155,7 @@ fn fold_reshape(
         dtype: src.dtype,
         data: Some(src_data),
         ptr: None,
+                    shape_needs_transpose: false,
     })
 }
 
@@ -171,6 +173,7 @@ fn fold_transpose(
             dtype: src.dtype,
             data: Some(src_data.clone()),
             ptr: None,
+                    shape_needs_transpose: false,
         });
     }
 
@@ -235,6 +238,7 @@ fn fold_transpose(
         dtype: src.dtype,
         data: Some(out_data),
         ptr: None,
+                    shape_needs_transpose: false,
     })
 }
 
@@ -386,6 +390,7 @@ mod tests {
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[1.0, 2.0])),
                         ptr: None,
+                    shape_needs_transpose: false,
                     },
                 ),
                 (
@@ -396,6 +401,7 @@ mod tests {
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[3.0, 4.0])),
                         ptr: None,
+                    shape_needs_transpose: false,
                     },
                 ),
             ]),
@@ -442,6 +448,7 @@ mod tests {
                         dtype: safetensors::Dtype::F32,
                         data: Some(f32_bytes(&[1.0, 2.0, 3.0, 4.0])),
                         ptr: None,
+                    shape_needs_transpose: false,
                     },
                 ),
                 (
@@ -452,6 +459,7 @@ mod tests {
                         dtype: safetensors::Dtype::I64,
                         data: Some(vec![4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
                         ptr: None,
+                    shape_needs_transpose: false,
                     },
                 ),
             ]),
@@ -493,6 +501,7 @@ mod tests {
                     dtype: safetensors::Dtype::F32,
                     data: Some(f32_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             )]),
             quantization_info: HashMap::new(),

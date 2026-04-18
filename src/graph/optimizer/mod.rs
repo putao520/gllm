@@ -111,6 +111,7 @@ impl GraphOptimizer {
                     dtype: tensor.dtype,
                     data: Some(tensor.raw_data().to_vec()),
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             );
         }
@@ -140,6 +141,7 @@ impl GraphOptimizer {
                     dtype: sparse.values.dtype,
                     data: Some(sparse.values.raw_data().to_vec()),
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             );
             fused.weight_bindings.insert(
@@ -150,6 +152,7 @@ impl GraphOptimizer {
                     dtype: sparse.indices.dtype,
                     data: Some(sparse.indices.raw_data().to_vec()),
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             );
         }

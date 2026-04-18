@@ -945,6 +945,7 @@ impl FusedGraphExecutor {
                 dtype: safetensors::Dtype::F32,
                 data: Some(f32_bytes),
                 ptr: None,
+                    shape_needs_transpose: false,
             });
         }
         self
@@ -968,6 +969,7 @@ impl FusedGraphExecutor {
                 dtype: safetensors::Dtype::F32,
                 data: None,
                 ptr: Some(ptr),
+                    shape_needs_transpose: false,
             });
         }
         self
@@ -1183,11 +1185,18 @@ impl FusedGraphExecutor {
             shapes.insert(name.clone(), vec![seq_sym.clone()]);
         }
 
-        // 2. Weight bindings: 读 shape 直接存。注意 MatMul weight 在 build_node_graph
-        //    中会被 swap 到 [K, N], 这里存原 [out, in] 原样, 由调用方决定是否 swap。
+        // 2. Weight bindings: 读 shape, 按 shape_needs_transpose 转到 canonical
+        //    [K, N] 供下游推导使用 (MatMul output shape = [M, N])。
+        //
+        //    ONNX 混用 MatMul/Gemm 格式 (某些 weight 是 canonical [K, N], 某些是
+        //    HF [out, in] + transB=1), per-format global flag 不够。后续 loader
+        //    层修复时细化。此处对 2D weight 暂保持 per-format 行为。
         for (name, wb) in &self.graph.weight_bindings {
             if !wb.shape.is_empty() {
-                let shape: Vec<SymDim> = wb.shape.iter().map(|&d| SymDim::Concrete(d)).collect();
+                let mut shape: Vec<SymDim> = wb.shape.iter().map(|&d| SymDim::Concrete(d)).collect();
+                if shape.len() == 2 && wb.shape_needs_transpose {
+                    shape.swap(0, 1); // [N=out, K=in] → [K, N]
+                }
                 shapes.insert(name.clone(), shape);
             }
         }
@@ -1230,16 +1239,15 @@ impl FusedGraphExecutor {
 
         match op_type {
             "MatMul" | "Gemm" => {
-                // output = [M, weight_N]. weight SafeTensors [out=N, in=K] → N is shape[0]
+                // output = [M, N]. weight 已在 build_tensor_shape_map 里 canonicalize
+                // 为 [K, N] (SafeTensors/PyTorch 会 swap, ONNX/GGUF 原生), 所以 N 永远
+                // 是 w_shape[1]。
                 if input_names.len() < 2 { return default_act; }
                 let act_shape = get_shape(&input_names[0]);
                 let w_shape = get_shape(&input_names[1]);
                 if w_shape.len() != 2 { return default_act; }
-                // weight shape 来自 weight_bindings, 是 HF [out, in] 布局 (Linear 权重)。
-                // MatMul(activation [M, K], weight [out=N, in=K]) → [M, N]
-                // N = w_shape[0]
                 let m = if act_shape.len() >= 2 { act_shape[act_shape.len() - 2].clone() } else { seq_sym.clone() };
-                let n = w_shape[0].clone();
+                let n = w_shape[1].clone();
                 vec![m, n]
             }
             "Gather" => {
@@ -1457,12 +1465,12 @@ impl FusedGraphExecutor {
                         if let Some(wb) = self.graph.weight_bindings.get(name) {
                             if !wb.shape.is_empty() {
                                 let mut shape: Vec<SymDim> = wb.shape.iter().map(|&d| SymDim::Concrete(d)).collect();
-                                // SafeTensors stores Linear weights as [out_features, in_features]
-                                // (PyTorch convention). infer_output_shape/atomic_op_to_kind use
-                                // math convention [K, N] where K=in, N=out.
-                                // Transpose weight shape for MatMul/Gemm weight inputs (index > 0).
-                                if is_matmul && i > 0 && shape.len() == 2 {
-                                    shape.swap(0, 1); // [N, K] → [K, N]
+                                // ARCH-WEIGHT-CANONICAL-LAYOUT: 仅 HF SafeTensors/PyTorch
+                                // 的 Linear weight 是 `[out, in]` 需要语义转置到 `[K, N]`。
+                                // ONNX 原生 `[K, N]` 和 GGUF 不需要 swap, 否则会把
+                                // intermediate size (4096) 错识为 hidden (1024)。
+                                if is_matmul && i > 0 && shape.len() == 2 && wb.shape_needs_transpose {
+                                    shape.swap(0, 1); // [N=out, K=in] → [K, N]
                                 }
                                 return shape;
                             }
@@ -2956,6 +2964,7 @@ mod tests {
                     dtype: safetensors::Dtype::F32,
                     data: None,
                     ptr: None,
+                    shape_needs_transpose: false,
                 },
             )]),
             quantization_info: HashMap::new(),
@@ -3524,6 +3533,7 @@ mod tests {
             dtype: safetensors::Dtype::F32,
             data: Some(embedded_data),
             ptr: Some(runtime_data.as_ptr()),
+                    shape_needs_transpose: false,
         };
 
         // ptr is set — it should take priority

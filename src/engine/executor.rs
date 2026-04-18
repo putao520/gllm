@@ -684,12 +684,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 // This MUST happen BEFORE JIT compilation so that build_node_graph
                 // uses correct GEMM dimensions (K, N) instead of defaulting to hidden_size.
                 // Inject real weight shapes by trying each format's TensorProvider
+                // ARCH-WEIGHT-CANONICAL-LAYOUT: shape_needs_transpose 按格式设置:
+                //   SafeTensors/PyTorch: HF 原生 [out, in], 需语义转置到 [K, N]
+                //   ONNX: 原生 [K, N] canonical
+                //   GGUF: 走独立量化路径, 存储布局与 ONNX 一致
                 if let Some(st) = loader.safetensors_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(st);
+                    ge.graph_mut().bind_weight_shapes_fuzzy(st, true);
                 } else if let Some(onnx) = loader.onnx_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(onnx);
+                    ge.graph_mut().bind_weight_shapes_fuzzy(onnx, false);
                 } else if let Some(gguf) = loader.gguf_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf);
+                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf, false);
                 }
 
                 // Phase 3a: JIT-compile with correct weight shapes.

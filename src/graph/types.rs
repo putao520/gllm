@@ -53,7 +53,12 @@ impl FusedGraph {
     /// REQ-ARCH-003: 零拷贝权重绑定
     ///
     /// 仅记录图输入中“需要作为权重”的张量名与元信息，不复制任何权重字节。
-    pub fn bind_weights<P: TensorProvider>(&mut self, provider: &P) -> usize {
+    ///
+    /// `shape_needs_transpose`: HF SafeTensors/PyTorch 的 Linear weight shape
+    /// 是 `[out, in]`, 需要在 shape 推导时语义转置到 `[K, N]`。ONNX 原生是
+    /// `[K, N]` 传 false, GGUF 走独立路径也传 false。调用方 (loader) 按实际
+    /// WeightFormat 传递此参数。
+    pub fn bind_weights<P: TensorProvider>(&mut self, provider: &P, shape_needs_transpose: bool) -> usize {
         let mut produced = HashSet::new();
         for node in &self.nodes {
             for output in &node.outputs {
@@ -76,6 +81,14 @@ impl FusedGraph {
                     continue;
                 }
                 if let Some(meta) = provider.tensor_info(input) {
+                    let is_embedding = meta.name.contains("embeddings.word_embeddings")
+                        || meta.name.contains("embeddings.position_embeddings")
+                        || meta.name.contains("embeddings.token_type_embeddings")
+                        || meta.name.ends_with(".embed_tokens.weight")
+                        || meta.name.contains("wte.")
+                        || meta.name.contains("wpe.")
+                        || meta.name == "token_embd.weight";
+                    let needs_transpose = shape_needs_transpose && meta.shape.len() == 2 && !is_embedding;
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
@@ -84,6 +97,7 @@ impl FusedGraph {
                             dtype: meta.dtype,
                             data: None,
                             ptr: None,
+                            shape_needs_transpose: needs_transpose,
                         },
                     );
                     bound += 1;
@@ -102,7 +116,7 @@ impl FusedGraph {
     ///
     /// This method tries exact match first, then strips/adds known architecture
     /// prefixes to find the matching tensor metadata.
-    pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P) -> usize {
+    pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P, shape_needs_transpose: bool) -> usize {
         const PREFIXES: &[&str] = &["model.", "roberta.", "bert.", "encoder.", "transformer."];
 
         let mut produced = HashSet::new();
@@ -178,6 +192,19 @@ impl FusedGraph {
                     });
 
                 if let Some(meta) = meta {
+                    // ARCH-WEIGHT-CANONICAL-LAYOUT: shape_needs_transpose 只对
+                    // Linear (2D MatMul/Gemm 权重) 生效。Embedding 表 (Gather weight)
+                    // 的 shape [vocab, hidden] 不走 MatMul 语义, 不能 transpose,
+                    // 否则 vocab 和 hidden 被互换 → Gather 输出 shape 爆炸/错位。
+                    // LayerNorm / bias / 1D 参数已通过 shape.len()==2 过滤。
+                    let is_embedding = meta.name.contains("embeddings.word_embeddings")
+                        || meta.name.contains("embeddings.position_embeddings")
+                        || meta.name.contains("embeddings.token_type_embeddings")
+                        || meta.name.ends_with(".embed_tokens.weight")
+                        || meta.name.contains("wte.")
+                        || meta.name.contains("wpe.")
+                        || meta.name == "token_embd.weight";
+                    let needs_transpose = shape_needs_transpose && meta.shape.len() == 2 && !is_embedding;
                     self.weight_bindings.insert(
                         input.clone(),
                         WeightBinding {
@@ -186,6 +213,7 @@ impl FusedGraph {
                             dtype: meta.dtype,
                             data: None,
                             ptr: None,
+                            shape_needs_transpose: needs_transpose,
                         },
                     );
                     bound += 1;
@@ -407,6 +435,15 @@ pub struct WeightBinding {
     /// The caller guarantees the pointed-to memory outlives any execution using
     /// this binding.
     pub ptr: Option<*const f32>,
+    /// ARCH-WEIGHT-CANONICAL-LAYOUT: 该权重的 shape 是否仍是 HF `[out, in]` 而
+    /// 需要语义转置到 `[K, N]`。由 loader 按 WeightFormat 设置:
+    ///   SafeTensors/PyTorch: true  (HF 原生 [out, in])
+    ///   ONNX: false                (原生 [K, N])
+    ///   GGUF: 走独立量化路径, 通常 false
+    /// 此 flag 与实际 data layout 独立 — upload 阶段 `normalize_linear_weight_layout`
+    /// 已对 data 做物理转置, 但 meta.shape 未同步更新, 这个 flag 捕获这个
+    /// 元数据差异, 由 executor 在 shape 推导时按需 swap。
+    pub shape_needs_transpose: bool,
 }
 
 // Safety: WeightBinding only stores a raw pointer; it does not own the data.

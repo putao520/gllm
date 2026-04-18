@@ -17,7 +17,10 @@ fn main() {
     let query = &args[1];
     let doc = &args[2];
 
-    let client = Client::new("BAAI/bge-reranker-v2-m3", ModelKind::Reranker)
+    // Override model via GLLM_RERANK_MODEL env var (便于测试 SafeTensors/ONNX/GGUF)
+    let model_id = std::env::var("GLLM_RERANK_MODEL")
+        .unwrap_or_else(|_| "BAAI/bge-reranker-v2-m3".to_string());
+    let client = Client::new(&model_id, ModelKind::Reranker)
         .expect("load model");
     let response = client.rerank(query, vec![doc.clone()])
         .expect("rerank");
