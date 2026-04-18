@@ -58,6 +58,15 @@ pub struct FusedGraph {
     pub inputs: Vec<String>,
     /// 输出名称列表
     pub outputs: Vec<String>,
+    /// ARCH-VALUE-INFO-SHAPE: 图输入的声明 shape, 从 `OnnxValueInfo.value_type` 继承。
+    ///
+    /// 每个维度用 `Option<usize>`:
+    /// - `Some(n)`: Concrete 维度 (`OnnxDim::Known(n)`)
+    /// - `None`: Symbolic 维度 (`OnnxDim::Param(_)` / `OnnxDim::Unknown`), 运行时由
+    ///   `SymDim::Symbolic` 绑定到实际值
+    ///
+    /// 缺失 key 或 `value_type=None` 时, 下游 shape 推导回退到 `[seq_sym]` 1D 默认。
+    pub input_shapes: HashMap<String, Vec<Option<usize>>>,
     /// 零拷贝权重绑定（仅保存名称/元信息，数据由 provider 按需提供）
     pub weight_bindings: HashMap<String, WeightBinding>,
     /// 量化标注信息
@@ -74,6 +83,7 @@ impl FusedGraph {
             nodes: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::new(),
             quantization_info: HashMap::new(),
             sparse_tensors: HashMap::new(),

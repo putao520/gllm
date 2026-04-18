@@ -9,7 +9,7 @@ mod pattern_fusion;
 pub use pass::{OptimizationContext, OptimizationPass};
 
 use crate::loader::onnx::OnnxGraph;
-use crate::loader::onnx::{OnnxAttributeValue, OnnxSparseFormat, OnnxTensor};
+use crate::loader::onnx::{OnnxAttributeValue, OnnxDim, OnnxSparseFormat, OnnxTensor, OnnxType};
 
 use super::types::{
     AtomicOp, AttrValue, FusedGraph, FusedNode, FusedOp, QuantizationInfo, SparseFormat,
@@ -90,6 +90,15 @@ impl GraphOptimizer {
         // 复制输入输出
         fused.inputs = graph.inputs.iter().map(|i| i.name.clone()).collect();
         fused.outputs = graph.outputs.iter().map(|o| o.name.clone()).collect();
+
+        // ARCH-VALUE-INFO-SHAPE: 从 OnnxValueInfo.value_type 继承声明的 shape。
+        // 下游 executor::build_tensor_shape_map 据此决定多维激活 (e.g. `[seq, hidden]`)
+        // 而不是全部默认 1D `[seq]`。缺失 value_type 时不插入, 保持旧默认行为。
+        for input in &graph.inputs {
+            if let Some(dims) = onnx_value_info_dims(input.value_type.as_ref()) {
+                fused.input_shapes.insert(input.name.clone(), dims);
+            }
+        }
 
         // 转换节点
         for node in &graph.nodes {
@@ -192,6 +201,28 @@ impl GraphOptimizer {
     pub fn pass_names(&self) -> Vec<&str> {
         self.passes.iter().map(|p| p.name()).collect()
     }
+}
+
+/// 从 `OnnxValueInfo.value_type` 提取 dims, 返回 `Vec<Option<usize>>`:
+/// - `OnnxDim::Known(n)` → `Some(n as usize)` (n ≥ 0)
+/// - `OnnxDim::Param(_)` / `OnnxDim::Unknown` → `None` (Symbolic)
+///
+/// 非 Tensor/SparseTensor 类型 (Sequence/Map/Optional) 返回 None, 调用方保持默认 shape。
+fn onnx_value_info_dims(value_type: Option<&OnnxType>) -> Option<Vec<Option<usize>>> {
+    let tt = match value_type? {
+        OnnxType::Tensor(t) | OnnxType::SparseTensor(t) => t,
+        _ => return None,
+    };
+    Some(
+        tt.shape
+            .dims
+            .iter()
+            .map(|d| match d {
+                OnnxDim::Known(n) if *n >= 0 => Some(*n as usize),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn convert_attributes(

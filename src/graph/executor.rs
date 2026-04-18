@@ -1487,9 +1487,24 @@ impl FusedGraphExecutor {
         let mut shapes: HashMap<String, Vec<SymDim>> = HashMap::new();
         let seq_sym = SymDim::Symbolic { name: "seq_len".to_string(), max_value: Some(SYMDIM_MAX_SEQ_LEN) };
 
-        // 1. Graph inputs (input_ids / position_ids / token_type_ids) = [seq]
+        // 1. Graph inputs: 优先继承 OnnxValueInfo.value_type 声明的 shape
+        //    (ARCH-VALUE-INFO-SHAPE), 否则回退到 `[seq_sym]` 1D 默认。
+        //
+        //    Concrete dim (`Some(n)`) → `SymDim::Concrete(n)`
+        //    Symbolic dim (`None`)    → `seq_sym` (外层 seq_len), 保持 Symbolic 穿透
+        //                                (ARCH-SYMDIM-NO-CONST-DEGRADE)。
         for name in &self.graph.inputs {
-            shapes.insert(name.clone(), vec![seq_sym.clone()]);
+            let shape = match self.graph.input_shapes.get(name) {
+                Some(declared) if !declared.is_empty() => declared
+                    .iter()
+                    .map(|d| match d {
+                        Some(n) => SymDim::Concrete(*n),
+                        None => seq_sym.clone(),
+                    })
+                    .collect(),
+                _ => vec![seq_sym.clone()],
+            };
+            shapes.insert(name.clone(), shape);
         }
 
         // 2. Weight bindings: 读 shape, 按 shape_needs_transpose 转到 canonical
@@ -3470,6 +3485,7 @@ mod tests {
             nodes: vec![],
             inputs: vec!["input".to_string()],
             outputs: vec!["output".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::new(),
             quantization_info: HashMap::new(),
             sparse_tensors: HashMap::new(),
@@ -3492,6 +3508,7 @@ mod tests {
             }],
             inputs: vec!["x".to_string()],
             outputs: vec!["y".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::from([(
                 "w".to_string(),
                 crate::graph::types::WeightBinding {
@@ -3870,6 +3887,7 @@ mod tests {
             ],
             inputs: vec!["input".to_string(), "up_weight".to_string(), "residual".to_string()],
             outputs: vec!["output".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::new(),
             quantization_info: HashMap::new(),
             sparse_tensors: HashMap::new(),
@@ -3914,6 +3932,7 @@ mod tests {
             }],
             inputs: vec!["x".to_string()],
             outputs: vec!["y".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::new(),
             quantization_info: HashMap::new(),
             sparse_tensors: HashMap::new(),
@@ -3959,6 +3978,7 @@ mod tests {
                 nodes: vec![node],
                 inputs: vec!["in".to_string()],
                 outputs: vec![format!("out_{i}")],
+                input_shapes: HashMap::new(),
                 weight_bindings: HashMap::new(),
                 quantization_info: HashMap::new(),
                 sparse_tensors: HashMap::new(),
@@ -4063,15 +4083,12 @@ mod tests {
     // T3.2 tests: OnnxGraph → FusedGraphExecutor end-to-end chain
     // ---------------------------------------------------------------------------
 
-    /// TODO(T26): FusedGraph 丢失 OnnxValueInfo.value_type shape 信息,
-    /// build_tensor_shape_map 把 activation 默认为 1D `[seq_sym]`,在
-    /// ARCH-SYMDIM-OUTER-ONLY 下 infer_output_shape_sym 要求 last dim Concrete
-    /// 而 1D shape 最后一维是 Symbolic → 编译失败。独立任务修,当前 ignore。
+    /// T26 已根治: FusedGraph 继承 OnnxValueInfo shape,build_tensor_shape_map
+    /// 优先用实际声明,原先的 1D 默认回退只在缺失时触发。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     #[test]
-    #[ignore = "T26: FusedGraph 需继承 OnnxValueInfo shape,待根治"]
     fn test_fused_graph_executor_from_simple_graph() {
-        use crate::loader::onnx::{OnnxGraph, OnnxNode, OnnxValueInfo, OnnxType, OnnxTensorType, OnnxTensorShape, OnnxDim};
+        use crate::loader::onnx::{OnnxDim, OnnxGraph, OnnxNode, OnnxTensorShape, OnnxTensorType, OnnxType, OnnxValueInfo};
         use crate::loader::onnx::proto;
 
         // Build a minimal OnnxGraph: Add node,inputs/outputs 必须带完整 shape,
@@ -4084,7 +4101,22 @@ mod tests {
             outputs: vec!["out".to_string()],
             attributes: HashMap::new(),
         };
-        let make_vi = |n: &str| OnnxValueInfo {
+        // ARCH-VALUE-INFO-SHAPE: 通过 OnnxValueInfo.value_type 声明 `[seq=4, hidden=64]`,
+        // FusedGraph.input_shapes 据此继承 2D, executor.build_tensor_shape_map 不再
+        // 把 `x`/`y` 错设为 1D `[seq]` → Add 输出 2D, last dim Concrete, 通过
+        // ARCH-SYMDIM-OUTER-ONLY 校验。
+        let make_vi_2d = |n: &str, d0: i64, d1: i64| OnnxValueInfo {
+            name: n.to_string(),
+            value_type: Some(OnnxType::Tensor(OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: OnnxTensorShape {
+                    dims: vec![OnnxDim::Known(d0), OnnxDim::Known(d1)],
+                },
+            })),
+            doc_string: String::new(),
+            metadata_props: HashMap::new(),
+        };
+        let make_vi_out = |n: &str| OnnxValueInfo {
             name: n.to_string(),
             value_type: Some(OnnxType::Tensor(OnnxTensorType {
                 elem_type: proto::tensor_proto::DataType::Float,
@@ -4099,8 +4131,8 @@ mod tests {
             name: "simple".to_string(),
             doc_string: String::new(),
             nodes: vec![node],
-            inputs: vec![make_vi("x"), make_vi("y")],
-            outputs: vec![make_vi("out")],
+            inputs: vec![make_vi_2d("x", 4, 64), make_vi_2d("y", 4, 64)],
+            outputs: vec![make_vi_out("out")],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -4167,9 +4199,9 @@ mod tests {
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     #[test]
-    #[ignore = "T26: FusedGraph 需继承 OnnxValueInfo shape,待根治"]
     fn test_fused_executor_with_kv_cache() {
-        use crate::loader::onnx::{OnnxGraph, OnnxNode, OnnxValueInfo};
+        use crate::loader::onnx::{OnnxDim, OnnxGraph, OnnxNode, OnnxTensorShape, OnnxTensorType, OnnxType, OnnxValueInfo};
+        use crate::loader::onnx::proto;
 
         // Build a minimal single-Add graph (no KV cache ops needed to test the API)
         let node = OnnxNode {
@@ -4180,7 +4212,19 @@ mod tests {
             outputs: vec!["out".to_string()],
             attributes: HashMap::new(),
         };
-        let make_vi = |n: &str| OnnxValueInfo {
+        // ARCH-VALUE-INFO-SHAPE: 声明 2D `[seq=4, hidden=64]` 供 shape 推导使用。
+        let make_vi_2d = |n: &str, d0: i64, d1: i64| OnnxValueInfo {
+            name: n.to_string(),
+            value_type: Some(OnnxType::Tensor(OnnxTensorType {
+                elem_type: proto::tensor_proto::DataType::Float,
+                shape: OnnxTensorShape {
+                    dims: vec![OnnxDim::Known(d0), OnnxDim::Known(d1)],
+                },
+            })),
+            doc_string: String::new(),
+            metadata_props: HashMap::new(),
+        };
+        let make_vi_out = |n: &str| OnnxValueInfo {
             name: n.to_string(),
             value_type: None,
             doc_string: String::new(),
@@ -4190,8 +4234,8 @@ mod tests {
             name: "kv_test".to_string(),
             doc_string: String::new(),
             nodes: vec![node],
-            inputs: vec![make_vi("x"), make_vi("y")],
-            outputs: vec![make_vi("out")],
+            inputs: vec![make_vi_2d("x", 4, 64), make_vi_2d("y", 4, 64)],
+            outputs: vec![make_vi_out("out")],
             value_info: vec![],
             initializers: HashMap::new(),
             sparse_initializers: vec![],
@@ -4252,7 +4296,7 @@ mod tests {
             dtype: safetensors::Dtype::F32,
             data: Some(embedded_data),
             ptr: Some(runtime_data.as_ptr()),
-                    shape_needs_transpose: false,
+            shape_needs_transpose: false,
         };
 
         // ptr is set — it should take priority

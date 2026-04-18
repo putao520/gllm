@@ -381,6 +381,7 @@ mod tests {
             nodes: vec![node],
             inputs: vec![],
             outputs: vec!["c".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::from([
                 (
                     "a".to_string(),
@@ -439,6 +440,7 @@ mod tests {
             nodes: vec![node],
             inputs: vec![],
             outputs: vec!["y".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::from([
                 (
                     "x".to_string(),
@@ -493,6 +495,7 @@ mod tests {
             nodes: vec![node],
             inputs: vec![],
             outputs: vec!["y".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::from([(
                 "x".to_string(),
                 WeightBinding {

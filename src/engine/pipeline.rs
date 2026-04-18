@@ -298,6 +298,7 @@ mod tests {
             }],
             inputs: vec!["x".to_string()],
             outputs: vec!["y".to_string()],
+            input_shapes: HashMap::new(),
             weight_bindings: HashMap::from([(
                 "w".to_string(),
                 crate::graph::types::WeightBinding {
