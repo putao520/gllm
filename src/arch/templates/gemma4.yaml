@@ -149,6 +149,27 @@ graph:
           inputs: ["layer_${i}_residual", "layer_${i}_mlp_out"]
           outputs: ["hidden_0"]
 
+        # ── PerLayerEmbedding (仅 E2B / E4B 启用, 31B Dense / 26B MoE 跳过) ──
+        # PerLayerEmbed 是复合 op, JIT 侧已建立 5-input trace (T28);
+        # YAML 只需声明一个节点, codegen 层负责展开为原语图。
+        #
+        # only_if 表达式来自 ResolvedConfig::has_per_layer_embedding (由
+        # hidden_size_per_layer_input > 0 推导)。E2B/E4B 此值 > 0, 31B/26B 为 0。
+        - name: "layer_${i}_ple"
+          op_type: PerLayerEmbed
+          only_if: has_per_layer_embedding
+          inputs:
+            - "hidden_0"
+            - "model.per_layer_embedding.embed_tokens.weight"
+            - "model.per_layer_embedding.per_layer_projection.weight"
+            - "model.layers.${i}.post_mlp_projection.weight"
+          outputs: ["hidden_0"]
+          attributes:
+            layer_idx: "${i}"
+            dim_per_layer: "${hidden_size_per_layer_input}"
+            num_layers: "${num_hidden_layers}"
+            hidden: "${hidden_size}"
+
     - name: final_norm
       op_type: SimplifiedLayerNormalization
       inputs: ["hidden_0", "model.norm.weight"]

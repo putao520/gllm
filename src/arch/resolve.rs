@@ -35,6 +35,10 @@ pub struct ResolvedConfig {
     pub num_kv_shared_layers: usize,
     pub global_head_dim: usize,
     pub hidden_size_per_layer_input: usize,
+    /// 派生字段 — 模型是否启用 PerLayerEmbedding (Gemma 4 E2B/E4B 为 true,
+    /// 31B Dense / 26B MoE 为 false)。由 `hidden_size_per_layer_input > 0`
+    /// 推导,供 YAML 模板 `only_if` 条件引用。
+    pub has_per_layer_embedding: bool,
 
     /// 额外的自定义配置
     pub extra: HashMap<String, i64>,
@@ -60,6 +64,7 @@ impl ResolvedConfig {
             num_kv_shared_layers: g.num_kv_shared_layers,
             global_head_dim: g.global_head_dim,
             hidden_size_per_layer_input: g.hidden_size_per_layer_input,
+            has_per_layer_embedding: g.hidden_size_per_layer_input > 0,
             extra,
         }
     }
@@ -91,6 +96,17 @@ impl ResolvedConfig {
     pub fn get_str(&self, key: &str) -> Option<&str> {
         match key {
             "dtype" => Some(&self.dtype),
+            _ => None,
+        }
+    }
+
+    /// 获取配置值（布尔）— 供 YAML 模板 `only_if` 条件字段引用。
+    ///
+    /// 返回 `None` 表示该键不是已知的布尔派生字段。调用方必须显式处理
+    /// 未知键（而非默认 false),避免 `only_if: typo_field` 静默跳过节点。
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        match key {
+            "has_per_layer_embedding" => Some(self.has_per_layer_embedding),
             _ => None,
         }
     }
@@ -356,6 +372,7 @@ mod tests {
             num_kv_shared_layers: 0,
             global_head_dim: 0,
             hidden_size_per_layer_input: 0,
+            has_per_layer_embedding: false,
             extra: HashMap::new(),
         };
 

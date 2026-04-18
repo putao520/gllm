@@ -158,6 +158,18 @@ pub struct NodeDef {
     /// 属性
     #[serde(default)]
     pub attributes: HashMap<String, AttributeValue>,
+    /// 条件生成表达式 — 为空或缺省表示始终生成。
+    ///
+    /// 表达式语法 (两种形式二选一):
+    ///   1. 字段名查表: `"has_per_layer_embedding"` → 查 `ResolvedConfig::get_bool`
+    ///   2. 简单比较: `"hidden_size_per_layer_input > 0"` → `split_whitespace`
+    ///      拆成 `variable op value`,op ∈ {`>`,`>=`,`==`,`!=`,`<`,`<=`},
+    ///      变量从 `ResolvedConfig::get_int` 查询,值为整数字面量。
+    ///
+    /// 求值为 `true` → 节点展开; `false` → 节点跳过。
+    /// 未知字段名或语法错误 → 模板错误 (禁止静默跳过掩盖拼写错误)。
+    #[serde(default)]
+    pub only_if: Option<String>,
 }
 
 /// 属性值
@@ -270,12 +282,18 @@ impl ArchTemplate {
         for graph_node in &self.graph.nodes {
             match graph_node {
                 GraphNode::Node(node_def) => {
+                    if !Self::eval_only_if(node_def.only_if.as_deref(), config)? {
+                        continue;
+                    }
                     nodes.push(self.node_def_to_onnx(node_def, config, None)?);
                 }
                 GraphNode::Repeat(repeat_block) => {
                     let repeat_count = self.resolve_repeat_count(&repeat_block.repeat, config)?;
                     for i in 0..repeat_count {
                         for node_def in &repeat_block.nodes {
+                            if !Self::eval_only_if(node_def.only_if.as_deref(), config)? {
+                                continue;
+                            }
                             // DualRotaryEmbedding 是 per-layer 双轨 RoPE 的逻辑节点,按
                             // `config.attention_pattern[i]` 在模板展开时解析为标准
                             // RotaryEmbedding + 对应 (theta, partial)。
@@ -343,7 +361,21 @@ impl ArchTemplate {
             let attr_value = match value {
                 AttributeValue::Int(v) => OnnxAttributeValue::Int(*v),
                 AttributeValue::Float(v) => OnnxAttributeValue::Float(*v as f32),
-                AttributeValue::String(s) => OnnxAttributeValue::String(substitute(s)),
+                AttributeValue::String(s) => {
+                    // YAML 的 `attr: "${i}"` / `attr: "${num_hidden_layers}"` 经占位符替换
+                    // 后得到纯数字字符串(如 "3" / "32"),下游 `atomic_op_to_kind::require_usize`
+                    // 要求 `AttrValue::Int`,如果保留为 String 会导致 "缺少必需属性" 错误。
+                    //
+                    // 规则: 替换后的字符串若能解析为 i64,则以 Int 发射; 否则保留为 String。
+                    // 这样既保持 YAML 语法简洁性(不需要额外类型标签),又让属性在下游以
+                    // 正确类型传递。对真正需要字符串语义的属性(如 dtype="f32")无影响。
+                    let substituted = substitute(s);
+                    if let Ok(n) = substituted.parse::<i64>() {
+                        OnnxAttributeValue::Int(n)
+                    } else {
+                        OnnxAttributeValue::String(substituted)
+                    }
+                }
                 AttributeValue::Ints(v) => OnnxAttributeValue::Ints(v.clone()),
                 AttributeValue::Floats(v) => {
                     OnnxAttributeValue::Floats(v.iter().map(|f| *f as f32).collect())
@@ -486,6 +518,74 @@ impl ArchTemplate {
         };
 
         Ok(vec![q_node, k_node])
+    }
+
+    /// 求值 `only_if` 条件表达式 (节点级展开守卫)。
+    ///
+    /// `None` / 空串 → `true` (无条件展开); 表达式求值为 `false` → 调用方跳过该节点。
+    ///
+    /// 支持两种语法:
+    /// 1. **字段名查表** (`has_per_layer_embedding`): 调用 `ResolvedConfig::get_bool`。
+    ///    未知字段 → `TemplateError::Invalid` (不做静默 false 掩盖拼写错误)。
+    /// 2. **整数比较** (`lhs op rhs`, 按 `split_whitespace` 拆 3 段): `lhs` 从
+    ///    `ResolvedConfig::get_int` 查询,`rhs` 为整数字面量,`op ∈ {>,>=,==,!=,<,<=}`。
+    ///
+    /// 选择查表 + 简单比较的双轨设计而非完整表达式解析:
+    /// - 字段名查表表达最常见的"启用/禁用"意图,阅读性最好
+    /// - 整数比较覆盖"派生字段不存在"的过渡场景 (如 `hidden_size_per_layer_input > 0`)
+    /// - 避免引入 pest/nom 等解析器依赖,保持模板引擎零依赖
+    fn eval_only_if(
+        expr: Option<&str>,
+        config: &super::resolve::ResolvedConfig,
+    ) -> Result<bool, TemplateError> {
+        let raw = match expr {
+            None => return Ok(true),
+            Some(s) => s.trim(),
+        };
+        if raw.is_empty() {
+            return Ok(true);
+        }
+
+        // 形式 2: 三段式比较 `lhs op rhs`
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        if tokens.len() == 3 {
+            let lhs_key = tokens[0];
+            let op = tokens[1];
+            let rhs_str = tokens[2];
+            let rhs: i64 = rhs_str.parse().map_err(|_| TemplateError::Invalid(format!(
+                "only_if '{raw}': rhs '{rhs_str}' 无法解析为整数"
+            )))?;
+            let lhs = config.get_int(lhs_key).ok_or_else(|| TemplateError::Invalid(format!(
+                "only_if '{raw}': 未知配置字段 '{lhs_key}' (ResolvedConfig::get_int 无匹配)"
+            )))?;
+            return match op {
+                ">" => Ok(lhs > rhs),
+                ">=" => Ok(lhs >= rhs),
+                "==" => Ok(lhs == rhs),
+                "!=" => Ok(lhs != rhs),
+                "<" => Ok(lhs < rhs),
+                "<=" => Ok(lhs <= rhs),
+                _ => Err(TemplateError::Invalid(format!(
+                    "only_if '{raw}': 未知比较运算符 '{op}' (支持 >,>=,==,!=,<,<=)"
+                ))),
+            };
+        }
+
+        // 形式 1: 单字段名查 bool
+        if tokens.len() == 1 {
+            let key = tokens[0];
+            if let Some(v) = config.get_bool(key) {
+                return Ok(v);
+            }
+            return Err(TemplateError::Invalid(format!(
+                "only_if '{raw}': 未知布尔字段 (ResolvedConfig::get_bool 无匹配)。\
+                 若需派生字段,请在 ResolvedConfig::get_bool 中注册,禁止静默返回 false。"
+            )));
+        }
+
+        Err(TemplateError::Invalid(format!(
+            "only_if '{raw}': 语法错误,期望 `<field>` 或 `<lhs> <op> <rhs>` (3 个空白分隔 token)"
+        )))
     }
 
     /// 解析重复次数
@@ -744,5 +844,236 @@ graph:
             assert!((read_f32(&graph.nodes[node_idx].attributes, "theta") - 1_000_000.0).abs() < 1e-2);
             assert!((read_f32(&graph.nodes[node_idx].attributes, "partial") - 0.25).abs() < 1e-6);
         }
+    }
+
+    /// serde 正确解析 `only_if` 字段 (存在 / 缺省都能 round-trip)。
+    #[test]
+    fn only_if_field_parsed_by_serde() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      inputs: []
+      outputs: []
+    - name: b
+      op_type: Mul
+      only_if: has_per_layer_embedding
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        assert_eq!(template.graph.nodes.len(), 2);
+        match (&template.graph.nodes[0], &template.graph.nodes[1]) {
+            (GraphNode::Node(a), GraphNode::Node(b)) => {
+                assert!(a.only_if.is_none(), "节点 a 缺省 only_if 应为 None");
+                assert_eq!(b.only_if.as_deref(), Some("has_per_layer_embedding"));
+            }
+            _ => panic!("期望两个 Node"),
+        }
+    }
+
+    /// `has_per_layer_embedding = false` 时带 only_if 的节点被跳过。
+    #[test]
+    fn only_if_skips_node_when_false() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_core"
+          op_type: Add
+          inputs: ["x_${i}"]
+          outputs: ["y_${i}"]
+        - name: "layer_${i}_ple"
+          op_type: PerLayerEmbed
+          only_if: has_per_layer_embedding
+          inputs: ["y_${i}"]
+          outputs: ["z_${i}"]
+          attributes:
+            layer_idx: "${i}"
+            dim_per_layer: 256
+            num_layers: "${num_hidden_layers}"
+            hidden: 1024
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+
+        // has_per_layer_embedding 必须基于 hidden_size_per_layer_input > 0 推导
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 2;
+        config.hidden_size = 1024;
+        config.num_attention_heads = 8;
+        config.head_dim = 128;
+        config.vocab_size = 32000;
+        config.hidden_size_per_layer_input = 0;
+        config.has_per_layer_embedding = false;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // 只有核心 Add 节点, PLE 被跳过
+        assert_eq!(graph.nodes.len(), 2, "PLE 节点必须在 only_if=false 时跳过");
+        assert_eq!(graph.nodes[0].name, "layer_0_core");
+        assert_eq!(graph.nodes[1].name, "layer_1_core");
+    }
+
+    /// `has_per_layer_embedding = true` 时 only_if 节点正常展开。
+    #[test]
+    fn only_if_expands_node_when_true() {
+        use crate::loader::onnx::OnnxAttributeValue;
+
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_core"
+          op_type: Add
+          inputs: ["x_${i}"]
+          outputs: ["y_${i}"]
+        - name: "layer_${i}_ple"
+          op_type: PerLayerEmbed
+          only_if: has_per_layer_embedding
+          inputs: ["y_${i}"]
+          outputs: ["z_${i}"]
+          attributes:
+            layer_idx: "${i}"
+            dim_per_layer: 256
+            num_layers: "${num_hidden_layers}"
+            hidden: 1024
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 2;
+        config.hidden_size = 1024;
+        config.num_attention_heads = 8;
+        config.head_dim = 128;
+        config.vocab_size = 32000;
+        config.hidden_size_per_layer_input = 256;
+        config.has_per_layer_embedding = true;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // 每层 core + ple = 2 节点, 2 层共 4 节点
+        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.nodes[0].name, "layer_0_core");
+        assert_eq!(graph.nodes[1].name, "layer_0_ple");
+        assert_eq!(graph.nodes[2].name, "layer_1_core");
+        assert_eq!(graph.nodes[3].name, "layer_1_ple");
+
+        // layer_idx / num_layers 占位符替换后必须以 Int 形式发射 (否则下游
+        // atomic_op_to_kind::require_usize 会因 AttrValue::String 失败)。
+        let read_int = |attrs: &std::collections::HashMap<String, crate::loader::onnx::OnnxAttribute>, key: &str| {
+            match attrs.get(key).map(|a| &a.value) {
+                Some(OnnxAttributeValue::Int(v)) => *v,
+                other => panic!("属性 {key} 期望 Int, 实际: {:?}", other),
+            }
+        };
+        assert_eq!(read_int(&graph.nodes[1].attributes, "layer_idx"), 0);
+        assert_eq!(read_int(&graph.nodes[1].attributes, "num_layers"), 2);
+        assert_eq!(read_int(&graph.nodes[3].attributes, "layer_idx"), 1);
+    }
+
+    /// 三段比较语法 `field op value` 按整数比较求值。
+    #[test]
+    fn only_if_comparison_expression() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      only_if: "hidden_size > 0"
+      inputs: []
+      outputs: []
+    - name: b
+      op_type: Add
+      only_if: "num_hidden_layers == 0"
+      inputs: []
+      outputs: []
+    - name: c
+      op_type: Add
+      only_if: "num_hidden_layers != 0"
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 4;
+        config.hidden_size = 1024;
+        config.num_attention_heads = 8;
+        config.head_dim = 128;
+        config.vocab_size = 32000;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // a: hidden_size > 0 → true; b: num_hidden_layers == 0 → false; c: != 0 → true
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.nodes[0].name, "a");
+        assert_eq!(graph.nodes[1].name, "c");
+    }
+
+    /// 未知 only_if 字段必须返回错误 (禁止静默 false 掩盖拼写错误)。
+    #[test]
+    fn only_if_unknown_field_errors() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      only_if: typo_field_that_does_not_exist
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 1;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+
+        let err = template.to_onnx_graph(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("typo_field_that_does_not_exist"),
+            "错误消息应包含未知字段名, 实际: {msg}");
+    }
+
+    /// 现有无 only_if 的节点始终展开 (向前兼容验证)。
+    #[test]
+    fn only_if_absent_expands_unconditionally() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 1;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].name, "a");
     }
 }
