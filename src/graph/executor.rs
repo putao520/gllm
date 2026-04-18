@@ -233,6 +233,62 @@ struct CompiledNode {
     per_output_feature_dims: Vec<usize>,
 }
 
+/// ARCH-ROPE-CACHE: 预填 cos/sin 表到 scratchpad。
+///
+/// 布局 (row-major): `[seq_len, head_dim]`
+///   - 每行前 `half_rot` 个 f32 是 cos 值 (i ∈ [0, half_rot))
+///   - 后 `half_rot` 个 f32 是 sin 值
+///   - 剩余 `passthrough_dim` 个 f32 未使用 (lower_rope 的 passthrough 分支不读)
+///
+/// 频率: freq_i = 1 / theta^(2i / head_dim), angle = position_p * freq_i
+///
+/// positions: 运行时 position 数组 (长度 ≥ effective_seq)
+/// effective_seq: 当前 forward pass 的 token 数
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn populate_rope_cache(
+    scratchpad: &mut [u8],
+    cache_offset: usize,
+    head_dim: usize,
+    theta: f64,
+    partial: f32,
+    positions: *const u32,
+    effective_seq: usize,
+) -> Result<(), ExecutionError> {
+    if positions.is_null() {
+        return Err(ExecutionError::Compilation(
+            "populate_rope_cache: positions pointer is null but kernel requires RoPE cache".into()));
+    }
+    let rot_dim = ((head_dim as f32 * partial) as usize) & !1;
+    let rot_dim = rot_dim.max(2);
+    let half_rot = rot_dim / 2;
+    let elem = std::mem::size_of::<f32>();
+    let row_bytes = head_dim * elem;
+    let total_bytes = effective_seq * row_bytes;
+    if cache_offset + total_bytes > scratchpad.len() {
+        return Err(ExecutionError::Compilation(format!(
+            "populate_rope_cache: scratchpad too small (need {} bytes at offset {}, have {})",
+            total_bytes, cache_offset, scratchpad.len())));
+    }
+    let positions_slice: &[u32] = unsafe { std::slice::from_raw_parts(positions, effective_seq) };
+    // SAFETY: scratchpad[cache_offset..cache_offset+total_bytes] 已 bound-check,
+    // f32 写入 row-major, 无 aliasing。
+    let cache_ptr = unsafe { scratchpad.as_mut_ptr().add(cache_offset) as *mut f32 };
+    for (row_idx, &pos) in positions_slice.iter().enumerate() {
+        let row_base = unsafe { cache_ptr.add(row_idx * head_dim) };
+        for i in 0..half_rot {
+            let freq = 1.0f64 / theta.powf(2.0 * i as f64 / head_dim as f64);
+            let angle = pos as f64 * freq;
+            let c = angle.cos() as f32;
+            let s = angle.sin() as f32;
+            unsafe {
+                *row_base.add(i) = c;
+                *row_base.add(half_rot + i) = s;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a CompilerGraph for FlashAttention.
 ///
 /// Q[s,h], K[s,h], V[s,h] → MultiHeadAttention → out[s,h]
@@ -2170,12 +2226,38 @@ impl FusedGraphExecutor {
             let seq_len = *shape_bindings.get("seq_len")
                 .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
 
+            // ARCH-ROPE-CACHE: 无 KV cache 路径也要预填 cos/sin 表。
+            // 没有外部 positions,使用 0..seq_len 作为默认 positions (prefill 语义)。
+            let positions_vec: Vec<u32> = (0..seq_len as u32).collect();
+            let positions_ptr_rope: *const u32 = if cn.compiled.rope_cache.is_some() {
+                positions_vec.as_ptr()
+            } else {
+                std::ptr::null()
+            };
+            if let Some(req) = cn.compiled.rope_cache {
+                populate_rope_cache(
+                    &mut scratchpad,
+                    req.cache_offset,
+                    req.head_dim,
+                    req.theta,
+                    req.partial,
+                    positions_ptr_rope,
+                    seq_len,
+                )?;
+            }
+
+            if std::env::var("GLLM_TRACE_EXEC").is_ok() {
+                eprintln!("[EXEC] node {} '{}' op={} seq={} act.len={} weight.len={} out.len={}",
+                    node_idx, self.graph.nodes[node_idx].name,
+                    self.graph.nodes[node_idx].op.name(),
+                    seq_len, activation.len(), weight_blob.len(), output_buf.len());
+            }
             unsafe {
                 cn.compiled.execute(
                     if activation.is_empty() { std::ptr::null() } else { activation.as_ptr() },
                     if weight_blob.is_empty() { std::ptr::null() } else { weight_blob.as_ptr() },
                     std::ptr::null_mut(),
-                    std::ptr::null(),
+                    positions_ptr_rope,
                     std::ptr::null(),
                     1,
                     seq_len,
@@ -2450,6 +2532,21 @@ impl FusedGraphExecutor {
             // must iterate over the full KV sequence (prefill + cached), not just the
             // current step's tokens.
             let effective_seq = if is_mha_node { mha_kv_seq_len } else { seq_len };
+
+            // ARCH-ROPE-CACHE: 当 kernel 声明依赖 RoPE cos/sin 表时,按
+            // positions 数组填充 scratchpad[cache_offset..]。布局:
+            //   [effective_seq, head_dim] row-major, 每行前 half 为 cos, 后 half 为 sin。
+            if let Some(req) = cn.compiled.rope_cache {
+                populate_rope_cache(
+                    &mut scratchpad,
+                    req.cache_offset,
+                    req.head_dim,
+                    req.theta,
+                    req.partial,
+                    positions,
+                    effective_seq,
+                )?;
+            }
 
             log::debug!("[EXEC] node {node_idx} exec: act={}B wt={}B out={}B scratch={}B eff_seq={}",
                 activation.len(), weight_blob.len(), output_bytes,
