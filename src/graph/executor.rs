@@ -1606,6 +1606,10 @@ impl FusedGraphExecutor {
                 // Calculate output_numel: use max_for_allocation for Symbolic dims
                 let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(SYMDIM_MAX_SEQ_LEN)).product();
 
+                if std::env::var("GLLM_DEBUG_SHAPES").is_ok() {
+                    eprintln!("[SHAPE] node '{}' op={} inputs={:?} input_shapes={:?} output_shape={:?} output_numel={}",
+                        node.name, atomic.op_type, node.inputs, input_shapes, output_shape, output_numel);
+                }
                 let g = build_atomic_graph(&atomic.op_type, &input_shapes, &output_shape, dtype)?;
                 Ok(make_node_build(g, node, output_numel, vec![]))
             }
@@ -2386,6 +2390,18 @@ impl FusedGraphExecutor {
         let kv_cache_v_ptr = kv_cache_v as *mut u8;
         let _ = (layer, total_seq); // used by caller for layout; kernel uses internal strides
 
+        if std::env::var("GLLM_DEBUG_GRAPH_ONCE").is_ok() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static PRINTED: AtomicBool = AtomicBool::new(false);
+            if !PRINTED.swap(true, Ordering::SeqCst) {
+                eprintln!("=== FusedGraph nodes ({}) ===", self.graph.nodes.len());
+                for (i, n) in self.graph.nodes.iter().enumerate() {
+                    eprintln!("  {i}: '{}' op={} inputs={:?} outputs={:?}",
+                        n.name, n.op.name(), n.inputs, n.outputs);
+                }
+                eprintln!("=== graph.outputs: {:?} ===", self.graph.outputs);
+            }
+        }
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
 
@@ -2394,6 +2410,12 @@ impl FusedGraphExecutor {
                 continue;
             }
 
+            if std::env::var("GLLM_TRACE_EXEC").is_ok() {
+                eprintln!("[EXEC-KV] node {node_idx} '{}' op={} out_names={:?}",
+                    self.graph.nodes[node_idx].name,
+                    self.graph.nodes[node_idx].op.name(),
+                    cn.graph_output_names);
+            }
             log::trace!("[EXEC] node {node_idx} '{}' ({})",
                 self.graph.nodes[node_idx].name,
                 self.graph.nodes[node_idx].op.name());

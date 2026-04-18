@@ -2189,6 +2189,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?
                 .sampling_config;
             let next_token = self.sample_from_logits(logits, &sampling_config)?;
+            if std::env::var("GLLM_DEBUG_SAMPLING").is_ok() {
+                let l = &logits.data;
+                // argmax + top-3 统计 + 方差
+                let mut top: [(u32, f32); 3] = [(0, f32::NEG_INFINITY); 3];
+                for (i, &v) in l.iter().enumerate() {
+                    if v > top[0].1 {
+                        top[2] = top[1]; top[1] = top[0]; top[0] = (i as u32, v);
+                    } else if v > top[1].1 {
+                        top[2] = top[1]; top[1] = (i as u32, v);
+                    } else if v > top[2].1 {
+                        top[2] = (i as u32, v);
+                    }
+                }
+                let mean: f32 = l.iter().sum::<f32>() / l.len() as f32;
+                let var: f32 = l.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / l.len() as f32;
+                eprintln!("[SAMPLE req={req_id} logits.len={} next={next_token} \
+                           top3=[{},{}], [{},{}], [{},{}] \
+                           mean={:.4} var={:.4}]",
+                    l.len(), top[0].0, top[0].1, top[1].0, top[1].1, top[2].0, top[2].1,
+                    mean, var);
+            }
 
             // Generation hooks (guardrails, probes) — per SPEC 04-API-DESIGN §7.4
             // Hooks can veto the current token or terminate generation.

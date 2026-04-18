@@ -215,14 +215,27 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
     fn run(
         &self,
         graph: FusedGraph,
-        _ctx: &OptimizationContext,
+        ctx: &OptimizationContext,
     ) -> Result<FusedGraph, OptimizeError> {
         let mut out = graph;
+        // lm_head 是 hidden→vocab 的非方阵线性, 当前 FusedRMSLinearConfig 只有
+        // hidden_size 一个维度参数, build_fused_rms_linear_graph 会把 linear_w
+        // 构造成 [hidden, hidden] — 对 lm_head 必然形状错配,执行后输出维度退化
+        // 为 hidden_size 而非 vocab_size (ARCH-RMSLINEAR-SQUARE-ONLY)。
+        //
+        // 用图输出集识别"终点线性 (lm_head)": 若 linear.outputs 在 graph.outputs
+        // 中, 跳过融合, 让 final_norm 和 lm_head 各自走 Standalone 路径。
+        let graph_output_set: std::collections::HashSet<&str> =
+            out.outputs.iter().map(|s| s.as_str()).collect();
         let (nodes, fusions) = fuse_window(std::mem::take(&mut out.nodes), 2, |window| {
             let [rms, linear] = window else {
                 return None;
             };
             if !is_rms_norm(rms) || !is_linear(linear) {
+                return None;
+            }
+            // 跳过指向 graph.outputs 的 linear (lm_head / classification head)
+            if linear.outputs.iter().any(|o| graph_output_set.contains(o.as_str())) {
                 return None;
             }
             let eps = rms.attributes.get("eps").and_then(|val| match val {
@@ -234,7 +247,7 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
             let mut fused = FusedNode::new(
                 format!("{}_fused_rms_linear", rms.name),
                 FusedOp::FusedRMSLinear(FusedRMSLinearConfig {
-                    hidden_size: _ctx.hidden_size(),
+                    hidden_size: ctx.hidden_size(),
                     eps,
                 }),
             );

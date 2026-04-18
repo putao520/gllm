@@ -185,15 +185,24 @@ pub fn decoder_final_norm_bias_aliases() -> Vec<String> {
 
 /// Generate alias names for the lm_head weight in decoder models.
 ///
-/// `token_embd.weight` is included as a GGUF weight-tying fallback:
-/// many GGUF models omit `output.weight` and instead tie the lm_head
-/// to the token embedding (llama.cpp convention).
+/// 权重绑定规则:
+/// 1. `lm_head.weight` / `output.weight` 是独立 lm_head 权重名。
+/// 2. 许多模型 (SmolLM2 / TinyLlama / 原生 Llama config.tie_word_embeddings=true /
+///    llama.cpp GGUF 默认) 会把 lm_head 和 token_embedding 张量捆绑为同一块权重,
+///    此时 safetensors/gguf 里不存在独立的 `lm_head.weight`,必须回退到 embed
+///    张量的各种别名: `token_embd.weight` (GGUF), `model.embed_tokens.weight`
+///    (HF SafeTensors), `embed_tokens.weight` (裸前缀), `roberta./bert.` 等。
+///
+/// 生成顺序: 先原生 lm_head 名,再跨类别回退到 embed 别名,保证"有就用自己的,
+/// 没有就用 tied embed"的语义。
 pub fn lm_head_aliases() -> Vec<String> {
-    vec![
+    let mut out = vec![
         "lm_head.weight".to_string(),
         "output.weight".to_string(),
-        "token_embd.weight".to_string(), // GGUF weight-tying: lm_head == token_embd
-    ]
+    ];
+    // Tied-weights fallback: embed 张量的所有候选名称。
+    out.extend(decoder_embed_aliases());
+    out
 }
 
 /// Score head weight aliases for decoder-based reranker models (e.g. Qwen3ForSequenceClassification).
