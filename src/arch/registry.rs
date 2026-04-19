@@ -343,4 +343,102 @@ mod tests {
             "USM Conformer 必须注册到全局模板表",
         );
     }
+
+    /// T44: SigLIP ViT YAML 解析 + to_onnx_graph 展开。
+    /// 给定 mock config (num_layers=2, patch=14, image=28 → num_patches=4),
+    /// 验证节点总数 / PatchEmbed / LearnedPos2D 节点存在 + 命名 + 权重引用。
+    #[test]
+    fn builtin_siglip_parses_and_expands() {
+        use super::super::resolve::ResolvedConfig;
+        use std::collections::HashMap;
+
+        register_builtin_templates();
+        let template = get_template("siglip")
+            .expect("siglip.yaml 必须被 build.rs 扫描并注册");
+        assert_eq!(template.name, "siglip");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.config.contains_key("patch_size"));
+        assert!(template.config.contains_key("image_size"));
+        assert!(template.tensor_patterns.layer_prefix.is_some());
+
+        // Mock SigLIP 配置: 2 层 ViT, embed=128, heads=4, patch=14, image=28,
+        // in_channels=3 → num_patches = (28/14)^2 = 4
+        let mut extra: HashMap<String, i64> = HashMap::new();
+        extra.insert("patch_size".into(), 14);
+        extra.insert("image_size".into(), 28);
+        extra.insert("num_patches".into(), 4);
+        extra.insert("in_channels".into(), 3);
+        let config = ResolvedConfig {
+            num_hidden_layers: 2,
+            hidden_size: 128,
+            num_attention_heads: 4,
+            num_key_value_heads: 4,
+            head_dim: 32,
+            intermediate_size: Some(512),
+            vocab_size: 1, // 视觉 encoder 不涉及 vocab
+            rope_theta: 10000.0,
+            dtype: "f32".to_string(),
+            extra,
+            ..Default::default()
+        };
+
+        let graph = template
+            .to_onnx_graph(&config)
+            .expect("to_onnx_graph 必须成功");
+
+        // 每层 ViT block 展开:
+        //   attn_norm + q + k + v + attn + o + attn_residual = 7
+        //   ffn_norm + fc1 + gelu + fc2 + ffn_residual       = 5
+        // 每层 12 个节点, 2 层 → 24,
+        // 顶层: patch_embed + pos_embed + final_norm        = 3
+        // 总计 24 + 3 = 27
+        let expected_per_layer = 12;
+        let expected_top = 3;
+        let expected_total = expected_per_layer * config.num_hidden_layers + expected_top;
+        assert_eq!(
+            graph.nodes.len(),
+            expected_total,
+            "SigLIP 展开节点数应为 {expected_total} \
+             (每层 {expected_per_layer} + 顶层 {expected_top})",
+        );
+
+        // PatchEmbed 节点存在 + 命名 + 输入/权重引用
+        let patch_nodes: Vec<_> = graph.nodes.iter()
+            .filter(|n| n.op_type == "PatchEmbed")
+            .collect();
+        assert_eq!(patch_nodes.len(), 1, "SigLIP 必须有且仅有 1 个 PatchEmbed 节点");
+        let patch = patch_nodes[0];
+        assert_eq!(patch.name, "patch_embed");
+        assert_eq!(patch.inputs.len(), 2, "PatchEmbed 需要 2 个输入 (image, kernel)");
+        assert_eq!(patch.inputs[1], "vision_tower.patch_embed.proj.weight");
+
+        // LearnedPos2D 节点存在 + 命名 + 权重引用
+        let pos_nodes: Vec<_> = graph.nodes.iter()
+            .filter(|n| n.op_type == "LearnedPos2D")
+            .collect();
+        assert_eq!(pos_nodes.len(), 1, "SigLIP 必须有且仅有 1 个 LearnedPos2D 节点");
+        let pos = pos_nodes[0];
+        assert_eq!(pos.name, "pos_embed");
+        assert_eq!(pos.inputs.len(), 2, "LearnedPos2D 需要 2 个输入 (patches, pos_table)");
+        assert_eq!(
+            pos.inputs[1],
+            "vision_tower.embeddings.position_embedding.weight",
+        );
+    }
+
+    /// T44: SigLIP 按模板名 / extra_aliases 多种 token 反查都能命中。
+    #[test]
+    fn builtin_siglip_registered_and_resolvable() {
+        register_builtin_templates();
+        assert!(get_template("siglip").is_some(),
+            "SigLIP 必须注册到全局模板表");
+        // 自动派生别名 + extra_aliases 统一校验
+        for token in ["siglip", "SiglipForCausalLM", "SiglipVisionModel",
+                      "siglip_vision_model", "SiglipModel"] {
+            assert!(
+                resolve_template(token).is_some(),
+                "token '{token}' 应解析到 SigLIP 模板",
+            );
+        }
+    }
 }

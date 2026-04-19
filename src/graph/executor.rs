@@ -1074,6 +1074,53 @@ fn atomic_op_to_kind(
             };
             Ok(OpKind::DepthwiseConv1D { channels, kernel_size, causal })
         }
+        "PatchEmbed" => {
+            // T44 SigLIP / ViT vision tower 核心算子。输入约定:
+            //   0. image  [in_channels, image_size, image_size]  (row-major CHW)
+            //   1. kernel [embed_dim, in_channels, patch_size, patch_size]
+            // 所有结构参数通过 YAML attributes 明确声明 (require_usize), 不从 shape
+            // 反推, 避免 batch 维度 / 布局混淆。
+            let patch_size = require_usize(attributes, "patch_size", "PatchEmbed")?;
+            let embed_dim = require_usize(attributes, "embed_dim", "PatchEmbed")?;
+            let in_channels = require_usize(attributes, "in_channels", "PatchEmbed")?;
+            let image_size = require_usize(attributes, "image_size", "PatchEmbed")?;
+            // ViT 语义: image_size 必须整除 patch_size (非整除 num_patches 未定义)。
+            if patch_size == 0 || image_size % patch_size != 0 {
+                return Err(ExecutionError::ShapeMismatch(format!(
+                    "PatchEmbed: image_size ({image_size}) 必须是 patch_size \
+                     ({patch_size}) 的整数倍",
+                )));
+            }
+            Ok(OpKind::PatchEmbed { patch_size, embed_dim, in_channels, image_size })
+        }
+        "LearnedPos2D" => {
+            // T44 SigLIP / ViT learned positional embedding (binary elementwise add)。
+            // 输入约定:
+            //   0. patches   [num_patches, embed_dim]
+            //   1. pos_table [num_patches, embed_dim]
+            // 结构参数通过 attributes 声明 (require_usize), 与 PatchEmbed 对齐的
+            // num_patches / embed_dim 必须匹配 (输入 shape 只做 sanity check)。
+            let num_patches = require_usize(attributes, "num_patches", "LearnedPos2D")?;
+            let embed_dim = require_usize(attributes, "embed_dim", "LearnedPos2D")?;
+            // Sanity check: 两个输入的形状必须相同 (均为 [num_patches, embed_dim])。
+            if input_shapes.len() >= 2 {
+                let a = &input_shapes[0];
+                let b = &input_shapes[1];
+                if a.len() >= 2 && b.len() >= 2 {
+                    let a_embed = a.last().and_then(|d| d.as_concrete());
+                    let b_embed = b.last().and_then(|d| d.as_concrete());
+                    if let (Some(ae), Some(be)) = (a_embed, b_embed) {
+                        if ae != be || ae != embed_dim {
+                            return Err(ExecutionError::ShapeMismatch(format!(
+                                "LearnedPos2D: 输入 embed_dim 不一致 (patches={ae}, \
+                                 pos_table={be}, attr={embed_dim})",
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(OpKind::LearnedPos2D { num_patches, embed_dim })
+        }
         "PleSlice" => {
             // T37: PleSlice → OpKind::ColumnSlice (真实 JIT 列切片 copy)。
             //
@@ -4064,6 +4111,115 @@ mod tests {
             gllm_kernels::types::DType::F32,
         )
         .expect_err("mismatched channels must error");
+        assert!(
+            matches!(err, ExecutionError::ShapeMismatch(_)),
+            "expected ShapeMismatch, got {err:?}",
+        );
+    }
+
+    /// T44: PatchEmbed 属性全部通过 require_usize 读取, 四个结构参数齐全时
+    /// 得到对应 OpKind。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_patch_embed_attributes_driven() {
+        use gllm_kernels::compiler::{OpKind, SymDim};
+        use crate::graph::types::AttrValue;
+        // image [3, 224, 224]; kernel [768, 3, 14, 14]
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(3), SymDim::Concrete(224), SymDim::Concrete(224)],
+            vec![SymDim::Concrete(768), SymDim::Concrete(3), SymDim::Concrete(14), SymDim::Concrete(14)],
+        ];
+        let mut attrs: HashMap<String, AttrValue> = HashMap::new();
+        attrs.insert("patch_size".into(), AttrValue::Int(14));
+        attrs.insert("embed_dim".into(), AttrValue::Int(768));
+        attrs.insert("in_channels".into(), AttrValue::Int(3));
+        attrs.insert("image_size".into(), AttrValue::Int(224));
+        let kind = atomic_op_to_kind(
+            "PatchEmbed",
+            &attrs,
+            &shapes,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect("PatchEmbed atomic mapping should succeed");
+        match kind {
+            OpKind::PatchEmbed { patch_size, embed_dim, in_channels, image_size } => {
+                assert_eq!(patch_size, 14);
+                assert_eq!(embed_dim, 768);
+                assert_eq!(in_channels, 3);
+                assert_eq!(image_size, 224);
+            }
+            other => panic!("expected PatchEmbed OpKind, got {:?}", other),
+        }
+    }
+
+    /// T44: image_size 不整除 patch_size 必须报 ShapeMismatch (ViT 语义保证)。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_patch_embed_non_divisible_errors() {
+        use gllm_kernels::compiler::SymDim;
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(3), SymDim::Concrete(225), SymDim::Concrete(225)],
+            vec![SymDim::Concrete(768), SymDim::Concrete(3), SymDim::Concrete(14), SymDim::Concrete(14)],
+        ];
+        let mut attrs: HashMap<String, AttrValue> = HashMap::new();
+        attrs.insert("patch_size".into(), AttrValue::Int(14));
+        attrs.insert("embed_dim".into(), AttrValue::Int(768));
+        attrs.insert("in_channels".into(), AttrValue::Int(3));
+        attrs.insert("image_size".into(), AttrValue::Int(225));
+        let err = atomic_op_to_kind(
+            "PatchEmbed",
+            &attrs,
+            &shapes,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect_err("225 % 14 != 0 must error");
+        assert!(
+            matches!(err, ExecutionError::ShapeMismatch(_)),
+            "expected ShapeMismatch, got {err:?}",
+        );
+    }
+
+    /// T44: LearnedPos2D 正常路径 + embed_dim 不一致 error 分支。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_learned_pos_2d_attributes_driven() {
+        use gllm_kernels::compiler::{OpKind, SymDim};
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(256), SymDim::Concrete(768)],
+            vec![SymDim::Concrete(256), SymDim::Concrete(768)],
+        ];
+        let mut attrs: HashMap<String, AttrValue> = HashMap::new();
+        attrs.insert("num_patches".into(), AttrValue::Int(256));
+        attrs.insert("embed_dim".into(), AttrValue::Int(768));
+        let kind = atomic_op_to_kind(
+            "LearnedPos2D",
+            &attrs,
+            &shapes,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect("LearnedPos2D mapping should succeed");
+        match kind {
+            OpKind::LearnedPos2D { num_patches, embed_dim } => {
+                assert_eq!(num_patches, 256);
+                assert_eq!(embed_dim, 768);
+            }
+            other => panic!("expected LearnedPos2D OpKind, got {:?}", other),
+        }
+
+        // embed_dim 不一致 → ShapeMismatch
+        let shapes_bad: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(256), SymDim::Concrete(512)],
+            vec![SymDim::Concrete(256), SymDim::Concrete(768)],
+        ];
+        let err = atomic_op_to_kind(
+            "LearnedPos2D",
+            &attrs,
+            &shapes_bad,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect_err("mismatched embed_dim must error");
         assert!(
             matches!(err, ExecutionError::ShapeMismatch(_)),
             "expected ShapeMismatch, got {err:?}",
