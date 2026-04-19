@@ -27,10 +27,12 @@ tensor_patterns:
   k_proj: "self_attn.k_proj.weight"
   v_proj: "self_attn.v_proj.weight"
   o_proj: "self_attn.o_proj.weight"
-  # FIXME(task#12): Qwen3 在 RoPE 之前对 Q/K 做 head-wise RMSNorm with weight
-  # (q_norm/k_norm.weight shape=[head_dim])。当前 OpKind::QkNorm 无 weight 输入
-  # (Gemma 4 风格 L2 normalize),不适用 Qwen3。需新 OpKind::HeadRmsNorm。
-  # 跳过 q_norm/k_norm → GGUF generator 输出 garbage (e2e_generator_gguf 失败)。
+  # Qwen3 在 RoPE 之前对 Q/K 做 head-wise RMSNorm with weight。
+  # GGUF tensor: blk.{i}.attn_q_norm.weight / attn_k_norm.weight (shape=[head_dim])。
+  # HF safetensors: model.layers.{i}.self_attn.q_norm.weight / k_norm.weight。
+  # 用 OpKind::HeadRmsNorm 处理(数学 = standard RMSNorm with weight,粒度=head_dim)。
+  q_norm: "self_attn.q_norm.weight"
+  k_norm: "self_attn.k_norm.weight"
   gate_proj: "mlp.gate_proj.weight"
   up_proj: "mlp.up_proj.weight"
   down_proj: "mlp.down_proj.weight"
@@ -78,16 +80,44 @@ graph:
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.v_proj.weight"]
           outputs: ["layer_${i}_v"]
 
-        # FIXME(task#12): Qwen3 此处需要 q_norm / k_norm (head-wise RMSNorm with
-        # weight)。当前缺失导致 generator 输出 garbage。
-        # OpKind::QkNorm 不适用(无 weight),需新增 OpKind::HeadRmsNorm。
-
-        - name: "layer_${i}_rope"
-          op_type: RotaryEmbedding
-          inputs: ["layer_${i}_q", "layer_${i}_k"]
-          outputs: ["layer_${i}_q_rope", "layer_${i}_k_rope"]
+        # Qwen3 head-wise RMSNorm with weight (lower 用 lower_norm_grouped):
+        #   外层 seq Symbolic, 内层 num_heads Const, 内层 RmsNorm body, weight 每 head 共用。
+        - name: "layer_${i}_q_norm"
+          op_type: HeadRmsNorm
+          inputs: ["layer_${i}_q", "model.layers.${i}.self_attn.q_norm.weight"]
+          outputs: ["layer_${i}_q_normed"]
           attributes:
+            head_dim: "${head_dim}"
+            eps: 1e-6
+
+        - name: "layer_${i}_k_norm"
+          op_type: HeadRmsNorm
+          inputs: ["layer_${i}_k", "model.layers.${i}.self_attn.k_norm.weight"]
+          outputs: ["layer_${i}_k_normed"]
+          attributes:
+            head_dim: "${head_dim}"
+            eps: 1e-6
+
+        # 拆成两个独立单输入 RoPE 节点 (避免 2-output rope 的 per_output_numel 问题)。
+        - name: "layer_${i}_rope_q"
+          op_type: RotaryEmbedding
+          inputs: ["layer_${i}_q_normed"]
+          outputs: ["layer_${i}_q_rope"]
+          attributes:
+            num_heads: "${num_heads}"
+            head_dim: "${head_dim}"
             theta: "${rope_theta}"
+            partial: 1.0
+
+        - name: "layer_${i}_rope_k"
+          op_type: RotaryEmbedding
+          inputs: ["layer_${i}_k_normed"]
+          outputs: ["layer_${i}_k_rope"]
+          attributes:
+            num_heads: "${num_kv_heads}"
+            head_dim: "${head_dim}"
+            theta: "${rope_theta}"
+            partial: 1.0
 
         - name: "layer_${i}_attn"
           op_type: Attention

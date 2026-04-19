@@ -918,6 +918,11 @@ fn atomic_op_to_kind(
             let head_dim = require_usize(attributes, "head_dim", "QkNorm")?;
             Ok(OpKind::QkNorm { head_dim })
         }
+        "HeadRmsNorm" => {
+            let head_dim = require_usize(attributes, "head_dim", "HeadRmsNorm")?;
+            let eps = attr_f32(attributes, "eps").unwrap_or(1e-6);
+            Ok(OpKind::HeadRmsNorm { head_dim, eps })
+        }
         "ValueNorm" => {
             let eps = attr_f32(attributes, "eps").unwrap_or(1e-6);
             Ok(OpKind::ValueNorm { eps })
