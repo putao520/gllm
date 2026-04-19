@@ -6,6 +6,19 @@
 - `./SPEC/` (Single Source of Truth, 10 documents, 113+ REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
+## 🚨 单工程双仓约定 (MONOREPO-PAIR)
+
+**铁律：`gllm` 与 `../gllm-kernels` 是同一工程在两个 git 仓库中的切分，任何涉及"项目状态"、"工作区清洁"、"编码前提交"的规则，**必须同时覆盖两个仓库**，没有例外**。
+
+- ✅ `gllm-kernels` 视为 `gllm` 的同项目组成部分（不是"第三方库"、不是"相关项目"）
+- ✅ 编码任务开始前的 git 清洁检查必须同时在两个仓库执行（`gllm/` 和 `../gllm-kernels/`）
+- ✅ 任何一个仓库存在未提交变更，两个仓库都算脏工作区
+- ✅ SPEC 完善、代码开发、测试执行、E2E 验证一律按统一工程口径规划
+- ❌ 禁止以"这是 gllm-kernels 仓库的问题，不在 gllm 任务范围内"为由绕过规则
+- ❌ 禁止单独审计其中一个仓库就宣告完成
+
+**理由**：`gllm` 上层逻辑与 `gllm-kernels` JIT codegen 的每一次变更都是强耦合的（SPEC 章节跨仓库引用、算子注册 ↔ lower/codegen ↔ client forward pass、telemetry offsets ↔ executor 读取）。分开看待会导致状态漂移、SSOT 断裂、孤岛模块。
+
 ## SPEC Index
 
 | Document | Content | 状态 |
