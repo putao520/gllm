@@ -277,13 +277,17 @@ impl ClientBuilder {
                 Some(Self::build_pipeline_model(generator_id, ModelKind::Chat)?);
         }
 
-        // ARCH-MULTIMODAL (SPEC §3.7): if the model declares a `vision_config`,
-        // try to materialise a real SigLIP encoder from the loaded weights
-        // and auto-register it. Failing to find every weight (e.g. text-only
-        // checkpoint that happens to declare vision geometry) falls through
-        // to `None`; the user can still inject a custom encoder via
+        // ARCH-MULTIMODAL (SPEC §3.7): if the model declares a `vision_config`
+        // or `audio_config`, try to materialise the real encoder from loaded
+        // weights and auto-register. Failing to find every weight (e.g. text-
+        // only checkpoint that happens to declare multimodal geometry) falls
+        // through to `None`; the user can still inject a custom encoder via
         // `Client::set_multimodal_encoder`.
-        let auto_vision_encoder: Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>> = {
+        //
+        // When BOTH vision and audio are available, wrap them in a dispatch
+        // composer so a single `MultimodalEncoder` implementation delegates
+        // `encode_image` to SigLIP and `encode_audio` to USM Conformer.
+        let vision_enc: Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>> = {
             let executor = state.backend.executor();
             match executor.try_build_siglip_encoder() {
                 Ok(Some(enc)) => Some(Arc::new(enc) as Arc<dyn crate::compat::multimodal::MultimodalEncoder>),
@@ -297,10 +301,33 @@ impl ClientBuilder {
                 }
             }
         };
+        let audio_enc: Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>> = {
+            let executor = state.backend.executor();
+            match executor.try_build_usm_conformer_encoder() {
+                Ok(Some(enc)) => Some(Arc::new(enc) as Arc<dyn crate::compat::multimodal::MultimodalEncoder>),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(
+                        "USM Conformer encoder auto-build failed ({e}); model will require manual \
+                         `Client::set_multimodal_encoder` to process audio"
+                    );
+                    None
+                }
+            }
+        };
+
+        let auto_encoder: Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>> =
+            match (vision_enc, audio_enc) {
+                (Some(v), Some(a)) => Some(Arc::new(MultimodalEncoderCompose::new(v, a))
+                    as Arc<dyn crate::compat::multimodal::MultimodalEncoder>),
+                (Some(v), None) => Some(v),
+                (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
 
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
-            multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_vision_encoder)),
+            multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_encoder)),
         })
     }
 
@@ -560,6 +587,41 @@ impl Default for ClientBuilder {
 /// # Ok(())
 /// # }
 /// ```
+/// Composes two distinct `MultimodalEncoder` implementations (vision +
+/// audio) into a single dispatch object. `encode_image` delegates to
+/// `vision`, `encode_audio` delegates to `audio`. Used by `build_state` /
+/// `ClientBuilder::build` when the loaded model exposes both SigLIP and
+/// USM Conformer weights.
+struct MultimodalEncoderCompose {
+    vision: Arc<dyn crate::compat::multimodal::MultimodalEncoder>,
+    audio: Arc<dyn crate::compat::multimodal::MultimodalEncoder>,
+}
+
+impl MultimodalEncoderCompose {
+    fn new(
+        vision: Arc<dyn crate::compat::multimodal::MultimodalEncoder>,
+        audio: Arc<dyn crate::compat::multimodal::MultimodalEncoder>,
+    ) -> Self {
+        Self { vision, audio }
+    }
+}
+
+impl crate::compat::multimodal::MultimodalEncoder for MultimodalEncoderCompose {
+    fn encode_image(
+        &self,
+        media: &crate::compat::multimodal::EncoderMedia,
+    ) -> Result<crate::compat::multimodal::MultimodalEncoded, BackendError> {
+        self.vision.encode_image(media)
+    }
+
+    fn encode_audio(
+        &self,
+        media: &crate::compat::multimodal::EncoderMedia,
+    ) -> Result<crate::compat::multimodal::MultimodalEncoded, BackendError> {
+        self.audio.encode_audio(media)
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     state: Arc<ArcSwapOption<ClientState>>,

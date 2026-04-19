@@ -288,6 +288,12 @@ pub struct ModelConfig {
     /// Present only for multimodal models (e.g. Gemma 4).
     pub vision_config: Option<crate::compat::vision_forward::VisionConfig>,
 
+    // ── Multimodal: Audio Encoder (USM Conformer) ──
+    /// Audio encoder configuration parsed from `"audio_config"` sub-object.
+    /// Present only for multimodal models that expose an audio tower
+    /// (e.g. Gemma 4 with USM Conformer).
+    pub audio_config: Option<crate::compat::audio_forward::AudioConfig>,
+
     /// Multimodal special token IDs (image / audio / eoi / eoa).
     ///
     /// **Source rule (T58)**: Must come from the model config or tokenizer
@@ -741,6 +747,7 @@ impl ModelConfig {
             hidden_size_per_layer_input,
             mtp_depth: None,
             vision_config: None,
+            audio_config: None,
             multimodal_token_ids: None,
         };
         apply_tensor_derived(base, derived)
@@ -975,6 +982,40 @@ impl ModelConfig {
             })
         });
 
+        // ── Multimodal: Audio Encoder (USM Conformer) ──
+        // 仅当 `audio_config` 存在且至少声明了核心几何维度时构造 AudioConfig;
+        // 其余字段 (conv_kernel_size / fft_size / hop_length / ...) 默认值对齐
+        // Gemma 4 USM-v2 官方参数。
+        let audio_config = value.get("audio_config").and_then(|ac| {
+            let default = crate::compat::audio_forward::AudioConfig::default();
+            let hidden_size = find_usize(ac, &["hidden_size"]).unwrap_or(default.hidden_size);
+            let num_layers = find_usize(ac, &["num_hidden_layers", "num_layers"]).unwrap_or(default.num_layers);
+            let num_heads = find_usize(ac, &["num_attention_heads", "num_heads"]).unwrap_or(default.num_heads);
+            let intermediate_size = find_usize(ac, &["intermediate_size"]).unwrap_or(default.intermediate_size);
+            let conv_kernel_size = find_usize(ac, &["conv_kernel_size", "depthwise_kernel_size"])
+                .unwrap_or(default.conv_kernel_size);
+            let sample_rate = find_usize(ac, &["sample_rate", "sampling_rate"]).unwrap_or(default.sample_rate);
+            let num_mel_bins = find_usize(ac, &["num_mel_bins", "n_mels"]).unwrap_or(default.num_mel_bins);
+            let fft_size = find_usize(ac, &["fft_size", "n_fft"]).unwrap_or(default.fft_size);
+            let hop_length = find_usize(ac, &["hop_length"]).unwrap_or(default.hop_length);
+            let win_length = find_usize(ac, &["win_length"]).unwrap_or(default.win_length);
+            let cfg = crate::compat::audio_forward::AudioConfig {
+                sample_rate,
+                hidden_size,
+                num_layers,
+                num_heads,
+                conv_kernel_size,
+                intermediate_size,
+                num_mel_bins,
+                fft_size,
+                hop_length,
+                win_length,
+                layer_norm_eps: default.layer_norm_eps,
+                stride: default.stride,
+            };
+            cfg.validate().ok().map(|_| cfg)
+        });
+
         // ── Multimodal special token IDs (T58) ──
         // 优先从 config 顶层字段读取（兼容 Gemma 4 `boi_token_id` /
         // `image_token_id` 两种命名），否则从 tokenizer special_tokens_map
@@ -994,7 +1035,7 @@ impl ModelConfig {
                 eoa_token_id: eoa_tok.unwrap_or(aud + 2),
             }),
             _ => {
-                if vision_config.is_some() {
+                if vision_config.is_some() || audio_config.is_some() {
                     Some(crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults())
                 } else {
                     None
@@ -1038,6 +1079,7 @@ impl ModelConfig {
             hidden_size_per_layer_input,
             mtp_depth,
             vision_config,
+            audio_config,
             multimodal_token_ids,
         })
     }
@@ -2092,6 +2134,7 @@ mod tests {
             hidden_size_per_layer_input: None,
             mtp_depth: None,
             vision_config: None,
+            audio_config: None,
             multimodal_token_ids: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
@@ -2317,6 +2360,7 @@ mod tests {
             hidden_size_per_layer_input: None,
             mtp_depth: None,
             vision_config: None,
+            audio_config: None,
             multimodal_token_ids: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());

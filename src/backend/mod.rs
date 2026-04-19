@@ -297,6 +297,20 @@ impl DynBackendExecutor {
         }
     }
 
+    /// Build a USM Conformer audio encoder from the loaded weights (CPU-only).
+    ///
+    /// Returns `Ok(None)` when the model has no `audio_config` or when required
+    /// weights are not present. See `BackendExecutor::try_build_usm_conformer_encoder`.
+    pub fn try_build_usm_conformer_encoder(
+        &self,
+    ) -> Result<Option<crate::compat::audio_forward::UsmConformerEncoder>, crate::engine::executor::ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.try_build_usm_conformer_encoder(),
+            DynBackendExecutor::F16(e) => e.try_build_usm_conformer_encoder(),
+            DynBackendExecutor::BF16(e) => e.try_build_usm_conformer_encoder(),
+        }
+    }
+
     /// Add a generation hook (guardrail/probe).
     pub fn add_hook(&self, hook: Box<dyn crate::generation::GenerationHook>) -> Result<(), crate::engine::executor::ExecutorError> {
         match self {
@@ -791,6 +805,60 @@ impl<E: Element> BackendExecutor<E> {
             _ => Err(ExecutorError::Backend(
                 crate::engine::executor::BackendError::Unimplemented(
                     "try_build_siglip_encoder currently only implemented for CPU backend",
+                ),
+            )),
+        }
+    }
+
+    /// Build a `UsmConformerEncoder` from the loaded model's audio weights.
+    ///
+    /// Returns `Ok(None)` if the model does not declare audio support
+    /// (`audio_config` is None) or if any USM Conformer weight is missing from
+    /// the weight store. Returns `Err` for hard failures. CPU-only to match
+    /// the SigLIP policy.
+    pub fn try_build_usm_conformer_encoder(
+        &self,
+    ) -> Result<Option<crate::compat::audio_forward::UsmConformerEncoder>, ExecutorError> {
+        let cfg = match self.model_config().audio_config.clone() {
+            Some(cfg) => cfg,
+            None => return Ok(None),
+        };
+        let token_ids = self
+            .model_config()
+            .multimodal_token_ids
+            .unwrap_or_else(|| crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults());
+
+        match self {
+            BackendExecutor::Cpu(exec) => {
+                let backend = exec.backend();
+                let weights = exec.weights();
+                crate::compat::audio_forward::try_build_usm_from_tensors(
+                    &cfg,
+                    token_ids,
+                    |name| {
+                        let result = crate::compat::weight_helpers::get_typed_data(
+                            weights, backend, &[name],
+                        );
+                        match result {
+                            Ok((bytes, dtype)) => {
+                                let data = crate::compat::jit_helpers::typed_bytes_to_f32(
+                                    &bytes, dtype,
+                                );
+                                let shape = weights
+                                    .tensor_shape(name)
+                                    .map(|s| s.to_vec())
+                                    .unwrap_or_else(|| vec![data.len()]);
+                                Some((data, shape))
+                            }
+                            Err(_) => None,
+                        }
+                    },
+                )
+                .map_err(ExecutorError::Backend)
+            }
+            _ => Err(ExecutorError::Backend(
+                crate::engine::executor::BackendError::Unimplemented(
+                    "try_build_usm_conformer_encoder currently only implemented for CPU backend",
                 ),
             )),
         }

@@ -60,6 +60,10 @@ pub use compat::multimodal::{
     EncoderMedia, MediaKind, MultimodalContext, MultimodalEncoded, MultimodalEncoder,
     MultimodalTokenIds, RoutedSequence,
 };
+pub use compat::audio_forward::{
+    audio_encode, mel_spectrogram, AudioConfig, AudioTensorLookup, InMemoryAudioWeights,
+    UsmConformerEncoder,
+};
 pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};
