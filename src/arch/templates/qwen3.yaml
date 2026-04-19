@@ -27,6 +27,10 @@ tensor_patterns:
   k_proj: "self_attn.k_proj.weight"
   v_proj: "self_attn.v_proj.weight"
   o_proj: "self_attn.o_proj.weight"
+  # FIXME(task#12): Qwen3 在 RoPE 之前对 Q/K 做 head-wise RMSNorm with weight
+  # (q_norm/k_norm.weight shape=[head_dim])。当前 OpKind::QkNorm 无 weight 输入
+  # (Gemma 4 风格 L2 normalize),不适用 Qwen3。需新 OpKind::HeadRmsNorm。
+  # 跳过 q_norm/k_norm → GGUF generator 输出 garbage (e2e_generator_gguf 失败)。
   gate_proj: "mlp.gate_proj.weight"
   up_proj: "mlp.up_proj.weight"
   down_proj: "mlp.down_proj.weight"
@@ -73,6 +77,10 @@ graph:
           op_type: MatMul
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.v_proj.weight"]
           outputs: ["layer_${i}_v"]
+
+        # FIXME(task#12): Qwen3 此处需要 q_norm / k_norm (head-wise RMSNorm with
+        # weight)。当前缺失导致 generator 输出 garbage。
+        # OpKind::QkNorm 不适用(无 weight),需新增 OpKind::HeadRmsNorm。
 
         - name: "layer_${i}_rope"
           op_type: RotaryEmbedding

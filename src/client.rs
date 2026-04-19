@@ -483,13 +483,18 @@ impl ClientBuilder {
         // Resolve the pipeline model's manifest to determine its architecture.
         let pipeline_manifest = Self::resolve_manifest(model_id, kind)?;
 
-        if pipeline_manifest.arch == primary_manifest.arch {
-            // Same architecture: share the primary model's encoder backend.
-            // The reranker uses CLS→Classifier while the embedder uses
-            // MeanPool→L2Norm, but the encoder forward pass is identical.
+        // ARCH-PIPELINE-SHARING: 仅当 model_id 与 arch 都相同(用户用同一模型同时
+        // 做 embed 和 rerank)时才共享 backend。架构相同但模型不同(e.g. e5-small +
+        // bge-reranker-v2-m3 都是 xlm-roberta)时,**权重完全不同**,共享 backend
+        // 会让 reranker 实际使用 embedder 的权重 → 数值漂移 / NaN。
+        // 历史 BUG: e2e_fusion_consistency_with_standalone / cross_arch_embed_rerank
+        // 在 e5-small-v2 + bge-reranker-v2-m3 场景下因共享 backend 输出 NaN。
+        if pipeline_manifest.arch == primary_manifest.arch
+            && model_id == primary_manifest.model_id
+        {
             log::info!(
-                "pipeline: sharing encoder weights between primary ({}) and pipeline ({}) — architecture {}",
-                primary_manifest.model_id, model_id, pipeline_manifest.arch,
+                "pipeline: sharing backend (same model_id={} & arch={})",
+                model_id, pipeline_manifest.arch,
             );
             Ok(PipelineModelState {
                 model_id: model_id.to_string(),
@@ -498,10 +503,10 @@ impl ClientBuilder {
                 shared_encoder: true,
             })
         } else {
-            // Different architecture: load independently.
+            // 不同 model_id 或不同 arch: 独立加载,各持自己的权重。
             log::info!(
-                "pipeline: loading independent backend for {} (arch {} != primary {})",
-                model_id, pipeline_manifest.arch, primary_manifest.arch,
+                "pipeline: loading independent backend for {} (arch {}, primary {} arch {})",
+                model_id, pipeline_manifest.arch, primary_manifest.model_id, primary_manifest.arch,
             );
             Self::build_pipeline_model(model_id, kind)
         }
