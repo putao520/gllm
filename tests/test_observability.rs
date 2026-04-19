@@ -41,6 +41,7 @@ fn make_kv_config(max_seq_len: usize) -> KvCacheConfig {
         num_experts: 0,
         moe_top_k: 0,
         expert_intermediate_size: 0,
+        position_offset: None,
     });
     KvCacheConfig {
         geometry,

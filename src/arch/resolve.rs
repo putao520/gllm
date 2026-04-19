@@ -104,11 +104,64 @@ impl ResolvedConfig {
     ///
     /// 返回 `None` 表示该键不是已知的布尔派生字段。调用方必须显式处理
     /// 未知键（而非默认 false),避免 `only_if: typo_field` 静默跳过节点。
+    ///
+    /// 支持两类键:
+    /// - **静态派生字段**: `has_per_layer_embedding`
+    /// - **per-layer 动态字段**: `is_kv_shared_layer_{N}` (N 为整数),
+    ///   等价于 `self.is_kv_shared_layer(N)`。模板 `eval_only_if_with_loop`
+    ///   先把 `${i}` 替换成层索引后以 `is_kv_shared_layer_3` 形式查询,
+    ///   避免在 YAML 里硬编码层索引。
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         match key {
             "has_per_layer_embedding" => Some(self.has_per_layer_embedding),
-            _ => None,
+            _ => {
+                // per-layer 动态字段: `is_kv_shared_layer_<N>`
+                if let Some(rest) = key.strip_prefix("is_kv_shared_layer_") {
+                    if let Ok(idx) = rest.parse::<usize>() {
+                        return Some(self.is_kv_shared_layer(idx));
+                    }
+                }
+                None
+            }
         }
+    }
+
+    /// Returns `true` when `layer_idx` is a KV-sharing consumer layer.
+    ///
+    /// A layer is a consumer when `num_kv_shared_layers > 0` and
+    /// `layer_idx >= num_hidden_layers - num_kv_shared_layers`. Gemma 4 E2B
+    /// (26 layers, 20 shared) marks layers 6..26 as consumers.
+    #[inline]
+    pub fn is_kv_shared_layer(&self, layer_idx: usize) -> bool {
+        self.num_kv_shared_layers > 0
+            && layer_idx < self.num_hidden_layers
+            && layer_idx >= self.num_hidden_layers.saturating_sub(self.num_kv_shared_layers)
+    }
+
+    /// Resolve the donor layer index for a KV-sharing consumer layer.
+    ///
+    /// Returns:
+    /// - `Ok(None)` when `layer_idx` is **not** a consumer (identity path: the
+    ///   layer owns its own K/V).
+    /// - `Ok(Some(donor))` — the donor layer index (strictly less than
+    ///   `num_hidden_layers - num_kv_shared_layers`) with the same
+    ///   `attention_pattern[·]` bucket as the consumer.
+    /// - `Err(..)` when the attention pattern is malformed or no donor exists.
+    ///
+    /// Delegates to `scheduler::find_donor` — the same algorithm used by the
+    /// runtime page allocator, guaranteeing graph and scheduler agree on the
+    /// donor choice.
+    pub fn donor_layer(&self, layer_idx: usize) -> Result<Option<usize>, ResolveError> {
+        crate::scheduler::find_donor(
+            layer_idx,
+            self.num_hidden_layers,
+            self.num_kv_shared_layers,
+            &self.attention_pattern,
+        )
+        .map_err(|e| ResolveError::DerivationFailed {
+            key: format!("donor_layer({layer_idx})"),
+            reason: format!("{e}"),
+        })
     }
 }
 
@@ -396,5 +449,74 @@ mod tests {
         assert_eq!(config.get_int("num_hidden_layers"), Some(24));
         assert_eq!(config.get_float("rope_theta"), Some(500000.0));
         assert_eq!(config.get_str("dtype"), Some("bf16"));
+    }
+
+    /// T43: `is_kv_shared_layer` reflects the trailing-consumer window.
+    #[test]
+    fn is_kv_shared_layer_identifies_consumer_window() {
+        let mut config = ResolvedConfig::default();
+        config.num_hidden_layers = 26;
+        config.num_kv_shared_layers = 20;
+        // Gemma 4 E2B: layers 0..6 own their KV, 6..26 are consumers.
+        for i in 0..6 {
+            assert!(!config.is_kv_shared_layer(i), "layer {i} must own its KV");
+        }
+        for i in 6..26 {
+            assert!(config.is_kv_shared_layer(i), "layer {i} must be a consumer");
+        }
+        // Out-of-range layers are never consumers.
+        assert!(!config.is_kv_shared_layer(26));
+
+        // Sharing disabled → nobody is a consumer.
+        config.num_kv_shared_layers = 0;
+        for i in 0..26 {
+            assert!(!config.is_kv_shared_layer(i),
+                "layer {i} must not be a consumer when sharing disabled");
+        }
+    }
+
+    /// T43: `donor_layer` reuses `scheduler::find_donor` so graph and runtime agree.
+    #[test]
+    fn donor_layer_matches_scheduler_find_donor() {
+        let mut config = ResolvedConfig::default();
+        config.num_hidden_layers = 8;
+        config.num_kv_shared_layers = 4;
+        // Alternating sliding/global buckets: 0,1,0,1,0,1,0,1.
+        config.attention_pattern = vec![0, 1, 0, 1, 0, 1, 0, 1];
+
+        // Non-consumer layers return None (identity path).
+        for i in 0..4 {
+            assert_eq!(config.donor_layer(i).unwrap(), None,
+                "non-consumer layer {i} must have no donor (identity)");
+        }
+        // Consumer layers pick the latest matching-bucket non-consumer.
+        assert_eq!(config.donor_layer(4).unwrap(), Some(2)); // bucket 0 → layer 2
+        assert_eq!(config.donor_layer(5).unwrap(), Some(3)); // bucket 1 → layer 3
+        assert_eq!(config.donor_layer(6).unwrap(), Some(2));
+        assert_eq!(config.donor_layer(7).unwrap(), Some(3));
+
+        // Malformed attention_pattern length → error (no silent fallback).
+        config.attention_pattern = vec![0u8; 4];
+        assert!(config.donor_layer(6).is_err(),
+            "pattern length mismatch must propagate scheduler error");
+    }
+
+    /// T43: `get_bool` resolves `is_kv_shared_layer_<N>` via the dynamic branch.
+    #[test]
+    fn get_bool_supports_per_layer_shared_kv_keys() {
+        let mut config = ResolvedConfig::default();
+        config.num_hidden_layers = 26;
+        config.num_kv_shared_layers = 20;
+
+        assert_eq!(config.get_bool("is_kv_shared_layer_0"), Some(false));
+        assert_eq!(config.get_bool("is_kv_shared_layer_5"), Some(false));
+        assert_eq!(config.get_bool("is_kv_shared_layer_6"), Some(true));
+        assert_eq!(config.get_bool("is_kv_shared_layer_25"), Some(true));
+
+        // Unknown key patterns stay `None` so the template engine can still
+        // fail loudly on typos.
+        assert_eq!(config.get_bool("is_kv_shared_layer_"), None);
+        assert_eq!(config.get_bool("is_kv_shared_layer_abc"), None);
+        assert_eq!(config.get_bool("typo_field"), None);
     }
 }

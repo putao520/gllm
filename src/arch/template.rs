@@ -282,7 +282,7 @@ impl ArchTemplate {
         for graph_node in &self.graph.nodes {
             match graph_node {
                 GraphNode::Node(node_def) => {
-                    if !Self::eval_only_if(node_def.only_if.as_deref(), config)? {
+                    if !Self::eval_only_if_with_loop(node_def.only_if.as_deref(), config, None)? {
                         continue;
                     }
                     nodes.push(self.node_def_to_onnx(node_def, config, None)?);
@@ -291,7 +291,11 @@ impl ArchTemplate {
                     let repeat_count = self.resolve_repeat_count(&repeat_block.repeat, config)?;
                     for i in 0..repeat_count {
                         for node_def in &repeat_block.nodes {
-                            if !Self::eval_only_if(node_def.only_if.as_deref(), config)? {
+                            if !Self::eval_only_if_with_loop(
+                                node_def.only_if.as_deref(),
+                                config,
+                                Some((&repeat_block.var, i)),
+                            )? {
                                 continue;
                             }
                             // DualRotaryEmbedding 是 per-layer 双轨 RoPE 的逻辑节点,按
@@ -359,17 +363,16 @@ impl ArchTemplate {
         use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
         use std::collections::HashMap;
 
-        let substitute = |s: &str| -> String {
-            let mut result = super::resolve::substitute_placeholders(s, config);
-            if let Some((var, idx)) = loop_var {
-                result = result.replace(&format!("${{{}}}", var), &idx.to_string());
-                result = result.replace(&format!("${}$", var), &idx.to_string());
-            }
-            result
+        let substitute = |s: &str| -> Result<String, TemplateError> {
+            Self::substitute_with_donor(s, config, loop_var)
         };
 
-        let inputs: Vec<String> = node_def.inputs.iter().map(|s| substitute(s)).collect();
-        let outputs: Vec<String> = node_def.outputs.iter().map(|s| substitute(s)).collect();
+        let inputs: Vec<String> = node_def.inputs.iter()
+            .map(|s| substitute(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outputs: Vec<String> = node_def.outputs.iter()
+            .map(|s| substitute(s))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut attributes = HashMap::new();
         for (key, value) in &node_def.attributes {
@@ -384,7 +387,7 @@ impl ArchTemplate {
                     // 规则: 替换后的字符串若能解析为 i64,则以 Int 发射; 否则保留为 String。
                     // 这样既保持 YAML 语法简洁性(不需要额外类型标签),又让属性在下游以
                     // 正确类型传递。对真正需要字符串语义的属性(如 dtype="f32")无影响。
-                    let substituted = substitute(s);
+                    let substituted = substitute(s)?;
                     if let Ok(n) = substituted.parse::<i64>() {
                         OnnxAttributeValue::Int(n)
                     } else {
@@ -407,13 +410,55 @@ impl ArchTemplate {
         }
 
         Ok(OnnxNode {
-            name: substitute(&node_def.name),
+            name: substitute(&node_def.name)?,
             op_type: node_def.op_type.clone(),
             domain: String::new(),
             inputs,
             outputs,
             attributes,
         })
+    }
+
+    /// Perform full placeholder substitution with donor-aware extension.
+    ///
+    /// Resolves (in order):
+    /// 1. Static config placeholders (e.g. `${num_hidden_layers}`) — via
+    ///    [`super::resolve::substitute_placeholders`].
+    /// 2. **Donor placeholder** (e.g. `${donor_i}` when `loop_var = ("i", _)`) —
+    ///    expands to the donor layer index for the current consumer layer, or
+    ///    to the current layer index itself for non-consumer layers (identity
+    ///    path). This lets YAML express "attention reads donor K/V on shared
+    ///    layers, self K/V otherwise" without branching.
+    /// 3. Loop-variable placeholder (e.g. `${i}`) — identity with the active
+    ///    repeat index. Resolved *after* donor so `${donor_i}` does not alias
+    ///    `${i}` inside `donor_<digits>`.
+    ///
+    /// A donor placeholder on a shared consumer layer with a malformed
+    /// attention pattern propagates the scheduler's error (no silent defaults).
+    fn substitute_with_donor(
+        s: &str,
+        config: &super::resolve::ResolvedConfig,
+        loop_var: Option<(&str, usize)>,
+    ) -> Result<String, TemplateError> {
+        let mut result = super::resolve::substitute_placeholders(s, config);
+        if let Some((var, idx)) = loop_var {
+            let donor_ph = format!("${{donor_{}}}", var);
+            if result.contains(&donor_ph) {
+                let donor_idx = match config.donor_layer(idx) {
+                    Ok(Some(d)) => d,
+                    Ok(None) => idx, // identity: non-consumer layer references its own tensors.
+                    Err(e) => {
+                        return Err(TemplateError::Invalid(format!(
+                            "donor placeholder for layer {idx}: {e}"
+                        )));
+                    }
+                };
+                result = result.replace(&donor_ph, &donor_idx.to_string());
+            }
+            result = result.replace(&format!("${{{}}}", var), &idx.to_string());
+            result = result.replace(&format!("${}$", var), &idx.to_string());
+        }
+        Ok(result)
     }
 
     /// 按 `config.attention_pattern[layer_idx]` 把 DualRotaryEmbedding 展开为
@@ -511,9 +556,7 @@ impl ArchTemplate {
 
         let base_name = substitute(&node_def.name);
         let q_in = substitute(&node_def.inputs[0]);
-        let k_in = substitute(&node_def.inputs[1]);
         let q_out = substitute(&node_def.outputs[0]);
-        let k_out = substitute(&node_def.outputs[1]);
 
         let q_node = OnnxNode {
             name: format!("{}_q", base_name),
@@ -523,6 +566,17 @@ impl ArchTemplate {
             outputs: vec![q_out],
             attributes: mk_attrs(),
         };
+
+        // SharedKvRef: on consumer layers, the K projection / K-norm path has
+        // been skipped upstream, so emitting a K-rope here would dangle on a
+        // non-existent `layer_${i}_k_normed`. Attention on consumer layers
+        // reads `layer_${donor_i}_k_rope` instead (see gemma4.yaml).
+        if config.is_kv_shared_layer(layer_idx) {
+            return Ok(vec![q_node]);
+        }
+
+        let k_in = substitute(&node_def.inputs[1]);
+        let k_out = substitute(&node_def.outputs[1]);
         let k_node = OnnxNode {
             name: format!("{}_k", base_name),
             op_type: "RotaryEmbedding".into(),
@@ -570,9 +624,7 @@ impl ArchTemplate {
 
         let base_name = substitute(&node_def.name);
         let q_in  = substitute(&node_def.inputs[0]);
-        let k_in  = substitute(&node_def.inputs[1]);
         let q_out = substitute(&node_def.outputs[0]);
-        let k_out = substitute(&node_def.outputs[1]);
 
         let mk_attrs = || -> std::collections::HashMap<String, OnnxAttribute> {
             let mut attrs = std::collections::HashMap::new();
@@ -592,6 +644,16 @@ impl ArchTemplate {
             outputs: vec![q_out],
             attributes: mk_attrs(),
         };
+
+        // SharedKvRef: consumer layers skip the K projection, so there is no
+        // `layer_${i}_k` to normalise. The attention node pulls the donor
+        // layer's pre-computed `layer_${donor_i}_k_rope` instead.
+        if config.is_kv_shared_layer(layer_idx) {
+            return Ok(vec![q_node]);
+        }
+
+        let k_in  = substitute(&node_def.inputs[1]);
+        let k_out = substitute(&node_def.outputs[1]);
         let k_node = OnnxNode {
             name: format!("{}_k", base_name),
             op_type: "QkNorm".into(),
@@ -741,14 +803,38 @@ impl ArchTemplate {
         Ok(vec![slice_node, ple_node])
     }
 
+    /// Wrapper over [`Self::eval_only_if`] that first substitutes the active
+    /// repeat-loop variable (e.g. `${i}`) in the expression so per-layer
+    /// conditions like `!is_kv_shared_layer_${i}` resolve against the current
+    /// layer index before field lookup.
+    fn eval_only_if_with_loop(
+        expr: Option<&str>,
+        config: &super::resolve::ResolvedConfig,
+        loop_var: Option<(&str, usize)>,
+    ) -> Result<bool, TemplateError> {
+        let substituted: Option<String> = expr.map(|raw| {
+            let mut s = raw.to_string();
+            if let Some((var, idx)) = loop_var {
+                s = s.replace(&format!("${{{}}}", var), &idx.to_string());
+                s = s.replace(&format!("${}$", var), &idx.to_string());
+            }
+            s
+        });
+        Self::eval_only_if(substituted.as_deref(), config)
+    }
+
     /// 求值 `only_if` 条件表达式 (节点级展开守卫)。
     ///
     /// `None` / 空串 → `true` (无条件展开); 表达式求值为 `false` → 调用方跳过该节点。
     ///
-    /// 支持两种语法:
-    /// 1. **字段名查表** (`has_per_layer_embedding`): 调用 `ResolvedConfig::get_bool`。
-    ///    未知字段 → `TemplateError::Invalid` (不做静默 false 掩盖拼写错误)。
-    /// 2. **整数比较** (`lhs op rhs`, 按 `split_whitespace` 拆 3 段): `lhs` 从
+    /// 支持三种语法:
+    /// 1. **字段名查表** (`has_per_layer_embedding` / `is_kv_shared_layer_3`):
+    ///    调用 `ResolvedConfig::get_bool`。per-layer 字段在 `eval_only_if_with_loop`
+    ///    先经过 `${i}` 占位符替换,查表时以带索引的键命中 `get_bool` 的 per-layer
+    ///    分支。未知字段 → `TemplateError::Invalid`。
+    /// 2. **前缀否定** (`!has_per_layer_embedding` / `!is_kv_shared_layer_5`):
+    ///    字段求值后取反。语法上等价于 `field == false` 但更贴近 YAML 习惯。
+    /// 3. **整数比较** (`lhs op rhs`, 按 `split_whitespace` 拆 3 段): `lhs` 从
     ///    `ResolvedConfig::get_int` 查询,`rhs` 为整数字面量,`op ∈ {>,>=,==,!=,<,<=}`。
     ///
     /// 选择查表 + 简单比较的双轨设计而非完整表达式解析:
@@ -767,7 +853,7 @@ impl ArchTemplate {
             return Ok(true);
         }
 
-        // 形式 2: 三段式比较 `lhs op rhs`
+        // 形式 3: 三段式比较 `lhs op rhs`
         let tokens: Vec<&str> = raw.split_whitespace().collect();
         if tokens.len() == 3 {
             let lhs_key = tokens[0];
@@ -792,20 +878,30 @@ impl ArchTemplate {
             };
         }
 
-        // 形式 1: 单字段名查 bool
+        // 形式 1 / 2: 单 token (可带 `!` 前缀否定)
         if tokens.len() == 1 {
-            let key = tokens[0];
+            let token = tokens[0];
+            let (key, negate) = if let Some(rest) = token.strip_prefix('!') {
+                (rest, true)
+            } else {
+                (token, false)
+            };
+            if key.is_empty() {
+                return Err(TemplateError::Invalid(format!(
+                    "only_if '{raw}': `!` 后缺少字段名"
+                )));
+            }
             if let Some(v) = config.get_bool(key) {
-                return Ok(v);
+                return Ok(if negate { !v } else { v });
             }
             return Err(TemplateError::Invalid(format!(
-                "only_if '{raw}': 未知布尔字段 (ResolvedConfig::get_bool 无匹配)。\
+                "only_if '{raw}': 未知布尔字段 '{key}' (ResolvedConfig::get_bool 无匹配)。\
                  若需派生字段,请在 ResolvedConfig::get_bool 中注册,禁止静默返回 false。"
             )));
         }
 
         Err(TemplateError::Invalid(format!(
-            "only_if '{raw}': 语法错误,期望 `<field>` 或 `<lhs> <op> <rhs>` (3 个空白分隔 token)"
+            "only_if '{raw}': 语法错误,期望 `<field>` / `!<field>` 或 `<lhs> <op> <rhs>` (3 个空白分隔 token)"
         )))
     }
 
@@ -1439,5 +1535,293 @@ graph:
         let graph = template.to_onnx_graph(&config).unwrap();
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].name, "a");
+    }
+
+    // ============================================================================
+    // T43: SharedKvRef graph-layer integration tests.
+    //
+    // These cover the template-engine primitives that make shared-KV routing work
+    // without Rust-side per-model branching:
+    //   - `!<field>` negation prefix in `only_if`
+    //   - per-layer `is_kv_shared_layer_{N}` lookup (from `${i}` substitution)
+    //   - `${donor_i}` placeholder resolution (identity / donor index)
+    //
+    // And the end-to-end expansion against the real gemma4.yaml for an E2B config
+    // (26 layers, 20 shared): k_proj / v_proj / v_norm / k-rope / k-qk-norm must
+    // disappear for the 20 consumer layers, attention reads donor tensors.
+    // ============================================================================
+
+    /// `!<field>` negates a boolean field lookup in `only_if`.
+    #[test]
+    fn only_if_negation_prefix() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      only_if: "!has_per_layer_embedding"
+      inputs: []
+      outputs: []
+    - name: b
+      op_type: Add
+      only_if: "has_per_layer_embedding"
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 1;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+        config.has_per_layer_embedding = false;
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // has_per_layer_embedding = false → `!has_...` = true, `has_...` = false.
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].name, "a");
+
+        config.has_per_layer_embedding = true;
+        let graph = template.to_onnx_graph(&config).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].name, "b");
+    }
+
+    /// `!<field>` on empty / malformed field returns an error (no silent defaults).
+    #[test]
+    fn only_if_negation_requires_field_name() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      only_if: "!"
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 1;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+
+        let err = template.to_onnx_graph(&config).unwrap_err();
+        assert!(format!("{err}").contains("缺少字段名") || format!("{err}").contains("`!`"));
+    }
+
+    /// Per-layer `is_kv_shared_layer_${i}` lookup inside a repeat block:
+    /// the repeat variable is substituted *before* field lookup so
+    /// `is_kv_shared_layer_3` hits the dynamic branch of `get_bool`.
+    #[test]
+    fn only_if_per_layer_shared_kv_lookup() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_kv"
+          op_type: Add
+          only_if: "!is_kv_shared_layer_${i}"
+          inputs: []
+          outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        // 10 layers, last 4 are consumers: layers 6..10 skipped.
+        config.num_hidden_layers = 10;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+        config.num_kv_shared_layers = 4;
+        config.attention_pattern = vec![0u8; 10];
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        // Only 6 non-consumer layers keep their KV node.
+        assert_eq!(graph.nodes.len(), 6, "consumer layers must skip the KV node");
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            assert_eq!(node.name, format!("layer_{idx}_kv"));
+        }
+    }
+
+    /// `${donor_i}` placeholder resolves identity on non-consumer layers and
+    /// resolves to the donor layer index on consumer layers.
+    #[test]
+    fn donor_placeholder_routes_to_donor_on_consumer_layers() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        - name: "layer_${i}_attn"
+          op_type: Attention
+          inputs: ["layer_${i}_q", "layer_${donor_i}_k", "layer_${donor_i}_v"]
+          outputs: ["layer_${i}_out"]
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        // 8 layers, last 4 shared. attention_pattern: alternating 0/1.
+        //   layer 0 → 0, layer 1 → 1, layer 2 → 0, layer 3 → 1   (non-consumer)
+        //   layer 4 → 0, layer 5 → 1, layer 6 → 0, layer 7 → 1   (consumer)
+        // donor bucket-matched latest non-consumer:
+        //   layer 4 (bucket 0) → donor 2
+        //   layer 5 (bucket 1) → donor 3
+        //   layer 6 (bucket 0) → donor 2
+        //   layer 7 (bucket 1) → donor 3
+        config.num_hidden_layers = 8;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+        config.num_kv_shared_layers = 4;
+        config.attention_pattern = vec![0, 1, 0, 1, 0, 1, 0, 1];
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        assert_eq!(graph.nodes.len(), 8);
+
+        // Non-consumer layers (0..4): donor_i == i, identity routing.
+        for i in 0..4 {
+            assert_eq!(graph.nodes[i].inputs[0], format!("layer_{i}_q"));
+            assert_eq!(graph.nodes[i].inputs[1], format!("layer_{i}_k"),
+                "non-consumer layer {i} must read self K");
+            assert_eq!(graph.nodes[i].inputs[2], format!("layer_{i}_v"));
+        }
+
+        // Consumer layers (4..8): K/V route to donor.
+        let expected_donor = [2usize, 3, 2, 3];
+        for (offset, &donor) in expected_donor.iter().enumerate() {
+            let i = 4 + offset;
+            assert_eq!(graph.nodes[i].inputs[0], format!("layer_{i}_q"));
+            assert_eq!(graph.nodes[i].inputs[1], format!("layer_{donor}_k"),
+                "consumer layer {i} must read donor {donor} K");
+            assert_eq!(graph.nodes[i].inputs[2], format!("layer_{donor}_v"));
+        }
+    }
+
+    /// End-to-end expansion against the real `gemma4.yaml` for a Gemma 4 E2B
+    /// config (26 layers, 20 shared). Consumer layers must not emit
+    /// `k_proj` / `v_proj` / `v_norm` / `_rope_k` / `_qk_norm_k`; attention
+    /// on consumer layers must read donor-layer tensors.
+    #[test]
+    fn gemma4_e2b_consumer_layers_skip_kv_and_route_to_donor() {
+        use super::super::resolve::ResolvedConfig;
+
+        let yaml = include_str!("templates/gemma4.yaml");
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+
+        let mut config = ResolvedConfig::default();
+        config.num_hidden_layers = 26;
+        config.hidden_size = 2048;
+        config.num_attention_heads = 8;
+        config.num_key_value_heads = 2;
+        config.head_dim = 256;
+        config.intermediate_size = Some(16384);
+        config.vocab_size = 262208;
+        config.rope_theta = 10_000.0;
+        config.global_rope_theta = 1_000_000.0;
+        config.sliding_window = 512;
+        config.hidden_size_per_layer_input = 128;
+        config.num_kv_shared_layers = 20;
+        // Every 6th layer is global (indices 5, 11, 17, 23).
+        config.attention_pattern = (0..26)
+            .map(|i| if (i + 1) % 6 == 0 { 1u8 } else { 0u8 })
+            .collect();
+        config.has_per_layer_embedding = true;
+        config.dtype = "f32".to_string();
+
+        let graph = template.to_onnx_graph(&config).unwrap();
+        let names: std::collections::HashSet<&str> =
+            graph.nodes.iter().map(|n| n.name.as_str()).collect();
+
+        // Non-consumer layers 0..6 own all K/V pipeline nodes.
+        for i in 0..6 {
+            assert!(names.contains(format!("layer_{i}_k_proj").as_str()),
+                "non-consumer layer {i} must have k_proj");
+            assert!(names.contains(format!("layer_{i}_v_proj").as_str()),
+                "non-consumer layer {i} must have v_proj");
+            assert!(names.contains(format!("layer_{i}_v_norm").as_str()),
+                "non-consumer layer {i} must have v_norm");
+            assert!(names.contains(format!("layer_{i}_qk_norm_k").as_str()),
+                "non-consumer layer {i} must have qk_norm_k");
+            assert!(names.contains(format!("layer_{i}_rope_k").as_str()),
+                "non-consumer layer {i} must have rope_k");
+        }
+
+        // Consumer layers 6..26 (20 layers) skip k_proj / v_proj / v_norm /
+        // qk_norm_k / rope_k — donated by their respective donors.
+        for i in 6..26 {
+            assert!(!names.contains(format!("layer_{i}_k_proj").as_str()),
+                "consumer layer {i} must skip k_proj");
+            assert!(!names.contains(format!("layer_{i}_v_proj").as_str()),
+                "consumer layer {i} must skip v_proj");
+            assert!(!names.contains(format!("layer_{i}_v_norm").as_str()),
+                "consumer layer {i} must skip v_norm");
+            assert!(!names.contains(format!("layer_{i}_qk_norm_k").as_str()),
+                "consumer layer {i} must skip qk_norm_k");
+            assert!(!names.contains(format!("layer_{i}_rope_k").as_str()),
+                "consumer layer {i} must skip rope_k");
+        }
+
+        // Count dropped k_proj nodes — must equal num_kv_shared_layers (20).
+        let k_proj_count = graph.nodes.iter()
+            .filter(|n| n.name.ends_with("_k_proj"))
+            .count();
+        assert_eq!(k_proj_count, config.num_hidden_layers - config.num_kv_shared_layers,
+            "k_proj must appear only on non-consumer layers");
+
+        // Consumer attention nodes must reference donor K / V tensors.
+        for i in 6..26 {
+            let attn = graph.nodes.iter()
+                .find(|n| n.name == format!("layer_{i}_attn"))
+                .expect("attention node for consumer layer");
+            let donor = config.donor_layer(i).unwrap().expect("donor present");
+            assert_ne!(donor, i, "consumer layer donor must differ from self");
+            assert_eq!(attn.inputs[0], format!("layer_{i}_q_rope"),
+                "consumer layer {i} still uses own Q rope");
+            assert_eq!(attn.inputs[1], format!("layer_{donor}_k_rope"),
+                "consumer layer {i} attention must read donor {donor} K rope");
+            assert_eq!(attn.inputs[2], format!("layer_{donor}_v_normed"),
+                "consumer layer {i} attention must read donor {donor} V normed");
+        }
+    }
+
+    /// Unknown `!<field>` errors out with a clear message (no silent false).
+    #[test]
+    fn only_if_negation_unknown_field_errors() {
+        let yaml = r#"
+name: test
+graph:
+  inputs: []
+  outputs: []
+  nodes:
+    - name: a
+      op_type: Add
+      only_if: "!typo_field"
+      inputs: []
+      outputs: []
+"#;
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 1;
+        config.hidden_size = 1;
+        config.num_attention_heads = 1;
+        config.vocab_size = 1;
+
+        let err = template.to_onnx_graph(&config).unwrap_err();
+        assert!(format!("{err}").contains("typo_field"),
+            "error must name the unknown field, got: {err}");
     }
 }

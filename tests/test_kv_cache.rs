@@ -30,6 +30,7 @@ fn make_state(backend: &CpuBackend<f32>, max_seq_len: usize) -> KvCacheState {
         num_experts: 0,
         moe_top_k: 0,
         expert_intermediate_size: 0,
+        position_offset: None,
     });
     let config = KvCacheConfig {
         geometry,

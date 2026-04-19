@@ -77,7 +77,14 @@ graph:
           outputs: ["layer_${i}_normed"]
 
         # ── Q/K/V Projections ──
-        # SharedKvRef 层跳过 K/V 投影，复用前一个非共享层的 KV
+        # SharedKvRef (Gemma 4 E2B/E4B): consumer layers (the trailing
+        # `num_kv_shared_layers` indices) reuse the donor layer's K/V outputs
+        # instead of computing their own. The K/V projection, QK-norm K-half,
+        # V-norm, and K-rope are all guarded by `!is_kv_shared_layer_${i}` (or
+        # handled inside the corresponding `expand_*`). The attention node
+        # therefore reads `layer_${donor_i}_k_rope` / `layer_${donor_i}_v_normed`:
+        # the `${donor_i}` placeholder resolves to `i` on non-consumer layers
+        # (identity) and to the donor layer index on consumer layers.
         - name: "layer_${i}_q_proj"
           op_type: MatMul
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.q_proj.weight"]
@@ -85,6 +92,7 @@ graph:
 
         - name: "layer_${i}_k_proj"
           op_type: MatMul
+          only_if: "!is_kv_shared_layer_${i}"
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.k_proj.weight"]
           outputs: ["layer_${i}_k"]
           attributes:
@@ -92,12 +100,15 @@ graph:
 
         - name: "layer_${i}_v_proj"
           op_type: MatMul
+          only_if: "!is_kv_shared_layer_${i}"
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.v_proj.weight"]
           outputs: ["layer_${i}_v"]
           attributes:
             kv_shareable: 1
 
         # ── QK-Norm (替代 softcap) ──
+        # On consumer layers `expand_qk_norm` emits only the Q half (K was
+        # skipped upstream); see template.rs for the branch.
         - name: "layer_${i}_qk_norm"
           op_type: QkNorm
           inputs: ["layer_${i}_q", "layer_${i}_k"]
@@ -106,10 +117,13 @@ graph:
         # ── Value Norm (无学习参数的 RMSNorm) ──
         - name: "layer_${i}_v_norm"
           op_type: ValueNorm
+          only_if: "!is_kv_shared_layer_${i}"
           inputs: ["layer_${i}_v"]
           outputs: ["layer_${i}_v_normed"]
 
         # ── Dual RoPE: sliding θ=10K / global θ=1M+partial=0.25 ──
+        # On consumer layers `expand_dual_rope` emits only the Q half (K rope
+        # comes from the donor layer); see template.rs for the branch.
         - name: "layer_${i}_rope"
           op_type: DualRotaryEmbedding
           inputs: ["layer_${i}_q_normed", "layer_${i}_k_normed"]
@@ -120,9 +134,13 @@ graph:
             global_partial: 0.25
 
         # ── Attention (per-layer: sliding-window 或 global) ──
+        # `${donor_i}` — identity for non-consumer layers, donor layer index for
+        # consumer layers. This keeps the attention-node shape uniform across
+        # the full layer stack (3 inputs, unchanged), with consumer layers
+        # transparently reading the donor's already-rotated K / normalised V.
         - name: "layer_${i}_attn"
           op_type: Attention
-          inputs: ["layer_${i}_q_rope", "layer_${i}_k_rope", "layer_${i}_v_normed"]
+          inputs: ["layer_${i}_q_rope", "layer_${donor_i}_k_rope", "layer_${donor_i}_v_normed"]
           outputs: ["layer_${i}_attn_out"]
           attributes:
             num_heads: "${num_attention_heads}"
