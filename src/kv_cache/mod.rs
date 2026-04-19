@@ -165,6 +165,62 @@ impl KvPageHeader {
 }
 
 // ============================================================================
+// Layer Donor Info (SharedKvRef §P1.1)
+// ============================================================================
+
+/// Per-page donor/refcount metadata for **layer-level** KV sharing
+/// (Gemma 4 E2B/E4B). Kept outside of `KvPageHeader` so the 40-byte hardware
+/// page-header contract stays intact (see REQ-KVPAGE-HEADER).
+///
+/// - `donor_layer = Some(n)` → this page is a *reference* pointing at the
+///   physical storage of layer `n`. Writes are forbidden; reads follow the
+///   donor.
+/// - `donor_layer = None` → this page owns its physical storage. The
+///   `borrower_refcount` tracks how many consumer layers hold a reference
+///   against it; the owner's physical block MUST NOT be reclaimed while
+///   `borrower_refcount > 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerDonorInfo {
+    /// Layer this entry represents.
+    pub layer: u16,
+    /// Attention-pattern bucket (0 = sliding, 1 = global).
+    pub attn_bucket: u8,
+    /// When `Some(n)`, this entry references layer `n`'s page; do not write.
+    pub donor_layer: Option<u16>,
+    /// How many *consumer* layers currently reference this owned page.
+    /// Only meaningful when `donor_layer.is_none()`.
+    pub borrower_refcount: u32,
+}
+
+impl LayerDonorInfo {
+    /// Construct an owned (donor-capable) entry with zero borrowers.
+    pub fn owned(layer: u16, attn_bucket: u8) -> Self {
+        Self {
+            layer,
+            attn_bucket,
+            donor_layer: None,
+            borrower_refcount: 0,
+        }
+    }
+
+    /// Construct a reference entry pointing at `donor_layer`.
+    pub fn reference(layer: u16, attn_bucket: u8, donor_layer: u16) -> Self {
+        Self {
+            layer,
+            attn_bucket,
+            donor_layer: Some(donor_layer),
+            borrower_refcount: 0,
+        }
+    }
+
+    /// True when this entry references another layer's storage.
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        self.donor_layer.is_some()
+    }
+}
+
+// ============================================================================
 // KV Cache Slot
 // ============================================================================
 
@@ -475,5 +531,28 @@ mod tests {
         buffer.swap();
         assert_eq!(buffer.front().handle(), back_id);
         assert_eq!(buffer.back().handle(), front_id);
+    }
+
+    // ------------------------------------------------------------------
+    // LayerDonorInfo (SharedKvRef §P1.1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn layer_donor_info_owned_has_no_donor() {
+        let entry = LayerDonorInfo::owned(5, 0);
+        assert_eq!(entry.layer, 5);
+        assert_eq!(entry.attn_bucket, 0);
+        assert!(entry.donor_layer.is_none());
+        assert!(!entry.is_shared());
+        assert_eq!(entry.borrower_refcount, 0);
+    }
+
+    #[test]
+    fn layer_donor_info_reference_points_at_donor() {
+        let entry = LayerDonorInfo::reference(25, 1, 11);
+        assert_eq!(entry.layer, 25);
+        assert_eq!(entry.attn_bucket, 1);
+        assert_eq!(entry.donor_layer, Some(11));
+        assert!(entry.is_shared());
     }
 }

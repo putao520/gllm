@@ -30,7 +30,10 @@ pub use memory_manager::{
     SessionId, SessionKvCache, Tier, TierManager, TierUsage, VirtualPageId,
 };
 pub use observer::{BasicObserver, ObserverError, RuntimeObserver};
-pub use paged_scheduler::{BlockTable, PagedScheduler, SchedulerError, SchedulerOutput};
+pub use paged_scheduler::{
+    find_donor, BlockTable, LayerAllocHint, LayerPageKey, LayerPageTable, PagedScheduler,
+    SchedulerError, SchedulerOutput,
+};
 pub use policy::{AbsolutePolicy, PolicyConfig, PolicyVariant, SchedulingPolicy};
 pub use prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 pub use sequence::{Sequence, SequenceState};

@@ -8,6 +8,7 @@ use super::prefix_index::{KvPrefixIndex, PrefixMatch, TokenId};
 use super::types::{GroupState, PageMetadata, SequenceGroup};
 use super::vllm2024::{Scheduler2024Config, Scheduler2024State};
 use super::types::{PageId, PageState, RequestId, StorageKey};
+use crate::kv_cache::LayerDonorInfo;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -55,6 +56,27 @@ pub enum SchedulerError {
     AllocatorInvariant { operation: &'static str },
     #[error("storage key conversion overflow: {field}")]
     StorageKeyOverflow { field: &'static str },
+    #[error(
+        "shared-KV donor layer {donor_layer} has no page for request {request_id} \
+         (consumer layer {consumer_layer})"
+    )]
+    MissingDonorPage {
+        request_id: RequestId,
+        consumer_layer: usize,
+        donor_layer: usize,
+    },
+    #[error(
+        "no donor candidate for consumer layer {layer} with attention bucket {bucket}"
+    )]
+    NoDonorForConsumer { layer: usize, bucket: u8 },
+    #[error(
+        "attention_pattern length {pattern_len} must equal num_layers {num_layers} \
+         when num_kv_shared_layers > 0"
+    )]
+    AttentionPatternMismatch {
+        pattern_len: usize,
+        num_layers: usize,
+    },
 }
 
 pub struct PagedScheduler {
@@ -577,6 +599,289 @@ impl PagedScheduler {
     }
 }
 
+// ===========================================================================
+// SharedKvRef — layer-granular page allocation (§P1.1).
+//
+// Gemma 4 E2B (20 shared) / E4B (18 shared) trailing layers reuse a donor
+// layer's KV storage instead of computing their own K/V.
+//
+// Unlike the request-level BlockTable above, `LayerPageTable` tracks
+// `(request, layer)` → page_id so consumer layers can *reference* their
+// donor's PageId without a new physical allocation.
+//
+// Invariants enforced here:
+//   1. Shared-ref allocation never calls `BlockAllocator::allocate()`.
+//   2. The donor's owned page is protected by `borrower_refcount`; the
+//      physical block is not returned to the allocator while any consumer
+//      holds a reference.
+//   3. All donor lookup paths return a typed `Err` (no silent defaults).
+// ===========================================================================
+
+/// Composite key for the per-layer page table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayerPageKey {
+    pub request: RequestId,
+    pub layer: usize,
+}
+
+impl LayerPageKey {
+    #[inline]
+    pub fn new(request: RequestId, layer: usize) -> Self {
+        Self { request, layer }
+    }
+}
+
+/// Allocation intent for a single `(request, layer)` page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerAllocHint {
+    /// Fresh page — pop from the allocator and mark as owned.
+    Owned { attn_bucket: u8 },
+    /// Shared-ref page — reuse `donor_layer`'s physical storage.
+    SharedRef {
+        attn_bucket: u8,
+        donor_layer: usize,
+    },
+}
+
+/// Resolve the donor layer for a shared-KV consumer layer.
+///
+/// Returns:
+/// - `Ok(None)` when `layer_i` is **not** a shared-KV consumer (either
+///   `num_kv_shared_layers == 0` or `layer_i < num_layers - num_kv_shared_layers`).
+/// - `Ok(Some(donor))` — the donor layer index for this consumer.
+/// - `Err(..)` when the attention pattern is malformed or no donor of the
+///   matching bucket exists.
+///
+/// The donor is the **latest** non-shared layer (strictly less than
+/// `num_layers - num_kv_shared_layers`) whose `attention_pattern[j]` equals
+/// the consumer's bucket.
+pub fn find_donor(
+    layer_i: usize,
+    num_layers: usize,
+    num_kv_shared_layers: usize,
+    attention_pattern: &[u8],
+) -> Result<Option<usize>, SchedulerError> {
+    if num_kv_shared_layers == 0 || layer_i >= num_layers {
+        return Ok(None);
+    }
+    if layer_i + num_kv_shared_layers < num_layers {
+        return Ok(None);
+    }
+    if attention_pattern.len() != num_layers {
+        return Err(SchedulerError::AttentionPatternMismatch {
+            pattern_len: attention_pattern.len(),
+            num_layers,
+        });
+    }
+    let first_consumer = num_layers - num_kv_shared_layers;
+    let target = attention_pattern[layer_i];
+    for candidate in (0..first_consumer).rev() {
+        if attention_pattern[candidate] == target {
+            return Ok(Some(candidate));
+        }
+    }
+    Err(SchedulerError::NoDonorForConsumer {
+        layer: layer_i,
+        bucket: target,
+    })
+}
+
+/// Layer-level page table: maps `(request, layer)` to a `PageId` and records
+/// donor / borrower refcount. Instantiate one per sequence and pass it into
+/// `PagedScheduler::allocate_layer_page` / `free_layer_page`.
+#[derive(Debug, Default)]
+pub struct LayerPageTable {
+    entries: HashMap<LayerPageKey, LayerPageEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayerPageEntry {
+    page_id: PageId,
+    info: LayerDonorInfo,
+}
+
+impl LayerPageTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Resolve the physical `PageId` for a layer, transparently following
+    /// donor links.
+    pub fn resolve(&self, key: LayerPageKey) -> Option<PageId> {
+        self.entries.get(&key).map(|e| e.page_id)
+    }
+
+    /// Fetch the full `LayerDonorInfo` entry (diagnostics / tests).
+    pub fn info(&self, key: LayerPageKey) -> Option<LayerDonorInfo> {
+        self.entries.get(&key).map(|e| e.info)
+    }
+
+    /// Borrower ref-count for the *owned* entry under `key`. Returns 0 when
+    /// the key does not resolve or when the entry is itself a reference.
+    pub fn borrower_refcount(&self, key: LayerPageKey) -> u32 {
+        match self.entries.get(&key) {
+            Some(entry) if entry.info.donor_layer.is_none() => entry.info.borrower_refcount,
+            _ => 0,
+        }
+    }
+
+    fn insert_owned(&mut self, key: LayerPageKey, page_id: PageId, attn_bucket: u8) {
+        self.entries.insert(
+            key,
+            LayerPageEntry {
+                page_id,
+                info: LayerDonorInfo::owned(key.layer as u16, attn_bucket),
+            },
+        );
+    }
+
+    fn insert_shared_ref(
+        &mut self,
+        key: LayerPageKey,
+        donor_layer: usize,
+        attn_bucket: u8,
+    ) -> Result<PageId, SchedulerError> {
+        let donor_key = LayerPageKey::new(key.request, donor_layer);
+        let donor_page = match self.entries.get_mut(&donor_key) {
+            Some(entry) if entry.info.donor_layer.is_none() => {
+                entry.info.borrower_refcount = entry.info.borrower_refcount.saturating_add(1);
+                entry.page_id
+            }
+            _ => {
+                return Err(SchedulerError::MissingDonorPage {
+                    request_id: key.request,
+                    consumer_layer: key.layer,
+                    donor_layer,
+                });
+            }
+        };
+        self.entries.insert(
+            key,
+            LayerPageEntry {
+                page_id: donor_page,
+                info: LayerDonorInfo::reference(
+                    key.layer as u16,
+                    attn_bucket,
+                    donor_layer as u16,
+                ),
+            },
+        );
+        Ok(donor_page)
+    }
+
+    /// Remove a layer entry.
+    ///
+    /// - Shared-reference entries: decrement the donor's `borrower_refcount`
+    ///   and return `None` (the physical block stays with its owner).
+    /// - Owned entries: return `Some(page_id)` **only** when
+    ///   `borrower_refcount == 0`. Otherwise re-insert the entry and return
+    ///   `None` (caller must release consumers first).
+    fn remove(&mut self, key: LayerPageKey) -> Option<PageId> {
+        let entry = self.entries.remove(&key)?;
+        match entry.info.donor_layer {
+            Some(donor_layer) => {
+                let donor_key = LayerPageKey::new(key.request, donor_layer as usize);
+                if let Some(donor) = self.entries.get_mut(&donor_key) {
+                    donor.info.borrower_refcount =
+                        donor.info.borrower_refcount.saturating_sub(1);
+                }
+                None
+            }
+            None => {
+                if entry.info.borrower_refcount > 0 {
+                    // Would create a use-after-free; caller must release
+                    // consumers first.
+                    self.entries.insert(key, entry);
+                    None
+                } else {
+                    Some(entry.page_id)
+                }
+            }
+        }
+    }
+}
+
+impl PagedScheduler {
+    /// Allocate a page for `layer_i` using the given `hint`.
+    ///
+    /// - `Owned`: pops a fresh block from the allocator and registers it in
+    ///   GMM (L1).
+    /// - `SharedRef`: consumes zero physical blocks; records a reference to
+    ///   the donor layer's page and increments the donor's borrower refcount.
+    pub fn allocate_layer_page(
+        &mut self,
+        request_id: RequestId,
+        layer_i: usize,
+        hint: LayerAllocHint,
+        layer_pages: &mut LayerPageTable,
+    ) -> Result<PageId, SchedulerError> {
+        let key = LayerPageKey::new(request_id, layer_i);
+        match hint {
+            LayerAllocHint::Owned { attn_bucket } => {
+                let free_blocks = self.allocator.get_num_free_blocks();
+                if free_blocks == 0 {
+                    return Err(SchedulerError::OutOfMemory {
+                        operation: "allocate_layer_page",
+                        needed_blocks: 1,
+                        free_blocks,
+                    });
+                }
+                let page_id = self
+                    .allocator
+                    .allocate()
+                    .ok_or(SchedulerError::AllocatorInvariant {
+                        operation: "allocate_layer_page",
+                    })?;
+                self.hgal.mark_accessed(page_id);
+                if let Err(e) = self.memory_manager.track_page(Tier::L1, page_id as usize) {
+                    log::warn!("GMM track_page failed on layer-page alloc: {}", e);
+                }
+                layer_pages.insert_owned(key, page_id, attn_bucket);
+                Ok(page_id)
+            }
+            LayerAllocHint::SharedRef {
+                attn_bucket,
+                donor_layer,
+            } => {
+                let page_id =
+                    layer_pages.insert_shared_ref(key, donor_layer, attn_bucket)?;
+                self.hgal.mark_accessed(page_id);
+                Ok(page_id)
+            }
+        }
+    }
+
+    /// Release a per-layer page. Returns `true` when the physical block was
+    /// returned to the allocator. Shared-ref releases only decrement donor
+    /// refcounts and always return `false`.
+    pub fn free_layer_page(
+        &mut self,
+        request_id: RequestId,
+        layer_i: usize,
+        layer_pages: &mut LayerPageTable,
+    ) -> bool {
+        let key = LayerPageKey::new(request_id, layer_i);
+        match layer_pages.remove(key) {
+            Some(page_id) => {
+                self.allocator.free(page_id);
+                if let Err(e) = self.memory_manager.free_page(Tier::L1, page_id as usize) {
+                    log::warn!("GMM free_page failed on layer-page free: {}", e);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +1038,179 @@ mod tests {
 
         let usage_after = scheduler.tier_usage(Tier::L1);
         assert!(usage_after.used > usage_before.used);
+    }
+
+    // -----------------------------------------------------------------------
+    // SharedKvRef (§P1.1) — donor discovery + layer-page allocation.
+    // -----------------------------------------------------------------------
+
+    use super::{find_donor, LayerAllocHint, LayerPageKey, LayerPageTable};
+
+    #[test]
+    fn find_donor_returns_latest_same_bucket_non_shared() {
+        // 32 layers, pattern with interleaved sliding(0) / global(1).
+        let num_layers = 32;
+        let num_kv_shared = 20;
+        let mut pattern = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
+            pattern.push(if i % 6 == 5 { 1 } else { 0 });
+        }
+        let first_consumer = num_layers - num_kv_shared; // 12
+        let consumer = 15;
+        let donor = find_donor(consumer, num_layers, num_kv_shared, &pattern)
+            .expect("lookup ok")
+            .expect("donor present");
+        assert!(donor < first_consumer, "donor {donor} must be non-shared");
+        assert_eq!(
+            pattern[donor], pattern[consumer],
+            "donor bucket must match consumer bucket"
+        );
+    }
+
+    #[test]
+    fn find_donor_returns_none_for_non_consumer_layer() {
+        let pattern = vec![0u8; 32];
+        let donor = find_donor(5, 32, 20, &pattern).expect("ok");
+        assert!(donor.is_none());
+    }
+
+    #[test]
+    fn find_donor_returns_none_when_sharing_disabled() {
+        let donor = find_donor(7, 12, 0, &[]).expect("ok");
+        assert!(donor.is_none());
+    }
+
+    #[test]
+    fn find_donor_errors_on_pattern_length_mismatch() {
+        let err = find_donor(15, 32, 20, &[0u8; 10]).expect_err("must error");
+        assert!(matches!(err, SchedulerError::AttentionPatternMismatch { .. }));
+    }
+
+    #[test]
+    fn find_donor_errors_when_bucket_absent_in_non_shared_prefix() {
+        let mut pattern = vec![0u8; 10];
+        pattern.extend_from_slice(&[1, 1]); // only 2 consumers, all global, no global donor.
+        let err = find_donor(10, 12, 2, &pattern).expect_err("must error");
+        assert!(matches!(err, SchedulerError::NoDonorForConsumer { .. }));
+    }
+
+    #[test]
+    fn shared_ref_page_reuses_donor_page_id_and_bumps_refcount() {
+        let mut scheduler = PagedScheduler::new(8, 4, HGALConfig::default());
+        let mut table = LayerPageTable::new();
+        let req = 7u64;
+        let donor_layer = 3usize;
+        let consumer = 9usize;
+        let donor_page = scheduler
+            .allocate_layer_page(
+                req,
+                donor_layer,
+                LayerAllocHint::Owned { attn_bucket: 0 },
+                &mut table,
+            )
+            .expect("alloc donor");
+        let shared_page = scheduler
+            .allocate_layer_page(
+                req,
+                consumer,
+                LayerAllocHint::SharedRef { attn_bucket: 0, donor_layer },
+                &mut table,
+            )
+            .expect("alloc shared ref");
+        assert_eq!(
+            donor_page, shared_page,
+            "consumer must inherit donor's PageId"
+        );
+        assert_eq!(
+            table.borrower_refcount(LayerPageKey::new(req, donor_layer)),
+            1
+        );
+        let info = table
+            .info(LayerPageKey::new(req, consumer))
+            .expect("info present");
+        assert!(info.is_shared());
+        assert_eq!(info.donor_layer, Some(donor_layer as u16));
+    }
+
+    #[test]
+    fn shared_ref_page_does_not_consume_free_blocks() {
+        let mut scheduler = PagedScheduler::new(4, 4, HGALConfig::default());
+        let mut table = LayerPageTable::new();
+        let req = 11u64;
+        let free_total = scheduler.num_free_blocks();
+        scheduler
+            .allocate_layer_page(req, 0, LayerAllocHint::Owned { attn_bucket: 0 }, &mut table)
+            .expect("owned");
+        assert_eq!(scheduler.num_free_blocks(), free_total - 1);
+        for shared_layer in 1..4 {
+            scheduler
+                .allocate_layer_page(
+                    req,
+                    shared_layer,
+                    LayerAllocHint::SharedRef {
+                        attn_bucket: 0,
+                        donor_layer: 0,
+                    },
+                    &mut table,
+                )
+                .expect("shared");
+        }
+        assert_eq!(
+            scheduler.num_free_blocks(),
+            free_total - 1,
+            "shared refs must not consume blocks"
+        );
+        assert_eq!(table.borrower_refcount(LayerPageKey::new(req, 0)), 3);
+    }
+
+    #[test]
+    fn owned_donor_cannot_be_freed_while_consumers_alive() {
+        let mut scheduler = PagedScheduler::new(4, 4, HGALConfig::default());
+        let mut table = LayerPageTable::new();
+        let req = 13u64;
+        scheduler
+            .allocate_layer_page(req, 0, LayerAllocHint::Owned { attn_bucket: 0 }, &mut table)
+            .expect("owned");
+        scheduler
+            .allocate_layer_page(
+                req,
+                1,
+                LayerAllocHint::SharedRef {
+                    attn_bucket: 0,
+                    donor_layer: 0,
+                },
+                &mut table,
+            )
+            .expect("shared");
+        let free_before = scheduler.num_free_blocks();
+        assert!(
+            !scheduler.free_layer_page(req, 0, &mut table),
+            "donor must not free while borrower alive"
+        );
+        assert_eq!(scheduler.num_free_blocks(), free_before);
+        // Release consumer first — no physical free.
+        assert!(!scheduler.free_layer_page(req, 1, &mut table));
+        assert_eq!(table.borrower_refcount(LayerPageKey::new(req, 0)), 0);
+        // Now donor can be reclaimed.
+        assert!(scheduler.free_layer_page(req, 0, &mut table));
+        assert_eq!(scheduler.num_free_blocks(), free_before + 1);
+    }
+
+    #[test]
+    fn shared_ref_without_donor_errors() {
+        let mut scheduler = PagedScheduler::new(4, 4, HGALConfig::default());
+        let mut table = LayerPageTable::new();
+        let err = scheduler
+            .allocate_layer_page(
+                17,
+                2,
+                LayerAllocHint::SharedRef {
+                    attn_bucket: 0,
+                    donor_layer: 0,
+                },
+                &mut table,
+            )
+            .expect_err("must error on missing donor");
+        assert!(matches!(err, SchedulerError::MissingDonorPage { .. }));
     }
 }
