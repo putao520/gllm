@@ -82,6 +82,20 @@
 | `gemma-4-26b-a4b` | Gemma4 | 26B MoE (4B Active) | `google/gemma-4-26B-A4B-it` | - | MoE 多模态对话 |
 | `gemma-4-31b` | Gemma4 | 31B Dense | `google/gemma-4-31B-IT` | - | 旗舰多模态(文本+图像+视频帧+音频) |
 
+**Gemma 4 能力状态矩阵** (T21–T42 接入通路完成,T43–T47 并行中):
+
+| 能力 | E2B | E4B | 26B-A4B | 31B | 说明 |
+|------|-----|-----|---------|-----|------|
+| **CPU JIT codegen** | ✅ | ✅ | ✅ | ✅ | QkNorm/ValueNorm/DualRoPE/PerLayerEmbed/ColumnSlice 全部走 Phase 3 x86_64/AArch64 lowering (T30/T37) |
+| **GPU codegen (PTX/HIP/MSL)** | ✅ | ✅ | ✅ | ✅ | 三后端 TileLevelFusion/ComputeRoot 已通 (T38) |
+| **PerLayerEmbedding (PLE)** | ✅ | ✅ | — | — | 仅 E2B/E4B 含 PLE;权重 alias + `only_if` 条件展开 + ColumnSlice JIT (T28.2/T28.3/T30/T37) |
+| **SharedKvRef (page 层)** | ✅ | ✅ | ✅ | ✅ | 后 N 层按 `num_kv_shared_layers` 引用 donor 层 KV page (T39 = P1.1) |
+| **SharedKvRef (graph 层)** | 🟡 | 🟡 | 🟡 | 🟡 | graph executor 侧跳过 K/V MatMul 的路径并行中 (T43) |
+| **FusedQkvNormRope 融合** | ✅ | ✅ | ✅ | ✅ | pattern_fusion 识别 + atomic_op_to_kind 契约 (T29/T36/T41/T42) |
+| **Vision encoder (SigLIP)** | 🟡 | 🟡 | 🟡 | 🟡 | 骨架就位,PatchEmbed/LearnedPos2D 算子接入中 (T44) |
+| **Audio encoder (USM Conformer)** | 🟡 | 🟡 | 🟡 | 🟡 | 骨架就位,DepthwiseConv1D/ConformerBlock 接入中 (T45) |
+| **E2E 推理数值验证** | 🟡 | 🟡 | 🟡 | 🟡 | 模拟加载 + JIT compile dry-run 已通过,真实 HF 下载 + 数值对齐待 (T47) |
+
 ## 2. Embedding Models (文本向量化)
 
 ### Qwen Series (Alibaba)

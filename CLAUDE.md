@@ -111,8 +111,19 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 
 **融合模式** (gllm 图优化层, `src/graph/optimizer/`):
 - FlashAttention / GQA / FusedQkvRope / SwiGLU / MoERouting / FusedRMSLinear
+- **FusedQkvNormRope** (Gemma 4): Q_proj/K_proj/V_proj + QkNorm + ValueNorm + DualRoPE 六算子融合
 - HardwareFusionPass: 硬件不支持时降级到 Atomic
 - DeadCodeElimination: 移除未使用节点
+
+**CompilerGraph OpKind (Gemma 4 新增算子)**:
+- `QkNorm { head_dim }`: Q/K 向量 L2 归一化 + √head_dim 缩放
+- `ValueNorm { eps }`: V 向量无学习参数 RMSNorm
+- `PerLayerEmbed { layer_idx, dim_per_layer }`: E2B/E4B 每层注入 token-identity + context-aware 信号
+- `ColumnSlice { start, end }`: PLE 按层切片真实列切片 JIT 实现 (T37)
+- `PatchEmbed` (Vision): 图像 → patch 序列 (Conv2D + Reshape) — 骨架中 (T44)
+- `LearnedPos2D` (Vision): 2D 学习位置编码 (非 RoPE) — 骨架中 (T44)
+- `DepthwiseConv1D` (Audio): Conformer 的深度卷积模块 — 骨架中 (T45)
+- `RoPE { partial: f32 }` (扩展): DualRoPE 支持 partial=0.25 p-RoPE 路径
 
 **设备适配** (`DeviceProfile`):
 - x86_64: SSE2 → AVX → AVX2 → AVX-512（通过 `simd_width` / `use_avx512` 参数化）
@@ -162,6 +173,29 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 > 4. GPU codegen 通过 `GpuDialect` trait 抽象，新增后端只需实现 trait 方法
 > 5. 性能优化的优先级：融合算子 > 原子算子 > scalar fallback
 > 6. 任何"绕过 JIT 管线"的 workaround（如直接调用预编译函数、静默 NOP、scalar fallback）均视为 bug
+
+### 5.3 Supported Model Architectures (能力矩阵索引)
+
+完整模型清单见 `SPEC/SUPPORTED_MODELS.md` 与 `SPEC/11-MODELS.md`。活跃架构能力状态:
+
+| 架构 | CPU JIT | GPU codegen | 备注 |
+|------|--------|-------------|------|
+| Qwen3 / Qwen3MoE | ✅ | ✅ | 通用标杆 |
+| Llama4 / SmolLM / InternLM | ✅ | ✅ | G-A 路径共用 |
+| GLM-4 / GLM-5 | ✅ | ✅ | MoE (glm-4.7-flash) |
+| Mistral3 / Ministral | ✅ | ✅ | Sliding Window |
+| Phi4 / Phi4-mini | ✅ | ✅ | Partial RoPE |
+| GPT-2-Next (GPT-OSS) | ✅ | ✅ | Absolute pos + LayerNorm+Bias |
+| DeepSeek V3/R1 / Kimi-K2 | ✅ | ✅ | MoE Router+SharedExperts |
+| XLM-R / XLM-R-Next (Encoder) | ✅ | ✅ | Embedding / Rerank |
+| **Gemma 4 (E2B/E4B/26B-A4B/31B)** | ✅ | ✅ | QkNorm + ValueNorm + DualRoPE + PLE(E2B/E4B) + SharedKvRef page 层 ✅; graph 层 🟡 T43; Vision/Audio 🟡 T44/T45; E2E 数值验证 🟡 T47 |
+
+**Gemma 4 关键差异点** (T21-T42 接入完成):
+- **DualRoPE**: sliding 层 θ=10K + partial=1.0;global 层 θ=1M + partial=0.25 (p-RoPE)
+- **QkNorm / ValueNorm**: Q/K L2 归一化 + V 无学习参数 RmsNorm
+- **PerLayerEmbedding** (仅 E2B/E4B): 每层 token-identity + context-aware 信号注入,经 `ColumnSlice` JIT 按层切片
+- **SharedKvRef**: 后 `num_kv_shared_layers` 层不计算 K/V,按 page 引用 donor 层 KV (T39 page 层完成,T43 graph 层并行中)
+- **FusedQkvNormRope**: pattern_fusion 识别 6 算子链 (T29/T41/T42)
 
 ## Directory Structure
 

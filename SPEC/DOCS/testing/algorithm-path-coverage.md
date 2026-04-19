@@ -40,7 +40,7 @@
 | G-A | Qwen3, Qwen2.5, Llama4, SmolLM2, SmolLM3, InternLM3, GLM4, GLM5 | **SmolLM2-135M** (ST) + **Qwen3-0.6B** (GGUF) | ✅ 已覆盖 |
 | G-B | Mistral3, Ministral | — | ❌ 未覆盖 |
 | G-C | Phi4, Phi4-mini | — | ❌ 未覆盖 |
-| G-D | Gemma4-E2B/E4B/31B/26B-A4B | — | 🟡 测试接入 `google/gemma-4-E2B`,待 E2E 数值对齐 |
+| G-D | Gemma4-E2B/E4B/31B/26B-A4B | `google/gemma-4-E2B` (模拟加载 + dry-run) | 🟢 atomic 契约 (T36) + pattern_fusion (T41/T42) + JIT compile (T30/T37/T38) 全过,待 E2E 数值对齐 (T47) |
 | G-E | GPT-OSS-1.5B, GPT-OSS-12B | — | ❌ 未覆盖 |
 | G-F | DeepSeek | — | ❌ 未覆盖 (模型过大) |
 | G-G | Qwen3MoE (235B), Llama4-Scout, Llama4-8B | — | ❌ 未覆盖 (模型过大) |
