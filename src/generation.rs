@@ -525,7 +525,18 @@ impl<'a> GenerationBuilder<'a> {
     /// # }
     /// ```
     pub fn generate(self) -> GenerationOutput {
+        // 多模态输入需要显式的 encoder 调用 + token routing，当前仅在
+        // 非 streaming 路径实现；streaming 路径沿用原走法。
+        let has_multimodal = self.image_input.is_some() || self.audio_input.is_some();
+
         if self.stream {
+            if has_multimodal {
+                // T58 铁律 NO_SILENT_FALLBACK：streaming 多模态尚未接入，
+                // 立即 Err 而非静默丢弃媒体输入。
+                return GenerationOutput::Response(Err(GllmError::RuntimeError(
+                    "multimodal streaming not yet supported (T58 scaffold only)".into(),
+                )));
+            }
             GenerationOutput::Stream(GenerationStream::new(
                 self.client,
                 self.prompt,
@@ -537,15 +548,29 @@ impl<'a> GenerationBuilder<'a> {
                 self.thinking_budget,
             ))
         } else {
-            let result = self.client.execute_generation(
-                self.prompt,
-                self.max_tokens,
-                self.temperature,
-                self.top_k,
-                self.top_p,
-                self.session_id,
-                self.thinking_budget,
-            );
+            let result = if has_multimodal {
+                self.client.execute_generation_multimodal(
+                    self.prompt,
+                    self.max_tokens,
+                    self.temperature,
+                    self.top_k,
+                    self.top_p,
+                    self.session_id,
+                    self.thinking_budget,
+                    self.image_input,
+                    self.audio_input,
+                )
+            } else {
+                self.client.execute_generation(
+                    self.prompt,
+                    self.max_tokens,
+                    self.temperature,
+                    self.top_k,
+                    self.top_p,
+                    self.session_id,
+                    self.thinking_budget,
+                )
+            };
             GenerationOutput::Response(result)
         }
     }
@@ -780,5 +805,107 @@ mod tests {
         let mut tracker = ThinkingTracker::new(Some(0));
         assert_eq!(tracker.state(), ThinkingState::Done);
         assert!(!tracker.feed("<thinking>anything</thinking>"));
+    }
+
+    // ========================================================================
+    // GenerationBuilder multimodal API tests (T58)
+    // ========================================================================
+
+    #[test]
+    fn generation_builder_image_stores_media_input() {
+        let client = Client::new_empty();
+        let builder = client
+            .generate("hello")
+            .image(MediaInput::File("/tmp/test.jpg".into()));
+        // image_input is set
+        assert!(builder.image_input.is_some());
+        assert!(builder.audio_input.is_none());
+        match builder.image_input.as_ref().unwrap() {
+            MediaInput::File(p) => assert_eq!(p, "/tmp/test.jpg"),
+            _ => panic!("expected File variant"),
+        }
+    }
+
+    #[test]
+    fn generation_builder_audio_stores_media_input() {
+        let client = Client::new_empty();
+        let builder = client
+            .generate("hello")
+            .audio(MediaInput::Raw(vec![1, 2, 3, 4]));
+        assert!(builder.image_input.is_none());
+        assert!(builder.audio_input.is_some());
+        match builder.audio_input.as_ref().unwrap() {
+            MediaInput::Raw(bytes) => assert_eq!(bytes, &[1, 2, 3, 4]),
+            _ => panic!("expected Raw variant"),
+        }
+    }
+
+    #[test]
+    fn generation_builder_image_with_base64() {
+        let client = Client::new_empty();
+        let builder = client.generate("hello").image(MediaInput::Base64 {
+            data: "abc".into(),
+            mime_type: Some("image/png".into()),
+        });
+        match builder.image_input.as_ref().unwrap() {
+            MediaInput::Base64 { data, mime_type } => {
+                assert_eq!(data, "abc");
+                assert_eq!(mime_type.as_deref(), Some("image/png"));
+            }
+            _ => panic!("expected Base64 variant"),
+        }
+    }
+
+    #[test]
+    fn generation_builder_multimodal_without_model_returns_error() {
+        // 无 model loaded + image input → InvalidModelType (no encoder)
+        let client = Client::new_empty();
+        let out = client
+            .generate("hello")
+            .image(MediaInput::Raw(vec![0]))
+            .generate();
+        match out {
+            GenerationOutput::Response(Err(e)) => {
+                // 无 encoder 注册 → InvalidModelType
+                assert!(matches!(e, GllmError::InvalidModelType));
+            }
+            GenerationOutput::Response(Ok(_)) => panic!("expected error"),
+            GenerationOutput::Stream(_) => panic!("stream=false path should not stream"),
+        }
+    }
+
+    #[test]
+    fn generation_builder_stream_plus_multimodal_is_rejected() {
+        let client = Client::new_empty();
+        let out = client
+            .generate("hello")
+            .image(MediaInput::Raw(vec![0]))
+            .stream(true)
+            .generate();
+        match out {
+            GenerationOutput::Response(Err(e)) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("multimodal streaming"),
+                    "expected streaming-not-supported error, got: {msg}"
+                );
+            }
+            _ => panic!("expected streaming+multimodal to error"),
+        }
+    }
+
+    #[test]
+    fn generation_builder_pure_text_unaffected_by_multimodal_fields() {
+        // 纯文本 generate（无 .image()/.audio()）应走原 execute_generation
+        // 路径，不触碰 multimodal encoder，也不检查多模态 token id。
+        let client = Client::new_empty();
+        let out = client.generate("hello").generate();
+        match out {
+            GenerationOutput::Response(Err(e)) => {
+                // 未加载模型 → NoModelLoaded (而不是 InvalidModelType)
+                assert!(matches!(e, GllmError::NoModelLoaded));
+            }
+            _ => panic!("expected NoModelLoaded error for text-only generation"),
+        }
     }
 }

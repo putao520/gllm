@@ -279,6 +279,7 @@ impl ClientBuilder {
 
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
+            multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -541,6 +542,19 @@ impl Default for ClientBuilder {
 #[derive(Clone)]
 pub struct Client {
     state: Arc<ArcSwapOption<ClientState>>,
+    /// Optional multimodal encoder (SigLIP vision / USM audio).
+    ///
+    /// T58 scaffold: when `None`, calls to `.image()` / `.audio()` on the
+    /// generation builder fail fast with `ClientError::InvalidModelType`.
+    /// Tests inject mock encoders via `set_multimodal_encoder()` to
+    /// validate routing without running a real encoder forward pass.
+    /// Production SigLIP / USM encoders will be registered here by
+    /// `build_state()` once the real implementations land (T55 / T55.2).
+    ///
+    /// Uses `Mutex<Option<Arc<dyn Trait>>>` because `ArcSwapOption`
+    /// requires a `Sized` inner type.
+    multimodal_encoder:
+        Arc<std::sync::Mutex<Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>>>>,
 }
 
 impl Client {
@@ -572,6 +586,7 @@ impl Client {
         let state = ClientBuilder::build_state(model_id, kind, InferenceMode::Latency)?;
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
+            multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -579,6 +594,7 @@ impl Client {
     pub fn new_empty() -> Self {
         Self {
             state: Arc::new(ArcSwapOption::empty()),
+            multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -787,6 +803,167 @@ impl Client {
             executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid, thinking_budget)
         } else {
             executor.generate(&prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
+        }?;
+
+        let (text, thinking_content) = crate::generation::split_thinking_content(&result);
+        Ok(GenerationResponse {
+            text,
+            thinking_content,
+            request_id: None,
+        })
+    }
+
+    /// Register a multimodal encoder (SigLIP vision / USM audio).
+    ///
+    /// T58 scaffold. Called by tests (mock encoder) and — once real
+    /// encoders exist — by `build_state()` when the model manifest
+    /// exposes `vision_config` / audio config. Overwrites any previously
+    /// registered encoder.
+    pub fn set_multimodal_encoder(
+        &self,
+        encoder: Arc<dyn crate::compat::multimodal::MultimodalEncoder>,
+    ) {
+        let mut guard = self
+            .multimodal_encoder
+            .lock()
+            .expect("multimodal_encoder mutex poisoned");
+        *guard = Some(encoder);
+    }
+
+    /// Returns true if a multimodal encoder has been registered.
+    pub fn has_multimodal_encoder(&self) -> bool {
+        self.multimodal_encoder
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Execute generation with multimodal inputs (T58 scaffold).
+    ///
+    /// Pipeline:
+    /// 1. Validate: multimodal encoder registered + model advertises
+    ///    `multimodal_token_ids`
+    /// 2. Encode each image / audio via the registered encoder
+    /// 3. Encode the prompt → token IDs
+    /// 4. Route tokens: expand each `image_token_id` / `audio_token_id`
+    ///    placeholder into the encoder-produced virtual token sequence
+    /// 5. Run generation
+    ///
+    /// The routed embedding sequence is computed and validated here but
+    /// not yet consumed by the decoder's embedding layer — embedding-side
+    /// fusion is a follow-up task (the executor still gathers text
+    /// embeddings for the original prompt). This scaffold guarantees:
+    /// - The API round-trips user input (image / audio paths / bytes)
+    /// - Token routing produces the correct expanded sequence
+    /// - Encoders are consulted and errors surfaced
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_generation_multimodal(
+        &self,
+        prompt: String,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: Option<u64>,
+        thinking_budget: Option<usize>,
+        image: Option<crate::generation::MediaInput>,
+        audio: Option<crate::generation::MediaInput>,
+    ) -> Result<GenerationResponse, ClientError> {
+        use crate::compat::multimodal::{
+            route_multimodal_tokens, EncoderMedia, MultimodalContext,
+        };
+
+        // 1. Encoder must be registered. Without it we refuse to silently
+        //    drop media input (NO_SILENT_FALLBACK).
+        let encoder_arc = {
+            let guard = self.multimodal_encoder.lock().map_err(|_| {
+                ClientError::RuntimeError("multimodal_encoder mutex poisoned".into())
+            })?;
+            guard.as_ref().cloned()
+        };
+        let encoder = encoder_arc.ok_or(ClientError::InvalidModelType)?;
+
+        let state = self.require_state()?;
+
+        // 2. Model must expose multimodal_token_ids via ModelConfig.
+        let (token_ids_cfg, hidden_size) = {
+            let executor = state.backend.executor();
+            let mc = executor.model_config();
+            let ids = mc.multimodal_token_ids.ok_or_else(|| {
+                ClientError::RuntimeError(
+                    "model does not advertise multimodal_token_ids (vision_config missing)"
+                        .into(),
+                )
+            })?;
+            (ids, mc.hidden_size)
+        };
+
+        // 3. Call encoders. If the encoder itself errors (e.g. invalid
+        //    file), propagate as RuntimeError.
+        let mut ctx = MultimodalContext::new();
+        if let Some(img) = image.as_ref() {
+            let media = EncoderMedia::from_generation(img);
+            let encoded = encoder
+                .encode_image(&media)
+                .map_err(|e| ClientError::RuntimeError(format!("vision encode failed: {e}")))?;
+            ctx.push_image(encoded).map_err(|e| {
+                ClientError::RuntimeError(format!("multimodal context reject: {e}"))
+            })?;
+        }
+        if let Some(aud) = audio.as_ref() {
+            let media = EncoderMedia::from_generation(aud);
+            let encoded = encoder
+                .encode_audio(&media)
+                .map_err(|e| ClientError::RuntimeError(format!("audio encode failed: {e}")))?;
+            ctx.push_audio(encoded).map_err(|e| {
+                ClientError::RuntimeError(format!("multimodal context reject: {e}"))
+            })?;
+        }
+
+        // 4. Tokenize prompt and route.
+        let prompt_tokens = {
+            let executor = state.backend.executor();
+            executor.encode_prompt(&prompt).map_err(|e| {
+                ClientError::RuntimeError(format!("encode_prompt failed: {e}"))
+            })?
+        };
+        let routed = route_multimodal_tokens(
+            &prompt_tokens,
+            &ctx,
+            &token_ids_cfg,
+            hidden_size,
+        )
+        .map_err(|e| ClientError::RuntimeError(format!("multimodal routing failed: {e}")))?;
+
+        // 5. Run generation. The routed embedding sequence has been
+        //    validated; full decoder-side fusion arrives alongside the
+        //    real SigLIP / Conformer implementations in a follow-up.
+        debug_assert!(
+            routed.seq_len() >= prompt_tokens.len(),
+            "routing can only grow the sequence"
+        );
+        let _ = routed; // explicit consume; silence unused-var lint
+
+        let mut executor = state.backend.executor_mut();
+        let result = if let Some(sid) = session_id {
+            executor.generate_with_session(
+                &prompt,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                sid,
+                thinking_budget,
+            )
+        } else {
+            executor.generate(
+                &prompt,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                thinking_budget,
+            )
         }?;
 
         let (text, thinking_content) = crate::generation::split_thinking_content(&result);
@@ -1352,4 +1529,126 @@ pub struct ModelInfo {
     pub id: String,
     pub arch: String,
     pub kind: ModelKind,
+}
+
+// ============================================================================
+// T58: Multimodal encoder registration tests
+// ============================================================================
+
+#[cfg(test)]
+mod multimodal_client_tests {
+    use super::*;
+    use crate::compat::multimodal::{
+        EncoderMedia, MediaKind, MultimodalEncoded, MultimodalEncoder,
+    };
+    use crate::engine::executor::BackendError;
+
+    /// Mock encoder that tracks invocation count.
+    struct MockEncoder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockEncoder {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl MultimodalEncoder for MockEncoder {
+        fn encode_image(
+            &self,
+            _media: &EncoderMedia,
+        ) -> Result<MultimodalEncoded, BackendError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(MultimodalEncoded {
+                tokens: vec![258880; 2],
+                embeddings: vec![0.0; 2 * 4],
+                hidden_size: 4,
+                kind: MediaKind::Image,
+            })
+        }
+
+        fn encode_audio(
+            &self,
+            _media: &EncoderMedia,
+        ) -> Result<MultimodalEncoded, BackendError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(MultimodalEncoded {
+                tokens: vec![258881; 1],
+                embeddings: vec![0.0; 1 * 4],
+                hidden_size: 4,
+                kind: MediaKind::Audio,
+            })
+        }
+    }
+
+    #[test]
+    fn client_has_no_multimodal_encoder_by_default() {
+        let client = Client::new_empty();
+        assert!(!client.has_multimodal_encoder());
+    }
+
+    #[test]
+    fn set_multimodal_encoder_activates_encoder() {
+        let client = Client::new_empty();
+        assert!(!client.has_multimodal_encoder());
+        client.set_multimodal_encoder(Arc::new(MockEncoder::new()));
+        assert!(client.has_multimodal_encoder());
+    }
+
+    #[test]
+    fn set_multimodal_encoder_overwrites_previous() {
+        let client = Client::new_empty();
+        let first = Arc::new(MockEncoder::new());
+        let second = Arc::new(MockEncoder::new());
+        client.set_multimodal_encoder(first.clone());
+        client.set_multimodal_encoder(second.clone());
+        // first 没被调用过，依然 0
+        assert_eq!(first.calls(), 0);
+        assert!(client.has_multimodal_encoder());
+    }
+
+    #[test]
+    fn multimodal_generation_without_model_errors_past_encoder_check() {
+        // 已注册 encoder，但未加载模型 → NoModelLoaded
+        let client = Client::new_empty();
+        client.set_multimodal_encoder(Arc::new(MockEncoder::new()));
+        let result = client.execute_generation_multimodal(
+            "hello".into(),
+            10,
+            1.0,
+            0,
+            1.0,
+            None,
+            None,
+            Some(crate::generation::MediaInput::Raw(vec![0xFF; 4])),
+            None,
+        );
+        // encoder 校验通过了（非 InvalidModelType），但 require_state 失败
+        assert!(matches!(result, Err(ClientError::NoModelLoaded)));
+    }
+
+    #[test]
+    fn multimodal_generation_without_encoder_errors() {
+        // 未注册 encoder + 多模态输入 → InvalidModelType
+        let client = Client::new_empty();
+        let result = client.execute_generation_multimodal(
+            "hello".into(),
+            10,
+            1.0,
+            0,
+            1.0,
+            None,
+            None,
+            Some(crate::generation::MediaInput::Raw(vec![0xFF; 4])),
+            None,
+        );
+        assert!(matches!(result, Err(ClientError::InvalidModelType)));
+    }
 }

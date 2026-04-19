@@ -56,6 +56,10 @@ pub use generation::{
     GenerationChunk, GenerationResponse, GenerationStream,
     GenerationHook, HookDecision, MediaInput, ThresholdHook,
 };
+pub use compat::multimodal::{
+    EncoderMedia, MediaKind, MultimodalContext, MultimodalEncoded, MultimodalEncoder,
+    MultimodalTokenIds, RoutedSequence,
+};
 pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};

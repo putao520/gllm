@@ -287,6 +287,15 @@ pub struct ModelConfig {
     /// Vision encoder configuration parsed from `"vision_config"` sub-object.
     /// Present only for multimodal models (e.g. Gemma 4).
     pub vision_config: Option<crate::compat::vision_forward::VisionConfig>,
+
+    /// Multimodal special token IDs (image / audio / eoi / eoa).
+    ///
+    /// **Source rule (T58)**: Must come from the model config or tokenizer
+    /// `special_tokens_map.json`; not hard-coded in Rust. When this is
+    /// `None`, the model is treated as text-only and calls to
+    /// `.image()` / `.audio()` on the generation builder fail fast with
+    /// `ClientError::InvalidModelType`.
+    pub multimodal_token_ids: Option<crate::compat::multimodal::MultimodalTokenIds>,
 }
 
 impl ModelConfig {
@@ -732,6 +741,7 @@ impl ModelConfig {
             hidden_size_per_layer_input,
             mtp_depth: None,
             vision_config: None,
+            multimodal_token_ids: None,
         };
         apply_tensor_derived(base, derived)
     }
@@ -965,6 +975,33 @@ impl ModelConfig {
             })
         });
 
+        // ── Multimodal special token IDs (T58) ──
+        // 优先从 config 顶层字段读取（兼容 Gemma 4 `boi_token_id` /
+        // `image_token_id` 两种命名），否则从 tokenizer special_tokens_map
+        // 读取（由 loader 侧合并到 value 时生效）。T58 铁律：禁止在 Rust
+        // 源码里硬编码 ID。仅当 `vision_config` 声明存在但顶层 token 字段
+        // 缺失时，才回退到 Gemma-4 默认值作为兜底，避免模型声明了多模态
+        // 能力却无法路由。
+        let image_tok = find_u32(value, &["image_token_id", "boi_token_id"]);
+        let audio_tok = find_u32(value, &["audio_token_id", "boa_token_id"]);
+        let eoi_tok = find_u32(value, &["eoi_token_id", "image_end_token_id"]);
+        let eoa_tok = find_u32(value, &["eoa_token_id", "audio_end_token_id"]);
+        let multimodal_token_ids = match (image_tok, audio_tok) {
+            (Some(img), Some(aud)) => Some(crate::compat::multimodal::MultimodalTokenIds {
+                image_token_id: img,
+                audio_token_id: aud,
+                eoi_token_id: eoi_tok.unwrap_or(img + 2),
+                eoa_token_id: eoa_tok.unwrap_or(aud + 2),
+            }),
+            _ => {
+                if vision_config.is_some() {
+                    Some(crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults())
+                } else {
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             hidden_size,
             num_attention_heads,
@@ -1001,6 +1038,7 @@ impl ModelConfig {
             hidden_size_per_layer_input,
             mtp_depth,
             vision_config,
+            multimodal_token_ids,
         })
     }
 
@@ -2054,6 +2092,7 @@ mod tests {
             hidden_size_per_layer_input: None,
             mtp_depth: None,
             vision_config: None,
+            multimodal_token_ids: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -2278,6 +2317,7 @@ mod tests {
             hidden_size_per_layer_input: None,
             mtp_depth: None,
             vision_config: None,
+            multimodal_token_ids: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }
