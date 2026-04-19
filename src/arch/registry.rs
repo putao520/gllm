@@ -262,4 +262,85 @@ mod tests {
         assert!(resolve_template("custom-llama-adapter-that-does-not-exist").is_none());
         assert!(get_template("nonexistent-template-name").is_none());
     }
+
+    /// T45: USM Conformer YAML 解析 + to_onnx_graph 展开。
+    /// 给定 mock config (num_layers=2), 验证节点总数与 DepthwiseConv1D 出现次数。
+    /// 不硬编码模板名 (若未来重命名, SCANNED_TEMPLATES 扫描自动跟进),
+    /// 直接基于注册表反查确认模板存在。
+    #[test]
+    fn builtin_usm_conformer_parses_and_expands() {
+        use super::super::resolve::ResolvedConfig;
+
+        register_builtin_templates();
+        let template = get_template("usm_conformer")
+            .expect("usm_conformer.yaml 必须被 build.rs 扫描并注册");
+        assert_eq!(template.name, "usm_conformer");
+        assert!(template.config.contains_key("num_layers"));
+        assert!(template.tensor_patterns.layer_prefix.is_some());
+
+        // Mock Conformer 配置: 2 层 Conformer, channels=512, heads=8, inter=2048
+        let config = ResolvedConfig {
+            num_hidden_layers: 2,
+            hidden_size: 512,
+            num_attention_heads: 8,
+            num_key_value_heads: 8,
+            head_dim: 64,
+            intermediate_size: Some(2048),
+            vocab_size: 1, // 音频编码器不涉及 vocab, 占位
+            rope_theta: 10000.0,
+            dtype: "f32".to_string(),
+            ..Default::default()
+        };
+
+        let graph = template
+            .to_onnx_graph(&config)
+            .expect("to_onnx_graph 必须成功");
+
+        // 每个 Conformer block 展开为:
+        //   FF1: norm + matmul + silu + matmul + add  (5)
+        //   MHA: norm + q + k + v + mha + o + add    (7)
+        //   Conv: norm + pw1 + glu + dw + bn + act + pw2 + add (8)
+        //   FF2: norm + matmul + silu + matmul + add  (5)
+        //   Block-end: norm                           (1)
+        // 每层 26 个节点; 2 层 → 52, 加顶层 final_norm → 53
+        let expected_per_layer = 26;
+        let expected_total = expected_per_layer * config.num_hidden_layers + 1;
+        assert_eq!(
+            graph.nodes.len(),
+            expected_total,
+            "USM Conformer 展开节点数应为 {expected_total} (每层 {expected_per_layer} + 1 final_norm)",
+        );
+
+        // 每层必须包含 1 个 DepthwiseConv1D
+        let dw_nodes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.op_type == "DepthwiseConv1D")
+            .collect();
+        assert_eq!(
+            dw_nodes.len(),
+            config.num_hidden_layers,
+            "每层 Conformer 必须包含 1 个 DepthwiseConv1D 节点, 共 {} 层",
+            config.num_hidden_layers,
+        );
+
+        // 验证 DepthwiseConv1D 节点命名与权重引用 (第 0 层)
+        let dw0 = &dw_nodes[0];
+        assert_eq!(dw0.name, "layer_0_conv_dw");
+        assert_eq!(dw0.inputs.len(), 2, "DepthwiseConv1D 需要 2 个输入 (x, weight)");
+        assert_eq!(
+            dw0.inputs[1],
+            "audio_tower.encoder.layers.0.conv_module.depthwise_conv.weight",
+        );
+    }
+
+    /// T45: 注册表按模板名 "usm_conformer" 反查成功。
+    #[test]
+    fn builtin_usm_conformer_registered() {
+        register_builtin_templates();
+        assert!(
+            get_template("usm_conformer").is_some(),
+            "USM Conformer 必须注册到全局模板表",
+        );
+    }
 }

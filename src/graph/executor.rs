@@ -1034,6 +1034,46 @@ fn atomic_op_to_kind(
         }
         "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
+        "DepthwiseConv1D" => {
+            // T45 USM Conformer conv module 核心算子。输入约定:
+            //   0. x       [seq_len, channels]
+            //   1. weight  [channels, kernel_size]
+            // channels / kernel_size 从 weight shape (input_shapes[1]) 推导,
+            // causal 默认 true (Conformer 推理标配; 训练时 YAML 可以扩展
+            // attribute 开关, 待本版 executor API 引入 attributes 再接入)。
+            if input_shapes.len() < 2 || input_shapes[1].len() != 2 {
+                return Err(ExecutionError::ShapeMismatch(format!(
+                    "atomic op 'DepthwiseConv1D' 需要 2 个输入 \
+                     (x [seq_len, channels], weight [channels, kernel_size]); got {:?}",
+                    input_shapes,
+                )));
+            }
+            let weight = &input_shapes[1];
+            let channels = weight[0].as_concrete().ok_or_else(|| ExecutionError::ShapeMismatch(
+                format!("DepthwiseConv1D weight[0] (channels) 必须 Concrete: {:?}", weight[0])))?;
+            let kernel_size = weight[1].as_concrete().ok_or_else(|| ExecutionError::ShapeMismatch(
+                format!("DepthwiseConv1D weight[1] (kernel_size) 必须 Concrete: {:?}", weight[1])))?;
+            // 基本 sanity check: x 的最内层维度必须与 weight 的 channels 对齐。
+            if !input_shapes[0].is_empty() {
+                let last = input_shapes[0].last().unwrap();
+                if let Some(x_channels) = last.as_concrete() {
+                    if x_channels != channels {
+                        return Err(ExecutionError::ShapeMismatch(format!(
+                            "DepthwiseConv1D: x 最内层维度 ({}) 必须等于 weight channels ({})",
+                            x_channels, channels,
+                        )));
+                    }
+                }
+            }
+            // causal: YAML 未提供 attribute 时默认 true (Conformer 推理标配)。
+            let causal = match attributes.get("causal") {
+                Some(AttrValue::Int(v)) => *v != 0,
+                Some(_) => return Err(ExecutionError::UnsupportedOp(
+                    "atomic op 'DepthwiseConv1D' 属性 'causal' 类型错误 (应为 Int)".into())),
+                None => true,
+            };
+            Ok(OpKind::DepthwiseConv1D { channels, kernel_size, causal })
+        }
         "PleSlice" => {
             // T37: PleSlice → OpKind::ColumnSlice (真实 JIT 列切片 copy)。
             //
@@ -3975,6 +4015,59 @@ mod tests {
         // 应该报告缺少第一个读到的属性 (layer_idx)
         assert!(msg.contains("layer_idx") || msg.contains("PerLayerEmbed"),
             "error should name missing attribute or op: got {msg:?}");
+    }
+
+    /// T45: DepthwiseConv1D weight shape [channels, kernel_size] 决定 OpKind 参数。
+    /// x: [seq_len, channels], weight: [channels, kernel_size]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_depthwise_conv1d_shape_driven() {
+        use gllm_kernels::compiler::{OpKind, SymDim};
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(16), SymDim::Concrete(512)],
+            vec![SymDim::Concrete(512), SymDim::Concrete(15)],
+        ];
+        let no_attrs: HashMap<String, AttrValue> = HashMap::new();
+        let kind = atomic_op_to_kind(
+            "DepthwiseConv1D",
+            &no_attrs,
+            &shapes,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect("DepthwiseConv1D atomic mapping should succeed");
+        match kind {
+            OpKind::DepthwiseConv1D { channels, kernel_size, causal } => {
+                assert_eq!(channels, 512, "channels derived from weight[0]");
+                assert_eq!(kernel_size, 15, "kernel_size derived from weight[1]");
+                assert!(causal, "causal should default to true (Conformer inference)");
+            }
+            other => panic!("expected DepthwiseConv1D OpKind, got {:?}", other),
+        }
+    }
+
+    /// T45: x 最内层 (256) 与 weight channels (512) 不一致 → ShapeMismatch。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_depthwise_conv1d_channel_mismatch() {
+        use gllm_kernels::compiler::SymDim;
+        use crate::graph::types::AttrValue;
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![SymDim::Concrete(16), SymDim::Concrete(256)],
+            vec![SymDim::Concrete(512), SymDim::Concrete(15)],
+        ];
+        let no_attrs: HashMap<String, AttrValue> = HashMap::new();
+        let err = atomic_op_to_kind(
+            "DepthwiseConv1D",
+            &no_attrs,
+            &shapes,
+            gllm_kernels::types::DType::F32,
+        )
+        .expect_err("mismatched channels must error");
+        assert!(
+            matches!(err, ExecutionError::ShapeMismatch(_)),
+            "expected ShapeMismatch, got {err:?}",
+        );
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]

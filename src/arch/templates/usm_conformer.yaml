@@ -1,0 +1,250 @@
+name: usm_conformer
+version: "1.0"
+# T45: USM-style Conformer audio encoder (Gemma 4 multi-modal audio tower).
+# 架构组成 (SPEC DOCS/architecture/gemma4-implementation-plan.md §P3.2):
+#   - Conformer Block: 半步 FF → MHA → ConvModule (含 DepthwiseConv1D) → 半步 FF
+#   - 每个块前后由 LayerNorm 收尾, 半步 FFN 为 Macaron 结构特征
+#
+# 本模板为"基础骨架" (task T45): 只描述拓扑结构, 不接入权重/多模态路由,
+# 仅用于 YAML 解析 + to_onnx_graph 展开测试。
+#
+# extra_aliases / family 字段为协议保留 (当前 worktree 的 ArchTemplate 结构
+# 忽略未知字段), 供后续架构注册表升级时识别。
+family: encoder
+extra_aliases:
+  - usm
+  - usmconformermodel
+  - conformer
+
+config:
+  num_layers: "${num_hidden_layers}"
+  hidden_size: "${hidden_size}"
+  num_heads: "${num_attention_heads}"
+  num_kv_heads: "${num_attention_heads}"
+  head_dim: "${head_dim}"
+  intermediate_size: "${intermediate_size}"
+  vocab_size: "${vocab_size}"
+  dtype: "${dtype}"
+
+tensor_patterns:
+  layer_prefix: "audio_tower.encoder.layers.{}"
+  # Conformer convolution module
+  q_proj: "self_attn.q_proj.weight"
+  k_proj: "self_attn.k_proj.weight"
+  v_proj: "self_attn.v_proj.weight"
+  o_proj: "self_attn.o_proj.weight"
+  gate_proj: "ff_module.linear_in.weight"
+  up_proj: "ff_module.linear_up.weight"
+  down_proj: "ff_module.linear_out.weight"
+  input_layernorm: "norm_self_attn.weight"
+  post_attention_layernorm: "norm_ff_module.weight"
+  final_norm: "audio_tower.encoder.final_norm.weight"
+
+graph:
+  inputs:
+    - name: audio_features
+      dtype: "${dtype}"
+      shape: [batch, seq_len, "${hidden_size}"]
+
+  outputs:
+    - name: audio_tokens
+      dtype: "${dtype}"
+      shape: [batch, seq_len, "${hidden_size}"]
+
+  nodes:
+    - repeat: "${num_hidden_layers}"
+      var: i
+      nodes:
+        # ── 半步 FF1 (Macaron structure) ──
+        - name: "layer_${i}_ff1_norm"
+          op_type: LayerNormalization
+          inputs:
+            - "hidden_0"
+            - "audio_tower.encoder.layers.${i}.norm_ff1.weight"
+            - "audio_tower.encoder.layers.${i}.norm_ff1.bias"
+          outputs: ["layer_${i}_ff1_normed"]
+
+        - name: "layer_${i}_ff1_in"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_ff1_normed"
+            - "audio_tower.encoder.layers.${i}.ff1_module.linear_in.weight"
+          outputs: ["layer_${i}_ff1_inter"]
+
+        - name: "layer_${i}_ff1_act"
+          op_type: Silu
+          inputs: ["layer_${i}_ff1_inter"]
+          outputs: ["layer_${i}_ff1_act_out"]
+
+        - name: "layer_${i}_ff1_out"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_ff1_act_out"
+            - "audio_tower.encoder.layers.${i}.ff1_module.linear_out.weight"
+          outputs: ["layer_${i}_ff1_proj"]
+
+        # 残差 (0.5 缩放语义由 Macaron 规约承担, 骨架阶段简化为直加)
+        - name: "layer_${i}_ff1_residual"
+          op_type: Add
+          inputs: ["hidden_0", "layer_${i}_ff1_proj"]
+          outputs: ["layer_${i}_after_ff1"]
+
+        # ── MHA (self-attention with rel-pos, 骨架简化为标准 attention) ──
+        - name: "layer_${i}_attn_norm"
+          op_type: LayerNormalization
+          inputs:
+            - "layer_${i}_after_ff1"
+            - "audio_tower.encoder.layers.${i}.norm_self_attn.weight"
+            - "audio_tower.encoder.layers.${i}.norm_self_attn.bias"
+          outputs: ["layer_${i}_attn_normed"]
+
+        - name: "layer_${i}_q_proj"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_attn_normed"
+            - "audio_tower.encoder.layers.${i}.self_attn.q_proj.weight"
+          outputs: ["layer_${i}_q"]
+
+        - name: "layer_${i}_k_proj"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_attn_normed"
+            - "audio_tower.encoder.layers.${i}.self_attn.k_proj.weight"
+          outputs: ["layer_${i}_k"]
+
+        - name: "layer_${i}_v_proj"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_attn_normed"
+            - "audio_tower.encoder.layers.${i}.self_attn.v_proj.weight"
+          outputs: ["layer_${i}_v"]
+
+        - name: "layer_${i}_attn"
+          op_type: MultiHeadAttention
+          inputs: ["layer_${i}_q", "layer_${i}_k", "layer_${i}_v"]
+          outputs: ["layer_${i}_attn_out"]
+
+        - name: "layer_${i}_o_proj"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_attn_out"
+            - "audio_tower.encoder.layers.${i}.self_attn.o_proj.weight"
+          outputs: ["layer_${i}_attn_proj"]
+
+        - name: "layer_${i}_attn_residual"
+          op_type: Add
+          inputs: ["layer_${i}_after_ff1", "layer_${i}_attn_proj"]
+          outputs: ["layer_${i}_after_attn"]
+
+        # ── Convolution Module ──
+        # 结构: LayerNorm → Pointwise(1x1, channel×2) → GLU → DepthwiseConv1D
+        #       → LayerNorm → Silu → Pointwise(1x1)
+        # GLU 用 Mul(a, Silu(b)) 近似 (骨架阶段); 完整实现后续拆 split+gate。
+        - name: "layer_${i}_conv_norm"
+          op_type: LayerNormalization
+          inputs:
+            - "layer_${i}_after_attn"
+            - "audio_tower.encoder.layers.${i}.conv_module.norm.weight"
+            - "audio_tower.encoder.layers.${i}.conv_module.norm.bias"
+          outputs: ["layer_${i}_conv_normed"]
+
+        - name: "layer_${i}_conv_pw1"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_conv_normed"
+            - "audio_tower.encoder.layers.${i}.conv_module.pointwise_conv1.weight"
+          outputs: ["layer_${i}_conv_gate_raw"]
+
+        - name: "layer_${i}_conv_glu"
+          op_type: Silu
+          inputs: ["layer_${i}_conv_gate_raw"]
+          outputs: ["layer_${i}_conv_gate"]
+
+        # 核心: DepthwiseConv1D (T45 新增 OpKind)
+        - name: "layer_${i}_conv_dw"
+          op_type: DepthwiseConv1D
+          inputs:
+            - "layer_${i}_conv_gate"
+            - "audio_tower.encoder.layers.${i}.conv_module.depthwise_conv.weight"
+          outputs: ["layer_${i}_conv_dw_out"]
+
+        - name: "layer_${i}_conv_bn"
+          op_type: LayerNormalization
+          inputs:
+            - "layer_${i}_conv_dw_out"
+            - "audio_tower.encoder.layers.${i}.conv_module.bn.weight"
+            - "audio_tower.encoder.layers.${i}.conv_module.bn.bias"
+          outputs: ["layer_${i}_conv_bn_out"]
+
+        - name: "layer_${i}_conv_act"
+          op_type: Silu
+          inputs: ["layer_${i}_conv_bn_out"]
+          outputs: ["layer_${i}_conv_act_out"]
+
+        - name: "layer_${i}_conv_pw2"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_conv_act_out"
+            - "audio_tower.encoder.layers.${i}.conv_module.pointwise_conv2.weight"
+          outputs: ["layer_${i}_conv_out"]
+
+        - name: "layer_${i}_conv_residual"
+          op_type: Add
+          inputs: ["layer_${i}_after_attn", "layer_${i}_conv_out"]
+          outputs: ["layer_${i}_after_conv"]
+
+        # ── 半步 FF2 (Macaron structure) ──
+        - name: "layer_${i}_ff2_norm"
+          op_type: LayerNormalization
+          inputs:
+            - "layer_${i}_after_conv"
+            - "audio_tower.encoder.layers.${i}.norm_ff2.weight"
+            - "audio_tower.encoder.layers.${i}.norm_ff2.bias"
+          outputs: ["layer_${i}_ff2_normed"]
+
+        - name: "layer_${i}_ff2_in"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_ff2_normed"
+            - "audio_tower.encoder.layers.${i}.ff2_module.linear_in.weight"
+          outputs: ["layer_${i}_ff2_inter"]
+
+        - name: "layer_${i}_ff2_act"
+          op_type: Silu
+          inputs: ["layer_${i}_ff2_inter"]
+          outputs: ["layer_${i}_ff2_act_out"]
+
+        - name: "layer_${i}_ff2_out"
+          op_type: MatMul
+          inputs:
+            - "layer_${i}_ff2_act_out"
+            - "audio_tower.encoder.layers.${i}.ff2_module.linear_out.weight"
+          outputs: ["layer_${i}_ff2_proj"]
+
+        - name: "layer_${i}_ff2_residual"
+          op_type: Add
+          inputs: ["layer_${i}_after_conv", "layer_${i}_ff2_proj"]
+          outputs: ["layer_${i}_block_out"]
+
+        # ── Block-end LayerNorm ──
+        - name: "layer_${i}_block_norm"
+          op_type: LayerNormalization
+          inputs:
+            - "layer_${i}_block_out"
+            - "audio_tower.encoder.layers.${i}.norm_final.weight"
+            - "audio_tower.encoder.layers.${i}.norm_final.bias"
+          outputs: ["hidden_0"]
+
+    - name: final_norm
+      op_type: LayerNormalization
+      inputs:
+        - "hidden_0"
+        - "audio_tower.encoder.final_norm.weight"
+        - "audio_tower.encoder.final_norm.bias"
+      outputs: [audio_tokens]
+
+fusion_hints:
+  - pattern: [q_proj, k_proj, v_proj]
+    target: FusedQkv
+  - pattern: [conv_pw1, conv_glu, conv_dw, conv_bn, conv_act, conv_pw2]
+    target: FusedConformerConv
