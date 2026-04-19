@@ -1395,12 +1395,7 @@ mod tests {
 
     /// 核心测试: audio_encode 必须产出非 stub 输出
     /// (要求 T45-forward: 形状正确,非全零,非 NaN)。
-    ///
-    /// 🚨 暂被 gllm-kernels multi-op JIT chain heap corruption 阻塞
-    /// (见 `standalone_ff1_only_does_not_crash` 注释)。Conformer block 内
-    /// LN+2 GEMM 链式执行触发堆越界写; JIT 修复后此测试自动通过。
     #[test]
-    #[ignore = "gllm-kernels multi-op JIT chain heap corruption (upstream)"]
     fn audio_encode_non_stub_output() {
         let config = small_config();
         let weights = build_random_weights(&config);
@@ -1445,12 +1440,7 @@ mod tests {
     }
 
     /// USM Conformer encoder 集成到 MultimodalEncoder trait。
-    ///
-    /// 🚨 同 `audio_encode_non_stub_output`,被 gllm-kernels JIT multi-op chain
-    /// 缺陷阻塞。encoder trait 与 routing 逻辑已验证 (见 `usm_conformer_encoder_*`
-    /// 其他测试);仅 audio_encode 内部 JIT 执行路径暂无法完成全图执行。
     #[test]
-    #[ignore = "gllm-kernels multi-op JIT chain heap corruption (upstream)"]
     fn usm_conformer_encoder_integrates_with_multimodal_context() {
         use crate::compat::multimodal::{MultimodalContext, MultimodalTokenIds};
 
@@ -1681,8 +1671,14 @@ mod tests {
     /// Note: CompiledLayer ABI 假设 inputs[0] 是 activation,其余是 weights。
     /// 但 MHA 需要 3 个 activation 输入 (Q, K, V)。本测试用 weight blob 替代
     /// K/V 输入作为近似 — 数值可能非 finite,但 JIT 编译 + 执行不得崩溃。
+    ///
+    /// 🚨 已知缺陷: lower_mha_with_hook 的 online softmax 输出不正确。
+    /// 单独跑时 garbage 值偶发 finite (assert 通过);与其他 JIT 测试同进程
+    /// 跑时 garbage 值含 NaN/inf (assert 失败)。属 MHA codegen 实现缺陷,
+    /// 不在本次 EpilogueInjection / silu telemetry 修复范围。FIXME: 重写
+    /// lower_mha_with_hook 实现真正的 online softmax 数值正确路径。
     #[test]
-    #[ignore = "MHA ABI mismatch: needs 3-activation-input test harness"]
+    #[ignore = "MHA codegen 输出未对齐 reference; is_finite() 检查偶发误判通过 (见函数 doc)"]
     fn standalone_mha_does_not_crash() {
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         let config = small_config();
@@ -1854,11 +1850,10 @@ mod tests {
         }
     }
 
-    /// 🚨 已知 gllm-kernels 多算子链式 codegen 缺陷 (同 standalone_ff1_only_does_not_crash):
-    /// 完整 Conformer block (FF1 + MHA + Conv + FF2) 执行时触发堆越界写。
-    /// 见 `standalone_ff1_only_does_not_crash` 注释。
+    /// 完整 Conformer block (FF1 + MHA + Conv + FF2) JIT 全管线稳定性验证。
+    /// 历史: gllm-kernels EpilogueInjection 硬编码 ABI output_ptr +
+    /// emit_silu_dead_neuron_telemetry 未 gate → 已根治 (见 fix commit)。
     #[test]
-    #[ignore = "gllm-kernels multi-op JIT chain heap corruption (upstream)"]
     fn standalone_conformer_block_does_not_crash() {
         let config = small_config();
         let num_frames = 8usize;
@@ -1928,5 +1923,541 @@ mod tests {
             assert!(v.is_finite(), "NaN at {i}: {v}");
         }
         assert!(out.iter().any(|&v| v.abs() > 1e-6), "output all zeros");
+    }
+
+    // ========================================================================
+    // Conformer block 二分定位 — 逐步堆叠子块,精确定位首个崩溃的算子组合。
+    // ========================================================================
+    use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
+
+    /// 通用 packing helper: 按 graph.inputs 顺序从 weights pool 拿张量。
+    fn pack_for_graph(g: &CompilerGraph, weights: &InMemoryAudioWeights) -> Vec<f32> {
+        let mut packed = Vec::new();
+        for &tid in g.inputs.iter().skip(1) {
+            let name = g.tensor(tid).expect("tensor exists").name.clone();
+            let slice = weights.get_audio_tensor(&name).expect(&format!("missing weight {name}"));
+            packed.extend_from_slice(slice);
+        }
+        packed
+    }
+
+    /// 把 layer 0 的 conformer 权重重命名为简短 helper key (norm_ff1.weight 等不变,
+    /// 直接借用 build_random_weights 生成的权重池),用于子图测试。
+    fn layer0_weights(config: &AudioConfig) -> InMemoryAudioWeights {
+        let mut w = build_random_weights(config);
+        // 别名: 把 audio_tower.encoder.layers.0.* 同时存为不带前缀的 key,方便子图引用。
+        let base = "audio_tower.encoder.layers.0";
+        let mappings = [
+            ("norm_ff1.weight", "ff1_norm_w"),
+            ("norm_ff1.bias", "ff1_norm_b"),
+            ("ff1_module.linear_in.weight", "ff1_in_w"),
+            ("ff1_module.linear_out.weight", "ff1_out_w"),
+            ("norm_self_attn.weight", "attn_norm_w"),
+            ("norm_self_attn.bias", "attn_norm_b"),
+            ("self_attn.q_proj.weight", "w_q"),
+            ("self_attn.k_proj.weight", "w_k"),
+            ("self_attn.v_proj.weight", "w_v"),
+            ("self_attn.o_proj.weight", "w_o"),
+            ("conv_module.norm.weight", "conv_norm_w"),
+            ("conv_module.norm.bias", "conv_norm_b"),
+            ("conv_module.pointwise_conv1.weight", "conv_pw1_w"),
+            ("conv_module.depthwise_conv.weight", "dw_w"),
+            ("conv_module.bn.weight", "conv_bn_w"),
+            ("conv_module.bn.bias", "conv_bn_b"),
+            ("conv_module.pointwise_conv2.weight", "conv_pw2_w"),
+            ("norm_ff2.weight", "ff2_norm_w"),
+            ("norm_ff2.bias", "ff2_norm_b"),
+            ("ff2_module.linear_in.weight", "ff2_in_w"),
+            ("ff2_module.linear_out.weight", "ff2_out_w"),
+            ("norm_final.weight", "final_norm_w"),
+            ("norm_final.bias", "final_norm_b"),
+        ];
+        for (suffix, alias) in mappings {
+            let full = format!("{base}.{suffix}");
+            let data = w.get_audio_tensor(&full).expect("layer0 tensor present").to_vec();
+            let len = data.len();
+            w.insert(alias, data, vec![len]);
+        }
+        w
+    }
+
+    /// 子图: 只 LN+GEMM+Silu (无第二个 GEMM,无 residual)。
+    fn build_subgraph_ln_gemm_silu(seq: usize, config: &AudioConfig) -> CompilerGraph {
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let gw = g.add_tensor_concrete("ff1_in_w", &[h, inter], dt);
+        g.inputs = vec![input, nw, nb, gw];
+        let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln");
+        let inter_t = g.add_tensor_concrete("inter_t", &[seq, inter], dt);
+        g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        let out = g.add_tensor_concrete("output", &[seq, inter], dt);
+        g.add_op(OpKind::Silu, vec![inter_t], vec![out], "silu");
+        g.outputs = vec![out];
+        g
+    }
+
+    /// 子图: 只 LN+GEMM+Silu+GEMM (无 residual)。
+    fn build_subgraph_ln_gemm_silu_gemm(seq: usize, config: &AudioConfig) -> CompilerGraph {
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let gw = g.add_tensor_concrete("ff1_in_w", &[h, inter], dt);
+        let ow = g.add_tensor_concrete("ff1_out_w", &[inter, h], dt);
+        g.inputs = vec![input, nw, nb, gw, ow];
+        let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln");
+        let inter_t = g.add_tensor_concrete("inter_t", &[seq, inter], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm_in");
+        let act = g.add_tensor_concrete("act", &[seq, inter], dt);
+        g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![act, ow], vec![out], "gemm_out");
+        g.outputs = vec![out];
+        g
+    }
+
+    /// 子图: FF1 only (LN+GEMM+Silu+GEMM+residual),与 build_conformer_block_graph 的 FF1 段相同。
+    fn build_subgraph_ff1(seq: usize, config: &AudioConfig) -> CompilerGraph {
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let gw = g.add_tensor_concrete("ff1_in_w", &[h, inter], dt);
+        let ow = g.add_tensor_concrete("ff1_out_w", &[inter, h], dt);
+        g.inputs = vec![input, nw, nb, gw, ow];
+        let normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ff1_ln");
+        let inter_t = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "ff1_gemm_in");
+        let act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
+        g.add_op(OpKind::Silu, vec![inter_t], vec![act], "ff1_silu");
+        let proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![act, ow], vec![proj], "ff1_gemm_out");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![input, proj], vec![out], "ff1_residual");
+        g.outputs = vec![out];
+        g
+    }
+
+    /// 子图: FF1 + Attn (FF1 → LN → Q/K/V → MHA → O → residual)。
+    fn build_subgraph_ff1_attn(seq: usize, config: &AudioConfig) -> CompilerGraph {
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let nh = config.num_heads;
+        let hd = config.head_dim();
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let ff1_nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let ff1_nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let ff1_iw = g.add_tensor_concrete("ff1_in_w", &[h, inter], dt);
+        let ff1_ow = g.add_tensor_concrete("ff1_out_w", &[inter, h], dt);
+        let attn_nw = g.add_tensor_concrete("attn_norm_w", &[h], dt);
+        let attn_nb = g.add_tensor_concrete("attn_norm_b", &[h], dt);
+        let w_q = g.add_tensor_concrete("w_q", &[h, h], dt);
+        let w_k = g.add_tensor_concrete("w_k", &[h, h], dt);
+        let w_v = g.add_tensor_concrete("w_v", &[h, h], dt);
+        let w_o = g.add_tensor_concrete("w_o", &[h, h], dt);
+        g.inputs = vec![input, ff1_nw, ff1_nb, ff1_iw, ff1_ow, attn_nw, attn_nb, w_q, w_k, w_v, w_o];
+
+        let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, ff1_nw, ff1_nb], vec![ff1_normed], "ff1_ln");
+        let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_gemm_in");
+        let ff1_act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
+        g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
+        let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: inter, dtype: dt }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_gemm_out");
+        let after_ff1 = g.add_tensor_concrete("after_ff1", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![input, ff1_proj], vec![after_ff1], "ff1_residual");
+
+        let attn_normed = g.add_tensor_concrete("attn_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![after_ff1, attn_nw, attn_nb], vec![attn_normed], "attn_ln");
+        let q = g.add_tensor_concrete("q", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_q], vec![q], "attn_q");
+        let k = g.add_tensor_concrete("k", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_k], vec![k], "attn_k");
+        let v = g.add_tensor_concrete("v", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_v], vec![v], "attn_v");
+        let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
+        g.add_op(OpKind::MultiHeadAttention {
+            seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false
+        }, vec![q, k, v], vec![attn_out], "attn_mha");
+        let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![attn_out, w_o], vec![attn_proj], "attn_o");
+        let after_attn = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![after_ff1, attn_proj], vec![after_attn], "attn_residual");
+        g.outputs = vec![after_attn];
+        g
+    }
+
+    fn run_subgraph(g: &CompilerGraph, weights: &InMemoryAudioWeights, seq: usize, hidden: usize) {
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(g).expect("compile ok");
+        let packed = pack_for_graph(g, weights);
+        let input: Vec<f32> = (0..seq * hidden).map(|i| (i as f32 * 0.001).sin()).collect();
+        let mut out = vec![0.0f32; seq * hidden];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
+        unsafe {
+            compiled.execute(
+                input.as_ptr() as *const u8,
+                packed.as_ptr() as *const u8,
+                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
+                1, seq,
+                out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr(),
+            );
+        }
+        for (i, &v) in out.iter().enumerate() {
+            assert!(v.is_finite(), "subgraph NaN at {i}: {v}");
+        }
+    }
+
+    #[test]
+    fn bisect_subgraph_ln_gemm_silu_seq3() {
+        let cfg = small_config();
+        let g = build_subgraph_ln_gemm_silu(3, &cfg);
+        let w = layer0_weights(&cfg);
+        // 输出形状 [seq, inter],非 [seq, hidden]
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compiler.compile_graph(&g).expect("compile");
+        let packed = pack_for_graph(&g, &w);
+        let input: Vec<f32> = (0..3 * cfg.hidden_size).map(|i| (i as f32 * 0.001).sin()).collect();
+        let mut out = vec![0.0f32; 3 * cfg.intermediate_size];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
+        unsafe {
+            compiled.execute(input.as_ptr() as *const u8, packed.as_ptr() as *const u8,
+                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
+                1, 3, out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr());
+        }
+        for (i, &v) in out.iter().enumerate() { assert!(v.is_finite(), "NaN at {i}"); }
+    }
+
+    #[test]
+    fn bisect_subgraph_ln_gemm_silu_gemm_seq3() {
+        let cfg = small_config();
+        let g = build_subgraph_ln_gemm_silu_gemm(3, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 3, cfg.hidden_size);
+    }
+
+    #[test]
+    fn bisect_subgraph_ff1_only_seq3() {
+        let cfg = small_config();
+        let g = build_subgraph_ff1(3, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 3, cfg.hidden_size);
+    }
+
+    #[test]
+    fn bisect_subgraph_ff1_only_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ff1(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    #[test]
+    fn bisect_subgraph_ff1_plus_attn_seq3() {
+        let cfg = small_config();
+        let g = build_subgraph_ff1_attn(3, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 3, cfg.hidden_size);
+    }
+
+    #[test]
+    fn bisect_subgraph_ff1_plus_attn_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ff1_attn(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 子图: FF1 + Attn + Conv module (停在 conv_residual)。
+    fn build_subgraph_ff1_attn_conv(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let inter = cfg.intermediate_size;
+        let nh = cfg.num_heads;
+        let hd = cfg.head_dim();
+        let kernel = cfg.conv_kernel_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let ff1_nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let ff1_nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let ff1_iw = g.add_tensor_concrete("ff1_in_w", &[h, inter], dt);
+        let ff1_ow = g.add_tensor_concrete("ff1_out_w", &[inter, h], dt);
+        let attn_nw = g.add_tensor_concrete("attn_norm_w", &[h], dt);
+        let attn_nb = g.add_tensor_concrete("attn_norm_b", &[h], dt);
+        let w_q = g.add_tensor_concrete("w_q", &[h, h], dt);
+        let w_k = g.add_tensor_concrete("w_k", &[h, h], dt);
+        let w_v = g.add_tensor_concrete("w_v", &[h, h], dt);
+        let w_o = g.add_tensor_concrete("w_o", &[h, h], dt);
+        let conv_nw = g.add_tensor_concrete("conv_norm_w", &[h], dt);
+        let conv_nb = g.add_tensor_concrete("conv_norm_b", &[h], dt);
+        let conv_pw1 = g.add_tensor_concrete("conv_pw1_w", &[h, h], dt);
+        let dw_w = g.add_tensor_concrete("dw_w", &[h, kernel], dt);
+        let conv_bn_w = g.add_tensor_concrete("conv_bn_w", &[h], dt);
+        let conv_bn_b = g.add_tensor_concrete("conv_bn_b", &[h], dt);
+        let conv_pw2 = g.add_tensor_concrete("conv_pw2_w", &[h, h], dt);
+        g.inputs = vec![input,
+            ff1_nw, ff1_nb, ff1_iw, ff1_ow,
+            attn_nw, attn_nb, w_q, w_k, w_v, w_o,
+            conv_nw, conv_nb, conv_pw1, dw_w, conv_bn_w, conv_bn_b, conv_pw2];
+
+        let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, ff1_nw, ff1_nb], vec![ff1_normed], "ff1_ln");
+        let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_in");
+        let ff1_act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
+        g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
+        let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: inter, dtype: dt }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_out");
+        let after_ff1 = g.add_tensor_concrete("after_ff1", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![input, ff1_proj], vec![after_ff1], "ff1_res");
+
+        let attn_normed = g.add_tensor_concrete("attn_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![after_ff1, attn_nw, attn_nb], vec![attn_normed], "attn_ln");
+        let q = g.add_tensor_concrete("q", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_q], vec![q], "q");
+        let k = g.add_tensor_concrete("k", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_k], vec![k], "k");
+        let v = g.add_tensor_concrete("v", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_v], vec![v], "v");
+        let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
+        g.add_op(OpKind::MultiHeadAttention {
+            seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false,
+        }, vec![q, k, v], vec![attn_out], "mha");
+        let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_out, w_o], vec![attn_proj], "o");
+        let after_attn = g.add_tensor_concrete("after_attn", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![after_ff1, attn_proj], vec![after_attn], "attn_res");
+
+        // Conv module
+        let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![after_attn, conv_nw, conv_nb], vec![conv_normed], "conv_ln");
+        let conv_pw1_out = g.add_tensor_concrete("conv_pw1_out", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "conv_pw1");
+        let conv_glu = g.add_tensor_concrete("conv_glu", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "conv_glu");
+        let conv_dw = g.add_tensor_concrete("conv_dw", &[seq, h], dt);
+        g.add_op(OpKind::DepthwiseConv1D { channels: h, kernel_size: kernel, causal: false },
+            vec![conv_glu, dw_w], vec![conv_dw], "dwc");
+        let conv_bn_out = g.add_tensor_concrete("conv_bn_out", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![conv_dw, conv_bn_w, conv_bn_b], vec![conv_bn_out], "conv_bn");
+        let conv_act = g.add_tensor_concrete("conv_act", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "conv_silu");
+        let conv_pw2_out = g.add_tensor_concrete("conv_pw2_out", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "conv_pw2");
+        let after_conv = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![after_attn, conv_pw2_out], vec![after_conv], "conv_res");
+        g.outputs = vec![after_conv];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_ff1_attn_conv_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ff1_attn_conv(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 子图: 单 conv module (LN+GEMM+Silu+DWC+LN+Silu+GEMM+Add)。
+    fn build_subgraph_conv_only(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let kernel = cfg.conv_kernel_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let conv_nw = g.add_tensor_concrete("conv_norm_w", &[h], dt);
+        let conv_nb = g.add_tensor_concrete("conv_norm_b", &[h], dt);
+        let conv_pw1 = g.add_tensor_concrete("conv_pw1_w", &[h, h], dt);
+        let dw_w = g.add_tensor_concrete("dw_w", &[h, kernel], dt);
+        let conv_bn_w = g.add_tensor_concrete("conv_bn_w", &[h], dt);
+        let conv_bn_b = g.add_tensor_concrete("conv_bn_b", &[h], dt);
+        let conv_pw2 = g.add_tensor_concrete("conv_pw2_w", &[h, h], dt);
+        g.inputs = vec![input, conv_nw, conv_nb, conv_pw1, dw_w, conv_bn_w, conv_bn_b, conv_pw2];
+
+        let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, conv_nw, conv_nb], vec![conv_normed], "ln");
+        let conv_pw1_out = g.add_tensor_concrete("pw1", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
+        let conv_glu = g.add_tensor_concrete("glu", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "glu_silu");
+        let conv_dw = g.add_tensor_concrete("dw", &[seq, h], dt);
+        g.add_op(OpKind::DepthwiseConv1D { channels: h, kernel_size: kernel, causal: false },
+            vec![conv_glu, dw_w], vec![conv_dw], "dwc");
+        let conv_bn_out = g.add_tensor_concrete("bn", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![conv_dw, conv_bn_w, conv_bn_b], vec![conv_bn_out], "bn_ln");
+        let conv_act = g.add_tensor_concrete("act", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "act_silu");
+        let conv_pw2_out = g.add_tensor_concrete("pw2", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![input, conv_pw2_out], vec![out], "res");
+        g.outputs = vec![out];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_conv_only_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_conv_only(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 子图: conv module 但跳过 DepthwiseConv1D (LN+GEMM+Silu+LN+Silu+GEMM+Add)。
+    fn build_subgraph_conv_no_dwc(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let conv_nw = g.add_tensor_concrete("conv_norm_w", &[h], dt);
+        let conv_nb = g.add_tensor_concrete("conv_norm_b", &[h], dt);
+        let conv_pw1 = g.add_tensor_concrete("conv_pw1_w", &[h, h], dt);
+        let conv_bn_w = g.add_tensor_concrete("conv_bn_w", &[h], dt);
+        let conv_bn_b = g.add_tensor_concrete("conv_bn_b", &[h], dt);
+        let conv_pw2 = g.add_tensor_concrete("conv_pw2_w", &[h, h], dt);
+        g.inputs = vec![input, conv_nw, conv_nb, conv_pw1, conv_bn_w, conv_bn_b, conv_pw2];
+
+        let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, conv_nw, conv_nb], vec![conv_normed], "ln");
+        let conv_pw1_out = g.add_tensor_concrete("pw1", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
+        let conv_glu = g.add_tensor_concrete("glu", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "glu_silu");
+        // skip DWC, treat conv_glu as conv_dw
+        let conv_bn_out = g.add_tensor_concrete("bn", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![conv_glu, conv_bn_w, conv_bn_b], vec![conv_bn_out], "bn_ln");
+        let conv_act = g.add_tensor_concrete("act", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "act_silu");
+        let conv_pw2_out = g.add_tensor_concrete("pw2", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Add, vec![input, conv_pw2_out], vec![out], "res");
+        g.outputs = vec![out];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_conv_no_dwc_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_conv_no_dwc(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 子图: LN + GEMM + Silu + LN (停在第 2 个 LN)。
+    fn build_subgraph_ln_gemm_silu_ln(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let gw = g.add_tensor_concrete("conv_pw1_w", &[h, h], dt);
+        let nw2 = g.add_tensor_concrete("conv_bn_w", &[h], dt);
+        let nb2 = g.add_tensor_concrete("conv_bn_b", &[h], dt);
+        g.inputs = vec![input, nw, nb, gw, nw2, nb2];
+        let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln1");
+        let inter_t = g.add_tensor_concrete("inter_t", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        let act = g.add_tensor_concrete("act", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![act, nw2, nb2], vec![out], "ln2");
+        g.outputs = vec![out];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_ln_gemm_silu_ln_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ln_gemm_silu_ln(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 子图: LN + GEMM + Silu + LN + Silu。
+    fn build_subgraph_ln_gemm_silu_ln_silu(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let dt = DType::F32;
+        let s = SymDim::Concrete(seq);
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        let gw = g.add_tensor_concrete("conv_pw1_w", &[h, h], dt);
+        let nw2 = g.add_tensor_concrete("conv_bn_w", &[h], dt);
+        let nb2 = g.add_tensor_concrete("conv_bn_b", &[h], dt);
+        g.inputs = vec![input, nw, nb, gw, nw2, nb2];
+        let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln1");
+        let inter_t = g.add_tensor_concrete("inter_t", &[seq, h], dt);
+        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        let act = g.add_tensor_concrete("act", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu1");
+        let bn = g.add_tensor_concrete("bn", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![act, nw2, nb2], vec![bn], "ln2");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![bn], vec![out], "silu2");
+        g.outputs = vec![out];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_ln_gemm_silu_ln_silu_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ln_gemm_silu_ln_silu(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
+    }
+
+    /// 极小子图: 单 LN + 单 Silu。
+    fn build_subgraph_ln_silu(seq: usize, cfg: &AudioConfig) -> CompilerGraph {
+        let h = cfg.hidden_size;
+        let dt = DType::F32;
+        let mut g = CompilerGraph::new();
+        let input = g.add_tensor_concrete("input", &[seq, h], dt);
+        let nw = g.add_tensor_concrete("ff1_norm_w", &[h], dt);
+        let nb = g.add_tensor_concrete("ff1_norm_b", &[h], dt);
+        g.inputs = vec![input, nw, nb];
+        let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
+        g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln");
+        let out = g.add_tensor_concrete("output", &[seq, h], dt);
+        g.add_op(OpKind::Silu, vec![normed], vec![out], "silu");
+        g.outputs = vec![out];
+        g
+    }
+
+    #[test]
+    fn bisect_subgraph_ln_silu_seq8() {
+        let cfg = small_config();
+        let g = build_subgraph_ln_silu(8, &cfg);
+        let w = layer0_weights(&cfg);
+        run_subgraph(&g, &w, 8, cfg.hidden_size);
     }
 }
