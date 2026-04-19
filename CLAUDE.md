@@ -723,3 +723,12 @@ MHA lower 中 `for h in 0..num_heads { for qi in 0..seq_len { ... } }` 将 seq_l
 - ❌ **禁止 `(i + 2) as f32` 式的 position offset**：RoBERTa position_offset 必须从模型配置读取
 - ❌ **禁止 `vec![0.0; seq_len]` 式的 token_type_ids**：必须从 tokenizer 或模型配置获取
 - ✅ 所有模型特定参数（position_offset, pad_token_id, bos_token_id）从 `ModelConfig` / `ModelManifest` 读取
+
+## 技能索引
+
+| 技能 | 描述 |
+|------|------|
+| `/root-cause-debugging-philosophy` | 高维度根本性根治调试哲学与SPEC驱动开发 |
+| `/concurrent-agent-orchestration` | 并发子agent编排：波次调度、冲突避让、用量限额恢复策略 |
+| `/e2e-test-debugging-workflow` | E2E测试调试与数值对齐工作流 |
+| `/jit-pipeline-development` | JIT编译管线开发规范与算子补充流程 |
