@@ -1801,7 +1801,6 @@ mod tests {
     /// chain 修复,此测试与 `audio_encode_non_stub_output` /
     /// `usm_conformer_encoder_integrates_with_multimodal_context` 将自然通过。
     #[test]
-    #[ignore = "gllm-kernels multi-op JIT chain heap corruption (upstream)"]
     fn standalone_ff1_only_does_not_crash() {
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         // 用 seq=3 (< mr=4) 触发 naive 路径而非 BLIS
