@@ -141,17 +141,18 @@ impl OptimizationPass for SwiGLUFusionPass {
     }
 }
 
-/// Gemma 4 pattern: QKV projection + QkNorm(Q,K) + ValueNorm(V) + RoPE(Q) + RoPE(K)
+/// Gemma 4 pattern: QKV projection + QkNorm(Q) + QkNorm(K) + ValueNorm(V) + RoPE(Q) + RoPE(K)
 ///
-/// 识别窗口 (7 个节点, 严格顺序):
+/// 识别窗口 (8 个节点, 严格顺序):
 /// ```text
-/// q_proj : MatMul  (inputs=[act, w_q])  -> q
-/// k_proj : MatMul  (inputs=[act, w_k])  -> k
-/// v_proj : MatMul  (inputs=[act, w_v])  -> v
-/// qk_norm: QkNorm  (inputs=[q, k])      -> q_normed, k_normed
-/// v_norm : ValueNorm (inputs=[v])       -> v_normed
-/// rope_q : RotaryEmbedding (inputs=[q_normed], ...) -> q_rope
-/// rope_k : RotaryEmbedding (inputs=[k_normed], ...) -> k_rope
+/// q_proj    : MatMul  (inputs=[act, w_q])   -> q
+/// k_proj    : MatMul  (inputs=[act, w_k])   -> k
+/// v_proj    : MatMul  (inputs=[act, w_v])   -> v
+/// qk_norm_q : QkNorm  (inputs=[q])          -> q_normed
+/// qk_norm_k : QkNorm  (inputs=[k])          -> k_normed
+/// v_norm    : ValueNorm (inputs=[v])        -> v_normed
+/// rope_q    : RotaryEmbedding (inputs=[q_normed], ...) -> q_rope
+/// rope_k    : RotaryEmbedding (inputs=[k_normed], ...) -> k_rope
 /// ```
 ///
 /// 对应 gllm-kernels `FusionMode::FusedQkvNormRope`。仅在 QkNorm / ValueNorm
@@ -160,6 +161,10 @@ impl OptimizationPass for SwiGLUFusionPass {
 ///
 /// 优先级 12: 早于 FusedQkvRope(15), 因为 FusedQkvNormRope 是更严格的超集,
 /// 必须先尝试匹配, 否则前三个 MatMul 会被 FusedQkvRope 抢占。
+///
+/// **契约说明**: `template.rs::expand_qk_norm` 把 YAML 的 2-in/2-out QkNorm
+/// 拆成两个独立的 1-in/1-out QkNorm(对齐 `OpKind::QkNorm` 的单输入签名),
+/// 本 Pass 识别这两个独立节点。禁止回退到"QkNorm 单节点 2-in/2-out"语义。
 #[derive(Debug)]
 pub struct FusedQkvNormRopeFusionPass;
 
@@ -174,8 +179,8 @@ impl OptimizationPass for FusedQkvNormRopeFusionPass {
         ctx: &OptimizationContext,
     ) -> Result<FusedGraph, OptimizeError> {
         let mut out = graph;
-        let (nodes, fusions) = fuse_window(std::mem::take(&mut out.nodes), 7, |window| {
-            let [q, k, v, qk_norm, v_norm, rope_q, rope_k] = window else {
+        let (nodes, fusions) = fuse_window(std::mem::take(&mut out.nodes), 8, |window| {
+            let [q, k, v, qk_norm_q, qk_norm_k, v_norm, rope_q, rope_k] = window else {
                 return None;
             };
 
@@ -191,14 +196,19 @@ impl OptimizationPass for FusedQkvNormRopeFusionPass {
                 return None;
             }
 
-            // 2. QkNorm: inputs=[q_out, k_out], outputs=[q_normed, k_normed]
-            if !is_atomic_op(qk_norm, "QkNorm") {
+            // 2. QkNorm 对: template.rs::expand_qk_norm 输出 [q_node, k_node]
+            //    qk_norm_q: inputs=[q_out], outputs=[q_normed]
+            //    qk_norm_k: inputs=[k_out], outputs=[k_normed]
+            if !is_atomic_op(qk_norm_q, "QkNorm") || !is_atomic_op(qk_norm_k, "QkNorm") {
                 return None;
             }
-            if qk_norm.inputs.len() != 2 || qk_norm.outputs.len() != 2 {
+            if qk_norm_q.inputs.len() != 1 || qk_norm_q.outputs.len() != 1 {
                 return None;
             }
-            if qk_norm.inputs[0] != q.outputs[0] || qk_norm.inputs[1] != k.outputs[0] {
+            if qk_norm_k.inputs.len() != 1 || qk_norm_k.outputs.len() != 1 {
+                return None;
+            }
+            if qk_norm_q.inputs[0] != q.outputs[0] || qk_norm_k.inputs[0] != k.outputs[0] {
                 return None;
             }
 
@@ -217,7 +227,7 @@ impl OptimizationPass for FusedQkvNormRopeFusionPass {
             if !is_rope(rope_q) || rope_q.inputs.is_empty() {
                 return None;
             }
-            if rope_q.inputs[0] != qk_norm.outputs[0] {
+            if rope_q.inputs[0] != qk_norm_q.outputs[0] {
                 return None;
             }
 
@@ -225,7 +235,7 @@ impl OptimizationPass for FusedQkvNormRopeFusionPass {
             if !is_rope(rope_k) || rope_k.inputs.is_empty() {
                 return None;
             }
-            if rope_k.inputs[0] != qk_norm.outputs[1] {
+            if rope_k.inputs[0] != qk_norm_k.outputs[0] {
                 return None;
             }
 
@@ -378,6 +388,11 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
         // 中, 跳过融合, 让 final_norm 和 lm_head 各自走 Standalone 路径。
         let graph_output_set: std::collections::HashSet<&str> =
             out.outputs.iter().map(|s| s.as_str()).collect();
+        // Fanout 检查(T42): 统计每个 activation 被多少节点消费。
+        // Gemma 4 / Llama 系列中 input_norm 的输出会同时被 q_proj/k_proj/v_proj 三路
+        // 消费, 此时融合 [rms_norm + q_proj] 会让 k_proj / v_proj 的输入成为悬空引用。
+        // 只允许 rms_norm.outputs[0] 恰好被 1 个节点消费时才融合,避免悬空激活 bug。
+        let fanout = compute_fanout(&out.nodes);
         let (nodes, fusions) = fuse_window(std::mem::take(&mut out.nodes), 2, |window| {
             let [rms, linear] = window else {
                 return None;
@@ -387,6 +402,16 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
             }
             // 跳过指向 graph.outputs 的 linear (lm_head / classification head)
             if linear.outputs.iter().any(|o| graph_output_set.contains(o.as_str())) {
+                return None;
+            }
+            // Fanout 铁律: rms_norm.outputs[0] 必须只有 1 个消费者(即 window 中的 linear)
+            if rms.outputs.is_empty() {
+                return None;
+            }
+            let rms_out = rms.outputs[0].as_str();
+            if fanout.get(rms_out).copied().unwrap_or(0) != 1 {
+                // 被多个节点共享的 norm 输出,融合后会产生悬空引用,跳过融合
+                // (节点保持 atomic,由下游 HardwareFusion / 各算子 codegen 各自处理)。
                 return None;
             }
             let eps = rms.attributes.get("eps").and_then(|val| match val {
@@ -420,6 +445,21 @@ impl OptimizationPass for FusedRMSLinearFusionPass {
     fn priority(&self) -> i32 {
         25
     }
+}
+
+/// 构造 `output_name → consumer_count` 映射表。用于 fanout 检查:
+/// 融合决策必须确认中间激活只有一个消费者,否则融合后会产生悬空引用。
+///
+/// 通用图遍历: 扫描所有节点的 `inputs`, 为每个出现的名字累加 1。
+/// 同一个节点多次引用同一个输入也会计数为多次(罕见但有效,例如 `Add(x, x)`)。
+fn compute_fanout(nodes: &[FusedNode]) -> std::collections::HashMap<String, usize> {
+    let mut fanout: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for node in nodes {
+        for input in &node.inputs {
+            *fanout.entry(input.clone()).or_insert(0) += 1;
+        }
+    }
+    fanout
 }
 
 #[derive(Debug)]
@@ -751,9 +791,9 @@ mod tests {
 
     #[test]
     fn fused_qkv_norm_rope_detected() {
-        // Gemma 4 pattern: QKV + QkNorm + ValueNorm + Q-RoPE + K-RoPE 融合识别。
-        // 构造节点时所有 input/output 名严格对齐,模拟 template.rs::expand_dual_rope
-        // 已把 DualRotaryEmbedding 拆成独立 Q/K RoPE 后的图形态。
+        // Gemma 4 pattern (模板展开后形态):
+        // QKV + QkNorm_q + QkNorm_k + ValueNorm + Q-RoPE + K-RoPE 共 8 节点。
+        // 构造节点时严格对齐 template.rs::expand_qk_norm + expand_dual_rope 的产物。
         let pass = FusedQkvNormRopeFusionPass;
         let ctx = OptimizationContext::default();
 
@@ -776,8 +816,10 @@ mod tests {
                 mk("layer_0_q_proj", "MatMul", vec!["hidden", "w_q"], vec!["q"], vec![]),
                 mk("layer_0_k_proj", "MatMul", vec!["hidden", "w_k"], vec!["k"], vec![]),
                 mk("layer_0_v_proj", "MatMul", vec!["hidden", "w_v"], vec!["v"], vec![]),
-                mk("layer_0_qk_norm", "QkNorm",
-                    vec!["q", "k"], vec!["q_normed", "k_normed"], vec![]),
+                mk("layer_0_qk_norm_q", "QkNorm",
+                    vec!["q"], vec!["q_normed"], vec![]),
+                mk("layer_0_qk_norm_k", "QkNorm",
+                    vec!["k"], vec!["k_normed"], vec![]),
                 mk("layer_0_v_norm", "ValueNorm",
                     vec!["v"], vec!["v_normed"], vec![]),
                 mk("layer_0_rope_q", "RotaryEmbedding",
@@ -797,7 +839,7 @@ mod tests {
         let fused = pass.run(graph, &ctx).unwrap();
         assert_eq!(fused.stats.qkv_norm_rope_fusions, 1,
             "应识别出 1 个 FusedQkvNormRope 融合");
-        assert_eq!(fused.nodes.len(), 1, "7 个 atomic 节点应被融合为 1 个 FusedQkvNormRope 节点");
+        assert_eq!(fused.nodes.len(), 1, "8 个 atomic 节点应被融合为 1 个 FusedQkvNormRope 节点");
 
         match &fused.nodes[0].op {
             FusedOp::FusedQkvNormRope(cfg) => {
@@ -892,8 +934,10 @@ mod tests {
                 mk_node("layer_0_q_proj", "MatMul", vec!["hidden", "w_q"], vec!["q"], vec![]),
                 mk_node("layer_0_k_proj", "MatMul", vec!["hidden", "w_k"], vec!["k"], vec![]),
                 mk_node("layer_0_v_proj", "MatMul", vec!["hidden", "w_v"], vec!["v"], vec![]),
-                mk_node("layer_0_qk_norm", "QkNorm",
-                    vec!["q", "k"], vec!["q_normed", "k_normed"], vec![]),
+                mk_node("layer_0_qk_norm_q", "QkNorm",
+                    vec!["q"], vec!["q_normed"], vec![]),
+                mk_node("layer_0_qk_norm_k", "QkNorm",
+                    vec!["k"], vec!["k_normed"], vec![]),
                 mk_node("layer_0_v_norm", "ValueNorm",
                     vec!["v"], vec!["v_normed"], vec![]),
                 mk_node("layer_0_rope_q", "RotaryEmbedding",
@@ -1042,5 +1086,95 @@ mod tests {
             }
             other => panic!("unexpected op: {other:?}"),
         }
+    }
+
+    #[test]
+    fn fused_rms_linear_fuses_when_fanout_is_one() {
+        // Baseline: RmsNorm → 单一 Linear 的简单链, fanout == 1, 正常融合。
+        let pass = FusedRMSLinearFusionPass;
+        let ctx = OptimizationContext::default();
+        let graph = FusedGraph {
+            nodes: vec![
+                FusedNode::new("norm", FusedOp::Atomic(AtomicOp::new("RmsNorm")))
+                    .with_inputs(vec!["hidden".into(), "norm_w".into()])
+                    .with_outputs(vec!["normed".into()]),
+                FusedNode::new("proj", FusedOp::Atomic(AtomicOp::new("MatMul")))
+                    .with_inputs(vec!["normed".into(), "w_proj".into()])
+                    .with_outputs(vec!["proj_out".into()]),
+            ],
+            ..FusedGraph::new()
+        };
+
+        let fused = pass.run(graph, &ctx).unwrap();
+        assert_eq!(fused.stats.rms_linear_fusions, 1,
+            "fanout=1 时应正常融合 RmsNorm+Linear");
+        assert_eq!(fused.nodes.len(), 1);
+        assert!(matches!(fused.nodes[0].op, FusedOp::FusedRMSLinear(_)));
+    }
+
+    #[test]
+    fn fused_rms_linear_skips_when_rms_output_has_multiple_consumers() {
+        // T42: Gemma 4/Llama 典型结构 — input_norm 的输出同时被 q/k/v 三路共享消费。
+        // 融合 [norm + q_proj] 会让 k_proj / v_proj 的输入 normed 成为悬空引用。
+        // 必须跳过融合,保留 RmsNorm atomic 节点。
+        let pass = FusedRMSLinearFusionPass;
+        let ctx = OptimizationContext::default();
+        let graph = FusedGraph {
+            nodes: vec![
+                FusedNode::new("input_norm", FusedOp::Atomic(AtomicOp::new("RmsNorm")))
+                    .with_inputs(vec!["hidden".into(), "norm_w".into()])
+                    .with_outputs(vec!["normed".into()]),
+                FusedNode::new("q_proj", FusedOp::Atomic(AtomicOp::new("MatMul")))
+                    .with_inputs(vec!["normed".into(), "w_q".into()])
+                    .with_outputs(vec!["q".into()]),
+                FusedNode::new("k_proj", FusedOp::Atomic(AtomicOp::new("MatMul")))
+                    .with_inputs(vec!["normed".into(), "w_k".into()])
+                    .with_outputs(vec!["k".into()]),
+                FusedNode::new("v_proj", FusedOp::Atomic(AtomicOp::new("MatMul")))
+                    .with_inputs(vec!["normed".into(), "w_v".into()])
+                    .with_outputs(vec!["v".into()]),
+            ],
+            ..FusedGraph::new()
+        };
+
+        let fused = pass.run(graph, &ctx).unwrap();
+        assert_eq!(fused.stats.rms_linear_fusions, 0,
+            "fanout=3 时必须跳过融合, 否则 k_proj/v_proj 会产生悬空引用");
+        assert_eq!(fused.nodes.len(), 4, "4 个原 atomic 节点应原样保留");
+        // input_norm 应保持 atomic, normed 仍然被 q/k/v 所有节点引用
+        assert!(matches!(&fused.nodes[0].op, FusedOp::Atomic(a) if a.op_type == "RmsNorm"));
+        for node in &fused.nodes[1..] {
+            assert!(matches!(&node.op, FusedOp::Atomic(a) if a.op_type == "MatMul"));
+            assert_eq!(node.inputs[0], "normed",
+                "k_proj/v_proj 的输入 normed 不应悬空");
+        }
+    }
+
+    #[test]
+    fn fused_rms_linear_fanout_counts_all_consumers() {
+        // 回归测试: compute_fanout 必须统计所有节点, 不能漏掉后续节点。
+        // RmsNorm 输出被 2 个消费者共享, 即使第 2 个出现在 window 外。
+        let pass = FusedRMSLinearFusionPass;
+        let ctx = OptimizationContext::default();
+        let graph = FusedGraph {
+            nodes: vec![
+                FusedNode::new("norm", FusedOp::Atomic(AtomicOp::new("RmsNorm")))
+                    .with_inputs(vec!["hidden".into(), "norm_w".into()])
+                    .with_outputs(vec!["normed".into()]),
+                FusedNode::new("proj_a", FusedOp::Atomic(AtomicOp::new("MatMul")))
+                    .with_inputs(vec!["normed".into(), "w_a".into()])
+                    .with_outputs(vec!["a_out".into()]),
+                // 与 norm 中间插入不相关节点,但消费同一个 normed
+                FusedNode::new("other_consumer", FusedOp::Atomic(AtomicOp::new("Add")))
+                    .with_inputs(vec!["normed".into(), "residual".into()])
+                    .with_outputs(vec!["sum".into()]),
+            ],
+            ..FusedGraph::new()
+        };
+
+        let fused = pass.run(graph, &ctx).unwrap();
+        assert_eq!(fused.stats.rms_linear_fusions, 0,
+            "normed 有 2 个消费者, 融合会导致 other_consumer 悬空");
+        assert_eq!(fused.nodes.len(), 3);
     }
 }
