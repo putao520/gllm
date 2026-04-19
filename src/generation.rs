@@ -369,6 +369,9 @@ pub struct GenerationResponse {
 /// - 文件路径: 从磁盘加载
 /// - Base64: API/Web 场景的内联数据
 /// - 原始字节: 内存中已解码的数据
+/// - URL: 远程资源 (encoder 负责拉取)
+///
+/// SPEC 依据: SPEC/04-API-DESIGN.md §3.7.1 四种模式。
 #[derive(Debug, Clone)]
 pub enum MediaInput {
     /// 文件路径 (本地磁盘)
@@ -377,6 +380,9 @@ pub enum MediaInput {
     Base64 { data: String, mime_type: Option<String> },
     /// 原始字节 (已解码的像素/PCM 数据)
     Raw(Vec<u8>),
+    /// 远程资源 URL (http/https/s3/file://), 由 encoder 负责拉取。
+    /// encoder 实现若不支持网络/远端协议应 Err(RuntimeError::NetworkUnreachable)。
+    Url(String),
 }
 
 pub struct GenerationBuilder<'a> {

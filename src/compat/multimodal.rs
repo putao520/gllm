@@ -78,10 +78,9 @@ impl Default for MultimodalTokenIds {
 // EncoderMedia — 编码器输入 (对齐 generation::MediaInput)
 // ============================================================================
 
-/// 编码器期望的媒体输入 (路径或原始字节)。
+/// 编码器期望的媒体输入。与 `generation::MediaInput` 对齐的四种模式。
 ///
-/// `generation::MediaInput` 的内部表示：文件路径保留为 `PathBuf`，
-/// Base64 延后解码，原始字节直接透传。
+/// SPEC 依据: SPEC/04-API-DESIGN.md §3.7.1 (MediaInput 四种模式)。
 #[derive(Debug, Clone)]
 pub enum EncoderMedia {
     /// 本地文件路径
@@ -91,8 +90,12 @@ pub enum EncoderMedia {
         data: String,
         mime_type: Option<String>,
     },
-    /// 原始字节（已解码的像素 / PCM）
+    /// 原始字节(已解码的像素 / PCM)
     Raw(Vec<u8>),
+    /// 远程资源 URL (http/https/s3/file://), 由 encoder 负责拉取。
+    /// encoder 实现若不支持网络/远端协议应返回 `BackendError::NetworkUnreachable`
+    /// 或同类显式错误,禁止 silent fallback 到本地空响应。
+    Url(String),
 }
 
 impl EncoderMedia {
@@ -109,6 +112,7 @@ impl EncoderMedia {
                 }
             }
             crate::generation::MediaInput::Raw(bytes) => EncoderMedia::Raw(bytes.clone()),
+            crate::generation::MediaInput::Url(url) => EncoderMedia::Url(url.clone()),
         }
     }
 }

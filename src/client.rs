@@ -886,15 +886,13 @@ impl Client {
         let state = self.require_state()?;
 
         // 2. Model must expose multimodal_token_ids via ModelConfig.
+        //    纯文本模型(未声明 image/audio token)不应接受 `.image()` / `.audio()`,
+        //    属于"模型类型与 API 不匹配"的语义错误 → InvalidModelType
+        //    (SPEC/04-API-DESIGN.md §3.7.4 行为约束 #2)
         let (token_ids_cfg, hidden_size) = {
             let executor = state.backend.executor();
             let mc = executor.model_config();
-            let ids = mc.multimodal_token_ids.ok_or_else(|| {
-                ClientError::RuntimeError(
-                    "model does not advertise multimodal_token_ids (vision_config missing)"
-                        .into(),
-                )
-            })?;
+            let ids = mc.multimodal_token_ids.ok_or(ClientError::InvalidModelType)?;
             (ids, mc.hidden_size)
         };
 
