@@ -1674,7 +1674,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 13.5 [P0] 融合 5：SiLU 死神经元掩码 (Dead Neuron Masking)
 
 > **前置条件**: §13.1 Gate-First Skip 的信号来源
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:12642-12680`（silu 实现）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（Silu lowering → epilogue ConditionalSkip + telemetry store）
 
 在计算 $\text{SiLU}(x) = x \cdot \sigma(x)$ 时，sigmoid 值已在寄存器中：
 - **白嫖触发器**: 追加 1 条 `vcmpps` + 1 条 `vphaddd`，统计 $\sigma(x) < \varepsilon$ 的元素数量
@@ -1686,7 +1686,7 @@ $$T_{\text{compute}}(\text{chunk}) \geqslant T_{\text{rdma\_transfer}}(\text{chu
 ### 13.6 [P0] 融合 6：MoE Gate 命中计数 (Expert Hit Counter)
 
 > **前置条件**: §15.4 冷板凳 Deopt 的信号源
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:3820-3980`（TopK 实现）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（TopK lowering → per-expert atomic hit counter）
 
 Gate 概率经 softmax 后，TopK 线性扫描已在遍历所有概率值：
 - **白嫖触发器**: 在 TopK 扫描循环中追加 1 条原子 `add`，将选中的 expert ID 写入共享计数器
@@ -1698,7 +1698,7 @@ Gate 概率经 softmax 后，TopK 线性扫描已在遍历所有概率值：
 ### 13.7 [P1] 融合 7：GEMM 行级激活统计 (Row-wise Activation Stats)
 
 > **前置条件**: §13.5 死神经元检测的扩展
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:9301-9344`（`emit_epilogue_on_accumulators_inner`）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（GEMM epilogue → row-wise L1/max/min 统计 store）
 
 K-loop 结束后累加器寄存器（ymm/zmm）包含完整 GEMM 输出：
 - **白嫖触发器**: 在 `emit_trace_on_accumulator` 写回前追加统计规约
@@ -1710,7 +1710,7 @@ K-loop 结束后累加器寄存器（ymm/zmm）包含完整 GEMM 输出：
 ### 13.8 [P1] 融合 8：RmsNorm per-channel Scale (KIVI 量化信号)
 
 > **前置条件**: §11 TurboQuant KV 非对称量化的 per-channel scale 来源
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:10324-10423`（RmsNorm 规约阶段）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（RmsNorm 规约 → per-channel |x| max 追踪）
 
 RmsNorm 的规约循环已在做 $\sum x^2$：
 - **白嫖触发器**: 追加 1 条 `vmaxps` 记录逐通道绝对值最大值
@@ -1722,7 +1722,7 @@ RmsNorm 的规约循环已在做 $\sum x^2$：
 ### 13.9 [P1] 融合 9：Softmax 锐度与 Attention Sink 检测 (Sharpness + Sink Detection)
 
 > **前置条件**: §13.2 质心预取的扩展
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:1880-1921`（Softmax max/sum 计算）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（Softmax lowering → sharpness + sink store）
 
 Softmax 的 max（`ymm4`）和 sum（`ymm5`）已在寄存器中：
 - **白嫖触发器**: max 值本身免费可取；追加 1 条除法得到 max/sum 比值
@@ -1737,7 +1737,7 @@ Softmax 的 max（`ymm4`）和 sum（`ymm5`）已在寄存器中：
 ### 13.10 [P2] 融合 10：Embedding 范数初始化 (RaBitQ Bootstrap)
 
 > **前置条件**: §11.3 RaBitQ 修正因子的初始值
-> **实现位置**: `src/compat/decoder_forward.rs`（hidden_state 初始化）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（Gather lowering → L2 norm reduce + store）
 
 Token embedding 查表后数据在 copy 路径上经过寄存器：
 - **白嫖触发器**: 在 copy 循环中追加 reduce + sqrt
@@ -1749,7 +1749,7 @@ Token embedding 查表后数据在 copy 路径上经过寄存器：
 ### 13.11 [P2] 融合 11：残差方向余弦 (Residual Cosine Similarity)
 
 > **前置条件**: §13.3 残差旁路的精化指标
-> **实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs:5613-5651`（`emit_cross_layer_residual`）
+> **实现位置**: `gllm-kernels/src/compiler/codegen/vm/plan_lower.rs`（Residual lowering → cosine sim + Δρ store）
 
 Residual Add 的两个输入 $x_{in}$ 和 $x_{out}$ 都在寄存器中：
 - **白嫖触发器**: 在现有 $\Delta\rho = \|x_{out}\| / \|x_{in}\|$ 基础上追加内积累加
