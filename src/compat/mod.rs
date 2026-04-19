@@ -6,7 +6,7 @@
 //! - `CpuBackend<E>` / `CudaBackend<E>` stub implementations
 //! - Backward-compatible re-export modules (`kernel_types`, `backend_trait`, `cpu_backend`)
 
-mod weight_helpers;
+pub(crate) mod weight_helpers;
 mod knowledge_injector;
 pub(crate) mod artifact_cache;
 

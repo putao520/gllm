@@ -375,6 +375,83 @@ pub fn route_multimodal_tokens(
 }
 
 // ============================================================================
+// Fused hidden state construction (ARCH-MULTIMODAL-FUSION injection input)
+// ============================================================================
+
+/// Build the fused hidden state to be injected into the decoder's first layer.
+///
+/// Shape: flat row-major `[routed.seq_len() * hidden_size]` f32 buffer.
+///
+/// For each position `i`:
+/// - If `routed.fused_embeddings[i]` is `Some(v)` (media virtual token) → copy `v`.
+/// - Otherwise (text token) → gather row `routed.token_ids[i]` from `embed_rows`.
+///
+/// `embed_rows`: flat `[vocab_size * hidden_size]` view of the model's
+/// `embed_tokens.weight` in f32, row-major. Callers are responsible for
+/// converting from the native weight dtype.
+///
+/// SPEC: 02-ARCHITECTURE ARCH-MULTIMODAL-FUSION injection point = after
+/// embedding lookup, before the first transformer layer, shape
+/// `[num_tokens, hidden_size]` row-major, zero-copy at position granularity.
+pub fn build_fused_hidden(
+    routed: &RoutedSequence,
+    embed_rows: &[f32],
+    hidden_size: usize,
+) -> Result<Vec<f32>, BackendError> {
+    if routed.hidden_size != hidden_size {
+        return Err(BackendError::Other(format!(
+            "build_fused_hidden: routed.hidden_size {} != model hidden_size {}",
+            routed.hidden_size, hidden_size
+        )));
+    }
+    if embed_rows.len() % hidden_size != 0 {
+        return Err(BackendError::Other(format!(
+            "build_fused_hidden: embed_rows.len() {} not divisible by hidden_size {}",
+            embed_rows.len(),
+            hidden_size
+        )));
+    }
+    let vocab_size = embed_rows.len() / hidden_size;
+    let seq_len = routed.seq_len();
+    if routed.fused_embeddings.len() != seq_len {
+        return Err(BackendError::Other(format!(
+            "build_fused_hidden: routed.fused_embeddings len {} != seq_len {}",
+            routed.fused_embeddings.len(),
+            seq_len
+        )));
+    }
+
+    let mut hidden = vec![0.0f32; seq_len * hidden_size];
+    for (i, opt_emb) in routed.fused_embeddings.iter().enumerate() {
+        let dst = &mut hidden[i * hidden_size..(i + 1) * hidden_size];
+        match opt_emb {
+            Some(media_emb) => {
+                if media_emb.len() != hidden_size {
+                    return Err(BackendError::Other(format!(
+                        "build_fused_hidden: media embedding at position {} has length {} != hidden_size {}",
+                        i,
+                        media_emb.len(),
+                        hidden_size
+                    )));
+                }
+                dst.copy_from_slice(media_emb);
+            }
+            None => {
+                let tok = routed.token_ids[i] as usize;
+                if tok >= vocab_size {
+                    return Err(BackendError::Other(format!(
+                        "build_fused_hidden: token id {} at position {} out of range (vocab {})",
+                        tok, i, vocab_size
+                    )));
+                }
+                dst.copy_from_slice(&embed_rows[tok * hidden_size..(tok + 1) * hidden_size]);
+            }
+        }
+    }
+    Ok(hidden)
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 
@@ -651,5 +728,78 @@ mod tests {
         assert!(!ids.is_image(258881));
         assert!(ids.is_audio(258881));
         assert!(!ids.is_audio(258880));
+    }
+
+    #[test]
+    fn build_fused_hidden_text_only_gathers_all_rows() {
+        // vocab=4, hidden=2; embed row[k] = [k*10, k*10+1]
+        let embed: Vec<f32> = (0..4 * 2).map(|i| i as f32).collect();
+        let routed = RoutedSequence {
+            token_ids: vec![2, 0, 3],
+            fused_embeddings: vec![None, None, None],
+            text_positions: vec![0, 1, 2],
+            hidden_size: 2,
+        };
+        let hidden = build_fused_hidden(&routed, &embed, 2).unwrap();
+        // row 2, row 0, row 3
+        assert_eq!(hidden, vec![4.0, 5.0, 0.0, 1.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn build_fused_hidden_overwrites_media_positions() {
+        // vocab=2, hidden=3
+        let embed: Vec<f32> = vec![0.0; 2 * 3];
+        let media = vec![9.0, 8.0, 7.0];
+        let routed = RoutedSequence {
+            token_ids: vec![0, 258880, 1],
+            fused_embeddings: vec![None, Some(media.clone()), None],
+            text_positions: vec![0, 2],
+            hidden_size: 3,
+        };
+        let hidden = build_fused_hidden(&routed, &embed, 3).unwrap();
+        // Position 1 overwritten by media
+        assert_eq!(&hidden[3..6], media.as_slice());
+        // Positions 0 and 2 are gathered (zeroes here)
+        assert_eq!(&hidden[0..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(&hidden[6..9], &[0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn build_fused_hidden_rejects_hidden_size_mismatch() {
+        let embed: Vec<f32> = vec![0.0; 4];
+        let routed = RoutedSequence {
+            token_ids: vec![0],
+            fused_embeddings: vec![None],
+            text_positions: vec![0],
+            hidden_size: 2,
+        };
+        let err = build_fused_hidden(&routed, &embed, 4).unwrap_err();
+        assert!(format!("{err}").contains("hidden_size"));
+    }
+
+    #[test]
+    fn build_fused_hidden_rejects_out_of_range_token() {
+        let embed: Vec<f32> = vec![0.0; 2];
+        let routed = RoutedSequence {
+            token_ids: vec![5], // vocab only has 1 row
+            fused_embeddings: vec![None],
+            text_positions: vec![0],
+            hidden_size: 2,
+        };
+        let err = build_fused_hidden(&routed, &embed, 2).unwrap_err();
+        assert!(format!("{err}").contains("out of range"));
+    }
+
+    #[test]
+    fn build_fused_hidden_rejects_media_embedding_wrong_length() {
+        let embed: Vec<f32> = vec![0.0; 4];
+        let routed = RoutedSequence {
+            token_ids: vec![258880],
+            fused_embeddings: vec![Some(vec![1.0, 2.0, 3.0])], // hidden=2, but 3 floats
+            text_positions: vec![],
+            hidden_size: 2,
+        };
+        let err = build_fused_hidden(&routed, &embed, 2).unwrap_err();
+        assert!(format!("{err}").contains("media embedding"));
     }
 }

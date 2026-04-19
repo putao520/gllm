@@ -130,6 +130,31 @@ impl DynBackendExecutor {
         }
     }
 
+    /// ARCH-MULTIMODAL-FUSION: dispatch by dtype variant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_multimodal(
+        &mut self,
+        token_ids: Vec<u32>,
+        fused_hidden: Vec<f32>,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        thinking_budget: Option<usize>,
+    ) -> Result<String, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+            DynBackendExecutor::F16(e) => e.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+            DynBackendExecutor::BF16(e) => e.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+        }
+    }
+
     /// Embedding output is always f32 (API standardization)
     pub fn embed(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
         match self {
@@ -409,6 +434,34 @@ impl<E: Element> BackendExecutor<E> {
         }
     }
 
+    /// ARCH-MULTIMODAL-FUSION: dispatch into each concrete Executor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_multimodal(
+        &mut self,
+        token_ids: Vec<u32>,
+        fused_hidden: Vec<f32>,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        thinking_budget: Option<usize>,
+    ) -> Result<String, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+            BackendExecutor::Rocm(exec) => exec.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+            BackendExecutor::Metal(exec) => exec.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+            BackendExecutor::Cpu(exec) => exec.generate_with_multimodal(
+                token_ids, fused_hidden, max_tokens, temperature, top_k, top_p, thinking_budget,
+            ),
+        }
+    }
+
     pub fn embed(&mut self, input: &str) -> Result<Vec<f32>, ExecutorError> {
         match self {
             BackendExecutor::Cuda(exec) => exec.embed(input),
@@ -620,6 +673,49 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => Ok(exec.weights()),
             _ => Err(ExecutorError::Backend(
                 crate::engine::executor::BackendError::Unimplemented("weights only available for CPU backend in this API")
+            )),
+        }
+    }
+
+    /// Override `multimodal_token_ids` in the underlying `ModelConfig`.
+    ///
+    /// Primarily used by the loader when tokenizer-side multimodal IDs land
+    /// later than the initial `ModelConfig` construction, and by integration
+    /// tests that wrap a text-only model with a mock encoder.
+    pub fn set_multimodal_token_ids(
+        &mut self,
+        ids: Option<crate::compat::multimodal::MultimodalTokenIds>,
+    ) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.set_multimodal_token_ids(ids),
+            BackendExecutor::Rocm(exec) => exec.set_multimodal_token_ids(ids),
+            BackendExecutor::Metal(exec) => exec.set_multimodal_token_ids(ids),
+            BackendExecutor::Cpu(exec) => exec.set_multimodal_token_ids(ids),
+        }
+    }
+
+    /// Retrieve `embed_tokens.weight` as a flat f32 row-major `[vocab, hidden]`
+    /// buffer (ARCH-MULTIMODAL-FUSION input construction).
+    ///
+    /// Handles native f32/f16/bf16 storage as well as quantized tensors
+    /// (dequantized to f32 via `get_typed_data` + `typed_bytes_to_f32`).
+    pub fn embed_tokens_f32(&self) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cpu(exec) => {
+                let backend = exec.backend();
+                let weights = exec.weights();
+                let (bytes, dtype) = crate::compat::weight_helpers::get_typed_data(
+                    weights,
+                    backend,
+                    &crate::weight_names::decoder_embed_aliases(),
+                )
+                .map_err(ExecutorError::Backend)?;
+                Ok(crate::compat::jit_helpers::typed_bytes_to_f32(&bytes, dtype))
+            }
+            _ => Err(ExecutorError::Backend(
+                crate::engine::executor::BackendError::Unimplemented(
+                    "embed_tokens_f32 only available for CPU backend in this API",
+                ),
             )),
         }
     }
