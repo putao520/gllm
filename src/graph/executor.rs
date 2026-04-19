@@ -1035,19 +1035,40 @@ fn atomic_op_to_kind(
         "LayerNorm" => Ok(OpKind::LayerNorm { eps: 1e-5 }),
         "RMSNorm" | "RmsNorm" => Ok(OpKind::RmsNorm { eps: 1e-5 }),
         "PleSlice" => {
-            // T33: PleSlice 是 PerLayerEmbed expander 引入的"列切片"伪 op ——
-            // 作用: 从 ple_full [seq, num_layers * dim_per_layer] 按
-            // layer_idx 切出当前层的 [seq, dim_per_layer] 子视图。
+            // T37: PleSlice → OpKind::ColumnSlice (真实 JIT 列切片 copy)。
             //
-            // 此处返回 Reshape NOP 以通过 atomic_op_to_kind 契约校验 (op_type 可识别);
-            // 实际执行由 `FusedOp::Atomic("PleSlice")` 在 graph/executor.rs 的 build 路径
-            // 特判处理 (runtime memcpy, 类似现有 "Slice" / "Shape" 分支)。
+            // 语义: 从 ple_full [seq, num_layers * dim_per_layer] 按 layer_idx
+            // 切出当前层的 [seq, dim_per_layer] 紧凑张量:
+            //   output[s, j] = input[s, layer_idx * dim_per_layer + j]
             //
-            // 必需 attributes: layer_idx / dim_per_layer / num_layers (由 expand_per_layer_embed 注入)。
-            let _layer_idx = require_usize(attributes, "layer_idx", "PleSlice")?;
-            let _dim_per_layer = require_usize(attributes, "dim_per_layer", "PleSlice")?;
-            let _num_layers = require_usize(attributes, "num_layers", "PleSlice")?;
-            Ok(OpKind::Reshape { target_shape: vec![] })
+            // 必需 attributes: layer_idx / dim_per_layer / num_layers
+            // (由 expand_per_layer_embed 注入)。
+            //
+            // 实现走完整 JIT 管线 (Scalar → SymExec trace opaque → plan_lower
+            // 专用分发 → lower_column_slice), 不再依赖 runtime NOP / fallback。
+            let layer_idx = require_usize(attributes, "layer_idx", "PleSlice")?;
+            let dim_per_layer = require_usize(attributes, "dim_per_layer", "PleSlice")?;
+            let num_layers = require_usize(attributes, "num_layers", "PleSlice")?;
+            if layer_idx >= num_layers {
+                return Err(ExecutionError::UnsupportedOp(format!(
+                    "PleSlice layer_idx({layer_idx}) >= num_layers({num_layers})",
+                )));
+            }
+            // seq_len 从 ple_full (inputs[0]) 倒数第 2 维推导,保留 Symbolic 语义
+            let seq_len = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
+                input_shapes[0][input_shapes[0].len() - 2].clone()
+            } else {
+                return Err(ExecutionError::ShapeMismatch(
+                    "atomic op 'PleSlice' 需要 inputs[0] (ple_full) 至少 2D".into()));
+            };
+            let input_inner = num_layers * dim_per_layer;
+            let start = layer_idx * dim_per_layer;
+            Ok(OpKind::ColumnSlice {
+                seq_len,
+                input_inner,
+                start,
+                slice_dim: dim_per_layer,
+            })
         }
         "PerLayerEmbed" => {
             // Gemma 4 E2B/E4B PLE 算子 (task #28)。YAML 模板必须显式提供:
@@ -1129,6 +1150,17 @@ fn infer_output_shape(
     op_type: &str,
     input_shapes: &[Vec<gllm_kernels::compiler::SymDim>],
 ) -> Vec<gllm_kernels::compiler::SymDim> {
+    infer_output_shape_with_attrs(op_type, input_shapes, &HashMap::new())
+}
+
+/// Extended shape inference that can consult node `attributes` for ops whose
+/// output shape cannot be derived from input shapes alone (e.g. `PleSlice`
+/// needs `dim_per_layer` to know the output last-dim).
+fn infer_output_shape_with_attrs(
+    op_type: &str,
+    input_shapes: &[Vec<gllm_kernels::compiler::SymDim>],
+    attributes: &std::collections::HashMap<String, crate::graph::types::AttrValue>,
+) -> Vec<gllm_kernels::compiler::SymDim> {
     use gllm_kernels::compiler::SymDim;
 
     match op_type {
@@ -1145,6 +1177,25 @@ fn infer_output_shape(
             } else {
                 vec![SymDim::Concrete(1)]
             }
+        }
+        // T37: PleSlice output = [seq_len, dim_per_layer]
+        // input[0] = ple_full [seq, num_layers * dim_per_layer]
+        // 默认 fall-through 会返回 input[0] shape (错误的 num_layers*dim 列数),
+        // 这里根据 dim_per_layer attribute 构造正确的切片输出 shape。
+        "PleSlice" => {
+            let seq_dim = input_shapes.first()
+                .and_then(|s| s.get(s.len().saturating_sub(2)).cloned())
+                .unwrap_or(SymDim::Concrete(1));
+            // attributes 在契约测试路径可能未被提供, 但 build_atomic_graph 走完整
+            // 路径时 attributes 一定存在 (require_usize 在 atomic_op_to_kind 已校验)。
+            let dim_per_layer = match attributes.get("dim_per_layer") {
+                Some(crate::graph::types::AttrValue::Int(v)) if *v > 0 => *v as usize,
+                _ => {
+                    // fallback: 无属性时保持 input shape (契约测试仅检查 op mapping)
+                    return input_shapes.first().cloned().unwrap_or_else(|| vec![SymDim::Concrete(1)]);
+                }
+            };
+            vec![seq_dim, SymDim::Concrete(dim_per_layer)]
         }
         // Elementwise ops preserve the first input's shape
         _ => {
@@ -1542,7 +1593,7 @@ impl FusedGraphExecutor {
         for node in &self.graph.nodes {
             if let super::types::FusedOp::Atomic(atomic) = &node.op {
                 let out_shape = Self::infer_atomic_output_shape(
-                    &atomic.op_type, &node.inputs, &shapes, hidden, &seq_sym,
+                    &atomic.op_type, &node.inputs, &node.attributes, &shapes, hidden, &seq_sym,
                 );
                 for out_name in &node.outputs {
                     shapes.insert(out_name.clone(), out_shape.clone());
@@ -1563,6 +1614,7 @@ impl FusedGraphExecutor {
     fn infer_atomic_output_shape(
         op_type: &str,
         input_names: &[String],
+        attributes: &HashMap<String, crate::graph::types::AttrValue>,
         shape_map: &HashMap<String, Vec<gllm_kernels::compiler::SymDim>>,
         hidden: usize,
         seq_sym: &gllm_kernels::compiler::SymDim,
@@ -1599,6 +1651,21 @@ impl FusedGraphExecutor {
                 } else {
                     default_act
                 }
+            }
+            "PleSlice" => {
+                // T37: ple_full [seq, num_layers * dim] → ple_slice [seq, dim]
+                // dim_per_layer 来自 attributes (由 expand_per_layer_embed 注入)。
+                let dim = match attributes.get("dim_per_layer") {
+                    Some(crate::graph::types::AttrValue::Int(v)) if *v > 0 => *v as usize,
+                    _ => return default_act,  // 保守默认, 下游 atomic_op_to_kind 会再校验
+                };
+                let seq = if let Some(n) = input_names.first() {
+                    let s = get_shape(n);
+                    if s.len() >= 2 { s[s.len() - 2].clone() } else { seq_sym.clone() }
+                } else {
+                    seq_sym.clone()
+                };
+                vec![seq, SymDim::Concrete(dim)]
             }
             "LayerNormalization" | "SimplifiedLayerNormalization" | "LayerNorm" | "RMSNorm" | "RmsNorm"
             | "Silu" | "SiLU" | "Swish" | "Gelu" | "GELU" | "Tanh" | "Softmax" => {
@@ -1901,7 +1968,9 @@ impl FusedGraphExecutor {
                     }
                 }
 
-                let output_shape = infer_output_shape(&atomic.op_type, &input_shapes);
+                let output_shape = infer_output_shape_with_attrs(
+                    &atomic.op_type, &input_shapes, &node.attributes,
+                );
 
                 // Calculate output_numel: use max_for_allocation for Symbolic dims
                 let output_numel: usize = output_shape.iter().map(|d| d.max_for_allocation(SYMDIM_MAX_SEQ_LEN)).product();
@@ -3725,6 +3794,60 @@ mod tests {
         let no_attrs: HashMap<String, AttrValue> = HashMap::new();
         let kind = atomic_op_to_kind("ValueNorm", &no_attrs, &shapes, gllm_kernels::types::DType::F32).unwrap();
         assert!(matches!(kind, OpKind::ValueNorm { eps } if (eps - 1e-6).abs() < 1e-9));
+    }
+
+    /// T37: PleSlice → OpKind::ColumnSlice (而不是 Reshape NOP)。
+    /// 必须根据 layer_idx × dim_per_layer 正确计算 start offset。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn atomic_op_to_kind_ple_slice_maps_to_column_slice() {
+        use gllm_kernels::compiler::{OpKind, SymDim};
+        use crate::graph::types::AttrValue;
+
+        // ple_full [seq_sym, num_layers * dim_per_layer] = [seq, 6 * 128 = 768]
+        let seq_sym = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) };
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![seq_sym.clone(), SymDim::Concrete(6 * 128)],
+        ];
+        let mut attrs = HashMap::new();
+        attrs.insert("layer_idx".into(), AttrValue::Int(3));
+        attrs.insert("dim_per_layer".into(), AttrValue::Int(128));
+        attrs.insert("num_layers".into(), AttrValue::Int(6));
+
+        let kind = atomic_op_to_kind("PleSlice", &attrs, &shapes,
+            gllm_kernels::types::DType::F32).unwrap();
+        match kind {
+            OpKind::ColumnSlice { seq_len, input_inner, start, slice_dim } => {
+                assert_eq!(seq_len, seq_sym, "seq_len 必须穿透 Symbolic");
+                assert_eq!(input_inner, 6 * 128, "input_inner = num_layers * dim_per_layer");
+                assert_eq!(start, 3 * 128, "start = layer_idx * dim_per_layer");
+                assert_eq!(slice_dim, 128, "slice_dim = dim_per_layer");
+            }
+            other => panic!("expected OpKind::ColumnSlice, got {other:?}"),
+        }
+    }
+
+    /// T37: infer_output_shape_with_attrs("PleSlice") 应返回 [seq, dim_per_layer],
+    /// 而不是 input[0] 的 [seq, num_layers*dim_per_layer]。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    #[test]
+    fn infer_output_shape_ple_slice_returns_dim_per_layer() {
+        use gllm_kernels::compiler::SymDim;
+        use crate::graph::types::AttrValue;
+
+        let seq_sym = SymDim::Symbolic { name: "seq_len".into(), max_value: Some(2048) };
+        let shapes: Vec<Vec<SymDim>> = vec![
+            vec![seq_sym.clone(), SymDim::Concrete(4 * 64)], // ple_full
+        ];
+        let mut attrs = HashMap::new();
+        attrs.insert("layer_idx".into(), AttrValue::Int(2));
+        attrs.insert("dim_per_layer".into(), AttrValue::Int(64));
+        attrs.insert("num_layers".into(), AttrValue::Int(4));
+
+        let out_shape = infer_output_shape_with_attrs("PleSlice", &shapes, &attrs);
+        assert_eq!(out_shape.len(), 2);
+        assert_eq!(out_shape[0], seq_sym, "output[0] = seq_len (保留 Symbolic)");
+        assert_eq!(out_shape[1], SymDim::Concrete(64), "output[1] = dim_per_layer, 不是 num_layers*dim");
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
