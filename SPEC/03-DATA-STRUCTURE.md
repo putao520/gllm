@@ -178,15 +178,49 @@ pub struct QuantizedTensor {
 
 ---
 
-| 架构 | `general.architecture` 值 | 特殊 Keys |
-|------|--------------------------|-----------|
+### 2.8 GGUF 架构专有 Keys (DATA-GGUF-ARCH-KEYS)
+
+> **关联实现**: `src/loader/gguf/reader.rs`, `src/model_config.rs::from_gguf_loader`
+>
+> 架构识别铁律: `general.architecture` 是唯一来源，禁止以文件名 / tensor 名
+> / arch 字符串 heuristic 推断。每个架构的专有 key 以 `{arch}.` 前缀为
+> 唯一命名空间, loader 通过 `gguf_arch_{u64,f32,str,bool,array_f32,array_u8}`
+> 访问, 缺失返回 `None` (不提供默认值), 由 `ModelConfig` 层决定语义。
+
+| 架构 | `general.architecture` 值 | 核心/专有 Keys |
+|------|--------------------------|----------------|
 | Llama | `llama` | `llama.rope.scaling.type`, `llama.rope.scaling.factor` |
-| Qwen2/Qwen2.5 | `qwen2`, `qwen2_5` | `qwen2.vocab_size`, `qwen2.rope.alpha` |
-| Qwen3 | `qwen3` | 待定义 |
-| Mistral | `mistral` | `mistral.sliding_window` |
-| Gemma4 | `gemma4` | `gemma4.sliding_window`, `gemma4.global_rope_theta`, `gemma4.per_layer_embedding` |
-| DeepSeek | `deepseek` | `deepseek.moe` 相关 keys |
-| GPT-2/GPT-OSS | `gpt2`, `gpt_neox` | `c_attn`, `c_proj` 融合权重 |
+| Qwen2 / Qwen2.5 | `qwen2`, `qwen2_5` | `qwen2.vocab_size`, `qwen2.rope.alpha` |
+| Qwen3 | `qwen3` | 与 Llama 同族，无额外专有字段 |
+| Mistral | `mistral` | `mistral.attention.sliding_window` |
+| Gemma 4 | `gemma4` | 见下方 §2.8.1 完整清单 |
+| DeepSeek V3/R1 | `deepseek`, `deepseek2` | `deepseek.expert_count`, `deepseek.expert_used_count`, `deepseek.expert_shared_count` |
+| GPT-2 / GPT-OSS | `gpt2`, `gpt_neox` | `c_attn`, `c_proj` 融合权重 |
+
+#### 2.8.1 Gemma 4 GGUF Key 清单
+
+| Key (`gemma4.` prefix) | 类型 | 语义 | 加载路径 | 缺省行为 |
+|------------------------|------|------|---------|----------|
+| `attention.sliding_window` | UINT64 | Sliding-window attention 窗口 (token 数) | `sliding_window` | `None` → `ModelGeometry::sliding_window = 0` (不启用) |
+| `attention.num_kv_shared_layers` | UINT64 | 后 N 层 KV 共享复用前非共享层 | `num_kv_shared_layers` | `None` → 0 (禁用 shared KV) |
+| `attention.global_head_dim` | UINT64 | Global attention 层 head_dim (Gemma 4: 512) | `global_head_dim` | `None` → 0 (继承 `attention.head_dim`) |
+| `attention.pattern` | ARRAY[UINT8] | 每层注意力类型 (0=sliding, 1=global) | `attention_pattern` | 若同时存在 Gemma 4 其他信号 (PLE / global rope / sliding window) 则由 `derive_default_attention_pattern(num_layers)` 按 "每 6 层第 6 层 global" 派生；否则 `None` |
+| `rope.global.freq_base` | FLOAT32 | Global attention 层 RoPE θ (Gemma 4: 1,000,000) | `global_rope_theta` | `None` → 0.0 (不启用 dual RoPE) |
+| `rope.partial_ratio` | FLOAT32 | p-RoPE 部分旋转比例 ∈ (0,1] (Gemma 4 global: 0.25) | `rope_partial_ratio` | `None` → 1.0 (全维度旋转) |
+| `embedding.per_layer_input` | UINT64 | PLE 每层注入维度 (E2B/E4B: 128) | `hidden_size_per_layer_input` | `None` → 0 (禁用 PLE) |
+
+**通用回退规则 (集中于一个函数)**:
+
+1. **敏感字段**（rope θ、partial ratio、global head dim、sliding window）缺失时
+   保持 `None`, 不编造 fallback 值。`ModelGeometry::from_config` 把 `None` 映射
+   为 "功能关闭" 语义 (0 或 1.0)。
+2. **`attention.pattern` 唯一例外**: 允许集中在
+   `src/model_config.rs::derive_default_attention_pattern` 中按 SPEC 派生,
+   且仅当同文件的 `from_gguf_loader` 已检测到至少一个 Gemma-4 独有信号
+   (PLE / global rope / sliding window) 时启用 — 避免污染其他架构。
+3. **架构识别** 只看 `general.architecture` 字符串, 禁止按 key 前缀或文件名
+   匹配。新架构加入 GGUF 加载路径不需要改 Rust 分派代码, 只需要在
+   `ModelGeometry::from_config` / 模板 YAML 中声明对应字段语义。
 
 ---
 

@@ -465,6 +465,13 @@ impl ModelConfig {
             bos_token_id,
             eos_token_id,
             pad_token_id,
+            global_rope_theta,
+            rope_partial_ratio,
+            attention_pattern_metadata,
+            sliding_window,
+            num_kv_shared_layers,
+            global_head_dim,
+            hidden_size_per_layer_input,
         ) = {
             let reader = loader.gguf_reader().map_err(|err| {
                 ModelConfigError::InvalidConfig(format!("failed to load GGUF metadata: {err}"))
@@ -597,6 +604,39 @@ impl ModelConfig {
                 .or_else(|| gguf_arch_f32(reader, arch, "attention.layer_norm_rms_epsilon"))
                 .filter(|v| v.is_finite() && *v > 0.0);
 
+            // ── Gemma 4 / dual-attention family metadata ───────────────────
+            // Ω1: load from GGUF when present. Rope/partial/global-head/PLE keys
+            // are sensitive (affect numerics) so 0/absent stays as `None` at
+            // this layer — `ModelGeometry::from_config` keeps the "0 means not
+            // enabled" contract explicit.
+            //
+            // Community key conventions (as of 2026 Q1, llama.cpp/unsloth):
+            //   {arch}.attention.sliding_window
+            //   {arch}.attention.num_kv_shared_layers
+            //   {arch}.attention.global_head_dim
+            //   {arch}.attention.pattern                 (ARRAY[U8])
+            //   {arch}.rope.global.freq_base             (Gemma 4 dual-RoPE global θ)
+            //   {arch}.rope.partial_ratio                (p-RoPE fraction, 0..=1)
+            //   {arch}.embedding.per_layer_input         (PLE injection width)
+            let global_rope_theta = gguf_arch_f32(reader, arch, "rope.global.freq_base")
+                .or_else(|| gguf_arch_f32(reader, arch, "global_rope_theta"))
+                .filter(|v| v.is_finite() && *v > 0.0);
+            let rope_partial_ratio = gguf_arch_f32(reader, arch, "rope.partial_ratio")
+                .or_else(|| gguf_arch_f32(reader, arch, "rope.global.partial_ratio"))
+                .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0);
+            let attention_pattern_metadata = gguf_arch_array_u8(reader, arch, "attention.pattern")
+                .or_else(|| gguf_arch_array_u8(reader, arch, "attention_pattern"));
+            let sliding_window = gguf_arch_usize(reader, arch, "attention.sliding_window")
+                .or_else(|| gguf_arch_usize(reader, arch, "sliding_window"));
+            let num_kv_shared_layers =
+                gguf_arch_usize(reader, arch, "attention.num_kv_shared_layers")
+                    .or_else(|| gguf_arch_usize(reader, arch, "num_kv_shared_layers"));
+            let global_head_dim = gguf_arch_usize(reader, arch, "attention.global_head_dim")
+                .or_else(|| gguf_arch_usize(reader, arch, "global_head_dim"));
+            let hidden_size_per_layer_input =
+                gguf_arch_usize(reader, arch, "embedding.per_layer_input")
+                    .or_else(|| gguf_arch_usize(reader, arch, "hidden_size_per_layer_input"));
+
             (
                 derived,
                 intermediate_size,
@@ -616,6 +656,13 @@ impl ModelConfig {
                 reader
                     .get_metadata_u64("tokenizer.ggml.padding_token_id")
                     .and_then(|v| u32::try_from(v).ok()),
+                global_rope_theta,
+                rope_partial_ratio,
+                attention_pattern_metadata,
+                sliding_window,
+                num_kv_shared_layers,
+                global_head_dim,
+                hidden_size_per_layer_input,
             )
         };
 
@@ -630,6 +677,25 @@ impl ModelConfig {
         let rope_theta = manifest.rope_base_override.unwrap_or(rope_theta); // LEGAL: manifest 可选字段，缺失时使用推导值
 
         let base_derived = derived.clone();
+
+        // Gemma 4 attention_pattern fallback: GGUF 未提供时，按 SPEC 默认模式
+        // (每 6 层第 6 层 global) 派生。仅当 PLE/global-rope 等信号表明确为
+        // Gemma-4 家族时启用；否则保持 None 以免污染其他 arch。
+        let enable_gemma4_pattern_default = hidden_size_per_layer_input
+            .map(|v| v > 0)
+            .unwrap_or(false)
+            || global_rope_theta.is_some()
+            || sliding_window.map(|v| v > 0).unwrap_or(false);
+        let attention_pattern = attention_pattern_metadata.or_else(|| {
+            if enable_gemma4_pattern_default && base_derived.num_hidden_layers > 0 {
+                Some(derive_default_attention_pattern(
+                    base_derived.num_hidden_layers,
+                ))
+            } else {
+                None
+            }
+        });
+
         let base = Self {
             hidden_size: base_derived.hidden_size,
             num_attention_heads: base_derived.num_attention_heads,
@@ -657,13 +723,13 @@ impl ModelConfig {
             eos_token_id,
             pad_token_id,
             tensor_map: HashMap::new(),
-            global_rope_theta: None,
-            rope_partial_ratio: None,
-            attention_pattern: None,
-            sliding_window: None,
-            num_kv_shared_layers: None,
-            global_head_dim: None,
-            hidden_size_per_layer_input: None,
+            global_rope_theta,
+            rope_partial_ratio,
+            attention_pattern,
+            sliding_window,
+            num_kv_shared_layers,
+            global_head_dim,
+            hidden_size_per_layer_input,
             mtp_depth: None,
             vision_config: None,
         };
@@ -1803,6 +1869,37 @@ fn gguf_arch_array_f32(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<
     Some(out)
 }
 
+/// Read a `{arch}.{suffix}` ARRAY metadata as `Vec<u8>`.
+///
+/// Used for Gemma 4 `attention.pattern` (0=sliding, 1=global) and similar
+/// per-layer tag arrays. Items are accepted from any integer GGUF type as long
+/// as they fit in u8 (0..=255). Any out-of-range or non-integer item causes the
+/// whole read to return `None` (Ω1: no silent truncation).
+fn gguf_arch_array_u8(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<Vec<u8>> {
+    let key = gguf_arch_key(arch, suffix);
+    let array = reader.get_metadata_array(&key)?;
+    let mut out = Vec::with_capacity(array.items.len());
+    for item in &array.items {
+        let value = item.as_u64()?;
+        let byte = u8::try_from(value).ok()?;
+        out.push(byte);
+    }
+    Some(out)
+}
+
+/// Gemma 4 fallback: derive per-layer attention pattern when GGUF metadata is
+/// absent. SPEC §Gemma4: every 6th layer (1-indexed) is global, others are
+/// sliding-window. I.e. `(i + 1) % 6 == 0 → 1 (global)`, else `0 (sliding)`.
+///
+/// This is the ONLY place the default pattern is synthesised. Loader paths,
+/// executor fixtures and tests must all go through this helper so the fallback
+/// stays centralised (per CLAUDE.md: fallback 逻辑集中在一个函数).
+pub fn derive_default_attention_pattern(num_layers: usize) -> Vec<u8> {
+    (0..num_layers)
+        .map(|i| if (i + 1) % 6 == 0 { 1u8 } else { 0u8 })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1962,6 +2059,185 @@ mod tests {
         assert_eq!(moe.num_experts, 64);
         assert_eq!(moe.num_experts_per_tok, 6);
         assert_eq!(moe.router_type, RouterType::DeepSeek);
+    }
+
+    // ── GGUF Gemma 4 extraction scaffolding ──────────────────────────────
+    //
+    // Build a minimal GGUF v3 byte stream with the given KV metadata and no
+    // tensors, write it to a temp file, and open it via `GgufReader::open`.
+    // This exercises the real public loader surface so any future changes to
+    // GGUF parsing stay covered by the same path production uses.
+    fn make_gguf_with_meta(kvs: &[(&str, GgufMetaValue)]) -> std::path::PathBuf {
+        use crate::loader::gguf::GGUF_MAGIC;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes()); // version
+        buf.extend_from_slice(&0u64.to_le_bytes()); // tensor_count = 0
+        buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+        for (k, v) in kvs {
+            write_kv_str(&mut buf, k);
+            v.write(&mut buf);
+        }
+        let pos = buf.len();
+        let aligned = (pos + 31) & !31;
+        buf.resize(aligned, 0u8);
+
+        let mut path = std::env::temp_dir();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        path.push(format!(
+            "gllm_gguf_gemma4_test_{ts}_{}.gguf",
+            std::process::id()
+        ));
+        std::fs::write(&path, &buf).expect("write temp GGUF");
+        path
+    }
+
+    fn write_kv_str(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    enum GgufMetaValue {
+        Str(&'static str),
+        U64(u64),
+        F32(f32),
+        ArrU8(Vec<u8>),
+    }
+
+    impl GgufMetaValue {
+        fn write(&self, buf: &mut Vec<u8>) {
+            use crate::loader::gguf::GgufValueType;
+            match self {
+                Self::Str(s) => {
+                    buf.extend_from_slice(&(GgufValueType::String as u32).to_le_bytes());
+                    write_kv_str(buf, s);
+                }
+                Self::U64(v) => {
+                    buf.extend_from_slice(&(GgufValueType::Uint64 as u32).to_le_bytes());
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+                Self::F32(v) => {
+                    buf.extend_from_slice(&(GgufValueType::Float32 as u32).to_le_bytes());
+                    buf.extend_from_slice(&v.to_bits().to_le_bytes());
+                }
+                Self::ArrU8(bytes) => {
+                    buf.extend_from_slice(&(GgufValueType::Array as u32).to_le_bytes());
+                    buf.extend_from_slice(&(GgufValueType::Uint8 as u32).to_le_bytes());
+                    buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+            }
+        }
+    }
+
+    /// TEST-GGUF-GEMMA4-ARCH-U8: gguf_arch_array_u8 正确解码 attention.pattern
+    #[test]
+    fn gguf_arch_array_u8_reads_attention_pattern() {
+        use crate::loader::gguf::GgufReader as GgufLoader;
+        let path = make_gguf_with_meta(&[
+            ("general.architecture", GgufMetaValue::Str("gemma4")),
+            (
+                "gemma4.attention.pattern",
+                GgufMetaValue::ArrU8(vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1]),
+            ),
+        ]);
+        let reader = GgufLoader::open(&path).expect("open test GGUF");
+        let pattern = gguf_arch_array_u8(&reader, "gemma4", "attention.pattern");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            pattern,
+            Some(vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1]),
+            "u8 array helper must round-trip attention.pattern bytes"
+        );
+    }
+
+    /// TEST-GGUF-GEMMA4-ARCH-SCALARS: 各类 arch scalar 读取 (u64 + f32)
+    #[test]
+    fn gguf_arch_scalars_read_gemma4_fields() {
+        use crate::loader::gguf::GgufReader as GgufLoader;
+        let path = make_gguf_with_meta(&[
+            ("general.architecture", GgufMetaValue::Str("gemma4")),
+            ("gemma4.attention.sliding_window", GgufMetaValue::U64(512)),
+            (
+                "gemma4.attention.num_kv_shared_layers",
+                GgufMetaValue::U64(4),
+            ),
+            ("gemma4.attention.global_head_dim", GgufMetaValue::U64(512)),
+            (
+                "gemma4.rope.global.freq_base",
+                GgufMetaValue::F32(1_000_000.0),
+            ),
+            ("gemma4.rope.partial_ratio", GgufMetaValue::F32(0.25)),
+            ("gemma4.embedding.per_layer_input", GgufMetaValue::U64(128)),
+        ]);
+        let reader = GgufLoader::open(&path).expect("open test GGUF");
+        assert_eq!(
+            gguf_arch_usize(&reader, "gemma4", "attention.sliding_window"),
+            Some(512)
+        );
+        assert_eq!(
+            gguf_arch_usize(&reader, "gemma4", "attention.num_kv_shared_layers"),
+            Some(4)
+        );
+        assert_eq!(
+            gguf_arch_usize(&reader, "gemma4", "attention.global_head_dim"),
+            Some(512)
+        );
+        assert_eq!(
+            gguf_arch_f32(&reader, "gemma4", "rope.global.freq_base"),
+            Some(1_000_000.0)
+        );
+        assert_eq!(
+            gguf_arch_f32(&reader, "gemma4", "rope.partial_ratio"),
+            Some(0.25)
+        );
+        assert_eq!(
+            gguf_arch_usize(&reader, "gemma4", "embedding.per_layer_input"),
+            Some(128)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TEST-GGUF-GEMMA4-ARCH-MISSING: 缺 key 时 helper 返回 None，不 panic
+    #[test]
+    fn gguf_arch_helpers_return_none_when_missing() {
+        use crate::loader::gguf::GgufReader as GgufLoader;
+        let path = make_gguf_with_meta(&[(
+            "general.architecture",
+            GgufMetaValue::Str("gemma4"),
+        )]);
+        let reader = GgufLoader::open(&path).expect("open test GGUF");
+        assert!(gguf_arch_usize(&reader, "gemma4", "attention.sliding_window").is_none());
+        assert!(gguf_arch_usize(&reader, "gemma4", "attention.num_kv_shared_layers").is_none());
+        assert!(gguf_arch_usize(&reader, "gemma4", "attention.global_head_dim").is_none());
+        assert!(gguf_arch_f32(&reader, "gemma4", "rope.global.freq_base").is_none());
+        assert!(gguf_arch_f32(&reader, "gemma4", "rope.partial_ratio").is_none());
+        assert!(gguf_arch_usize(&reader, "gemma4", "embedding.per_layer_input").is_none());
+        assert!(gguf_arch_array_u8(&reader, "gemma4", "attention.pattern").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TEST-GGUF-GEMMA4-001: derive_default_attention_pattern 每 6 层第 6 层 global
+    #[test]
+    fn derive_default_attention_pattern_matches_gemma4_rule() {
+        // 26 层（Gemma 4 E2B）: idx 5, 11, 17, 23 为 global (即第 6/12/18/24 层)
+        let pattern = derive_default_attention_pattern(26);
+        assert_eq!(pattern.len(), 26);
+        for (i, &v) in pattern.iter().enumerate() {
+            let expect = if (i + 1) % 6 == 0 { 1u8 } else { 0u8 };
+            assert_eq!(v, expect, "layer {i} expected {expect} got {v}");
+        }
+        // 少于 6 层 → 全部 sliding
+        let small = derive_default_attention_pattern(5);
+        assert_eq!(small, vec![0, 0, 0, 0, 0]);
+        // 边界: 0 层 → 空 Vec
+        assert!(derive_default_attention_pattern(0).is_empty());
+        // 恰好 6 层 → 最后一层 global
+        let six = derive_default_attention_pattern(6);
+        assert_eq!(six, vec![0, 0, 0, 0, 0, 1]);
     }
 
     #[test]

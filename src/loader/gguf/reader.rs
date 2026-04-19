@@ -749,6 +749,10 @@ mod tests {
                 write_u32(buf, GgufValueType::String as u32);
                 write_string(buf, s);
             }
+            GgufValue::Uint8(v) => {
+                write_u32(buf, GgufValueType::Uint8 as u32);
+                buf.push(*v);
+            }
             GgufValue::Uint32(v) => {
                 write_u32(buf, GgufValueType::Uint32 as u32);
                 write_u32(buf, *v);
@@ -757,6 +761,10 @@ mod tests {
                 write_u32(buf, GgufValueType::Uint64 as u32);
                 write_u64(buf, *v);
             }
+            GgufValue::Float32(v) => {
+                write_u32(buf, GgufValueType::Float32 as u32);
+                buf.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
             GgufValue::Array(arr) => {
                 write_u32(buf, GgufValueType::Array as u32);
                 write_u32(buf, arr.item_type as u32);
@@ -764,6 +772,7 @@ mod tests {
                 for item in &arr.items {
                     match item {
                         GgufValue::String(s) => write_string(buf, s),
+                        GgufValue::Uint8(v) => buf.push(*v),
                         GgufValue::Uint32(v) => write_u32(buf, *v),
                         _ => panic!("unsupported array item type in test helper"),
                     }
@@ -952,6 +961,92 @@ mod tests {
         let result = reader.tokenizer_tokens();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), GgufError::MissingMetadata(_)));
+    }
+
+    /// TEST-GGUF-GEMMA4-READ: Gemma 4 特有 metadata key 可经 GgufReader 读取
+    ///   - {arch}.attention.sliding_window      (Uint64)
+    ///   - {arch}.attention.num_kv_shared_layers (Uint64)
+    ///   - {arch}.attention.global_head_dim      (Uint64)
+    ///   - {arch}.rope.global.freq_base          (Float32)
+    ///   - {arch}.rope.partial_ratio             (Float32)
+    ///   - {arch}.embedding.per_layer_input      (Uint64)
+    ///   - {arch}.attention.pattern              (ARRAY[Uint8])
+    #[test]
+    fn test_gguf_gemma4_metadata_round_trip() {
+        let pattern = GgufArray {
+            item_type: GgufValueType::Uint8,
+            items: vec![
+                GgufValue::Uint8(0),
+                GgufValue::Uint8(0),
+                GgufValue::Uint8(0),
+                GgufValue::Uint8(0),
+                GgufValue::Uint8(0),
+                GgufValue::Uint8(1),
+            ],
+        };
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("gemma4"))),
+            ("gemma4.attention.sliding_window", GgufValue::Uint64(512)),
+            ("gemma4.attention.num_kv_shared_layers", GgufValue::Uint64(4)),
+            ("gemma4.attention.global_head_dim", GgufValue::Uint64(512)),
+            ("gemma4.rope.global.freq_base", GgufValue::Float32(1_000_000.0)),
+            ("gemma4.rope.partial_ratio", GgufValue::Float32(0.25)),
+            ("gemma4.embedding.per_layer_input", GgufValue::Uint64(128)),
+            ("gemma4.attention.pattern", GgufValue::Array(pattern)),
+        ]);
+
+        let reader = parse_from_bytes(bytes).expect("parse Gemma 4 GGUF");
+        assert_eq!(reader.architecture().unwrap(), "gemma4");
+        assert_eq!(
+            reader.get_metadata_u64("gemma4.attention.sliding_window"),
+            Some(512)
+        );
+        assert_eq!(
+            reader.get_metadata_u64("gemma4.attention.num_kv_shared_layers"),
+            Some(4)
+        );
+        assert_eq!(
+            reader.get_metadata_u64("gemma4.attention.global_head_dim"),
+            Some(512)
+        );
+        assert_eq!(
+            reader.get_metadata_f32("gemma4.rope.global.freq_base"),
+            Some(1_000_000.0)
+        );
+        assert_eq!(
+            reader.get_metadata_f32("gemma4.rope.partial_ratio"),
+            Some(0.25)
+        );
+        assert_eq!(
+            reader.get_metadata_u64("gemma4.embedding.per_layer_input"),
+            Some(128)
+        );
+
+        let arr = reader
+            .get_metadata_array("gemma4.attention.pattern")
+            .expect("attention.pattern must parse as ARRAY[U8]");
+        assert_eq!(arr.item_type, GgufValueType::Uint8);
+        assert_eq!(arr.items.len(), 6);
+        let u8s: Vec<u64> = arr.items.iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!(u8s, vec![0, 0, 0, 0, 0, 1]);
+    }
+
+    /// TEST-GGUF-GEMMA4-MISSING: 缺少 Gemma 4 特有 key 时，accessor 返回 None，不 panic
+    #[test]
+    fn test_gguf_gemma4_metadata_missing_returns_none() {
+        let bytes = build_gguf(&[
+            ("general.architecture", GgufValue::String(Arc::from("gemma4"))),
+        ]);
+        let reader = parse_from_bytes(bytes).expect("parse bare Gemma 4 GGUF");
+        assert!(reader
+            .get_metadata_u64("gemma4.attention.sliding_window")
+            .is_none());
+        assert!(reader
+            .get_metadata_f32("gemma4.rope.global.freq_base")
+            .is_none());
+        assert!(reader
+            .get_metadata_array("gemma4.attention.pattern")
+            .is_none());
     }
 
     /// TEST-GGUF-009: Tensor 边界检查 — rel_offset 超出文件大小时返回错误
