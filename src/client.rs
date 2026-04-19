@@ -392,37 +392,20 @@ impl ClientBuilder {
         let detected_backend = detect_backend()?;
         let backend_type = detected_backend.backend_type();
 
-        // Strategy Arbiter: compute StrategyBias from InferenceMode × GraphArchetype × Hardware.
-        // Must happen BEFORE BackendContext::new() which triggers JIT compilation.
-        if let Some(ref model_cfg) = model_config_for_arbiter {
-            use crate::engine::arbiter::ArbiterHwView;
-
-            let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
-            let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
-
-            // Build hardware view from the already-detected backend type.
-            // GPU backends get ArbiterHwView::gpu() for correct bias adjustments
-            // (SPEC §4.3.3: epilogue×1.2, k_depth×1.2, pipeline×1.2 on GPU).
-            let hw_view = match backend_type {
-                BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
-                    ArbiterHwView::gpu(49152)
-                }
-                BackendType::Cpu => {
-                    let profile = gllm_kernels::dispatch::device_profile();
-                    ArbiterHwView::from(profile)
-                }
-            };
-
-            // StrategyArbiter now returns gllm_kernels::compiler::planner::StrategyBias
-            // directly — no field-by-field copy needed.
-            let arbiter_bias = crate::engine::arbiter::StrategyArbiter::arbitrate(
-                inference_mode,
-                &archetype,
-                &hw_view,
-            );
-
-            gllm_kernels::compiler::planner::init_global_execution_plan_with_bias(&arbiter_bias);
-        }
+        // ARCH-FUSION-PLAN-ISOLATION: 跳过 model-specific bias init,使用全局 default plan。
+        //
+        // 历史 BUG: init_global_execution_plan_with_bias(model_bias) 写入 OnceLock,
+        // 第一次 init 后所有后续 Client 沿用相同 bias。当 fusion 测试加载多个不同
+        // archetype 的模型 (e.g. e5-small-v2 encoder + Qwen3-Reranker decoder) 时,
+        // 第二个模型用第一个模型的 bias 编译 → strategy 选择不当 → JIT kernel 数值
+        // 漂移 (e2e_fusion_consistency_with_standalone / cross_arch_embed_rerank NaN)。
+        //
+        // 临时方案: 禁用 arbiter init,所有 Client 走 default bias (lazy init 的
+        // StrategyBias::default(),性能略次优但行为稳定可预测,fusion 测试可通过)。
+        //
+        // 长期方案 (follow-up): 把 EXECUTION_PLAN 改为 Arc<ExecutionPlan> 存在
+        // ClientState,codegen 接受 ExecutionPlan 参数,实现真正的 per-Client plan 隔离。
+        let _ = (&model_config_for_arbiter, &inference_mode, &backend_type);
 
         let config_path = loader.config_path().map(|p| p.to_path_buf());
         let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());

@@ -1183,6 +1183,16 @@ fn atomic_op_to_kind(
             };
             Ok(OpKind::PerLayerEmbed { seq_len, layer_idx, dim_per_layer, num_layers, hidden })
         }
+        // ARCH-ONNX-FUSED-DETECT: ONNX optimized models (O3/O4) 常含 fused operators
+        // 如 FusedGELU/FusedLayerNorm/FusedMatMul/FusedConv 等 ORT 内置算子。gllm 当前
+        // 的 JIT 路径不识别这些 fused op,直接返回明确错误而非产生 NaN。
+        op if op.starts_with("Fused")
+            || op.starts_with("com.microsoft.")
+            || op == "Gelu" && false /* Gelu 已上方支持,这里 dummy 防止 unused */
+        => Err(ExecutionError::UnsupportedOp(format!(
+            "atomic op '{op_type}' 是 ONNX optimized model (O3/O4) 的 fused operator,\
+             gllm JIT 不支持。建议: 用 model.onnx 原版 (非优化) 或 SafeTensors。"
+        ))),
         _ => Err(ExecutionError::UnsupportedOp(format!(
             "atomic op '{}' has no CompilerGraph mapping — \
              JIT codegen not implemented for this op type",

@@ -435,6 +435,26 @@ impl HfHubClient {
     }
 
     fn ranked_onnx_candidates(&self, repo: &str) -> Vec<String> {
+        // ARCH-ONNX-WARN: 当所选最高优先级 ONNX 是 O3/O4 优化或量化版本时,
+        // 提示用户可能存在 fused operator 不识别 / 数值漂移风险。
+        fn warn_if_optimized(name: &str, repo: &str) {
+            let lower = name.to_ascii_lowercase();
+            let stem = lower.rsplit('/').next().unwrap_or(&lower);
+            let is_optimized = stem.contains("_o2") || stem.contains("_o3")
+                || stem.contains("_o4") || stem.contains("_o5");
+            let is_quantized = stem.contains("int8") || stem.contains("uint8")
+                || stem.contains("quint8") || stem.contains("bnb");
+            if is_optimized || is_quantized {
+                eprintln!(
+                    "[gllm:onnx] WARN repo {repo} 仓库不含 model.onnx 原始版本,\
+                     退化选用 {name} (优化/量化变体)。\
+                     gllm ONNX loader 可能不识别 fused operators (FusedGELU/FusedLayerNorm 等),\
+                     可能产生 NaN/数值漂移。建议: 优先用 SafeTensors 加载,\
+                     或上游模型仓库提供 model.onnx 原版。"
+                );
+            }
+        }
+
         // ARCH-ONNX-PRIORITY: 优先级排序避免选到优化/量化版本(可能 NaN/数值漂移)
         //   0. model.onnx / onnx/model.onnx       — 原始 fp32,最稳定
         //   1. *_fp32.onnx / *_O1.onnx            — 基础优化保守
@@ -481,6 +501,7 @@ impl HfHubClient {
                         .cmp(&preferred_rank(b))
                         .then_with(|| a.cmp(b))
                 });
+                warn_if_optimized(&result[0], repo);
                 return result;
             }
 
@@ -496,6 +517,7 @@ impl HfHubClient {
                         .cmp(&preferred_rank(b))
                         .then_with(|| a.cmp(b))
                 });
+                warn_if_optimized(&result[0], repo);
                 return result;
             }
         }
