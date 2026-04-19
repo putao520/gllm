@@ -333,6 +333,18 @@ pub struct SequenceInput {
     pub tokens: Vec<u32>,
     pub position: usize,
     pub draft_steps: usize,
+    /// Pre-computed fused embedding sequence for this step (multimodal only).
+    ///
+    /// ARCH-MULTIMODAL-FUSION (SPEC/02-ARCHITECTURE.md):
+    /// flat row-major `[tokens.len() * hidden_size]` f32 buffer. When present,
+    /// the forward pass seeds `hidden_0` with this buffer and bypasses the
+    /// `Gather(embed_tokens, input_ids)` node. Only populated for the prefill
+    /// step of multimodal requests; decode steps still use Gather-on-input_ids
+    /// because generated tokens are always text.
+    ///
+    /// Pure text requests leave this as `None` — they follow the standard
+    /// Gather path with zero runtime overhead.
+    pub fused_hidden: Option<Vec<f32>>,
 }
 
 /// Batched input for the forward pass.
@@ -374,6 +386,15 @@ pub struct RequestData {
     pub session_id: Option<SessionId>,
     /// Thinking token budget: None = unlimited, Some(0) = disabled, Some(n) = max n tokens.
     pub thinking_budget: Option<usize>,
+    /// Multimodal fused embedding (ARCH-MULTIMODAL-FUSION).
+    ///
+    /// Populated by `enqueue_with_multimodal` when the request carries image
+    /// or audio content. Flat row-major `[prompt_tokens.len() * hidden_size]`
+    /// f32 buffer: text positions gathered from `embed_tokens.weight`, media
+    /// positions copied from the encoder output. Consumed once on the prefill
+    /// step and then set to `None` so subsequent decode steps follow the
+    /// standard Gather-on-input_ids path.
+    pub fused_prefill_hidden: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1246,6 +1267,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         &self.model_config
     }
 
+    /// Override `model_config.multimodal_token_ids` at runtime.
+    ///
+    /// This is the single plumbing point for runtime multimodal registration
+    /// and is used by (a) loaders that discover tokenizer-level multimodal
+    /// IDs post-hoc and (b) integration tests that exercise the fusion path
+    /// on models whose config does not originally advertise multimodal IDs
+    /// (e.g. wrapping SmolLM2 with a mock vision encoder). Accepts `None`
+    /// to clear a previously-set override.
+    pub fn set_multimodal_token_ids(
+        &mut self,
+        ids: Option<crate::compat::multimodal::MultimodalTokenIds>,
+    ) {
+        self.model_config.multimodal_token_ids = ids;
+    }
+
     /// §12.6 获取系统硬件拓扑
     pub fn system_topology(&self) -> &crate::sensors::SystemTopology {
         &self.system_topology
@@ -1339,6 +1375,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             finished: false,
             session_id: None,
             thinking_budget: None,
+            fused_prefill_hidden: None,
         };
 
         self.requests.insert(id, request_data);
@@ -1368,6 +1405,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             finished: false,
             session_id: None,
             thinking_budget,
+            fused_prefill_hidden: None,
         };
 
         self.requests.insert(id, request_data);
@@ -1375,6 +1413,61 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(id)
     }
 
+
+    /// Enqueue a multimodal generation request (ARCH-MULTIMODAL-FUSION).
+    ///
+    /// Unlike `enqueue_with_config` which tokenizes the prompt string, this
+    /// accepts the *already-routed* token sequence (special tokens expanded
+    /// into encoder virtual tokens) together with a pre-computed fused hidden
+    /// state of shape `[token_ids.len() * hidden_size]`. The first prefill
+    /// step seeds the graph's leading `Gather` output with that buffer and
+    /// bypasses the standard embedding lookup.
+    ///
+    /// SPEC: 04-API-DESIGN §3.7, 02-ARCHITECTURE §ARCH-MULTIMODAL-FUSION.
+    pub fn enqueue_with_multimodal(
+        &mut self,
+        _kind: RequestKind,
+        token_ids: Vec<u32>,
+        fused_hidden: Vec<f32>,
+        max_new_tokens: usize,
+        sampling_config: SamplingConfig,
+        thinking_budget: Option<usize>,
+    ) -> ExecutorResult<RequestId> {
+        if token_ids.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        let hidden = self.geometry.hidden_size;
+        let expected = token_ids.len() * hidden;
+        if fused_hidden.len() != expected {
+            return Err(ExecutorError::Config(ModelConfigError::InvalidConfig(
+                format!(
+                    "enqueue_with_multimodal: fused_hidden length {} != token_ids.len()*hidden_size ({}*{})",
+                    fused_hidden.len(),
+                    token_ids.len(),
+                    hidden,
+                ),
+            )));
+        }
+
+        let id = self.requests.len() as RequestId + 1;
+        let sequence = Sequence::new(id, token_ids.clone());
+
+        let request_data = RequestData {
+            prompt_tokens: token_ids,
+            output_tokens: Vec::new(),
+            sampling_config,
+            is_prefill: true,
+            max_new_tokens,
+            finished: false,
+            session_id: None,
+            thinking_budget,
+            fused_prefill_hidden: Some(fused_hidden),
+        };
+
+        self.requests.insert(id, request_data);
+        self.batcher.enqueue(sequence);
+        Ok(id)
+    }
 
     /// Register a new session for multi-turn KV cache reuse.
     pub fn register_session(&mut self, session_id: SessionId) {
@@ -1864,8 +1957,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let current_draft_steps = batch.draft_steps.get(idx).copied().unwrap_or(0); // LEGAL: draft_steps=0 表示无 draft tokens
             self.ensure_pages_resident(req_id)?;
 
-            let (tokens, position) = {
-                let Some(req) = self.requests.get(&req_id) else {
+            let (tokens, position, fused_hidden) = {
+                let Some(req) = self.requests.get_mut(&req_id) else {
                     // Request was removed, skip it
                     continue;
                 };
@@ -1887,7 +1980,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     req.prompt_tokens.len() + req.output_tokens.len().saturating_sub(1)
                 };
-                (tokens, position)
+
+                // ARCH-MULTIMODAL-FUSION: consume the pre-computed fused hidden
+                // state once on prefill. Decode steps re-enter with None so
+                // subsequent generated tokens go through the standard Gather
+                // path. `take()` guarantees idempotence (no double-consume).
+                let fused = if req.is_prefill {
+                    req.fused_prefill_hidden.take()
+                } else {
+                    None
+                };
+                (tokens, position, fused)
             };
 
             if tokens.is_empty() {
@@ -1898,7 +2001,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 continue;
             }
 
-            sequences.push(SequenceInput { tokens, position, draft_steps: current_draft_steps });
+            sequences.push(SequenceInput {
+                tokens,
+                position,
+                draft_steps: current_draft_steps,
+                fused_hidden,
+            });
             request_indices.push(req_id);
         }
 
@@ -2401,6 +2509,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 tokens: spine_tokens.clone(),
                                 position,
                                 draft_steps: spine_tokens.len(),
+                                fused_hidden: None,
                             });
                             verify_req_indices.push(req_id);
                         }
@@ -2543,6 +2652,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             tokens: tokens.to_vec(),
             position: 0,
             draft_steps: 0,
+            fused_hidden: None,
         };
 
         let batch_input = BatchInput {
@@ -2606,6 +2716,65 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let req_id =
             self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config, thinking_budget)?;
+
+        loop {
+            self.step()?;
+
+            if let Some(req) = self.requests.get(&req_id) {
+                if req.finished {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        let req = self
+            .requests
+            .get(&req_id)
+            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
+        let text = self.decode_tokens(&req.output_tokens)?;
+        Ok(text)
+    }
+
+    /// Generate with multimodal-routed inputs (ARCH-MULTIMODAL-FUSION).
+    ///
+    /// Takes the pre-expanded token sequence and pre-computed fused hidden
+    /// state (text positions: gathered from `embed_tokens`; media positions:
+    /// encoder output), runs the standard continuous-batching generation loop,
+    /// and returns the decoded text.
+    ///
+    /// Pure text callers should continue to use `generate` / `generate_with_sampling`.
+    /// This entry point exists strictly for the `.image()` / `.audio()` path in
+    /// `GenerationBuilder` per SPEC 04-API-DESIGN §3.7.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_multimodal(
+        &mut self,
+        token_ids: Vec<u32>,
+        fused_hidden: Vec<f32>,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        thinking_budget: Option<usize>,
+    ) -> ExecutorResult<String> {
+        if token_ids.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        let sampling_config = SamplingConfig {
+            temperature,
+            top_k,
+            top_p,
+        };
+
+        let req_id = self.enqueue_with_multimodal(
+            RequestKind::Chat,
+            token_ids,
+            fused_hidden,
+            max_tokens,
+            sampling_config,
+            thinking_budget,
+        )?;
 
         loop {
             self.step()?;

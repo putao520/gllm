@@ -537,9 +537,9 @@ mod tests {
     fn test_request_state_table_from_batch() {
         let batch = BatchInput {
             sequences: vec![
-                SequenceInput { tokens: vec![1, 2, 3, 4], position: 0, draft_steps: 0 },
-                SequenceInput { tokens: vec![5], position: 4, draft_steps: 0 },
-                SequenceInput { tokens: vec![6], position: 10, draft_steps: 0 },
+                SequenceInput { tokens: vec![1, 2, 3, 4], position: 0, draft_steps: 0, fused_hidden: None },
+                SequenceInput { tokens: vec![5], position: 4, draft_steps: 0, fused_hidden: None },
+                SequenceInput { tokens: vec![6], position: 10, draft_steps: 0, fused_hidden: None },
             ],
         };
         let ids = vec![100, 200, 300];
@@ -557,8 +557,8 @@ mod tests {
         let pipeline = CompactScatterPipeline::new();
         let batch = BatchInput {
             sequences: vec![
-                SequenceInput { tokens: vec![1], position: 0, draft_steps: 0 },
-                SequenceInput { tokens: vec![2], position: 1, draft_steps: 0 },
+                SequenceInput { tokens: vec![1], position: 0, draft_steps: 0, fused_hidden: None },
+                SequenceInput { tokens: vec![2], position: 1, draft_steps: 0, fused_hidden: None },
             ],
         };
         let ids = vec![1, 2];
@@ -610,8 +610,8 @@ mod tests {
     fn test_range_group_assignment() {
         let batch = BatchInput {
             sequences: vec![
-                SequenceInput { tokens: vec![1], position: 0, draft_steps: 0 },
-                SequenceInput { tokens: vec![2], position: 1, draft_steps: 0 },
+                SequenceInput { tokens: vec![1], position: 0, draft_steps: 0, fused_hidden: None },
+                SequenceInput { tokens: vec![2], position: 1, draft_steps: 0, fused_hidden: None },
             ],
         };
         let ids = vec![1, 2];

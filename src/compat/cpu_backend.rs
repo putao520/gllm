@@ -117,6 +117,18 @@ fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
     unsafe { std::slice::from_raw_parts(ptr, count) }.to_vec()
 }
 
+/// Return the output tensor name of the leading `Gather(embed_tokens, input_ids)`
+/// node in a decoder graph, used as the injection point for
+/// ARCH-MULTIMODAL-FUSION. Returns `None` when no such leading Gather exists
+/// (the graph is not a standard decoder embedding graph).
+fn first_gather_output(executor: &crate::graph::executor::FusedGraphExecutor) -> Option<String> {
+    let first = executor.graph().nodes.first()?;
+    if first.op.name() != "Gather" {
+        return None;
+    }
+    first.outputs.first().cloned()
+}
+
 // ---------------------------------------------------------------------------
 // KV Cache storage
 // ---------------------------------------------------------------------------
@@ -398,6 +410,33 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
 
             let position_ids: Vec<f32> = (position..position + seq_len).map(|p| p as f32).collect();
             inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
+
+            // ARCH-MULTIMODAL-FUSION (SPEC/02-ARCHITECTURE.md):
+            // When a multimodal request is dispatched, the Executor attaches a
+            // pre-computed fused hidden state on the prefill step. Seed the
+            // first Gather output so the graph executor's `is_node_computed`
+            // check skips `Gather(embed_tokens, input_ids)` and continues with
+            // the caller-provided text+media fusion. Strictly a prefill-only
+            // bypass: decode steps always re-run Gather on input_ids because
+            // newly generated tokens are always text.
+            if let Some(fused) = seq.fused_hidden.as_ref() {
+                let expected = seq_len * config.hidden_size();
+                if fused.len() != expected {
+                    return Err(BE::Other(format!(
+                        "ARCH-MULTIMODAL-FUSION: fused_hidden length {} != seq_len * hidden_size ({} * {})",
+                        fused.len(),
+                        seq_len,
+                        config.hidden_size(),
+                    )));
+                }
+                let gather_output = first_gather_output(executor).ok_or_else(|| {
+                    BE::Other(
+                        "ARCH-MULTIMODAL-FUSION: decoder graph has no leading Gather(embed_tokens) node — \
+                         cannot inject fused embedding".into(),
+                    )
+                })?;
+                inputs.insert(gather_output, f32_to_bytes(fused));
+            }
 
             let kv_handle = &mut kv_caches[seq_idx];
             let store = self.kv_store.lock().map_err(|e| BE::Cpu(format!("KV lock: {e}")))?;
