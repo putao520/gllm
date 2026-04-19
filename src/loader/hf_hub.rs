@@ -435,6 +435,38 @@ impl HfHubClient {
     }
 
     fn ranked_onnx_candidates(&self, repo: &str) -> Vec<String> {
+        // ARCH-ONNX-PRIORITY: 优先级排序避免选到优化/量化版本(可能 NaN/数值漂移)
+        //   0. model.onnx / onnx/model.onnx       — 原始 fp32,最稳定
+        //   1. *_fp32.onnx / *_O1.onnx            — 基础优化保守
+        //   2. *_fp16.onnx                        — 半精度,gllm 可处理
+        //   3. *_O[2-4].onnx                      — 中高级优化(可能 fused 算子无法识别)
+        //   4. *_int8/_qint8/_quint8/_uint8.onnx  — 量化(需 dequant 路径)
+        //   5. 其他                                — 兜底
+        // 历史 BUG:multilingual-e5-small 仓库仅有 model_O4.onnx + model_qint8_*.onnx,
+        // 字典序排序选中 model_O4 (高级优化),embedding 输出 NaN at index 0。
+        fn preferred_rank(name: &str) -> usize {
+            let lower = name.to_ascii_lowercase();
+            // 去掉路径前缀(onnx/) 与扩展名 (.onnx) 后比对后缀
+            let stem = lower
+                .rsplit('/')
+                .next()
+                .unwrap_or(&lower)
+                .trim_end_matches(".onnx");
+            if stem == "model" {
+                0
+            } else if stem.ends_with("_fp32") || stem.ends_with("_o1") {
+                1
+            } else if stem.ends_with("_fp16") {
+                2
+            } else if stem.ends_with("_o2") || stem.ends_with("_o3") || stem.ends_with("_o4") {
+                3
+            } else if stem.contains("int8") || stem.contains("uint8") || stem.contains("quint8") {
+                4
+            } else {
+                5
+            }
+        }
+
         if let Ok(files) = self.list_repo_files(repo) {
             // Ω1: 优先选择 onnx/ 目录下的文件
             let onnx_dir_files: Vec<_> = files
@@ -444,7 +476,11 @@ impl HfHubClient {
                 .collect();
             if !onnx_dir_files.is_empty() {
                 let mut result = onnx_dir_files;
-                result.sort();
+                result.sort_by(|a, b| {
+                    preferred_rank(a)
+                        .cmp(&preferred_rank(b))
+                        .then_with(|| a.cmp(b))
+                });
                 return result;
             }
 
@@ -455,7 +491,11 @@ impl HfHubClient {
                 .collect();
             if !root_onnx.is_empty() {
                 let mut result = root_onnx;
-                result.sort();
+                result.sort_by(|a, b| {
+                    preferred_rank(a)
+                        .cmp(&preferred_rank(b))
+                        .then_with(|| a.cmp(b))
+                });
                 return result;
             }
         }
