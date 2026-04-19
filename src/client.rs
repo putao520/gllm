@@ -935,43 +935,33 @@ impl Client {
         )
         .map_err(|e| ClientError::RuntimeError(format!("multimodal routing failed: {e}")))?;
 
-        // 5. Run generation. The routed embedding sequence has been
-        //    validated; full decoder-side fusion arrives alongside the
-        //    real SigLIP / Conformer implementations in a follow-up.
+        // 5. Decoder-side fusion is not yet implemented.
+        //
+        // `routed` 含正确拼接的 embedding 序列 (prompt text + encoder-produced
+        // virtual tokens),但当前 executor.generate 接口只消费原始 text prompt,
+        // 不接收 embedding 序列作为输入。如果此时直接走 text-only 生成,会产生
+        // **虚假 API** (用户 `.image(path)` 看似成功但 image 实际 0 参与解码)。
+        //
+        // CLAUDE.md NO_SILENT_FALLBACK / NO_ISLAND_MODULE 禁止这种假象。必须
+        // 显式 Err 告知调用方"多模态 decoder 融合未实现",拒绝绕过。真实
+        // 注入由后续任务 (T64 B 路径 / T55+T55.2 encoder JIT 落地后) 启用。
         debug_assert!(
             routed.seq_len() >= prompt_tokens.len(),
             "routing can only grow the sequence"
         );
-        let _ = routed; // explicit consume; silence unused-var lint
-
-        let mut executor = state.backend.executor_mut();
-        let result = if let Some(sid) = session_id {
-            executor.generate_with_session(
-                &prompt,
-                max_tokens,
-                temperature,
-                top_k,
-                top_p,
-                sid,
-                thinking_budget,
-            )
-        } else {
-            executor.generate(
-                &prompt,
-                max_tokens,
-                temperature,
-                top_k,
-                top_p,
-                thinking_budget,
-            )
-        }?;
-
-        let (text, thinking_content) = crate::generation::split_thinking_content(&result);
-        Ok(GenerationResponse {
-            text,
-            thinking_content,
-            request_id: None,
-        })
+        let _ = (max_tokens, temperature, top_k, top_p, session_id, thinking_budget, state);
+        let _ = routed;
+        Err(ClientError::RuntimeError(format!(
+            "multimodal decoder fusion not yet implemented: the SigLIP / Conformer \
+             encoders produced a valid expanded embedding sequence ({} tokens from prompt + \
+             encoded media), but `executor.generate` currently accepts only a text prompt and \
+             cannot consume embedding sequences directly. \
+             Invoking text-only generation here would silently drop the media input — \
+             refusing per NO_SILENT_FALLBACK. See SPEC/04-API-DESIGN.md §3.7 and \
+             task T64 for the fusion path. To proceed, remove `.image()` / `.audio()` \
+             and use text-only `generate()`.",
+            routed.seq_len()
+        )))
     }
 
     pub(crate) fn execute_embeddings(

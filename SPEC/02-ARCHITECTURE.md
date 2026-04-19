@@ -190,6 +190,68 @@ Level 3: Embed + Rerank + LLM (三模型，完整 RAG)
 
 **实现位置**: `src/graph/optimizer/pattern_fusion.rs` 的 `FlashAttentionFusionPass` 和 `CanonicalizeAttentionPass`。
 
+### 多模态接入架构 (ARCH-MULTIMODAL) — REQ-ARCH-MULTIMODAL
+
+多模态 generator (Gemma 4 31B/E4B 等) 的 image / audio 输入通过**独立 encoder + token routing + decoder fusion** 三阶段接入,不破坏纯文本路径。
+
+#### 数据流
+
+```
+[text prompt]           ────┐
+[MediaInput::Image]  → SigLIP ViT encoder  → (virtual image tokens, embeddings)
+[MediaInput::Audio]  → USM Conformer encoder → (virtual audio tokens, embeddings)
+                            ↓
+                    route_multimodal_tokens
+                            ↓
+             RoutedSequence { tokens, embeddings, span_map }
+                            ↓
+                    [Decoder-side fusion]          ← ARCH-MULTIMODAL-FUSION
+                            ↓
+                    FusedGraphExecutor.generate
+                            ↓
+                          answer
+```
+
+#### 三阶段接入契约
+
+| 阶段 | 模块 | 输入 | 输出 | SPEC ID |
+|------|------|------|------|---------|
+| 1. Encoding | `MultimodalEncoder` trait | `EncoderMedia` (File/Base64/Raw/Url) | `MultimodalEncoded { tokens, embeddings, kind }` | REQ-API-MULTIMODAL-ENCODER |
+| 2. Routing | `route_multimodal_tokens` (纯函数) | prompt_tokens + MultimodalContext + MultimodalTokenIds | `RoutedSequence` (virtual tokens 扩展 + per-span embedding 引用) | REQ-ARCH-MULTIMODAL-ROUTING |
+| 3. Fusion | Decoder embedding lookup | RoutedSequence + 文本 embedding 表 | 拼接的 hidden_state 序列输入第一层 transformer | REQ-ARCH-MULTIMODAL-FUSION |
+
+#### Routing 规则 (REQ-ARCH-MULTIMODAL-ROUTING)
+
+- Prompt 中遇到 `image_token_id` → 消费下一个 `MultimodalEncoded(kind=Image)` 并插入其 `tokens` 序列
+- 遇到 `audio_token_id` → 同上消费 Audio
+- 其他 → 保留原 token
+- `MultimodalContext` 按 push 顺序 FIFO,缺媒体抛 `SlotUnderflow`
+- 多次 image/audio 交错:按 prompt 中特殊 token 出现顺序严格匹配
+
+#### Fusion 契约 (ARCH-MULTIMODAL-FUSION)
+
+- **注入点**: `decoder_forward` 的 embedding lookup(Gather op 之后,第一个 transformer 层之前)
+- **实现方式**: virtual token 对应位置直接用 encoder 的 `embeddings` 覆盖 embed_tokens 查表结果,不过 text embedding 表
+- **shape 契约**: encoder 产出的 `embeddings` 必须为 `[num_tokens, hidden_size]` row-major,hidden_size 与 decoder 一致
+- **零拷贝要求**: 当 encoder 和 decoder 在同一后端(CPU/GPU)时,embeddings buffer 直接注入 decoder 输入张量,不做中间拷贝
+
+#### 状态机约束 (REQ-ARCH-MULTIMODAL-NO-SILENT)
+
+- 用户传 `.image()` 但未 `set_multimodal_encoder` → `ClientError::InvalidModelType` (立即 Err,不 fallback 到 text-only)
+- 模型不声明 `multimodal_token_ids` → `InvalidModelType` 拒绝
+- encoder 成功但 decoder-side fusion 未实现 → `RuntimeError("multimodal decoder fusion not yet implemented")` (NO_SILENT_FALLBACK;不允许 silent drop media input)
+- 纯文本调用(无媒体)绕过整条多模态路径,与既有 text-only 语义 100% 相同(零回归)
+
+#### 实现位置
+
+| 组件 | 文件 |
+|------|------|
+| Encoder trait + EncoderMedia + MultimodalEncoded + MultimodalContext + route_multimodal_tokens | `src/compat/multimodal.rs` |
+| MultimodalTokenIds config 解析(image_token_id / boi_token_id / audio_token_id / boa_token_id + Gemma 4 fallback) | `src/model_config.rs::from_value` |
+| Client.set_multimodal_encoder + execute_generation_multimodal 分派 | `src/client.rs` |
+| GenerationBuilder.image/.audio + MediaInput enum | `src/generation.rs` |
+| Decoder-side fusion(待接入) | `src/compat/decoder_forward.rs` (T64 后续) |
+
 ### 公共 API
 
 **同步/异步客户端**：提供 `Client` 和 `AsyncClient` 两种接口类型

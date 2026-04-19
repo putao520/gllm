@@ -221,6 +221,73 @@ embed(texts).rerank_query(query).top_n(n).generate_answer(prompt)
 2. Generator 独立于 embedder/reranker（Decoder 架构 vs Encoder 架构），权重不共享
 3. top-n 文档通过文本拼接传入 LLM（非 hidden state 注入），保持 LLM 的通用性
 
+### 3.7 多模态生成 (Multimodal Generation) — REQ-API-MULTIMODAL
+
+**适用范围**: Gemma 4 31B/E4B 等 vision+audio 多模态 generator。文本-only 模型 (SmolLM2、Qwen3 等) 的 `.image()` / `.audio()` 被拒为 `InvalidModelType`。
+
+#### 3.7.1 API 表面
+
+**注入编码器**:
+```rust
+use gllm::compat::multimodal::MultimodalEncoder;
+
+let client = Client::new_chat("google/gemma-4-31B-IT")?;
+client.set_multimodal_encoder(Arc::new(MySigLipUsmEncoder::new()?));
+```
+
+**附加媒体输入**:
+```rust
+let resp = client.generate("Describe this image.")
+    .image(MediaInput::File("/path/to/cat.jpg".into()))    // 或 Base64/Raw
+    .max_tokens(100)
+    .temperature(0.3)
+    .generate()?;
+```
+
+`MediaInput` 支持四种模式,按代价递增:
+| 模式 | 使用场景 |
+|------|---------|
+| `MediaInput::File(PathBuf)` | 本地文件,由 encoder 负责解码 |
+| `MediaInput::Base64 { data, mime_type }` | 网络上传的 base64 payload |
+| `MediaInput::Raw(bytes)` | 预解码的像素 / PCM 帧 |
+| `MediaInput::Url(String)` | 远程 URI,encoder 负责拉取(可能 Err::NetworkUnreachable) |
+
+#### 3.7.2 Encoder trait (REQ-API-MULTIMODAL-ENCODER)
+
+```rust
+pub trait MultimodalEncoder: Send + Sync {
+    fn encode_image(&self, media: &EncoderMedia) -> Result<MultimodalEncoded, BackendError>;
+    fn encode_audio(&self, media: &EncoderMedia) -> Result<MultimodalEncoded, BackendError>;
+}
+
+pub struct MultimodalEncoded {
+    pub tokens: Vec<u32>,        // 虚拟 token 序列(长度由 encoder 决定)
+    pub embeddings: Vec<f32>,    // [num_tokens, hidden_size] row-major
+    pub kind: MediaKind,         // Image / Audio
+}
+```
+
+- `tokens.len() * hidden_size == embeddings.len()` 由 `MultimodalEncoded::validate()` 强制
+- encoder 实现可选 SigLIP ViT (image) / USM Conformer (audio),或任何满足 trait 的实现
+
+#### 3.7.3 特殊 Token ID 来源 (REQ-API-MULTIMODAL-TOKENS)
+
+- **SSOT**: `ModelConfig::multimodal_token_ids: Option<MultimodalTokenIds>`
+- 解析优先级(`model_config.rs::from_value`):
+  1. `config.json` 顶层 `image_token_id` / `audio_token_id` (HF 惯例)
+  2. alias `boi_token_id` / `boa_token_id` (Gemma 4 命名)
+  3. 两者均缺且 `vision_config` 存在 → fallback `MultimodalTokenIds::gemma4_defaults()` (258880 / 258881)
+  4. 纯文本模型 → `None`,`.image()` 调用在 `execute_generation_multimodal` 第 2 步被 `InvalidModelType` 拒绝
+- **禁止硬编码**: 任何 `const IMAGE_TOKEN: u32 = 258880` 直接写到 Rust 源码均违规,必须从 config 或 manifest 读
+
+#### 3.7.4 行为约束 (REQ-API-MULTIMODAL-BEHAVIOR)
+
+1. `.image()` / `.audio()` 调用前未 `set_multimodal_encoder` → `ClientError::InvalidModelType` (不是 silent-drop)
+2. 模型不声明 `multimodal_token_ids` → `InvalidModelType` 拒绝媒体输入
+3. encoder 执行失败(文件不存在、解码异常、OOM) → 原错误包装为 `RuntimeError("vision encode failed: ...")`
+4. **decoder-side fusion 未就绪时禁止 silent fallback**: 当 encoder 成功产出 embedding 序列但 `executor.generate` 当前不支持 embedding 直接注入,client 必须 `Err("multimodal decoder fusion not yet implemented")` (NO_SILENT_FALLBACK)。不允许"看似成功但 media 被默默丢弃"的虚假 API。
+5. 纯文本调用(无 `.image()` / `.audio()`)永远绕过多模态 routing,与既有 `generate()` 语义 100% 一致
+
 ## 4. 错误处理
 
 所有 API 返回 `Result<T, GllmError>`。
