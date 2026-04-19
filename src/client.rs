@@ -277,9 +277,30 @@ impl ClientBuilder {
                 Some(Self::build_pipeline_model(generator_id, ModelKind::Chat)?);
         }
 
+        // ARCH-MULTIMODAL (SPEC §3.7): if the model declares a `vision_config`,
+        // try to materialise a real SigLIP encoder from the loaded weights
+        // and auto-register it. Failing to find every weight (e.g. text-only
+        // checkpoint that happens to declare vision geometry) falls through
+        // to `None`; the user can still inject a custom encoder via
+        // `Client::set_multimodal_encoder`.
+        let auto_vision_encoder: Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>> = {
+            let executor = state.backend.executor();
+            match executor.try_build_siglip_encoder() {
+                Ok(Some(enc)) => Some(Arc::new(enc) as Arc<dyn crate::compat::multimodal::MultimodalEncoder>),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(
+                        "SigLIP encoder auto-build failed ({e}); model will require manual \
+                         `Client::set_multimodal_encoder` to process images"
+                    );
+                    None
+                }
+            }
+        };
+
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
-            multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
+            multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_vision_encoder)),
         })
     }
 

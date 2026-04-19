@@ -283,6 +283,20 @@ impl DynBackendExecutor {
         }
     }
 
+    /// Build a SigLIP encoder from the loaded weights (CPU-only for now).
+    ///
+    /// Returns `Ok(None)` when the model has no `vision_config` or when
+    /// required weights are not present. See `BackendExecutor::try_build_siglip_encoder`.
+    pub fn try_build_siglip_encoder(
+        &self,
+    ) -> Result<Option<crate::compat::vision_forward::SigLipEncoder>, crate::engine::executor::ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.try_build_siglip_encoder(),
+            DynBackendExecutor::F16(e) => e.try_build_siglip_encoder(),
+            DynBackendExecutor::BF16(e) => e.try_build_siglip_encoder(),
+        }
+    }
+
     /// Add a generation hook (guardrail/probe).
     pub fn add_hook(&self, hook: Box<dyn crate::generation::GenerationHook>) -> Result<(), crate::engine::executor::ExecutorError> {
         match self {
@@ -715,6 +729,68 @@ impl<E: Element> BackendExecutor<E> {
             _ => Err(ExecutorError::Backend(
                 crate::engine::executor::BackendError::Unimplemented(
                     "embed_tokens_f32 only available for CPU backend in this API",
+                ),
+            )),
+        }
+    }
+
+    /// Build a `SigLipEncoder` from the loaded model's vision weights.
+    ///
+    /// Returns `Ok(None)` if the model does not declare vision support
+    /// (`vision_config` is None) or if any SigLIP weight is missing from the
+    /// weight store. Returns `Err` only for hard failures (shape mismatch,
+    /// corrupt weights, I/O error). CPU-only for now — the vision encoder
+    /// JIT path currently targets x86_64 / AArch64 CPU codegen; GPU vision
+    /// encoding is a separate (future) concern.
+    pub fn try_build_siglip_encoder(
+        &self,
+    ) -> Result<Option<crate::compat::vision_forward::SigLipEncoder>, ExecutorError> {
+        let cfg = match self.model_config().vision_config.clone() {
+            Some(cfg) => cfg,
+            None => return Ok(None),
+        };
+        let token_ids = self
+            .model_config()
+            .multimodal_token_ids
+            .unwrap_or_else(|| {
+                crate::compat::multimodal::MultimodalTokenIds::gemma4_defaults()
+            });
+
+        match self {
+            BackendExecutor::Cpu(exec) => {
+                let backend = exec.backend();
+                let weights = exec.weights();
+                crate::compat::vision_forward::try_build_siglip_from_tensors(
+                    &cfg,
+                    token_ids,
+                    |name| {
+                        // get_typed_data returns (bytes, dtype). For CPU the
+                        // Element is f32, so the bytes map zero-copy to f32,
+                        // but we still run it through typed_bytes_to_f32 to
+                        // normalise f16/bf16/quantized storage.
+                        let result = crate::compat::weight_helpers::get_typed_data(
+                            weights, backend, &[name],
+                        );
+                        match result {
+                            Ok((bytes, dtype)) => {
+                                let data = crate::compat::jit_helpers::typed_bytes_to_f32(
+                                    &bytes, dtype,
+                                );
+                                let shape = weights
+                                    .tensor_shape(name)
+                                    .map(|s| s.to_vec())
+                                    .unwrap_or_else(|| vec![data.len()]);
+                                Some((data, shape))
+                            }
+                            Err(_) => None,
+                        }
+                    },
+                )
+                .map_err(ExecutorError::Backend)
+            }
+            _ => Err(ExecutorError::Backend(
+                crate::engine::executor::BackendError::Unimplemented(
+                    "try_build_siglip_encoder currently only implemented for CPU backend",
                 ),
             )),
         }
