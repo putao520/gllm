@@ -9,7 +9,7 @@
 //! 废弃散乱的指令集条件判断。
 //! 所有硬件探测结果必须严格坍缩为对底层 JIT 编译器的**强数学约束变量组**。
 
-use crate::sensors::MemoryNetworkSensors;
+use crate::sensors::{GpuPlatform, GpuTopology, MemoryNetworkSensors};
 use super::profiler::ProbeResult;
 
 // ── IR 约束变量 (§12.6 Target Execution Topology) ──
@@ -170,10 +170,15 @@ impl CompilerConstraints {
     ///
     /// §12.6 核心法则：废弃散乱的指令集条件判断，
     /// 所有硬件探测结果必须坍缩为此结构体。
+    ///
+    /// `gpu_topology` (SPEC/02-HARDWARE.md §2.2 Phase 4) 驱动 GPU 相关约束
+    /// (SM 版本/数量、共享内存、L2 容量、warp_size、Tensor Core 代数、
+    ///  TMA/FP4/FP6 特性)。当为 `None` 时系统为 CPU-only。
     pub fn derive(
         profile: &gllm_kernels::dispatch::DeviceProfile,
         sensors: &MemoryNetworkSensors,
         probe_result: Option<&ProbeResult>,
+        gpu_topology: Option<&GpuTopology>,
     ) -> Self {
         let mut constraints = Self::default();
 
@@ -242,19 +247,50 @@ impl CompilerConstraints {
             .map(|t| t.nodes.len())
             .unwrap_or(1);
 
-        // ── GPU 约束 — DeviceProfile has no gpu field, derive from ISV capabilities ──
-        // GPU constraints come from separate GPU detection path
-        constraints.gpu_sm_version = None;
-        constraints.gpu_sm_count = None;
-        constraints.gpu_warp_size = None;
-        constraints.smem_size = None;
-        constraints.tensor_core_gen = 0;
+        // ── GPU 约束 (SPEC/02-HARDWARE.md §2.2 Phase 4) ──
+        //
+        // GpuTopology 由 `sensors::gpu::detect_gpu()` 在加载期一次性探测。
+        // `None` 表示 CPU-only 系统（所有 GPU 字段清零）。
+        if let Some(gpu) = gpu_topology {
+            constraints.gpu_sm_count = Some(gpu.compute_unit_count);
+            constraints.gpu_warp_size = Some(gpu.warp_size);
+            constraints.smem_size = Some(gpu.shared_mem_per_sm_bytes);
+            constraints.tensor_core_gen = gpu.tensor_core_gen;
 
-        // ── Hopper/Blackwell 特性 ──
-        // Only set if GPU is detected (would be via feature-gated path)
-        constraints.has_tma = false;
-        constraints.has_native_fp4 = false;
-        constraints.has_native_fp6 = false;
+            // L2 cache: GPU L2 优先于 CPU L2（gllm-kernels Compiler 在 GPU codegen
+            // 时消费 l2_cache_size 作为分块锚点）。仅当 GPU 侧提供有效值时覆盖。
+            if gpu.l2_bytes > 0 {
+                constraints.l2_cache_size = gpu.l2_bytes;
+            }
+
+            // sm_version 仅在 CUDA 平台有意义（HIP 使用 gfx_arch，Metal 使用 gpu_family）。
+            constraints.gpu_sm_version = match gpu.platform {
+                GpuPlatform::Cuda { sm_version } => Some(sm_version),
+                // HIP/Metal 不使用 SM 版本；这里返回 None 让 codegen 走各自的 platform 路径。
+                GpuPlatform::Hip { .. } | GpuPlatform::Metal { .. } => None,
+            };
+
+            // ── Hopper/Blackwell 特性（仅 NVIDIA）──
+            let sm = match gpu.platform {
+                GpuPlatform::Cuda { sm_version } => sm_version,
+                _ => 0,
+            };
+            // TMA (Tensor Memory Accelerator): Hopper SM90+
+            constraints.has_tma = sm >= 90;
+            // FP4 原生: Blackwell SM100+
+            constraints.has_native_fp4 = sm >= 100;
+            // FP6 原生: Blackwell SM100+ (与 FP4 同代)
+            constraints.has_native_fp6 = sm >= 100;
+        } else {
+            constraints.gpu_sm_version = None;
+            constraints.gpu_sm_count = None;
+            constraints.gpu_warp_size = None;
+            constraints.smem_size = None;
+            constraints.tensor_core_gen = 0;
+            constraints.has_tma = false;
+            constraints.has_native_fp4 = false;
+            constraints.has_native_fp6 = false;
+        }
 
         // ── RDMA 约束 ──
         if let Some(_probe) = probe_result {
@@ -339,12 +375,98 @@ mod tests {
     fn test_compiler_constraints_derive() {
         let profile = gllm_kernels::dispatch::DeviceProfile::detect();
         let sensors = MemoryNetworkSensors::detect(&profile);
-        let constraints = CompilerConstraints::derive(&profile, &sensors, None);
+        let constraints = CompilerConstraints::derive(&profile, &sensors, None, None);
 
         // 基本合理性检查
         assert!(constraints.simd_width_bits > 0);
         assert!(constraints.l2_cache_size > 0);
         assert!(constraints.l1i_size > 0);
+        // GPU 字段：无 GPU topology 必须全部为 None / 0
+        assert_eq!(constraints.gpu_sm_count, None);
+        assert_eq!(constraints.gpu_warp_size, None);
+        assert_eq!(constraints.smem_size, None);
+        assert_eq!(constraints.tensor_core_gen, 0);
+        assert!(!constraints.has_tma);
+        assert!(!constraints.has_native_fp4);
+        assert!(!constraints.has_native_fp6);
+    }
+
+    #[test]
+    fn test_compiler_constraints_derive_with_cuda_hopper() {
+        // 模拟 Hopper (SM90) GPU topology
+        let profile = gllm_kernels::dispatch::DeviceProfile::detect();
+        let sensors = MemoryNetworkSensors::detect(&profile);
+        let gpu = GpuTopology {
+            platform: GpuPlatform::Cuda { sm_version: 90 },
+            compute_unit_count: 132,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 228 * 1024,
+            l2_bytes: 50 * 1024 * 1024,
+            global_mem_bytes: 80 * 1024 * 1024 * 1024,
+            warp_size: 32,
+            compute_cap_major: 9,
+            compute_cap_minor: 0,
+        };
+        let c = CompilerConstraints::derive(&profile, &sensors, None, Some(&gpu));
+
+        assert_eq!(c.gpu_sm_version, Some(90));
+        assert_eq!(c.gpu_sm_count, Some(132));
+        assert_eq!(c.gpu_warp_size, Some(32));
+        assert_eq!(c.smem_size, Some(228 * 1024));
+        assert_eq!(c.tensor_core_gen, 3);
+        assert!(c.has_tma, "Hopper SM90 must have TMA");
+        assert!(!c.has_native_fp4, "Hopper SM90 does not have native FP4");
+        assert_eq!(c.l2_cache_size, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_compiler_constraints_derive_with_cuda_blackwell() {
+        let profile = gllm_kernels::dispatch::DeviceProfile::detect();
+        let sensors = MemoryNetworkSensors::detect(&profile);
+        let gpu = GpuTopology {
+            platform: GpuPlatform::Cuda { sm_version: 100 },
+            compute_unit_count: 192,
+            tensor_core_gen: 4,
+            shared_mem_per_sm_bytes: 256 * 1024,
+            l2_bytes: 96 * 1024 * 1024,
+            global_mem_bytes: 192 * 1024 * 1024 * 1024,
+            warp_size: 32,
+            compute_cap_major: 10,
+            compute_cap_minor: 0,
+        };
+        let c = CompilerConstraints::derive(&profile, &sensors, None, Some(&gpu));
+
+        assert_eq!(c.gpu_sm_version, Some(100));
+        assert_eq!(c.tensor_core_gen, 4);
+        assert!(c.has_tma);
+        assert!(c.has_native_fp4, "Blackwell SM100 must have native FP4");
+        assert!(c.has_native_fp6, "Blackwell SM100 must have native FP6");
+    }
+
+    #[test]
+    fn test_compiler_constraints_derive_with_hip() {
+        let profile = gllm_kernels::dispatch::DeviceProfile::detect();
+        let sensors = MemoryNetworkSensors::detect(&profile);
+        let gpu = GpuTopology {
+            platform: GpuPlatform::Hip { gfx_arch: 0x942 },
+            compute_unit_count: 228,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 64 * 1024,
+            l2_bytes: 256 * 1024 * 1024,
+            global_mem_bytes: 192 * 1024 * 1024 * 1024,
+            warp_size: 64,
+            compute_cap_major: 9,
+            compute_cap_minor: 0x42,
+        };
+        let c = CompilerConstraints::derive(&profile, &sensors, None, Some(&gpu));
+
+        assert_eq!(c.gpu_sm_version, None, "HIP does not use SM version");
+        assert_eq!(c.gpu_sm_count, Some(228));
+        assert_eq!(c.gpu_warp_size, Some(64));
+        assert_eq!(c.tensor_core_gen, 3);
+        // Hopper-only 特性在 HIP 路径上必须 false
+        assert!(!c.has_tma);
+        assert!(!c.has_native_fp4);
     }
 
     #[test]

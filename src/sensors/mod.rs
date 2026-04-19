@@ -6,6 +6,10 @@
 use gllm_kernels::dispatch::DeviceProfile;
 use crate::jit::compiler_constraints::CompilerConstraints;
 
+pub mod gpu;
+
+pub use gpu::{GpuPlatform, GpuTopology};
+
 /// NUMA 拓扑结构
 #[derive(Debug, Clone)]
 pub struct NumaTopology {
@@ -197,21 +201,6 @@ pub struct CpuTopology {
     pub l3_bytes: usize,
 }
 
-/// GPU 拓扑信息
-#[derive(Debug, Clone)]
-pub struct GpuTopology {
-    /// SM/CU 数量
-    pub compute_unit_count: usize,
-    /// 共享内存大小 (bytes per SM)
-    pub smem_bytes: usize,
-    /// L2 缓存大小 (bytes)
-    pub l2_bytes: usize,
-    /// SM 版本 (NVIDIA: 70/80/90/100)
-    pub sm_version: Option<u32>,
-    /// Warp/Wavefront 大小
-    pub warp_size: usize,
-}
-
 /// 系统级硬件拓扑 (§12.6)
 ///
 /// 聚合 CPU + GPU 拓扑信息，一次性探测，运行时固定。
@@ -232,7 +221,22 @@ pub struct SystemTopology {
 
 impl SystemTopology {
     /// 一次性探测系统拓扑 (§12.6: 加载期探测，运行时固定)
+    ///
+    /// GPU 探测错误（feature 启用但 runtime 查询失败）会 panic。
+    /// 需要可恢复语义的调用方使用 [`SystemTopology::try_detect`]。
     pub fn detect() -> Self {
+        Self::try_detect().expect("SystemTopology::detect: GPU probe failure")
+    }
+
+    /// 一次性探测系统拓扑，传播 GPU 探测错误（真实 bug 场景）。
+    ///
+    /// ## 返回值
+    ///
+    /// - `Ok(topo)`: 探测成功（`topo.gpu` 为 `Some` 表示有 GPU，`None` 表示 CPU-only 系统）
+    /// - `Err(msg)`: feature 启用且 driver 库加载成功，但属性查询失败
+    ///
+    /// 禁止降级：feature 启用但 runtime 错误绝不静默返回 `gpu: None`。
+    pub fn try_detect() -> Result<Self, String> {
         let profile = DeviceProfile::detect();
         let sensors = MemoryNetworkSensors::detect(&profile);
         let (l1d, l2, _l3) = profile.cache_sizes();
@@ -251,23 +255,31 @@ impl SystemTopology {
             l3_bytes,
         };
 
-        // GPU 拓扑：当前通过 DeviceProfile 推导
-        // 真实 GPU 检测需要 feature-gated CUDA/HIP/Metal 路径
-        let gpu = None; // TODO(Phase 4): GPU 拓扑探测
+        // §12.6 Phase 4: 真实 GPU 拓扑探测（CUDA → HIP → Metal）。
+        // feature-gated；无 feature 启用 → Ok(None)。
+        let gpu = gpu::detect_gpu()?;
 
-        let constraints = CompilerConstraints::derive(&profile, &sensors, None);
+        let constraints = CompilerConstraints::derive(&profile, &sensors, None, gpu.as_ref());
 
-        Self {
+        Ok(Self {
             cpu,
             gpu,
             sensors,
             profile,
             constraints,
-        }
+        })
     }
 
-    /// 从已有 DeviceProfile 构建（避免重复探测）
+    /// 从已有 DeviceProfile 构建（避免重复探测）。
+    ///
+    /// GPU 探测错误会 panic；使用 [`SystemTopology::try_from_profile`] 获得 Result。
     pub fn from_profile(profile: DeviceProfile) -> Self {
+        Self::try_from_profile(profile)
+            .expect("SystemTopology::from_profile: GPU probe failure")
+    }
+
+    /// 从已有 DeviceProfile 构建，传播 GPU 探测错误。
+    pub fn try_from_profile(profile: DeviceProfile) -> Result<Self, String> {
         let sensors = MemoryNetworkSensors::detect(&profile);
         let (l1d, l2, _l3) = profile.cache_sizes();
 
@@ -285,15 +297,17 @@ impl SystemTopology {
             l3_bytes,
         };
 
-        let constraints = CompilerConstraints::derive(&profile, &sensors, None);
+        let gpu = gpu::detect_gpu()?;
 
-        Self {
+        let constraints = CompilerConstraints::derive(&profile, &sensors, None, gpu.as_ref());
+
+        Ok(Self {
             cpu,
-            gpu: None,
+            gpu,
             sensors,
             profile,
             constraints,
-        }
+        })
     }
 
     /// 获取 JIT 编译器约束变量
@@ -322,13 +336,12 @@ impl MemoryNetworkSensors {
     /// 计算 RDMA Pipelining 的最小 Chunk 大小
     ///
     /// 满足约束: T_compute(chunk) >= T_rdma_transfer(chunk)
-    pub fn min_chunk_size_for_rdma(&self, compute_tflops: f32) -> Option<usize> {
+    pub fn min_chunk_size_for_rdma(&self, _compute_tflops: f32) -> Option<usize> {
         let bandwidth = self.nic_bandwidth_gbs?;
         let latency = self.rdma_latency_us?;
 
-        let transfer_time_per_gb = 1.0 / bandwidth;
-        let compute_time_per_tflop = 1.0 / compute_tflops;
-
+        // 最小传输数据量 = latency(s) * bandwidth(GB/s) → GB
+        // 假设 token = 4KB (4096 B) embedding
         let min_data_gb = latency * 1e-6 * bandwidth;
         let min_tokens = (min_data_gb * 1e9 / 4096.0) as usize;
 
@@ -363,8 +376,61 @@ mod tests {
         let profile = DeviceProfile::detect();
         let topo = SystemTopology::from_profile(profile);
         assert!(topo.cpu.core_count > 0);
-        assert_eq!(topo.has_gpu(), false); // CPU-only for now
         assert!(topo.numa_node_count() >= 1);
+
+        // 无 GPU feature → has_gpu() 必须 false
+        // feature 启用但无物理 GPU → has_gpu() 仍为 false
+        // feature 启用且有物理 GPU → has_gpu() 为 true（字段已被真实填充）
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+        {
+            assert!(!topo.has_gpu(), "CPU-only build must report has_gpu() == false");
+        }
+
+        // GPU 探测结果与 constraints 字段一致性
+        if let Some(gpu) = topo.gpu.as_ref() {
+            assert!(gpu.compute_unit_count > 0);
+            assert!(gpu.warp_size > 0);
+            assert_eq!(
+                topo.constraints.gpu_warp_size,
+                Some(gpu.warp_size),
+                "CompilerConstraints.gpu_warp_size must mirror GpuTopology.warp_size"
+            );
+            assert_eq!(
+                topo.constraints.gpu_sm_count,
+                Some(gpu.compute_unit_count),
+                "CompilerConstraints.gpu_sm_count must mirror GpuTopology.compute_unit_count"
+            );
+        } else {
+            assert_eq!(topo.constraints.gpu_sm_count, None);
+            assert_eq!(topo.constraints.gpu_warp_size, None);
+        }
+    }
+
+    #[test]
+    fn test_gpu_detection_result_shape() {
+        // try_detect 必须可调用且返回 Result
+        let result = SystemTopology::try_detect();
+        // 在 CI 里通常 CPU-only 或 driver 不存在 → Ok
+        // 若真实 GPU 探测失败（feature 启用但 runtime 错误） → Err
+        match result {
+            Ok(topo) => {
+                assert!(topo.cpu.core_count > 0);
+            }
+            Err(msg) => {
+                assert!(!msg.is_empty(), "error must have diagnostic message");
+            }
+        }
+    }
+
+    #[cfg(not(any(feature = "cuda", feature = "hip", feature = "metal")))]
+    #[test]
+    fn test_no_gpu_feature_yields_none() {
+        // 无 GPU feature 编译 → SystemTopology::detect().gpu 必须为 None（无 panic）
+        let topo = SystemTopology::detect();
+        assert!(topo.gpu.is_none());
+        assert!(topo.constraints.gpu_sm_count.is_none());
+        assert!(topo.constraints.gpu_sm_version.is_none());
+        assert!(topo.constraints.gpu_warp_size.is_none());
     }
 
     #[test]
