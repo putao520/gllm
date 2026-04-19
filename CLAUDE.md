@@ -34,7 +34,6 @@
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) | ✅ |
 | `12-STRATEGY-ARBITER.md` | 策略仲裁器 (InferenceMode Latency/Throughput, GraphProfile 模型图拓扑特征, StrategyBias 成本调制, HwOptEngine 集成) | ✅ |
 | `DOCS/scheduling/jit-cache-protocol.md` | JIT 编译缓存协议 (三级缓存, SymDim 动态维度, CPU/GPU 统一) | ✅ |
-| `DOCS/scheduling/unified-jit-architecture-master.md` | 📎 索引文件（内容已迁移至 02-ARCHITECTURE.md §9-§16） | ✅ |
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 | ✅ |
 | `../gllm-kernels/SPEC/ARCH-DATA-FLOW-CONTRACT.md` | **数据流唯一来源契约** — lower/executor 每个值的唯一数据源映射表，禁止独立计算/反推/硬编码 | ✅ |
