@@ -9,6 +9,7 @@
 pub(crate) mod weight_helpers;
 mod knowledge_injector;
 pub(crate) mod artifact_cache;
+pub(crate) mod sampling;
 
 mod gpu_compile;
 #[allow(dead_code)]

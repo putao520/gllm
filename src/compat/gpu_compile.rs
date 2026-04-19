@@ -3091,68 +3091,41 @@ pub(crate) fn build_lm_head_graph(
     gllm_kernels::compiler::CompilerGraph::lm_head(seq_len, hidden, vocab_size, dtype)
 }
 
-/// CPU-side sampling from logits: temperature -> top-k -> top-p -> softmax -> sample.
+/// CPU-side sampling from logits: temperature -> top-k -> top-p -> softmax -> multinomial.
 ///
-/// Shared across all GPU backends (logits are downloaded to CPU before sampling).
+/// GPU 后端将 logits DtoH 后调用此函数。采样逻辑与 CPU 后端共享 `compat::sampling::sample_logits_row`，
+/// 确保 temperature / top_k / top_p 在所有后端产生一致的随机采样行为（T==0 → argmax,
+/// T>0 → multinomial）。禁止静默降级为 argmax。
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(crate) fn sample_logits_cpu(
     logits: &[f32],
     vocab_size: usize,
     sampling: &SamplingConfig,
-) -> Vec<u32> {
-    let seq_logits_count = logits.len() / vocab_size;
-    let mut result = Vec::with_capacity(seq_logits_count.max(1));
+) -> Result<Vec<u32>, crate::engine::executor::BackendError> {
+    use crate::engine::executor::BackendError as BE;
 
-    for seq_idx in 0..seq_logits_count.max(1) {
-        let start = seq_idx * vocab_size;
-        let end = (start + vocab_size).min(logits.len());
-        let row = &logits[start..end];
-
-        // Apply temperature
-        let temperature = if sampling.temperature <= 0.0 { 1e-8 } else { sampling.temperature };
-        let mut scored: Vec<(usize, f32)> = row.iter().enumerate()
-            .map(|(i, &v)| (i, v / temperature))
-            .collect();
-
-        // Sort descending by score
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)); // LEGAL: NaN 比较的标准 Rust 模式
-
-        // Top-k filtering
-        if sampling.top_k > 0 && sampling.top_k < scored.len() {
-            scored.truncate(sampling.top_k);
-        }
-
-        // Top-p (nucleus) filtering
-        if sampling.top_p < 1.0 && sampling.top_p > 0.0 {
-            let max_val = scored[0].1;
-            let mut cumulative = 0.0f32;
-            let mut cutoff = scored.len();
-            let exp_sum: f32 = scored.iter().map(|(_, s)| (*s - max_val).exp()).sum();
-            for (i, (_, s)) in scored.iter().enumerate() {
-                cumulative += (*s - max_val).exp() / exp_sum;
-                if cumulative >= sampling.top_p {
-                    cutoff = i + 1;
-                    break;
-                }
-            }
-            scored.truncate(cutoff);
-        }
-
-        // Softmax + argmax (greedy / deterministic sampling)
-        let max_val = scored[0].1;
-        let exp_vals: Vec<f32> = scored.iter().map(|(_, s)| (*s - max_val).exp()).collect();
-        let exp_sum: f32 = exp_vals.iter().sum();
-        let probs: Vec<f32> = exp_vals.iter().map(|e| e / exp_sum).collect();
-
-        let best_idx = probs.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) // LEGAL: NaN 比较的标准 Rust 模式
-            .map(|(i, _)| i)
-            .unwrap_or(0); // LEGAL: 空 probs 时默认索引 0
-
-        result.push(scored[best_idx].0 as u32);
+    if logits.is_empty() {
+        return Err(BE::Other("sample_logits_cpu: empty logits".into()));
+    }
+    if vocab_size == 0 {
+        return Err(BE::Other("sample_logits_cpu: vocab_size == 0".into()));
+    }
+    if logits.len() % vocab_size != 0 {
+        return Err(BE::Other(format!(
+            "sample_logits_cpu: logits len {} not divisible by vocab_size {}",
+            logits.len(),
+            vocab_size
+        )));
     }
 
-    result
+    let rows = logits.len() / vocab_size;
+    let mut result = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let start = r * vocab_size;
+        let row = &logits[start..start + vocab_size];
+        result.push(crate::compat::sampling::sample_logits_row(row, sampling)?);
+    }
+    Ok(result)
 }
 
 // ===========================================================================

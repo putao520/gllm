@@ -70,11 +70,47 @@ if let Some(info) = client.model_info() {
 let output = client.generate("Hello, who are you?")
     .max_tokens(100)
     .temperature(0.7)
+    .top_k(40)
+    .top_p(0.9)
     .stream(false)
     .generate()?;
 
 println!("{}", output.text);
 ```
+
+#### 3.1.1 采样参数
+
+| 参数 | 类型 | 默认 | 语义 |
+|------|------|------|------|
+| `temperature` | `f32` | `0.7` | `0.0` → greedy（确定性）；`>0` → 缩放 logits 后多项式采样 |
+| `top_k` | `usize` | `0` | `0` → 禁用；`k>0` → 只从 logit 值最大的 k 个候选中采样 |
+| `top_p` | `f32` | `1.0` | `1.0` → 禁用；`p∈(0,1)` → 按概率降序累积截断（nucleus sampling） |
+
+#### 3.1.2 采样语义契约 (REQ-API-SAMPLING-CONTRACT)
+
+**所有后端（CPU / CUDA / HIP / Metal）必须遵循相同的采样语义，禁止静默降级为 argmax。**
+
+采样路径严格按以下顺序执行：
+
+1. **Greedy**: `temperature == 0.0` → 直接对原始 logits 取 argmax，忽略 `top_k` / `top_p`；结果确定性、可复现。
+2. **Stochastic** (`temperature > 0.0`):
+   a. 按原始 logit 降序，取前 `top_k` 个候选（`top_k == 0` 表示保留全部）。
+   b. 对候选应用 `logit / temperature` 缩放。
+   c. softmax（subtract max 数值稳定）→ 得到概率分布 `p_i`。
+   d. 若 `top_p ∈ (0, 1)`：按 `p_i` 降序累积，截断至累积概率首次 `≥ top_p` 的位置，再重新归一化。
+   e. 多项式采样：从 `rand::thread_rng()` 取 `r ∈ [0, 1)`，落在对应 CDF 桶内的候选即为结果。
+3. **组合行为**: `top_k > 0 && top_p ∈ (0, 1)` 时，先 `top_k` 截断候选集，再 `top_p` 截断累积概率 — 两者可叠加。
+4. **错误路径**: 空 logits / 所有 logit 为 `-inf` / softmax 和为零 → 返回 `BackendError`，**不得**返回默认 token 0 或静默 argmax 绕过。
+
+**实现位置** (SSOT): `src/compat/sampling.rs::sample_logits_row`。
+- CPU 后端 `src/compat/cpu_backend.rs::CpuBackend::sample_from_tensor` 直接调用该函数。
+- GPU 后端 `src/compat/gpu_compile.rs::sample_logits_cpu` 将 logits DtoH 后调用该函数。
+
+**不变式**:
+- `T=0, 任意 logits` → 每次调用结果恒定（argmax）。
+- `T=1, uniform logits` → 不同 token 出现概率相等（统计意义上 argmax 非唯一胜出）。
+- `top_k=k` → 采样结果必落在 logit 前 k 名内。
+- `top_p=p (p<1, 尖峰分布)` → 采样集中在峰值候选。
 
 ### 3.2 向量嵌入 (Embedding)
 

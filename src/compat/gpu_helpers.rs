@@ -684,7 +684,7 @@ pub(super) fn gpu_sample_from_tensor(
     vocab_size: usize,
     sampling: &crate::engine::executor::SamplingConfig,
 ) -> Result<Vec<u32>, BE> {
-    Ok(super::gpu_compile::sample_logits_cpu(&logits.data, vocab_size, sampling))
+    super::gpu_compile::sample_logits_cpu(&logits.data, vocab_size, sampling)
 }
 
 /// GPU swap_out_pages: download page data from GPU to host swap store.
