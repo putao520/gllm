@@ -28,6 +28,24 @@ fn debug_embed_determinism() {
 }
 
 #[test]
+#[ignore = "诊断用 — 验证多次连续 embed 的 stable convergence"]
+fn debug_embed_determinism_multi_run() {
+    let client = Client::new_embedding("intfloat/e5-small-v2").expect("load");
+
+    let mut prev: Option<Vec<f32>> = None;
+    for i in 0..6 {
+        let r = client.embed(["hello"]).expect("embed");
+        let e = r.embeddings[0].embedding.clone();
+        eprintln!("run {} first8 = {:?}", i, &e[..8]);
+        if let Some(p) = &prev {
+            let same: usize = p.iter().zip(e.iter()).filter(|(a, b)| (*a - *b).abs() < 1e-7).count();
+            eprintln!("  vs run {}: same={}/{}", i - 1, same, p.len());
+        }
+        prev = Some(e);
+    }
+}
+
+#[test]
 #[ignore = "诊断用,手动跑 — 测试不同输入两次 embed 是否各自一致"]
 fn debug_embed_determinism_diff_inputs() {
     let client = Client::new_embedding("intfloat/e5-small-v2").expect("load");

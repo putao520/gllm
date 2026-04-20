@@ -2691,6 +2691,13 @@ impl FusedGraphExecutor {
         inputs: &HashMap<String, Vec<u8>>,
         shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        // ARCH-DET-DIAG (task #18): per-call counter to allow GLLM_DUMP_LAYERS
+        // to write each call into a sub-directory `call{N}/`. Used to bisect
+        // the first divergent node between successive identical inferences.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUN_COMPILED_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let call_idx = RUN_COMPILED_COUNTER.fetch_add(1, Ordering::SeqCst);
+
         let (mut tensors, weight_ptrs) = Self::seed_tensors_and_weight_ptrs(inputs, &self.graph.weight_bindings);
         // 仅 seed 阶段提供的 input 名字视为"外部已计算", 其余节点必须按拓扑顺序
         // 执行。禁止基于运行时 tensors map 判断跳过 (overwrite tensor 会导致
@@ -2769,11 +2776,14 @@ impl FusedGraphExecutor {
             // Debug: GLLM_DUMP_LAYERS=/path/to/dir 时 dump 每个节点 output (仅
             // live 部分 seq_len*feature_dim)。格式: 4B u32 seq_len + 4B u32
             // feature_dim + seq*feat*4B f32 raw。
+            // ARCH-DET-DIAG: 同一 client 的多次连续 run 会被分到 call{N}/ 子目录,
+            // 便于 diff 找出首个发散 node。
             if let Ok(dump_dir) = std::env::var("GLLM_DUMP_LAYERS") {
                 use std::io::Write;
-                let _ = std::fs::create_dir_all(&dump_dir);
+                let call_dir = format!("{}/call{}", dump_dir, call_idx);
+                let _ = std::fs::create_dir_all(&call_dir);
                 let node_name = &self.graph.nodes[node_idx].name;
-                let path = format!("{}/{:03}_{}.bin", dump_dir, node_idx, node_name);
+                let path = format!("{}/{:03}_{}.bin", call_dir, node_idx, node_name);
                 if let Ok(mut f) = std::fs::File::create(&path) {
                     let feat = cn.feature_dim.max(1) as u32;
                     let sl = seq_len as u32;
@@ -2781,6 +2791,18 @@ impl FusedGraphExecutor {
                     f.write_all(&feat.to_le_bytes()).ok();
                     let live_bytes = (seq_len * cn.feature_dim.max(1) * cn.output_dtype.size_bytes()).min(output_buf.len());
                     f.write_all(&output_buf[..live_bytes]).ok();
+                }
+            }
+            // GLLM_DUMP_CODE=<dir>: dump raw JIT machine code (per node, dedup by 1st call only)
+            if let Ok(code_dir) = std::env::var("GLLM_DUMP_CODE") {
+                if call_idx == 0 {
+                    use std::io::Write;
+                    let _ = std::fs::create_dir_all(&code_dir);
+                    let node_name = &self.graph.nodes[node_idx].name;
+                    let path = format!("{}/{:03}_{}.bin", code_dir, node_idx, node_name);
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let _ = f.write_all(cn.compiled.code_bytes());
+                    }
                 }
             }
 
