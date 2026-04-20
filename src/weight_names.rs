@@ -119,7 +119,14 @@ pub fn pooler_aliases(suffix: &str) -> Vec<String> {
 use crate::manifest::ArchFamily;
 
 /// Known architecture prefixes for decoder-only models.
-const DECODER_PREFIXES: &[&str] = &["", "model"];
+///
+/// Includes multi-modal nesting variants (`model.language_model`, `language_model`)
+/// for models like Gemma 4 that wrap the text decoder under a `language_model`
+/// sub-module alongside `vision_tower` / `audio_tower` / `embed_vision`. The
+/// canonical YAML template names use the bare `model.` prefix; these extra
+/// entries let `bind_weight_shapes_fuzzy` and the executor weight-binding loop
+/// resolve the actual storage names.
+const DECODER_PREFIXES: &[&str] = &["", "model", "language_model", "model.language_model"];
 
 /// Unified entry point: get architecture prefixes by family.
 pub fn arch_prefixes(family: ArchFamily) -> &'static [&'static str] {
@@ -361,26 +368,37 @@ pub const PLE_PROJECTION: &str = "model.per_layer_embedding.per_layer_projection
 pub const PLE_POST_MLP_PROJ_PREFIX: &str = "post_mlp_projection.weight";
 
 /// Generate alias names for PLE embed_tokens weight.
+///
+/// Canonical (gllm template): `model.per_layer_embedding.embed_tokens.weight`
+/// HuggingFace storage (Gemma 4): `model.language_model.embed_tokens_per_layer.weight`
+/// (also handles bare `embed_tokens_per_layer.weight` and `language_model.` nesting).
 pub fn ple_embed_tokens_aliases() -> Vec<String> {
     let mut out = Vec::new();
     for &prefix in DECODER_PREFIXES {
         if prefix.is_empty() {
             out.push("per_layer_embedding.embed_tokens.weight".to_string());
+            out.push("embed_tokens_per_layer.weight".to_string());
         } else {
             out.push(format!("{prefix}.per_layer_embedding.embed_tokens.weight"));
+            out.push(format!("{prefix}.embed_tokens_per_layer.weight"));
         }
     }
     out
 }
 
 /// Generate alias names for PLE per_layer_projection weight.
+///
+/// Canonical (gllm template): `model.per_layer_embedding.per_layer_projection.weight`
+/// HuggingFace storage (Gemma 4): `model.language_model.per_layer_model_projection.weight`
 pub fn ple_projection_aliases() -> Vec<String> {
     let mut out = Vec::new();
     for &prefix in DECODER_PREFIXES {
         if prefix.is_empty() {
             out.push("per_layer_embedding.per_layer_projection.weight".to_string());
+            out.push("per_layer_model_projection.weight".to_string());
         } else {
             out.push(format!("{prefix}.per_layer_embedding.per_layer_projection.weight"));
+            out.push(format!("{prefix}.per_layer_model_projection.weight"));
         }
     }
     out
@@ -388,9 +406,16 @@ pub fn ple_projection_aliases() -> Vec<String> {
 
 /// Generate alias names for the per-layer post_mlp_projection weight.
 ///
+/// Canonical (gllm template): `model.layers.{i}.post_mlp_projection.weight`
+/// HuggingFace storage (Gemma 4): `model.language_model.layers.{i}.per_layer_projection.weight`
+///
 /// `layer`: layer index (0-based)
 pub fn ple_post_mlp_proj_aliases(layer: usize) -> Vec<String> {
-    decoder_layer_aliases(layer, PLE_POST_MLP_PROJ_PREFIX, None)
+    let mut out = decoder_layer_aliases(layer, PLE_POST_MLP_PROJ_PREFIX, None);
+    // Gemma 4 storage uses `per_layer_projection.weight` (no `post_mlp_` prefix) under the
+    // language_model decoder layer.
+    out.extend(decoder_layer_aliases(layer, "per_layer_projection.weight", None));
+    out
 }
 
 /// 给定 **任意** canonical PLE 权重名 (global 两种 / per-layer post_mlp_projection),
@@ -444,17 +469,25 @@ mod tests {
     #[test]
     fn ple_embed_tokens_aliases_contains_canonical_and_bare() {
         let aliases = ple_embed_tokens_aliases();
+        // 每个 DECODER_PREFIX 产出 canonical (per_layer_embedding.embed_tokens.weight) +
+        // Gemma 4 storage (embed_tokens_per_layer.weight) 两个变体
         assert!(aliases.iter().any(|a| a == "per_layer_embedding.embed_tokens.weight"));
         assert!(aliases.iter().any(|a| a == "model.per_layer_embedding.embed_tokens.weight"));
-        assert_eq!(aliases.len(), DECODER_PREFIXES.len());
+        assert!(aliases.iter().any(|a| a == "embed_tokens_per_layer.weight"));
+        assert!(aliases.iter().any(|a| a == "model.language_model.embed_tokens_per_layer.weight"));
+        assert_eq!(aliases.len(), DECODER_PREFIXES.len() * 2);
     }
 
     #[test]
     fn ple_projection_aliases_contains_canonical_and_bare() {
         let aliases = ple_projection_aliases();
+        // 每个 DECODER_PREFIX 产出 canonical (per_layer_embedding.per_layer_projection.weight) +
+        // Gemma 4 storage (per_layer_model_projection.weight) 两个变体
         assert!(aliases.iter().any(|a| a == "per_layer_embedding.per_layer_projection.weight"));
         assert!(aliases.iter().any(|a| a == "model.per_layer_embedding.per_layer_projection.weight"));
-        assert_eq!(aliases.len(), DECODER_PREFIXES.len());
+        assert!(aliases.iter().any(|a| a == "per_layer_model_projection.weight"));
+        assert!(aliases.iter().any(|a| a == "model.language_model.per_layer_model_projection.weight"));
+        assert_eq!(aliases.len(), DECODER_PREFIXES.len() * 2);
     }
 
     #[test]

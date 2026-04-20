@@ -182,7 +182,19 @@ impl FusedGraph {
     /// This method tries exact match first, then strips/adds known architecture
     /// prefixes to find the matching tensor metadata.
     pub fn bind_weight_shapes_fuzzy<P: TensorProvider>(&mut self, provider: &P, format_needs_transpose: bool) -> usize {
-        const PREFIXES: &[&str] = &["model.", "roberta.", "bert.", "encoder.", "transformer."];
+        // Multi-modal models (e.g. Gemma 4 `Gemma4ForConditionalGeneration`) nest the
+        // text decoder weights under `model.language_model.` while the YAML template
+        // names them with the bare `model.` prefix. We try both add/strip directions
+        // for these multi-modal nesting variants in addition to the standard prefixes.
+        const PREFIXES: &[&str] = &[
+            "model.",
+            "roberta.",
+            "bert.",
+            "encoder.",
+            "transformer.",
+            "language_model.",
+            "model.language_model.",
+        ];
 
         let mut produced = HashSet::new();
         for node in &self.nodes {

@@ -749,7 +749,19 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         let found = TensorLookup::get_tensor(&weights, &canonical_name)
                             .map(|t| t.as_ref().as_ptr() as *const f32);
                         let found = found.or_else(|| {
-                            const PREFIXES: &[&str] = &["roberta.", "bert.", "model.", "encoder.", "transformer."];
+                            // Multi-modal models (e.g. Gemma 4 `Gemma4ForConditionalGeneration`)
+                            // nest the text decoder weights under `model.language_model.` while
+                            // the YAML template names them with the bare `model.` prefix. Include
+                            // both add/strip directions for these multi-modal nesting variants.
+                            const PREFIXES: &[&str] = &[
+                                "roberta.",
+                                "bert.",
+                                "model.",
+                                "encoder.",
+                                "transformer.",
+                                "language_model.",
+                                "model.language_model.",
+                            ];
                             for prefix in PREFIXES {
                                 if let Some(stripped) = canonical_name.strip_prefix(prefix) {
                                     if let Some(t) = TensorLookup::get_tensor(&weights, stripped) {
@@ -843,6 +855,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 "model.embed_tokens.weight", "embed_tokens.weight",
                                 "transformer.wte.weight", "embeddings.word_embeddings.weight",
                                 "token_embd.weight",
+                                // Gemma 4 multi-modal nesting
+                                "model.language_model.embed_tokens.weight",
+                                "language_model.embed_tokens.weight",
                             ];
                             let mut result: Option<Vec<u8>> = None;
                             for alias in EMBED_ALIASES {

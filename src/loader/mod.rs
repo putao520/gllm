@@ -774,7 +774,25 @@ impl Loader {
             None
         };
 
+        // Gemma 4 multi-modal SafeTensors 的张量布局是
+        //   model.{audio_tower,vision_tower,embed_audio,embed_vision}.*
+        //   model.language_model.{layers.*,embed_tokens,...}
+        // 与单模态 LLM (model.layers.*) 完全不同。这种 multi-modal nesting 在所有
+        // `check_name` 规则下都会落空,因为没有任何分支能把
+        // `model.language_model` 识别成 decoder family。先扫一遍找
+        // `model.language_model.` / `language_model.` 前缀,命中即返回 `gemma4`。
+        // 优先级高于通用 check_name,但不会影响其他 SafeTensors 模型 (它们没有
+        // language_model 这一层 nesting)。
+        let is_gemma4_name = |name: &str| -> bool {
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("model.language_model.")
+                || lower.starts_with("language_model.")
+        };
+
         if let Some(st) = self.safetensors.as_ref() {
+            if st.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
+                return Some("gemma4".to_string());
+            }
             for meta in st.iter_tensors() {
                 if let Some(arch) = check_name(&meta.name) {
                     return Some(arch);
@@ -782,6 +800,9 @@ impl Loader {
             }
         }
         if let Some(onnx) = self.onnx.as_ref() {
+            if onnx.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
+                return Some("gemma4".to_string());
+            }
             for meta in onnx.iter_tensors() {
                 if let Some(arch) = check_name(&meta.name) {
                     return Some(arch);
@@ -789,6 +810,9 @@ impl Loader {
             }
         }
         if let Some(gguf) = self.gguf.as_ref() {
+            if gguf.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
+                return Some("gemma4".to_string());
+            }
             for meta in gguf.iter_tensors() {
                 if let Some(arch) = check_name(&meta.name) {
                     return Some(arch);
