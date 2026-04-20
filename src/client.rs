@@ -127,6 +127,12 @@ pub struct ClientState {
     pub inference_mode: InferenceMode,
     pub reranker_state: Option<PipelineModelState>,
     pub generator_state: Option<PipelineModelState>,
+    /// ARCH-PER-CLIENT-PLAN (REQ-ARB-008): per-Client ExecutionPlan computed from
+    /// model archetype + inference mode + hardware via StrategyArbiter. Pushed onto
+    /// the kernels thread-local stack via `with_execution_plan` for the duration of
+    /// each inference call (embed/rerank/generate),消除全局 OnceLock 锁定首个
+    /// model bias 的污染问题。
+    pub execution_plan: Arc<gllm_kernels::compiler::planner::ExecutionPlan>,
 }
 
 /// State for a pipeline sub-model (reranker or generator).
@@ -392,20 +398,35 @@ impl ClientBuilder {
         let detected_backend = detect_backend()?;
         let backend_type = detected_backend.backend_type();
 
-        // ARCH-FUSION-PLAN-ISOLATION: 跳过 model-specific bias init,使用全局 default plan。
-        //
-        // 历史 BUG: init_global_execution_plan_with_bias(model_bias) 写入 OnceLock,
-        // 第一次 init 后所有后续 Client 沿用相同 bias。当 fusion 测试加载多个不同
-        // archetype 的模型 (e.g. e5-small-v2 encoder + Qwen3-Reranker decoder) 时,
-        // 第二个模型用第一个模型的 bias 编译 → strategy 选择不当 → JIT kernel 数值
-        // 漂移 (e2e_fusion_consistency_with_standalone / cross_arch_embed_rerank NaN)。
-        //
-        // 临时方案: 禁用 arbiter init,所有 Client 走 default bias (lazy init 的
-        // StrategyBias::default(),性能略次优但行为稳定可预测,fusion 测试可通过)。
-        //
-        // 长期方案 (follow-up): 把 EXECUTION_PLAN 改为 Arc<ExecutionPlan> 存在
-        // ClientState,codegen 接受 ExecutionPlan 参数,实现真正的 per-Client plan 隔离。
-        let _ = (&model_config_for_arbiter, &inference_mode, &backend_type);
+        // ARCH-PER-CLIENT-PLAN (REQ-ARB-008/009 fundamental fix): Strategy Arbiter
+        // 计算 per-Client StrategyBias,生成独立 ExecutionPlan 存到 ClientState。
+        // 不再写入全局 OnceLock — 每个 Client (含 fusion pipeline 的 reranker /
+        // generator) 各自持有 Arc<ExecutionPlan>,inference 调用时经
+        // `with_execution_plan` 推到 kernels thread-local stack,消除多 Client 间
+        // bias 污染 (历史 BUG: e2e_fusion_consistency / cross_arch_embed_rerank NaN)。
+        let arbiter_bias = if let Some(ref model_cfg) = model_config_for_arbiter {
+            use crate::engine::arbiter::ArbiterHwView;
+            let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
+            let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
+            let hw_view = match backend_type {
+                BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
+                    ArbiterHwView::gpu(49152)
+                }
+                BackendType::Cpu => {
+                    let profile = gllm_kernels::dispatch::device_profile();
+                    ArbiterHwView::from(profile)
+                }
+            };
+            crate::engine::arbiter::StrategyArbiter::arbitrate(
+                inference_mode,
+                &archetype,
+                &hw_view,
+            )
+        } else {
+            gllm_kernels::compiler::planner::StrategyBias::default()
+        };
+        let execution_plan =
+            gllm_kernels::compiler::planner::compute_execution_plan_with_bias(&arbiter_bias);
 
         let config_path = loader.config_path().map(|p| p.to_path_buf());
         let tokenizer_path = loader.tokenizer_path().map(|p| p.to_path_buf());
@@ -413,13 +434,18 @@ impl ClientBuilder {
 
         let manifest = Arc::new(manifest);
 
-        let backend = BackendContext::new(
-            model_id.to_string(),
-            manifest.clone(),
-            detected_backend,
-            weight_paths,
-            config_path,
-            tokenizer_path,
+        // ARCH-PER-CLIENT-PLAN: 编译阶段也用 per-Client plan,确保 JIT codegen 的
+        // FusionPlan/AttentionStrategy/MoE 决策与 inference 阶段一致。
+        let backend = gllm_kernels::compiler::planner::with_execution_plan(
+            execution_plan.clone(),
+            || BackendContext::new(
+                model_id.to_string(),
+                manifest.clone(),
+                detected_backend,
+                weight_paths,
+                config_path,
+                tokenizer_path,
+            ),
         )?;
 
         Ok(ClientState {
@@ -429,6 +455,7 @@ impl ClientBuilder {
             inference_mode,
             reranker_state: None,
             generator_state: None,
+            execution_plan,
         })
     }
 
@@ -869,18 +896,21 @@ impl Client {
         thinking_budget: Option<usize>,
     ) -> Result<GenerationResponse, ClientError> {
         let state = self.require_state()?;
-        let mut executor = state.backend.executor_mut();
-        let result = if let Some(sid) = session_id {
-            executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid, thinking_budget)
-        } else {
-            executor.generate(&prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
-        }?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let result = if let Some(sid) = session_id {
+                executor.generate_with_session(&prompt, max_tokens, temperature, top_k, top_p, sid, thinking_budget)
+            } else {
+                executor.generate(&prompt, max_tokens, temperature, top_k, top_p, thinking_budget)
+            }?;
 
-        let (text, thinking_content) = crate::generation::split_thinking_content(&result);
-        Ok(GenerationResponse {
-            text,
-            thinking_content,
-            request_id: None,
+            let (text, thinking_content) = crate::generation::split_thinking_content(&result);
+            Ok(GenerationResponse {
+                text,
+                thinking_content,
+                request_id: None,
+            })
         })
     }
 
@@ -1130,17 +1160,20 @@ impl Client {
         inputs: Vec<String>,
     ) -> Result<EmbeddingsResponse, ClientError> {
         let state = self.require_state()?;
-        let mut executor = state.backend.executor_mut();
-        let mut embeddings = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            embeddings.push(Embedding {
-                embedding: executor.embed(input)?,
-            });
-        }
-        Ok(EmbeddingsResponse {
-            embeddings,
-            rerank_scores: None,
-            request_id: None,
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let mut embeddings = Vec::with_capacity(inputs.len());
+            for input in &inputs {
+                embeddings.push(Embedding {
+                    embedding: executor.embed(input)?,
+                });
+            }
+            Ok(EmbeddingsResponse {
+                embeddings,
+                rerank_scores: None,
+                request_id: None,
+            })
         })
     }
 
@@ -1151,6 +1184,8 @@ impl Client {
         top_n: usize,
     ) -> Result<RerankResponse, ClientError> {
         let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
         let mut executor = state.backend.executor_mut();
         let mut scores = Vec::with_capacity(documents.len());
         for doc in documents.iter() {
@@ -1184,6 +1219,7 @@ impl Client {
             results,
             request_id: None,
         })
+        })
     }
 
     pub(crate) fn execute_classify(
@@ -1191,6 +1227,8 @@ impl Client {
         texts: Vec<String>,
     ) -> Result<crate::classify::ClassifyResponse, ClientError> {
         let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
         let mut executor = state.backend.executor_mut();
         let mut predictions = Vec::with_capacity(texts.len());
 
@@ -1221,6 +1259,7 @@ impl Client {
         }
 
         Ok(crate::classify::ClassifyResponse { predictions })
+        })
     }
 
     // -----------------------------------------------------------------
