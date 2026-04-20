@@ -238,3 +238,46 @@ fn e2e_generator_gemma4_qknorm() {
     );
 }
 
+// ============================================================================
+// G-E 路径: GPT-OSS (MoE + sliding/full attention 交替 + yarn RoPE + RMSNorm
+//          + SiLU + attention bias + mxfp4 量化)
+// ============================================================================
+
+/// TEST-E2E-GEN-005: GPT-OSS-20B 端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **算法路径差异**: G-E 路径覆盖 OpenAI gpt-oss 架构:
+///   - MoE 32 local experts / 4 experts/token (router 不量化, experts 用 mxfp4)
+///   - 24 层 sliding/full attention 交替 (sliding_window=128)
+///   - yarn RoPE (theta=150000, factor=32, original_max_position=4096)
+///   - attention_bias=true (Q/K/V 都带 bias)
+///   - swiglu_limit=7.0 (SwiGLU 钳位)
+///   - tie_word_embeddings=false
+///
+/// **期望结果**: 成功加载 openai/gpt-oss-20b SafeTensors 权重并生成语义合理的 token
+#[test]
+#[ignore = "follow-up: gpt-oss-20b 完整支持需 gllm-kernels 新增 yarn RoPE + mxfp4 反量化, gllm 新建 gptoss.yaml (sliding/full layer 路由 + Q/K/V bias + clipped SwiGLU)"]
+fn e2e_generator_gptoss_20b() {
+    const MODEL: &str = "openai/gpt-oss-20b";
+
+    let client = Client::new_chat(MODEL).expect("Failed to load gpt-oss-20b");
+    let response = client
+        .generate("The capital of France is")
+        .max_tokens(10)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("Generation failed");
+
+    let text = response.text.trim();
+    assert_generation_sane(text, "gptoss_20b");
+
+    let lower = text.to_lowercase();
+    let is_reasonable =
+        lower.contains("paris") || lower.contains("capital") || lower.contains("france");
+    assert!(
+        is_reasonable,
+        "Output should mention Paris/capital/France, got: {:?}",
+        text
+    );
+}
