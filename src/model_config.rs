@@ -758,9 +758,18 @@ impl ModelConfig {
         value: &Value,
         weight_dtype: Option<DType>,
     ) -> ModelConfigResult<Self> {
-        let hidden_size = require_usize(value, &["hidden_size", "n_embd", "d_model"])?;
-        let num_attention_heads =
-            require_usize(value, &["num_attention_heads", "n_head", "num_heads"])?;
+        // ARCH-MULTIMODAL-NESTED-CONFIG: Multi-modal 模型(Gemma 4 / SigLIP+LLaMA 等)
+        // 把文本骨干字段嵌套在 `text_config` 子对象内,顶层只有
+        // `architectures/audio_config/text_config/vision_config`。所有 require/find
+        // 都先查顶层,再查 text_config 子对象。
+        let hidden_size = require_usize(value, &[
+            "hidden_size", "n_embd", "d_model",
+            "text_config.hidden_size", "text_config.n_embd", "text_config.d_model",
+        ])?;
+        let num_attention_heads = require_usize(value, &[
+            "num_attention_heads", "n_head", "num_heads",
+            "text_config.num_attention_heads", "text_config.n_head", "text_config.num_heads",
+        ])?;
         let num_key_value_heads = find_usize(
             value,
             &[
@@ -768,26 +777,42 @@ impl ModelConfig {
                 "num_kv_heads",
                 "n_kv_head",
                 "attention.num_key_value_heads",
+                "text_config.num_key_value_heads",
+                "text_config.num_kv_heads",
             ],
         )
         .unwrap_or_else(|| {
             log::debug!("num_key_value_heads not found: defaulting to num_attention_heads = {}", num_attention_heads);
             num_attention_heads // LEGAL: num_key_value_heads 默认等于 num_attention_heads（非 GQA 模型）
         });
-        let num_hidden_layers =
-            require_usize(value, &["num_hidden_layers", "n_layer", "num_layers"])?;
+        let num_hidden_layers = require_usize(value, &[
+            "num_hidden_layers", "n_layer", "num_layers",
+            "text_config.num_hidden_layers", "text_config.n_layer", "text_config.num_layers",
+        ])?;
         let intermediate_size = find_usize(
             value,
-            &["intermediate_size", "n_inner", "ffn_inter_dim", "d_ff"],
+            &[
+                "intermediate_size", "n_inner", "ffn_inter_dim", "d_ff",
+                "text_config.intermediate_size", "text_config.n_inner",
+            ],
         );
-        let num_experts = find_usize(value, &["num_experts", "moe.num_experts", "num_local_experts", "n_routed_experts"]);
-        let num_experts_per_tok = find_usize(value, &["num_experts_per_tok", "num_selected_experts", "num_experts_per_token", "moe.num_experts_per_tok"]);
+        let num_experts = find_usize(value, &[
+            "num_experts", "moe.num_experts", "num_local_experts", "n_routed_experts",
+            "text_config.num_experts", "text_config.num_local_experts",
+        ]);
+        let num_experts_per_tok = find_usize(value, &[
+            "num_experts_per_tok", "num_selected_experts", "num_experts_per_token",
+            "moe.num_experts_per_tok",
+            "text_config.num_experts_per_tok",
+        ]);
         let expert_intermediate_size = find_usize(
             value,
             &[
                 "expert_intermediate_size",
                 "moe.expert_intermediate_size",
                 "moe_intermediate_size",
+                "text_config.expert_intermediate_size",
+                "text_config.moe_intermediate_size",
             ],
         );
         if matches!(num_experts, Some(0)) {
@@ -800,7 +825,7 @@ impl ModelConfig {
                 "expert_intermediate_size must be > 0 when provided".to_string(),
             ));
         }
-        let vocab_size = require_usize(value, &["vocab_size"])?;
+        let vocab_size = require_usize(value, &["vocab_size", "text_config.vocab_size"])?;
         let rope_scaling = rope_scaling_from_metadata_json(value)?;
 
         let max_position_embeddings = find_usize(

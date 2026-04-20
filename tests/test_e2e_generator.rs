@@ -256,7 +256,6 @@ fn e2e_generator_gemma4_qknorm() {
 ///
 /// **期望结果**: 成功加载 openai/gpt-oss-20b SafeTensors 权重并生成语义合理的 token
 #[test]
-#[ignore = "follow-up: gpt-oss-20b 完整支持需 gllm-kernels 新增 yarn RoPE + mxfp4 反量化, gllm 新建 gptoss.yaml (sliding/full layer 路由 + Q/K/V bias + clipped SwiGLU)"]
 fn e2e_generator_gptoss_20b() {
     const MODEL: &str = "openai/gpt-oss-20b";
 
