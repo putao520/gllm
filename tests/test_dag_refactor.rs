@@ -114,7 +114,7 @@ fn dag_refactor_bind_weights_and_execute() {
             dtype: Dtype::F32,
         }],
     };
-    assert_eq!(graph.bind_weights(&provider), 1);
+    assert_eq!(graph.bind_weights(&provider, false), 1);
     assert!(graph.weight_bindings.contains_key("w"));
 
     let mut executor = FusedGraphExecutor::new(graph);

@@ -149,6 +149,10 @@ pub struct PipelineModelState {
     /// (same architecture). The reranker uses CLS→Classifier while the
     /// embedder uses MeanPool→L2Norm, but the encoder forward pass is identical.
     pub shared_encoder: bool,
+    /// ARCH-PER-CLIENT-PLAN: pipeline 模型自己的 ExecutionPlan,在 inference 时
+    /// 经 with_execution_plan 推入 TLS,供 codegen 层 (autotuning / dispatch)
+    /// 透明读取。shared_encoder=true 时与 primary 共享同一 Arc。
+    pub execution_plan: Arc<gllm_kernels::compiler::planner::ExecutionPlan>,
 }
 
 // ============================================================================
@@ -274,6 +278,7 @@ impl ClientBuilder {
                     ModelKind::Reranker,
                     &state.manifest,
                     &state.backend,
+                    &state.execution_plan,
                 )?
             );
         }
@@ -398,33 +403,30 @@ impl ClientBuilder {
         let detected_backend = detect_backend()?;
         let backend_type = detected_backend.backend_type();
 
-        // ARCH-PER-CLIENT-PLAN (REQ-ARB-008/009 fundamental fix): Strategy Arbiter
-        // 计算 per-Client StrategyBias,生成独立 ExecutionPlan 存到 ClientState。
-        // 不再写入全局 OnceLock — 每个 Client (含 fusion pipeline 的 reranker /
-        // generator) 各自持有 Arc<ExecutionPlan>,inference 调用时经
-        // `with_execution_plan` 推到 kernels thread-local stack,消除多 Client 间
-        // bias 污染 (历史 BUG: e2e_fusion_consistency / cross_arch_embed_rerank NaN)。
-        let arbiter_bias = if let Some(ref model_cfg) = model_config_for_arbiter {
-            use crate::engine::arbiter::ArbiterHwView;
-            let graph_profile = crate::graph::profile::GraphProfiler::profile(model_cfg);
-            let archetype = crate::graph::profile::GraphArchetype::derive(&graph_profile);
-            let hw_view = match backend_type {
-                BackendType::Cuda | BackendType::Rocm | BackendType::Metal => {
-                    ArbiterHwView::gpu(49152)
-                }
-                BackendType::Cpu => {
-                    let profile = gllm_kernels::dispatch::device_profile();
-                    ArbiterHwView::from(profile)
-                }
+        // ARCH-PER-CLIENT-PLAN (REQ-ARB-008/009): per-Client ExecutionPlan
+        // 隔离 (Arc<ExecutionPlan> 存 ClientState + with_execution_plan TLS push)。
+        // REQ-ARB-001~007 完整调用 StrategyArbiter::arbitrate(mode, archetype, hw):
+        //   InferenceMode (Latency/Throughput baseline) ×
+        //   GraphArchetype (fusion_profitable / pipeline_valuable 等模型图特征) ×
+        //   ArbiterHwView (cache / SIMD regs / GPU)
+        // → StrategyBias → compute_execution_plan_with_bias → 每 Client 独立 plan。
+        let arbiter_bias = if let Some(cfg) = &model_config_for_arbiter {
+            let hw_profile = gllm_kernels::dispatch::device_profile();
+            let archetype = {
+                let graph_profile = crate::graph::profile::GraphProfiler::profile(cfg);
+                crate::engine::arbiter::GraphArchetype::derive(&graph_profile)
             };
+            let hw_view = crate::engine::arbiter::ArbiterHwView::from(hw_profile);
             crate::engine::arbiter::StrategyArbiter::arbitrate(
                 inference_mode,
                 &archetype,
                 &hw_view,
             )
         } else {
+            // model_config 缺失时退回 mode baseline (无 archetype/hw modulation)
             gllm_kernels::compiler::planner::StrategyBias::default()
         };
+        let _ = backend_type;
         let execution_plan =
             gllm_kernels::compiler::planner::compute_execution_plan_with_bias(&arbiter_bias);
 
@@ -473,6 +475,7 @@ impl ClientBuilder {
             manifest: state.manifest,
             backend: state.backend,
             shared_encoder: false,
+            execution_plan: state.execution_plan,
         })
     }
 
@@ -489,6 +492,7 @@ impl ClientBuilder {
         kind: ModelKind,
         primary_manifest: &Arc<ModelManifest>,
         primary_backend: &Arc<BackendContext>,
+        primary_execution_plan: &Arc<gllm_kernels::compiler::planner::ExecutionPlan>,
     ) -> Result<PipelineModelState, ClientError> {
         // Resolve the pipeline model's manifest to determine its architecture.
         let pipeline_manifest = Self::resolve_manifest(model_id, kind)?;
@@ -511,6 +515,8 @@ impl ClientBuilder {
                 manifest: Arc::new(pipeline_manifest),
                 backend: Arc::clone(primary_backend),
                 shared_encoder: true,
+                // shared_encoder=true → 复用 primary_state 的 plan (架构相同 + model_id 相同)
+                execution_plan: Arc::clone(primary_execution_plan),
             })
         } else {
             // 不同 model_id 或不同 arch: 独立加载,各持自己的权重。
@@ -1329,20 +1335,23 @@ impl Client {
         query: &str,
         documents: &[String],
     ) -> Result<Vec<f32>, ClientError> {
-        let mut executor = reranker.backend.executor_mut();
-        let mut scores = Vec::with_capacity(documents.len());
-        for doc in documents {
-            let score_vec = executor.rerank_pair(query, doc).map_err(|e| {
-                ClientError::RuntimeError(format!("pipeline rerank_pair error: {}", e))
-            })?;
-            let val = score_vec.first().copied().ok_or_else(|| {
-                ClientError::RuntimeError(
-                    "pipeline rerank_pair returned empty scores".into(),
-                )
-            })?;
-            scores.push(val);
-        }
-        Ok(scores)
+        let plan = reranker.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = reranker.backend.executor_mut();
+            let mut scores = Vec::with_capacity(documents.len());
+            for doc in documents {
+                let score_vec = executor.rerank_pair(query, doc).map_err(|e| {
+                    ClientError::RuntimeError(format!("pipeline rerank_pair error: {}", e))
+                })?;
+                let val = score_vec.first().copied().ok_or_else(|| {
+                    ClientError::RuntimeError(
+                        "pipeline rerank_pair returned empty scores".into(),
+                    )
+                })?;
+                scores.push(val);
+            }
+            Ok(scores)
+        })
     }
 
     /// Execute the full RAG pipeline: embed → rerank → generate answer.
@@ -1404,13 +1413,16 @@ impl Client {
             query,
         );
 
-        // Step 4: generate answer with the pipeline generator model
-        let mut gen_executor = generator.backend.executor_mut();
-        let answer = gen_executor
-            .generate(&prompt, 512, 0.7, 50, 0.9, None)
-            .map_err(|e| {
-                ClientError::RuntimeError(format!("pipeline generator error: {}", e))
-            })?;
+        // Step 4: generate answer with the pipeline generator model (per-Client plan 推入 TLS)
+        let gen_plan = generator.execution_plan.clone();
+        let answer = gllm_kernels::compiler::planner::with_execution_plan(gen_plan, || {
+            let mut gen_executor = generator.backend.executor_mut();
+            gen_executor
+                .generate(&prompt, 512, 0.7, 50, 0.9, None)
+                .map_err(|e| {
+                    ClientError::RuntimeError(format!("pipeline generator error: {}", e))
+                })
+        })?;
 
         Ok(RagResponse {
             text: answer,
