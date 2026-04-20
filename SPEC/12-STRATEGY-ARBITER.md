@@ -151,7 +151,7 @@ pub struct GraphProfile {
 pub enum FfnKind {
     SwiGLU,       // gate + up + silu + mul + down (Llama/Qwen/DeepSeek)
     GeGLU,        // gate + up + gelu + mul + down
-    ReLU,         // up + relu + down (legacy GPT-2)
+    ReLU,         // up + relu + down (legacy)
     MoESwiGLU,    // MoE routing → per-expert SwiGLU
     MoEGeGLU,     // MoE routing → per-expert GeGLU
 }

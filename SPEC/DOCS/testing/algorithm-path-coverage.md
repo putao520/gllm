@@ -29,7 +29,7 @@
 | **G-B** | SwiGLU | **Sliding Window** | Full RoPE | RMSNorm | — | mistral3 |
 | **G-C** | SwiGLU | Standard | **Partial RoPE** | RMSNorm | — | phi4 |
 | **G-D** | **Std GELU** (non-gated) | **Sliding+Global 交替** | **Dual RoPE (sliding θ=10K / global θ=1M+p-RoPE partial=0.25)** | RMSNorm + **QkNorm** + **ValueNorm** | **Per-Layer Embeddings (PLE)** | gemma4 |
-| **G-E** | **Std GELU** | Standard | **Absolute** | **LayerNorm+Bias** | Bias throughout | gpt2next |
+| **G-E** | SwiGLU+MoE | **Sliding/Full 交替** | **yarn RoPE** | RMSNorm | **MoE 4 experts/token + attention bias + mxfp4 量化** | gptoss |
 | **G-F** | SwiGLU+**MoE** | Standard | Full RoPE | RMSNorm | **Router+SharedExperts+Dispatch** | deepseek |
 | **G-G** | SwiGLU+**MoE** | Standard | Full RoPE | RMSNorm | **QwenRouter** | qwen3 (MoE variant) |
 
@@ -88,7 +88,7 @@
 
 | 问题 | 详情 | 状态 |
 |------|------|------|
-| ~~GPT-OSS 未注册~~ | `gpt2next.yaml` 模板已通过 build.rs 扫描自动注册 | ✅ 已修复 |
+| GPT-OSS (gpt-oss-20b) 模板未实现 | 真实 gpt-oss 架构 (MoE + sliding/full + yarn RoPE + RMSNorm + SiLU + bias + mxfp4) 需新建专用 YAML 模板 | 🟡 待开发 |
 
 ## 5. E2E 测试最终方案 (每路径一个代表)
 

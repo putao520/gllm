@@ -127,7 +127,7 @@
 
 | Key | 类型 | 说明 |
 |-----|------|------|
-| `tokenizer.ggml.model` | STRING | Tokenizer 类型 (gpt2, llama, spm) |
+| `tokenizer.ggml.model` | STRING | Tokenizer 类型 (llama, spm 等) |
 | `tokenizer.ggml.tokens` | ARRAY[STRING] | Token 字符串列表 (**修复 bug**) |
 | `tokenizer.ggml.merges` | ARRAY[STRING] | BPE merge 规则 |
 | `tokenizer.ggml.scores` | ARRAY[FLOAT32] | Token 分数 |
@@ -195,7 +195,7 @@ pub struct QuantizedTensor {
 | Mistral | `mistral` | `mistral.attention.sliding_window` |
 | Gemma 4 | `gemma4` | 见下方 §2.8.1 完整清单 |
 | DeepSeek V3/R1 | `deepseek`, `deepseek2` | `deepseek.expert_count`, `deepseek.expert_used_count`, `deepseek.expert_shared_count` |
-| GPT-2 / GPT-OSS | `gpt2`, `gpt_neox` | `c_attn`, `c_proj` 融合权重 |
+| GPT-OSS | `gpt_oss` | MoE + sliding/full attention 交替 + yarn RoPE + RMSNorm + SiLU + attention bias |
 
 #### 2.8.1 Gemma 4 GGUF Key 清单
 

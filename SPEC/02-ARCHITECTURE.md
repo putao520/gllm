@@ -499,7 +499,7 @@ Client::new_chat("Qwen/Qwen3-0.6B")
     - **理由**: 模型元数据（量化类型、精度）在文件内部，无需从文件名推测
 
 3.  **融合权重处理 (ARCH-LOADER-FUSED)**
-    - 针对 **GPT-OSS** (GPT-2 style) 和 **Qwen3 / Llama 4** 等模型，必须支持 Fused QKV (e.g. `c_attn`, `W_pack`) 和 Fused MLP (e.g. `c_proj`, `gate_up_proj`) 的自动拆分。
+    - 针对 **Qwen3 / Llama 4** 等模型，必须支持 Fused QKV (e.g. `W_pack`) 和 Fused MLP (e.g. `gate_up_proj`) 的自动拆分。
     - **禁止**：运行时动态拆分（这会破坏零拷贝原则）。
     - **禁止**：将拆分逻辑下沉至 GPU Backend。Backend 接口应保持数学上的纯净（独立 Q/K/V），格式适配由 Loader 层负责。
     - **要求**：在权重加载阶段（CPU -> GPU Upload 前）完成权重的拆分和重排，确保 GPU 内核接收到的是标准的 Q/K/V 和 Gate/Up/Down 格式。

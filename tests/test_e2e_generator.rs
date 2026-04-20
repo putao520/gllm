@@ -196,6 +196,48 @@ fn e2e_generator_onnx() {
 }
 
 // ============================================================================
+// G-C 路径: SwiGLU + RMSNorm + Standard attention + Partial RoPE (Phi-4 架构)
+// ============================================================================
+
+/// TEST-E2E-GEN-006: Phi-4-mini Partial RoPE 路径端到端推理
+/// **关联需求**: REQ-TEST-002
+/// **测试类型**: 正向
+/// **算法路径差异**: G-C 路径覆盖 Phi-4 架构 Partial RoPE:
+///   - Phi-4-mini partial_rotary_factor=0.75 (只旋转 head_dim 的 75%)
+///   - 其余结构与 G-A (Qwen3) 相同: SwiGLU + RMSNorm + Standard Causal Attention
+///   - 权重布局: Fused qkv_proj + Fused gate_up_proj + tie_word_embeddings=true
+///
+/// **期望结果**: 成功加载 microsoft/Phi-4-mini-instruct SafeTensors 权重并生成语义合理 token
+#[test]
+fn e2e_generator_phi4_partial_rope() {
+    const MODEL: &str = "microsoft/Phi-4-mini-instruct";
+
+    let client = Client::new_chat(MODEL).expect("Failed to load Phi-4 model");
+    let response = client
+        .generate("The capital of France is")
+        .max_tokens(10)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("Generation failed");
+
+    let text = response.text.trim();
+
+    // 反退化检查
+    assert_generation_sane(text, "phi4_partial_rope");
+
+    // 语义正确性
+    let lower = text.to_lowercase();
+    let is_reasonable =
+        lower.contains("paris") || lower.contains("capital") || lower.contains("france");
+    assert!(
+        is_reasonable,
+        "Output should mention Paris/capital/France, got: {:?}",
+        text
+    );
+}
+
+// ============================================================================
 // G-D 路径: QkNorm + ValueNorm + DualRoPE (sliding/global) + p-RoPE (Gemma 4 架构)
 // ============================================================================
 

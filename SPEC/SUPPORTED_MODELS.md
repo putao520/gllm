@@ -42,12 +42,11 @@
 | `glm-5-9b` | GLM-5 | 9B | `THUDM/glm-5-9b-chat` | `ZhipuAI/glm-5-9b-chat` | 下一代架构 (Preview) |
 
 ### GPT-OSS Series (OpenAI)
-> Status: **GPT-OSS (2026)** open weights release.
+> Status: **GPT-OSS (2025)** open weights release。MoE + sliding-window + yarn RoPE + RMSNorm + SiLU + attention bias。
 
 | Model ID | Architecture | Specs | HF Repo | ModelScope Repo | 特性 |
 |----------|--------------|-------|---------|-----------------|------|
-| `gpt-oss-1.5b` | GPT-2-Next | 1.5B | `openai/gpt-oss-1.5b` | `openai-mirror/gpt-oss-1.5b` | Fused QKV 经典架构回归 |
-| `gpt-oss-12b` | GPT-2-Next | 12B | `openai/gpt-oss-12b` | `openai-mirror/gpt-oss-12b` | 强推理能力 |
+| `gpt-oss-20b` | GptOss | 20B (MoE, 4 experts/token) | `openai/gpt-oss-20b` | - | mxfp4 量化 + 24 层 sliding/full 交替 attention |
 
 ### Phi Series (Microsoft)
 > Status: **Phi-4 (2025)** 轻量主力，**Phi-4-mini (Feb 2025)** SLM 标准。**Legacy Exception**: 低资源设备与兼容性保留（早于 2025-09）。

@@ -158,7 +158,7 @@ Q_proj → K_proj → V_proj → QkNorm(Q,K) → ValueNorm(V) → DualRoPE(Q,K)
 up_proj → GELU → down_proj
 ```
 
-与 GPT-2-Next 的 `FusedLinearGELU` 完全一致，直接复用。
+复用现有 `FusedLinearGELU`（up_proj + GELU + down_proj 的 epilogue fusion 模式）。
 
 ### 3.3 FlashAttention (已有，扩展)
 
