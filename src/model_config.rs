@@ -837,6 +837,8 @@ impl ModelConfig {
                 "seq_length",
                 "n_positions",
                 "rope_scaling.original_max_position_embeddings",
+                "text_config.max_position_embeddings",
+                "text_config.rope_scaling.original_max_position_embeddings",
             ]
         )
         .unwrap_or_else(|| {
@@ -863,7 +865,7 @@ impl ModelConfig {
             rope_scaling
                 .as_ref()
                 .and_then(|cfg| cfg.base)
-                .or_else(|| find_f32(value, &["rope_theta", "rope_base", "rope_base_value"]))
+                .or_else(|| find_f32(value, &["rope_theta", "rope_base", "rope_base_value", "text_config.rope_theta"]))
                 .unwrap_or_else(|| {
                     log::debug!("rope_theta not found: defaulting to 0.0 (model uses absolute position embeddings)");
                     0.0 // LEGAL: encoder 模型（BERT/XLM-R）无 RoPE，0.0 表示不使用旋转位置编码
@@ -905,7 +907,7 @@ impl ModelConfig {
         // Ω1: head_dim 从元数据读取，或使用标准公式计算
         // 注意：Embedding 模型可能没有 num_attention_heads，此时 head_dim = 0
         let head_dim = if num_attention_heads > 0 {
-            find_usize(value, &["attention.head_dim", "head_dim", "kv_channels"])
+            find_usize(value, &["attention.head_dim", "head_dim", "kv_channels", "text_config.head_dim", "text_config.attention.head_dim"])
                 .unwrap_or_else(|| {
                     let derived = hidden_size / num_attention_heads;
                     log::debug!("head_dim not found: deriving from hidden_size/num_heads => {}", derived);
