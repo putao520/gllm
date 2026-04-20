@@ -889,6 +889,12 @@ fn atomic_op_to_kind(
             _ => None,
         }
     }
+    fn attr_string(attrs: &std::collections::HashMap<String, AttrValue>, key: &str) -> Option<String> {
+        match attrs.get(key)? {
+            AttrValue::String(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
     fn attr_usize(attrs: &std::collections::HashMap<String, AttrValue>, key: &str) -> Option<usize> {
         match attrs.get(key)? {
             AttrValue::Int(v) if *v >= 0 => Some(*v as usize),
@@ -937,7 +943,31 @@ fn atomic_op_to_kind(
             let head_dim = require_usize(attributes, "head_dim", "RotaryEmbedding")?;
             let theta = attr_f32(attributes, "theta").unwrap_or(10000.0) as f64;
             let partial = attr_f32(attributes, "partial").unwrap_or(1.0);
-            Ok(OpKind::RoPE { num_heads, head_dim, theta, partial, rope_scaling: None })
+            let rope_scaling = match attr_string(attributes, "scaling_type").as_deref() {
+                Some("yarn") => {
+                    let factor = attr_f32(attributes, "scaling_factor")
+                        .or_else(|| attr_f32(attributes, "factor"))
+                        .unwrap_or(1.0);
+                    let beta_fast = attr_f32(attributes, "beta_fast").unwrap_or(32.0);
+                    let beta_slow = attr_f32(attributes, "beta_slow").unwrap_or(1.0);
+                    let original_max_position = attr_usize(attributes, "original_max_position")
+                        .unwrap_or(4096);
+                    Some(gllm_kernels::compiler::graph::RopeScaling::Yarn {
+                        factor,
+                        beta_fast,
+                        beta_slow,
+                        original_max_position,
+                    })
+                }
+                Some("linear") => {
+                    let factor = attr_f32(attributes, "scaling_factor")
+                        .or_else(|| attr_f32(attributes, "factor"))
+                        .unwrap_or(1.0);
+                    Some(gllm_kernels::compiler::graph::RopeScaling::Linear { factor })
+                }
+                _ => None,
+            };
+            Ok(OpKind::RoPE { num_heads, head_dim, theta, partial, rope_scaling })
         }
         "Attention" | "MultiHeadAttention" => {
             // Inputs: [Q, K, V] (可能 + mask)。Q shape = [seq_len, num_heads*head_dim]。
@@ -960,7 +990,11 @@ fn atomic_op_to_kind(
                 return Err(ExecutionError::ShapeMismatch(
                     "atomic op 'Attention' 需要 Q 输入至少 2D 以推导 seq_len".into()));
             };
-            Ok(OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads, head_dim, causal, attention_sinks: false })
+            let attention_sinks = match attributes.get("attention_sinks") {
+                Some(AttrValue::Int(v)) => *v != 0,
+                _ => false,
+            };
+            Ok(OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads, head_dim, causal, attention_sinks })
         }
         "Gather" => {
             // Embedding lookup: inputs = [table(vocab, embed_dim), indices(seq_len)],
@@ -1198,6 +1232,50 @@ fn atomic_op_to_kind(
             "atomic op '{op_type}' 是 ONNX optimized model (O3/O4) 的 fused operator,\
              gllm JIT 不支持。建议: 用 model.onnx 原版 (非优化) 或 SafeTensors。"
         ))),
+        "MoERouter" => {
+            let num_experts = require_usize(attributes, "num_experts", "MoERouter")?;
+            let top_k = require_usize(attributes, "top_k", "MoERouter")?;
+            let hidden = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
+                input_shapes[0][input_shapes[0].len() - 1].as_concrete().ok_or_else(|| {
+                    ExecutionError::ShapeMismatch(
+                        "MoERouter hidden 维度必须 Concrete".into())
+                })?
+            } else {
+                return Err(ExecutionError::ShapeMismatch(
+                    "atomic op 'MoERouter' 需要 hidden 输入至少 2D".into()));
+            };
+            let seq_len = input_shapes[0][input_shapes[0].len() - 2].clone();
+            Ok(OpKind::MoERouter { num_experts, top_k, hidden, seq_len })
+        }
+        "MoEDispatchPacked" => {
+            let num_experts = require_usize(attributes, "num_experts", "MoEDispatchPacked")?;
+            let top_k = require_usize(attributes, "top_k", "MoEDispatchPacked")?;
+            let mxfp4_block_size = require_usize(attributes, "mxfp4_block_size", "MoEDispatchPacked")?;
+            let swiglu_limit = attr_f32(attributes, "swiglu_limit").unwrap_or(7.0);
+            let intermediate_size = if !input_shapes.is_empty() && input_shapes.len() > 3 {
+                // gate_up_blocks: [num_experts, 2*intermediate/block_size, hidden, bytes_per_block]
+                // intermediate_size = dim1 * block_size / 2
+                input_shapes[3].get(1).and_then(|d| d.as_concrete())
+                    .map(|d| d * mxfp4_block_size / 2)
+                    .ok_or_else(|| ExecutionError::ShapeMismatch(
+                        "MoEDispatchPacked: 无法从 gate_up_blocks shape 推导 intermediate_size".into()))?
+            } else {
+                return Err(ExecutionError::ShapeMismatch(
+                    "MoEDispatchPacked: 需要 gate_up_blocks 输入以推导 intermediate_size".into()));
+            };
+            let hidden = if !input_shapes.is_empty() {
+                input_shapes[0][input_shapes[0].len() - 1].as_concrete().ok_or_else(|| {
+                    ExecutionError::ShapeMismatch("MoEDispatchPacked: hidden 维度必须 Concrete".into())
+                })?
+            } else { return Err(ExecutionError::ShapeMismatch(
+                "MoEDispatchPacked: 需要 hidden_input".into()));
+            };
+            let seq_len = input_shapes[0][input_shapes[0].len() - 2].clone();
+            Ok(OpKind::MoEDispatchPacked {
+                num_experts, top_k, mxfp4_block_size, swiglu_limit,
+                intermediate_size, hidden, seq_len,
+            })
+        }
         _ => Err(ExecutionError::UnsupportedOp(format!(
             "atomic op '{}' has no CompilerGraph mapping — \
              JIT codegen not implemented for this op type",

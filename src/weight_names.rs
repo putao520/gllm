@@ -279,6 +279,42 @@ pub fn moe_expert_aliases(layer: usize, expert: usize, suffix: &str) -> Vec<Stri
 }
 
 // ---------------------------------------------------------------------------
+// GPT-OSS specific weight name aliases
+// ---------------------------------------------------------------------------
+
+/// Attention sinks aliases for GPT-OSS (learnable softmax denominator tokens).
+///
+/// Canonical: `model.layers.{layer}.self_attn.sinks`
+/// GGUF: `blk.{layer}.attn_sinks.weight`
+pub fn attn_sinks_aliases(layer: usize) -> Vec<String> {
+    decoder_layer_aliases(layer, "self_attn.sinks", Some("attn_sinks.weight"))
+}
+
+/// MoE router weight aliases for GPT-OSS (uses `mlp.router` naming).
+///
+/// GPT-OSS uses `mlp.router.weight/bias` instead of the standard `mlp.gate.weight`.
+pub fn moe_router_weight_aliases(layer: usize) -> Vec<String> {
+    decoder_layer_aliases(layer, "mlp.router.weight", Some("ffn_gate_inp.weight"))
+}
+
+/// MoE router bias aliases for GPT-OSS.
+pub fn moe_router_bias_aliases(layer: usize) -> Vec<String> {
+    decoder_layer_aliases(layer, "mlp.router.bias", Some("ffn_gate_inp.bias"))
+}
+
+/// Packed MoE expert tensor aliases for GPT-OSS (mxfp4 quantized).
+///
+/// `suffix` is one of: `gate_up_proj_blocks`, `gate_up_proj_scales`, `gate_up_proj_bias`,
+/// `down_proj_blocks`, `down_proj_scales`, `down_proj_bias`.
+pub fn moe_packed_expert_aliases(layer: usize, suffix: &str) -> Vec<String> {
+    let gguf_suffix = HF_TO_GGUF_LAYER_SUFFIX
+        .iter()
+        .find(|&&(hf, _)| hf == format!("mlp.experts.{suffix}").as_str())
+        .map(|&(_, gg)| gg);
+    decoder_layer_aliases(layer, &format!("mlp.experts.{suffix}"), gguf_suffix)
+}
+
+// ---------------------------------------------------------------------------
 // HF → GGUF decoder layer name translation
 // ---------------------------------------------------------------------------
 
@@ -311,6 +347,18 @@ static HF_TO_GGUF_LAYER_SUFFIX: &[(&str, &str)] = &[
     // Attention norm (Qwen2.5 etc.)
     ("self_attn.q_norm.weight",          "attn_q_norm.weight"),
     ("self_attn.k_norm.weight",          "attn_k_norm.weight"),
+    // GPT-OSS attention sinks (learnable softmax denominator tokens)
+    ("self_attn.sinks",                  "attn_sinks.weight"),
+    // GPT-OSS MoE router (uses "router" naming, not "gate")
+    ("mlp.router.weight",                "ffn_gate_inp.weight"),
+    ("mlp.router.bias",                  "ffn_gate_inp.bias"),
+    // GPT-OSS packed MoE expert weights (mxfp4 quantized)
+    ("mlp.experts.gate_up_proj_blocks",  "ffn_experts_gate_up_blocks.weight"),
+    ("mlp.experts.gate_up_proj_scales",  "ffn_experts_gate_up_scales.weight"),
+    ("mlp.experts.gate_up_proj_bias",    "ffn_experts_gate_up_bias.weight"),
+    ("mlp.experts.down_proj_blocks",     "ffn_experts_down_blocks.weight"),
+    ("mlp.experts.down_proj_scales",     "ffn_experts_down_scales.weight"),
+    ("mlp.experts.down_proj_bias",       "ffn_experts_down_bias.weight"),
 ];
 
 /// Given a canonical weight name (HuggingFace or GGUF style), generate all possible
@@ -540,5 +588,64 @@ mod tests {
         assert!(all_ple_weight_aliases("model.layers.0.self_attn.q_proj.weight").is_empty());
         assert!(all_ple_weight_aliases("lm_head.weight").is_empty());
         assert!(all_ple_weight_aliases("model.embed_tokens.weight").is_empty());
+    }
+
+    // ── GPT-OSS weight alias tests ──
+
+    #[test]
+    fn gptoss_attn_sinks_aliases() {
+        let aliases = attn_sinks_aliases(3);
+        assert!(aliases.iter().any(|a| a == "model.layers.3.self_attn.sinks"));
+        assert!(aliases.iter().any(|a| a == "layers.3.self_attn.sinks"));
+        assert!(aliases.iter().any(|a| a == "blk.3.attn_sinks.weight"));
+        assert!(aliases.iter().any(|a| a == "h.3.self_attn.sinks"));
+    }
+
+    #[test]
+    fn gptoss_moe_router_aliases() {
+        let weight = moe_router_weight_aliases(2);
+        assert!(weight.iter().any(|a| a == "model.layers.2.mlp.router.weight"));
+        assert!(weight.iter().any(|a| a == "blk.2.ffn_gate_inp.weight"));
+        assert!(weight.iter().any(|a| a == "h.2.mlp.router.weight"));
+
+        let bias = moe_router_bias_aliases(2);
+        assert!(bias.iter().any(|a| a == "model.layers.2.mlp.router.bias"));
+        assert!(bias.iter().any(|a| a == "blk.2.ffn_gate_inp.bias"));
+    }
+
+    #[test]
+    fn gptoss_moe_packed_expert_aliases() {
+        let blocks = moe_packed_expert_aliases(0, "gate_up_proj_blocks");
+        assert!(blocks.iter().any(|a| a == "model.layers.0.mlp.experts.gate_up_proj_blocks"));
+        assert!(blocks.iter().any(|a| a == "blk.0.ffn_experts_gate_up_blocks.weight"));
+
+        let scales = moe_packed_expert_aliases(0, "gate_up_proj_scales");
+        assert!(scales.iter().any(|a| a == "model.layers.0.mlp.experts.gate_up_proj_scales"));
+        assert!(scales.iter().any(|a| a == "blk.0.ffn_experts_gate_up_scales.weight"));
+
+        let down_blocks = moe_packed_expert_aliases(5, "down_proj_blocks");
+        assert!(down_blocks.iter().any(|a| a == "model.layers.5.mlp.experts.down_proj_blocks"));
+        assert!(down_blocks.iter().any(|a| a == "blk.5.ffn_experts_down_blocks.weight"));
+    }
+
+    #[test]
+    fn gptoss_all_decoder_weight_aliases_attn_sinks() {
+        let aliases = all_decoder_weight_aliases("model.layers.3.self_attn.sinks");
+        assert!(!aliases.is_empty(), "attn sinks must be resolvable");
+        assert!(aliases.iter().any(|a| a == "blk.3.attn_sinks.weight"));
+    }
+
+    #[test]
+    fn gptoss_all_decoder_weight_aliases_router() {
+        let aliases = all_decoder_weight_aliases("model.layers.1.mlp.router.weight");
+        assert!(!aliases.is_empty(), "MoE router must be resolvable");
+        assert!(aliases.iter().any(|a| a == "blk.1.ffn_gate_inp.weight"));
+    }
+
+    #[test]
+    fn gptoss_all_decoder_weight_aliases_packed_experts() {
+        let aliases = all_decoder_weight_aliases("model.layers.0.mlp.experts.gate_up_proj_blocks");
+        assert!(!aliases.is_empty(), "packed expert blocks must be resolvable");
+        assert!(aliases.iter().any(|a| a == "blk.0.ffn_experts_gate_up_blocks.weight"));
     }
 }

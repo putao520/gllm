@@ -69,6 +69,7 @@ pub enum RouterType {
     Qwen,
     Mixtral,
     DeepSeek,
+    GptOss,
     Unknown,
 }
 

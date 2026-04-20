@@ -98,6 +98,7 @@ impl ArchRegistry {
             "deepseek" => crate::manifest::RouterType::DeepSeek,
             "qwen" => crate::manifest::RouterType::Qwen,
             "mixtral" => crate::manifest::RouterType::Mixtral,
+            "gptoss" => crate::manifest::RouterType::GptOss,
             _ => crate::manifest::RouterType::Unknown,
         })
     }
