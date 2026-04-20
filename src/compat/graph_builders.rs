@@ -74,7 +74,7 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
 
     let attn_out = g.add_tensor("attn_out", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
     g.add_op(
-        OpKind::MultiHeadAttention { seq_len: sym_s.clone(), num_heads, num_kv_heads, head_dim, causal: true },
+        OpKind::MultiHeadAttention { seq_len: sym_s.clone(), num_heads, num_kv_heads, head_dim, causal: true, attention_sinks: false },
         vec![q_rope, k_rope, v_out], vec![attn_out], "mha",
     );
 

@@ -497,6 +497,7 @@ fn build_vision_encoder_graph(
                 num_kv_heads: num_heads,
                 head_dim,
                 causal: false,
+                attention_sinks: false,
             },
             vec![q, k, v],
             vec![attn],

@@ -329,6 +329,7 @@ fn build_flash_attention_graph(
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
             causal: config.causal,
+            attention_sinks: false,
         },
         vec![q, k, v],
         vec![out],
@@ -711,6 +712,7 @@ fn build_gqa_graph(
             num_kv_heads: config.num_heads,
             head_dim: config.head_dim,
             causal: true, // GQA is decoder-only, always causal
+            attention_sinks: false,
         },
         vec![q, k, v],
         vec![out],
@@ -958,7 +960,7 @@ fn atomic_op_to_kind(
                 return Err(ExecutionError::ShapeMismatch(
                     "atomic op 'Attention' 需要 Q 输入至少 2D 以推导 seq_len".into()));
             };
-            Ok(OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads, head_dim, causal })
+            Ok(OpKind::MultiHeadAttention { seq_len, num_heads, num_kv_heads, head_dim, causal, attention_sinks: false })
         }
         "Gather" => {
             // Embedding lookup: inputs = [table(vocab, embed_dim), indices(seq_len)],
@@ -4035,11 +4037,12 @@ mod tests {
         attrs.insert("head_dim".into(), AttrValue::Int(128));
         let kind = atomic_op_to_kind("Attention", &attrs, &shapes, gllm_kernels::types::DType::F32).unwrap();
         match kind {
-            OpKind::MultiHeadAttention { num_heads, num_kv_heads, head_dim, causal, seq_len } => {
+            OpKind::MultiHeadAttention { num_heads, num_kv_heads, head_dim, causal, seq_len, attention_sinks } => {
                 assert_eq!(num_heads, 8);
                 assert_eq!(num_kv_heads, 2);
                 assert_eq!(head_dim, 128);
                 assert!(causal, "decoder attention 默认 causal=true");
+                assert!(!attention_sinks, "默认 attention_sinks=false（gpt-oss 专用路径）");
                 assert!(seq_len.is_symbolic(), "seq_len 保留 Symbolic");
             }
             other => panic!("expected MultiHeadAttention, got {other:?}"),

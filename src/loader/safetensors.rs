@@ -13,6 +13,17 @@ use serde_json::Value;
 
 use super::{parallel::ParallelLoader, LoaderError, Result};
 
+// Sibling module in `src/loader/` — `mod.rs` is owned by other agents, so we
+// declare it inline here via `#[path]` to avoid touching that file.
+#[path = "mxfp4_pairing.rs"]
+pub mod mxfp4_pairing;
+
+use mxfp4_pairing::{
+    scan_mxfp4_pairs, CandidateTensor, Mxfp4Pair, Mxfp4PairMap, Mxfp4ScalesSidecarSet,
+    repack_to_gguf_layout,
+};
+use crate::loader::gguf::GgmlDType;
+
 #[derive(Debug, Clone)]
 pub struct TensorLocation {
     pub file_idx: usize,
@@ -183,6 +194,18 @@ pub struct SafeTensorsLoader {
     index: HashMap<String, TensorLocation>,
     gllm_config: Option<Value>,
     gllm_tokenizer_config: Option<Value>,
+    /// MXFP4 pair map — logical `_blocks` name → `Mxfp4Pair` metadata.
+    ///
+    /// Built once at load time by scanning the tensor index for
+    /// `*_blocks` / `*_scales` sibling pairs (OpenAI gpt-oss layout).
+    mxfp4_pairs: Mxfp4PairMap,
+    /// `_scales` tensor names consumed as mxfp4 sidecars. These are
+    /// hidden from `iter_tensors()` / `tensor_info()` so the upload path
+    /// does not treat them as standalone U8 weights.
+    mxfp4_sidecars: Mxfp4ScalesSidecarSet,
+    /// `_blocks` logical name → `_scales` sidecar name. Spec-mandated
+    /// explicit mapping for diagnostic / template-binding consumers.
+    mxfp4_scale_map: HashMap<String, String>,
 }
 
 impl SafeTensorsLoader {
@@ -218,12 +241,88 @@ impl SafeTensorsLoader {
         let gllm_tokenizer_config =
             parse_namespace_metadata(&files, &["gllm.tokenizer", "_gllm_tokenizer"])?;
 
+        // Scan for mxfp4 `_blocks` / `_scales` pairs (OpenAI gpt-oss layout).
+        // The scanner is purely structural — it pairs tensors by name suffix +
+        // byte-length invariant, no format-level metadata required.
+        let candidates: Vec<CandidateTensor> = index
+            .iter()
+            .map(|(name, loc)| CandidateTensor {
+                name: name.clone(),
+                dtype: loc.dtype,
+                shape: loc.shape.clone(),
+                byte_len: byte_len_of(loc.dtype, &loc.shape),
+            })
+            .collect();
+        let scan = scan_mxfp4_pairs(candidates);
+
         Ok(Self {
             files,
             index,
             gllm_config,
             gllm_tokenizer_config,
+            mxfp4_pairs: scan.pairs,
+            mxfp4_sidecars: scan.sidecars,
+            mxfp4_scale_map: scan.blocks_to_scales,
         })
+    }
+
+    /// Returns the mxfp4 pair metadata for a logical `_blocks` tensor, if any.
+    ///
+    /// Used by diagnostic tooling and by the in-process upload path to locate
+    /// the companion `_scales` tensor and repack bytes into the GGUF-style
+    /// interleaved layout expected by the cpu_backend Mxfp4 dequantize path.
+    pub fn mxfp4_pair(&self, blocks_name: &str) -> Option<&Mxfp4Pair> {
+        self.mxfp4_pairs.get(blocks_name)
+    }
+
+    /// Returns the full `blocks_name → scales_name` map (spec-mandated).
+    pub fn mxfp4_scale_map(&self) -> &HashMap<String, String> {
+        &self.mxfp4_scale_map
+    }
+
+    /// Returns `true` if `name` is a `_scales` tensor claimed as an mxfp4
+    /// sidecar (hidden from the regular enumeration / upload path).
+    pub fn is_mxfp4_sidecar(&self, name: &str) -> bool {
+        self.mxfp4_sidecars.contains(name)
+    }
+
+    /// Read raw bytes for a tensor ignoring the mxfp4 pairing rewrite.
+    ///
+    /// Used by [`Self::load_mxfp4_repacked_bytes`] to fetch the underlying
+    /// physical `_blocks` and `_scales` byte slices before repacking into
+    /// the GGUF-style interleaved layout. Kept private — external callers
+    /// should go through the `TensorProvider` API.
+    fn raw_tensor_bytes(&self, name: &str) -> Result<&[u8]> {
+        let location = self
+            .index
+            .get(name)
+            .ok_or_else(|| LoaderError::MissingTensor(name.to_string()))?;
+        let file = &self.files[location.file_idx];
+        let view = file
+            .tensors
+            .tensor(name)
+            .map_err(LoaderError::SafeTensors)?;
+        // SAFETY: view borrows from the mmap stored in `file.mmap`, which
+        // outlives `&self` — extending the lifetime to `&'_ self` is sound.
+        let data: &[u8] = view.data();
+        let data: &'_ [u8] = unsafe { std::mem::transmute::<&[u8], &[u8]>(data) };
+        Ok(data)
+    }
+
+    /// Build the GGUF-style interleaved bytes for a logical mxfp4 tensor.
+    ///
+    /// Repacks `[blocks_bytes | scales_bytes]` into `[scale|qs|...|scale|qs]`
+    /// per-block layout expected by `compat::cpu_backend::dequantize::Mxfp4`.
+    fn load_mxfp4_repacked_bytes(&self, blocks_name: &str) -> Result<Vec<u8>> {
+        let pair = self.mxfp4_pairs.get(blocks_name).ok_or_else(|| {
+            LoaderError::MissingTensor(format!(
+                "mxfp4 pair not indexed for '{blocks_name}'"
+            ))
+        })?;
+        let blocks = self.raw_tensor_bytes(&pair.blocks_name)?;
+        let scales = self.raw_tensor_bytes(&pair.scales_name)?;
+        repack_to_gguf_layout(pair, blocks, scales)
+            .map_err(LoaderError::InvalidQuantization)
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -370,6 +469,13 @@ impl SafeTensorsLoader {
 
 impl super::TensorProvider for SafeTensorsLoader {
     fn tensor_info(&self, name: &str) -> Option<super::TensorMeta> {
+        // MXFP4 `_scales` tensors are sidecars — consumed by the logical
+        // `_blocks` tensor via `load_tensor_data` and hidden from regular
+        // enumeration so the upload path does not treat them as standalone
+        // U8 weights.
+        if self.mxfp4_sidecars.contains(name) {
+            return None;
+        }
         let meta = self.tensor_meta(name)?;
         Some(super::TensorMeta {
             name: name.to_string(),
@@ -379,17 +485,66 @@ impl super::TensorProvider for SafeTensorsLoader {
     }
 
     fn iter_tensors(&self) -> impl Iterator<Item = super::TensorMeta> {
-        self.index.iter().map(|(name, meta)| super::TensorMeta {
-            name: name.clone(),
-            shape: meta.shape.clone(),
-            dtype: meta.dtype,
-        })
+        self.index
+            .iter()
+            .filter(|(name, _)| !self.mxfp4_sidecars.contains(name.as_str()))
+            .map(|(name, meta)| super::TensorMeta {
+                name: name.clone(),
+                shape: meta.shape.clone(),
+                dtype: meta.dtype,
+            })
     }
 
     fn load_tensor_data(&self, name: &str) -> super::Result<Cow<'_, [u8]>> {
+        // MXFP4 `_blocks` tensors are paired with a sidecar `_scales` tensor
+        // and must be repacked into the GGUF-style interleaved layout
+        // (`[scale|qs|...]` per block) that the cpu_backend Mxfp4 dequantize
+        // path expects. This turns two physical safetensors tensors into a
+        // single logical mxfp4 tensor transparently to upstream.
+        if self.mxfp4_pairs.contains_key(name) {
+            let bytes = self.load_mxfp4_repacked_bytes(name)?;
+            return Ok(Cow::Owned(bytes));
+        }
+        // Refuse to serve raw sidecar bytes through the regular API — they
+        // are logically consumed by the paired `_blocks` tensor.
+        if self.mxfp4_sidecars.contains(name) {
+            return Err(LoaderError::MissingTensor(format!(
+                "'{name}' is an mxfp4 scales sidecar; load the paired _blocks tensor instead"
+            )));
+        }
         let tensor = self.tensor(name)?;
         Ok(Cow::Borrowed(tensor.data))
     }
+
+    /// Report the virtual GGML dtype for mxfp4 `_blocks` tensors so that the
+    /// generic `Loader::upload_provider` flow routes them through the
+    /// quantized-tensor path (see `adapter::ggml_dtype_to_quant_type`).
+    ///
+    /// All other tensors return `None` (native float / bias / sinks flow
+    /// through the regular `upload_weights` path).
+    fn ggml_dtype(&self, name: &str) -> Option<GgmlDType> {
+        if self.mxfp4_pairs.contains_key(name) {
+            Some(GgmlDType::MXFP4)
+        } else {
+            None
+        }
+    }
+}
+
+/// Byte length of a dense tensor stored in the safetensors file, computed
+/// from dtype × product of shape dims. Used by the mxfp4 pair scanner.
+fn byte_len_of(dtype: Dtype, shape: &[usize]) -> usize {
+    let elem_size = match dtype {
+        Dtype::BOOL | Dtype::U8 | Dtype::I8 => 1,
+        Dtype::F16 | Dtype::BF16 | Dtype::I16 | Dtype::U16 => 2,
+        Dtype::F32 | Dtype::I32 | Dtype::U32 => 4,
+        Dtype::F64 | Dtype::I64 | Dtype::U64 => 8,
+        // Any exotic dtype falls back to 1 — the pair scanner treats mismatched
+        // byte ratios as non-pairs, so an over-conservative size just means the
+        // candidate is rejected.
+        _ => 1,
+    };
+    shape.iter().product::<usize>() * elem_size
 }
 
 fn parse_namespace_metadata(files: &[MappedSafetensors], keys: &[&str]) -> Result<Option<Value>> {
@@ -559,4 +714,313 @@ fn cast_or_copy_u64(data: &[u8]) -> Result<Cow<'_, [u64]>> {
         ]));
     }
     Ok(Cow::Owned(out))
+}
+
+#[cfg(test)]
+mod mxfp4_integration_tests {
+    //! End-to-end tests for mxfp4 pair detection + bias/sinks loading through
+    //! the real `SafeTensorsLoader` + `TensorProvider` surface.
+    //!
+    //! Exercises the full rewire: load a file with `<prefix>_blocks` /
+    //! `<prefix>_scales` / `<prefix>_bias` / `self_attn.sinks` + `*.bias`
+    //! weights, then verify that:
+    //! - `_scales` is hidden from enumeration,
+    //! - `_blocks` is exposed as MXFP4 via `ggml_dtype()` and repacked into
+    //!   GGUF-style interleaved layout on load,
+    //! - bias / sinks tensors load unchanged through the regular path,
+    //! - the explicit `blocks → scales` map is populated for consumers.
+
+    use super::*;
+    use crate::loader::TensorProvider;
+    use ::safetensors::tensor::{serialize_to_file, TensorView};
+    use ::safetensors::Dtype;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    /// Build a minimal gpt-oss-style single-layer safetensors file on disk.
+    ///
+    /// Emits (for layer 0):
+    ///   - `mlp.experts.gate_up_proj_blocks` (U8)
+    ///   - `mlp.experts.gate_up_proj_scales` (U8)
+    ///   - `mlp.experts.gate_up_proj_bias`   (BF16)
+    ///   - `self_attn.q_proj.weight`         (BF16)
+    ///   - `self_attn.q_proj.bias`           (BF16)
+    ///   - `self_attn.sinks`                 (BF16, [num_heads])
+    ///
+    /// Returns (path, expected_repacked_bytes).
+    fn write_gpt_oss_like_fixture(
+        dir: &std::path::Path,
+        num_experts: usize,
+        num_blocks_per_expert: usize,
+        block_size: usize,
+        num_heads: usize,
+    ) -> (std::path::PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let bytes_per_block = block_size / 2;
+        let total_blocks = num_experts * num_blocks_per_expert;
+        // Deterministic byte fill for reproducible assertions.
+        let blocks_bytes: Vec<u8> = (0..total_blocks * bytes_per_block)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+            .collect();
+        let scales_bytes: Vec<u8> = (0..total_blocks)
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(128))
+            .collect();
+        // Expected GGUF-style interleaved output.
+        let mut expected = Vec::with_capacity(total_blocks * (1 + bytes_per_block));
+        for blk in 0..total_blocks {
+            expected.push(scales_bytes[blk]);
+            let qs = &blocks_bytes[blk * bytes_per_block..(blk + 1) * bytes_per_block];
+            expected.extend_from_slice(qs);
+        }
+
+        // Bias = BF16 tensor of shape [num_experts, 2*num_blocks_per_expert]
+        // (arbitrary — we only check the tensor loads with the right dtype).
+        let bias_elems = num_experts * (2 * num_blocks_per_expert).max(1);
+        let bias_bytes: Vec<u8> = (0..bias_elems * 2)
+            .map(|i| (i as u8).wrapping_mul(17))
+            .collect();
+
+        // q_proj.weight BF16, q_proj.bias BF16, self_attn.sinks BF16[num_heads]
+        let qw_rows = 16usize;
+        let qw_cols = 16usize;
+        let qw_bytes: Vec<u8> = (0..qw_rows * qw_cols * 2).map(|i| (i as u8) ^ 0x5A).collect();
+        let qb_bytes: Vec<u8> = (0..qw_cols * 2).map(|i| (i as u8).wrapping_add(3)).collect();
+        let sinks_bytes: Vec<u8> = (0..num_heads * 2).map(|i| (i as u8).wrapping_add(9)).collect();
+
+        // Build views with ownership of the byte buffers kept alive in this
+        // function (serialize_to_file copies on write).
+        let blocks_view = TensorView::new(
+            Dtype::U8,
+            vec![num_experts, num_blocks_per_expert, bytes_per_block],
+            &blocks_bytes,
+        )
+        .expect("blocks view");
+        let scales_view =
+            TensorView::new(Dtype::U8, vec![num_experts, num_blocks_per_expert], &scales_bytes)
+                .expect("scales view");
+        let bias_view = TensorView::new(
+            Dtype::BF16,
+            vec![num_experts, (2 * num_blocks_per_expert).max(1)],
+            &bias_bytes,
+        )
+        .expect("bias view");
+        let qw_view =
+            TensorView::new(Dtype::BF16, vec![qw_rows, qw_cols], &qw_bytes).expect("qw view");
+        let qb_view = TensorView::new(Dtype::BF16, vec![qw_cols], &qb_bytes).expect("qb view");
+        let sinks_view =
+            TensorView::new(Dtype::BF16, vec![num_heads], &sinks_bytes).expect("sinks view");
+
+        let path = dir.join("model.safetensors");
+        let metadata: Option<HashMap<String, String>> = None;
+        serialize_to_file(
+            vec![
+                ("model.layers.0.mlp.experts.gate_up_proj_blocks", blocks_view),
+                ("model.layers.0.mlp.experts.gate_up_proj_scales", scales_view),
+                ("model.layers.0.mlp.experts.gate_up_proj_bias", bias_view),
+                ("model.layers.0.self_attn.q_proj.weight", qw_view),
+                ("model.layers.0.self_attn.q_proj.bias", qb_view),
+                ("model.layers.0.self_attn.sinks", sinks_view),
+            ],
+            &metadata,
+            &path,
+        )
+        .expect("write safetensors");
+
+        (path, expected, bias_bytes, sinks_bytes)
+    }
+
+    #[test]
+    fn mxfp4_pair_is_detected_and_scales_sidecar_hidden() {
+        let dir = TempDir::new().expect("temp dir");
+        let (path, _expected, _bias, _sinks) =
+            write_gpt_oss_like_fixture(dir.path(), 2, 2, 32, 4);
+        let loader = SafeTensorsLoader::from_files(
+            &[path],
+            crate::loader::ParallelLoader::new(false),
+        )
+        .expect("load");
+
+        // Pair map must be indexed by _blocks name with the matching _scales
+        // sidecar recorded.
+        let map = loader.mxfp4_scale_map();
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("model.layers.0.mlp.experts.gate_up_proj_blocks")
+                .map(String::as_str),
+            Some("model.layers.0.mlp.experts.gate_up_proj_scales"),
+        );
+
+        let pair = loader
+            .mxfp4_pair("model.layers.0.mlp.experts.gate_up_proj_blocks")
+            .expect("pair present");
+        assert_eq!(pair.block_size, 32);
+        assert_eq!(pair.num_blocks, 2 * 2);
+        assert_eq!(
+            pair.bias_name.as_deref(),
+            Some("model.layers.0.mlp.experts.gate_up_proj_bias"),
+        );
+
+        // The scales tensor is a sidecar — must be hidden from enumeration.
+        assert!(loader.is_mxfp4_sidecar("model.layers.0.mlp.experts.gate_up_proj_scales"));
+        let enumerated: Vec<String> = loader.iter_tensors().map(|m| m.name).collect();
+        assert!(!enumerated
+            .iter()
+            .any(|n| n == "model.layers.0.mlp.experts.gate_up_proj_scales"));
+        // But _blocks and _bias still appear (as logical mxfp4 + native bf16).
+        assert!(enumerated
+            .iter()
+            .any(|n| n == "model.layers.0.mlp.experts.gate_up_proj_blocks"));
+        assert!(enumerated
+            .iter()
+            .any(|n| n == "model.layers.0.mlp.experts.gate_up_proj_bias"));
+    }
+
+    #[test]
+    fn mxfp4_blocks_report_ggml_mxfp4_dtype_and_repack_to_interleaved_bytes() {
+        let dir = TempDir::new().expect("temp dir");
+        let (path, expected_interleaved, _bias, _sinks) =
+            write_gpt_oss_like_fixture(dir.path(), 2, 2, 32, 4);
+        let loader = SafeTensorsLoader::from_files(
+            &[path],
+            crate::loader::ParallelLoader::new(false),
+        )
+        .expect("load");
+
+        let blocks_name = "model.layers.0.mlp.experts.gate_up_proj_blocks";
+        // ggml_dtype override routes _blocks through the quantized upload path.
+        assert_eq!(
+            loader.ggml_dtype(blocks_name),
+            Some(GgmlDType::MXFP4),
+            "mxfp4 _blocks tensor must report GgmlDType::MXFP4"
+        );
+        // Non-mxfp4 tensors (bias / sinks / q_proj.weight) return None.
+        assert_eq!(
+            loader.ggml_dtype("model.layers.0.self_attn.q_proj.weight"),
+            None,
+        );
+        assert_eq!(
+            loader.ggml_dtype("model.layers.0.self_attn.sinks"),
+            None,
+        );
+
+        // load_tensor_data(_blocks) returns the GGUF-style interleaved layout.
+        let owned = loader.load_tensor_data(blocks_name).expect("load blocks");
+        let got: &[u8] = owned.as_ref();
+        assert_eq!(got, expected_interleaved.as_slice());
+
+        // Refuse to serve _scales sidecar through the regular API.
+        let err = loader
+            .load_tensor_data("model.layers.0.mlp.experts.gate_up_proj_scales")
+            .expect_err("sidecar must not be servable");
+        assert!(
+            matches!(err, crate::loader::LoaderError::MissingTensor(_)),
+            "unexpected error: {err:?}"
+        );
+
+        // Mapping GgmlDType::MXFP4 → QuantType::Mxfp4{block_size=32} is wired.
+        use gllm_kernels::quant::QuantType;
+        assert_eq!(
+            crate::loader::adapter::ggml_dtype_to_quant_type(GgmlDType::MXFP4),
+            Some(QuantType::Mxfp4 { block_size: 32 }),
+        );
+    }
+
+    #[test]
+    fn attention_bias_and_sinks_load_through_regular_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let num_heads = 4usize;
+        let (path, _expected, bias_bytes, sinks_bytes) =
+            write_gpt_oss_like_fixture(dir.path(), 2, 2, 32, num_heads);
+        let loader = SafeTensorsLoader::from_files(
+            &[path],
+            crate::loader::ParallelLoader::new(false),
+        )
+        .expect("load");
+
+        // q_proj.bias and self_attn.sinks are plain BF16 native tensors.
+        let qb = loader
+            .tensor_info("model.layers.0.self_attn.q_proj.bias")
+            .expect("q_proj.bias must be visible");
+        assert_eq!(qb.dtype, Dtype::BF16);
+        assert_eq!(qb.shape.len(), 1, "1-D bias");
+
+        let sinks_meta = loader
+            .tensor_info("model.layers.0.self_attn.sinks")
+            .expect("sinks must be visible");
+        assert_eq!(sinks_meta.dtype, Dtype::BF16);
+        assert_eq!(sinks_meta.shape, vec![num_heads]);
+
+        // Byte-for-byte identity through load_tensor_data for the native path.
+        let sinks_data = loader
+            .load_tensor_data("model.layers.0.self_attn.sinks")
+            .expect("load sinks");
+        let sinks_got: &[u8] = sinks_data.as_ref();
+        assert_eq!(sinks_got, sinks_bytes.as_slice());
+
+        // The expert bias is a native BF16 tensor too — not part of the mxfp4
+        // pair, passes through unchanged.
+        let bias_data = loader
+            .load_tensor_data("model.layers.0.mlp.experts.gate_up_proj_bias")
+            .expect("load expert bias");
+        let bias_got: &[u8] = bias_data.as_ref();
+        assert_eq!(bias_got, bias_bytes.as_slice());
+        assert_eq!(
+            loader
+                .tensor_info("model.layers.0.mlp.experts.gate_up_proj_bias")
+                .expect("bias visible")
+                .dtype,
+            Dtype::BF16,
+        );
+    }
+
+    #[test]
+    fn mxfp4_flows_through_loader_upload_as_quantized_tensor() {
+        // End-to-end: `Loader::upload_weights` must route the mxfp4 `_blocks`
+        // tensor through the quantized path (landing in `WeightsHandle.quantized`)
+        // rather than the native-float path, and the companion `_scales`
+        // sidecar must be invisible to the upload loop.
+        use crate::compat::cpu_backend::CpuBackend;
+        use crate::loader::{Loader, WeightFormat};
+        use crate::manifest::ModelManifest;
+        use gllm_kernels::quant::QuantType;
+
+        let dir = TempDir::new().expect("temp dir");
+        let (path, expected_interleaved, _bias, _sinks) =
+            write_gpt_oss_like_fixture(dir.path(), 2, 2, 32, 4);
+        let mut loader = Loader::new(ModelManifest::default())
+            .with_weights(vec![path])
+            .load()
+            .expect("loader load");
+        assert_eq!(loader.weight_format(), WeightFormat::SafeTensors);
+
+        let backend = CpuBackend::<f32>::new();
+        let handle = loader.upload_weights::<_, f32>(&backend).expect("upload");
+
+        let blocks_name = "model.layers.0.mlp.experts.gate_up_proj_blocks";
+        let qt = handle
+            .quantized_tensor(blocks_name)
+            .expect("mxfp4 _blocks must land in the quantized map");
+        assert_eq!(qt.quant_type, QuantType::Mxfp4 { block_size: 32 });
+        assert_eq!(qt.data, expected_interleaved);
+        assert!(handle.is_quantized(blocks_name));
+
+        // The `_scales` sidecar is consumed into the repacked bytes and must
+        // NOT appear anywhere in the handle.
+        let scales_name = "model.layers.0.mlp.experts.gate_up_proj_scales";
+        assert!(handle.quantized_tensor(scales_name).is_none());
+        assert!(handle.tensor_shape(scales_name).is_none());
+
+        // The `_bias` sibling is a native BF16 tensor — routes through the
+        // regular upload path (lands in `handle.tensors`, not `quantized`).
+        let bias_name = "model.layers.0.mlp.experts.gate_up_proj_bias";
+        assert!(!handle.is_quantized(bias_name));
+        assert!(
+            handle.tensor_shape(bias_name).is_some(),
+            "bias tensor must be uploaded through the native-float path"
+        );
+
+        // `self_attn.sinks` (BF16) also routes through the native path.
+        let sinks_name = "model.layers.0.self_attn.sinks";
+        assert!(!handle.is_quantized(sinks_name));
+        assert!(handle.tensor_shape(sinks_name).is_some());
+    }
 }

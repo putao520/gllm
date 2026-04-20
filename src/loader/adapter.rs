@@ -82,8 +82,15 @@ pub fn ggml_dtype_to_quant_type(dtype: GgmlDType) -> Option<QuantType> {
         | GgmlDType::I16
         | GgmlDType::I32
         | GgmlDType::I64 => None,
-        // Exotic types — not yet mapped to kernels
-        GgmlDType::TQ1_0 | GgmlDType::TQ2_0 | GgmlDType::MXFP4 => None,
+        // MXFP4 (OCP Microscaling FP4). The SafeTensors loader rewires
+        // `<prefix>_blocks` + `<prefix>_scales` pairs (OpenAI gpt-oss layout)
+        // into GGUF-style interleaved bytes before upload, so the
+        // compat::cpu_backend::dequantize `Mxfp4` path handles them uniformly
+        // regardless of source format. Block size is fixed to the OCP standard
+        // 32 (matches both GGUF type 39 and gpt-oss packaging).
+        GgmlDType::MXFP4 => Some(QuantType::Mxfp4 { block_size: 32 }),
+        // Exotic GGUF types not yet mapped to kernels.
+        GgmlDType::TQ1_0 | GgmlDType::TQ2_0 => None,
     }
 }
 
@@ -153,7 +160,7 @@ impl GgufAdapter {
 /// | F32 | F32 | None |
 /// | F16 | F16 | None |
 /// | BF16 | BF16 | None |
-/// | Q4_0/Q4_1/Q4_K/IQ4_NL/IQ4_XS/MXFP4 | PackedU8(Int4) | Q4_0/Q4_1/Q4K/IQ4NL/IQ4XS/— |
+/// | Q4_0/Q4_1/Q4_K/IQ4_NL/IQ4_XS/MXFP4 | PackedU8(Int4) | Q4_0/Q4_1/Q4K/IQ4NL/IQ4XS/Mxfp4{32} |
 /// | Q2_K/IQ2_XXS/IQ2_XS/IQ2_S/TQ2_0 | PackedU8(Int2) | Q2K/IQ2XXS/IQ2XS/IQ2S/— |
 /// | IQ1_S/IQ1_M/TQ1_0 | PackedU8(Int1) | IQ1S/IQ1M/— |
 /// | Q8_0/Q8_1/Q8_K/I8 | U8 | Q8_0/Q8_1/Q8K/— |
