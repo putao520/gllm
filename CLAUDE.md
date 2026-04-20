@@ -197,7 +197,7 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 | GLM-4 / GLM-5 | ✅ | ✅ | MoE (glm-4.7-flash) |
 | Mistral3 / Ministral | ✅ | ✅ | Sliding Window |
 | Phi4 / Phi4-mini | ✅ | ✅ | Partial RoPE |
-| GPT-2-Next (GPT-OSS) | ✅ | ✅ | Absolute pos + LayerNorm+Bias |
+| GptOss (gpt-oss-20b) | 🟡 模板待编写 | 🟡 | MoE + sliding/full attention 交替 + yarn RoPE + RMSNorm + SiLU + attention bias |
 | DeepSeek V3/R1 / Kimi-K2 | ✅ | ✅ | MoE Router+SharedExperts |
 | XLM-R / XLM-R-Next (Encoder) | ✅ | ✅ | Embedding / Rerank |
 | **Gemma 4 (E2B/E4B/26B-A4B/31B)** | ✅ | ✅ | QkNorm + ValueNorm + DualRoPE + PLE(E2B/E4B) + SharedKvRef page 层 ✅; graph 层 🟡 T43; Vision/Audio 🟡 T44/T45; E2E 数值验证 🟡 T47 |

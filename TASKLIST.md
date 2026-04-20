@@ -46,29 +46,6 @@
 
 ---
 
-## 阶段 2：GPT-2 路径 JIT 化 (REQ-JIT-GRAPH-002)
-
-### T2.1 gllm-kernels: 新增 GeluNew OpKind 变体
-- 文件: `gllm-kernels/src/compiler/graph.rs`
-- 内容: `OpKind::GeluNew` — GPT-2 tanh 近似 GELU
-
-### T2.2 gllm-kernels: GeluNew codegen 实现
-- 文件: `gllm-kernels/src/compiler/codegen/x86_64.rs`
-- 内容: Phase 0 scalar → SymExec → Phase 3 AVX2/AVX-512 codegen
-
-### T2.3 gllm: Gpt2CachedJit 结构体 + 四图编译
-- 文件: `src/compat/decoder_forward.rs`
-- 内容:
-  - `Gpt2CachedJit { ln1_qkv, cached_attn, o_proj, ln2_mlp }`
-  - `compile_gpt2_jit()` 编译四个图（含 SymDim::Symbolic("total_seq")）
-  - 替换 `gpt2_forward_sequence` 中所有 scalar GEMM
-
-### T2.4 验证
-- `grep -rn "for.*hidden_size\|for.*qkv_dim" src/compat/decoder_forward.rs` 返回 0
-- `cargo test --lib` 两个 crate 全部通过
-
----
-
 ## 阶段 3：图执行器打通 (REQ-JIT-GRAPH-003)
 
 ### T3.1 gllm: FusedGraph 执行器支持完整 decoder forward ✅
@@ -115,7 +92,6 @@
 ### T4.3 gllm: decoder_forward.rs 接入全局缓存 ✅
 - 文件: `src/compat/decoder_forward.rs`
 - 内容:
-  - `compile_gpt2_jit` 调用 → `global_jit_cache().get_or_compile(...)` (4 个图: LnQkv/OProj/LnMlp/FinalLnLmHead)
   - `compile_decode_jit` 调用 → `global_jit_cache().get_or_compile(...)` (2 个图: QRope/Norm2)
   - `kv_proj_decode` 编译 → `global_jit_cache().get_or_compile(...)` (KvProjection)
   - `compile_moe_decode_jit` 调用 → `global_jit_cache().get_or_compile(...)` (3 个图: MoePreAttn/MoeOGemm/MoeNorm2)
