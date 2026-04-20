@@ -127,12 +127,11 @@ fn e2e_generator_safetensors() {
 /// **测试类型**: 正向
 /// **期望结果**: 成功加载 GGUF 模型并生成 token 序列
 ///
-/// 🚨 task #12 follow-up: Qwen3-0.6B-GGUF 输出 garbage "ormireandT ==ckGboso�"。
-/// HeadRmsNorm OpKind framework 已完成且单元测试数值正确,但 GGUF 推理路径仍
-/// garbage。根因怀疑 yaml q_norm/k_norm 节点未正确接入 fusion / weight 加载 /
-/// tensor shape 推导 num_heads 错误。需要 PyTorch reference dump 逐层比对。
+/// 🚨 task #12 follow-up: Qwen3-0.6B-GGUF 输出 garbage。HeadRmsNorm OpKind
+/// framework + 数值单元测试已通过,但 GGUF 推理路径整体 garbage。根因怀疑:
+/// (a) yaml q_norm/k_norm 节点未正确接入 fusion / weight 加载;
+/// (b) task #14 attention JIT 不确定性叠加 — Qwen3 推理依赖更多 attn 层。
 #[test]
-#[ignore = "Qwen3-0.6B-GGUF garbage 输出 (HeadRmsNorm 数值已验证正确,根因在 fusion/weight/shape 接入,task #12 follow-up)"]
 fn e2e_generator_gguf() {
     const MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
 

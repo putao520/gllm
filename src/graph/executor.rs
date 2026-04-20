@@ -2729,6 +2729,15 @@ impl FusedGraphExecutor {
                 )?;
             }
 
+            // GLLM_HASH_NODES: dump 每个 node 的 input/weight/output fingerprint
+            // 用于诊断 task #14 (embed 不确定性) — attention JIT 输出不一致。
+            let hash_nodes = std::env::var("GLLM_HASH_NODES").is_ok();
+            let act_hash = if hash_nodes {
+                activation.iter().fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64))
+            } else { 0 };
+            let weight_hash = if hash_nodes {
+                weight_blob.iter().fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64))
+            } else { 0 };
             if std::env::var("GLLM_TRACE_EXEC").is_ok() {
                 eprintln!("[EXEC] node {} '{}' op={} seq={} act.len={} weight.len={} out.len={}",
                     node_idx, self.graph.nodes[node_idx].name,
@@ -2747,6 +2756,11 @@ impl FusedGraphExecutor {
                     output_buf.as_mut_ptr(),
                     scratchpad.as_mut_ptr(),
                 );
+            }
+            if hash_nodes {
+                let out_hash = output_buf.iter().fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64));
+                eprintln!("[HASH] node {:3} '{}' act=0x{:016x} weight=0x{:016x} → out=0x{:016x}",
+                    node_idx, self.graph.nodes[node_idx].name, act_hash, weight_hash, out_hash);
             }
 
             // Debug: GLLM_DUMP_LAYERS=/path/to/dir 时 dump 每个节点 output (仅

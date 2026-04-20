@@ -387,12 +387,9 @@ fn e2e_fusion_consistency_with_standalone() {
 /// **测试类型**: 正向 (跨架构融合)
 ///
 /// 🚨 跨测试污染: 单独跑通过,与同 process 内任何其他 fusion 测试一起跑会触发
-/// 后续测试 SIGSEGV (e.g. consistency + cross_arch + embed_rerank → embed_rerank
-/// SIGSEGV)。根因怀疑: Qwen3-Reranker GGUF Decoder backend 加载留下 JIT 可执行
-/// 内存 / mmap state 污染下游 e5+bge Encoder backend。
-/// follow-up task #14: 追查 embed 函数不确定性 + cross-test backend 状态隔离。
+/// 后续测试 SIGSEGV / NaN。根因 task #14: attention JIT codegen 不确定性,
+/// 不同 backend (Encoder + Decoder) 加载顺序产生 JIT 代码重 mmap 区干扰。
 #[test]
-#[ignore = "跨测试污染:Qwen3-Reranker GGUF Decoder 加载后污染下游 fusion 测试 SIGSEGV (单独跑通过,task #14 follow-up)"]
 fn e2e_fusion_cross_arch_embed_rerank() {
     const EMBED_MODEL: &str = "intfloat/e5-small-v2";
     const RERANKER_MODEL: &str = "DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF";
