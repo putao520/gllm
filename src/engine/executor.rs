@@ -715,7 +715,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else if let Some(onnx) = loader.onnx_ref() {
                     ge.graph_mut().bind_weight_shapes_fuzzy(onnx, false);
                 } else if let Some(gguf) = loader.gguf_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf, false);
+                    // ARCH-WEIGHT-CANONICAL-LAYOUT (GGUF): GGUF stores Linear weights
+                    // as [out_features, in_features] (same row-major layout as HF
+                    // SafeTensors). Linear weight roles need a metadata swap to
+                    // canonical [K=in, N=out] just like SafeTensors. Embedding tables
+                    // (Gather role) and 1D norm/bias weights are excluded by
+                    // `is_linear_matmul_weight` so they keep their raw [vocab, hidden]
+                    // / [hidden] shapes — matching the dequant path below which only
+                    // physically transposes 2D Linear weights.
+                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf, true);
                 }
 
                 // Phase 3a: JIT-compile with correct weight shapes.
@@ -745,7 +753,34 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             }
                         }
                     }
+                    // ARCH-GGUF-DEQUANT-ROLE-AWARE: build a name→needs_transpose
+                    // set mirroring `bind_weight_shapes_fuzzy`'s role-based logic
+                    // so dequant can decide per canonical_name whether to
+                    // physically transpose the f32 payload. Linear MatMul weights
+                    // (q/k/v/o/gate/up/down/lm_head) need [out, in] → [in, out];
+                    // Gather embedding tables and 1D norm/bias weights must NOT
+                    // be transposed.
+                    //
+                    // Snapshot to an owned `HashSet<String>` so we don't keep
+                    // a borrow of `ge` while mutating it via `bind`/`bind_bytes`.
+                    let needs_transpose_set: std::collections::HashSet<String> = {
+                        let mut role_map: std::collections::HashMap<&str, Vec<(&FusedOp, usize)>> =
+                            std::collections::HashMap::new();
+                        for node in &ge.graph().nodes {
+                            for (i, input) in node.inputs.iter().enumerate() {
+                                role_map.entry(input.as_str()).or_default().push((&node.op, i));
+                            }
+                        }
+                        role_map
+                            .keys()
+                            .filter(|name| {
+                                crate::graph::types::is_linear_matmul_weight(name, &role_map)
+                            })
+                            .map(|name| name.to_string())
+                            .collect()
+                    };
                     for canonical_name in expected_names {
+                        let needs_transpose = needs_transpose_set.contains(&canonical_name);
                         let found = TensorLookup::get_tensor(&weights, &canonical_name)
                             .map(|t| t.as_ref().as_ptr() as *const f32);
                         let found = found.or_else(|| {
@@ -820,19 +855,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             None
                         });
                         // Dequantize a QuantizedTensor to f32 bytes using the backend.
-                        let dequant = |q_tensor: &crate::loader::QuantizedTensor| -> Option<Vec<u8>> {
+                        //
+                        // ARCH-GGUF-DEQUANT-ROLE-AWARE: GGUF/HF store 2D weights as
+                        // `[out_features, in_features]` row-major. Linear MatMul
+                        // operands need a physical transpose to canonical
+                        // `[K=in, N=out]` (matching `format_needs_transpose=true` in
+                        // `bind_weight_shapes_fuzzy`). Gather embedding tables MUST
+                        // be left as `[vocab, hidden]` row-major so the JIT Gather
+                        // reads `table[token_id * embed_dim + j]` correctly.
+                        // 1D weights (norm/bias) never get transposed.
+                        let dequant = |q_tensor: &crate::loader::QuantizedTensor,
+                                       transpose: bool|
+                         -> Option<Vec<u8>> {
                             let numel: usize = q_tensor.shape.iter().product();
                             let mut f32_out = vec![0.0f32; numel];
                             backend.dequantize(&q_tensor.data, &mut f32_out, q_tensor.quant_type)
                                 .ok()?;
-                            // Transpose: GGUF/HF store Linear weights as [out_features, in_features]
-                            // (row-major). The JIT GEMM (A=[seq,K], B=[K,N]) expects B in
-                            // column-major / transposed-row-major → [K, N]. We must transpose here.
                             let shape = &q_tensor.shape;
                             let f32_to_bytes = |v: &[f32]| -> Vec<u8> {
                                 v.iter().flat_map(|f| f.to_le_bytes()).collect()
                             };
-                            if shape.len() == 2 {
+                            if transpose && shape.len() == 2 {
                                 let rows = shape[0]; // out_features = N
                                 let cols = shape[1]; // in_features = K
                                 let mut transposed = vec![0.0f32; numel];
@@ -903,7 +946,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         } else if let Some(ptr) = found {
                             ge = ge.bind(canonical_name.clone(), ptr);
                         } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
-                            if let Some(f32_bytes) = dequant(q_tensor) {
+                            if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                 ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                             }
                         } else {
@@ -917,7 +960,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                     break;
                                 }
                                 if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &alias) {
-                                    if let Some(f32_bytes) = dequant(q_tensor) {
+                                    if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                         ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                                         bound_alias = true;
                                     }
@@ -942,7 +985,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                                     break 'outer;
                                                 }
                                                 if let Some(q_tensor) = TensorLookup::get_quantized(&weights, alias) {
-                                                    if let Some(f32_bytes) = dequant(q_tensor) {
+                                                    if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                                         ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                                                     }
                                                     break 'outer;
