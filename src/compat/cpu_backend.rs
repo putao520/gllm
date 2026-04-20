@@ -849,6 +849,11 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             AWQ4 | GPTQ4 | Squeeze => {
                 return Err(BE::Unimplemented("quantized_matmul: external formats (AWQ4/GPTQ4/Squeeze) require dedicated API"));
             }
+            // MXFP4 (OCP Microscaling FP4): dedicated matmul lowering not yet wired
+            // (T-MXFP4-LOWER). Use `dequantize()` first, then dispatch to standard f32 matmul.
+            Mxfp4 { .. } => {
+                return Err(BE::Unimplemented("quantized_matmul: MXFP4 path requires dedicated matmul lowering (T-MXFP4-LOWER)"));
+            }
         }
         Ok(())
     }
@@ -907,6 +912,36 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             // External formats not supported through this unified path
             AWQ4 | GPTQ4 | Squeeze => {
                 return Err(BE::Unimplemented("dequantize: external formats (AWQ4/GPTQ4/Squeeze) require dedicated API"));
+            }
+            // MXFP4 (OCP Microscaling FP4): block layout = [scale_byte (e8m0), qs[block_size/2]
+            // (packed e2m1)]. Standard `block_size = 32` ⇒ 17 bytes per block. Split scales out
+            // and dispatch to the dedicated AVX2/scalar mxfp4 routine.
+            Mxfp4 { block_size } => {
+                let bytes_per_block = quant_type.block_bytes();
+                debug_assert_eq!(bytes_per_block, 1 + block_size / 2);
+                let num_blocks = block_data.len() / bytes_per_block;
+                if block_data.len() != num_blocks * bytes_per_block {
+                    return Err(BE::Unimplemented(
+                        "dequantize: MXFP4 input length not a multiple of block_bytes",
+                    ));
+                }
+                if output.len() != num_blocks * block_size {
+                    return Err(BE::Unimplemented(
+                        "dequantize: MXFP4 output length does not match num_blocks × block_size",
+                    ));
+                }
+                // GGUF MXFP4 layout interleaves scale + qs per block:
+                //   block i = block_data[i * bytes_per_block .. (i+1) * bytes_per_block]
+                //   scale  = block[0], qs = block[1..]
+                // The standalone routine expects two contiguous arrays — repack here.
+                let mut scales = Vec::with_capacity(num_blocks);
+                let mut packed = Vec::with_capacity(num_blocks * (block_size / 2));
+                for blk in 0..num_blocks {
+                    let base = blk * bytes_per_block;
+                    scales.push(block_data[base]);
+                    packed.extend_from_slice(&block_data[base + 1..base + bytes_per_block]);
+                }
+                gllm_kernels::quant_mxfp4::dequant_mxfp4(&packed, &scales, output, block_size);
             }
         }
         Ok(())

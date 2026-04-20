@@ -424,6 +424,7 @@ fn build_rope_graph(
             head_dim: config.head_dim,
             theta: config.rope_theta,
             partial: 1.0,
+            rope_scaling: None,
         },
         vec![input],
         vec![out],
@@ -488,7 +489,7 @@ fn build_fused_qkv_rope_graph(
 
     let q_rope = g.add_tensor("q_rope", vec![seq_len_sym.clone(), SymDim::Concrete(q_dim)], dt);
     g.add_op(
-        OpKind::RoPE { num_heads: config.num_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        OpKind::RoPE { num_heads: config.num_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0, rope_scaling: None },
         vec![q_out],
         vec![q_rope],
         "rope_q",
@@ -496,7 +497,7 @@ fn build_fused_qkv_rope_graph(
 
     let k_rope = g.add_tensor("k_rope", vec![seq_len_sym, SymDim::Concrete(kv_dim)], dt);
     g.add_op(
-        OpKind::RoPE { num_heads: config.num_kv_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0 },
+        OpKind::RoPE { num_heads: config.num_kv_heads, head_dim: config.head_dim, theta: config.rope_theta, partial: 1.0, rope_scaling: None },
         vec![k_out],
         vec![k_rope],
         "rope_k",
@@ -598,6 +599,7 @@ fn build_fused_qkv_norm_rope_graph(
             head_dim: config.head_dim,
             theta: config.rope_theta,
             partial: config.rope_partial,
+            rope_scaling: None,
         },
         vec![q_normed],
         vec![q_rope],
@@ -611,6 +613,7 @@ fn build_fused_qkv_norm_rope_graph(
             head_dim: config.head_dim,
             theta: config.rope_theta,
             partial: config.rope_partial,
+            rope_scaling: None,
         },
         vec![k_normed],
         vec![k_rope],
@@ -932,7 +935,7 @@ fn atomic_op_to_kind(
             let head_dim = require_usize(attributes, "head_dim", "RotaryEmbedding")?;
             let theta = attr_f32(attributes, "theta").unwrap_or(10000.0) as f64;
             let partial = attr_f32(attributes, "partial").unwrap_or(1.0);
-            Ok(OpKind::RoPE { num_heads, head_dim, theta, partial })
+            Ok(OpKind::RoPE { num_heads, head_dim, theta, partial, rope_scaling: None })
         }
         "Attention" | "MultiHeadAttention" => {
             // Inputs: [Q, K, V] (可能 + mask)。Q shape = [seq_len, num_heads*head_dim]。
@@ -3981,7 +3984,7 @@ mod tests {
         attrs.insert("partial".to_string(), AttrValue::Float(0.25));
         let kind = atomic_op_to_kind("RotaryEmbedding", &attrs, &shapes, gllm_kernels::types::DType::F32).unwrap();
         match kind {
-            OpKind::RoPE { num_heads, head_dim, theta, partial } => {
+            OpKind::RoPE { num_heads, head_dim, theta, partial, rope_scaling: _ } => {
                 assert_eq!(num_heads, 8);
                 assert_eq!(head_dim, 128);
                 assert!((theta - 1_000_000.0).abs() < 1e-3);

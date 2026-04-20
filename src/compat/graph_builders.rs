@@ -68,9 +68,9 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
     g.add_op(OpKind::FusedRmsNormGemm { m: sym_s.clone(), n: kv_dim, k: h, eps, dtype: dt }, vec![input, rn1_w, w_v], vec![v_out], "gemm_v_fused");
 
     let q_rope = g.add_tensor("q_rope", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
-    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![q_out], vec![q_rope], "rope_q");
+    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![q_out], vec![q_rope], "rope_q");
     let k_rope = g.add_tensor("k_rope", vec![sym_s.clone(), SymDim::Concrete(kv_dim)], ft);
-    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![k_out], vec![k_rope], "rope_k");
+    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![k_out], vec![k_rope], "rope_k");
 
     let attn_out = g.add_tensor("attn_out", vec![sym_s.clone(), SymDim::Concrete(q_dim)], ft);
     g.add_op(

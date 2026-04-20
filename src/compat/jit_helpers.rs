@@ -602,9 +602,9 @@ pub(crate) fn build_moe_pre_attention_graph(
     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], ft);
-    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![q_out], vec![q_rope], "rope_q");
+    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![q_out], vec![q_rope], "rope_q");
     let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], ft);
-    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0 }, vec![k_out], vec![k_rope], "rope_k");
+    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![k_out], vec![k_rope], "rope_k");
 
     // Output: q_rope (primary output). k_rope and v_out are extracted from scratchpad.
     g.outputs = vec![q_rope];
