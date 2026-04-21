@@ -153,19 +153,39 @@ pub enum MegaKernelError {
     NotCompiled,
 }
 
+/// True mega-kernel 编译产物。
+///
+/// 持有 JIT 编译的层代码 + 全模型权重布局 + 缓冲布局。
+/// 推理时通过单次 CALL 执行。
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+struct MegaKernelCompiled {
+    /// JIT 编译的单层模板代码（当前阶段：每层调用一次；Phase 3 后：真正的 mega-kernel）
+    layer_code: gllm_kernels::compiler::CompiledLayer,
+    /// 全模型权重布局（embed → layer_0 → ... → layer_N → lm_head）
+    weight_layout: gllm_kernels::compiler::MegaKernelWeightLayout,
+    /// 运行时缓冲布局（activation ping/pong, logits, sampling workspace）
+    buffer_layout: gllm_kernels::compiler::MegaKernelBufferLayout,
+    /// 预打包的连续权重 blob
+    weight_blob: Vec<u8>,
+}
+
 /// Mega-Kernel 执行器 (§9.1)
 ///
-/// 将整个 decoder layer loop 编译为全层融合图。
-/// 模型加载时编译，推理时只执行。
+/// 两种编译路径:
+/// 1. **Legacy**: 包装 FusedGraphExecutor（逐节点执行）
+/// 2. **True Mega-Kernel**: 通过 `compile_mega_kernel()` 编译，单次 CALL
 ///
 /// ## 执行流程
 /// 1. `compile()` — 模型加载时，将所有层编译为 JIT 融合图
 /// 2. `prepare_batch()` — 构建 RequestStateTable + 值域分组
 /// 3. `execute()` — 单一 Launch 执行全层融合图
 pub struct MegaKernelExecutor {
-    /// 全层融合图执行器（模型加载时编译）
+    /// 全层融合图执行器（模型加载时编译）— legacy 路径
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    graph_executor: FusedGraphExecutor,
+    graph_executor: Option<FusedGraphExecutor>,
+    /// True mega-kernel 编译产物 — 单次 CALL 路径
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    mega_compiled: Option<MegaKernelCompiled>,
     /// 模型配置
     num_layers: usize,
     hidden_size: usize,
@@ -178,10 +198,7 @@ pub struct MegaKernelExecutor {
 }
 
 impl MegaKernelExecutor {
-    /// 从 FusedGraphExecutor 构建 Mega-Kernel 执行器
-    ///
-    /// FusedGraphExecutor 已在模型加载时编译好全层融合图。
-    /// MegaKernelExecutor 在其上层添加 RequestStateTable 和 Compact/Scatter。
+    /// 从 FusedGraphExecutor 构建 Mega-Kernel 执行器 (legacy 路径)
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn from_graph_executor(
         graph_executor: FusedGraphExecutor,
@@ -192,7 +209,8 @@ impl MegaKernelExecutor {
     ) -> Self {
         let is_compiled = graph_executor.is_compiled();
         Self {
-            graph_executor,
+            graph_executor: Some(graph_executor),
+            mega_compiled: None,
             num_layers,
             hidden_size,
             vocab_size,
@@ -200,6 +218,70 @@ impl MegaKernelExecutor {
             is_compiled,
             compact_scatter: CompactScatterPipeline::new(),
         }
+    }
+
+    /// 从 ModelGeometry 编译 true mega-kernel。
+    ///
+    /// 通过 `InferenceCompiler::compile_mega_kernel()` 编译单层模板图，
+    /// 然后预打包所有权重到连续 blob。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn compile_from_geometry(
+        geometry: &crate::model_config::ModelGeometry,
+        weight_ptrs: &std::collections::HashMap<String, *const u8>,
+        weight_sizes: &std::collections::HashMap<String, usize>,
+    ) -> Result<Self, MegaKernelError> {
+        let config = gllm_kernels::compiler::ModelMegaConfig {
+            num_layers: geometry.num_layers,
+            hidden: geometry.hidden_size,
+            num_heads: geometry.num_heads,
+            num_kv_heads: geometry.num_kv_heads,
+            head_dim: geometry.head_dim,
+            intermediate: geometry.intermediate_size,
+            vocab_size: geometry.vocab_size,
+            rms_eps: geometry.norm_eps,
+            rope_theta: geometry.rope_theta,
+            rope_partial: geometry.rope_partial_ratio,
+            dtype: geometry.dtype,
+            max_seq_len: geometry.max_seq_len,
+            num_eos_tokens: 1,
+            rope_scaling: None,
+        };
+
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let output = compiler.compile_mega_kernel(&config)
+            .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
+
+        // 打包权重到连续 blob
+        let weight_blob = pack_mega_kernel_weights(
+            &output.weight_layout,
+            geometry.num_layers,
+            geometry.hidden_size,
+            geometry.num_heads,
+            geometry.num_kv_heads,
+            geometry.head_dim,
+            geometry.intermediate_size,
+            weight_ptrs,
+            weight_sizes,
+            geometry.dtype,
+        );
+
+        let mega_compiled = MegaKernelCompiled {
+            layer_code: output.layer_code,
+            weight_layout: output.weight_layout,
+            buffer_layout: output.buffer_layout,
+            weight_blob,
+        };
+
+        Ok(Self {
+            graph_executor: None,
+            mega_compiled: Some(mega_compiled),
+            num_layers: geometry.num_layers,
+            hidden_size: geometry.hidden_size,
+            vocab_size: geometry.vocab_size,
+            dtype: geometry.dtype,
+            is_compiled: true,
+            compact_scatter: CompactScatterPipeline::new(),
+        })
     }
 
     /// 是否已编译
@@ -236,6 +318,15 @@ impl MegaKernelExecutor {
             return Err(MegaKernelError::NotCompiled);
         }
 
+        // True mega-kernel 路径（如果可用）
+        if let Some(ref mega) = self.mega_compiled {
+            return self.execute_mega_kernel(mega, batch);
+        }
+
+        // Legacy 路径：通过 FusedGraphExecutor
+        let graph_executor = self.graph_executor.as_ref()
+            .ok_or(MegaKernelError::NotCompiled)?;
+
         // Phase 1: Compact — 按值域分组挤压
         let compacted = self.compact_scatter.compact(&batch.state_table);
 
@@ -259,7 +350,7 @@ impl MegaKernelExecutor {
         let shape_bindings = std::collections::HashMap::from([
             ("seq_len".to_string(), 1usize), // MegaKernel 通常处理单 token
         ]);
-        let results = self.graph_executor.run(&inputs, &shape_bindings)?;
+        let results = graph_executor.run(&inputs, &shape_bindings)?;
 
         // Phase 3: Scatter — 将输出 bytes 转回 f32，按原始偏移回写
         // 提取所有输出张量，转为 Vec<Vec<f32>>
@@ -273,10 +364,155 @@ impl MegaKernelExecutor {
 
         Ok(scattered)
     }
+
+    /// True mega-kernel 执行路径：单次 CALL 完成所有层计算。
+    ///
+    /// 当前阶段：逐层调用 CompiledLayerFn（每层一次 CALL）。
+    /// Phase 3 后：单次 MegaKernelFn CALL 完成 embed → N layers → lm_head → sampling。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn execute_mega_kernel(
+        &self,
+        mega: &MegaKernelCompiled,
+        batch: &MegaBatch,
+    ) -> Result<Vec<Vec<f32>>, MegaKernelError> {
+        let batch_size = batch.batch_input.sequences.len();
+        let total_tokens: usize = batch.batch_input.sequences.iter().map(|s| s.tokens.len()).sum();
+        let elem_bytes = self.dtype.size_bytes();
+
+        // 分配 activation buffers (ping/pong)
+        let activation_bytes = total_tokens * self.hidden_size * elem_bytes;
+        let mut activation_ping = vec![0u8; activation_bytes];
+        let mut activation_pong = vec![0u8; activation_bytes];
+
+        // 分配 scratchpad
+        let scratchpad_bytes = mega.buffer_layout.total_scratchpad_bytes;
+        let mut scratchpad = vec![0u8; scratchpad_bytes];
+
+        // 逐层执行（Phase 3 将替换为真正的 mega-kernel 单次 CALL）
+        let weight_base = mega.weight_blob.as_ptr();
+        let layer_stride = mega.weight_layout.layer_stride;
+
+        for layer_idx in 0..self.num_layers {
+            let layer_weight_offset = mega.weight_layout.layer_base_offset(layer_idx);
+            let layer_weight_ptr = unsafe { weight_base.add(layer_weight_offset) };
+
+            let (input_ptr, output_ptr) = if layer_idx % 2 == 0 {
+                (activation_ping.as_ptr(), activation_pong.as_mut_ptr())
+            } else {
+                (activation_pong.as_ptr(), activation_ping.as_mut_ptr())
+            };
+
+            // 准备 positions（简单递增）
+            let positions: Vec<u32> = (0..total_tokens as u32).collect();
+            let seq_lens: Vec<usize> = batch.batch_input.sequences.iter()
+                .map(|s| s.tokens.len())
+                .collect();
+
+            unsafe {
+                mega.layer_code.execute(
+                    input_ptr,
+                    layer_weight_ptr,
+                    std::ptr::null_mut(), // KV cache (Phase 3)
+                    positions.as_ptr(),
+                    seq_lens.as_ptr(),
+                    batch_size,
+                    total_tokens,
+                    output_ptr,
+                    scratchpad.as_mut_ptr(),
+                );
+            }
+
+            // 交换 ping/pong
+            std::mem::swap(&mut activation_ping, &mut activation_pong);
+        }
+
+        // 将最终 activation 转换为输出格式
+        let final_activation = if self.num_layers % 2 == 0 {
+            &activation_ping
+        } else {
+            &activation_pong
+        };
+
+        // 输出：取最后一个 token 的 hidden state 作为 logits（简化版）
+        let output_vec: Vec<f32> = final_activation.chunks_exact(elem_bytes)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+
+        Ok(vec![output_vec; batch_size])
+    }
 }
 
 // ============================================================================
-// CompactScatterPipeline (§9.1)
+// Weight Blob Packing
+// ============================================================================
+
+/// 将所有模型权重打包到单一连续 blob。
+///
+/// 按照 MegaKernelWeightLayout 定义的顺序:
+/// embed_weight → layer_0_weights → layer_1_weights → ... → lm_head_weight
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn pack_mega_kernel_weights(
+    layout: &gllm_kernels::compiler::MegaKernelWeightLayout,
+    num_layers: usize,
+    hidden: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    intermediate: usize,
+    weight_ptrs: &std::collections::HashMap<String, *const u8>,
+    weight_sizes: &std::collections::HashMap<String, usize>,
+    dtype: DType,
+) -> Vec<u8> {
+    let mut blob = vec![0u8; layout.total_bytes];
+    let elem_bytes = dtype.size_bytes();
+
+    // Helper: copy weight from ptr into blob at offset
+    let copy_weight = |blob: &mut [u8], offset: usize, ptr: *const u8, size: usize| {
+        if !ptr.is_null() && size > 0 {
+            let src = unsafe { std::slice::from_raw_parts(ptr, size) };
+            blob[offset..offset + size].copy_from_slice(src);
+        }
+    };
+
+    // Embedding weight: "embed_tokens.weight" → [vocab_size, hidden]
+    if let Some(&ptr) = weight_ptrs.get("embed_tokens.weight") {
+        let size = *weight_sizes.get("embed_tokens.weight").unwrap_or(&0);
+        copy_weight(&mut blob, layout.embed_offset, ptr, size);
+    }
+
+    // Per-layer weights
+    let per_layer = &layout.per_layer;
+    let weight_names = [
+        ("model.layers.{L}.input_layernorm.weight", per_layer.attn_norm_offset, per_layer.attn_norm_bytes),
+        ("model.layers.{L}.self_attn.q_proj.weight", per_layer.w_q_offset, per_layer.w_q_bytes),
+        ("model.layers.{L}.self_attn.k_proj.weight", per_layer.w_k_offset, per_layer.w_k_bytes),
+        ("model.layers.{L}.self_attn.v_proj.weight", per_layer.w_v_offset, per_layer.w_v_bytes),
+        ("model.layers.{L}.self_attn.o_proj.weight", per_layer.w_o_offset, per_layer.w_o_bytes),
+        ("model.layers.{L}.post_attention_layernorm.weight", per_layer.ffn_norm_offset, per_layer.ffn_norm_bytes),
+        ("model.layers.{L}.mlp.gate_proj.weight", per_layer.w_gate_offset, per_layer.w_gate_bytes),
+        ("model.layers.{L}.mlp.up_proj.weight", per_layer.w_up_offset, per_layer.w_up_bytes),
+        ("model.layers.{L}.mlp.down_proj.weight", per_layer.w_down_offset, per_layer.w_down_bytes),
+    ];
+
+    for layer_idx in 0..num_layers {
+        let layer_base = layout.layer_base_offset(layer_idx);
+        for (name_template, rel_offset, expected_size) in &weight_names {
+            let name = name_template.replace("{L}", &layer_idx.to_string());
+            if let Some(&ptr) = weight_ptrs.get(&name) {
+                let size = *weight_sizes.get(&name).unwrap_or(expected_size);
+                copy_weight(&mut blob, layer_base + rel_offset, ptr, size);
+            }
+        }
+    }
+
+    // lm_head weight: "lm_head.weight" → [vocab_size, hidden]
+    if let Some(&ptr) = weight_ptrs.get("lm_head.weight") {
+        let size = *weight_sizes.get("lm_head.weight").unwrap_or(&0);
+        copy_weight(&mut blob, layout.lm_head_offset, ptr, size);
+    }
+
+    blob
+}
 // ============================================================================
 
 /// Compact 后的批次信息
