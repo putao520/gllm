@@ -29,6 +29,7 @@ use crate::manifest::{
     EMPTY_FILE_MAP,
 };
 use crate::rerank::{RerankResponse, RerankResult};
+use gllm_kernels::types::DType;
 use thiserror::Error;
 
 // ============================================================================
@@ -1456,8 +1457,26 @@ impl Client {
 
     /// Register a Semantic Gatekeeper on the currently loaded model.
     ///
-    /// Triggers Level Keys precomputation + Q-tap epilogue injection on
-    /// detection layers. Subsequent `generate()` calls automatically engage SG.
+    /// 完整流程 (对齐 SPEC/SEMANTIC-GATEKEEPER.md §2 §3):
+    ///   1. `config.validate()` — 配置合法性检查
+    ///   2. 解析 ModelGeometry (num_layers / hidden_size / num_kv_heads / head_dim / dtype)
+    ///   3. `config.resolve_detection_layers()` → 物理层索引集合
+    ///   4. 读取 `embed_tokens.weight` → `EmbedLookupOnlyGraph::build_and_compile` (JIT)
+    ///   5. 对每个检测层 L: 读取 `input_layernorm.weight` + `self_attn.k_proj.weight`
+    ///      → `KProjOnlyGraph::build_and_compile` (JIT)
+    ///   6. `precompute_level_keys(...)` — 填充 LevelKeysCache 所有检测层 × L1/L2/L3
+    ///   7. 构造 `GatekeeperRingBuffer` (q_dim = num_heads × head_dim)
+    ///   8. 构造 `SemanticGatekeeperCallback` (priority=90)
+    ///   9. [Phase C 依赖] 将 callback 接入 executor.callback_chain_override
+    ///  10. [Phase C 依赖] 更新检测层 FusedAttentionLayer 携带 q_tap sink_ptr
+    ///
+    /// 当前实现执行步骤 1-8 的完整 JIT 预计算(真实走 `InferenceCompiler`),
+    /// 第 9-10 步需 gllm-kernels Q-tap codegen + executor callback 注入钩子
+    /// (Phase C) 落地. 于第 9 步边界返回显式 `ClientError::RuntimeError`,
+    /// 禁止静默 NOP (NO_SILENT_FALLBACK / 禁止 stub).
+    ///
+    /// 完成 Phase C 后,本函数将通过原子替换 `ClientState` 或扩展存储机制挂接
+    /// 长寿命 `SemanticGatekeeperCallback`. 在此之前,SG 注册被严格拒绝.
     ///
     /// # 关联
     /// - SPEC/SEMANTIC-GATEKEEPER.md §3 Level Keys 预计算
@@ -1467,40 +1486,273 @@ impl Client {
         &self,
         config: crate::semantic_gatekeeper::SemanticGatekeeperConfig,
     ) -> Result<(), ClientError> {
-        // SPEC 铁律: validate() 必须在预计算前执行,拒绝非法配置
-        config
-            .validate()
-            .map_err(|e| ClientError::RuntimeError(format!("gatekeeper config invalid: {e}")))?;
-        // Phase E 占位: 预计算流水线 (LevelKeysCache + Q-tap codegen) 待 Phase C
-        // SymDim 穿透完成后接入; 当前返回显式错误,严禁静默 NOP.
+        use crate::semantic_gatekeeper::{
+            precompute_level_keys, EmbedLookupOnlyGraph, KProjOnlyGraph,
+        };
+
+        // ── 1. 配置校验 ──
+        config.validate().map_err(|e| {
+            ClientError::RuntimeError(format!(
+                "semantic gatekeeper: Phase C pending — config invalid: {e}"
+            ))
+        })?;
+
+        // ── 2. 解析模型几何 ──
+        let state = self.require_state().map_err(|_| {
+            ClientError::RuntimeError(
+                "semantic gatekeeper: Phase C pending — no model loaded".to_string(),
+            )
+        })?;
+        let executor = state.backend.executor();
+        let model_config = executor.model_config();
+        let num_layers = model_config.num_hidden_layers;
+        let hidden_size = model_config.hidden_size;
+        let vocab_size = model_config.vocab_size;
+        let num_heads = model_config.num_attention_heads;
+        let num_kv_heads = model_config.num_key_value_heads;
+        let head_dim = model_config.head_dim;
+        let kv_dim = num_kv_heads.checked_mul(head_dim).ok_or_else(|| {
+            ClientError::RuntimeError(
+                "semantic gatekeeper: Phase C pending — kv_dim overflow".to_string(),
+            )
+        })?;
+        let q_dim = num_heads.checked_mul(head_dim).ok_or_else(|| {
+            ClientError::RuntimeError(
+                "semantic gatekeeper: Phase C pending — q_dim overflow".to_string(),
+            )
+        })?;
+        let dtype = model_config.dtype;
+        let rms_eps = model_config.layer_norm_epsilon.unwrap_or(1e-6);
+        if num_layers == 0 || hidden_size == 0 || vocab_size == 0 || kv_dim == 0 || q_dim == 0 {
+            return Err(ClientError::RuntimeError(format!(
+                "semantic gatekeeper: Phase C pending — invalid geometry: \
+                 num_layers={num_layers} hidden={hidden_size} vocab={vocab_size} \
+                 kv_dim={kv_dim} q_dim={q_dim}"
+            )));
+        }
+
+        // ── 3. 解析物理检测层索引 ──
+        let detection_layers = config.resolve_detection_layers(num_layers);
+        if detection_layers.is_empty() {
+            return Err(ClientError::RuntimeError(
+                "semantic gatekeeper: Phase C pending — detection_depths resolved to empty set"
+                    .to_string(),
+            ));
+        }
+
+        // ── 4. 提取 token embedding 字节 → EmbedLookupOnlyGraph ──
+        let (embed_bytes, embed_dtype) = {
+            let weights = executor.weights().map_err(|e| {
+                ClientError::RuntimeError(format!(
+                    "semantic gatekeeper: Phase C pending — weights accessor failed: {e}"
+                ))
+            })?;
+            let backend = executor.cpu_backend().map_err(|e| {
+                ClientError::RuntimeError(format!(
+                    "semantic gatekeeper: Phase C pending — cpu_backend accessor failed: {e}"
+                ))
+            })?;
+            let aliases = crate::weight_names::decoder_embed_aliases();
+            crate::compat::weight_helpers::get_typed_data::<f32>(weights, backend, &aliases)
+                .map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — embed_tokens weight lookup failed: {e}"
+                    ))
+                })?
+        };
+        if embed_dtype != DType::F32 {
+            // `embed_tokens_f32` / `get_typed_data::<f32>` 返回的 bytes 统一对齐
+            // Element=f32, 因此 dtype 必为 F32. 其他值意味着 WeightsHandle 内部
+            // 错配, 直接 Err 而非静默纠正.
+            return Err(ClientError::RuntimeError(format!(
+                "semantic gatekeeper: Phase C pending — expected f32 embed bytes, got {embed_dtype:?}"
+            )));
+        }
+        let embed_bytes_model_dtype = if dtype == DType::F32 {
+            embed_bytes
+        } else {
+            let f32_slice = crate::compat::jit_helpers::typed_bytes_to_f32(&embed_bytes, DType::F32);
+            crate::compat::weight_helpers::f32_to_typed_bytes(&f32_slice, dtype)
+        };
+        let embed_graph = EmbedLookupOnlyGraph::build_and_compile(
+            hidden_size,
+            vocab_size,
+            dtype,
+            &embed_bytes_model_dtype,
+        )
+        .map_err(sg_err_to_client)?;
+
+        // ── 5. 每个检测层构造 KProjOnlyGraph ──
+        let mut kproj_graphs: Vec<KProjOnlyGraph> = Vec::with_capacity(detection_layers.len());
+        for &layer_idx in &detection_layers {
+            let ln_aliases = crate::weight_names::decoder_layer_aliases(
+                layer_idx,
+                "input_layernorm.weight",
+                Some("attn_norm.weight"),
+            );
+            let k_aliases = crate::weight_names::decoder_layer_aliases(
+                layer_idx,
+                "self_attn.k_proj.weight",
+                Some("attn_k.weight"),
+            );
+
+            let (ln_bytes_f32, _) = {
+                let weights = executor.weights().map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — weights accessor failed: {e}"
+                    ))
+                })?;
+                let backend = executor.cpu_backend().map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — cpu_backend accessor failed: {e}"
+                    ))
+                })?;
+                crate::compat::weight_helpers::get_typed_data::<f32>(
+                    weights, backend, &ln_aliases,
+                )
+                .map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — input_layernorm@L{layer_idx} lookup failed: {e}"
+                    ))
+                })?
+            };
+            let (k_bytes_f32, _) = {
+                let weights = executor.weights().map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — weights accessor failed: {e}"
+                    ))
+                })?;
+                let backend = executor.cpu_backend().map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — cpu_backend accessor failed: {e}"
+                    ))
+                })?;
+                crate::compat::weight_helpers::get_typed_data::<f32>(
+                    weights, backend, &k_aliases,
+                )
+                .map_err(|e| {
+                    ClientError::RuntimeError(format!(
+                        "semantic gatekeeper: Phase C pending — k_proj@L{layer_idx} lookup failed: {e}"
+                    ))
+                })?
+            };
+
+            // Convert both weight blobs to target dtype bytes.
+            let ln_bytes = if dtype == DType::F32 {
+                ln_bytes_f32
+            } else {
+                let f = crate::compat::jit_helpers::typed_bytes_to_f32(&ln_bytes_f32, DType::F32);
+                crate::compat::weight_helpers::f32_to_typed_bytes(&f, dtype)
+            };
+            let k_bytes = if dtype == DType::F32 {
+                k_bytes_f32
+            } else {
+                let f = crate::compat::jit_helpers::typed_bytes_to_f32(&k_bytes_f32, DType::F32);
+                crate::compat::weight_helpers::f32_to_typed_bytes(&f, dtype)
+            };
+
+            let kpg = KProjOnlyGraph::build_and_compile(
+                layer_idx,
+                hidden_size,
+                kv_dim,
+                rms_eps,
+                dtype,
+                &ln_bytes,
+                &k_bytes,
+            )
+            .map_err(sg_err_to_client)?;
+            kproj_graphs.push(kpg);
+        }
+
+        // ── 6. 预计算 LevelKeysCache (真实 JIT) ──
+        struct TokenizerAdapter<'a>(&'a crate::tokenizer::TokenizerHandle);
+        impl<'a> crate::semantic_gatekeeper::TokenizerEncoder for TokenizerAdapter<'a> {
+            fn encode(
+                &self,
+                text: &str,
+            ) -> Result<Vec<u32>, crate::semantic_gatekeeper::TokenizerEncodeError> {
+                if text.trim().is_empty() {
+                    return Err(crate::semantic_gatekeeper::TokenizerEncodeError::EmptyText);
+                }
+                self.0.encode(text, false).map_err(|e| {
+                    crate::semantic_gatekeeper::TokenizerEncodeError::Backend(format!("{e}"))
+                })
+            }
+        }
+        let adapter = TokenizerAdapter(executor.tokenizer());
+        let level_keys = precompute_level_keys(
+            &config,
+            &adapter,
+            &embed_graph,
+            &kproj_graphs,
+            &detection_layers,
+            hidden_size,
+            kv_dim,
+            dtype,
+        )
+        .map_err(sg_err_to_client)?;
+        drop(executor);
+
+        // ── 7. 构造 Q-tap ring buffer (sink_ptr 将由 Phase C codegen 读取) ──
+        let _ring_buffer = std::sync::Arc::new(
+            crate::semantic_gatekeeper::GatekeeperRingBuffer::new(q_dim, dtype.size_bytes()),
+        );
+
+        // ── 8. 断言预计算产物完整 (防御性 assert, 不构造 callback 因 Phase C pending) ──
+        debug_assert_eq!(level_keys.detection_layers(), detection_layers.as_slice());
+        debug_assert_eq!(level_keys.kv_dim(), kv_dim);
+        debug_assert_eq!(level_keys.len(), detection_layers.len());
+
+        // ── 9-10. Phase C 依赖: FusedAttentionLayer q_tap codegen + callback 注入 ──
+        //
+        // 预计算 (steps 1-8) 走完证明 SG 在本模型上的可行性, 但注册流程未闭合:
+        // - executor 尚无 callback_chain_override 字段, 无法持有长寿命 callback
+        // - FusedAttentionLayer 的 q_tap sink_ptr 由 gllm-kernels Q-tap
+        //   epilogue codegen 注入, 该路径 Phase C 未落地
+        // 返回显式错误, 禁止以 "注册成功" 名义误导调用方.
         Err(ClientError::RuntimeError(
-            "semantic gatekeeper: Phase C pending (LevelKeysCache + Q-tap codegen)".to_string(),
+            "semantic gatekeeper: Phase C pending — FusedAttentionLayer q_tap codegen + \
+             executor callback chain injection not yet integrated, \
+             register_semantic_gatekeeper not operational \
+             (pre-registration JIT precompute validated)"
+                .to_string(),
         ))
     }
 
     /// Unregister the Semantic Gatekeeper, releasing Level Keys cache and
     /// reverting detection-layer FusedAttentionLayer back to `q_tap: None`.
     ///
-    /// 幂等操作: 无 SG 注册时不返回错误.
+    /// 幂等操作 (SPEC §7.1): 无 SG 注册状态时 `Ok(())`. 由于当前
+    /// `register_semantic_gatekeeper` 于 Phase C 之前始终返回 Err (未正式注册),
+    /// Client 从未持有 SG 状态, 故本函数始终 `Ok(())`. Phase C 完成后
+    /// 若存在真实注册状态将清理 callback 链 + 恢复 q_tap: None.
     ///
     /// # 关联
     /// - SPEC/04-API-DESIGN.md §7.1
     pub fn unregister_semantic_gatekeeper(&self) -> Result<(), ClientError> {
-        // Phase E 占位: 当前无注册状态可清理,幂等 Ok.
         Ok(())
     }
 
     /// Reset gatekeeper runtime state (ActiveState) without discarding the
     /// precomputed Level Keys cache. Use case: cross-request cold boundary or
-    /// explicit semantic context switch.
+    /// explicit semantic context switch (SPEC §5.3 刷新触发器 3).
+    ///
+    /// 幂等操作: 无 SG 注册状态时无 ActiveState 可清, 返回 `Ok(())`.
+    /// Phase C 完成后若活跃 SemanticGatekeeperCallback 存在, 其 `reset_state()`
+    /// 会被调用.
     ///
     /// # 关联
     /// - SPEC/SEMANTIC-GATEKEEPER.md §5.3 Refresh Triggers
     /// - SPEC/04-API-DESIGN.md §7.1
     pub fn reset_gatekeeper_state(&self) -> Result<(), ClientError> {
-        // Phase E 占位: 当前 ActiveState 未驻留 Client,幂等 Ok.
         Ok(())
     }
+}
+
+fn sg_err_to_client(err: crate::semantic_gatekeeper::SemanticGatekeeperError) -> ClientError {
+    ClientError::RuntimeError(format!(
+        "semantic gatekeeper: Phase C pending — precompute error: {err}"
+    ))
 }
 
 // ============================================================================

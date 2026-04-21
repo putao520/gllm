@@ -138,7 +138,6 @@ impl LayerCallback for SemanticGatekeeperCallback {
         };
 
         let dtype = ctx.model_config.geometry.dtype;
-        let elem_bytes = dtype.size_bytes();
 
         // 3. 从 hidden_state 切出最后一个 token 向量.
         let last_hidden = match extract_last_token_hidden(ctx.hidden_state, self.hidden_size, dtype)

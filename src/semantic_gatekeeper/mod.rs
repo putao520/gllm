@@ -29,7 +29,7 @@ pub mod small_graph;
 
 pub use active_state::ActiveState;
 pub use callback::SemanticGatekeeperCallback;
-pub use level_keys::LevelKeysCache;
+pub use level_keys::{precompute as precompute_level_keys, LevelKeysCache, LevelKeysError};
 pub use ring_buffer::{GatekeeperRingBuffer, QTapReadError};
 pub use small_graph::{EmbedLookupOnlyGraph, KProjOnlyGraph};
 
@@ -163,6 +163,34 @@ pub trait AstSentinel: Send + Sync {
 pub trait TokenizerLookup: Send + Sync {
     /// 将 token id 序列反解为字符串. 未知 id 应以跳过或占位符处理.
     fn decode(&self, tokens: &[u32]) -> String;
+}
+
+// ============================================================================
+// TokenizerEncoder — Level Keys 预计算 & 运行时知识文本编码路径
+// ============================================================================
+
+/// 文本 → token id 编码接口.
+///
+/// Level Keys 预计算 (`level_keys::precompute`) 和运行时知识文本编码均通过
+/// 此 trait 调用主模型 tokenizer; 以 trait 形式解耦具体 `TokenizerHandle`
+/// 实现,便于单元测试注入 mock,亦允许 SG Provider 端使用独立 tokenizer.
+pub trait TokenizerEncoder: Send + Sync {
+    /// 将文本编码为 token id 序列.
+    ///
+    /// `add_special_tokens` 语义由实现者决定: 对主模型 embed 输入通常应为 `false`
+    /// (避免 BOS/EOS 污染 mean-pool 结果).
+    fn encode(&self, text: &str) -> Result<Vec<u32>, TokenizerEncodeError>;
+}
+
+/// `TokenizerEncoder::encode` 错误.
+#[derive(Debug, thiserror::Error, Clone)]
+pub enum TokenizerEncodeError {
+    #[error("empty text not allowed")]
+    EmptyText,
+    #[error("tokenizer backend error: {0}")]
+    Backend(String),
+    #[error("token id {token} exceeds vocab size {vocab_size}")]
+    TokenOutOfRange { token: u32, vocab_size: usize },
 }
 
 // ============================================================================

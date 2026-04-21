@@ -1351,6 +1351,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.forward_config.clone()
     }
 
+    /// Expose the loaded `TokenizerHandle` (read-only).
+    ///
+    /// Consumer: `Client::register_semantic_gatekeeper` uses it to encode
+    /// SG level descriptor strings and runtime knowledge text into token ids
+    /// (SPEC/SEMANTIC-GATEKEEPER.md §3.1).
+    pub fn tokenizer(&self) -> &TokenizerHandle {
+        &self.tokenizer
+    }
+
     /// Add a generation hook (guardrail/probe).
     ///
     /// per SPEC 04-API-DESIGN §7.4 — hooks are called after each decode step

@@ -678,6 +678,17 @@ impl<E: Element> BackendExecutor<E> {
         }
     }
 
+    /// Tokenizer handle exposed for Semantic Gatekeeper registration
+    /// (SPEC/SEMANTIC-GATEKEEPER.md §3.1 level-descriptor tokenization).
+    pub fn tokenizer(&self) -> &crate::tokenizer::TokenizerHandle {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.tokenizer(),
+            BackendExecutor::Rocm(exec) => exec.tokenizer(),
+            BackendExecutor::Metal(exec) => exec.tokenizer(),
+            BackendExecutor::Cpu(exec) => exec.tokenizer(),
+        }
+    }
+
     /// Override `multimodal_token_ids` in the underlying `ModelConfig`.
     ///
     /// Primarily used by the loader when tokenizer-side multimodal IDs land
