@@ -9,10 +9,8 @@ pub mod callbacks;
 
 pub use pipeline::{PipelineError, UnifiedPipeline};
 
-/// 引擎上下文 (per SPEC 04-API-DESIGN §8.1, §7.2, 元数据)
+/// 引擎上下文。提供给各类 runtime hook 的引擎访问接口。
 ///
-/// 提供给 `KnowledgeDataSource::materialize()` 的引擎访问接口。
-/// 允许数据源在物理化时访问引擎资源（如 KV cache、权重等）。
 /// 所有维度字段从模型配置读取 (Ω1 真实性原则).
 #[derive(Clone)]
 pub struct EngineContext {
@@ -78,16 +76,3 @@ pub use attention_contracts::{
     VisibilityMode, WeightBacking, WeightView,
 };
 
-// Re-export knowledge injection types at engine::knowledge (per SPEC 04-API-DESIGN §7.2)
-pub mod knowledge {
-    pub use crate::knowledge::{
-        KnowledgeSource, InjectionKind, InjectionScheduler, KnowledgeDataSource, KnowledgeError,
-        KnowledgeInjectionConfig, KnowledgeInjectionResult, KvSideloadManager, LayerTarget,
-        MaterializedPayload,
-    };
-}
-
-// Re-export guardrail types at engine::guard (per SPEC 04-API-DESIGN §7.4)
-pub mod guard {
-    pub use crate::intent::{GuardProbe, SafetyPolicy};
-}

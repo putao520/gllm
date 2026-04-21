@@ -7,7 +7,6 @@
 //! - Backward-compatible re-export modules (`kernel_types`, `backend_trait`, `cpu_backend`)
 
 pub(crate) mod weight_helpers;
-mod knowledge_injector;
 pub(crate) mod artifact_cache;
 pub(crate) mod sampling;
 
@@ -216,54 +215,6 @@ pub(crate) enum PoolingMode {
     ClsClassifier,
 }
 
-// Re-export knowledge injection API (per SPEC 04-API-DESIGN §8)
-pub use knowledge_injector::{
-    inject_frozen_kv, inject_frozen_kv_from_bytes, inject_late_fusion, inject_dynamic_lora,
-    LoRAAdapter, register_kv_pages,
-};
-
-// ARCH-FULL-JIT: forward_to_layer / forward_to_semantic_layer / layer_target_to_idx
-// formerly in decoder_forward.rs — now provided as stubs returning errors.
-// The real execution path is FusedGraphExecutor.
-
-/// Convert a semantic `LayerTarget` to a physical layer index.
-pub fn layer_target_to_idx(target: crate::knowledge::LayerTarget, num_layers: usize) -> usize {
-    use crate::knowledge::LayerTarget;
-    match target {
-        LayerTarget::ShallowSyntax => num_layers / 4,
-        LayerTarget::MidSemantic => num_layers / 2,
-        LayerTarget::DeepLogic => (num_layers * 3) / 4,
-    }
-}
-
-/// Run a truncated forward pass up to a specific layer index.
-///
-/// ARCH-FULL-JIT: hand-written forward passes have been deleted.
-/// Use `FusedGraphExecutor` for real execution.
-pub fn forward_to_layer<E: Element>(
-    _backend: &cpu_backend::CpuBackend<E>,
-    _tokens: &[u32],
-    _weights: &dyn backend_trait::TensorLookup<E, cpu_backend::CpuBackend<E>>,
-    _config: &crate::engine::executor::GeneratorForwardConfig,
-    _target_layer: usize,
-) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
-    Err(crate::engine::executor::BackendError::Other(
-        "ARCH-FULL-JIT: hand-written forward_to_layer deleted, use FusedGraphExecutor".into(),
-    ))
-}
-
-/// Run a truncated forward pass up to a semantic layer target.
-///
-/// ARCH-FULL-JIT: hand-written forward passes have been deleted.
-/// Use `FusedGraphExecutor` for real execution.
-pub fn forward_to_semantic_layer<E: Element>(
-    _backend: &cpu_backend::CpuBackend<E>,
-    _tokens: &[u32],
-    _weights: &dyn backend_trait::TensorLookup<E, cpu_backend::CpuBackend<E>>,
-    _config: &crate::engine::executor::GeneratorForwardConfig,
-    _target: crate::knowledge::LayerTarget,
-) -> Result<Vec<f32>, crate::engine::executor::BackendError> {
-    Err(crate::engine::executor::BackendError::Other(
-        "ARCH-FULL-JIT: hand-written forward_to_semantic_layer deleted, use FusedGraphExecutor".into(),
-    ))
-}
+// Knowledge injection API (旧 InjectionKind / LayerTarget 已废弃) 已经
+// 整体被 src/semantic_gatekeeper/ 模块 (SPEC/SEMANTIC-GATEKEEPER.md) 替代。
+// 任何残留引用应指向 crate::semantic_gatekeeper::* 而非此处。

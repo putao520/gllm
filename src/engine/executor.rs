@@ -552,14 +552,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     moe_prefetcher: Option<crate::moe::prefetch::ExpertWeightPrefetcher>,
     /// §17 推测解码引擎（EESD / SAGUARO / Standard）
     spec_decoding: crate::speculative::engine::SpecDecodingState,
-    /// §8.1 Knowledge Injection payload (set via Client::inject_knowledge → set_knowledge_payload)
-    knowledge_payload: Option<crate::knowledge::MaterializedPayload>,
     /// §16.1 RAG system (set via set_rag_system)
     rag_system: Option<crate::rag::LateFusionRag>,
-    /// §16.4 Guardrail probe runners (set via Client::attach_guardrail → add_guardrail_runner)
-    guardrail_runners: Vec<crate::guardrail::GuardProbeRunner>,
-    /// §16.3 Intent recall config
-    intent_config: crate::intent::IntentConfig,
     /// §14.4 Hot JMP Patching 管理器（冷专家 NOP/Deopt + 前缀塌缩）
     hot_patch_manager: Option<crate::moe::hot_patch::HotPatchManager>,
     /// §9.3 残差数据总线（Injection/Recall 端口）
@@ -1196,10 +1190,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             moe_dispatcher,
             moe_prefetcher,
             spec_decoding: crate::speculative::engine::SpecDecodingState::new_standard(),
-            knowledge_payload: None,
             rag_system: None,
-            guardrail_runners: Vec::new(),
-            intent_config: crate::intent::IntentConfig::default(),
             hot_patch_manager,
             residual_bus: {
                 let mut bus = crate::routing::ResidualBus::new(
@@ -1713,12 +1704,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         );
         callbacks.push(Box::new(bus_bridge));
 
-        // §8.1 Knowledge Inject callback (priority 90, pre_node)
-        if let Some(payload) = self.knowledge_payload.take() {
-            callbacks.push(Box::new(
-                crate::engine::callbacks::KnowledgeInjectCallback::new(payload, num_layers),
-            ));
-        }
+        // §2.9 Semantic Gatekeeper callback (priority 90, pre_node)
+        // Real registration happens via Client::register_semantic_gatekeeper which
+        // inserts the SemanticGatekeeperCallback into the chain directly. Executor
+        // itself no longer holds knowledge-injection state.
 
         // §16.1 RAG Inject callback (priority 80, pre_node)
         if let Some(rag) = self.rag_system.take() {
@@ -1744,21 +1733,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // §16.2 Early Exit callback (priority 50, post_node)
         callbacks.push(Box::new(early_exit_cb));
 
-        // §16.4 Guardrail Probe callbacks (priority 40, post_node)
-        for runner in std::mem::take(&mut self.guardrail_runners) {
-            callbacks.push(Box::new(
-                crate::engine::callbacks::GuardrailProbeCallback::new(runner, num_layers),
-            ));
-        }
-
-        // §16.3 Intent Recall callback (priority 30, post_node)
-        callbacks.push(Box::new(
-            crate::engine::callbacks::IntentRecallCallback::new(
-                self.intent_config.clone(),
-                num_layers,
-            ),
-        ));
-
         let mut callback_chain = crate::graph::layer_callback::CallbackChain::new(callbacks);
         self.forward_config.callback_chain_ptr = &mut callback_chain as *mut _;
 
@@ -1781,24 +1755,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         self.policy = policy;
     }
 
-    /// §8.1 Set knowledge injection payload for KnowledgeInjectCallback.
-    pub fn set_knowledge_payload(&mut self, payload: crate::knowledge::MaterializedPayload) {
-        self.knowledge_payload = Some(payload);
-    }
-
     /// §16.1 Set the Late-Fusion RAG system for RagInjectCallback.
     pub fn set_rag_system(&mut self, rag: crate::rag::LateFusionRag) {
         self.rag_system = Some(rag);
-    }
-
-    /// §16.4 Add a guardrail probe runner for GuardrailProbeCallback.
-    pub fn add_guardrail_runner(&mut self, runner: crate::guardrail::GuardProbeRunner) {
-        self.guardrail_runners.push(runner);
-    }
-
-    /// §16.3 Set intent recall configuration for IntentRecallCallback.
-    pub fn set_intent_config(&mut self, config: crate::intent::IntentConfig) {
-        self.intent_config = config;
     }
 
     /// Main Engine Step: Continuous Batching

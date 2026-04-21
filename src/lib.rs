@@ -2,7 +2,6 @@
 
 pub mod compat;
 
-pub mod guardrail;
 pub mod manifest;
 
 pub mod arch;
@@ -15,13 +14,12 @@ pub mod scheduler;
 pub mod client;
 pub mod embeddings;
 pub mod generation;
-pub mod intent;
-pub mod knowledge;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
 pub mod classify;
 pub mod rerank;
+pub mod semantic_gatekeeper;
 pub mod tokenizer;
 pub mod weight_loader;
 pub mod weight_names;
@@ -64,18 +62,13 @@ pub use compat::audio_forward::{
     audio_encode, mel_spectrogram, AudioConfig, AudioTensorLookup, InMemoryAudioWeights,
     UsmConformerEncoder,
 };
-pub use guardrail::{GuardProbeError, GuardProbeRunner};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};
 pub use rerank::{RerankResponse, RerankResult};
-pub use intent::{
-    GuardProbe, GuardrailAttachment, IntentConfig, IntentEncoding,
-    IntentError, SafetyPolicy, SafetyPolicyConfig,
-};
-pub use knowledge::{
-    KnowledgeSource, HitRateTracker, InjectionKind, InjectionScheduler, KnowledgeDataSource,
-    KnowledgeError, KnowledgeInjectionConfig, KnowledgeInjectionResult, KvSideloadManager,
-    LayerTarget, MaterializedPayload,
+pub use semantic_gatekeeper::{
+    AstContext, AstSentinel, KnowledgeEntry, KnowledgeProvider, RetrieveContext,
+    SemanticGatekeeperCallback, SemanticGatekeeperConfig, SemanticGatekeeperError, SemanticLevel,
+    TokenizerLookup, DEFAULT_LEVEL_DESCRIPTORS,
 };
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
