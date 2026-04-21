@@ -377,7 +377,7 @@
 |----|----------|------|----------|------|
 | **REQ-HR-001** | Binary classify head | lm_head logits 切片 positive/negative token → softmax(T) → P(positive) | 1. `client.classify_binary("Is water wet? Answer yes or no:", {positive="yes", negative="no", T=1.0})` 返回 f32 ∈ [0.0, 1.0]；2. SmolLM2-135M-Instruct 上 P(yes) > 0.5 (真实 LLM 行为)；3. `P(yes) + P(no) - 1.0` 绝对值 < 1e-5 | 🟢 已实现 |
 | **REQ-HR-002** | Multiway classify head | N 个候选 token 的 lm_head logit 联合 softmax 归一化 | 1. `classify_multiway(prompt, ["sports", "politics", "technology"])` 返回 Vec<f32> 长度 3；2. `sum(probs) - 1.0` 绝对值 < 1e-5；3. 所有 `probs[i] ∈ [0.0, 1.0]` | 🟢 已实现 |
-| **REQ-HR-003** | Mid-layer encode (占位) | FusedGraphExecutor 单次前向未暴露 callback 截断,encode_to_layer 显式拒绝 | 1. `client.encode_to_layer(text, LayerAnchor::Relative(0.5), PoolMode::MeanPool)` 返回 `Err(HeadRoutingError::MidLayerNotSupported)`；2. 错误消息包含固定子串 "MidLayerNotSupported"；3. 禁止 stub / scalar fallback / silent Ok | 🟢 已实现 (显式拒绝) |
+| **REQ-HR-003** | Mid-layer encode | FusedGraphExecutor 单次前向通过 `MidLayerEncodeCallback` 截断, `encode_to_layer` pool hidden 返回 | 1. `client.encode_to_layer(text, LayerAnchor::Relative(0.5), PoolMode::MeanPool)` 返回 `Ok(Vec<f32>)` 长度 = hidden_size；2. 向量所有元素 finite, L2 norm > 0；3. 不同 anchor (0.5 vs 0.9) 产生**不同** embedding — 证明截断深度真实生效；4. 禁止 stub / scalar fallback / silent Ok | 🟢 已实现 |
 | **REQ-HR-004** | 同一 Client 切换不重新加载模型 | 多个 HR API 调用复用同一 `BackendContext` | 1. 同一 client 依次 `generate / classify_binary / classify_multiway`,三次 API 调用之间 `Arc::as_ptr(&state.backend)` 地址恒定；2. HR 调用不触发 `ClientBuilder::build_state`；3. 总 JIT 编译次数 = 1 (加载时) | 🟢 已实现 |
 | **REQ-HR-005** | NO_ISLAND_MODULE 合规 | HR API 真实接入生产路径,禁止仅 `#[cfg(test)]` 调用 | 1. `grep classify_binary\|classify_multiway\|encode_to_layer src/*.rs` 在非 `#[cfg(test)]` 路径中有真实实现与导出；2. `Client::classify_binary` 真实调用 `head_routing::LayerAnchor::resolve` / `PoolMode::apply` / `Backend::score_tokens_forward_gpu_pure`；3. E2E 测试 TEST-HR-001/002/004 通过真实 SmolLM2 推理路径验证 | 🟢 已实现 |
 
@@ -391,9 +391,76 @@
 
 - `src/head_routing.rs` — `LayerAnchor` / `PoolMode` / `ClassifyBinaryConfig` / `ClassifyMultiwayConfig` / `HeadRoutingError`
 - `src/client.rs` — `Client::classify_binary` / `classify_multiway` / `encode_to_layer`
-- `src/compat/cpu_backend.rs` — `Backend::score_tokens_forward_gpu_pure` (CPU 完整实现)
-- `src/compat/mod.rs` — `score_tokens_forward_gpu_pure` trait 方法签名
+- `src/compat/cpu_backend.rs` — `Backend::score_tokens_forward_gpu_pure` + `encode_at_layer_forward_gpu_pure` + `apply_guardrail_probe` (CPU 完整实现)
+- `src/compat/mod.rs` — 相关 trait 方法签名
 - `src/compat/gpu_backend_macro.rs` — GPU 后端 (CUDA/HIP/Metal) 统一返回 `Unimplemented` (显式,非 silent)
+- `src/graph/executor.rs` — `FusedGraphExecutor::run_with_callbacks` 扩展 (Part 1 基础设施)
+- `src/engine/callbacks/mid_layer_encode.rs` — `MidLayerEncodeCallback` (post_node ExitEarly with hidden)
 - `src/backend/mod.rs` / `src/engine/executor.rs` — 调用链 pass-through
 - `src/lib.rs` — 公共类型导出
+
+---
+
+## 14. Guardrail SDK (REQ-GR)
+
+> **协议 SSOT**: `SPEC/GUARDRAIL.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.9`
+>
+> **定位**: 在推理前向**中途**插入小线性安全分类探针 + 多档策略响应 (HaltAndVeto / LogOnly / SampleDowngrade), 正交于 SG / HR。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-GR-001** | 零权重探针不触发 veto | `GuardProbeWeights { weight=[0...], bias=0 }` + `HaltAndVeto { threshold: 0.99 }` | 1. `classify_binary` 成功返回 Ok; 2. `attachment.is_vetoed() == false`; 3. `last_score() ≈ 0.5` (sigmoid(0)); 4. `actual_layer ∈ [0, num_layers)` | 🟢 已实现 |
+| **REQ-GR-002** | HaltAndVeto 触发 | `weight=[0...], bias=+20` → sigmoid(20) ≈ 1.0 > threshold=0.5 | 1. `classify_binary` 返回 Err(guardrail vetoed); 2. `is_vetoed() == true`; 3. `last_veto_reason()` 包含 "vetoed" / "score" 子串; 4. `last_score() > 0.99` | 🟢 已实现 |
+| **REQ-GR-003** | LogOnly 不改变生成 | `bias=+100, LogOnly` | 1. classify_binary 成功返回; 2. 分数与无 guardrail 时完全相等 (浮点 < 1e-4); 3. `is_vetoed() == false`; 4. `last_score() > 0.99` | 🟢 已实现 |
+| **REQ-GR-004** | SampleDowngrade 记录温度 | `SampleDowngrade { min_temperature: 0.3 }` | 1. classify_binary 成功返回; 2. `attachment.downgraded_temperature() == Some(0.3)`; 3. `is_vetoed() == false` | 🟢 已实现 |
+| **REQ-GR-005** | Attach / detach 生命周期 | 多次 attach / detach 的 id 管理 | 1. 多次 attach 返回单调递增 id; 2. detach 未知 id → Err; 3. detach 后重复 detach 同一 id → Err; 4. 另一个 id 独立成功 | 🟢 已实现 |
+
+### 14.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_guardrail.rs` | REQ-GR-001..005 + TEST-GR-006 (safetensors 缺文件) | 🟢 已实现 |
+
+### 14.2 实现映射
+
+- `src/guardrail.rs` — `GuardProbe` / `GuardProbeWeights` / `SafetyPolicy` / `GuardrailError` / `GuardrailAttachment` / `GuardrailSharedState` / `load_probe_weights` / `validate_policy` / `resolve_anchor`
+- `src/engine/callbacks/guardrail_probe.rs` — `GuardrailProbeCallback` (`LayerCallback::post_node`)
+- `src/client.rs` — `Client::attach_guardrail` / `attach_guardrail_inline` / `detach_guardrail` / `build_guardrail_chain` / `guardrails` registry
+- `src/compat/cpu_backend.rs` — `Backend::apply_guardrail_probe` CPU 实现
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 `Unimplemented` (显式)
+- `src/lib.rs` — 公共导出
+
+---
+
+## 15. Intent Recall SDK (REQ-INTENT)
+
+> **协议 SSOT**: `SPEC/INTENT.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.10`
+>
+> **定位**: 截断前向到 anchor 层 + pool hidden state 作为意图识别 / RAG query 召回向量。`Client::encode_intent` 是 `encode_to_layer` 的语义包装 (DRY 铁律 — 零代码复制)。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-INTENT-001** | Basic shape + finite | encode_intent 返回 `IntentEncoding { embedding, actual_layer, pool }` | 1. `dim()` == `hidden_size`; 2. 所有元素 finite; 3. `l2_norm() > 0`; 4. `pool` 原样透传; 5. `actual_layer ∈ [0, num_layers)` | 🟢 已实现 |
+| **REQ-INTENT-002** | PoolMode 语义 | MeanPool / LastToken / ClsToken 在多 token 文本上产生不同 embedding | 1. 三个 embedding 维度相同; 2. MeanPool vs LastToken L1 delta > 1e-3; 3. ClsToken vs LastToken L1 delta > 1e-3 | 🟢 已实现 |
+| **REQ-INTENT-003** | delegate 等价 | `encode_intent` 内部 delegate 到 `encode_to_layer`,结果一致 | 1. 同 text/anchor/pool 下 `encode_intent(...).embedding` 与 `encode_to_layer(...)` 逐元素 \|Δ\| < 1e-5; 2. DRY: `encode_intent` 在 client.rs 中无独立前向实现 | 🟢 已实现 |
+
+### 15.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_intent.rs` | REQ-INTENT-001..003 | 🟢 已实现 |
+
+### 15.2 实现映射
+
+- `src/intent.rs` — `IntentEncoding` / `IntentError`
+- `src/client.rs` — `Client::encode_intent` (delegate 到 `encode_to_layer`)
+- `src/engine/callbacks/mid_layer_encode.rs` — `MidLayerEncodeCallback` (复用 HR 路径)
+- `src/engine/executor.rs` — `Executor::encode_at_layer_for_prompt`
+- `src/compat/cpu_backend.rs` — `Backend::encode_at_layer_forward_gpu_pure` CPU 实现
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 `Unimplemented` (显式)
+- `src/lib.rs` — 公共导出
 

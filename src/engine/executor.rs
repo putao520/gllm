@@ -2989,6 +2989,23 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         prompt: &str,
         target_token_ids: &[u32],
     ) -> ExecutorResult<Vec<f32>> {
+        self.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, None)
+    }
+
+    /// Like `score_tokens_for_prompt` but threads an optional `CallbackChain`
+    /// into the forward pass. Callbacks installed here observe `pre_node` /
+    /// `post_node` hooks during the JIT-compiled forward and may trigger
+    /// `ExitEarly` (HR encode_to_layer) / veto (Guardrail) semantics.
+    ///
+    /// The chain is attached via `forward_config.callback_chain_ptr` — the
+    /// backend consumes this pointer when calling
+    /// `FusedGraphExecutor::run_with_callbacks`.
+    pub fn score_tokens_for_prompt_with_callbacks(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+        callbacks: Option<&mut crate::graph::layer_callback::CallbackChain>,
+    ) -> ExecutorResult<Vec<f32>> {
         let tokens = self.encode_prompt(prompt)?;
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
@@ -2998,14 +3015,74 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .as_mut()
             .map(|ge| ge as *mut _)
             .unwrap_or(std::ptr::null_mut());
-        let logits = self.backend.score_tokens_forward_gpu_pure(
+        self.forward_config.callback_chain_ptr = callbacks
+            .map(|c| c as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        let result = self.backend.score_tokens_forward_gpu_pure(
             &tokens,
             target_token_ids,
             &self.topology,
             &self.weights,
             &self.forward_config,
-        )?;
+        );
+        // Clear the callback pointer so subsequent calls do not re-use a
+        // dangling pointer if the caller drops the chain.
+        self.forward_config.callback_chain_ptr = std::ptr::null_mut();
+        let logits = result?;
         Ok(logits)
+    }
+
+    /// Head Routing §3.4 / Intent §3 — truncate the forward pass at
+    /// `anchor_layer` via `MidLayerEncodeCallback` and pool the captured
+    /// hidden state.
+    ///
+    /// Returns a `[hidden_size]` vector. `anchor_layer` must already have
+    /// been resolved from a `LayerAnchor` (range check happens at Client API).
+    pub fn encode_at_layer_for_prompt(
+        &mut self,
+        prompt: &str,
+        anchor_layer: usize,
+        pool: crate::head_routing::PoolMode,
+    ) -> ExecutorResult<Vec<f32>> {
+        use crate::graph::layer_callback::CallbackChain;
+        let tokens = self.encode_prompt(prompt)?;
+        if tokens.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+
+        let mut chain = CallbackChain::new(vec![Box::new(
+            crate::engine::callbacks::mid_layer_encode::MidLayerEncodeCallback::new(anchor_layer),
+        )]);
+        self.forward_config.callback_chain_ptr = &mut chain as *mut _;
+
+        let result = self.backend.encode_at_layer_forward_gpu_pure(
+            &tokens,
+            anchor_layer,
+            &self.topology,
+            &self.weights,
+            &self.forward_config,
+        );
+        self.forward_config.callback_chain_ptr = std::ptr::null_mut();
+        let hidden = result?;
+
+        let hidden_size = self.forward_config.hidden_size();
+        let seq_len = tokens.len();
+        if hidden_size == 0 || hidden.len() < seq_len * hidden_size {
+            return Err(ExecutorError::Scheduler(format!(
+                "encode_at_layer_for_prompt: hidden buffer too small, expected >= {}*{}, got {}",
+                seq_len,
+                hidden_size,
+                hidden.len()
+            )));
+        }
+        pool.apply(&hidden, seq_len, hidden_size).map_err(|e| {
+            ExecutorError::Scheduler(format!("encode_at_layer_for_prompt pool failed: {e}"))
+        })
     }
 
     pub fn is_finished(&self, request_id: RequestId) -> bool {

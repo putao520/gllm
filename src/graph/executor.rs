@@ -2163,6 +2163,40 @@ impl FusedGraphExecutor {
         inputs: &HashMap<String, Vec<u8>>,
         shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_internal(inputs, shape_bindings, None, None)
+    }
+
+    /// Execute the fused graph with optional per-node callbacks.
+    ///
+    /// Mirrors `run()` but threads a `CallbackChain` through the node loop,
+    /// enabling mid-layer intervention (ExitEarly for HR `encode_to_layer` /
+    /// Intent, InjectHidden/CompactMask for Guardrail). Used by the
+    /// single-forward paths (embedding / classify / rerank / score_tokens /
+    /// encode_to_layer) that do not own a KV cache.
+    ///
+    /// `forward_config` is required so callbacks can access model geometry
+    /// (hidden_size, num_layers, dtype) via `LayerContext::model_config`.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn run_with_callbacks(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
+        callbacks: &mut super::layer_callback::CallbackChain,
+        forward_config: &crate::engine::executor::GeneratorForwardConfig,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_internal(inputs, shape_bindings, Some(callbacks), Some(forward_config))
+    }
+
+    /// Shared dependency-validation + dispatch path for `run` / `run_with_callbacks`.
+    fn run_internal(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
+        #[allow(unused_variables)]
+        callbacks: Option<&mut super::layer_callback::CallbackChain>,
+        #[allow(unused_variables)]
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         // Dependency validation pass (always runs)
         let mut available: HashSet<String> = inputs.keys().cloned().collect();
         for weight_name in self.graph.weight_bindings.keys() {
@@ -2194,7 +2228,7 @@ impl FusedGraphExecutor {
         // JIT execution path
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         if self.is_compiled {
-            return self.run_compiled(inputs, shape_bindings);
+            return self.run_compiled(inputs, shape_bindings, callbacks, forward_config);
         }
 
         // No compiled kernels available — refuse to return dummy results.
@@ -2628,11 +2662,20 @@ impl FusedGraphExecutor {
     }
 
     /// Execute the compiled JIT kernels in topological order (no KV cache).
+    ///
+    /// When `callbacks` is `Some(_)`, `pre_node()` / `post_node()` fire between
+    /// each graph node. `forward_config` must be provided alongside callbacks
+    /// (required by `LayerContext::model_config`). `ExitEarly { logits }`
+    /// stops execution and returns the provided bytes under the `"logits"` key
+    /// — used by HR `encode_to_layer` / Intent to extract mid-layer hidden
+    /// state without running subsequent layers.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn run_compiled(
         &self,
         inputs: &HashMap<String, Vec<u8>>,
         shape_bindings: &HashMap<String, usize>,
+        mut callbacks: Option<&mut super::layer_callback::CallbackChain>,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         // ARCH-DET-DIAG (task #18): per-call counter to allow GLLM_DUMP_LAYERS
         // to write each call into a sub-directory `call{N}/`. Used to bisect
@@ -2647,9 +2690,70 @@ impl FusedGraphExecutor {
         // 错误跳过, 例如 xlmr hidden_0 每层 overwrite)。
         let seeded_outputs: HashSet<String> = inputs.keys().cloned().collect();
 
+        // Shared seq_len across the whole node loop (avoids re-lookup per node
+        // and is used by the pre-node callback context for LayerContext).
+        let loop_seq_len = *shape_bindings.get("seq_len")
+            .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
+
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
             if Self::is_node_computed(cn, &seeded_outputs) { continue; }
+
+            // §9-§18: Pre-node callback dispatch — allows HR/Intent to intercept
+            // mid-layer hidden state via ExitEarly / InjectHidden.
+            let layer_idx = Self::extract_layer_index(&self.graph.nodes[node_idx].name).unwrap_or(node_idx);
+            if let Some(ref mut cb) = callbacks {
+                let hidden_state = cn.graph_input_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state,
+                    kv_cache_k: std::ptr::null_mut(),
+                    kv_cache_v: std::ptr::null_mut(),
+                    total_seq: loop_seq_len,
+                    seq_len: loop_seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("run_with_callbacks requires forward_config"),
+                };
+                match cb.dispatch_pre_node(&ctx) {
+                    super::layer_callback::CallbackAction::ExitEarly { logits } => {
+                        log::trace!("run_compiled: pre-node early exit at node {} (layer {})", node_idx, layer_idx);
+                        let mut out = HashMap::new();
+                        if !logits.is_empty() {
+                            let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            out.insert("logits".to_string(), bytes);
+                        } else if let Some(name) = cn.graph_input_names.first() {
+                            if let Some(data) = tensors.get(name) {
+                                out.insert("logits".to_string(), data.clone());
+                            }
+                        }
+                        return Ok(out);
+                    }
+                    super::layer_callback::CallbackAction::InjectHidden { data } => {
+                        if !cn.graph_input_names.is_empty() {
+                            tensors.insert(cn.graph_input_names[0].clone(), data);
+                        }
+                    }
+                    super::layer_callback::CallbackAction::SkipThisNode => {
+                        if !cn.graph_output_names.is_empty() && !cn.graph_input_names.is_empty() {
+                            if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
+                                for out_name in &cn.graph_output_names {
+                                    tensors.insert(out_name.clone(), input_data.clone());
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // CompactMask is gate-skip specific and only applies to KV-cache path.
+                    super::layer_callback::CallbackAction::CompactMask { .. }
+                    | super::layer_callback::CallbackAction::Continue => {}
+                }
+            }
 
             let activation = Self::load_activation(cn, &tensors, false);
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
@@ -2659,8 +2763,7 @@ impl FusedGraphExecutor {
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
             // ARCH-SYMDIM-NO-CONST-DEGRADE: seq_len 从 shape_bindings 正向传递
-            let seq_len = *shape_bindings.get("seq_len")
-                .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
+            let seq_len = loop_seq_len;
 
             // ARCH-ROPE-CACHE: 无 KV cache 路径也要预填 cos/sin 表。
             // 没有外部 positions,使用 0..seq_len 作为默认 positions (prefill 语义)。
@@ -2766,6 +2869,43 @@ impl FusedGraphExecutor {
                     "node has {} outputs but no per_output_numel — compile() should have set this",
                     cn.graph_output_names.len(),
                 )));
+            }
+
+            // §9-§18: Post-node callback — HR encode_to_layer / Guardrail / Intent
+            // fire here after the node's output has been stored. `ExitEarly`
+            // returns immediately with the provided logits bytes (or the current
+            // node output when `logits` is empty).
+            if let Some(ref mut cb) = callbacks {
+                let output_data = cn.graph_output_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state: output_data,
+                    kv_cache_k: std::ptr::null_mut(),
+                    kv_cache_v: std::ptr::null_mut(),
+                    total_seq: loop_seq_len,
+                    seq_len: loop_seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("run_with_callbacks requires forward_config"),
+                };
+                if let super::layer_callback::CallbackAction::ExitEarly { logits } =
+                    cb.dispatch_post_node(&ctx, output_data)
+                {
+                    log::trace!("run_compiled: post-node early exit at node {} (layer {})", node_idx, layer_idx);
+                    let mut out = HashMap::new();
+                    if !logits.is_empty() {
+                        let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        out.insert("logits".to_string(), bytes);
+                    } else if let Some(last_output) = cn.graph_output_names.first().and_then(|n| tensors.get(n)) {
+                        out.insert("logits".to_string(), last_output.clone());
+                    }
+                    return Ok(out);
+                }
             }
         }
 

@@ -210,31 +210,55 @@ fn test_hr_002_multiway_classify() {
     }
 }
 
-/// TEST-HR-003: Encode to mid-layer — MidLayerNotSupported error (REQ-HR-003)
+/// TEST-HR-003: Encode to mid-layer — real forward, mid-layer exit (REQ-HR-003)
 ///
-/// FusedGraphExecutor 的单次前向路径尚未暴露 callback 截断。encode_to_layer
-/// 必须返回显式 `HeadRoutingError::MidLayerNotSupported`,错误消息包含
-/// 固定子串 "MidLayerNotSupported"。
+/// After the Part 1 callback infrastructure landed, `encode_to_layer` truncates
+/// the forward at the anchor layer via `MidLayerEncodeCallback` and pools the
+/// captured hidden state. Verify:
+///   (a) Returns a `[hidden_size]` vector (non-empty, finite)
+///   (b) L2 norm > 0 (non-trivial signal, not all zeros)
+///   (c) Different anchor layers produce different embeddings (proof that the
+///       truncation actually takes effect, not a full-forward fallback).
 ///
-/// 禁止 panic、stub、silent Ok。
+/// `MidLayerNotSupported` is **never** expected here — the old explicit-refusal
+/// path has been retired.
 #[test]
 fn test_hr_003_encode_to_layer_shape() {
     let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2-135M-Instruct");
 
-    let result = client.encode_to_layer(
-        "embedding text",
-        LayerAnchor::Relative(0.5),
-        PoolMode::MeanPool,
+    let emb_mid = client
+        .encode_to_layer("embedding text", LayerAnchor::Relative(0.5), PoolMode::MeanPool)
+        .expect("encode_to_layer must succeed with MidLayerEncodeCallback infrastructure");
+
+    // (a) Non-empty vector, every entry finite.
+    assert!(!emb_mid.is_empty(), "encode_to_layer returned empty embedding");
+    assert!(
+        emb_mid.iter().all(|v| v.is_finite()),
+        "encode_to_layer returned non-finite value(s)"
     );
 
-    // (a) 返回 Err
-    let err = result.expect_err("encode_to_layer must return Err (MidLayerNotSupported)");
+    // (b) Non-trivial L2 norm.
+    let l2: f32 = emb_mid.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(l2 > 0.0, "encode_to_layer pooled vector has L2 norm = 0");
 
-    // (b) 错误消息包含固定子串
-    let msg = format!("{err}");
+    // (c) Different anchor layers → different embeddings. Pick a later layer
+    // to prove truncation depth affects output.
+    let emb_late = client
+        .encode_to_layer(
+            "embedding text",
+            LayerAnchor::Relative(0.9),
+            PoolMode::MeanPool,
+        )
+        .expect("encode_to_layer (late anchor) failed");
+    assert_eq!(emb_mid.len(), emb_late.len(), "embedding dim mismatch");
+    let cos_delta: f32 = emb_mid
+        .iter()
+        .zip(emb_late.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
     assert!(
-        msg.contains("MidLayerNotSupported"),
-        "encode_to_layer error message must contain 'MidLayerNotSupported' sentinel, got: {msg}"
+        cos_delta > 1e-4,
+        "mid-layer (0.5) and late-layer (0.9) embeddings are identical — truncation failed"
     );
 }
 

@@ -14,7 +14,9 @@ pub mod scheduler;
 pub mod client;
 pub mod embeddings;
 pub mod generation;
+pub mod guardrail;
 pub mod head_routing;
+pub mod intent;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
@@ -74,6 +76,10 @@ pub use semantic_gatekeeper::{
 pub use head_routing::{
     ClassifyBinaryConfig, ClassifyMultiwayConfig, HeadRoutingError, LayerAnchor, PoolMode,
 };
+pub use guardrail::{
+    GuardProbe, GuardProbeWeights, GuardrailAttachment, GuardrailError, SafetyPolicy,
+};
+pub use intent::{IntentEncoding, IntentError};
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
 

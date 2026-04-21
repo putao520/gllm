@@ -96,6 +96,32 @@ fn shape_bindings_from_tokens(tokens: &[u32]) -> HashMap<String, usize> {
     bindings
 }
 
+/// Dispatch to `FusedGraphExecutor::run` or `run_with_callbacks` based on
+/// whether `config.callback_chain_ptr` is populated. The pointer is owned by
+/// the caller (Executor) for the duration of the forward — safe as long as
+/// the Executor holds the CallbackChain alive across the call.
+fn run_with_optional_callbacks(
+    executor: &crate::graph::executor::FusedGraphExecutor,
+    inputs: &HashMap<String, Vec<u8>>,
+    bindings: &HashMap<String, usize>,
+    config: &GeneratorForwardConfig,
+) -> Result<HashMap<String, Vec<u8>>, BE> {
+    if config.callback_chain_ptr.is_null() {
+        executor
+            .run(inputs, bindings)
+            .map_err(|e| BE::Other(format!("FusedGraphExecutor run failed: {e}")))
+    } else {
+        // SAFETY: Executor guarantees the CallbackChain lives until
+        // `callback_chain_ptr` is cleared after the backend call returns.
+        let chain = unsafe { &mut *config.callback_chain_ptr };
+        executor
+            .run_with_callbacks(inputs, bindings, chain, config)
+            .map_err(|e| {
+                BE::Other(format!("FusedGraphExecutor run_with_callbacks failed: {e}"))
+            })
+    }
+}
+
 /// 从 seq_len 直接构建 shape bindings
 fn shape_bindings_from_seq(seq_len: usize) -> HashMap<String, usize> {
     let mut bindings = HashMap::new();
@@ -701,15 +727,13 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             ));
         }
 
-        // ARCH-FULL-JIT: 走 FusedGraphExecutor 单次前向
+        // ARCH-FULL-JIT: 走 FusedGraphExecutor 单次前向。Guardrail callbacks
+        // 可通过 `config.callback_chain_ptr` 在 forward 中途注入 post_node
+        // 回调 (GuardrailProbeCallback 计算 safety 分数 / veto)。
         let executor = get_graph_executor(config)?;
         let inputs = prepare_encoder_inputs(tokens, config);
         let bindings = shape_bindings_from_tokens(tokens);
-        let outputs = executor.run(&inputs, &bindings).map_err(|e| {
-            BE::Other(format!(
-                "FusedGraphExecutor score_tokens run failed: {e}"
-            ))
-        })?;
+        let outputs = run_with_optional_callbacks(executor, &inputs, &bindings, config)?;
         let hidden = extract_final_hidden(&outputs, executor)?;
         if hidden.is_empty() {
             return Err(BE::Other(
@@ -719,7 +743,15 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
 
         let hidden_size = config.hidden_size();
         let seq_len = tokens.len();
+        // Guardrail veto path: executor returns `{"logits": hidden_bytes}`
+        // via ExitEarly with an unknown seq_len × hidden_size layout. We
+        // treat any short buffer as "forward was truncated by guardrail" and
+        // return empty logits — the Client layer inspects
+        // `GuardrailAttachment::is_vetoed()` to surface the veto reason.
         if hidden.len() < seq_len * hidden_size {
+            if !config.callback_chain_ptr.is_null() {
+                return Ok(Vec::new());
+            }
             return Err(BE::Other(format!(
                 "score_tokens: hidden buffer too small, expected >= {}*{}={}, got {}",
                 seq_len,
@@ -801,6 +833,107 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             logits.push(acc as f32);
         }
         Ok(logits)
+    }
+
+    /// HR `encode_to_layer` / Intent `encode_intent` — run the generator
+    /// forward with a `MidLayerEncodeCallback` attached to
+    /// `config.callback_chain_ptr`, returning the captured `[seq_len, hidden_size]`
+    /// hidden state as flat f32.
+    fn encode_at_layer_forward_gpu_pure(
+        &self,
+        tokens: &[u32],
+        anchor_layer: usize,
+        _topology: &AttentionTopology,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
+        config: &GeneratorForwardConfig,
+    ) -> Result<Vec<f32>, BE> {
+        if tokens.is_empty() {
+            return Err(BE::Other(
+                "encode_at_layer_forward_gpu_pure: empty tokens".into(),
+            ));
+        }
+        use crate::manifest::ArchFamily;
+        if config.arch_family != ArchFamily::Decoder {
+            return Err(BE::Unimplemented(
+                "encode_at_layer_forward_gpu_pure currently requires decoder generator model",
+            ));
+        }
+        let num_layers = config.num_layers();
+        if anchor_layer >= num_layers {
+            return Err(BE::Other(format!(
+                "encode_at_layer: anchor_layer {} out of [0, {})",
+                anchor_layer, num_layers
+            )));
+        }
+        if config.callback_chain_ptr.is_null() {
+            return Err(BE::Other(
+                "encode_at_layer: callback_chain_ptr must be populated (MidLayerEncodeCallback)".into(),
+            ));
+        }
+
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = run_with_optional_callbacks(executor, &inputs, &bindings, config)?;
+
+        // MidLayerEncodeCallback writes hidden state under the `"logits"`
+        // key on ExitEarly (see FusedGraphExecutor post-node handler).
+        let bytes = outputs
+            .get("logits")
+            .or_else(|| {
+                // Fallback: walk graph outputs if the callback did not trigger
+                // (e.g. anchor layer not reached because layer_idx mapping is
+                // stale). This is an error, not a fallback path.
+                None
+            })
+            .ok_or_else(|| {
+                BE::Other(format!(
+                    "encode_at_layer: MidLayerEncodeCallback did not fire at anchor_layer={} — \
+                     graph produced no `logits` key; layer_idx mapping may be stale",
+                    anchor_layer
+                ))
+            })?;
+
+        Ok(bytes_to_f32(bytes))
+    }
+
+    /// Guardrail SDK — run generator forward with `GuardrailProbeCallback`
+    /// attached. Returns the final hidden state on normal completion, or an
+    /// empty vector when the guardrail raised ExitEarly (veto path).
+    fn apply_guardrail_probe(
+        &self,
+        tokens: &[u32],
+        _topology: &AttentionTopology,
+        _weights: &dyn backend_trait::TensorLookup<E, Self>,
+        config: &GeneratorForwardConfig,
+    ) -> Result<Vec<f32>, BE> {
+        if tokens.is_empty() {
+            return Err(BE::Other("apply_guardrail_probe: empty tokens".into()));
+        }
+        use crate::manifest::ArchFamily;
+        if config.arch_family != ArchFamily::Decoder {
+            return Err(BE::Unimplemented(
+                "apply_guardrail_probe currently requires decoder generator model",
+            ));
+        }
+        if config.callback_chain_ptr.is_null() {
+            return Err(BE::Other(
+                "apply_guardrail_probe: callback_chain_ptr must be populated".into(),
+            ));
+        }
+
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = run_with_optional_callbacks(executor, &inputs, &bindings, config)?;
+
+        // Veto path — ExitEarly wrote into "logits". Ignore; caller reads
+        // shared state.
+        if outputs.contains_key("logits") && !outputs.iter().any(|(k, _)| k != "logits") {
+            return Ok(Vec::new());
+        }
+        let hidden = extract_final_hidden(&outputs, executor)?;
+        Ok(hidden)
     }
 
     fn get_memory_pressure(&self) -> Result<f32, BE> {

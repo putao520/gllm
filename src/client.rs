@@ -338,6 +338,8 @@ impl ClientBuilder {
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_encoder)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -658,6 +660,29 @@ pub struct Client {
     /// requires a `Sized` inner type.
     multimodal_encoder:
         Arc<std::sync::Mutex<Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>>>>,
+
+    /// Registered Guardrail attachments (SPEC/GUARDRAIL.md).
+    ///
+    /// Maps `GuardrailAttachment::id` → stored spec (weights + policy + layer).
+    /// `Client::classify_binary` / `encode_intent` / future generation paths
+    /// iterate this map to build a `CallbackChain` with the corresponding
+    /// `GuardrailProbeCallback` per forward call.
+    guardrails: Arc<std::sync::Mutex<HashMap<u64, GuardrailRegistration>>>,
+    /// Monotonic id allocator for `attach_guardrail`.
+    guardrail_next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Internal storage for a registered Guardrail (kept inside the Client).
+///
+/// Cloned into a fresh `GuardrailProbeCallback` on each forward invocation
+/// (callbacks require `Send + !Sync` ownership per CallbackChain semantics).
+#[derive(Clone)]
+struct GuardrailRegistration {
+    weights: crate::guardrail::GuardProbeWeights,
+    policy: crate::guardrail::SafetyPolicy,
+    actual_layer: usize,
+    probe_name: String,
+    shared: Arc<crate::guardrail::GuardrailSharedState>,
 }
 
 impl Client {
@@ -690,6 +715,8 @@ impl Client {
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -698,6 +725,8 @@ impl Client {
         Self {
             state: Arc::new(ArcSwapOption::empty()),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -758,6 +787,16 @@ impl Client {
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
             .ok_or(ClientError::NoModelLoaded)
+    }
+
+    /// Get the currently loaded model's `(hidden_size, num_layers)` — convenience
+    /// accessor for HR / Guardrail / Intent callers that need to size probe
+    /// weights or validate layer anchors without walking the executor lock.
+    pub fn model_dims(&self) -> Result<(usize, usize), ClientError> {
+        let state = self.require_state()?;
+        let executor = state.backend.executor();
+        let cfg = executor.model_config();
+        Ok((cfg.hidden_size, cfg.num_hidden_layers))
     }
 
     /// Check if a model is loaded.
@@ -893,6 +932,8 @@ impl Client {
         use crate::head_routing::{softmax_with_temperature, HeadRoutingError};
 
         let state = self.require_state()?;
+        let hidden_size = state.backend.executor().model_config().hidden_size;
+        let mut guardrail_chain = self.build_guardrail_chain(Vec::new(), hidden_size);
         let plan = state.execution_plan.clone();
         gllm_kernels::compiler::planner::with_execution_plan(plan, || {
             let mut executor = state.backend.executor_mut();
@@ -908,8 +949,19 @@ impl Client {
                 ))));
             }
             let logits = executor
-                .score_tokens_for_prompt(prompt, &[pos_id, neg_id])
+                .score_tokens_for_prompt_with_callbacks(
+                    prompt,
+                    &[pos_id, neg_id],
+                    guardrail_chain.as_mut(),
+                )
                 .map_err(ClientError::from)?;
+            if logits.is_empty() {
+                // Guardrail vetoed the forward — surface an explicit error so
+                // callers can treat P(positive) as undefined.
+                return Err(ClientError::RuntimeError(
+                    "classify_binary: guardrail vetoed forward pass (see GuardrailAttachment::last_veto_reason)".into(),
+                ));
+            }
             if logits.len() != 2 {
                 return Err(ClientError::RuntimeError(format!(
                     "classify_binary: expected 2 logits, got {}",
@@ -969,22 +1021,21 @@ impl Client {
         })
     }
 
-    /// Mid-layer encode head (REQ-HR-003) — 截断前向到 `anchor` 层,
-    /// pool hidden state 返回向量。
+    /// Mid-layer encode head (REQ-HR-003) — truncate the forward pass at
+    /// `anchor` and pool the captured hidden state.
     ///
-    /// **当前状态**: `FusedGraphExecutor` 的单次前向路径 (`executor.run()` /
-    /// `run_with_kv_cache_with_config`) 未暴露 `CallbackChain`,无法在中间层
-    /// 截断。本函数**显式返回** `HeadRoutingError::MidLayerNotSupported`,
-    /// 禁止 stub / silent fallback / scalar 降级 (NO_SILENT_FALLBACK 铁律)。
+    /// Implementation: attaches a `MidLayerEncodeCallback` at the resolved
+    /// physical layer via `FusedGraphExecutor::run_with_callbacks`. The
+    /// callback returns `CallbackAction::ExitEarly { logits: <hidden as f32> }`
+    /// when the anchor layer's `post_node` fires. `encode_at_layer_for_prompt`
+    /// then reshapes to `[seq_len, hidden_size]` and applies `pool`.
     ///
-    /// 错误消息包含固定子串 `"MidLayerNotSupported"` 以便上层匹配
-    /// (REQ-HR-003 验收标准 #2)。
-    ///
-    /// 验证 `LayerAnchor` 越界时优先返回 `InvalidLayerAnchor`,以保留契约
-    /// 端到端可测试性 (TEST-HR-005)。
+    /// Validates `anchor` before running: `InvalidLayerAnchor` surfaces
+    /// eagerly (contract for TEST-HR-005).
     ///
     /// # 关联
-    /// - SPEC/HEAD-ROUTING.md §5
+    /// - SPEC/HEAD-ROUTING.md §5 mid-layer encode 协议
+    /// - SPEC/INTENT.md §3 架构
     /// - SPEC/04-API-DESIGN.md §3.8.1 / §3.8.4
     pub fn encode_to_layer(
         &self,
@@ -992,22 +1043,222 @@ impl Client {
         anchor: crate::head_routing::LayerAnchor,
         pool: crate::head_routing::PoolMode,
     ) -> Result<Vec<f32>, ClientError> {
-        use crate::head_routing::HeadRoutingError;
+        let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let num_layers = executor.model_config().num_hidden_layers;
+            let resolved_layer = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+            executor
+                .encode_at_layer_for_prompt(text, resolved_layer, pool)
+                .map_err(ClientError::from)
+        })
+    }
 
-        let _ = text; // text 仅在未来 mid-layer exit 实现后使用
-        let _ = pool;
+    // -----------------------------------------------------------------
+    // Intent Recall SDK (SPEC/INTENT.md, SPEC/04-API-DESIGN §3.10)
+    // -----------------------------------------------------------------
+
+    /// Intent Recall — semantic wrapper around `encode_to_layer`.
+    ///
+    /// Returns `IntentEncoding { embedding, actual_layer, pool }` for
+    /// intent-classification downstreams. Identical forward path to
+    /// `encode_to_layer` (zero code duplication via delegation).
+    ///
+    /// # 关联
+    /// - SPEC/INTENT.md
+    /// - SPEC/04-API-DESIGN.md §3.10
+    pub fn encode_intent(
+        &self,
+        text: &str,
+        anchor: crate::head_routing::LayerAnchor,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<crate::intent::IntentEncoding, ClientError> {
         let state = self.require_state()?;
         let num_layers = {
             let executor = state.backend.executor();
             executor.model_config().num_hidden_layers
         };
-        // 验证 anchor,让 InvalidLayerAnchor 优先于 MidLayerNotSupported 暴露,
-        // 确保契约测试 (TEST-HR-005) 可直接覆盖 resolve 分支。
-        let _resolved = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+        let actual_layer = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+        let embedding = self.encode_to_layer(text, anchor, pool)?;
+        Ok(crate::intent::IntentEncoding {
+            embedding,
+            actual_layer,
+            pool,
+        })
+    }
 
-        // FusedGraphExecutor::run_with_early_exit(anchor_layer) 未落地 —
-        // 显式拒绝 (NO_SILENT_FALLBACK)。
-        Err(hr_err_to_client(HeadRoutingError::MidLayerNotSupported))
+    // -----------------------------------------------------------------
+    // Guardrail SDK (SPEC/GUARDRAIL.md, SPEC/04-API-DESIGN §3.9)
+    // -----------------------------------------------------------------
+
+    /// Attach a Guardrail probe at the given anchor layer.
+    ///
+    /// The returned `GuardrailAttachment` carries an `id` usable for
+    /// `Client::detach_guardrail(id)`, along with shared-state accessors
+    /// (`last_score()` / `is_vetoed()` / `downgraded_temperature()`). On
+    /// subsequent `classify_binary` / `classify_multiway` / `encode_intent`
+    /// calls, the Client builds a `CallbackChain` that includes a
+    /// `GuardrailProbeCallback` per registered attachment.
+    ///
+    /// # Errors
+    /// - `ClientError::NoModelLoaded` if no model is loaded
+    /// - Anchor resolution failure (越界 / NaN) → `ClientError::RuntimeError`
+    /// - Policy validation failure → `ClientError::RuntimeError`
+    /// - Weight load failure → `ClientError::RuntimeError`
+    ///
+    /// # 关联
+    /// - SPEC/GUARDRAIL.md §3 API
+    /// - SPEC/04-API-DESIGN.md §3.9
+    pub fn attach_guardrail(
+        &self,
+        probe: crate::guardrail::GuardProbe,
+        anchor: crate::head_routing::LayerAnchor,
+        policy: crate::guardrail::SafetyPolicy,
+    ) -> Result<crate::guardrail::GuardrailAttachment, ClientError> {
+        use crate::guardrail::{self, GuardrailSharedState};
+        guardrail::validate_policy(&policy).map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let weights = guardrail::load_probe_weights(&probe)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        let actual_layer = guardrail::resolve_anchor(anchor, num_layers)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+
+        let id = self
+            .guardrail_next_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let probe_name = format!("guardrail#{id}");
+        let shared = Arc::new(GuardrailSharedState::new());
+
+        let registration = GuardrailRegistration {
+            weights: weights.clone(),
+            policy,
+            actual_layer,
+            probe_name: probe_name.clone(),
+            shared: shared.clone(),
+        };
+        {
+            let mut map = self
+                .guardrails
+                .lock()
+                .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+            map.insert(id, registration);
+        }
+
+        Ok(guardrail::GuardrailAttachment {
+            id,
+            actual_layer,
+            probe_name,
+            shared,
+        })
+    }
+
+    /// Attach a Guardrail probe directly from inline weights. Convenience
+    /// wrapper used primarily by tests / in-process probes constructed from
+    /// already-loaded tensors.
+    pub fn attach_guardrail_inline(
+        &self,
+        weights: crate::guardrail::GuardProbeWeights,
+        anchor: crate::head_routing::LayerAnchor,
+        policy: crate::guardrail::SafetyPolicy,
+    ) -> Result<crate::guardrail::GuardrailAttachment, ClientError> {
+        use crate::guardrail::{self, GuardrailSharedState};
+        guardrail::validate_policy(&policy).map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        let actual_layer = guardrail::resolve_anchor(anchor, num_layers)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+
+        let id = self
+            .guardrail_next_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let probe_name = format!("guardrail#{id}");
+        let shared = Arc::new(GuardrailSharedState::new());
+
+        let registration = GuardrailRegistration {
+            weights,
+            policy,
+            actual_layer,
+            probe_name: probe_name.clone(),
+            shared: shared.clone(),
+        };
+        {
+            let mut map = self
+                .guardrails
+                .lock()
+                .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+            map.insert(id, registration);
+        }
+
+        Ok(guardrail::GuardrailAttachment {
+            id,
+            actual_layer,
+            probe_name,
+            shared,
+        })
+    }
+
+    /// Detach a previously attached Guardrail. Returns error if `id` was not
+    /// registered or has already been detached (idempotency left to caller).
+    pub fn detach_guardrail(&self, id: u64) -> Result<(), ClientError> {
+        let mut map = self
+            .guardrails
+            .lock()
+            .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+        if map.remove(&id).is_none() {
+            return Err(ClientError::RuntimeError(format!(
+                "detach_guardrail: id {id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Snapshot of registered Guardrails — used internally by
+    /// `classify_binary` / `encode_intent` / `generate` to build per-call
+    /// `CallbackChain`s and by tests to inspect registration state.
+    fn guardrail_registrations(&self) -> Vec<GuardrailRegistration> {
+        self.guardrails
+            .lock()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Build a `CallbackChain` containing one `GuardrailProbeCallback` per
+    /// registered guardrail, plus the supplied extra callbacks (e.g.
+    /// MidLayerEncodeCallback for `encode_intent`). Returns `None` when the
+    /// chain would be empty (caller falls back to zero-callback path).
+    pub(crate) fn build_guardrail_chain(
+        &self,
+        extra: Vec<Box<dyn crate::graph::layer_callback::LayerCallback + Send>>,
+        hidden_size: usize,
+    ) -> Option<crate::graph::layer_callback::CallbackChain> {
+        let mut callbacks = extra;
+        for reg in self.guardrail_registrations() {
+            // Reset shared state so each forward produces a fresh snapshot.
+            reg.shared.reset();
+            callbacks.push(Box::new(
+                crate::engine::callbacks::guardrail_probe::GuardrailProbeCallback::new(
+                    reg.actual_layer,
+                    reg.weights,
+                    reg.policy,
+                    hidden_size,
+                    reg.shared,
+                    reg.probe_name,
+                ),
+            ));
+        }
+        if callbacks.is_empty() {
+            None
+        } else {
+            Some(crate::graph::layer_callback::CallbackChain::new(callbacks))
+        }
     }
 
     // -----------------------------------------------------------------

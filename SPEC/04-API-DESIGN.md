@@ -434,8 +434,147 @@ pub enum HeadRoutingError {
 1. **零重载**: `classify_binary` / `classify_multiway` 复用加载时的 `FusedGraphExecutor`,不触发权重重装或 JIT 重编译。多次调用之间 `Arc::as_ptr(&client.state().backend)` 地址恒定。
 2. **Tied embedding**: decoder generator (SmolLM2 / Qwen3 / Gemma 等) lm_head 与 embed_tokens 权重共享,`logit_t = h_last · embed_tokens[t]`。
 3. **单 token 要求**: `positive_token` / `negative_token` / `labels[i]` 必须 tokenize 为**单个** token id,否则返回 `TokenNotFound(...)`。多 token 标签需调用方拆分或替换为单 token 同义词。
-4. **显式错误**: token 未找到、温度非法、层索引越界、mid-layer 未支持 —— 全部返回 `Err(HeadRoutingError::...)`,禁止 silent 返回 0 / 默认值 / argmax。
+4. **显式错误**: token 未找到、温度非法、层索引越界 —— 全部返回 `Err(HeadRoutingError::...)`,禁止 silent 返回 0 / 默认值 / argmax。
 5. **正交于 SG**: 未注册 Semantic Gatekeeper 时,HR 读取的 hidden 就是 forward 原始结果;注册 SG 后 HR 读取的 hidden 包含 SG 残差注入——这是**设计意图**,允许知识注入驱动分类。
+6. **Mid-layer encode 实现**: `encode_to_layer` 通过 `MidLayerEncodeCallback` + `FusedGraphExecutor::run_with_callbacks` 在 anchor 层 `post_node` 触发 `ExitEarly { logits: hidden_state_as_f32 }`,由 Client 层按 `PoolMode` pool 后返回 `Vec<f32>`。不同 anchor / pool 产出不同向量,证明截断真实生效。
+
+### 3.9 Guardrail SDK — in-flight 安全 veto 探针 (REQ-GR)
+
+> **协议 SSOT**: `SPEC/GUARDRAIL.md`
+>
+> **需求**: `SPEC/01-REQUIREMENTS.md §14` REQ-GR-001..005
+
+#### 3.9.1 API 表面
+
+```rust
+use gllm::{Client, GuardProbe, GuardProbeWeights, LayerAnchor, SafetyPolicy};
+
+let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+
+// 从 safetensors 加载探针
+let attachment = client.attach_guardrail(
+    GuardProbe::from_safetensors("toxicity_probe.safetensors"),
+    LayerAnchor::Relative(0.5),
+    SafetyPolicy::HaltAndVeto { threshold: 0.95 },
+)?;
+
+// 或 inline 权重 (测试 / 程序生成)
+let attachment = client.attach_guardrail_inline(
+    GuardProbeWeights { weight: vec![0.0; 576], bias: 0.0 },
+    LayerAnchor::Relative(0.5),
+    SafetyPolicy::LogOnly,
+)?;
+
+let _score = client.classify_binary(prompt, cfg)?;
+if attachment.is_vetoed() {
+    eprintln!("blocked: {:?}", attachment.last_veto_reason());
+}
+
+client.detach_guardrail(attachment.id)?;
+```
+
+#### 3.9.2 类型定义
+
+```rust
+pub enum GuardProbe {
+    FromSafetensors { path: String },
+}
+
+pub struct GuardProbeWeights {
+    pub weight: Vec<f32>,
+    pub bias: f32,
+}
+
+pub enum SafetyPolicy {
+    HaltAndVeto { threshold: f32 },
+    LogOnly,
+    SampleDowngrade { min_temperature: f32 },
+}
+
+pub struct GuardrailAttachment {
+    pub id: u64,
+    pub actual_layer: usize,
+    pub probe_name: String,
+    // ... (shared state accessors)
+}
+
+impl GuardrailAttachment {
+    pub fn id(&self) -> u64;
+    pub fn last_score(&self) -> Option<f32>;
+    pub fn is_vetoed(&self) -> bool;
+    pub fn last_veto_reason(&self) -> Option<String>;
+    pub fn downgraded_temperature(&self) -> Option<f32>;
+    pub fn reset(&self);
+}
+
+pub enum GuardrailError {
+    ProbeLoadFailed(String),
+    InvalidShape(String),
+    InvalidPolicy(String),
+    InvalidAnchor(String),
+    NoModelLoaded,
+    NotFound(u64),
+    Io(String),
+}
+```
+
+#### 3.9.3 行为契约 (REQ-GR-001..005)
+
+1. **零重载**: `attach_guardrail` 仅注册到 `Client.guardrails` HashMap,不触发权重重装或 JIT 重编译。
+2. **探针运行时**: `GuardrailProbeCallback::post_node` 在 anchor 层触发,计算 `score = sigmoid(W · h_last + b)`。
+3. **HaltAndVeto**: `score > threshold` → ExitEarly 截断前向 + `trigger_veto(reason)` → Client 看到空 logits 返回 `Err`。
+4. **LogOnly**: 只 `record_score`,不改变前向,两次 classify 分数完全相等。
+5. **SampleDowngrade**: 只 `record_downgrade(min_temp)`,不中断前向,供上层采样器查询。
+6. **NO_SILENT_FALLBACK**: 权重加载失败 / 策略非法 / anchor 越界 → 显式 `ClientError::RuntimeError`。
+
+### 3.10 Intent Recall SDK — 中间层 encode 语义包装 (REQ-INTENT)
+
+> **协议 SSOT**: `SPEC/INTENT.md`
+>
+> **需求**: `SPEC/01-REQUIREMENTS.md §15` REQ-INTENT-001..003
+
+```rust
+use gllm::{Client, IntentEncoding, LayerAnchor, PoolMode};
+
+let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+
+let intent = client.encode_intent(
+    "What is the weather in Paris?",
+    LayerAnchor::Relative(0.5),
+    PoolMode::MeanPool,
+)?;
+
+assert_eq!(intent.dim(), 576);
+println!("actual_layer = {}", intent.actual_layer);
+let query_vec = intent.embedding;
+```
+
+#### 3.10.1 类型定义
+
+```rust
+pub struct IntentEncoding {
+    pub embedding: Vec<f32>,
+    pub actual_layer: usize,
+    pub pool: PoolMode,
+}
+
+impl IntentEncoding {
+    pub fn dim(&self) -> usize;
+    pub fn l2_norm(&self) -> f32;
+}
+
+pub enum IntentError {
+    InvalidLayerAnchor(String),
+    EncodeFailed(String),
+    NoModelLoaded,
+}
+```
+
+#### 3.10.2 行为契约
+
+- `encode_intent` 内部直接 delegate 到 `encode_to_layer` (DRY 铁律 — 零代码复制)。
+- 相同 `text/anchor/pool` 下, `encode_intent(...).embedding` 与 `encode_to_layer(...)` 逐元素相等 (|Δ| < 1e-5)。
+- `actual_layer` 即 `anchor.resolve(num_layers)` 的结果,严格 < `num_layers`。
 
 ## 4. 错误处理
 

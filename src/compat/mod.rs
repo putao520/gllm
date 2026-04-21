@@ -133,6 +133,51 @@ pub mod backend_trait {
         where
             Self: Sized;
 
+        /// Intent / HR `encode_to_layer` — run the JIT forward with a
+        /// `MidLayerEncodeCallback` attached through
+        /// `config.callback_chain_ptr`, truncating at `anchor_layer`. Returns
+        /// the flattened `[seq_len, hidden_size]` hidden state as f32.
+        ///
+        /// # Contract
+        /// - `tokens.is_empty()` → `BackendError::Other("empty tokens")`
+        /// - Model must be a decoder generator: encoder path raises
+        ///   `Unimplemented` to avoid silent fallbacks.
+        /// - `config.callback_chain_ptr` must be non-null and point at a
+        ///   `CallbackChain` containing a `MidLayerEncodeCallback`.
+        ///
+        /// # 关联
+        /// - SPEC/HEAD-ROUTING.md §5 mid-layer encode 协议
+        /// - SPEC/INTENT.md §2 architecture
+        fn encode_at_layer_forward_gpu_pure(
+            &self,
+            tokens: &[u32],
+            anchor_layer: usize,
+            topology: &AttentionTopology,
+            weights: &dyn TensorLookup<E, Self>,
+            config: &GeneratorForwardConfig,
+        ) -> Result<Vec<f32>, BackendError>
+        where
+            Self: Sized;
+
+        /// Guardrail SDK — run a full generator forward (same as
+        /// `batch_forward_gpu_pure` but single-sequence, no KV cache, no
+        /// sampling) with `config.callback_chain_ptr` driving Guardrail Probe
+        /// callbacks. Returns final hidden state `[seq_len, hidden_size]` as
+        /// f32 or `Ok(vec![])` when the callback chain raised `ExitEarly`
+        /// (veto) before completing.
+        ///
+        /// # 关联
+        /// - SPEC/GUARDRAIL.md §3 Client API
+        fn apply_guardrail_probe(
+            &self,
+            tokens: &[u32],
+            topology: &AttentionTopology,
+            weights: &dyn TensorLookup<E, Self>,
+            config: &GeneratorForwardConfig,
+        ) -> Result<Vec<f32>, BackendError>
+        where
+            Self: Sized;
+
         fn get_memory_pressure(&self) -> Result<f32, BackendError>;
 
         fn swap_out_pages(
