@@ -489,7 +489,7 @@ impl Client {
                 *max_reasoning_tokens,
                 *step_count,
                 &model_name,
-                hook.as_deref_mut(),
+                &mut hook,
                 &mut pending_inject,
             )?,
             ReasoningMode::Auto {
@@ -505,7 +505,7 @@ impl Client {
                 *entropy_threshold,
                 stop_patterns,
                 &model_name,
-                hook.as_deref_mut(),
+                &mut hook,
                 &mut pending_inject,
             )?,
         };
@@ -551,7 +551,7 @@ impl Client {
         max_reasoning_tokens: usize,
         step_count: usize,
         model_name: &str,
-        hook: Option<&mut dyn ReasoningStepHook>,
+        hook: &mut Option<Box<dyn ReasoningStepHook>>,
         pending_inject: &mut Option<String>,
     ) -> Result<ReasoningStopReason, ClientError> {
         for step in 1..=step_count {
@@ -565,7 +565,7 @@ impl Client {
 
             // ── on_step_start ──
             let mut inject_prompt: Option<String> = None;
-            if let Some(h) = hook {
+            if let Some(h) = hook.as_deref_mut() {
                 let remaining_budget =
                     max_reasoning_tokens.saturating_sub(*total_tokens);
                 let ctx = StepContext {
@@ -640,7 +640,7 @@ impl Client {
             context.push_str(&chunk_trimmed);
 
             // ── on_step_end ──
-            if let Some(h) = hook {
+            if let Some(h) = hook.as_deref_mut() {
                 let accumulated = trace.join(&tpl.step_separator);
                 let result = StepResult {
                     step_index: step_index_0,
@@ -674,7 +674,7 @@ impl Client {
         entropy_threshold: Option<f32>,
         stop_patterns: &[String],
         model_name: &str,
-        hook: Option<&mut dyn ReasoningStepHook>,
+        hook: &mut Option<Box<dyn ReasoningStepHook>>,
         pending_inject: &mut Option<String>,
     ) -> Result<ReasoningStopReason, ClientError> {
         let mut step: usize = 1;
@@ -695,7 +695,7 @@ impl Client {
 
             // ── on_step_start ──
             let mut inject_prompt: Option<String> = None;
-            if let Some(h) = hook {
+            if let Some(h) = hook.as_deref_mut() {
                 let remaining = max_total_tokens.saturating_sub(*total_tokens);
                 let ctx = StepContext {
                     step_index: step_index_0,
@@ -767,7 +767,7 @@ impl Client {
             context.push_str(&chunk_trimmed);
 
             // ── on_step_end ──
-            if let Some(h) = hook {
+            if let Some(h) = hook.as_deref_mut() {
                 let accumulated = trace.join(&tpl.step_separator);
                 let result = StepResult {
                     step_index: step_index_0,
