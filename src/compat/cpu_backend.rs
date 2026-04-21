@@ -734,6 +734,15 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let inputs = prepare_encoder_inputs(tokens, config);
         let bindings = shape_bindings_from_tokens(tokens);
         let outputs = run_with_optional_callbacks(executor, &inputs, &bindings, config)?;
+
+        // SPEC/GUARDRAIL.md §5.1 step 3-4: empty outputs + active callback chain
+        // = Guardrail HaltAndVeto. Return empty logits so Client surfaces the
+        // veto via `GuardrailAttachment::is_vetoed()` rather than computing a
+        // classifier score from truncated hidden state.
+        if outputs.is_empty() && !config.callback_chain_ptr.is_null() {
+            return Ok(Vec::new());
+        }
+
         let hidden = extract_final_hidden(&outputs, executor)?;
         if hidden.is_empty() {
             return Err(BE::Other(
@@ -743,15 +752,7 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
 
         let hidden_size = config.hidden_size();
         let seq_len = tokens.len();
-        // Guardrail veto path: executor returns `{"logits": hidden_bytes}`
-        // via ExitEarly with an unknown seq_len × hidden_size layout. We
-        // treat any short buffer as "forward was truncated by guardrail" and
-        // return empty logits — the Client layer inspects
-        // `GuardrailAttachment::is_vetoed()` to surface the veto reason.
         if hidden.len() < seq_len * hidden_size {
-            if !config.callback_chain_ptr.is_null() {
-                return Ok(Vec::new());
-            }
             return Err(BE::Other(format!(
                 "score_tokens: hidden buffer too small, expected >= {}*{}={}, got {}",
                 seq_len,
@@ -927,9 +928,10 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let bindings = shape_bindings_from_tokens(tokens);
         let outputs = run_with_optional_callbacks(executor, &inputs, &bindings, config)?;
 
-        // Veto path — ExitEarly wrote into "logits". Ignore; caller reads
-        // shared state.
-        if outputs.contains_key("logits") && !outputs.iter().any(|(k, _)| k != "logits") {
+        // SPEC/GUARDRAIL.md §5.1 step 3-4: Guardrail HaltAndVeto emits empty
+        // `ExitEarly`, `FusedGraphExecutor` returns empty outputs. Caller reads
+        // `GuardrailAttachment::is_vetoed()` for the reason string.
+        if outputs.is_empty() {
             return Ok(Vec::new());
         }
         let hidden = extract_final_hidden(&outputs, executor)?;

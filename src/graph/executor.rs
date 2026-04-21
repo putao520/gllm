@@ -2745,14 +2745,13 @@ impl FusedGraphExecutor {
                 match cb.dispatch_pre_node(&ctx) {
                     super::layer_callback::CallbackAction::ExitEarly { logits } => {
                         log::trace!("run_compiled: pre-node early exit at node {} (layer {})", node_idx, layer_idx);
+                        // SPEC/GUARDRAIL.md §5.1 step 3 / SPEC/HEAD-ROUTING.md §5:
+                        //   non-empty logits  → `{"logits": bytes}` (HR/Intent/CoT 主动捕获)
+                        //   empty logits      → 返回空 outputs (Guardrail veto 信号)
                         let mut out = HashMap::new();
                         if !logits.is_empty() {
                             let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
                             out.insert("logits".to_string(), bytes);
-                        } else if let Some(name) = cn.graph_input_names.first() {
-                            if let Some(data) = tensors.get(name) {
-                                out.insert("logits".to_string(), data.clone());
-                            }
                         }
                         return Ok(out);
                     }
@@ -2919,12 +2918,13 @@ impl FusedGraphExecutor {
                     cb.dispatch_post_node(&ctx, output_data)
                 {
                     log::trace!("run_compiled: post-node early exit at node {} (layer {})", node_idx, layer_idx);
+                    // SPEC/GUARDRAIL.md §5.1 step 3 / SPEC/HEAD-ROUTING.md §5:
+                    //   non-empty logits  → `{"logits": bytes}` (HR/Intent/CoT 主动捕获)
+                    //   empty logits      → 返回空 outputs (Guardrail veto 信号)
                     let mut out = HashMap::new();
                     if !logits.is_empty() {
                         let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
                         out.insert("logits".to_string(), bytes);
-                    } else if let Some(last_output) = cn.graph_output_names.first().and_then(|n| tensors.get(n)) {
-                        out.insert("logits".to_string(), last_output.clone());
                     }
                     return Ok(out);
                 }
@@ -3526,12 +3526,13 @@ impl FusedGraphExecutor {
                 match cb.dispatch_post_node(&ctx, output_data) {
                     super::layer_callback::CallbackAction::ExitEarly { logits } => {
                         log::trace!("graph_executor: §16.2 post-node early exit at node {} (layer {})", node_idx, layer_idx);
+                        // SPEC/GUARDRAIL.md §5.1 step 3 / SPEC/HEAD-ROUTING.md §5:
+                        //   non-empty logits  → `{"logits": bytes}` (HR/Intent/CoT 主动捕获)
+                        //   empty logits      → 返回空 outputs (Guardrail veto 信号)
                         let mut out = HashMap::new();
                         if !logits.is_empty() {
                             let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
                             out.insert("logits".to_string(), logits_bytes);
-                        } else if let Some(last_output) = cn.graph_output_names.first().and_then(|n| tensors.get(n)) {
-                            out.insert("logits".to_string(), last_output.clone());
                         }
                         return Ok(out);
                     }
