@@ -139,6 +139,4 @@ impl_gpu_backend! {
     cfg_pred = [feature = "hip"],
     feature_label = "hip",
     upload_err = Other,
-    decoder_forward = hip_decoder_forward,
-    bert_forward = hip_bert_encoder_forward,
 }

@@ -237,6 +237,4 @@ impl_gpu_backend! {
     cfg_pred = [feature = "cuda"],
     feature_label = "cuda",
     upload_err = Other,
-    decoder_forward = cuda_decoder_forward,
-    bert_forward = cuda_bert_encoder_forward,
 }

@@ -1397,25 +1397,6 @@ fn infer_output_shape_with_attrs(
 // FusedGraphExecutor
 // ---------------------------------------------------------------------------
 
-/// GPU-compiled node: holds CUDA module + kernel entries for one FusedNode.
-#[cfg(feature = "cuda")]
-struct GpuCompiledNode {
-    /// Keep the CUDA module alive so kernel function pointers remain valid.
-    _module: gllm_kernels::gpu::cuda::CudaModule,
-    /// Per-kernel metadata for launching.
-    kernel_entries: Vec<crate::compat::GpuKernelEntry>,
-    /// The CompilerGraph used (needed for tensor metadata during launch).
-    graph: gllm_kernels::compiler::CompilerGraph,
-    /// Names of the FusedNode input tensors, in order.
-    graph_input_names: Vec<String>,
-    /// Names of the FusedNode output tensors.
-    graph_output_names: Vec<String>,
-    /// Number of elements in the output tensor(s).
-    output_numel: usize,
-    /// Per-output element counts for multi-output nodes.
-    per_output_numel: Vec<usize>,
-}
-
 /// FusedGraph 执行器。
 ///
 /// Two-phase usage:
@@ -1423,19 +1404,22 @@ struct GpuCompiledNode {
 /// 2. `run(inputs)` — executes the compiled kernels in topological order
 ///
 /// `run()` without prior `compile()` returns `NotCompiled` error.
+///
+/// ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED migration: the former `compile_gpu` /
+/// `run_gpu` methods (and their backing `GpuCompiledNode` state) depended on
+/// `crate::compat::cuda_compile_graph` / `cuda_launch_graph` which were tied
+/// to the obsolete `codegen::gpu_ir::PtxDialect` pipeline. Both the glue and
+/// the dialect have been deleted from gllm-kernels. The GPU execution path is
+/// pending re-integration with `gllm_kernels::compiler::InferenceCompiler::compile_graph`
+/// + `vm::plan_lower::compile_layer` → `CodegenOutput` (with a still-to-design
+/// KV-cache-aware `run_gpu_with_kv_cache` entry point).
 pub struct FusedGraphExecutor {
     graph: FusedGraph,
     /// Per-node compiled JIT kernels (indexed by node position in graph.nodes).
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     compiled_nodes: Vec<CompiledNode>,
-    /// Per-node GPU-compiled kernels (indexed by node position in graph.nodes).
-    #[cfg(feature = "cuda")]
-    gpu_compiled_nodes: Vec<GpuCompiledNode>,
     /// Whether compile() has been called successfully.
     is_compiled: bool,
-    /// Whether compile_gpu() has been called successfully.
-    #[cfg(feature = "cuda")]
-    is_gpu_compiled: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1478,11 +1462,7 @@ impl FusedGraphExecutor {
             graph,
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
             compiled_nodes: Vec::new(),
-            #[cfg(feature = "cuda")]
-            gpu_compiled_nodes: Vec::new(),
             is_compiled: false,
-            #[cfg(feature = "cuda")]
-            is_gpu_compiled: false,
         }
     }
 
@@ -2170,56 +2150,6 @@ impl FusedGraphExecutor {
         }
     }
 
-    /// Compile every FusedNode into GPU (CUDA) kernels.
-    ///
-    /// For each node:
-    /// 1. Builds a `CompilerGraph` (same as CPU path)
-    /// 2. Compiles to PTX via the JIT pipeline
-    /// 3. Loads the CUDA module and extracts kernel entries
-    ///
-    /// After `compile_gpu()`, call `run()` with the same inputs — the executor
-    /// will automatically dispatch to the GPU path.
-    #[cfg(feature = "cuda")]
-    pub fn compile_gpu(
-        &mut self,
-        seq_len: usize,
-        hidden: usize,
-        dtype: gllm_kernels::types::DType,
-        device: &gllm_kernels::gpu::cuda::CudaDevice,
-        gpu_profile: &gllm_kernels::gpu::GpuDeviceProfile,
-        sm_version: u32,
-    ) -> Result<(), ExecutionError> {
-        let mut gpu_nodes = Vec::with_capacity(self.graph.nodes.len());
-
-        for (idx, node) in self.graph.nodes.iter().enumerate() {
-            let build = self.build_node_graph(idx, seq_len, hidden, dtype)?;
-
-            let (module, kernel_entries) =
-                crate::compat::cuda_compile_graph(device, gpu_profile, sm_version, &build.graph)
-                    .map_err(|e| {
-                        ExecutionError::Compilation(format!(
-                            "GPU compilation failed for node '{}' (op: {}): {}",
-                            node.name,
-                            node.op.name(),
-                            e,
-                        ))
-                    })?;
-
-            gpu_nodes.push(GpuCompiledNode {
-                _module: module,
-                kernel_entries,
-                graph: build.graph,
-                graph_input_names: build.input_names,
-                graph_output_names: build.output_names,
-                output_numel: build.output_numel,
-                per_output_numel: build.per_output_numel,
-            });
-        }
-
-        self.gpu_compiled_nodes = gpu_nodes;
-        self.is_gpu_compiled = true;
-        Ok(())
-    }
 
     /// Execute the fused graph.
     ///
@@ -2280,133 +2210,6 @@ impl FusedGraphExecutor {
         ))
     }
 
-    /// Execute the fused graph on GPU.
-    ///
-    /// Requires prior `compile_gpu()` call. Uploads input tensors to GPU,
-    /// launches all compiled kernels in topological order, and downloads
-    /// output tensors back to host.
-    #[cfg(feature = "cuda")]
-    pub fn run_gpu(
-        &self,
-        inputs: &HashMap<String, Vec<u8>>,
-        device: &gllm_kernels::gpu::cuda::CudaDevice,
-    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
-        use gllm_kernels::gpu::{GpuDevice, GpuBuffer};
-        use gllm_kernels::compiler::TensorId;
-
-        if !self.is_gpu_compiled {
-            return Err(ExecutionError::NotCompiled);
-        }
-
-        let stream = device.default_stream();
-        let mut tensors: HashMap<String, Vec<u8>> = HashMap::new();
-
-        // Seed with graph inputs
-        for (name, data) in inputs {
-            tensors.insert(name.clone(), data.clone());
-        }
-        // Seed with weight binding data
-        for (name, wb) in &self.graph.weight_bindings {
-            if let Some(ref data) = wb.data {
-                tensors.insert(name.clone(), data.clone());
-            }
-        }
-
-        // Execute each node on GPU
-        for (_node_idx, gcn) in self.gpu_compiled_nodes.iter().enumerate() {
-            if !gcn.graph_output_names.is_empty() && gcn.graph_output_names.iter().all(|name| tensors.contains_key(name)) {
-                continue;
-            }
-
-            // Allocate GPU buffers for all graph tensors
-            let mut gpu_buffers: Vec<(TensorId, gllm_kernels::gpu::cuda::CudaBuffer)> = Vec::new();
-            let mut tensor_ptrs: HashMap<TensorId, u64> = HashMap::new();
-
-            for (tidx, meta) in gcn.graph.tensors.iter().enumerate() {
-                let tid = TensorId(tidx as u32);
-                let n_elements = meta.concrete_numel();
-                let size_bytes = n_elements * meta.dtype.size_bytes();
-                let mut buf = device.alloc(size_bytes)
-                    .map_err(|e| ExecutionError::Backend(format!(
-                        "GPU alloc failed for {}: {e}", meta.name
-                    )))?;
-
-                // Upload data for input tensors by matching graph tensor names
-                // to FusedNode input names
-                let graph_input_idx = gcn.graph.inputs.iter().position(|&t| t == tid);
-                if let Some(gi) = graph_input_idx {
-                    if gi < gcn.graph_input_names.len() {
-                        let fused_name = &gcn.graph_input_names[gi];
-                        if let Some(data) = tensors.get(fused_name) {
-                            device.htod(data, &mut buf, stream)
-                                .map_err(|e| ExecutionError::Backend(format!(
-                                    "htod {} failed: {e}", fused_name
-                                )))?;
-                        }
-                    }
-                }
-
-                tensor_ptrs.insert(tid, buf.as_device_ptr());
-                gpu_buffers.push((tid, buf));
-            }
-
-            // Launch all kernels for this node
-            crate::compat::cuda_launch_graph(
-                device, stream, &gcn.kernel_entries, &tensor_ptrs, &gcn.graph,
-            ).map_err(|e| ExecutionError::Backend(format!(
-                "GPU kernel launch failed: {e}"
-            )))?;
-
-            // Synchronize
-            device.sync()
-                .map_err(|e| ExecutionError::Backend(format!("GPU sync: {e}")))?;
-
-            // Download output(s)
-            if gcn.graph_output_names.len() == 1 {
-                let output_tid = gcn.graph.outputs[0];
-                let output_buf = gpu_buffers.iter()
-                    .find(|(tid, _)| *tid == output_tid)
-                    .map(|(_, buf)| buf)
-                    .ok_or_else(|| ExecutionError::Backend("output buffer missing".into()))?;
-                let out_dtype = gcn.graph.tensors[output_tid.0 as usize].dtype;
-                let nbytes = gcn.output_numel * out_dtype.size_bytes();
-                let mut host_buf = vec![0u8; nbytes];
-                device.dtoh(output_buf, &mut host_buf, stream)
-                    .map_err(|e| ExecutionError::Backend(format!("dtoh: {e}")))?;
-                tensors.insert(gcn.graph_output_names[0].clone(), host_buf);
-            } else if !gcn.per_output_numel.is_empty() {
-                // Multi-output: download each output separately
-                for (i, name) in gcn.graph_output_names.iter().enumerate() {
-                    if i < gcn.graph.outputs.len() {
-                        let output_tid = gcn.graph.outputs[i];
-                        let output_buf = gpu_buffers.iter()
-                            .find(|(tid, _)| *tid == output_tid)
-                            .map(|(_, buf)| buf)
-                            .ok_or_else(|| ExecutionError::Backend(
-                                format!("output buffer missing for {name}")
-                            ))?;
-                        let per_out_dtype = gcn.graph.tensors[output_tid.0 as usize].dtype;
-                        let nbytes = gcn.per_output_numel[i] * per_out_dtype.size_bytes();
-                        let mut host_buf = vec![0u8; nbytes];
-                        device.dtoh(output_buf, &mut host_buf, stream)
-                            .map_err(|e| ExecutionError::Backend(format!(
-                                "dtoh {name}: {e}"
-                            )))?;
-                        tensors.insert(name.clone(), host_buf);
-                    }
-                }
-            }
-            // gpu_buffers dropped here, freeing GPU memory for this node
-        }
-
-        // Collect graph outputs
-        let mut out = HashMap::new();
-        for name in &self.graph.outputs {
-            let data = tensors.remove(name).unwrap_or_default(); // LEGAL: 不存在的 tensor 返回空数据
-            out.insert(name.clone(), data);
-        }
-        Ok(out)
-    }
 
     // -----------------------------------------------------------------------
     // Shared execution helpers (used by run_compiled and run_with_kv_cache)
@@ -3499,11 +3302,6 @@ impl FusedGraphExecutor {
         self.is_compiled
     }
 
-    /// Returns true if the executor has been compiled for GPU.
-    #[cfg(feature = "cuda")]
-    pub fn is_gpu_compiled(&self) -> bool {
-        self.is_gpu_compiled
-    }
 
     /// Extract layer index from a node name like "layer_3_q_proj_fused_qkv_rope" → Some(3).
     fn extract_layer_index(name: &str) -> Option<usize> {

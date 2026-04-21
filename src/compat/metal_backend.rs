@@ -139,6 +139,4 @@ impl_gpu_backend! {
     cfg_pred = [all(target_os = "macos", feature = "metal")],
     feature_label = "metal",
     upload_err = Metal,
-    decoder_forward = metal_decoder_forward,
-    bert_forward = metal_bert_encoder_forward,
 }

@@ -197,15 +197,15 @@ pub use cuda_backend::{CudaBackend, GpuDeviceInfo};
 pub use hip_backend::HipBackend;
 pub use metal_backend::MetalBackend;
 
-// Re-export pub(crate) GPU compilation helpers
-#[cfg(feature = "cuda")]
-pub(crate) use gpu_compile::{
-    compile_graph_to_ptx, cuda_compile_graph, cuda_launch_graph, GpuKernelEntry,
-};
-#[cfg(feature = "hip")]
-pub(crate) use gpu_compile::{
-    compile_graph_to_hip, hip_compile_graph, hip_launch_graph, HipKernelEntry,
-};
+// ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED migration:
+// Former re-exports (compile_graph_to_ptx, cuda_compile_graph, cuda_launch_graph,
+// compile_graph_to_hip, hip_compile_graph, hip_launch_graph, and their *KernelEntry
+// companions) have been deleted. The corresponding functions used `gpu_ir` /
+// `PtxDialect::with_dtype` / `fuse_with_dag_prebuilt(..., &DeviceProfile)` —
+// none of which exist in current gllm-kernels. The replacement path is
+// `gllm_kernels::compiler::InferenceCompiler::compile_graph` driving the
+// `vm::plan_lower::compile_layer` → CodegenOutput pipeline, integrated via
+// `FusedGraphExecutor::run_gpu_with_kv_cache` (not yet implemented).
 
 /// Pooling mode for BERT-family encoder output.
 #[derive(Debug, Clone, Copy, PartialEq)]

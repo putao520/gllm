@@ -703,9 +703,9 @@ pub(super) fn gpu_swap_out_pages(
     let meta = meta_store.get(&handle.0)
         .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
 
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size();
+    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size();
+    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size();
     let total_page_bytes = meta.num_layers * meta.num_kv_heads * page_slice_bytes * 2;
 
     let mut swap_store = backend.swap_store().lock()
@@ -721,7 +721,7 @@ pub(super) fn gpu_swap_out_pages(
         }
 
         let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
+        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size();
         let mut host_buf = vec![0u8; total_page_bytes];
         let mut dst_offset = 0usize;
 
@@ -730,7 +730,7 @@ pub(super) fn gpu_swap_out_pages(
             for layer in 0..meta.num_layers {
                 for head in 0..meta.num_kv_heads {
                     let src_offset = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
+                        + token_start * meta.head_dim * meta.dtype_size()) as u64;
                     let src_ptr = half_base + src_offset;
 
                     backend.raw_dtoh(src_ptr, &mut host_buf[dst_offset..dst_offset + actual_slice_bytes])
@@ -763,9 +763,9 @@ pub(super) fn gpu_swap_in_pages(
     let meta = meta_store.get(&handle.0)
         .ok_or_else(|| backend.gpu_error(format!("KV cache handle {} not found in metadata", handle.0)))?;
 
-    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size;
-    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size;
-    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size;
+    let half_bytes = meta.num_layers * meta.num_kv_heads * meta.max_seq_len * meta.head_dim * meta.dtype_size();
+    let page_slice_bytes = meta.page_size * meta.head_dim * meta.dtype_size();
+    let head_stride = meta.max_seq_len * meta.head_dim * meta.dtype_size();
 
     let mut swap_store = backend.swap_store().lock()
         .map_err(|e| backend.gpu_error(format!("swap_store lock poisoned: {e}")))?;
@@ -783,7 +783,7 @@ pub(super) fn gpu_swap_in_pages(
         }
 
         let actual_tokens = meta.page_size.min(meta.max_seq_len - token_start);
-        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size;
+        let actual_slice_bytes = actual_tokens * meta.head_dim * meta.dtype_size();
         let mut src_offset = 0usize;
 
         for kv_half in 0..2usize {
@@ -791,7 +791,7 @@ pub(super) fn gpu_swap_in_pages(
             for layer in 0..meta.num_layers {
                 for head in 0..meta.num_kv_heads {
                     let dst_offset_gpu = ((layer * meta.num_kv_heads + head) * head_stride
-                        + token_start * meta.head_dim * meta.dtype_size) as u64;
+                        + token_start * meta.head_dim * meta.dtype_size()) as u64;
                     let dst_ptr = half_base + dst_offset_gpu;
 
                     backend.raw_htod(&host_buf[src_offset..src_offset + actual_slice_bytes], dst_ptr)

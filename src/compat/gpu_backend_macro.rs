@@ -1,11 +1,24 @@
 //! Macro to generate the `Backend<E>` trait impl for GPU backends (CUDA/HIP/Metal).
 //!
-//! All three GPU backends share an identical trait impl structure:
-//! - Each method is cfg-gated on the backend feature
-//! - Enabled path delegates to `gpu_helpers::*` or `gpu_compile::*`
-//! - Disabled path suppresses unused-variable warnings and returns `Err(BE::Unimplemented(...))`
+//! **ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED migration (in progress)**:
+//! - Hand-written GPU decoder/encoder forwards have been deleted from `gpu_compile`
+//!   (violated ARCH-FULL-JIT).
+//! - GPU backend forward paths must go through the same `FusedGraphExecutor`
+//!   pipeline as CPU, with JIT codegen driven by `DeviceProfile` producing
+//!   PTX/AMDGPU/AIR kernels.
+//! - The required host-side glue (GPU KV-cache binding, `run_gpu_with_kv_cache`
+//!   on `FusedGraphExecutor`, multi-layer GPU execution across symbolic dims)
+//!   is pending a dedicated SPEC workstream. Until that lands, forward methods
+//!   return an explicit `Err(BE::Unimplemented(...))` — this is not a fallback
+//!   (no silent degradation) but an explicit contractual "not yet implemented"
+//!   surfaced at the call site, consistent with the `Backend::quantized_matmul`
+//!   / `Backend::dequantize` trait default pattern.
 //!
-//! The macro eliminates ~540 lines of triplicated boilerplate.
+//! Hardware resource methods (alloc_kv_cache, upload_weights, swap_*,
+//! get_memory_pressure, get_page_states, sample_from_tensor) continue to use
+//! `gpu_helpers::*` and the surviving JIT infrastructure in `gpu_compile`
+//! (compile_graph_to_ptx, cuda_compile_graph, cuda_launch_graph and their
+//! HIP / Metal counterparts).
 
 /// Generate a complete `Backend<E>` implementation for a GPU backend.
 ///
@@ -13,17 +26,13 @@
 /// - `$backend_ty`: The backend struct name (e.g. `CudaBackend`)
 /// - `$cfg_pred`: The cfg predicate as `meta` (e.g. `feature = "cuda"`)
 /// - `$feature_label`: A string literal for error messages (e.g. `"cuda"`)
-/// - `$upload_err_variant`: The `BackendError` variant for upload errors (e.g. `Other`, `Metal`)
-/// - `$decoder_forward_fn`: The decoder forward function in `gpu_compile` (e.g. `cuda_decoder_forward`)
-/// - `$bert_forward_fn`: The BERT encoder forward function in `gpu_compile` (e.g. `cuda_bert_encoder_forward`)
+/// - `$upload_err_variant`: The `BackendError` variant for upload errors
 macro_rules! impl_gpu_backend {
     (
         backend = $backend_ty:ident,
         cfg_pred = [ $($cfg_pred:tt)+ ],
         feature_label = $feature_label:expr,
-        upload_err = $upload_err_variant:ident,
-        decoder_forward = $decoder_forward_fn:ident,
-        bert_forward = $bert_forward_fn:ident $(,)?
+        upload_err = $upload_err_variant:ident $(,)?
     ) => {
         impl<E: Element> Backend<E> for $backend_ty<E> {
             type Tensor = Vec<E>;
@@ -59,20 +68,11 @@ macro_rules! impl_gpu_backend {
                 (Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>),
                 BE,
             > {
-                #[cfg( $($cfg_pred)+ )]
-                {
-                    super::gpu_compile::$decoder_forward_fn(
-                        self, input, topology, weights, kv_caches, config,
-                    )
-                    .map(|(logits, telemetry)| {
-                        (logits, 0.0, telemetry)
-                    })
-                }
-                #[cfg(not( $($cfg_pred)+ ))]
-                {
-                    let _ = (input, topology, weights, kv_caches, config);
-                    Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
-                }
+                let _ = (input, topology, weights, kv_caches, config);
+                Err(BE::Unimplemented(concat!(
+                    $feature_label,
+                    " decoder forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu_with_kv_cache not implemented)"
+                )))
             }
 
             fn sample_from_tensor(
@@ -102,15 +102,11 @@ macro_rules! impl_gpu_backend {
                 weights: &dyn backend_trait::TensorLookup<E, Self>,
                 config: &GeneratorForwardConfig,
             ) -> Result<Vec<f32>, BE> {
-                #[cfg( $($cfg_pred)+ )]
-                {
-                    super::gpu_compile::$bert_forward_fn(self, tokens, weights, config)
-                }
-                #[cfg(not( $($cfg_pred)+ ))]
-                {
-                    let _ = (tokens, weights, config);
-                    Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
-                }
+                let _ = (tokens, weights, config);
+                Err(BE::Unimplemented(concat!(
+                    $feature_label,
+                    " encoder forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                )))
             }
 
             fn rerank_forward_gpu_pure(
@@ -120,15 +116,11 @@ macro_rules! impl_gpu_backend {
                 weights: &dyn backend_trait::TensorLookup<E, Self>,
                 config: &GeneratorForwardConfig,
             ) -> Result<Vec<f32>, BE> {
-                #[cfg( $($cfg_pred)+ )]
-                {
-                    super::gpu_compile::$bert_forward_fn(self, tokens, weights, config)
-                }
-                #[cfg(not( $($cfg_pred)+ ))]
-                {
-                    let _ = (tokens, weights, config);
-                    Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
-                }
+                let _ = (tokens, weights, config);
+                Err(BE::Unimplemented(concat!(
+                    $feature_label,
+                    " rerank forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                )))
             }
 
             fn classify_forward_gpu_pure(
@@ -138,15 +130,11 @@ macro_rules! impl_gpu_backend {
                 weights: &dyn backend_trait::TensorLookup<E, Self>,
                 config: &GeneratorForwardConfig,
             ) -> Result<Vec<f32>, BE> {
-                #[cfg( $($cfg_pred)+ )]
-                {
-                    super::gpu_compile::$bert_forward_fn(self, tokens, weights, config)
-                }
-                #[cfg(not( $($cfg_pred)+ ))]
-                {
-                    let _ = (tokens, weights, config);
-                    Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
-                }
+                let _ = (tokens, weights, config);
+                Err(BE::Unimplemented(concat!(
+                    $feature_label,
+                    " classify forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                )))
             }
 
             fn get_memory_pressure(&self) -> Result<f32, BE> {
