@@ -1,5 +1,8 @@
 # Semantic Gatekeeper 技术协议 (ARCH-SEMANTIC-GATEKEEPER)
 
+> **执行模型**: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 `08-EXECUTOR.md` §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。
+
+
 > **SSOT**: 本文档是 gllm 隐藏状态驱动的免训练知识调度与注入架构的唯一真源。
 >
 > **关联需求**: `SPEC/01-REQUIREMENTS.md §12` REQ-SG-001..008

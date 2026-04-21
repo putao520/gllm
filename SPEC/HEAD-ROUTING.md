@@ -1,5 +1,8 @@
 # Head Routing SDK — 同一 LLM 多头 API
 
+> **执行模型**: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 `08-EXECUTOR.md` §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。
+
+
 > **📌 SSOT**: 本文档定义 gllm 的 Head Routing SDK 技术协议,允许同一加载后的 LLM 在运行时通过 Client API 切换输出头形态 (text generation / binary classify / multiway classify / mid-layer encode),**不重新加载模型权重**。
 
 > **需求 SSOT**: `SPEC/01-REQUIREMENTS.md §13` REQ-HR-001..005

@@ -90,7 +90,9 @@ println!("{}", output.text);
 
 **所有后端（CPU / CUDA / HIP / Metal）必须遵循相同的采样语义，禁止静默降级为 argmax。**
 
-采样路径严格按以下顺序执行：
+> **铁律 ARCH-RUST-IS-CODEGEN**: 采样由 JIT mega-kernel 内部完成（详见 `08-EXECUTOR.md §4.1.1`）。采样参数（temperature、top_k、top_p）通过 `MegaKernelFn` 栈参数传入，每次请求可不同。Rust 不参与采样计算，不读取 logits，不做 DtoH 传回 logits。
+
+采样语义（JIT 机器码内部执行，Rust 不可见）：
 
 1. **Greedy**: `temperature == 0.0` → 直接对原始 logits 取 argmax，忽略 `top_k` / `top_p`；结果确定性、可复现。
 2. **Stochastic** (`temperature > 0.0`):
@@ -98,13 +100,11 @@ println!("{}", output.text);
    b. 对候选应用 `logit / temperature` 缩放。
    c. softmax（subtract max 数值稳定）→ 得到概率分布 `p_i`。
    d. 若 `top_p ∈ (0, 1)`：按 `p_i` 降序累积，截断至累积概率首次 `≥ top_p` 的位置，再重新归一化。
-   e. 多项式采样：从 `rand::thread_rng()` 取 `r ∈ [0, 1)`，落在对应 CDF 桶内的候选即为结果。
+   e. 多项式采样：从硬件随机源取 `r ∈ [0, 1)`，落在对应 CDF 桶内的候选即为结果。
 3. **组合行为**: `top_k > 0 && top_p ∈ (0, 1)` 时，先 `top_k` 截断候选集，再 `top_p` 截断累积概率 — 两者可叠加。
-4. **错误路径**: 空 logits / 所有 logit 为 `-inf` / softmax 和为零 → 返回 `BackendError`，**不得**返回默认 token 0 或静默 argmax 绕过。
+4. **错误路径**: 空 logits / 所有 logit 为 `-inf` / softmax 和为零 → JIT 内部返回 EOS token，**不得**返回默认 token 0 或静默 argmax 绕过。
 
-**实现位置** (SSOT): `src/compat/sampling.rs::sample_logits_row`。
-- CPU 后端 `src/compat/cpu_backend.rs::CpuBackend::sample_from_tensor` 直接调用该函数。
-- GPU 后端 `src/compat/gpu_compile.rs::sample_logits_cpu` 将 logits DtoH 后调用该函数。
+**JIT codegen 实现位置**: `gllm-kernels/src/compiler/codegen/x86_64.rs`（CPU）/ `gpu_ir/`（GPU）。采样逻辑编译进 mega-kernel，参数从栈读取。
 
 **不变式**:
 - `T=0, 任意 logits` → 每次调用结果恒定（argmax）。

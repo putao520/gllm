@@ -118,10 +118,10 @@ impl VmState {
 }
 ```
 
-### 2.3 CompiledLayerFn 参数名序列
+### 2.3 MegaKernelFn 参数名序列
 
 ```rust
-/// CompiledLayerFn 的参数名序列——与签名一一对应。
+/// MegaKernelFn 的参数名序列——与签名一一对应。
 /// VmState::init_x86_sysv() 的输入。
 pub const COMPILED_LAYER_PARAM_NAMES: &[&str] = &[
     "input",       // arg 0: rdi

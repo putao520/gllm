@@ -1,5 +1,8 @@
 # Guardrail SDK — In-Flight 安全 Veto 探针协议
 
+> **执行模型**: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 `08-EXECUTOR.md` §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。
+
+
 > **SSOT**: 本文档定义 gllm Guardrail SDK 的技术协议, 提供推理**前向中途**插入安全分类线性探针 + 多档策略响应(HaltAndVeto / LogOnly / SampleDowngrade)的机制。
 >
 > **需求 SSOT**: `SPEC/01-REQUIREMENTS.md §14` REQ-GR-001..005

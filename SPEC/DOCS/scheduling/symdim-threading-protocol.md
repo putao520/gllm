@@ -38,7 +38,7 @@ gllm-kernels: compile_graph() → plan_lower::lower_fusion_plan()
       │
       ▼
 gllm: FusedGraphExecutor::execute()
-  └─ CompiledLayerFn ABI 第 7 个参数 = seq_len (运行时值)
+  └─ MegaKernelFn ABI [rsp+0] (prompt_len) = seq_len (运行时值)
      executor 传入 effective_seq = 实际 token 数
 ```
 
@@ -85,9 +85,9 @@ pub struct SymDimSlotMap {
 }
 ```
 
-**预定义映射**（与 CompiledLayerFn ABI 对齐）：
+**预定义映射**（与 MegaKernelFn ABI 对齐）：
 
-| 符号名称 | ABI 位置 | 物理寄存器/栈位 | CompiledLayerFn 参数 |
+| 符号名称 | ABI 位置 | 物理寄存器/栈位 | MegaKernelFn 参数 |
 |---------|----------|---------------|---------------------|
 | `"seq_len"` | `PtrExpr::StackArg(16)` | `[rbp+16]` | 第 7 个参数 |
 | `"batch_size"` | `PtrExpr::AbiArg(5)` | `r9` | 第 6 个参数 |

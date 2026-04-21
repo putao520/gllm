@@ -40,7 +40,7 @@ CompilerGraph + DeviceProfile + OpTrace 缓存
 │  · x86_64: iced-x86 CodeAssembler                           │
 │  · AArch64: dynasm-rs Assembler                             │
 │  · GPU: PtxCodeGen / HipCodeGen / AirCodeGen                │
-│  · 输出: CompiledLayer (mmap RWX 或 GPU module)              │
+│  · 输出: MegaKernel binary (mmap RWX 或 GPU module)              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -403,7 +403,7 @@ gllm 负责将高层 FusedGraph 展开为原子算子 DAG 后传入 gllm-kernels
 
 ```
 gllm: ONNX Graph → GraphOptimizer → FusedGraph → expand_for_compiler() → CompilerGraph
-gllm-kernels: compile_graph(graph, profile) → CompiledLayer
+gllm-kernels: compile_graph(graph, profile) → MegaKernel binary
 ```
 
 ### CompilerGraph

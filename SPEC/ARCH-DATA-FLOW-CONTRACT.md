@@ -156,19 +156,28 @@ CompiledNode { feature_dim, per_output_feature_dims, output_dtype, ... }
 **禁止**：`for p in 0..k { prog.emit(...) }` — K 是矩阵维度，可能很大。
 **合法展开上界**：编译时常量且 ≤ MAX_NR_VECS (8)。超过此上界必须 emit_loop。
 
-## §5 CompiledLayerFn ABI (10 参数)
+## §5 MegaKernelFn ABI（唯一入口，详见 08-EXECUTOR.md §4.1.3）
+
+> **废弃**: `CompiledLayerFn` 单节点 ABI。Mega-kernel 是唯一入口。
 
 ```
-arg[0] rdi    = input_ptr      (activation / Q for MHA)
-arg[1] rsi    = weight_ptr     (packed weights / K+V for MHA)
+arg[0] rdi    = input_ids_ptr  (prompt token ID 数组)
+arg[1] rsi    = weight_blob_ptr (全部权重连续打包)
 arg[2] rdx    = kv_cache_ptr
 arg[3] rcx    = positions_ptr
-arg[4] r8     = seq_lens_ptr
+arg[4] r8     = aux_ptr        (KV-V half 指针)
 arg[5] r9     = batch_size
-arg[6] [rbp+16] = seq_len      ← SymDim 运行时绑定点
-arg[7] [rbp+24] = output_ptr
-arg[8] [rbp+32] = scratchpad_ptr
-arg[9] [rbp+40] = telemetry_ptr
+arg[6] [rsp+0]  = prompt_len    ← SymDim 运行时绑定点
+arg[7] [rsp+8]  = scratchpad_ptr
+arg[8] [rsp+16] = output_tokens_ptr
+arg[9] [rsp+24] = temperature   ← 采样参数（运行时传入）
+arg[10] [rsp+28] = top_k
+arg[11] [rsp+32] = top_p
+arg[12] [rsp+36] = max_new_tokens
+arg[13] [rsp+40] = eos_token_id
+arg[14] [rsp+48] = hook_ctx_ptr
+arg[15] [rsp+56] = telemetry_ptr
+→ rax: 实际生成的 token 数
 ```
 
 **数据来源**：`SymDimSlotMap::default_abi()` 将 `"seq_len"` 映射到 `PtrExpr::StackArg(16)`。

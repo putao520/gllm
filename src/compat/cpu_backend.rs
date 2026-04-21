@@ -13,16 +13,17 @@ use std::sync::{Arc, Mutex};
 // ARCH-FULL-JIT: FusedGraphExecutor 接入辅助函数
 // ---------------------------------------------------------------------------
 
-/// 从 GeneratorForwardConfig 中安全获取 FusedGraphExecutor 引用。
-fn get_graph_executor(config: &GeneratorForwardConfig) -> Result<&crate::graph::executor::FusedGraphExecutor, BE> {
+/// 从 GeneratorForwardConfig 中安全获取 FusedGraphExecutor 可变引用。
+/// ARCH-HOTPATH-ZERO-OVERHEAD: 需要 &mut 以复用预分配的 output_buf/scratchpad。
+fn get_graph_executor(config: &GeneratorForwardConfig) -> Result<&mut crate::graph::executor::FusedGraphExecutor, BE> {
     if config.graph_executor_ptr.is_null() {
         return Err(BE::Other(
             "ARCH-FULL-JIT: graph_executor_ptr is null — model was not JIT-compiled".into(),
         ));
     }
     // SAFETY: graph_executor_ptr 生命周期由 Executor 管理，在 forward 调用期间始终有效。
-    // Executor 的 Mutex 保证单线程访问。
-    Ok(unsafe { &*config.graph_executor_ptr })
+    // Executor 保证单线程访问 (Mutex 或单线程 client)。
+    Ok(unsafe { &mut *config.graph_executor_ptr })
 }
 
 /// 为 encoder 模型（embedding/rerank/classify）准备 FusedGraphExecutor 输入。

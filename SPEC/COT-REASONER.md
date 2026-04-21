@@ -1,5 +1,8 @@
 # CoT Reasoner SDK — 任意 LLM 原生 Chain-of-Thought 推理协议
 
+> **执行模型**: Hook/Callback 在 mega-kernel 架构下通过 JIT 内嵌条件 JMP 实现（详见 `08-EXECUTOR.md` §4.1.5）。无 hook 注册时不生成跳转代码。Hook 通信通过共享内存，不经过 Rust 函数调用。
+
+
 > **📌 SSOT**: 本文档定义 gllm 的 Chain-of-Thought (CoT) Reasoner SDK 技术协议。允许**任意** generator LLM (SmolLM2 / Llama / Qwen 等) 在不依赖专用 `thinking_head` 权重的前提下,通过 Client API 获得原生多步推理能力,同时支持 Manual (用户指定步长) 与 Auto (引擎自动判定) 两种模式。
 
 > **需求 SSOT**: `SPEC/01-REQUIREMENTS.md §16` REQ-COT-001..009

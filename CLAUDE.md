@@ -2,6 +2,19 @@
 
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
+## 🚨🚨🚨 铁律 ARCH-RUST-IS-CODEGEN — Rust = 代码生成器，推理阶段什么都不做
+
+**Rust 的定位**: 代码生成器 + Hook ABI 工具库。**推理阶段 Rust 什么都不做。**
+
+- ❌ **禁止** Rust 参与推理/计算/数据搬运/文本解码/采样/KV cache 管理/循环
+- ❌ **禁止** 在热路径中出现 HashMap、String、Vec、for 循环、clone、malloc
+- ❌ **禁止** 任何形式的 Rust 编排引擎（逐节点/逐层循环）
+- ✅ **Rust 只做**: 模型加载时生成 JIT 机器码 → 推理时调用一次 JIT 入口函数
+- ✅ **所有功能全部 JIT**: forward、采样、generate 循环、KV cache、stop condition、token→text、Guardrail、SG、HR、Intent、CoT、Early Exit、MoE — 全部编译为机器码
+- ✅ **Hook**: JIT 内嵌条件 JMP。无 hook = 不生成跳转代码。Hook 通信 = 共享内存，不经过 Rust
+
+**推理时 Rust 的全部操作**: 一次 CALL。返回后 output_buffer 中已有完整 UTF-8 文本。
+
 ## SPEC Location
 - `./SPEC/` (Single Source of Truth, 28 documents, 142 REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
