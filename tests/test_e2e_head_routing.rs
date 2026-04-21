@@ -18,7 +18,7 @@ use gllm::{
 
 const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
-/// TEST-HR-005: LayerAnchor contract
+/// TEST-HR-005 (REQ-HR-005): LayerAnchor contract
 ///
 /// 纯类型契约,不依赖模型加载。对应 `head_routing::LayerAnchor::resolve`
 /// 的边界语义验证。即使其他测试因环境/模型问题失败,这个测试也必须通过。

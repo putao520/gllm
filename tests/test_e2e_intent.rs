@@ -11,7 +11,7 @@ use gllm::{Client, LayerAnchor, PoolMode};
 
 const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
-/// TEST-INTENT-001: `encode_intent` 返回 hidden_size 维向量, 所有元素 finite.
+/// TEST-INTENT-001 (REQ-INTENT-001): `encode_intent` 返回 hidden_size 维向量, 所有元素 finite.
 #[test]
 fn test_intent_001_basic_shape_and_finiteness() {
     let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2-135M-Instruct");
@@ -34,7 +34,7 @@ fn test_intent_001_basic_shape_and_finiteness() {
     assert!(enc.actual_layer < num_layers);
 }
 
-/// TEST-INTENT-002: 不同 `PoolMode` 产生不同向量 (MeanPool vs LastToken vs ClsToken).
+/// TEST-INTENT-002 (REQ-INTENT-002): 不同 `PoolMode` 产生不同向量 (MeanPool vs LastToken vs ClsToken).
 #[test]
 fn test_intent_002_pool_mode_matters() {
     let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2-135M-Instruct");
@@ -78,8 +78,8 @@ fn test_intent_002_pool_mode_matters() {
     );
 }
 
-/// TEST-INTENT-003: `encode_intent` 和 `encode_to_layer` 产生相同 embedding
-///    (delegation contract — intent wraps HR with zero code duplication).
+/// TEST-INTENT-003 (REQ-INTENT-003): `encode_intent` 和 `encode_to_layer`
+/// 产生相同 embedding (delegation contract — intent wraps HR with zero code duplication).
 #[test]
 fn test_intent_003_delegates_to_encode_to_layer() {
     let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2-135M-Instruct");
