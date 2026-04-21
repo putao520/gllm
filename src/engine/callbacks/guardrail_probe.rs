@@ -110,10 +110,25 @@ impl LayerCallback for GuardrailProbeCallback {
                     );
                     log::warn!("{reason}");
                     self.shared.trigger_veto(reason);
-                    // ExitEarly with empty logits — the executor will use the
-                    // current hidden-state as "logits" bytes; upper layers
-                    // inspect `attachment.is_vetoed()` to finalize.
-                    CallbackAction::ExitEarly { logits: Vec::new() }
+                    // SPEC/GUARDRAIL.md §5.1 step 4: backend sees "logits 异常"
+                    // → returns `Ok(vec![])` so the client surfaces the veto.
+                    //
+                    // Emit a single sentinel `f32::NAN` via `ExitEarly { logits }`
+                    // rather than `Vec::new()`.  `FusedGraphExecutor::run_compiled`
+                    // treats `logits.is_empty()` as "fall back to the last node
+                    // output", which produces a full `[seq_len, hidden_size]`
+                    // buffer indistinguishable from a valid forward — the
+                    // size-based veto detection in `score_tokens_forward_gpu_pure`
+                    // would then miss the veto and compute bogus logits.
+                    //
+                    // A single-element sentinel guarantees the backend sees a
+                    // buffer strictly smaller than `seq_len * hidden_size` and
+                    // triggers the veto return path.  This distinguishes
+                    // guardrail veto from `MidLayerEncodeCallback`, which
+                    // returns a full `seq_len * hidden_size` hidden tensor.
+                    CallbackAction::ExitEarly {
+                        logits: vec![f32::NAN],
+                    }
                 } else {
                     CallbackAction::Continue
                 }
