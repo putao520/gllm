@@ -3,7 +3,7 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 28 documents, 132 REQs)
+- `./SPEC/` (Single Source of Truth, 28 documents, 142 REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## 🚨 单工程双仓约定 (MONOREPO-PAIR)

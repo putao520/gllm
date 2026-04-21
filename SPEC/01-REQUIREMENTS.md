@@ -499,3 +499,26 @@
 - **禁止**为 CoT 扩展 JIT 管线或 GraphType
 - 完全符合 CLAUDE.md ARCH-CPU-GPU-UNIFIED（CoT 只在 Client 层 orchestrate，后端零变更）
 
+## 17. 多模型融合管线 (REQ-PIPELINE)
+
+> **API 定义**: `SPEC/04-API-DESIGN.md §2.1 (Client Builder)`, `§3.5 (Embed+Rerank)`, `§3.6 (Embed+Rerank+LLM)`
+>
+> **E2E 测试**: `tests/test_e2e_fusion.rs` (REQ-PIPELINE-004/005 融合管线), `tests/test_e2e_rag_pipeline.rs` (REQ-PIPELINE-005 跨模型 RAG)
+>
+> **核心定位**: 在同一 Client 实例内组合 Embedder + Reranker + Generator 三类模型，支持从单一 embed 到完整 RAG 的渐进式管线，模型间零权重重载、encoder 架构相同时权重共享。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-PIPELINE-001** | Client Builder 多模型挂载 | `Client::builder().model(emb).reranker(rr).generator(llm).build()` 在单次 build 中加载 1-3 个异构模型，各自独立 JIT 编译 | 1. `.model()` 必选；`.reranker()` / `.generator()` 可选；2. 三个模型架构可完全不同（Encoder/Decoder/Reranker）；3. build 失败时所有已加载模型资源释放；4. `model_info()` 返回三者各自的 manifest | ✅ |
+| **REQ-PIPELINE-002** | 异构模型 Session 隔离 | Embedder / Reranker / Generator 各自持有独立的 `ClientState`（权重、JIT cache、KV cache），不共享指针或缓存 | 1. 三个 `model_info().id` 互不相等；2. 权重内存地址互不重叠；3. JIT cache 按 `ModelArchKey` 隔离；4. 一个模型 swap 不影响其余两个 | ✅ |
+| **REQ-PIPELINE-003** | Encoder 权重共享 | 当 reranker 与 embedder 同架构（相同 `ModelArchKey`）时，encoder 前向权重物理共享，仅输出层独立 | 1. 同架构 embed+rerank 内存占用 < 2× 单 embedder + 10%；2. 两者 embedding forward 数值 bit-exact 一致；3. 不同架构时各自独立加载，无共享 | ✅ |
+| **REQ-PIPELINE-004** | Embed+Rerank 融合管线 | `embed_builder(texts).rerank_query(q).top_n(n).generate()` 在单次调用内完成 embed → rerank → 排序截断 | 1. 返回 `EmbeddingsResponse { embeddings, rerank_scores }`；2. rerank_scores 非退化、降序排列；3. top_n 截断后结果数 ≤ n；4. 未设 `.rerank_query()` 时退化为普通 embed（零开销）；5. 设 `.rerank_query()` 但未挂载 reranker → `RerankerNotLoaded` 错误 | ✅ |
+| **REQ-PIPELINE-005** | Embed+Rerank+LLM 完整 RAG 管线 | `embed_builder(texts).rerank_query(q).top_n(n).generate_answer(prompt)` 三阶段串联：embed → rerank → LLM 生成 | 1. 返回 `RagResponse { text, sources, rerank_scores }`；2. `text` 非空且语义合理（非重复/退化）；3. `sources` 为 top-n 文档索引集合；4. 未挂载 generator 时 → `GeneratorNotLoaded` 错误；5. LLM context 通过文本拼接传入（非 hidden state 注入），保持通用性 | ✅ |
+
+### 17.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_fusion.rs` | REQ-PIPELINE-001/004/005 融合管线（同架构+跨架构 embed+rerank、top_n 截断、RAG 生成） | ✅ |
+| `tests/test_e2e_rag_pipeline.rs` | REQ-PIPELINE-001/002/005 跨模型 RAG（独立 Client session 隔离、cosine 召回+rerank 精排+generator 生成） | ✅ |
+
