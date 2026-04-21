@@ -7,8 +7,33 @@ use log;
 use crate::compat::backend_trait::{Backend, Element};
 use crate::compat::CpuBackend;
 use crate::scheduler::types::{PageId, RequestId, StorageKey};
+use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
 use gllm_kernels::types::DType;
 use thiserror::Error;
+
+/// Cap the geometry-declared `max_position_embeddings` by the JIT compile-time
+/// ceiling (`SYMDIM_MAX_SEQ_LEN`) whenever it is used to size / index the
+/// runtime KV cache.
+///
+/// Rationale: modern LLMs (Gemma 4 E2B = 131 072, DeepSeek = 163 840, Kimi =
+/// 200 000+) ship with enormous theoretical context windows that would
+/// allocate hundreds of gigabytes of CPU KV cache at load time (e.g. Gemma 4
+/// E2B: 15 effective layers × 1 KV head × 131 072 × 256 head_dim × 4 B × 2 =
+/// 3.84 GB just for the zero-memset, on top of the weight loader!).
+///
+/// The JIT-emitted attention kernel already bakes `SYMDIM_MAX_SEQ_LEN` as its
+/// compile-time upper bound (`emit_multi_head_attention` computes the `V_ptr`
+/// offset as `compile_seq_len * kv_dim * 4` where `compile_seq_len ==
+/// SYMDIM_MAX_SEQ_LEN`), so the cache stride MUST match this constant. Any
+/// larger allocation is wasted memory and any smaller stride produces
+/// out-of-bounds reads inside the JIT kernel. Exposing a single SSOT
+/// (`effective_kv_max_seq_len`) keeps the cache size, the cache-offset math
+/// in `merge_kv_cache_for_decode` / `perform_kv_cache_write`, and the JIT
+/// `compile_seq_len` in lock-step.
+#[inline]
+pub fn effective_kv_max_seq_len(geometry_max_seq_len: usize) -> usize {
+    geometry_max_seq_len.min(SYMDIM_MAX_SEQ_LEN)
+}
 
 // ---- Engine types (moved from compat) ----
 
@@ -111,8 +136,12 @@ impl GeneratorForwardConfig {
     pub fn norm_eps(&self) -> f32 { self.geometry.norm_eps }
     /// Backward-compatible accessor: model weight dtype.
     pub fn dtype(&self) -> DType { self.geometry.dtype }
-    /// Backward-compatible accessor: maximum sequence length.
-    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
+    /// Backward-compatible accessor: maximum sequence length, capped by the
+    /// JIT compile-time ceiling (`SYMDIM_MAX_SEQ_LEN`). See
+    /// `effective_kv_max_seq_len` for why the cap is mandatory.
+    pub fn max_seq_len(&self) -> usize {
+        effective_kv_max_seq_len(self.geometry.max_seq_len)
+    }
     /// Backward-compatible accessor: number of attention heads.
     pub fn num_heads(&self) -> usize { self.geometry.num_heads }
     /// Backward-compatible accessor: number of KV heads.
@@ -191,8 +220,16 @@ impl KvCacheConfig {
     pub fn num_heads(&self) -> usize { self.geometry.num_kv_heads }
     /// Dimension of each attention head.
     pub fn head_dim(&self) -> usize { self.geometry.head_dim }
-    /// Maximum sequence length.
-    pub fn max_seq_len(&self) -> usize { self.geometry.max_seq_len }
+    /// Maximum sequence length, capped by the JIT compile-time ceiling
+    /// (`SYMDIM_MAX_SEQ_LEN`). This is the stride used by the KV cache buffer
+    /// allocation and by `merge_kv_cache_for_decode` / `perform_kv_cache_write`
+    /// offset math — it MUST equal the `compile_seq_len` baked into the JIT
+    /// attention kernel. Models with `max_position_embeddings` larger than
+    /// `SYMDIM_MAX_SEQ_LEN` (e.g. Gemma 4 E2B's 131 072) would otherwise
+    /// allocate multi-GB of zeroed cache that the JIT kernel can't index into.
+    pub fn max_seq_len(&self) -> usize {
+        effective_kv_max_seq_len(self.geometry.max_seq_len)
+    }
     /// SharedKvRef: 后 N 层共享 KV cache.
     pub fn num_kv_shared_layers(&self) -> usize { self.geometry.num_kv_shared_layers }
     /// Per-layer attention pattern (0=sliding, 1=global).

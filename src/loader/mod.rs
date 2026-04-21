@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use ::safetensors::Dtype;
 use crate::compat::backend_trait::{Backend, Element};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -1021,44 +1022,18 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
 
     // P4/P5 heuristics (sparsity, deduplication) operate on f32.
     // We must extract a mutable f32 buffer regardless of whether conversion is needed.
+    //
+    // ARCH-LOADER-PARALLEL-CONVERT: Rayon-parallel dtype→f32 conversion.
+    // For large models (e.g. Gemma 4 E2B 9.6 GB BF16), a single-threaded
+    // `chunks_exact().map().collect()` takes 60-120s on 4.8B elements. The
+    // parallel path pre-allocates the output Vec and uses `par_chunks_mut`
+    // so each worker writes into its own disjoint slice — no synchronisation,
+    // ~5-10s on a 20-core machine.
     let mut converted_f32: Vec<f32> = match meta.dtype {
-        Dtype::F32 => {
-            let src_size = std::mem::size_of::<f32>();
-            data.chunks_exact(src_size)
-                .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const f32) })
-                .collect()
-        }
-        Dtype::F16 => {
-            let src_size = std::mem::size_of::<half::f16>();
-            data.chunks_exact(src_size)
-                .map(|chunk| {
-                    let val: half::f16 =
-                        unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const half::f16) };
-                    val.to_f32()
-                })
-                .collect()
-        }
-        Dtype::BF16 => {
-            let src_size = std::mem::size_of::<half::bf16>();
-            data.chunks_exact(src_size)
-                .map(|chunk| {
-                    let val: half::bf16 = unsafe {
-                        std::ptr::read_unaligned(chunk.as_ptr() as *const half::bf16)
-                    };
-                    val.to_f32()
-                })
-                .collect()
-        }
-        Dtype::F64 => {
-            let src_size = std::mem::size_of::<f64>();
-            data.chunks_exact(src_size)
-                .map(|chunk| {
-                    let val: f64 =
-                        unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const f64) };
-                    val as f32
-                })
-                .collect()
-        }
+        Dtype::F32 => parallel_bytes_to_f32_lossless(data)?,
+        Dtype::F16 => parallel_half_to_f32::<half::f16>(data)?,
+        Dtype::BF16 => parallel_half_to_f32::<half::bf16>(data)?,
+        Dtype::F64 => parallel_f64_to_f32(data)?,
         _ => {
             return Err(LoaderError::Backend(format!(
                 "cannot convert {:?} to f32 for heuristics",
@@ -1132,15 +1107,183 @@ fn normalize_linear_weight_layout(meta: &mut TensorMeta, data: &mut Vec<f32>) {
         );
         return;
     }
-    // Row-major [rows, cols] → [cols, rows] in-place via new buffer (transpose).
+    // Row-major [rows, cols] → [cols, rows] via cache-blocked transpose.
     let mut out = vec![0.0f32; data.len()];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
+    cache_blocked_transpose_f32(data, &mut out, rows, cols);
     *data = out;
     meta.shape = vec![cols, rows]; // canonical [in, out] = [K, N]
+}
+
+/// Cache-blocked (tiled) f32 transpose.
+///
+/// `src` is `[rows, cols]` row-major; `dst` is written as `[cols, rows]`
+/// row-major (i.e. `dst[c * rows + r] = src[r * cols + c]`).
+///
+/// Naive transpose writes with a stride of `rows * 4` bytes → every store
+/// misses L1 on typical weight shapes (e.g. 1536 × 12288 → 6144-byte stride).
+/// Observed throughput is ~50-200 MB/s.
+///
+/// A tile-based transpose keeps `TILE × TILE` f32s in L1 (16 KB for 64×64)
+/// so reads and writes within a tile both hit L1. We additionally use Rayon
+/// to parallelise over the outer row-tile dimension so 20 cores can co-operate
+/// on independent chunks of `dst`.
+///
+/// Both axes are processed in `TILE`-sized blocks; the tail rows/cols inside
+/// the last tile are handled by `.min(rows)` / `.min(cols)` inside the inner
+/// loops. Produces bit-identical output to a naive transpose for all finite
+/// f32 values.
+fn cache_blocked_transpose_f32(src: &[f32], dst: &mut [f32], rows: usize, cols: usize) {
+    const TILE: usize = 64;
+    debug_assert_eq!(src.len(), rows * cols);
+    debug_assert_eq!(dst.len(), rows * cols);
+
+    // SAFETY: each parallel worker writes to a disjoint set of output rows.
+    // We parallelise over `j_tile` (the column dimension of `src`, i.e. the
+    // ROW dimension of `dst`). Thread `j_tile` only writes to
+    // `dst[jj * rows .. (jj+1) * rows]` for `jj` in `[j_tile*TILE,
+    // (j_tile+1)*TILE)`, which is a strictly disjoint row range across
+    // threads. We cannot take `&mut [f32]` slices of arbitrary row ranges
+    // across the parallel iterator (borrow checker can't prove disjointness
+    // through a raw `for_each`), so we pass the base pointer as a `usize`
+    // address (which is `Send + Sync`) and re-cast inside each closure.
+    let dst_addr = dst.as_mut_ptr() as usize;
+
+    let num_j_tiles = cols.div_ceil(TILE);
+    (0..num_j_tiles).into_par_iter().for_each(|j_tile| {
+        let j_start = j_tile * TILE;
+        let j_end = (j_start + TILE).min(cols);
+        let dst_base = dst_addr as *mut f32;
+        for i_start in (0..rows).step_by(TILE) {
+            let i_end = (i_start + TILE).min(rows);
+            for ii in i_start..i_end {
+                let src_row = ii * cols;
+                for jj in j_start..j_end {
+                    // dst[jj * rows + ii] = src[ii * cols + jj]
+                    unsafe {
+                        let v = *src.get_unchecked(src_row + jj);
+                        *dst_base.add(jj * rows + ii) = v;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Parallel byte-exact `&[u8]` → `Vec<f32>` (for native `F32`) using
+/// `par_chunks_exact` so unaligned loads happen across all cores.
+///
+/// Returns `Err` if `data.len()` is not a multiple of `size_of::<f32>()`.
+fn parallel_bytes_to_f32_lossless(data: &[u8]) -> Result<Vec<f32>> {
+    let src_size = std::mem::size_of::<f32>();
+    if data.len() % src_size != 0 {
+        return Err(LoaderError::Backend(format!(
+            "F32 tensor data length {} is not a multiple of {}",
+            data.len(),
+            src_size
+        )));
+    }
+    let n = data.len() / src_size;
+    let mut out = vec![0.0f32; n];
+    out.par_chunks_mut(1024)
+        .zip(data.par_chunks_exact(src_size * 1024).with_min_len(1))
+        .for_each(|(out_chunk, in_bytes)| {
+            for (i, sub) in in_bytes.chunks_exact(src_size).enumerate() {
+                // SAFETY: sub.len() == src_size, read_unaligned is always valid.
+                out_chunk[i] = unsafe { std::ptr::read_unaligned(sub.as_ptr() as *const f32) };
+            }
+        });
+    // Handle the tail chunks (where par_chunks_exact leaves a remainder on the
+    // input side and par_chunks_mut may expose a smaller last chunk on the
+    // output side). `par_chunks_exact` emits exact-sized chunks only — if the
+    // total element count is not a multiple of 1024 we still need to cover the
+    // final partial chunk manually.
+    let completed = (n / 1024) * 1024;
+    if completed < n {
+        let tail_bytes = &data[completed * src_size..];
+        for (i, sub) in tail_bytes.chunks_exact(src_size).enumerate() {
+            out[completed + i] =
+                unsafe { std::ptr::read_unaligned(sub.as_ptr() as *const f32) };
+        }
+    }
+    Ok(out)
+}
+
+/// Parallel `&[u8]` → `Vec<f32>` for any 16-bit half-precision type
+/// (`half::f16` or `half::bf16`).
+fn parallel_half_to_f32<H>(data: &[u8]) -> Result<Vec<f32>>
+where
+    H: Copy + Send + Sync + 'static,
+    H: HalfToF32,
+{
+    let src_size = std::mem::size_of::<H>();
+    if data.len() % src_size != 0 {
+        return Err(LoaderError::Backend(format!(
+            "{} tensor data length {} is not a multiple of {}",
+            std::any::type_name::<H>(),
+            data.len(),
+            src_size
+        )));
+    }
+    let n = data.len() / src_size;
+    let mut out = vec![0.0f32; n];
+    const CHUNK: usize = 4096;
+    out.par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let byte_start = chunk_idx * CHUNK * src_size;
+            let byte_end = byte_start + out_chunk.len() * src_size;
+            let in_bytes = &data[byte_start..byte_end];
+            for (i, sub) in in_bytes.chunks_exact(src_size).enumerate() {
+                // SAFETY: sub.len() == src_size = size_of::<H>().
+                let v: H = unsafe { std::ptr::read_unaligned(sub.as_ptr() as *const H) };
+                out_chunk[i] = v.to_f32_fast();
+            }
+        });
+    Ok(out)
+}
+
+/// Parallel `&[u8]` → `Vec<f32>` for `F64` (narrowing cast).
+fn parallel_f64_to_f32(data: &[u8]) -> Result<Vec<f32>> {
+    let src_size = std::mem::size_of::<f64>();
+    if data.len() % src_size != 0 {
+        return Err(LoaderError::Backend(format!(
+            "F64 tensor data length {} is not a multiple of {}",
+            data.len(),
+            src_size
+        )));
+    }
+    let n = data.len() / src_size;
+    let mut out = vec![0.0f32; n];
+    const CHUNK: usize = 4096;
+    out.par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let byte_start = chunk_idx * CHUNK * src_size;
+            let byte_end = byte_start + out_chunk.len() * src_size;
+            let in_bytes = &data[byte_start..byte_end];
+            for (i, sub) in in_bytes.chunks_exact(src_size).enumerate() {
+                let v: f64 =
+                    unsafe { std::ptr::read_unaligned(sub.as_ptr() as *const f64) };
+                out_chunk[i] = v as f32;
+            }
+        });
+    Ok(out)
+}
+
+/// Internal trait bridging `half::f16` / `half::bf16` to their `to_f32`
+/// implementation inside a generic context.
+trait HalfToF32 {
+    fn to_f32_fast(self) -> f32;
+}
+
+impl HalfToF32 for half::f16 {
+    #[inline(always)]
+    fn to_f32_fast(self) -> f32 { self.to_f32() }
+}
+
+impl HalfToF32 for half::bf16 {
+    #[inline(always)]
+    fn to_f32_fast(self) -> f32 { self.to_f32() }
 }
 
 /// Heuristic: 判断一个 2D tensor 是否是 Linear 权重 (需要 canonical layout 归一化)。
@@ -1535,7 +1678,144 @@ pub struct UploadedTensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use ::safetensors::tensor::Dtype;
+
+    /// Naive reference transpose: dst[c * rows + r] = src[r * cols + c].
+    fn naive_transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; src.len()];
+        for r in 0..rows {
+            for c in 0..cols {
+                out[c * rows + r] = src[r * cols + c];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cache_blocked_transpose_matches_naive_small_sizes() {
+        // Exercise exact-tile, tile+tail, non-multiple sizes, 1×N, N×1.
+        let cases: &[(usize, usize)] = &[
+            (1, 1), (1, 7), (7, 1), (8, 8), (63, 65), (64, 64), (65, 63),
+            (128, 65), (65, 128), (100, 200), (200, 100), (129, 129),
+        ];
+        for &(rows, cols) in cases {
+            let n = rows * cols;
+            let src: Vec<f32> = (0..n as u32).map(|x| x as f32 * 0.5 - 7.25).collect();
+            let mut blocked = vec![0.0f32; n];
+            cache_blocked_transpose_f32(&src, &mut blocked, rows, cols);
+            let reference = naive_transpose(&src, rows, cols);
+            assert_eq!(
+                blocked, reference,
+                "cache_blocked_transpose diverged at rows={}, cols={}",
+                rows, cols
+            );
+        }
+    }
+
+    #[test]
+    fn cache_blocked_transpose_matches_naive_weight_size() {
+        // Realistic Linear weight: [1536, 12288] — exactly the case naive
+        // transpose degrades on (6144-byte write stride vs 64-byte L1 line).
+        let rows = 1536;
+        let cols = 12288;
+        let n = rows * cols;
+        // Build a deterministic pattern; f32 bit-exactness required.
+        let src: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (i as u32).wrapping_mul(2654435761);
+                f32::from_bits(x)
+            })
+            // Filter out NaN so equality works; map bit pattern to a finite value.
+            .map(|f| if f.is_finite() { f } else { 0.0 })
+            .collect();
+        let mut blocked = vec![0.0f32; n];
+        cache_blocked_transpose_f32(&src, &mut blocked, rows, cols);
+
+        // Spot-check a scattered set of coordinates rather than allocate a second
+        // full buffer (the naive path is painfully slow on this shape).
+        let sample_points: [(usize, usize); 32] = [
+            (0, 0), (1535, 12287), (0, 12287), (1535, 0),
+            (1, 1), (2, 3), (5, 7), (11, 13), (17, 19),
+            (23, 29), (31, 37), (41, 43), (47, 53), (59, 61),
+            (67, 71), (73, 79), (83, 89), (97, 101), (103, 107),
+            (109, 113), (127, 131), (137, 139), (149, 151), (157, 163),
+            (167, 173), (179, 181), (191, 193), (197, 199), (211, 223),
+            (1000, 7000), (1234, 5678), (999, 9999),
+        ];
+        for (r, c) in sample_points {
+            assert_eq!(
+                blocked[c * rows + r], src[r * cols + c],
+                "mismatch at (r={}, c={})", r, c
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_bf16_to_f32_matches_serial() {
+        // 100_000 BF16 elements covering finite positive + negative + zero.
+        let n = 100_000usize;
+        let bf16s: Vec<half::bf16> = (0..n)
+            .map(|i| {
+                let x = (i as i32) - (n as i32 / 2);
+                half::bf16::from_f32(x as f32 * 0.0078125)
+            })
+            .collect();
+        // Flatten to bytes
+        let mut bytes = Vec::with_capacity(n * 2);
+        for v in &bf16s {
+            let raw: u16 = v.to_bits();
+            bytes.extend_from_slice(&raw.to_le_bytes());
+        }
+
+        let parallel_out = parallel_half_to_f32::<half::bf16>(&bytes).expect("parallel bf16 conversion failed");
+        // Reference: single-threaded conversion.
+        let serial_out: Vec<f32> = bf16s.iter().map(|v| v.to_f32()).collect();
+
+        assert_eq!(parallel_out.len(), serial_out.len());
+        for (i, (p, s)) in parallel_out.iter().zip(serial_out.iter()).enumerate() {
+            assert_eq!(
+                p.to_bits(), s.to_bits(),
+                "bit-pattern mismatch at index {}: parallel={:?}, serial={:?}",
+                i, p, s
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_f16_to_f32_matches_serial() {
+        // F16 path: 50_000 values, including subnormals near zero.
+        let n = 50_000usize;
+        let f16s: Vec<half::f16> = (0..n)
+            .map(|i| half::f16::from_f32(((i as f32) - (n as f32) / 2.0) * 1.0e-3))
+            .collect();
+        let mut bytes = Vec::with_capacity(n * 2);
+        for v in &f16s {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+
+        let parallel_out = parallel_half_to_f32::<half::f16>(&bytes).expect("parallel f16 conversion failed");
+        let serial_out: Vec<f32> = f16s.iter().map(|v| v.to_f32()).collect();
+        for (i, (p, s)) in parallel_out.iter().zip(serial_out.iter()).enumerate() {
+            assert_eq!(
+                p.to_bits(), s.to_bits(),
+                "bit-pattern mismatch at index {}: parallel={:?}, serial={:?}",
+                i, p, s
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_f32_passthrough_is_exact() {
+        let n = 12345usize;
+        let src: Vec<f32> = (0..n).map(|i| (i as f32) * 1.5 - 3.0).collect();
+        let mut bytes = Vec::with_capacity(n * 4);
+        for v in &src {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let out = parallel_bytes_to_f32_lossless(&bytes).expect("parallel f32 passthrough failed");
+        assert_eq!(out, src);
+    }
 
     #[test]
     #[cfg(feature = "jit-cuda")]

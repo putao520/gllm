@@ -102,6 +102,58 @@ pub struct GeneratorForwardConfig {
 
 **变更**: 删除 `graph_executor_ptr: *mut FusedGraphExecutor`。不再需要裸指针传递——`graph_executor` 是 Executor 的固定成员。
 
+### 1.2.1 Effective KV max_seq_len (ARCH-KV-EFFECTIVE-MAXSEQ)
+
+`GeneratorForwardConfig::max_seq_len()` 与 `KvCacheConfig::max_seq_len()` 返回的是 KV cache 的**有效**长度上界，必须等于 JIT 编译时 baked 进 attention kernel 的 `compile_seq_len`（由 `SYMDIM_MAX_SEQ_LEN` 统一定义，当前值 `2048`）。
+
+**单一真源**:
+
+```rust
+#[inline]
+pub fn effective_kv_max_seq_len(geometry_max_seq_len: usize) -> usize {
+    geometry_max_seq_len.min(SYMDIM_MAX_SEQ_LEN)
+}
+```
+
+**为什么必须 cap**:
+- 现代 LLM 的 `max_position_embeddings` 动辄 10 万级（Gemma 4 E2B: 131 072; Kimi-K2: 200 000+），未 cap 时会在加载阶段分配数 GB 全零 KV cache（Gemma 4 E2B: 15 effective layers × 1 KV head × 131 072 × 256 head_dim × 4 B × 2 = 3.84 GB memset）。
+- JIT 发射的 `emit_multi_head_attention` 把 `compile_seq_len * kv_dim * 4` 作为 `V_ptr` 的编译时常量偏移（见 `gllm-kernels/src/compiler/graph.rs`）。若 KV cache stride 小于该常量 → JIT 越界读；若大于 → 浪费内存但 JIT 读不到超出 stride 的位置。
+- `merge_kv_cache_for_decode` / `perform_kv_cache_write` 的 `layer_byte_offset = effective_kv_layer × num_kv_heads × cache_max_seq × head_dim × elem_bytes` 必须使用同一 `cache_max_seq`，否则各层 K/V 写入位置漂移。
+
+**禁止**:
+- 直接使用 `geometry.max_seq_len`（未 cap 的原始 `max_position_embeddings`）作为 KV cache 维度
+- 在 `KvCacheBuffer::new` / `merge_kv_cache_for_decode` / `perform_kv_cache_write` 中分别计算 cap（违反 SSOT）
+
+### 1.2.2 SharedKvRef Effective Layer Remapping (ARCH-KV-EFFECTIVE-LAYER)
+
+Gemma 4 E2B / E4B 的后 `num_kv_shared_layers` 层共享前一个同类型（sliding / global）非共享层的 KV cache（见 §3 SharedKvRef）。因此 KV cache buffer 只分配 `effective_kv_layers = num_layers - num_kv_shared_layers` 个物理层槽。
+
+所有直接寻址 KV buffer 的调用点必须将原始 `layer_index` 映射到 `effective_kv_layer`：
+
+```rust
+pub fn effective_kv_layer(&self, layer: usize) -> usize {
+    let shared_start = self.num_layers.saturating_sub(self.num_kv_shared_layers);
+    if layer < shared_start {
+        return layer.min(self.effective_kv_layers().saturating_sub(1));
+    }
+    // Shared tail: find nearest preceding same-type non-shared layer.
+    let this_type = self.attention_pattern.get(layer).copied().unwrap_or(0);
+    for j in (0..shared_start).rev() {
+        if self.attention_pattern.get(j).copied().unwrap_or(0) == this_type {
+            return j;
+        }
+    }
+    self.effective_kv_layers().saturating_sub(1)  // clamp
+}
+```
+
+**调用点** (必须使用 `effective_kv_layer`，不是原始 layer index):
+- `FusedGraphExecutor::merge_kv_cache_for_decode`
+- `FusedGraphExecutor::perform_kv_cache_write`
+- `KvCacheBuffer::layer_kv_offset`
+
+**越界保护**: 所有计算 `layer_byte_offset` 的位置必须附 `debug_assert!(effective_kv_layer < effective_kv_layers())`，防止 SharedKvRef 元数据错误导致 buffer 越界写。
+
 ### 1.3 ExecutorError
 
 ```rust

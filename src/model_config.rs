@@ -131,6 +131,45 @@ impl ModelGeometry {
     pub fn expert_weight_bytes(&self) -> usize {
         self.hidden_size * self.expert_intermediate_size * 3 * self.dtype.size_bytes()
     }
+
+    /// SharedKvRef (Gemma 4): how many physical KV-cache layers we actually
+    /// allocate (= `num_layers - num_kv_shared_layers`). All callers that
+    /// stride into the KV cache buffer MUST use this — using the raw
+    /// `num_layers` would over-allocate, and using the raw per-op layer index
+    /// without donor remapping would read past the buffer for any layer in
+    /// the shared tail.
+    pub fn effective_kv_layers(&self) -> usize {
+        self.num_layers.saturating_sub(self.num_kv_shared_layers).max(1)
+    }
+
+    /// SharedKvRef: map a raw per-op layer index (0..num_layers) to its
+    /// effective KV-cache layer index (0..effective_kv_layers).
+    ///
+    /// Non-shared layers return their own index. Shared layers (the last
+    /// `num_kv_shared_layers` of the model) are mapped to the nearest
+    /// preceding non-shared layer of the same attention type
+    /// (sliding vs global), mirroring `KvCacheBuffer::build_kv_donor_map`.
+    /// If no matching donor exists (degenerate case), we clamp to the last
+    /// effective layer rather than returning an out-of-range index — every
+    /// call site writes/reads using `effective * num_kv_heads * max_seq *
+    /// head_dim * elem_bytes`, so a clamp keeps the offset inside the
+    /// allocated buffer.
+    pub fn effective_kv_layer(&self, layer: usize) -> usize {
+        let shared_start = self.num_layers.saturating_sub(self.num_kv_shared_layers);
+        if layer < shared_start {
+            return layer.min(self.effective_kv_layers().saturating_sub(1));
+        }
+        // Shared layer: find the nearest non-shared layer of the same type.
+        let this_type = self.attention_pattern.get(layer).copied().unwrap_or(0);
+        for j in (0..shared_start).rev() {
+            let j_type = self.attention_pattern.get(j).copied().unwrap_or(0);
+            if j_type == this_type {
+                return j;
+            }
+        }
+        // Fallback: clamp to the last effective layer.
+        self.effective_kv_layers().saturating_sub(1)
+    }
 }
 
 #[derive(Debug, Error)]

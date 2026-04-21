@@ -2434,8 +2434,23 @@ impl FusedGraphExecutor {
         let kv_dim = num_kv_heads * head_dim;
         let elem_bytes = gllm_kernels::types::DType::F32.size_bytes();
         let cached_len = total_seq - seq_len;
-        let cache_max_seq = forward_config.expect("KV cache operation requires forward_config").max_seq_len();
-        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
+        let fcfg = forward_config.expect("KV cache operation requires forward_config");
+        let cache_max_seq = fcfg.max_seq_len();
+        // SharedKvRef (Gemma 4): the KV-cache buffer only allocates
+        // `effective_kv_layers = num_layers - num_kv_shared_layers` physical
+        // layer slots. Using the raw `kv_layer` index would read past the
+        // allocation for any shared-tail layer. Route through
+        // `ModelGeometry::effective_kv_layer` so the offset matches
+        // `KvCacheBuffer::layer_kv_offset`.
+        let effective_kv_layer = fcfg.geometry.effective_kv_layer(kv_layer);
+        debug_assert!(
+            effective_kv_layer < fcfg.geometry.effective_kv_layers(),
+            "effective_kv_layer {} out of bounds (effective_layers={})",
+            effective_kv_layer,
+            fcfg.geometry.effective_kv_layers(),
+        );
+        let layer_byte_offset =
+            effective_kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
         // Build merged K and V padded to SYMDIM_MAX_SEQ_LEN rows.
         //
@@ -2533,8 +2548,19 @@ impl FusedGraphExecutor {
         let head_dim = config.head_dim;
         let kv_dim = num_kv_heads * head_dim;
 
-        let cache_max_seq = forward_config.expect("KV cache operation requires forward_config").max_seq_len();
+        let fcfg = forward_config.expect("KV cache operation requires forward_config");
+        let cache_max_seq = fcfg.max_seq_len();
         let write_start = total_seq.saturating_sub(seq_len);
+        // SharedKvRef: remap raw layer index to effective KV layer index so
+        // the offset math stays inside the buffer (see
+        // `ModelGeometry::effective_kv_layer`).
+        let effective_kv_layer = fcfg.geometry.effective_kv_layer(kv_layer);
+        debug_assert!(
+            effective_kv_layer < fcfg.geometry.effective_kv_layers(),
+            "effective_kv_layer {} out of bounds (effective_layers={})",
+            effective_kv_layer,
+            fcfg.geometry.effective_kv_layers(),
+        );
 
         let k_name = cn.graph_output_names.get(1).cloned();
         let v_name = cn.graph_output_names.get(2).cloned();
@@ -2543,7 +2569,8 @@ impl FusedGraphExecutor {
         let (Some(k_data), Some(v_data)) = (tensors.get(&k_name), tensors.get(&v_name)) else { return };
 
         let elem_bytes = gllm_kernels::types::DType::F32.size_bytes();
-        let layer_byte_offset = kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
+        let layer_byte_offset =
+            effective_kv_layer * num_kv_heads * cache_max_seq * head_dim * elem_bytes;
 
         unsafe {
             let k_base = kv_cache_k as *mut u8;
