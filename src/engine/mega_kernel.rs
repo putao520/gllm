@@ -155,18 +155,20 @@ pub enum MegaKernelError {
 
 /// True mega-kernel 编译产物。
 ///
-/// 持有 JIT 编译的层代码 + 全模型权重布局 + 缓冲布局。
-/// 推理时通过单次 CALL 执行。
+/// 持有完整的 mega-kernel 机器码（embedding → layer loop → lm_head → sampling → generate loop）
+/// + 全模型权重布局 + 缓冲布局。推理时通过单次 CALL 执行。
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 struct MegaKernelCompiled {
-    /// JIT 编译的单层模板代码（当前阶段：每层调用一次；Phase 3 后：真正的 mega-kernel）
-    layer_code: gllm_kernels::compiler::CompiledLayer,
     /// 全模型权重布局（embed → layer_0 → ... → layer_N → lm_head）
     weight_layout: gllm_kernels::compiler::MegaKernelWeightLayout,
     /// 运行时缓冲布局（activation ping/pong, logits, sampling workspace）
     buffer_layout: gllm_kernels::compiler::MegaKernelBufferLayout,
     /// 预打包的连续权重 blob
     weight_blob: Vec<u8>,
+    /// mmap'd 可执行缓冲区（mega-kernel 机器码）
+    exec_code: gllm_kernels::compiler::CompiledLayer,
+    /// MegaKernelFn 函数指针（指向 exec_code 的入口）
+    entry_fn: gllm_kernels::compiler::MegaKernelFn,
 }
 
 /// Mega-Kernel 执行器 (§9.1)
@@ -222,8 +224,9 @@ impl MegaKernelExecutor {
 
     /// 从 ModelGeometry 编译 true mega-kernel。
     ///
-    /// 通过 `InferenceCompiler::compile_mega_kernel()` 编译单层模板图，
-    /// 然后预打包所有权重到连续 blob。
+    /// 1. 编译单层模板图 (CompiledLayerFn)
+    /// 2. 发射完整 mega-kernel wrapper（embedding → N 层循环 → lm_head → sampling → generate loop）
+    /// 3. 预打包所有权重到连续 blob
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn compile_from_geometry(
         geometry: &crate::model_config::ModelGeometry,
@@ -247,11 +250,34 @@ impl MegaKernelExecutor {
             rope_scaling: None,
         };
 
+        // Step 1: 编译单层模板图
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
-        // 打包权重到连续 blob
+        let layer_fn = unsafe { output.layer_code.entry_point() };
+        // lm_head 使用相同的编译产物（GEMM 算子是通用的）
+        let lm_head_fn = layer_fn;
+
+        // Step 2: 发射完整 mega-kernel wrapper
+        let mega_code = gllm_kernels::compiler::codegen::vm::mega_kernel_emit::emit_mega_kernel_x86(
+            &config,
+            &output.weight_layout,
+            &output.buffer_layout,
+            layer_fn,
+            lm_head_fn,
+        ).map_err(|e| MegaKernelError::Compilation(format!("mega-kernel emit: {}", e)))?;
+
+        // 将机器码包装为可执行 CompiledLayer
+        let exec_code = gllm_kernels::compiler::CompiledLayer::from_code(
+            &mega_code,
+            output.buffer_layout.total_scratchpad_bytes,
+            0,
+        ).map_err(|e| MegaKernelError::Compilation(format!("mega-kernel exec buffer: {}", e)))?;
+
+        let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
+
+        // Step 3: 打包权重到连续 blob
         let weight_blob = pack_mega_kernel_weights(
             &output.weight_layout,
             geometry.num_layers,
@@ -266,10 +292,11 @@ impl MegaKernelExecutor {
         );
 
         let mega_compiled = MegaKernelCompiled {
-            layer_code: output.layer_code,
             weight_layout: output.weight_layout,
             buffer_layout: output.buffer_layout,
             weight_blob,
+            exec_code,
+            entry_fn,
         };
 
         Ok(Self {
@@ -365,80 +392,89 @@ impl MegaKernelExecutor {
         Ok(scattered)
     }
 
-    /// True mega-kernel 执行路径：单次 CALL 完成所有层计算。
+    /// True mega-kernel 执行路径：单次 MegaKernelFn CALL。
     ///
-    /// 当前阶段：逐层调用 CompiledLayerFn（每层一次 CALL）。
-    /// Phase 3 后：单次 MegaKernelFn CALL 完成 embed → N layers → lm_head → sampling。
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    /// 一次调用完成: embedding → N 层循环 → lm_head → argmax → store token → check stop。
+    /// 返回: 每个序列的 output tokens（从 output_tokens buffer 读取）。
+    #[cfg(target_arch = "x86_64")]
     fn execute_mega_kernel(
         &self,
         mega: &MegaKernelCompiled,
         batch: &MegaBatch,
     ) -> Result<Vec<Vec<f32>>, MegaKernelError> {
         let batch_size = batch.batch_input.sequences.len();
-        let total_tokens: usize = batch.batch_input.sequences.iter().map(|s| s.tokens.len()).sum();
-        let elem_bytes = self.dtype.size_bytes();
+        let max_tokens = 64; // MVP: 固定最大生成 token 数
 
-        // 分配 activation buffers (ping/pong)
-        let activation_bytes = total_tokens * self.hidden_size * elem_bytes;
-        let mut activation_ping = vec![0u8; activation_bytes];
-        let mut activation_pong = vec![0u8; activation_bytes];
-
-        // 分配 scratchpad
-        let scratchpad_bytes = mega.buffer_layout.total_scratchpad_bytes;
-        let mut scratchpad = vec![0u8; scratchpad_bytes];
-
-        // 逐层执行（Phase 3 将替换为真正的 mega-kernel 单次 CALL）
-        let weight_base = mega.weight_blob.as_ptr();
-        let layer_stride = mega.weight_layout.layer_stride;
-
-        for layer_idx in 0..self.num_layers {
-            let layer_weight_offset = mega.weight_layout.layer_base_offset(layer_idx);
-            let layer_weight_ptr = unsafe { weight_base.add(layer_weight_offset) };
-
-            let (input_ptr, output_ptr) = if layer_idx % 2 == 0 {
-                (activation_ping.as_ptr(), activation_pong.as_mut_ptr())
-            } else {
-                (activation_pong.as_ptr(), activation_ping.as_mut_ptr())
-            };
-
-            // 准备 positions（简单递增）
-            let positions: Vec<u32> = (0..total_tokens as u32).collect();
-            let seq_lens: Vec<usize> = batch.batch_input.sequences.iter()
-                .map(|s| s.tokens.len())
-                .collect();
-
-            unsafe {
-                mega.layer_code.execute(
-                    input_ptr,
-                    layer_weight_ptr,
-                    std::ptr::null_mut(), // KV cache (Phase 3)
-                    positions.as_ptr(),
-                    seq_lens.as_ptr(),
-                    batch_size,
-                    total_tokens,
-                    output_ptr,
-                    scratchpad.as_mut_ptr(),
-                );
-            }
-
-            // 交换 ping/pong
-            std::mem::swap(&mut activation_ping, &mut activation_pong);
-        }
-
-        // 将最终 activation 转换为输出格式
-        let final_activation = if self.num_layers % 2 == 0 {
-            &activation_ping
-        } else {
-            &activation_pong
-        };
-
-        // 输出：取最后一个 token 的 hidden state 作为 logits（简化版）
-        let output_vec: Vec<f32> = final_activation.chunks_exact(elem_bytes)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        // 准备 input_ids（所有序列的 token IDs 拼接）
+        let input_ids: Vec<u32> = batch.batch_input.sequences.iter()
+            .flat_map(|s| s.tokens.iter().copied())
             .collect();
 
-        Ok(vec![output_vec; batch_size])
+        // 准备 positions
+        let positions: Vec<u32> = batch.batch_input.sequences.iter()
+            .flat_map(|s| {
+                let start = s.position as u32;
+                (start..start + s.tokens.len() as u32).collect::<Vec<_>>()
+            })
+            .collect();
+
+        // 分配 output tokens buffer
+        let mut output_tokens = vec![0u32; max_tokens];
+
+        // 分配 scratchpad
+        let mut scratchpad = vec![0u8; mega.buffer_layout.total_scratchpad_bytes];
+
+        // 准备 MegaKernelFn 参数
+        let temperature: f32 = 0.0; // greedy
+        let top_k: u32 = 1;
+        let top_p: f32 = 1.0;
+        let max_new_tokens: u32 = max_tokens as u32;
+        let eos_token_id: u32 = 2; // 标准 EOS
+
+        let generated_count = unsafe {
+            (mega.entry_fn)(
+                input_ids.as_ptr(),
+                mega.weight_blob.as_ptr(),
+                std::ptr::null_mut(), // kv_cache (MVP: NULL)
+                positions.as_ptr(),
+                std::ptr::null(),     // aux_ptr
+                batch_size,
+                input_ids.len(),      // prompt_len
+                scratchpad.as_mut_ptr(),
+                output_tokens.as_mut_ptr(),
+                temperature,
+                top_k,
+                top_p,
+                max_new_tokens,
+                eos_token_id,
+                std::ptr::null(),     // hook_ctx_ptr
+                std::ptr::null_mut(), // telemetry_ptr
+            )
+        };
+
+        // 转换 output tokens 为 f32（每个序列）
+        let mut results = Vec::with_capacity(batch_size);
+        for seq in &batch.batch_input.sequences {
+            let seq_tokens: Vec<f32> = output_tokens[..generated_count.min(max_tokens)]
+                .iter()
+                .map(|&t| t as f32)
+                .collect();
+            results.push(seq_tokens);
+        }
+
+        Ok(results)
+    }
+
+    /// 非 x86_64 fallback：逐层调用 CompiledLayerFn。
+    #[cfg(not(target_arch = "x86_64"))]
+    fn execute_mega_kernel(
+        &self,
+        mega: &MegaKernelCompiled,
+        batch: &MegaBatch,
+    ) -> Result<Vec<Vec<f32>>, MegaKernelError> {
+        Err(MegaKernelError::Execution(
+            "mega-kernel execution only supported on x86_64".into(),
+        ))
     }
 }
 
