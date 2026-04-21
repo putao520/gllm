@@ -67,8 +67,9 @@ pub use compat::audio_forward::{
     UsmConformerEncoder,
 };
 pub use cot_reasoner::{
-    ReasoningBuilder, ReasoningError, ReasoningMode, ReasoningResponse, ReasoningStopReason,
-    ReasoningTemplate, DEFAULT_STOP_PATTERNS,
+    ReasoningBuilder, ReasoningError, ReasoningMode, ReasoningResponse, ReasoningStepHook,
+    ReasoningStopReason, ReasoningTemplate, StepAction, StepContext, StepKnowledge, StepResult,
+    DEFAULT_STOP_PATTERNS,
 };
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};

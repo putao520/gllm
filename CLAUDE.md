@@ -43,7 +43,7 @@
 | `HEAD-ROUTING.md` | **Head Routing SDK 技术协议 (SSOT)** — 同一 generator LLM 多头 API (generate/classify_binary/classify_multiway/encode_to_layer) 运行时切换,零权重重载、零 JIT 重编译,E2E 验收 (REQ-HR-001..005) | ✅ |
 | `GUARDRAIL.md` | **Guardrail SDK 技术协议 (SSOT)** — in-flight 安全 veto 探针,`attach_guardrail` + `GuardrailProbeCallback` (post_node),SafetyPolicy (HaltAndVeto/LogOnly/SampleDowngrade),正交于 SG/HR,E2E 验收 (REQ-GR-001..005) | ✅ |
 | `INTENT.md` | **Intent Recall SDK 技术协议 (SSOT)** — `encode_intent` 截断前向至 anchor 层 pool hidden 作为意图识别向量,delegate 到 `encode_to_layer` (DRY),E2E 验收 (REQ-INTENT-001..003) | ✅ |
-| `COT-REASONER.md` | **CoT Reasoner SDK (SSOT)** — 任意 LLM 原生 Chain-of-Thought 推理 (Manual + Auto 模式),Client 层 orchestration,零 Backend 扩展,E2E 验收 (REQ-COT-001..006) | ✅ |
+| `COT-REASONER.md` | **CoT Reasoner SDK (SSOT)** — 任意 LLM 原生 Chain-of-Thought 推理 (Manual + Auto 模式),Client 层 orchestration,零 Backend 扩展,Step Hook 推理引擎级思考控制 (REQ-COT-007..009),E2E 验收 (REQ-COT-001..009) | ✅ |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) | ✅ |
 | `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 | ✅ |
 | `ARCH-DATA-FLOW-CONTRACT.md` | 数据流唯一来源契约（gllm 侧 executor/loader 数据流 SSOT） | ✅ |

@@ -482,13 +482,16 @@
 | **REQ-COT-004** | Reasoning trace 完整保留 | 每个 reasoning step 产出的 chunk text 作为独立元素存入 `reasoning_trace: Vec<String>` | 1. `reasoning_trace.len() == actual_steps`；2. 每个 trace 元素非空；3. trace 中保留 step chunk 的原始语义内容 | 🔴 待实现 |
 | **REQ-COT-005** | 与 Semantic Gatekeeper 正交 | `register_semantic_gatekeeper(cfg)` 后调用 `reason(...)` 可正常工作，step 间的 `Client::generate` 自然走 SG 注入 | 1. `reason` 调用不 panic；2. 每次内部 `execute_generation` 触发 SG callback ≥1 次（mock counter 验证）；3. 不修改 SG API 或 Callback chain | 🔴 待实现 |
 | **REQ-COT-006** | NO_ISLAND_MODULE 合规 | `Client::reason` 必须在真实 SDK 路径被调用，不是孤岛模块 | 1. `GenerationBuilder::reasoning` → `ReasoningBuilder::execute` → `Client::reason` 的转发链真实存在；2. E2E 测试 `test_cot_006_arbitrary_llm` 用 SmolLM2-135M-Instruct 跑通全链；3. grep `Client::reason` 在 `src/` 非测试代码中有至少 1 个真实调用点 | 🔴 待实现 |
+| **REQ-COT-007** | Step Hook trait 定义与生命周期 | `ReasoningStepHook` trait 提供 `on_step_start` / `on_step_end` 回调，通过 `ReasoningBuilder::with_step_hook()` 注册 | 1. trait 有 `on_step_start(&mut self, &StepContext) -> StepAction` + `on_step_end(&mut self, &StepResult) -> StepKnowledge` 两个方法；2. trait bound 包含 `Send + Sync`；3. E2E 测试: 注册 hook 后 Manual 3 步 reasoning，`on_step_start` 和 `on_step_end` 各被调用 3 次；4. 不注册 hook 时行为与原实现完全一致 (backward compatible) | 🔴 待实现 |
+| **REQ-COT-008** | StepContext 包含 accumulated reasoning text | `StepContext` 传递前序步骤累积文本，允许 hook 基于历史做动态决策 | 1. `on_step_start` 的 `StepContext.accumulated_text` 在 step_index=0 时为空串；2. step_index=1 时包含 step 0 的 chunk_text；3. step_index=2 时包含 step 0+1 的累积文本；4. `model_name` 非空；5. `remaining_budget` > 0 且逐步递减 | 🔴 待实现 |
+| **REQ-COT-009** | StepAction 支持 Continue/Skip/InjectPrompt/Halt | `StepAction` 枚举提供 4 种流程控制，`StepKnowledge` 支持跨步知识注入与温度覆盖 | 1. `Continue` 正常执行；2. `Skip` 跳过某步且 trace 无空元素；3. `InjectPrompt(extra)` 的 extra 出现在该步 prompt 中；4. `Halt(reason)` 提前终止且 `stopped_reason = HaltByHook(reason)`；5. E2E 测试覆盖 `InjectPrompt`: 注入关键词后 chunk 包含该关键词 | 🔴 待实现 |
 
 ### 16.1 测试文件规划
 
 | 测试文件 | 覆盖维度 | 状态 |
 |----------|----------|------|
-| `tests/test_e2e_cot_reasoner.rs` | REQ-COT-001~006 端到端（SmolLM2-135M-Instruct 真实模型） | 🔴 待实现 |
-| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式单元测试 | 🔴 待实现 |
+| `tests/test_e2e_cot_reasoner.rs` | REQ-COT-001~009 端到端（SmolLM2-135M-Instruct 真实模型） | 🔴 待实现 |
+| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式 / Step Hook 单元测试 | 🔴 待实现 |
 
 ### 16.2 实现路径（纯 Client SDK，零 Backend 扩展）
 
