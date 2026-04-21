@@ -585,20 +585,23 @@ fn pack_mega_kernel_weights(
     dtype: DType,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; layout.total_bytes];
-    let elem_bytes = dtype.size_bytes();
+    let _ = dtype; // dtype not needed for packing — sizes come from layout
 
-    // Helper: copy weight from ptr into blob at offset
-    let copy_weight = |blob: &mut [u8], offset: usize, ptr: *const u8, size: usize| {
-        if !ptr.is_null() && size > 0 {
-            let src = unsafe { std::slice::from_raw_parts(ptr, size) };
-            blob[offset..offset + size].copy_from_slice(src);
-        }
+    // Helper: copy weight from ptr into blob at offset, clamping to available space.
+    // Returns false if the copy would overflow (weight too large for slot).
+    let mut copy_weight = |blob: &mut [u8], offset: usize, ptr: *const u8, size: usize, slot_size: usize| -> bool {
+        if ptr.is_null() || size == 0 { return true; }
+        let copy_size = size.min(slot_size).min(blob.len().saturating_sub(offset));
+        if copy_size == 0 || offset >= blob.len() { return false; }
+        let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
+        blob[offset..offset + copy_size].copy_from_slice(src);
+        copy_size == size
     };
 
     // Embedding weight: "embed_tokens.weight" → [vocab_size, hidden]
     if let Some(&ptr) = weight_ptrs.get("embed_tokens.weight") {
         let size = *weight_sizes.get("embed_tokens.weight").unwrap_or(&0);
-        copy_weight(&mut blob, layout.embed_offset, ptr, size);
+        copy_weight(&mut blob, layout.embed_offset, ptr, size, layout.embed_bytes);
     }
 
     // Per-layer weights
@@ -617,11 +620,11 @@ fn pack_mega_kernel_weights(
 
     for layer_idx in 0..num_layers {
         let layer_base = layout.layer_base_offset(layer_idx);
-        for (name_template, rel_offset, expected_size) in &weight_names {
+        for (name_template, rel_offset, slot_size) in &weight_names {
             let name = name_template.replace("{L}", &layer_idx.to_string());
             if let Some(&ptr) = weight_ptrs.get(&name) {
-                let size = *weight_sizes.get(&name).unwrap_or(expected_size);
-                copy_weight(&mut blob, layer_base + rel_offset, ptr, size);
+                let size = *weight_sizes.get(&name).unwrap_or(slot_size);
+                copy_weight(&mut blob, layer_base + rel_offset, ptr, size, *slot_size);
             }
         }
     }
@@ -629,7 +632,7 @@ fn pack_mega_kernel_weights(
     // lm_head weight: "lm_head.weight" → [vocab_size, hidden]
     if let Some(&ptr) = weight_ptrs.get("lm_head.weight") {
         let size = *weight_sizes.get("lm_head.weight").unwrap_or(&0);
-        copy_weight(&mut blob, layout.lm_head_offset, ptr, size);
+        copy_weight(&mut blob, layout.lm_head_offset, ptr, size, layout.lm_head_bytes);
     }
 
     blob
