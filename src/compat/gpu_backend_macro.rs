@@ -137,6 +137,21 @@ macro_rules! impl_gpu_backend {
                 )))
             }
 
+            fn score_tokens_forward_gpu_pure(
+                &self,
+                tokens: &[u32],
+                target_token_ids: &[u32],
+                _topology: &AttentionTopology,
+                weights: &dyn backend_trait::TensorLookup<E, Self>,
+                config: &GeneratorForwardConfig,
+            ) -> Result<Vec<f32>, BE> {
+                let _ = (tokens, target_token_ids, weights, config);
+                Err(BE::Unimplemented(concat!(
+                    $feature_label,
+                    " score_tokens forward (Head Routing SDK) pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                )))
+            }
+
             fn get_memory_pressure(&self) -> Result<f32, BE> {
                 #[cfg( $($cfg_pred)+ )]
                 {

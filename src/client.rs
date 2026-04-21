@@ -866,6 +866,151 @@ impl Client {
     }
 
     // -----------------------------------------------------------------
+    // Head Routing SDK (SPEC/HEAD-ROUTING.md, SPEC/04-API-DESIGN §3.8)
+    //
+    // 同一 generator LLM 加载后,运行时切换输出头形态,零权重重载、零 JIT
+    // 重编译 (REQ-HR-001..005)。
+    // -----------------------------------------------------------------
+
+    /// Binary classify head (REQ-HR-001) — 对 `prompt` 跑一次 generator
+    /// forward,读取 lm_head 对 positive/negative token 的 logit,
+    /// softmax 归一化后返回 `P(positive_token) ∈ [0.0, 1.0]`。
+    ///
+    /// # 错误
+    /// - `positive_token` / `negative_token` 无法单 token 化 →
+    ///   `HeadRoutingError::TokenNotFound(...)` 包装为 `ClientError::RuntimeError`
+    /// - `temperature <= 0` / NaN → `InvalidConfig`
+    /// - 下游 backend forward 失败 → 原错误传播
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §3.2 / §4
+    /// - SPEC/04-API-DESIGN.md §3.8
+    pub fn classify_binary(
+        &self,
+        prompt: &str,
+        config: crate::head_routing::ClassifyBinaryConfig,
+    ) -> Result<f32, ClientError> {
+        use crate::head_routing::{softmax_with_temperature, HeadRoutingError};
+
+        let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let tokenizer = executor.tokenizer();
+            let pos_id = resolve_single_token(tokenizer, &config.positive_token)
+                .map_err(hr_err_to_client)?;
+            let neg_id = resolve_single_token(tokenizer, &config.negative_token)
+                .map_err(hr_err_to_client)?;
+            if pos_id == neg_id {
+                return Err(hr_err_to_client(HeadRoutingError::InvalidConfig(format!(
+                    "positive_token ({}) and negative_token ({}) resolve to same token id {}",
+                    config.positive_token, config.negative_token, pos_id,
+                ))));
+            }
+            let logits = executor
+                .score_tokens_for_prompt(prompt, &[pos_id, neg_id])
+                .map_err(ClientError::from)?;
+            if logits.len() != 2 {
+                return Err(ClientError::RuntimeError(format!(
+                    "classify_binary: expected 2 logits, got {}",
+                    logits.len()
+                )));
+            }
+            let probs = softmax_with_temperature(&logits, config.temperature)
+                .map_err(hr_err_to_client)?;
+            // probs[0] 对应 pos_id (positive_token), probs[1] 对应 neg_id
+            Ok(probs[0])
+        })
+    }
+
+    /// Multiway classify head (REQ-HR-002) — 对 `prompt` 跑一次 generator
+    /// forward,读取 lm_head 对每个 `labels[i]` token 的 logit,对 N 个
+    /// logit 联合 softmax 归一化,返回 `Vec<f32>` (每个标签对应概率)。
+    ///
+    /// # 错误
+    /// - `labels.is_empty()` → `EmptyLabels`
+    /// - 任一 label 无法单 token 化 → `TokenNotFound(label)`
+    /// - `config.temperature <= 0` → `InvalidConfig`
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §3.3 / §4
+    pub fn classify_multiway(
+        &self,
+        prompt: &str,
+        labels: &[&str],
+        config: crate::head_routing::ClassifyMultiwayConfig,
+    ) -> Result<Vec<f32>, ClientError> {
+        use crate::head_routing::{softmax_with_temperature, HeadRoutingError};
+
+        if labels.is_empty() {
+            return Err(hr_err_to_client(HeadRoutingError::EmptyLabels));
+        }
+        let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let tokenizer = executor.tokenizer();
+            let mut token_ids = Vec::with_capacity(labels.len());
+            for label in labels {
+                let id = resolve_single_token(tokenizer, label).map_err(hr_err_to_client)?;
+                token_ids.push(id);
+            }
+            let logits = executor
+                .score_tokens_for_prompt(prompt, &token_ids)
+                .map_err(ClientError::from)?;
+            if logits.len() != labels.len() {
+                return Err(ClientError::RuntimeError(format!(
+                    "classify_multiway: expected {} logits, got {}",
+                    labels.len(),
+                    logits.len()
+                )));
+            }
+            softmax_with_temperature(&logits, config.temperature).map_err(hr_err_to_client)
+        })
+    }
+
+    /// Mid-layer encode head (REQ-HR-003) — 截断前向到 `anchor` 层,
+    /// pool hidden state 返回向量。
+    ///
+    /// **当前状态**: `FusedGraphExecutor` 的单次前向路径 (`executor.run()` /
+    /// `run_with_kv_cache_with_config`) 未暴露 `CallbackChain`,无法在中间层
+    /// 截断。本函数**显式返回** `HeadRoutingError::MidLayerNotSupported`,
+    /// 禁止 stub / silent fallback / scalar 降级 (NO_SILENT_FALLBACK 铁律)。
+    ///
+    /// 错误消息包含固定子串 `"MidLayerNotSupported"` 以便上层匹配
+    /// (REQ-HR-003 验收标准 #2)。
+    ///
+    /// 验证 `LayerAnchor` 越界时优先返回 `InvalidLayerAnchor`,以保留契约
+    /// 端到端可测试性 (TEST-HR-005)。
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §5
+    /// - SPEC/04-API-DESIGN.md §3.8.1 / §3.8.4
+    pub fn encode_to_layer(
+        &self,
+        text: &str,
+        anchor: crate::head_routing::LayerAnchor,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<Vec<f32>, ClientError> {
+        use crate::head_routing::HeadRoutingError;
+
+        let _ = text; // text 仅在未来 mid-layer exit 实现后使用
+        let _ = pool;
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        // 验证 anchor,让 InvalidLayerAnchor 优先于 MidLayerNotSupported 暴露,
+        // 确保契约测试 (TEST-HR-005) 可直接覆盖 resolve 分支。
+        let _resolved = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+
+        // FusedGraphExecutor::run_with_early_exit(anchor_layer) 未落地 —
+        // 显式拒绝 (NO_SILENT_FALLBACK)。
+        Err(hr_err_to_client(HeadRoutingError::MidLayerNotSupported))
+    }
+
+    // -----------------------------------------------------------------
     // Internal Methods
     // -----------------------------------------------------------------
 
@@ -1753,6 +1898,39 @@ fn sg_err_to_client(err: crate::semantic_gatekeeper::SemanticGatekeeperError) ->
     ClientError::RuntimeError(format!(
         "semantic gatekeeper: Phase C pending — precompute error: {err}"
     ))
+}
+
+/// Head Routing SDK — 将内部 `HeadRoutingError` 映射为 `ClientError`。
+fn hr_err_to_client(err: crate::head_routing::HeadRoutingError) -> ClientError {
+    use crate::head_routing::HeadRoutingError as HE;
+    match err {
+        HE::TokenNotFound(_) | HE::EmptyLabels | HE::InvalidLayerAnchor(_)
+        | HE::InvalidConfig(_) | HE::MidLayerNotSupported | HE::Backend(_) => {
+            ClientError::RuntimeError(format!("{err}"))
+        }
+    }
+}
+
+/// Resolve `text` to a single token id via the loaded tokenizer.
+/// 要求 tokenize 结果恰好 1 个 token,否则 `TokenNotFound(...)`。
+fn resolve_single_token(
+    tokenizer: &crate::tokenizer::TokenizerHandle,
+    text: &str,
+) -> Result<u32, crate::head_routing::HeadRoutingError> {
+    let ids = tokenizer
+        .encode(text, false)
+        .map_err(|e| crate::head_routing::HeadRoutingError::Backend(format!("tokenizer error: {e}")))?;
+    match ids.as_slice() {
+        [] => Err(crate::head_routing::HeadRoutingError::TokenNotFound(format!(
+            "{text:?} tokenized to empty id list"
+        ))),
+        [id] => Ok(*id),
+        many => Err(crate::head_routing::HeadRoutingError::TokenNotFound(format!(
+            "{text:?} tokenized to {} tokens {:?}, Head Routing requires single-token labels",
+            many.len(),
+            many
+        ))),
+    }
 }
 
 // ============================================================================

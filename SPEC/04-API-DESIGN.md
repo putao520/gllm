@@ -324,6 +324,119 @@ pub struct MultimodalEncoded {
 4. **decoder-side fusion 未就绪时禁止 silent fallback**: 当 encoder 成功产出 embedding 序列但 `executor.generate` 当前不支持 embedding 直接注入,client 必须 `Err("multimodal decoder fusion not yet implemented")` (NO_SILENT_FALLBACK)。不允许"看似成功但 media 被默默丢弃"的虚假 API。
 5. 纯文本调用(无 `.image()` / `.audio()`)永远绕过多模态 routing,与既有 `generate()` 语义 100% 一致
 
+### 3.8 Head Routing — 同一 generator 多头 API (REQ-HR)
+
+> **协议 SSOT**: `SPEC/HEAD-ROUTING.md`
+>
+> **需求**: `SPEC/01-REQUIREMENTS.md §13` REQ-HR-001..005
+>
+> **定位**: 同一 `Client::new_chat(...)` 加载的 generator LLM,通过运行时 API 选择输出头形态,**不重新加载权重、不重新 JIT 编译**。与加载时的 `ModelKind` 正交——`ModelKind` 决定主 head,Head Routing 在单次 API 调用中切换输出形态。
+
+#### 3.8.1 API 表面
+
+```rust
+use gllm::{Client, ClassifyBinaryConfig, ClassifyMultiwayConfig, LayerAnchor, PoolMode};
+
+let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+
+// 1. Generate head (已有 §3.1, 不变)
+let text = client.generate("Hello").response()?;
+
+// 2. Binary classify head
+let score: f32 = client.classify_binary(
+    "Is water wet? Answer yes or no:",
+    ClassifyBinaryConfig {
+        positive_token: "yes".to_string(),
+        negative_token: "no".to_string(),
+        temperature: 1.0,
+    },
+)?;
+// 返回 P(yes) ∈ [0.0, 1.0]
+
+// 3. Multiway classify head
+let scores: Vec<f32> = client.classify_multiway(
+    "Topic:",
+    &["sports", "politics", "technology"],
+    ClassifyMultiwayConfig::default(),
+)?;
+// 返回 [P(sports), P(politics), P(technology)], sum ≈ 1.0
+
+// 4. Encode to mid-layer
+let emb: Vec<f32> = client.encode_to_layer(
+    "embedding text",
+    LayerAnchor::Relative(0.5),
+    PoolMode::MeanPool,
+)?;
+// 当前阶段: Err(HeadRoutingError::MidLayerNotSupported) - FusedGraphExecutor
+// 单次前向未暴露 callback 截断路径,显式拒绝以保持 NO_SILENT_FALLBACK 合规。
+// 落地依赖 FusedGraphExecutor 扩展 mid-layer exit 支持。
+```
+
+#### 3.8.2 配置类型
+
+```rust
+pub struct ClassifyBinaryConfig {
+    /// positive 类别对应的 token 文本 (必须单 token 化)
+    pub positive_token: String,
+    /// negative 类别对应的 token 文本 (必须单 token 化)
+    pub negative_token: String,
+    /// softmax 温度 (> 0)。1.0 保持原始分布;< 1 锐化;> 1 平滑。
+    pub temperature: f32,
+}
+
+pub struct ClassifyMultiwayConfig {
+    /// softmax 温度 (> 0)
+    pub temperature: f32,
+}
+
+impl Default for ClassifyMultiwayConfig {
+    fn default() -> Self { Self { temperature: 1.0 } }
+}
+
+pub enum LayerAnchor {
+    /// 相对深度 ∈ [0.0, 1.0]。0.0 = layer 0, 1.0 = 最后一层
+    Relative(f32),
+    /// 绝对层索引 (0-based)
+    Absolute(usize),
+}
+
+pub enum PoolMode {
+    /// 对 seq 维度求平均
+    MeanPool,
+    /// 取最后一个 token
+    LastToken,
+    /// 取第一个 token (CLS 位置)
+    ClsToken,
+}
+```
+
+#### 3.8.3 错误类型
+
+```rust
+pub enum HeadRoutingError {
+    /// label 或 positive/negative token 无法单 token 化,或 tokenize 失败
+    TokenNotFound(String),
+    /// LayerAnchor::Relative 越界 [0.0, 1.0] 或 Absolute 越界 [0, num_layers)
+    InvalidLayerAnchor(f32),
+    /// classify_multiway 收到空 labels 切片
+    EmptyLabels,
+    /// 配置参数非法 (如 temperature ≤ 0)
+    InvalidConfig(String),
+    /// encode_to_layer 当前未被 FusedGraphExecutor 支持 (显式拒绝,非 stub)
+    MidLayerNotSupported,
+    /// 下游 backend/tokenizer 错误传播
+    Backend(String),
+}
+```
+
+#### 3.8.4 行为契约 (REQ-HR-001..005)
+
+1. **零重载**: `classify_binary` / `classify_multiway` 复用加载时的 `FusedGraphExecutor`,不触发权重重装或 JIT 重编译。多次调用之间 `Arc::as_ptr(&client.state().backend)` 地址恒定。
+2. **Tied embedding**: decoder generator (SmolLM2 / Qwen3 / Gemma 等) lm_head 与 embed_tokens 权重共享,`logit_t = h_last · embed_tokens[t]`。
+3. **单 token 要求**: `positive_token` / `negative_token` / `labels[i]` 必须 tokenize 为**单个** token id,否则返回 `TokenNotFound(...)`。多 token 标签需调用方拆分或替换为单 token 同义词。
+4. **显式错误**: token 未找到、温度非法、层索引越界、mid-layer 未支持 —— 全部返回 `Err(HeadRoutingError::...)`,禁止 silent 返回 0 / 默认值 / argmax。
+5. **正交于 SG**: 未注册 Semantic Gatekeeper 时,HR 读取的 hidden 就是 forward 原始结果;注册 SG 后 HR 读取的 hidden 包含 SG 残差注入——这是**设计意图**,允许知识注入驱动分类。
+
 ## 4. 错误处理
 
 所有 API 返回 `Result<T, GllmError>`。

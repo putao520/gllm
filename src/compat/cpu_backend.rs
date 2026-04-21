@@ -446,18 +446,23 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             let start = std::time::Instant::now();
             let total_seq = position + seq_len;
             let result = if has_kv {
-                let store = self.kv_store.lock().map_err(|e| BE::Cpu(format!("KV lock: {e}")))?;
-                let buf = store.get(&kv_handle.0).ok_or_else(|| {
-                    BE::Cpu("KV cache buffer not found".into())
-                })?;
-                let k_ptr = buf.k.as_ptr() as *mut f32;
-                let v_ptr = buf.v.as_ptr() as *mut f32;
-                drop(store);
+                let (k_ptr, v_ptr, donor_map) = {
+                    let store = self.kv_store.lock().map_err(|e| BE::Cpu(format!("KV lock: {e}")))?;
+                    let buf = store.get(&kv_handle.0).ok_or_else(|| {
+                        BE::Cpu("KV cache buffer not found".into())
+                    })?;
+                    let k_ptr = buf.k.as_ptr() as *mut f32;
+                    let v_ptr = buf.v.as_ptr() as *mut f32;
+                    // SharedKvRef (T43): consumer 层通过 donor_map 解析到 donor 层物理 slot.
+                    let donor_map = buf.kv_donor_map.clone();
+                    (k_ptr, v_ptr, donor_map)
+                };
 
                 let positions_u32: Vec<u32> = (position..position + seq_len).map(|p| p as u32).collect();
                 executor.run_with_kv_cache_with_config(
                     &inputs, k_ptr, v_ptr,
                     0, total_seq, seq_len, positions_u32.as_ptr(), config,
+                    Some(&donor_map),
                 ).map_err(|e| BE::Other(format!("FusedGraphExecutor decoder run failed: {e}")))
             } else {
                 let bindings = shape_bindings_from_seq(seq_len);
@@ -660,6 +665,142 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         let hidden_size = config.hidden_size();
         // 分类: [CLS] token 表示
         Ok(hidden[..hidden_size].to_vec())
+    }
+
+    /// Head Routing SDK (REQ-HR-001 / REQ-HR-002) — 对 decoder generator 的
+    /// 最后一个 token hidden state 与指定 vocab token 的 embed 行做点积,返回
+    /// 每个 target_token_ids 对应的原始 logit。依赖 tied embedding
+    /// (lm_head.weight == embed_tokens.weight),与 `rerank_forward_gpu_pure`
+    /// decoder 分支同源实现。
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §4.2
+    /// - SPEC/04-API-DESIGN.md §3.8
+    fn score_tokens_forward_gpu_pure(
+        &self,
+        tokens: &[u32],
+        target_token_ids: &[u32],
+        _topology: &AttentionTopology,
+        weights: &dyn backend_trait::TensorLookup<E, Self>,
+        config: &GeneratorForwardConfig,
+    ) -> Result<Vec<f32>, BE> {
+        if tokens.is_empty() {
+            return Err(BE::Other(
+                "score_tokens_forward_gpu_pure: empty tokens".into(),
+            ));
+        }
+        if target_token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        use crate::manifest::ArchFamily;
+        let is_decoder = config.arch_family == ArchFamily::Decoder;
+        if !is_decoder {
+            return Err(BE::Unimplemented(
+                "score_tokens_forward_gpu_pure currently requires decoder generator model",
+            ));
+        }
+
+        // ARCH-FULL-JIT: 走 FusedGraphExecutor 单次前向
+        let executor = get_graph_executor(config)?;
+        let inputs = prepare_encoder_inputs(tokens, config);
+        let bindings = shape_bindings_from_tokens(tokens);
+        let outputs = executor.run(&inputs, &bindings).map_err(|e| {
+            BE::Other(format!(
+                "FusedGraphExecutor score_tokens run failed: {e}"
+            ))
+        })?;
+        let hidden = extract_final_hidden(&outputs, executor)?;
+        if hidden.is_empty() {
+            return Err(BE::Other(
+                "score_tokens forward produced empty output tensor".into(),
+            ));
+        }
+
+        let hidden_size = config.hidden_size();
+        let seq_len = tokens.len();
+        if hidden.len() < seq_len * hidden_size {
+            return Err(BE::Other(format!(
+                "score_tokens: hidden buffer too small, expected >= {}*{}={}, got {}",
+                seq_len,
+                hidden_size,
+                seq_len * hidden_size,
+                hidden.len()
+            )));
+        }
+        let last_start = (seq_len - 1) * hidden_size;
+        let last_hidden = &hidden[last_start..last_start + hidden_size];
+
+        // Tied embedding: lm_head 权重与 embed_tokens 共享,直接读 embed_tokens.
+        const EMBED_ALIASES: &[&str] = &[
+            "model.embed_tokens.weight",
+            "embed_tokens.weight",
+            "transformer.wte.weight",
+            "embeddings.word_embeddings.weight",
+            "token_embd.weight",
+        ];
+        let mut embed_data: Option<(&[E], Vec<usize>)> = None;
+        for alias in EMBED_ALIASES {
+            if let Some(t) = weights.get_tensor(alias) {
+                let shape = weights
+                    .tensor_shape(alias)
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                if shape.len() == 2 {
+                    embed_data = Some((t.as_ref(), shape));
+                    break;
+                }
+            }
+        }
+        let (data_e, shape) = embed_data.ok_or_else(|| {
+            BE::Other(
+                "score_tokens: embed_tokens.weight not found in weight store \
+                 (tried model.embed_tokens.weight / embed_tokens.weight / \
+                 transformer.wte.weight / embeddings.word_embeddings.weight / \
+                 token_embd.weight)"
+                    .into(),
+            )
+        })?;
+
+        // CPU backend: Element size 必须与 f32 相同
+        if std::mem::size_of::<E>() != std::mem::size_of::<f32>() {
+            return Err(BE::Other(
+                "score_tokens: CPU backend path only supports f32 element size".into(),
+            ));
+        }
+        // SAFETY: data_e 是 CPU backend 的 Element 存储,E 在 CPU 固定为 f32。
+        // 上面的 size_of 断言已验证。
+        let data: &[f32] = unsafe {
+            std::slice::from_raw_parts(data_e.as_ptr() as *const f32, data_e.len())
+        };
+        let vocab = shape[0];
+        let hidden_dim = shape[1];
+        if hidden_dim != hidden_size {
+            return Err(BE::Other(format!(
+                "score_tokens embed shape mismatch: expected hidden={}, got {}",
+                hidden_size, hidden_dim
+            )));
+        }
+
+        // 为每个 target token id 计算点积 logit_t = h_last · embed[t]
+        let mut logits = Vec::with_capacity(target_token_ids.len());
+        for &tid in target_token_ids {
+            let t = tid as usize;
+            if t >= vocab {
+                return Err(BE::Other(format!(
+                    "score_tokens: target token id {} out of vocab {}",
+                    t, vocab
+                )));
+            }
+            let row = &data[t * hidden_dim..(t + 1) * hidden_dim];
+            // f64 accumulator 避免大模型 hidden_size 的浮点误差累积
+            let mut acc: f64 = 0.0;
+            for i in 0..hidden_dim {
+                acc += last_hidden[i] as f64 * row[i] as f64;
+            }
+            logits.push(acc as f32);
+        }
+        Ok(logits)
     }
 
     fn get_memory_pressure(&self) -> Result<f32, BE> {

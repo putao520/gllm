@@ -14,6 +14,7 @@ pub mod scheduler;
 pub mod client;
 pub mod embeddings;
 pub mod generation;
+pub mod head_routing;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
@@ -69,6 +70,9 @@ pub use semantic_gatekeeper::{
     AstContext, AstSentinel, KnowledgeEntry, KnowledgeProvider, RetrieveContext,
     SemanticGatekeeperCallback, SemanticGatekeeperConfig, SemanticGatekeeperError, SemanticLevel,
     TokenizerLookup, DEFAULT_LEVEL_DESCRIPTORS,
+};
+pub use head_routing::{
+    ClassifyBinaryConfig, ClassifyMultiwayConfig, HeadRoutingError, LayerAnchor, PoolMode,
 };
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};

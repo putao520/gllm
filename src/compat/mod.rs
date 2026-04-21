@@ -108,6 +108,31 @@ pub mod backend_trait {
         where
             Self: Sized;
 
+        /// Head Routing SDK — 对给定 tokens 跑一次 generator forward,读取最后
+        /// 一个 token 的 hidden state 并与 `embed_tokens.weight` 的指定行做点积,
+        /// 返回每个 `target_token_ids[i]` 对应的**原始 logit** (未经 softmax)。
+        ///
+        /// # 契约
+        /// - `tokens.is_empty()` → `BackendError::Other("empty tokens")`
+        /// - `target_token_ids.is_empty()` → `Ok(vec![])`
+        /// - 模型必须是 decoder generator (tied embedding):否则 `Unimplemented`
+        /// - `target_token_ids[i] >= vocab_size` → `Other(format!("..."))`
+        /// - 不做 softmax、不做温度缩放(由调用方 client 层处理)
+        ///
+        /// # 关联
+        /// - SPEC/HEAD-ROUTING.md §4.2
+        /// - SPEC/04-API-DESIGN.md §3.8
+        fn score_tokens_forward_gpu_pure(
+            &self,
+            tokens: &[u32],
+            target_token_ids: &[u32],
+            topology: &AttentionTopology,
+            weights: &dyn TensorLookup<E, Self>,
+            config: &GeneratorForwardConfig,
+        ) -> Result<Vec<f32>, BackendError>
+        where
+            Self: Sized;
+
         fn get_memory_pressure(&self) -> Result<f32, BackendError>;
 
         fn swap_out_pages(

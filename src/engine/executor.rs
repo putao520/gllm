@@ -2976,6 +2976,38 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         Ok(logits)
     }
 
+    /// Head Routing SDK — 对 `prompt` 跑一次 generator forward,返回
+    /// `target_token_ids` 每个 id 对应的**原始 logit** (未经 softmax/温度缩放)。
+    ///
+    /// 调用者 (Client) 负责应用温度 + softmax 归一化。
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §4.2
+    /// - SPEC/04-API-DESIGN.md §3.8
+    pub fn score_tokens_for_prompt(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+    ) -> ExecutorResult<Vec<f32>> {
+        let tokens = self.encode_prompt(prompt)?;
+        if tokens.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+        self.forward_config.graph_executor_ptr = self
+            .graph_executor
+            .as_mut()
+            .map(|ge| ge as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        let logits = self.backend.score_tokens_forward_gpu_pure(
+            &tokens,
+            target_token_ids,
+            &self.topology,
+            &self.weights,
+            &self.forward_config,
+        )?;
+        Ok(logits)
+    }
+
     pub fn is_finished(&self, request_id: RequestId) -> bool {
         self.requests
             .get(&request_id)

@@ -28,6 +28,7 @@
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) | ✅ |
 | `04-API-DESIGN.md` | 客户端公共 API (§7-§8 Semantic Gatekeeper 隐藏状态知识注入 SDK) | ✅ |
 | `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、E2E 验收 (REQ-SG-001..008) | 🔴 待实现 |
+| `HEAD-ROUTING.md` | **Head Routing SDK 技术协议 (SSOT)** — 同一 generator LLM 多头 API (generate/classify_binary/classify_multiway/encode_to_layer) 运行时切换,零权重重载、零 JIT 重编译,E2E 验收 (REQ-HR-001..005) | ✅ |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) | ✅ |
 | `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 | ✅ |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking | ✅ |

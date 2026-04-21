@@ -363,3 +363,37 @@
 - 新增 `src/semantic_gatekeeper/` 模块（`level_keys.rs` / `small_graph.rs` / `callback.rs` / `ring_buffer.rs` / `active_state.rs`）
 - gllm-kernels 侧 `FusedAttentionLayerConfig` 扩展 `q_tap: Option<QTapConfig>`，Phase 3 codegen 扩展 Q-tap STG 指令生成（x86_64 / AArch64 / PTX / HIP / MSL 全后端）
 
+---
+
+## 13. Head Routing SDK (REQ-HR)
+
+> **协议 SSOT**: `SPEC/HEAD-ROUTING.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.8`
+>
+> **定位**: 同一 generator LLM 加载后,通过 Client API 运行时切换输出头形态 (generate / classify_binary / classify_multiway / encode_to_layer),**不重新加载模型权重、不重新 JIT 编译**。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-HR-001** | Binary classify head | lm_head logits 切片 positive/negative token → softmax(T) → P(positive) | 1. `client.classify_binary("Is water wet? Answer yes or no:", {positive="yes", negative="no", T=1.0})` 返回 f32 ∈ [0.0, 1.0]；2. SmolLM2-135M-Instruct 上 P(yes) > 0.5 (真实 LLM 行为)；3. `P(yes) + P(no) - 1.0` 绝对值 < 1e-5 | 🟢 已实现 |
+| **REQ-HR-002** | Multiway classify head | N 个候选 token 的 lm_head logit 联合 softmax 归一化 | 1. `classify_multiway(prompt, ["sports", "politics", "technology"])` 返回 Vec<f32> 长度 3；2. `sum(probs) - 1.0` 绝对值 < 1e-5；3. 所有 `probs[i] ∈ [0.0, 1.0]` | 🟢 已实现 |
+| **REQ-HR-003** | Mid-layer encode (占位) | FusedGraphExecutor 单次前向未暴露 callback 截断,encode_to_layer 显式拒绝 | 1. `client.encode_to_layer(text, LayerAnchor::Relative(0.5), PoolMode::MeanPool)` 返回 `Err(HeadRoutingError::MidLayerNotSupported)`；2. 错误消息包含固定子串 "MidLayerNotSupported"；3. 禁止 stub / scalar fallback / silent Ok | 🟢 已实现 (显式拒绝) |
+| **REQ-HR-004** | 同一 Client 切换不重新加载模型 | 多个 HR API 调用复用同一 `BackendContext` | 1. 同一 client 依次 `generate / classify_binary / classify_multiway`,三次 API 调用之间 `Arc::as_ptr(&state.backend)` 地址恒定；2. HR 调用不触发 `ClientBuilder::build_state`；3. 总 JIT 编译次数 = 1 (加载时) | 🟢 已实现 |
+| **REQ-HR-005** | NO_ISLAND_MODULE 合规 | HR API 真实接入生产路径,禁止仅 `#[cfg(test)]` 调用 | 1. `grep classify_binary\|classify_multiway\|encode_to_layer src/*.rs` 在非 `#[cfg(test)]` 路径中有真实实现与导出；2. `Client::classify_binary` 真实调用 `head_routing::LayerAnchor::resolve` / `PoolMode::apply` / `Backend::score_tokens_forward_gpu_pure`；3. E2E 测试 TEST-HR-001/002/004 通过真实 SmolLM2 推理路径验证 | 🟢 已实现 |
+
+### 13.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_head_routing.rs` | REQ-HR-001~005 端到端 (TEST-HR-001..005) | 🟢 已实现 |
+
+### 13.2 实现映射
+
+- `src/head_routing.rs` — `LayerAnchor` / `PoolMode` / `ClassifyBinaryConfig` / `ClassifyMultiwayConfig` / `HeadRoutingError`
+- `src/client.rs` — `Client::classify_binary` / `classify_multiway` / `encode_to_layer`
+- `src/compat/cpu_backend.rs` — `Backend::score_tokens_forward_gpu_pure` (CPU 完整实现)
+- `src/compat/mod.rs` — `score_tokens_forward_gpu_pure` trait 方法签名
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 (CUDA/HIP/Metal) 统一返回 `Unimplemented` (显式,非 silent)
+- `src/backend/mod.rs` / `src/engine/executor.rs` — 调用链 pass-through
+- `src/lib.rs` — 公共类型导出
+
