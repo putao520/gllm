@@ -464,3 +464,38 @@
 - `src/compat/gpu_backend_macro.rs` — GPU 后端 `Unimplemented` (显式)
 - `src/lib.rs` — 公共导出
 
+## 16. CoT Reasoner SDK (REQ-COT)
+
+> **协议 SSOT**: `SPEC/COT-REASONER.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.11`
+>
+> **实现模块**: `src/cot_reasoner.rs` + `src/generation.rs::GenerationBuilder::reasoning`
+>
+> **核心定位**: 对**任意** generator LLM（SmolLM2 / Llama / Qwen 等，不依赖模型自带 thinking_head 权重）原生支持 Chain-of-Thought 推理。完全复用 `Client::generate` 公共管线，不新增 Backend trait 方法。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-COT-001** | Manual 模式 budget 精确控制 | 用户指定 `max_reasoning_tokens` + `step_count`，引擎严格遵守预算与步数上限 | 1. `reasoning_trace.len() ≤ step_count`；2. `total_reasoning_tokens ≤ max_reasoning_tokens`（允许 ≤10% tokenizer 估算误差）；3. `stopped_reason ∈ { StepCountReached, BudgetExhausted }`；4. 最终 `text` 非空 | 🔴 待实现 |
+| **REQ-COT-002** | Auto 模式 pattern-match 停止 | `ReasoningMode::Auto` 下任一 `stop_patterns` 子串在 chunk 中命中即停止 | 1. 命中时 `stopped_reason == PatternMatched(p)`；2. 未命中时 `stopped_reason ∈ { BudgetExhausted, EntropyConverged }`，不静默继续；3. `reasoning_trace.len() ≥ 1` | 🔴 待实现 |
+| **REQ-COT-003** | Auto 模式 entropy-convergence 停止 | `entropy_threshold: Some(t)` 启用连续 chunk 文本熵估算收敛检测（当前启发式版本，logit 级见 §5.2 未来） | 1. 已知重复模式文本喂入 → 估算 entropy < t → `EntropyConverged`；2. 单元测试覆盖启发式本身；3. 文档说明真实 logit-level entropy 依赖 `GenerationResponse` 扩展 | 🔴 待实现 |
+| **REQ-COT-004** | Reasoning trace 完整保留 | 每个 reasoning step 产出的 chunk text 作为独立元素存入 `reasoning_trace: Vec<String>` | 1. `reasoning_trace.len() == actual_steps`；2. 每个 trace 元素非空；3. trace 中保留 step chunk 的原始语义内容 | 🔴 待实现 |
+| **REQ-COT-005** | 与 Semantic Gatekeeper 正交 | `register_semantic_gatekeeper(cfg)` 后调用 `reason(...)` 可正常工作，step 间的 `Client::generate` 自然走 SG 注入 | 1. `reason` 调用不 panic；2. 每次内部 `execute_generation` 触发 SG callback ≥1 次（mock counter 验证）；3. 不修改 SG API 或 Callback chain | 🔴 待实现 |
+| **REQ-COT-006** | NO_ISLAND_MODULE 合规 | `Client::reason` 必须在真实 SDK 路径被调用，不是孤岛模块 | 1. `GenerationBuilder::reasoning` → `ReasoningBuilder::execute` → `Client::reason` 的转发链真实存在；2. E2E 测试 `test_cot_006_arbitrary_llm` 用 SmolLM2-135M-Instruct 跑通全链；3. grep `Client::reason` 在 `src/` 非测试代码中有至少 1 个真实调用点 | 🔴 待实现 |
+
+### 16.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_cot_reasoner.rs` | REQ-COT-001~006 端到端（SmolLM2-135M-Instruct 真实模型） | 🔴 待实现 |
+| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式单元测试 | 🔴 待实现 |
+
+### 16.2 实现路径（纯 Client SDK，零 Backend 扩展）
+
+- `Client::reason(prompt, mode, template)` 在 `src/cot_reasoner.rs` 实现，内部多轮调用 `Client::execute_generation` 复用现有 JIT 缓存与 FusedGraphExecutor
+- `GenerationBuilder::reasoning(mode) -> ReasoningBuilder` 在 `src/generation.rs` 添加便捷链式 API
+- **禁止**修改 `src/compat/` 任何 forward pass / Backend trait
+- **禁止**新增 `FusedGraphExecutor` 方法
+- **禁止**为 CoT 扩展 JIT 管线或 GraphType
+- 完全符合 CLAUDE.md ARCH-CPU-GPU-UNIFIED（CoT 只在 Client 层 orchestrate，后端零变更）
+

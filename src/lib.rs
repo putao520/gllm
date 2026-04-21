@@ -12,6 +12,7 @@ pub mod loader;
 pub mod scheduler;
 
 pub mod client;
+pub mod cot_reasoner;
 pub mod embeddings;
 pub mod generation;
 pub mod guardrail;
@@ -64,6 +65,10 @@ pub use compat::multimodal::{
 pub use compat::audio_forward::{
     audio_encode, mel_spectrogram, AudioConfig, AudioTensorLookup, InMemoryAudioWeights,
     UsmConformerEncoder,
+};
+pub use cot_reasoner::{
+    ReasoningBuilder, ReasoningError, ReasoningMode, ReasoningResponse, ReasoningStopReason,
+    ReasoningTemplate, DEFAULT_STOP_PATTERNS,
 };
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};

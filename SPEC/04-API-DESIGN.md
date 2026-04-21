@@ -575,6 +575,106 @@ pub enum IntentError {
 - `encode_intent` 内部直接 delegate 到 `encode_to_layer` (DRY 铁律 — 零代码复制)。
 - 相同 `text/anchor/pool` 下, `encode_intent(...).embedding` 与 `encode_to_layer(...)` 逐元素相等 (|Δ| < 1e-5)。
 - `actual_layer` 即 `anchor.resolve(num_layers)` 的结果,严格 < `num_layers`。
+### 3.11 CoT Reasoner — 任意 LLM 原生多步推理 (REQ-COT)
+
+> **协议 SSOT**: `SPEC/COT-REASONER.md`
+>
+> **需求 SSOT**: `SPEC/01-REQUIREMENTS.md §16` REQ-COT-001..006
+>
+> **核心定位**: 对**任意** generator LLM 原生支持 Chain-of-Thought 推理,**不依赖模型自带 thinking_head 权重**,**不新增 Backend trait 方法**。仅通过 prompt engineering + 多轮 `Client::generate` iteration 在 Client 层 orchestrate。
+
+#### 3.11.1 基本用法
+
+```rust
+use gllm::{Client, ReasoningMode};
+
+let client = Client::new_chat("HuggingFaceTB/SmolLM2-135M-Instruct")?;
+
+// Manual 模式: 固定步长 + 精确 budget 控制
+let answer = client
+    .generate("What is 127 * 83?")
+    .reasoning(ReasoningMode::Manual {
+        max_reasoning_tokens: 512,
+        step_count: 3,
+    })
+    .execute()?;
+
+println!("Final answer: {}", answer.text);
+for (i, step) in answer.reasoning_trace.iter().enumerate() {
+    println!("Step {}: {}", i + 1, step);
+}
+println!("Stopped due to: {:?}", answer.stopped_reason);
+```
+
+```rust
+// Auto 模式: 引擎自动决定步数/停止
+let answer = client
+    .generate("Design a REST API for a blog service")
+    .reasoning(ReasoningMode::Auto {
+        max_total_tokens: 2048,
+        entropy_threshold: Some(0.5),
+        stop_patterns: vec!["Final Answer:".into(), "In conclusion,".into()],
+    })
+    .execute()?;
+```
+
+#### 3.11.2 ReasoningMode
+
+| 变体 | 字段 | 语义 |
+|------|------|------|
+| `Manual` | `max_reasoning_tokens: usize` | 所有 reasoning step 合计最大 token 数(不含 final answer) |
+| `Manual` | `step_count: usize` | 步数 ≥ 1,引擎为每步分配约 `max_reasoning_tokens / step_count` 预算 |
+| `Auto` | `max_total_tokens: usize` | 所有 step 合计上限,耗尽即停 |
+| `Auto` | `entropy_threshold: Option<f32>` | `Some(t)` 启用文本启发式熵收敛检测(§5.2);`None` 禁用 |
+| `Auto` | `stop_patterns: Vec<String>` | 任一子串在 chunk 中命中即停,空列表 = 禁用 pattern match |
+
+#### 3.11.3 ReasoningTemplate
+
+可覆写的 prompt 模板:
+
+| 字段 | 默认值 | 语义 |
+|------|--------|------|
+| `system_prompt` | "You are a careful reasoner. Break problems into explicit steps..." | 整条 reasoning 开头的系统引导 |
+| `step_prefix` | `"Step {n}:"` | 每步前置标记,`{n}` 替换为 1-based index |
+| `final_prefix` | `"Final Answer:"` | Final answer 阶段前置标记 |
+| `step_separator` | `"\n\n"` | step 间分隔符 |
+| `temperature` | `0.7` | 每 step 采样温度 |
+| `top_k` | `0` | top-k 采样参数 |
+| `top_p` | `1.0` | top-p nucleus 采样参数 |
+| `final_answer_budget` | `256` | Final answer 阶段独立 token 预算 |
+
+#### 3.11.4 ReasoningResponse
+
+```rust
+pub struct ReasoningResponse {
+    pub text: String,                       // Final answer (不含 trace)
+    pub reasoning_trace: Vec<String>,       // 每 step 的原始 chunk text
+    pub total_reasoning_tokens: usize,      // 所有 reasoning step 的合计 token 估算
+    pub actual_steps: usize,                // == reasoning_trace.len()
+    pub stopped_reason: ReasoningStopReason, // BudgetExhausted / StepCountReached / PatternMatched(s) / EntropyConverged
+}
+```
+
+#### 3.11.5 错误模式
+
+| 错误 | 触发场景 |
+|------|----------|
+| `ClientError::NoModelLoaded` | 调用前未加载模型 |
+| `ClientError::RuntimeError("cot_reasoner: ...")` | 内部某轮 `Client::generate` 失败,原 message 包装 |
+| `ClientError::RuntimeError("cot_reasoner invalid config: ...")` | `step_count == 0` / `max_reasoning_tokens == 0` / `temperature <= 0` 等 |
+
+**禁止**: 静默返回空 `ReasoningResponse`、fallback 到单次 generate、忽略 budget 溢出。所有错误显式 propagate。
+
+#### 3.11.6 与 thinking_budget 的区分
+
+| 关注点 | `thinking_budget(n)` (§3.1) | `reasoning(ReasoningMode)` (本节) |
+|--------|----------------------------|----------------------------------|
+| 作用粒度 | 单次 generate 内 `<thinking>` token 数 | 跨多次 generate 调用的 orchestration |
+| 依赖权重 | **是**(qwen3-thinking 等有 thinking_head) | **否**(任意 LLM) |
+| Step 概念 | 无 | 有(Manual 指定,Auto 自适应) |
+| 停止信号 | budget 耗尽 | budget / step count / pattern / entropy |
+
+两者可独立使用,不冲突。注意: 当前 CoT Reasoner 内部 `Client::generate` 调用不开启 `thinking_budget`(保持默认 `None`),避免 reasoning trace 被模型的 `<thinking>` 二次分割。
 
 ## 4. 错误处理
 
