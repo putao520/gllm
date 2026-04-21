@@ -2768,6 +2768,25 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         top_p: f32,
         thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
+        // Mega-kernel 快速路径：单次 CALL 完成 prompt encode → N 层 → lm_head → sampling → generate loop
+        // 所有逻辑在 JIT 机器码中执行，Rust 仅做 tokenize + 一次 CALL + detokenize
+        #[cfg(target_arch = "x86_64")]
+        if let Some(ref mega) = self.mega_kernel {
+            if mega.is_compiled() && mega.has_true_mega_kernel() {
+                let prompt_tokens = self.encode_prompt(prompt)?;
+                let output_tokens = mega.generate_single_sequence(
+                    &prompt_tokens,
+                    max_tokens,
+                    temperature,
+                    top_k,
+                    top_p,
+                ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                    format!("mega-kernel generate failed: {}", e),
+                )))?;
+                return self.decode_tokens(&output_tokens);
+            }
+        }
+
         if prompt.trim().is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }

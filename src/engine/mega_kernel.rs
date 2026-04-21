@@ -314,6 +314,71 @@ impl MegaKernelExecutor {
     /// 是否已编译
     pub fn is_compiled(&self) -> bool { self.is_compiled }
 
+    /// 是否有真正的 mega-kernel（单次 CALL 完成全部推理）
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn has_true_mega_kernel(&self) -> bool {
+        self.mega_compiled.is_some()
+    }
+
+    /// 单序列 mega-kernel 生成。
+    ///
+    /// 一次 CALL 完成: prompt encode → embedding → N 层 → lm_head → argmax sampling → generate loop。
+    /// 返回 output token IDs（不包含 prompt tokens）。
+    #[cfg(target_arch = "x86_64")]
+    pub fn generate_single_sequence(
+        &self,
+        prompt_tokens: &[u32],
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+    ) -> Result<Vec<u32>, MegaKernelError> {
+        let mega = self.mega_compiled.as_ref()
+            .ok_or(MegaKernelError::NotCompiled)?;
+
+        let prompt_len = prompt_tokens.len();
+        // 输入 buffer: prompt tokens + 预留空间给生成的 tokens
+        let max_total = prompt_len + max_new_tokens;
+        let mut input_ids = vec![0u32; max_total];
+        input_ids[..prompt_len].copy_from_slice(prompt_tokens);
+
+        // positions: prompt tokens 从 0 开始
+        let positions: Vec<u32> = (0..max_total as u32).collect();
+
+        // output tokens buffer
+        let mut output_tokens = vec![0u32; max_new_tokens];
+
+        // scratchpad
+        let mut scratchpad = vec![0u8; mega.buffer_layout.total_scratchpad_bytes];
+
+        // EOS token ID (标准 LLaMA/GPT 类模型)
+        let eos_token_id = 2u32;
+
+        let generated_count = unsafe {
+            (mega.entry_fn)(
+                input_ids.as_ptr(),
+                mega.weight_blob.as_ptr(),
+                std::ptr::null_mut(), // kv_cache (MVP: NULL)
+                positions.as_ptr(),
+                std::ptr::null(),     // aux_ptr
+                1,                    // batch_size = 1
+                prompt_len,           // prompt_len
+                scratchpad.as_mut_ptr(),
+                output_tokens.as_mut_ptr(),
+                temperature,
+                top_k as u32,
+                top_p,
+                max_new_tokens as u32,
+                eos_token_id,
+                std::ptr::null(),     // hook_ctx_ptr
+                std::ptr::null_mut(), // telemetry_ptr
+            )
+        };
+
+        let count = generated_count.min(max_new_tokens);
+        Ok(output_tokens[..count].to_vec())
+    }
+
     /// 准备 Mega-Kernel 批次
     ///
     /// 从 BatchInput 构建 RequestStateTable，执行值域分组。
