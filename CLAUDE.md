@@ -3,7 +3,7 @@
 **Inference Client** — High-level library for model management, scheduling, and engine orchestration.
 
 ## SPEC Location
-- `./SPEC/` (Single Source of Truth, 10 documents, 113+ REQs)
+- `./SPEC/` (Single Source of Truth, 28 documents, 132 REQs)
 - `../gllm-kernels/SPEC/` (Backend constraints)
 
 ## 🚨 单工程双仓约定 (MONOREPO-PAIR)
@@ -27,13 +27,26 @@
 | `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补, §13.12 硬件感知融合拓扑 (12 Profile: SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ⚠️ §1-§8 ✅, §9-§12/§14-§16 🟡, §13 ⚠️ |
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) | ✅ |
 | `04-API-DESIGN.md` | 客户端公共 API (§7-§8 Semantic Gatekeeper 隐藏状态知识注入 SDK) | ✅ |
-| `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、E2E 验收 (REQ-SG-001..008) | 🔴 待实现 |
+| `00-PHILOSOPHY.md` | 核心哲学原则 (Accuracy First, JIT Hot-Repair, No Pragmatic Hacks, ARCH-FULL-JIT) | ✅ |
+| `01-JIT-PIPELINE.md` | JIT 四阶段管线 (Scalar→SymExec→IR→ISA Lowering) + CompilerGraph + DeviceProfile | ✅ |
+| `02-HARDWARE.md` | 硬件探测与 DeviceProfile 12 Profile (SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ✅ |
+| `03-GRAPH-IR.md` | CompilerGraph IR 规范 + OpKind + SymDim + CallbackChain 契约 (pre_node/post_node/CallbackAction) | ✅ |
+| `04-OPERATORS.md` | 算子族清单与注册规范 (GEMM/RmsNorm/RoPE/Attention/MoE/PLE/Gather/...) | ✅ |
+| `05-OPTIMIZATIONS.md` | 融合决策 + Epilogue 白嫖 + TileLevelFusion/ComputeRoot 寄存器约束 | ✅ |
+| `06-RUNTIME.md` | 运行时执行模型 (FusedGraphExecutor, run_with_callbacks, KV cache 数据流) | ✅ |
+| `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE) | ✅ |
+| `08-EXECUTOR.md` | Executor 规范 (§1.2.1 ARCH-KV-EFFECTIVE-MAXSEQ + §1.2.2 ARCH-KV-EFFECTIVE-LAYER SSOT 映射) | ✅ |
+| `09-API.md` | 公共 API 契约（内部 trait/枚举/错误语义） | ✅ |
+| `10-QUALITY.md` | 质量保证与数值对齐要求 | ✅ |
+| `11-MODELS.md` | 支持的模型架构详细规范（全量索引） | ✅ |
+| `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、E2E 验收 (REQ-SG-001..008) | ⚠️ Phase A/B/D/E/F 已实现；Phase C 待闭环 (gllm-kernels Q-tap codegen commit `82d99b2d` 已完成，但 gllm 侧 `register_semantic_gatekeeper` 未接入，仍返回 `Err("Phase C pending")`) |
 | `HEAD-ROUTING.md` | **Head Routing SDK 技术协议 (SSOT)** — 同一 generator LLM 多头 API (generate/classify_binary/classify_multiway/encode_to_layer) 运行时切换,零权重重载、零 JIT 重编译,E2E 验收 (REQ-HR-001..005) | ✅ |
 | `GUARDRAIL.md` | **Guardrail SDK 技术协议 (SSOT)** — in-flight 安全 veto 探针,`attach_guardrail` + `GuardrailProbeCallback` (post_node),SafetyPolicy (HaltAndVeto/LogOnly/SampleDowngrade),正交于 SG/HR,E2E 验收 (REQ-GR-001..005) | ✅ |
 | `INTENT.md` | **Intent Recall SDK 技术协议 (SSOT)** — `encode_intent` 截断前向至 anchor 层 pool hidden 作为意图识别向量,delegate 到 `encode_to_layer` (DRY),E2E 验收 (REQ-INTENT-001..003) | ✅ |
-| `COT-REASONER.md` | **CoT Reasoner SDK (SSOT)** — 任意 LLM 原生 Chain-of-Thought 推理 (Manual + Auto 模式),Client 层 orchestration,零 Backend 扩展,E2E 验收 (REQ-COT-001..006) | 🟢 已实现 |
+| `COT-REASONER.md` | **CoT Reasoner SDK (SSOT)** — 任意 LLM 原生 Chain-of-Thought 推理 (Manual + Auto 模式),Client 层 orchestration,零 Backend 扩展,E2E 验收 (REQ-COT-001..006) | ✅ |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) | ✅ |
 | `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 | ✅ |
+| `ARCH-DATA-FLOW-CONTRACT.md` | 数据流唯一来源契约（gllm 侧 executor/loader 数据流 SSOT） | ✅ |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking | ✅ |
 | `P0-P3-ROADMAP.md` | Priority roadmap (all P0-P3 completed) | ✅ |
 | `SUPPORTED_MODELS.md` | 20+ model architectures (generators/embeddings/rerankers) | ✅ |

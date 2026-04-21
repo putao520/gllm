@@ -39,7 +39,7 @@ use crate::head_routing::LayerAnchor;
 // GuardProbe — 探针权重来源
 // ============================================================================
 
-/// 安全探针权重来源 (SPEC/GUARDRAIL.md §4).
+/// 安全探针权重来源 (SPEC/GUARDRAIL.md §4, REQ-GR-001).
 ///
 /// 当前支持 safetensors 文件加载. 将来可扩展 HuggingFace Hub / 内存字节等来源.
 #[derive(Debug, Clone)]
@@ -106,7 +106,8 @@ impl GuardProbeWeights {
 // SafetyPolicy
 // ============================================================================
 
-/// Guardrail 触发后的动作策略 (SPEC/GUARDRAIL.md §5).
+/// Guardrail 触发后的动作策略 (SPEC/GUARDRAIL.md §5, REQ-GR-002 HaltAndVeto,
+/// REQ-GR-003 LogOnly, REQ-GR-004 SampleDowngrade).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SafetyPolicy {
     /// 分数 `> threshold` 时设置 veto 标志 + 提前退出前向
@@ -128,7 +129,8 @@ pub enum SafetyPolicy {
 /// `Client::attach_guardrail` 成功后返回的句柄.
 ///
 /// 用户可通过 `attachment.id()` 保存句柄, 通过 `Client::detach_guardrail(id)`
-/// 解绑. `last_score()` / `last_veto_reason()` 查询最新一次触发结果.
+/// 解绑. `last_score()` / `last_veto_reason()` 查询最新一次触发结果
+/// (REQ-GR-005: 多探针并发挂载 / 独立查询).
 #[derive(Debug, Clone)]
 pub struct GuardrailAttachment {
     /// 内部唯一 id (由 Client 分配, 用于 `detach_guardrail`).

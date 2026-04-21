@@ -4,6 +4,11 @@
 //! **SSOT**: `SPEC/INTENT.md`, `SPEC/01-REQUIREMENTS.md §15`,
 //! `SPEC/04-API-DESIGN.md §3.10`.
 //!
+//! **REQ 覆盖**:
+//! - REQ-INTENT-001 — `encode_intent` 返回 shape 正确、全 finite 的向量
+//! - REQ-INTENT-002 — `PoolMode` (Last/Mean/CLS) 影响输出向量内容
+//! - REQ-INTENT-003 — `encode_intent` 与 `encode_to_layer` 语义等价 (DRY delegate)
+//!
 //! # Rationale
 //!
 //! Many downstream tasks (intent routing, RAG query understanding) need a
