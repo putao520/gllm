@@ -1048,6 +1048,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     geometry.hidden_size,
                     geometry.vocab_size,
                     geometry.dtype,
+                    model_config.eos_token_id.unwrap_or(2),
                 ))
             } else {
                 None

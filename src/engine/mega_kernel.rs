@@ -193,6 +193,8 @@ pub struct MegaKernelExecutor {
     hidden_size: usize,
     vocab_size: usize,
     dtype: DType,
+    /// EOS token ID — 从 ModelConfig 读取，传给 JIT 停止条件
+    eos_token_id: u32,
     /// 是否已编译
     is_compiled: bool,
     /// Compact→Execute→Scatter 管线
@@ -208,6 +210,7 @@ impl MegaKernelExecutor {
         hidden_size: usize,
         vocab_size: usize,
         dtype: DType,
+        eos_token_id: u32,
     ) -> Self {
         let is_compiled = graph_executor.is_compiled();
         Self {
@@ -217,6 +220,7 @@ impl MegaKernelExecutor {
             hidden_size,
             vocab_size,
             dtype,
+            eos_token_id,
             is_compiled,
             compact_scatter: CompactScatterPipeline::new(),
         }
@@ -232,6 +236,7 @@ impl MegaKernelExecutor {
         geometry: &crate::model_config::ModelGeometry,
         weight_ptrs: &std::collections::HashMap<String, *const u8>,
         weight_sizes: &std::collections::HashMap<String, usize>,
+        eos_token_id: u32,
     ) -> Result<Self, MegaKernelError> {
         let config = gllm_kernels::compiler::ModelMegaConfig {
             num_layers: geometry.num_layers,
@@ -306,6 +311,7 @@ impl MegaKernelExecutor {
             hidden_size: geometry.hidden_size,
             vocab_size: geometry.vocab_size,
             dtype: geometry.dtype,
+            eos_token_id,
             is_compiled: true,
             compact_scatter: CompactScatterPipeline::new(),
         })
@@ -351,9 +357,6 @@ impl MegaKernelExecutor {
         // scratchpad
         let mut scratchpad = vec![0u8; mega.buffer_layout.total_scratchpad_bytes];
 
-        // EOS token ID (标准 LLaMA/GPT 类模型)
-        let eos_token_id = 2u32;
-
         let generated_count = unsafe {
             (mega.entry_fn)(
                 input_ids.as_ptr(),
@@ -369,7 +372,7 @@ impl MegaKernelExecutor {
                 top_k as u32,
                 top_p,
                 max_new_tokens as u32,
-                eos_token_id,
+                self.eos_token_id,
                 std::ptr::null(),     // hook_ctx_ptr
                 std::ptr::null_mut(), // telemetry_ptr
             )
@@ -494,7 +497,7 @@ impl MegaKernelExecutor {
         let top_k: u32 = 1;
         let top_p: f32 = 1.0;
         let max_new_tokens: u32 = max_tokens as u32;
-        let eos_token_id: u32 = 2; // 标准 EOS
+        let eos_token_id = self.eos_token_id;
 
         let generated_count = unsafe {
             (mega.entry_fn)(
