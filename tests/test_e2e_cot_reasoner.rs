@@ -23,6 +23,8 @@ use gllm::{
     Client, ReasoningMode, ReasoningStepHook, ReasoningStopReason, ReasoningTemplate,
     StepAction, StepContext, StepKnowledge, StepResult,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
@@ -409,7 +411,7 @@ fn test_cot_007_step_hook_on_start_end_called() {
     // execute 后读取计数器。由于 ReasoningStepHook: Send + Sync, 用
     // Arc + 内部 Cell 来跨 ownership 读取。
     use std::sync::Arc;
-    let hook_inner = Arc::new(CallCountHook::new());
+    let hook_inner = Arc::new(Mutex::new(CallCountHook::new()));
     let hook_for_builder: Box<dyn ReasoningStepHook> = Box::new(ArcCloneHook {
         inner: Arc::clone(&hook_inner),
     });
@@ -426,20 +428,23 @@ fn test_cot_007_step_hook_on_start_end_called() {
         .expect("reasoning with hook failed");
 
     // (a) on_step_start 和 on_step_end 各被调用 step_count 次
-    assert_eq!(
-        hook_inner.start_calls.get(),
-        STEP_COUNT,
-        "on_step_start must be called {} times, got {}",
-        STEP_COUNT,
-        hook_inner.start_calls.get()
-    );
-    assert_eq!(
-        hook_inner.end_calls.get(),
-        STEP_COUNT,
-        "on_step_end must be called {} times, got {}",
-        STEP_COUNT,
-        hook_inner.end_calls.get()
-    );
+    {
+        let guard = hook_inner.lock().unwrap();
+        assert_eq!(
+            guard.start_calls.get(),
+            STEP_COUNT,
+            "on_step_start must be called {} times, got {}",
+            STEP_COUNT,
+            guard.start_calls.get()
+        );
+        assert_eq!(
+            guard.end_calls.get(),
+            STEP_COUNT,
+            "on_step_end must be called {} times, got {}",
+            STEP_COUNT,
+            guard.end_calls.get()
+        );
+    }
 
     // (c) 正常停止原因
     assert!(
@@ -452,18 +457,18 @@ fn test_cot_007_step_hook_on_start_end_called() {
     );
 }
 
-/// 辅助: Arc 包装的 hook, 允许在 execute 后读取内部状态。
+/// 辅助: Arc<Mutex> 包装的 hook, 允许在 execute 后读取内部状态。
 struct ArcCloneHook {
-    inner: Arc<CallCountHook>,
+    inner: Arc<Mutex<CallCountHook>>,
 }
 
 impl ReasoningStepHook for ArcCloneHook {
     fn on_step_start(&mut self, ctx: &StepContext) -> StepAction {
-        self.inner.on_step_start(ctx)
+        self.inner.lock().unwrap().on_step_start(ctx)
     }
 
     fn on_step_end(&mut self, result: &StepResult) -> StepKnowledge {
-        self.inner.on_step_end(result)
+        self.inner.lock().unwrap().on_step_end(result)
     }
 }
 
@@ -485,7 +490,7 @@ unsafe impl Sync for CallCountHook {}
 fn test_cot_008_step_context_accumulated_text() {
     let client = Client::new_chat(MODEL).expect("Failed to load SmolLM2-135M-Instruct");
 
-    let hook_inner = Arc::new(CallCountHook::new());
+    let hook_inner = Arc::new(Mutex::new(CallCountHook::new()));
     let hook_for_builder: Box<dyn ReasoningStepHook> = Box::new(ArcCloneHook {
         inner: Arc::clone(&hook_inner),
     });
@@ -500,7 +505,8 @@ fn test_cot_008_step_context_accumulated_text() {
         .execute()
         .expect("reasoning with hook failed");
 
-    let contexts = hook_inner.start_contexts.borrow();
+    let guard = hook_inner.lock().unwrap();
+    let contexts = guard.start_contexts.borrow();
 
     // 确保有实际 step 执行
     let actual = response.actual_steps.min(contexts.len());
