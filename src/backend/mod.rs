@@ -191,6 +191,54 @@ impl DynBackendExecutor {
         }
     }
 
+    /// Head Routing SDK — 对 `prompt` 跑一次 generator forward,返回
+    /// `target_token_ids` 每个 id 对应的原始 logit (未经 softmax)。
+    pub fn score_tokens_for_prompt(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.score_tokens_for_prompt(prompt, target_token_ids),
+            DynBackendExecutor::F16(e) => e.score_tokens_for_prompt(prompt, target_token_ids),
+            DynBackendExecutor::BF16(e) => e.score_tokens_for_prompt(prompt, target_token_ids),
+        }
+    }
+
+    /// Head Routing / Guardrail — `prompt` + explicit callback chain variant.
+    pub fn score_tokens_for_prompt_with_callbacks(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+        callbacks: Option<&mut crate::graph::layer_callback::CallbackChain>,
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => {
+                e.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+            DynBackendExecutor::F16(e) => {
+                e.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+            DynBackendExecutor::BF16(e) => {
+                e.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+        }
+    }
+
+    /// Head Routing §3.4 / Intent §3 — mid-layer encode.
+    pub fn encode_at_layer_for_prompt(
+        &mut self,
+        prompt: &str,
+        anchor_layer: usize,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            DynBackendExecutor::F32(e) => e.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+            DynBackendExecutor::F16(e) => e.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+            DynBackendExecutor::BF16(e) => e.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+        }
+    }
+
     /// Returns the element type name for debugging/logging
     pub fn dtype_name(&self) -> &'static str {
         match self {
@@ -496,6 +544,63 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Rocm(exec) => exec.classify(input),
             BackendExecutor::Metal(exec) => exec.classify(input),
             BackendExecutor::Cpu(exec) => exec.classify(input),
+        }
+    }
+
+    /// Head Routing SDK — 对 `prompt` 跑一次 generator forward,返回
+    /// `target_token_ids` 每个 id 对应的原始 logit (未经 softmax)。
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §4.2
+    /// - SPEC/04-API-DESIGN.md §3.8
+    pub fn score_tokens_for_prompt(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.score_tokens_for_prompt(prompt, target_token_ids),
+            BackendExecutor::Rocm(exec) => exec.score_tokens_for_prompt(prompt, target_token_ids),
+            BackendExecutor::Metal(exec) => exec.score_tokens_for_prompt(prompt, target_token_ids),
+            BackendExecutor::Cpu(exec) => exec.score_tokens_for_prompt(prompt, target_token_ids),
+        }
+    }
+
+    /// Head Routing / Guardrail — pass-through for explicit callback chain.
+    pub fn score_tokens_for_prompt_with_callbacks(
+        &mut self,
+        prompt: &str,
+        target_token_ids: &[u32],
+        callbacks: Option<&mut crate::graph::layer_callback::CallbackChain>,
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => {
+                exec.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+            BackendExecutor::Rocm(exec) => {
+                exec.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+            BackendExecutor::Metal(exec) => {
+                exec.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+            BackendExecutor::Cpu(exec) => {
+                exec.score_tokens_for_prompt_with_callbacks(prompt, target_token_ids, callbacks)
+            }
+        }
+    }
+
+    /// HR §3.4 / Intent §3 — mid-layer encode pass-through.
+    pub fn encode_at_layer_for_prompt(
+        &mut self,
+        prompt: &str,
+        anchor_layer: usize,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<Vec<f32>, ExecutorError> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+            BackendExecutor::Rocm(exec) => exec.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+            BackendExecutor::Metal(exec) => exec.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
+            BackendExecutor::Cpu(exec) => exec.encode_at_layer_for_prompt(prompt, anchor_layer, pool),
         }
     }
 

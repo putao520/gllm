@@ -17,12 +17,16 @@
 
 pub mod early_exit;
 pub mod gate_skip;
+pub mod guardrail_probe;
+pub mod mid_layer_encode;
 pub mod moe_dispatch;
 pub mod rag_inject;
 pub mod residual_bus_bridge;
 
 pub use early_exit::EarlyExitCallback;
 pub use gate_skip::GateSkipCallback;
+pub use guardrail_probe::GuardrailProbeCallback;
+pub use mid_layer_encode::MidLayerEncodeCallback;
 pub use moe_dispatch::MoeDispatchCallback;
 pub use rag_inject::RagInjectCallback;
 pub use residual_bus_bridge::ResidualBusBridgeCallback;

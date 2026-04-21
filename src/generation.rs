@@ -494,6 +494,48 @@ impl<'a> GenerationBuilder<'a> {
         self
     }
 
+    /// 转换为 CoT Reasoning builder (SPEC 04-API-DESIGN §3.11).
+    ///
+    /// 对任意 generator LLM (SmolLM2 / Llama / Qwen 等,**不依赖模型自带
+    /// thinking_head 权重**) 启用原生多步推理。完全复用现有 `Client::generate`
+    /// 公共管线,通过 prompt engineering + 迭代 generate 在 Client 层实现。
+    ///
+    /// 调用后应链式 `.template(...)` (可选) + `.execute()` 得到
+    /// `Result<ReasoningResponse, ClientError>`。
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use gllm::{Client, ReasoningMode};
+    /// # fn example(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let answer = client.generate("What is 127 * 83?")
+    ///     .reasoning(ReasoningMode::Manual {
+    ///         max_reasoning_tokens: 512,
+    ///         step_count: 3,
+    ///     })
+    ///     .execute()?;
+    /// println!("Final answer: {}", answer.text);
+    /// for (i, step) in answer.reasoning_trace.iter().enumerate() {
+    ///     println!("Step {}: {}", i + 1, step);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # 与 `thinking_budget` 的区别
+    ///
+    /// - `thinking_budget(n)` — 依赖模型自带 thinking_head(qwen3-thinking 等),
+    ///   单次 generate 内限制 `<thinking>` token 数。
+    /// - `reasoning(mode)` — **任意** LLM,跨多次 generate 的 orchestration。
+    ///
+    /// 两者可独立使用,不冲突。
+    pub fn reasoning(
+        self,
+        mode: crate::cot_reasoner::ReasoningMode,
+    ) -> crate::cot_reasoner::ReasoningBuilder<'a> {
+        crate::cot_reasoner::ReasoningBuilder::new(self.client, self.prompt, mode)
+    }
+
     /// Execute the generation (per SPEC 04-API-DESIGN §3.1 REQ-GEN-005)
     ///
     /// Returns either:

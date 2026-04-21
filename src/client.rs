@@ -338,6 +338,8 @@ impl ClientBuilder {
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_encoder)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -658,6 +660,29 @@ pub struct Client {
     /// requires a `Sized` inner type.
     multimodal_encoder:
         Arc<std::sync::Mutex<Option<Arc<dyn crate::compat::multimodal::MultimodalEncoder>>>>,
+
+    /// Registered Guardrail attachments (SPEC/GUARDRAIL.md).
+    ///
+    /// Maps `GuardrailAttachment::id` → stored spec (weights + policy + layer).
+    /// `Client::classify_binary` / `encode_intent` / future generation paths
+    /// iterate this map to build a `CallbackChain` with the corresponding
+    /// `GuardrailProbeCallback` per forward call.
+    guardrails: Arc<std::sync::Mutex<HashMap<u64, GuardrailRegistration>>>,
+    /// Monotonic id allocator for `attach_guardrail`.
+    guardrail_next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Internal storage for a registered Guardrail (kept inside the Client).
+///
+/// Cloned into a fresh `GuardrailProbeCallback` on each forward invocation
+/// (callbacks require `Send + !Sync` ownership per CallbackChain semantics).
+#[derive(Clone)]
+struct GuardrailRegistration {
+    weights: crate::guardrail::GuardProbeWeights,
+    policy: crate::guardrail::SafetyPolicy,
+    actual_layer: usize,
+    probe_name: String,
+    shared: Arc<crate::guardrail::GuardrailSharedState>,
 }
 
 impl Client {
@@ -690,6 +715,8 @@ impl Client {
         Ok(Client {
             state: Arc::new(ArcSwapOption::from_pointee(state)),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -698,6 +725,8 @@ impl Client {
         Self {
             state: Arc::new(ArcSwapOption::empty()),
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
+            guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -758,6 +787,16 @@ impl Client {
             .as_ref()
             .map(|loaded| loaded.manifest.clone())
             .ok_or(ClientError::NoModelLoaded)
+    }
+
+    /// Get the currently loaded model's `(hidden_size, num_layers)` — convenience
+    /// accessor for HR / Guardrail / Intent callers that need to size probe
+    /// weights or validate layer anchors without walking the executor lock.
+    pub fn model_dims(&self) -> Result<(usize, usize), ClientError> {
+        let state = self.require_state()?;
+        let executor = state.backend.executor();
+        let cfg = executor.model_config();
+        Ok((cfg.hidden_size, cfg.num_hidden_layers))
     }
 
     /// Check if a model is loaded.
@@ -863,6 +902,363 @@ impl Client {
     {
         let texts: Vec<String> = inputs.into_iter().map(Into::into).collect();
         self.execute_classify(texts)
+    }
+
+    // -----------------------------------------------------------------
+    // Head Routing SDK (SPEC/HEAD-ROUTING.md, SPEC/04-API-DESIGN §3.8)
+    //
+    // 同一 generator LLM 加载后,运行时切换输出头形态,零权重重载、零 JIT
+    // 重编译 (REQ-HR-001..005)。
+    // -----------------------------------------------------------------
+
+    /// Binary classify head (REQ-HR-001) — 对 `prompt` 跑一次 generator
+    /// forward,读取 lm_head 对 positive/negative token 的 logit,
+    /// softmax 归一化后返回 `P(positive_token) ∈ [0.0, 1.0]`。
+    ///
+    /// # 错误
+    /// - `positive_token` / `negative_token` 无法单 token 化 →
+    ///   `HeadRoutingError::TokenNotFound(...)` 包装为 `ClientError::RuntimeError`
+    /// - `temperature <= 0` / NaN → `InvalidConfig`
+    /// - 下游 backend forward 失败 → 原错误传播
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §3.2 / §4
+    /// - SPEC/04-API-DESIGN.md §3.8
+    pub fn classify_binary(
+        &self,
+        prompt: &str,
+        config: crate::head_routing::ClassifyBinaryConfig,
+    ) -> Result<f32, ClientError> {
+        use crate::head_routing::{softmax_with_temperature, HeadRoutingError};
+
+        let state = self.require_state()?;
+        let hidden_size = state.backend.executor().model_config().hidden_size;
+        let mut guardrail_chain = self.build_guardrail_chain(Vec::new(), hidden_size);
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let tokenizer = executor.tokenizer();
+            let pos_id = resolve_single_token(tokenizer, &config.positive_token)
+                .map_err(hr_err_to_client)?;
+            let neg_id = resolve_single_token(tokenizer, &config.negative_token)
+                .map_err(hr_err_to_client)?;
+            if pos_id == neg_id {
+                return Err(hr_err_to_client(HeadRoutingError::InvalidConfig(format!(
+                    "positive_token ({}) and negative_token ({}) resolve to same token id {}",
+                    config.positive_token, config.negative_token, pos_id,
+                ))));
+            }
+            let logits = executor
+                .score_tokens_for_prompt_with_callbacks(
+                    prompt,
+                    &[pos_id, neg_id],
+                    guardrail_chain.as_mut(),
+                )
+                .map_err(ClientError::from)?;
+            if logits.is_empty() {
+                // Guardrail vetoed the forward — surface an explicit error so
+                // callers can treat P(positive) as undefined.
+                return Err(ClientError::RuntimeError(
+                    "classify_binary: guardrail vetoed forward pass (see GuardrailAttachment::last_veto_reason)".into(),
+                ));
+            }
+            if logits.len() != 2 {
+                return Err(ClientError::RuntimeError(format!(
+                    "classify_binary: expected 2 logits, got {}",
+                    logits.len()
+                )));
+            }
+            let probs = softmax_with_temperature(&logits, config.temperature)
+                .map_err(hr_err_to_client)?;
+            // probs[0] 对应 pos_id (positive_token), probs[1] 对应 neg_id
+            Ok(probs[0])
+        })
+    }
+
+    /// Multiway classify head (REQ-HR-002) — 对 `prompt` 跑一次 generator
+    /// forward,读取 lm_head 对每个 `labels[i]` token 的 logit,对 N 个
+    /// logit 联合 softmax 归一化,返回 `Vec<f32>` (每个标签对应概率)。
+    ///
+    /// # 错误
+    /// - `labels.is_empty()` → `EmptyLabels`
+    /// - 任一 label 无法单 token 化 → `TokenNotFound(label)`
+    /// - `config.temperature <= 0` → `InvalidConfig`
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §3.3 / §4
+    pub fn classify_multiway(
+        &self,
+        prompt: &str,
+        labels: &[&str],
+        config: crate::head_routing::ClassifyMultiwayConfig,
+    ) -> Result<Vec<f32>, ClientError> {
+        use crate::head_routing::{softmax_with_temperature, HeadRoutingError};
+
+        if labels.is_empty() {
+            return Err(hr_err_to_client(HeadRoutingError::EmptyLabels));
+        }
+        let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let tokenizer = executor.tokenizer();
+            let mut token_ids = Vec::with_capacity(labels.len());
+            for label in labels {
+                let id = resolve_single_token(tokenizer, label).map_err(hr_err_to_client)?;
+                token_ids.push(id);
+            }
+            let logits = executor
+                .score_tokens_for_prompt(prompt, &token_ids)
+                .map_err(ClientError::from)?;
+            if logits.len() != labels.len() {
+                return Err(ClientError::RuntimeError(format!(
+                    "classify_multiway: expected {} logits, got {}",
+                    labels.len(),
+                    logits.len()
+                )));
+            }
+            softmax_with_temperature(&logits, config.temperature).map_err(hr_err_to_client)
+        })
+    }
+
+    /// Mid-layer encode head (REQ-HR-003) — truncate the forward pass at
+    /// `anchor` and pool the captured hidden state.
+    ///
+    /// Implementation: attaches a `MidLayerEncodeCallback` at the resolved
+    /// physical layer via `FusedGraphExecutor::run_with_callbacks`. The
+    /// callback returns `CallbackAction::ExitEarly { logits: <hidden as f32> }`
+    /// when the anchor layer's `post_node` fires. `encode_at_layer_for_prompt`
+    /// then reshapes to `[seq_len, hidden_size]` and applies `pool`.
+    ///
+    /// Validates `anchor` before running: `InvalidLayerAnchor` surfaces
+    /// eagerly (contract for TEST-HR-005).
+    ///
+    /// # 关联
+    /// - SPEC/HEAD-ROUTING.md §5 mid-layer encode 协议
+    /// - SPEC/INTENT.md §3 架构
+    /// - SPEC/04-API-DESIGN.md §3.8.1 / §3.8.4
+    pub fn encode_to_layer(
+        &self,
+        text: &str,
+        anchor: crate::head_routing::LayerAnchor,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<Vec<f32>, ClientError> {
+        let state = self.require_state()?;
+        let plan = state.execution_plan.clone();
+        gllm_kernels::compiler::planner::with_execution_plan(plan, || {
+            let mut executor = state.backend.executor_mut();
+            let num_layers = executor.model_config().num_hidden_layers;
+            let resolved_layer = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+            executor
+                .encode_at_layer_for_prompt(text, resolved_layer, pool)
+                .map_err(ClientError::from)
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Intent Recall SDK (SPEC/INTENT.md, SPEC/04-API-DESIGN §3.10)
+    // -----------------------------------------------------------------
+
+    /// Intent Recall — semantic wrapper around `encode_to_layer`.
+    ///
+    /// Returns `IntentEncoding { embedding, actual_layer, pool }` for
+    /// intent-classification downstreams. Identical forward path to
+    /// `encode_to_layer` (zero code duplication via delegation).
+    ///
+    /// # 关联
+    /// - SPEC/INTENT.md
+    /// - SPEC/04-API-DESIGN.md §3.10
+    pub fn encode_intent(
+        &self,
+        text: &str,
+        anchor: crate::head_routing::LayerAnchor,
+        pool: crate::head_routing::PoolMode,
+    ) -> Result<crate::intent::IntentEncoding, ClientError> {
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        let actual_layer = anchor.resolve(num_layers).map_err(hr_err_to_client)?;
+        let embedding = self.encode_to_layer(text, anchor, pool)?;
+        Ok(crate::intent::IntentEncoding {
+            embedding,
+            actual_layer,
+            pool,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Guardrail SDK (SPEC/GUARDRAIL.md, SPEC/04-API-DESIGN §3.9)
+    // -----------------------------------------------------------------
+
+    /// Attach a Guardrail probe at the given anchor layer.
+    ///
+    /// The returned `GuardrailAttachment` carries an `id` usable for
+    /// `Client::detach_guardrail(id)`, along with shared-state accessors
+    /// (`last_score()` / `is_vetoed()` / `downgraded_temperature()`). On
+    /// subsequent `classify_binary` / `classify_multiway` / `encode_intent`
+    /// calls, the Client builds a `CallbackChain` that includes a
+    /// `GuardrailProbeCallback` per registered attachment.
+    ///
+    /// # Errors
+    /// - `ClientError::NoModelLoaded` if no model is loaded
+    /// - Anchor resolution failure (越界 / NaN) → `ClientError::RuntimeError`
+    /// - Policy validation failure → `ClientError::RuntimeError`
+    /// - Weight load failure → `ClientError::RuntimeError`
+    ///
+    /// # 关联
+    /// - SPEC/GUARDRAIL.md §3 API
+    /// - SPEC/04-API-DESIGN.md §3.9
+    pub fn attach_guardrail(
+        &self,
+        probe: crate::guardrail::GuardProbe,
+        anchor: crate::head_routing::LayerAnchor,
+        policy: crate::guardrail::SafetyPolicy,
+    ) -> Result<crate::guardrail::GuardrailAttachment, ClientError> {
+        use crate::guardrail::{self, GuardrailSharedState};
+        guardrail::validate_policy(&policy).map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let weights = guardrail::load_probe_weights(&probe)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        let actual_layer = guardrail::resolve_anchor(anchor, num_layers)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+
+        let id = self
+            .guardrail_next_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let probe_name = format!("guardrail#{id}");
+        let shared = Arc::new(GuardrailSharedState::new());
+
+        let registration = GuardrailRegistration {
+            weights: weights.clone(),
+            policy,
+            actual_layer,
+            probe_name: probe_name.clone(),
+            shared: shared.clone(),
+        };
+        {
+            let mut map = self
+                .guardrails
+                .lock()
+                .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+            map.insert(id, registration);
+        }
+
+        Ok(guardrail::GuardrailAttachment {
+            id,
+            actual_layer,
+            probe_name,
+            shared,
+        })
+    }
+
+    /// Attach a Guardrail probe directly from inline weights. Convenience
+    /// wrapper used primarily by tests / in-process probes constructed from
+    /// already-loaded tensors.
+    pub fn attach_guardrail_inline(
+        &self,
+        weights: crate::guardrail::GuardProbeWeights,
+        anchor: crate::head_routing::LayerAnchor,
+        policy: crate::guardrail::SafetyPolicy,
+    ) -> Result<crate::guardrail::GuardrailAttachment, ClientError> {
+        use crate::guardrail::{self, GuardrailSharedState};
+        guardrail::validate_policy(&policy).map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+        let state = self.require_state()?;
+        let num_layers = {
+            let executor = state.backend.executor();
+            executor.model_config().num_hidden_layers
+        };
+        let actual_layer = guardrail::resolve_anchor(anchor, num_layers)
+            .map_err(|e| ClientError::RuntimeError(format!("{e}")))?;
+
+        let id = self
+            .guardrail_next_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let probe_name = format!("guardrail#{id}");
+        let shared = Arc::new(GuardrailSharedState::new());
+
+        let registration = GuardrailRegistration {
+            weights,
+            policy,
+            actual_layer,
+            probe_name: probe_name.clone(),
+            shared: shared.clone(),
+        };
+        {
+            let mut map = self
+                .guardrails
+                .lock()
+                .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+            map.insert(id, registration);
+        }
+
+        Ok(guardrail::GuardrailAttachment {
+            id,
+            actual_layer,
+            probe_name,
+            shared,
+        })
+    }
+
+    /// Detach a previously attached Guardrail. Returns error if `id` was not
+    /// registered or has already been detached (idempotency left to caller).
+    pub fn detach_guardrail(&self, id: u64) -> Result<(), ClientError> {
+        let mut map = self
+            .guardrails
+            .lock()
+            .map_err(|e| ClientError::RuntimeError(format!("guardrails mutex poisoned: {e}")))?;
+        if map.remove(&id).is_none() {
+            return Err(ClientError::RuntimeError(format!(
+                "detach_guardrail: id {id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Snapshot of registered Guardrails — used internally by
+    /// `classify_binary` / `encode_intent` / `generate` to build per-call
+    /// `CallbackChain`s and by tests to inspect registration state.
+    fn guardrail_registrations(&self) -> Vec<GuardrailRegistration> {
+        self.guardrails
+            .lock()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Build a `CallbackChain` containing one `GuardrailProbeCallback` per
+    /// registered guardrail, plus the supplied extra callbacks (e.g.
+    /// MidLayerEncodeCallback for `encode_intent`). Returns `None` when the
+    /// chain would be empty (caller falls back to zero-callback path).
+    pub(crate) fn build_guardrail_chain(
+        &self,
+        extra: Vec<Box<dyn crate::graph::layer_callback::LayerCallback + Send>>,
+        hidden_size: usize,
+    ) -> Option<crate::graph::layer_callback::CallbackChain> {
+        let mut callbacks = extra;
+        for reg in self.guardrail_registrations() {
+            // Reset shared state so each forward produces a fresh snapshot.
+            reg.shared.reset();
+            callbacks.push(Box::new(
+                crate::engine::callbacks::guardrail_probe::GuardrailProbeCallback::new(
+                    reg.actual_layer,
+                    reg.weights,
+                    reg.policy,
+                    hidden_size,
+                    reg.shared,
+                    reg.probe_name,
+                ),
+            ));
+        }
+        if callbacks.is_empty() {
+            None
+        } else {
+            Some(crate::graph::layer_callback::CallbackChain::new(callbacks))
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1753,6 +2149,39 @@ fn sg_err_to_client(err: crate::semantic_gatekeeper::SemanticGatekeeperError) ->
     ClientError::RuntimeError(format!(
         "semantic gatekeeper: Phase C pending — precompute error: {err}"
     ))
+}
+
+/// Head Routing SDK — 将内部 `HeadRoutingError` 映射为 `ClientError`。
+fn hr_err_to_client(err: crate::head_routing::HeadRoutingError) -> ClientError {
+    use crate::head_routing::HeadRoutingError as HE;
+    match err {
+        HE::TokenNotFound(_) | HE::EmptyLabels | HE::InvalidLayerAnchor(_)
+        | HE::InvalidConfig(_) | HE::MidLayerNotSupported | HE::Backend(_) => {
+            ClientError::RuntimeError(format!("{err}"))
+        }
+    }
+}
+
+/// Resolve `text` to a single token id via the loaded tokenizer.
+/// 要求 tokenize 结果恰好 1 个 token,否则 `TokenNotFound(...)`。
+fn resolve_single_token(
+    tokenizer: &crate::tokenizer::TokenizerHandle,
+    text: &str,
+) -> Result<u32, crate::head_routing::HeadRoutingError> {
+    let ids = tokenizer
+        .encode(text, false)
+        .map_err(|e| crate::head_routing::HeadRoutingError::Backend(format!("tokenizer error: {e}")))?;
+    match ids.as_slice() {
+        [] => Err(crate::head_routing::HeadRoutingError::TokenNotFound(format!(
+            "{text:?} tokenized to empty id list"
+        ))),
+        [id] => Ok(*id),
+        many => Err(crate::head_routing::HeadRoutingError::TokenNotFound(format!(
+            "{text:?} tokenized to {} tokens {:?}, Head Routing requires single-token labels",
+            many.len(),
+            many
+        ))),
+    }
 }
 
 // ============================================================================

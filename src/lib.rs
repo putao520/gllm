@@ -12,8 +12,12 @@ pub mod loader;
 pub mod scheduler;
 
 pub mod client;
+pub mod cot_reasoner;
 pub mod embeddings;
 pub mod generation;
+pub mod guardrail;
+pub mod head_routing;
+pub mod intent;
 pub mod kv_cache;
 pub mod model_config;
 pub mod quantization;
@@ -62,6 +66,10 @@ pub use compat::audio_forward::{
     audio_encode, mel_spectrogram, AudioConfig, AudioTensorLookup, InMemoryAudioWeights,
     UsmConformerEncoder,
 };
+pub use cot_reasoner::{
+    ReasoningBuilder, ReasoningError, ReasoningMode, ReasoningResponse, ReasoningStopReason,
+    ReasoningTemplate, DEFAULT_STOP_PATTERNS,
+};
 pub use embeddings::{Embedding, EmbeddingsResponse, RagResponse};
 pub use classify::{ClassifyResponse, ClassificationResult};
 pub use rerank::{RerankResponse, RerankResult};
@@ -70,6 +78,13 @@ pub use semantic_gatekeeper::{
     SemanticGatekeeperCallback, SemanticGatekeeperConfig, SemanticGatekeeperError, SemanticLevel,
     TokenizerLookup, DEFAULT_LEVEL_DESCRIPTORS,
 };
+pub use head_routing::{
+    ClassifyBinaryConfig, ClassifyMultiwayConfig, HeadRoutingError, LayerAnchor, PoolMode,
+};
+pub use guardrail::{
+    GuardProbe, GuardProbeWeights, GuardrailAttachment, GuardrailError, SafetyPolicy,
+};
+pub use intent::{IntentEncoding, IntentError};
 pub use manifest::EMPTY_FILE_MAP;
 pub use tokenizer::{TokenizerError, TokenizerHandle};
 

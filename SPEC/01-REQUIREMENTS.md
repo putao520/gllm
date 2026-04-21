@@ -363,3 +363,139 @@
 - 新增 `src/semantic_gatekeeper/` 模块（`level_keys.rs` / `small_graph.rs` / `callback.rs` / `ring_buffer.rs` / `active_state.rs`）
 - gllm-kernels 侧 `FusedAttentionLayerConfig` 扩展 `q_tap: Option<QTapConfig>`，Phase 3 codegen 扩展 Q-tap STG 指令生成（x86_64 / AArch64 / PTX / HIP / MSL 全后端）
 
+---
+
+## 13. Head Routing SDK (REQ-HR)
+
+> **协议 SSOT**: `SPEC/HEAD-ROUTING.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.8`
+>
+> **定位**: 同一 generator LLM 加载后,通过 Client API 运行时切换输出头形态 (generate / classify_binary / classify_multiway / encode_to_layer),**不重新加载模型权重、不重新 JIT 编译**。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-HR-001** | Binary classify head | lm_head logits 切片 positive/negative token → softmax(T) → P(positive) | 1. `client.classify_binary("Is water wet? Answer yes or no:", {positive="yes", negative="no", T=1.0})` 返回 f32 ∈ [0.0, 1.0]；2. SmolLM2-135M-Instruct 上 P(yes) > 0.5 (真实 LLM 行为)；3. `P(yes) + P(no) - 1.0` 绝对值 < 1e-5 | 🟢 已实现 |
+| **REQ-HR-002** | Multiway classify head | N 个候选 token 的 lm_head logit 联合 softmax 归一化 | 1. `classify_multiway(prompt, ["sports", "politics", "technology"])` 返回 Vec<f32> 长度 3；2. `sum(probs) - 1.0` 绝对值 < 1e-5；3. 所有 `probs[i] ∈ [0.0, 1.0]` | 🟢 已实现 |
+| **REQ-HR-003** | Mid-layer encode | FusedGraphExecutor 单次前向通过 `MidLayerEncodeCallback` 截断, `encode_to_layer` pool hidden 返回 | 1. `client.encode_to_layer(text, LayerAnchor::Relative(0.5), PoolMode::MeanPool)` 返回 `Ok(Vec<f32>)` 长度 = hidden_size；2. 向量所有元素 finite, L2 norm > 0；3. 不同 anchor (0.5 vs 0.9) 产生**不同** embedding — 证明截断深度真实生效；4. 禁止 stub / scalar fallback / silent Ok | 🟢 已实现 |
+| **REQ-HR-004** | 同一 Client 切换不重新加载模型 | 多个 HR API 调用复用同一 `BackendContext` | 1. 同一 client 依次 `generate / classify_binary / classify_multiway`,三次 API 调用之间 `Arc::as_ptr(&state.backend)` 地址恒定；2. HR 调用不触发 `ClientBuilder::build_state`；3. 总 JIT 编译次数 = 1 (加载时) | 🟢 已实现 |
+| **REQ-HR-005** | NO_ISLAND_MODULE 合规 | HR API 真实接入生产路径,禁止仅 `#[cfg(test)]` 调用 | 1. `grep classify_binary\|classify_multiway\|encode_to_layer src/*.rs` 在非 `#[cfg(test)]` 路径中有真实实现与导出；2. `Client::classify_binary` 真实调用 `head_routing::LayerAnchor::resolve` / `PoolMode::apply` / `Backend::score_tokens_forward_gpu_pure`；3. E2E 测试 TEST-HR-001/002/004 通过真实 SmolLM2 推理路径验证 | 🟢 已实现 |
+
+### 13.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_head_routing.rs` | REQ-HR-001~005 端到端 (TEST-HR-001..005) | 🟢 已实现 |
+
+### 13.2 实现映射
+
+- `src/head_routing.rs` — `LayerAnchor` / `PoolMode` / `ClassifyBinaryConfig` / `ClassifyMultiwayConfig` / `HeadRoutingError`
+- `src/client.rs` — `Client::classify_binary` / `classify_multiway` / `encode_to_layer`
+- `src/compat/cpu_backend.rs` — `Backend::score_tokens_forward_gpu_pure` + `encode_at_layer_forward_gpu_pure` + `apply_guardrail_probe` (CPU 完整实现)
+- `src/compat/mod.rs` — 相关 trait 方法签名
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 (CUDA/HIP/Metal) 统一返回 `Unimplemented` (显式,非 silent)
+- `src/graph/executor.rs` — `FusedGraphExecutor::run_with_callbacks` 扩展 (Part 1 基础设施)
+- `src/engine/callbacks/mid_layer_encode.rs` — `MidLayerEncodeCallback` (post_node ExitEarly with hidden)
+- `src/backend/mod.rs` / `src/engine/executor.rs` — 调用链 pass-through
+- `src/lib.rs` — 公共类型导出
+
+---
+
+## 14. Guardrail SDK (REQ-GR)
+
+> **协议 SSOT**: `SPEC/GUARDRAIL.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.9`
+>
+> **定位**: 在推理前向**中途**插入小线性安全分类探针 + 多档策略响应 (HaltAndVeto / LogOnly / SampleDowngrade), 正交于 SG / HR。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-GR-001** | 零权重探针不触发 veto | `GuardProbeWeights { weight=[0...], bias=0 }` + `HaltAndVeto { threshold: 0.99 }` | 1. `classify_binary` 成功返回 Ok; 2. `attachment.is_vetoed() == false`; 3. `last_score() ≈ 0.5` (sigmoid(0)); 4. `actual_layer ∈ [0, num_layers)` | 🟢 已实现 |
+| **REQ-GR-002** | HaltAndVeto 触发 | `weight=[0...], bias=+20` → sigmoid(20) ≈ 1.0 > threshold=0.5 | 1. `classify_binary` 返回 Err(guardrail vetoed); 2. `is_vetoed() == true`; 3. `last_veto_reason()` 包含 "vetoed" / "score" 子串; 4. `last_score() > 0.99` | 🟢 已实现 |
+| **REQ-GR-003** | LogOnly 不改变生成 | `bias=+100, LogOnly` | 1. classify_binary 成功返回; 2. 分数与无 guardrail 时完全相等 (浮点 < 1e-4); 3. `is_vetoed() == false`; 4. `last_score() > 0.99` | 🟢 已实现 |
+| **REQ-GR-004** | SampleDowngrade 记录温度 | `SampleDowngrade { min_temperature: 0.3 }` | 1. classify_binary 成功返回; 2. `attachment.downgraded_temperature() == Some(0.3)`; 3. `is_vetoed() == false` | 🟢 已实现 |
+| **REQ-GR-005** | Attach / detach 生命周期 | 多次 attach / detach 的 id 管理 | 1. 多次 attach 返回单调递增 id; 2. detach 未知 id → Err; 3. detach 后重复 detach 同一 id → Err; 4. 另一个 id 独立成功 | 🟢 已实现 |
+
+### 14.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_guardrail.rs` | REQ-GR-001..005 + TEST-GR-006 (safetensors 缺文件) | 🟢 已实现 |
+
+### 14.2 实现映射
+
+- `src/guardrail.rs` — `GuardProbe` / `GuardProbeWeights` / `SafetyPolicy` / `GuardrailError` / `GuardrailAttachment` / `GuardrailSharedState` / `load_probe_weights` / `validate_policy` / `resolve_anchor`
+- `src/engine/callbacks/guardrail_probe.rs` — `GuardrailProbeCallback` (`LayerCallback::post_node`)
+- `src/client.rs` — `Client::attach_guardrail` / `attach_guardrail_inline` / `detach_guardrail` / `build_guardrail_chain` / `guardrails` registry
+- `src/compat/cpu_backend.rs` — `Backend::apply_guardrail_probe` CPU 实现
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 `Unimplemented` (显式)
+- `src/lib.rs` — 公共导出
+
+---
+
+## 15. Intent Recall SDK (REQ-INTENT)
+
+> **协议 SSOT**: `SPEC/INTENT.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.10`
+>
+> **定位**: 截断前向到 anchor 层 + pool hidden state 作为意图识别 / RAG query 召回向量。`Client::encode_intent` 是 `encode_to_layer` 的语义包装 (DRY 铁律 — 零代码复制)。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-INTENT-001** | Basic shape + finite | encode_intent 返回 `IntentEncoding { embedding, actual_layer, pool }` | 1. `dim()` == `hidden_size`; 2. 所有元素 finite; 3. `l2_norm() > 0`; 4. `pool` 原样透传; 5. `actual_layer ∈ [0, num_layers)` | 🟢 已实现 |
+| **REQ-INTENT-002** | PoolMode 语义 | MeanPool / LastToken / ClsToken 在多 token 文本上产生不同 embedding | 1. 三个 embedding 维度相同; 2. MeanPool vs LastToken L1 delta > 1e-3; 3. ClsToken vs LastToken L1 delta > 1e-3 | 🟢 已实现 |
+| **REQ-INTENT-003** | delegate 等价 | `encode_intent` 内部 delegate 到 `encode_to_layer`,结果一致 | 1. 同 text/anchor/pool 下 `encode_intent(...).embedding` 与 `encode_to_layer(...)` 逐元素 \|Δ\| < 1e-5; 2. DRY: `encode_intent` 在 client.rs 中无独立前向实现 | 🟢 已实现 |
+
+### 15.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_intent.rs` | REQ-INTENT-001..003 | 🟢 已实现 |
+
+### 15.2 实现映射
+
+- `src/intent.rs` — `IntentEncoding` / `IntentError`
+- `src/client.rs` — `Client::encode_intent` (delegate 到 `encode_to_layer`)
+- `src/engine/callbacks/mid_layer_encode.rs` — `MidLayerEncodeCallback` (复用 HR 路径)
+- `src/engine/executor.rs` — `Executor::encode_at_layer_for_prompt`
+- `src/compat/cpu_backend.rs` — `Backend::encode_at_layer_forward_gpu_pure` CPU 实现
+- `src/compat/gpu_backend_macro.rs` — GPU 后端 `Unimplemented` (显式)
+- `src/lib.rs` — 公共导出
+
+## 16. CoT Reasoner SDK (REQ-COT)
+
+> **协议 SSOT**: `SPEC/COT-REASONER.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §3.11`
+>
+> **实现模块**: `src/cot_reasoner.rs` + `src/generation.rs::GenerationBuilder::reasoning`
+>
+> **核心定位**: 对**任意** generator LLM（SmolLM2 / Llama / Qwen 等，不依赖模型自带 thinking_head 权重）原生支持 Chain-of-Thought 推理。完全复用 `Client::generate` 公共管线，不新增 Backend trait 方法。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-COT-001** | Manual 模式 budget 精确控制 | 用户指定 `max_reasoning_tokens` + `step_count`，引擎严格遵守预算与步数上限 | 1. `reasoning_trace.len() ≤ step_count`；2. `total_reasoning_tokens ≤ max_reasoning_tokens`（允许 ≤10% tokenizer 估算误差）；3. `stopped_reason ∈ { StepCountReached, BudgetExhausted }`；4. 最终 `text` 非空 | 🔴 待实现 |
+| **REQ-COT-002** | Auto 模式 pattern-match 停止 | `ReasoningMode::Auto` 下任一 `stop_patterns` 子串在 chunk 中命中即停止 | 1. 命中时 `stopped_reason == PatternMatched(p)`；2. 未命中时 `stopped_reason ∈ { BudgetExhausted, EntropyConverged }`，不静默继续；3. `reasoning_trace.len() ≥ 1` | 🔴 待实现 |
+| **REQ-COT-003** | Auto 模式 entropy-convergence 停止 | `entropy_threshold: Some(t)` 启用连续 chunk 文本熵估算收敛检测（当前启发式版本，logit 级见 §5.2 未来） | 1. 已知重复模式文本喂入 → 估算 entropy < t → `EntropyConverged`；2. 单元测试覆盖启发式本身；3. 文档说明真实 logit-level entropy 依赖 `GenerationResponse` 扩展 | 🔴 待实现 |
+| **REQ-COT-004** | Reasoning trace 完整保留 | 每个 reasoning step 产出的 chunk text 作为独立元素存入 `reasoning_trace: Vec<String>` | 1. `reasoning_trace.len() == actual_steps`；2. 每个 trace 元素非空；3. trace 中保留 step chunk 的原始语义内容 | 🔴 待实现 |
+| **REQ-COT-005** | 与 Semantic Gatekeeper 正交 | `register_semantic_gatekeeper(cfg)` 后调用 `reason(...)` 可正常工作，step 间的 `Client::generate` 自然走 SG 注入 | 1. `reason` 调用不 panic；2. 每次内部 `execute_generation` 触发 SG callback ≥1 次（mock counter 验证）；3. 不修改 SG API 或 Callback chain | 🔴 待实现 |
+| **REQ-COT-006** | NO_ISLAND_MODULE 合规 | `Client::reason` 必须在真实 SDK 路径被调用，不是孤岛模块 | 1. `GenerationBuilder::reasoning` → `ReasoningBuilder::execute` → `Client::reason` 的转发链真实存在；2. E2E 测试 `test_cot_006_arbitrary_llm` 用 SmolLM2-135M-Instruct 跑通全链；3. grep `Client::reason` 在 `src/` 非测试代码中有至少 1 个真实调用点 | 🔴 待实现 |
+
+### 16.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_cot_reasoner.rs` | REQ-COT-001~006 端到端（SmolLM2-135M-Instruct 真实模型） | 🔴 待实现 |
+| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式单元测试 | 🔴 待实现 |
+
+### 16.2 实现路径（纯 Client SDK，零 Backend 扩展）
+
+- `Client::reason(prompt, mode, template)` 在 `src/cot_reasoner.rs` 实现，内部多轮调用 `Client::execute_generation` 复用现有 JIT 缓存与 FusedGraphExecutor
+- `GenerationBuilder::reasoning(mode) -> ReasoningBuilder` 在 `src/generation.rs` 添加便捷链式 API
+- **禁止**修改 `src/compat/` 任何 forward pass / Backend trait
+- **禁止**新增 `FusedGraphExecutor` 方法
+- **禁止**为 CoT 扩展 JIT 管线或 GraphType
+- 完全符合 CLAUDE.md ARCH-CPU-GPU-UNIFIED（CoT 只在 Client 层 orchestrate，后端零变更）
+

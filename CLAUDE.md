@@ -28,6 +28,10 @@
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) | ✅ |
 | `04-API-DESIGN.md` | 客户端公共 API (§7-§8 Semantic Gatekeeper 隐藏状态知识注入 SDK) | ✅ |
 | `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、E2E 验收 (REQ-SG-001..008) | 🔴 待实现 |
+| `HEAD-ROUTING.md` | **Head Routing SDK 技术协议 (SSOT)** — 同一 generator LLM 多头 API (generate/classify_binary/classify_multiway/encode_to_layer) 运行时切换,零权重重载、零 JIT 重编译,E2E 验收 (REQ-HR-001..005) | ✅ |
+| `GUARDRAIL.md` | **Guardrail SDK 技术协议 (SSOT)** — in-flight 安全 veto 探针,`attach_guardrail` + `GuardrailProbeCallback` (post_node),SafetyPolicy (HaltAndVeto/LogOnly/SampleDowngrade),正交于 SG/HR,E2E 验收 (REQ-GR-001..005) | ✅ |
+| `INTENT.md` | **Intent Recall SDK 技术协议 (SSOT)** — `encode_intent` 截断前向至 anchor 层 pool hidden 作为意图识别向量,delegate 到 `encode_to_layer` (DRY),E2E 验收 (REQ-INTENT-001..003) | ✅ |
+| `COT-REASONER.md` | **CoT Reasoner SDK (SSOT)** — 任意 LLM 原生 Chain-of-Thought 推理 (Manual + Auto 模式),Client 层 orchestration,零 Backend 扩展,E2E 验收 (REQ-COT-001..006) | 🟢 已实现 |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) | ✅ |
 | `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 | ✅ |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking | ✅ |

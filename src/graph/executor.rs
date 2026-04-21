@@ -2163,6 +2163,40 @@ impl FusedGraphExecutor {
         inputs: &HashMap<String, Vec<u8>>,
         shape_bindings: &HashMap<String, usize>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_internal(inputs, shape_bindings, None, None)
+    }
+
+    /// Execute the fused graph with optional per-node callbacks.
+    ///
+    /// Mirrors `run()` but threads a `CallbackChain` through the node loop,
+    /// enabling mid-layer intervention (ExitEarly for HR `encode_to_layer` /
+    /// Intent, InjectHidden/CompactMask for Guardrail). Used by the
+    /// single-forward paths (embedding / classify / rerank / score_tokens /
+    /// encode_to_layer) that do not own a KV cache.
+    ///
+    /// `forward_config` is required so callbacks can access model geometry
+    /// (hidden_size, num_layers, dtype) via `LayerContext::model_config`.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn run_with_callbacks(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
+        callbacks: &mut super::layer_callback::CallbackChain,
+        forward_config: &crate::engine::executor::GeneratorForwardConfig,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
+        self.run_internal(inputs, shape_bindings, Some(callbacks), Some(forward_config))
+    }
+
+    /// Shared dependency-validation + dispatch path for `run` / `run_with_callbacks`.
+    fn run_internal(
+        &self,
+        inputs: &HashMap<String, Vec<u8>>,
+        shape_bindings: &HashMap<String, usize>,
+        #[allow(unused_variables)]
+        callbacks: Option<&mut super::layer_callback::CallbackChain>,
+        #[allow(unused_variables)]
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+    ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         // Dependency validation pass (always runs)
         let mut available: HashSet<String> = inputs.keys().cloned().collect();
         for weight_name in self.graph.weight_bindings.keys() {
@@ -2194,7 +2228,7 @@ impl FusedGraphExecutor {
         // JIT execution path
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         if self.is_compiled {
-            return self.run_compiled(inputs, shape_bindings);
+            return self.run_compiled(inputs, shape_bindings, callbacks, forward_config);
         }
 
         // No compiled kernels available — refuse to return dummy results.
@@ -2363,13 +2397,37 @@ impl FusedGraphExecutor {
         node_op: &FusedOp,
         tensors: &mut HashMap<String, Vec<u8>>,
         mha_kv_seq_len: usize,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
     ) {
+        // SPEC/01-JIT-PIPELINE.md §437 (ARCH-GQA-RESHAPE): MHA JIT kernel 期待
+        // K/V shape = [seq, num_heads*head_dim]。YAML-driven 模型 (如 Gemma 4)
+        // 把 attention 节点表达为 FusedOp::Atomic("Attention"/"MultiHeadAttention"),
+        // pattern_fusion 不一定命中 GQA/FlashAttention variant (Gemma 4
+        // fusion_hints 的 FlashAttention pattern 要求 [matmul,scale,softmax,matmul]
+        // 裸序列,但 YAML 直接给单个 Attention atomic op)。因此 Atomic attention
+        // 也必须走 expand 路径,从 forward_config.geometry 读 num_heads
+        // (generator 所有 attn 层对称)。
         let expand = match node_op {
             FusedOp::GQA(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
                 Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
             }
             FusedOp::FlashAttention(ref cfg) if cfg.num_kv_heads < cfg.num_heads => {
                 Some((cfg.num_heads / cfg.num_kv_heads, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim))
+            }
+            FusedOp::Atomic(op) if matches!(op.op_type.as_str(), "Attention" | "MultiHeadAttention") => {
+                match forward_config {
+                    None => None,
+                    Some(cfg) => {
+                        let num_heads = cfg.geometry.num_heads;
+                        let num_kv_heads = cfg.geometry.num_kv_heads;
+                        let head_dim = cfg.geometry.head_dim;
+                        if num_kv_heads == 0 || num_heads <= num_kv_heads || num_heads % num_kv_heads != 0 {
+                            None
+                        } else {
+                            Some((num_heads / num_kv_heads, num_heads, num_kv_heads, head_dim))
+                        }
+                    }
+                }
             }
             _ => None,
         };
@@ -2408,6 +2466,10 @@ impl FusedGraphExecutor {
     /// Merge KV cache entries for decode step MHA.
     ///
     /// Returns `mha_kv_seq_len` (total_seq if merged, seq_len otherwise).
+    ///
+    /// SharedKvRef (T43): `kv_donor_map[layer_i] = Some(donor)` 时用 donor 作为
+    /// 物理偏移基，consumer 层读 donor 层的 KV buffer (SPEC/08-EXECUTOR.md §4,
+    /// REQ-KV-SHARED, CLAUDE.md §5.3)。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn merge_kv_cache_for_decode(
         cn: &CompiledNode,
@@ -2419,12 +2481,20 @@ impl FusedGraphExecutor {
         forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
         total_seq: usize,
         seq_len: usize,
+        kv_donor_map: Option<&[Option<usize>]>,
     ) -> usize {
         if total_seq <= seq_len || kv_cache_k.is_null() { return seq_len; }
 
+        // T43 Atomic Attention 分支: YAML 模型 (Gemma 4) 直接用
+        // FusedOp::Atomic("Attention") / "MultiHeadAttention"。从 forward_config.geometry
+        // 读全局 num_kv_heads / head_dim (generator 所有 attn 层对称)。
         let (num_kv_heads, head_dim) = match node_op {
             FusedOp::GQA(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
             FusedOp::FlashAttention(ref cfg) => (cfg.num_kv_heads, cfg.head_dim),
+            FusedOp::Atomic(op) if matches!(op.op_type.as_str(), "Attention" | "MultiHeadAttention") => {
+                let cfg = forward_config.expect("KV cache operation requires forward_config");
+                (cfg.geometry.num_kv_heads, cfg.geometry.head_dim)
+            }
             _ => return seq_len,
         };
         if num_kv_heads == 0 || head_dim == 0 { return seq_len; }
@@ -2438,10 +2508,10 @@ impl FusedGraphExecutor {
         let cache_max_seq = fcfg.max_seq_len();
         // SharedKvRef (Gemma 4): the KV-cache buffer only allocates
         // `effective_kv_layers = num_layers - num_kv_shared_layers` physical
-        // layer slots. Using the raw `kv_layer` index would read past the
-        // allocation for any shared-tail layer. Route through
-        // `ModelGeometry::effective_kv_layer` so the offset matches
-        // `KvCacheBuffer::layer_kv_offset`.
+        // layer slots. Use `ModelGeometry::effective_kv_layer` (SSOT) which
+        // mirrors `KvCacheBuffer::build_kv_donor_map`. The raw `kv_donor_map`
+        // parameter stays for downstream consumers (e.g. `perform_kv_cache_write`).
+        let _ = kv_donor_map;
         let effective_kv_layer = fcfg.geometry.effective_kv_layer(kv_layer);
         debug_assert!(
             effective_kv_layer < fcfg.geometry.effective_kv_layers(),
@@ -2526,11 +2596,23 @@ impl FusedGraphExecutor {
         total_seq
     }
 
-    /// Write K/V from FusedQkvRope output into the KV cache buffer.
+    /// Write K/V from Fused{Qkv,QkvNorm}Rope output into the KV cache buffer.
+    ///
+    /// SharedKvRef (T43): `kv_donor_map[layer_i] = Some(donor)` 的 consumer 层
+    /// 不写入自己的 KV — donor 层已经计算并写入过了。consumer 层的 YAML template
+    /// (见 src/arch/templates/gemma4.yaml §Q/K/V Projections 的 `only_if:
+    /// "!is_kv_shared_layer_${i}"`) 在图层已经跳过了 k_proj/v_proj，但 generic
+    /// builder (build_fused_attention_layer_graph_symbolic) 与 YAML 外的 codepath
+    /// 仍然执行 Fused{Qkv,QkvNorm}Rope；此处在写侧做二次防护。
+    ///
+    /// 签名仅接收维度参数（`num_kv_heads`, `head_dim`），允许同一函数
+    /// 同时服务 `FusedQkvRopeConfig` / `FusedQkvNormRopeConfig`
+    /// （Gemma 4 用后者，见 SPEC/08-EXECUTOR.md §4.2 + gemma4.yaml:234）。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn perform_kv_cache_write(
         cn: &CompiledNode,
-        config: &FusedQkvRopeConfig,
+        num_kv_heads: usize,
+        head_dim: usize,
         node_name: &str,
         tensors: &HashMap<String, Vec<u8>>,
         kv_cache_k: *mut f32,
@@ -2538,14 +2620,21 @@ impl FusedGraphExecutor {
         forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
         total_seq: usize,
         seq_len: usize,
+        kv_donor_map: Option<&[Option<usize>]>,
     ) {
         if kv_cache_k.is_null() || kv_cache_v.is_null() || cn.per_output_numel.len() != 3 {
             return;
         }
         let Some(kv_layer) = Self::extract_layer_index(node_name) else { return };
 
-        let num_kv_heads = config.num_kv_heads;
-        let head_dim = config.head_dim;
+        // SharedKvRef: consumer 层不写自己的 KV (donor 层已算过,重写会覆盖 donor 内容)。
+        if kv_donor_map
+            .and_then(|m| m.get(kv_layer).copied().flatten())
+            .is_some()
+        {
+            return;
+        }
+
         let kv_dim = num_kv_heads * head_dim;
 
         let fcfg = forward_config.expect("KV cache operation requires forward_config");
@@ -2595,11 +2684,20 @@ impl FusedGraphExecutor {
     }
 
     /// Execute the compiled JIT kernels in topological order (no KV cache).
+    ///
+    /// When `callbacks` is `Some(_)`, `pre_node()` / `post_node()` fire between
+    /// each graph node. `forward_config` must be provided alongside callbacks
+    /// (required by `LayerContext::model_config`). `ExitEarly { logits }`
+    /// stops execution and returns the provided bytes under the `"logits"` key
+    /// — used by HR `encode_to_layer` / Intent to extract mid-layer hidden
+    /// state without running subsequent layers.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn run_compiled(
         &self,
         inputs: &HashMap<String, Vec<u8>>,
         shape_bindings: &HashMap<String, usize>,
+        mut callbacks: Option<&mut super::layer_callback::CallbackChain>,
+        forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         // ARCH-DET-DIAG (task #18): per-call counter to allow GLLM_DUMP_LAYERS
         // to write each call into a sub-directory `call{N}/`. Used to bisect
@@ -2614,9 +2712,70 @@ impl FusedGraphExecutor {
         // 错误跳过, 例如 xlmr hidden_0 每层 overwrite)。
         let seeded_outputs: HashSet<String> = inputs.keys().cloned().collect();
 
+        // Shared seq_len across the whole node loop (avoids re-lookup per node
+        // and is used by the pre-node callback context for LayerContext).
+        let loop_seq_len = *shape_bindings.get("seq_len")
+            .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
+
         for (node_idx, _node) in self.graph.nodes.iter().enumerate() {
             let cn = &self.compiled_nodes[node_idx];
             if Self::is_node_computed(cn, &seeded_outputs) { continue; }
+
+            // §9-§18: Pre-node callback dispatch — allows HR/Intent to intercept
+            // mid-layer hidden state via ExitEarly / InjectHidden.
+            let layer_idx = Self::extract_layer_index(&self.graph.nodes[node_idx].name).unwrap_or(node_idx);
+            if let Some(ref mut cb) = callbacks {
+                let hidden_state = cn.graph_input_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state,
+                    kv_cache_k: std::ptr::null_mut(),
+                    kv_cache_v: std::ptr::null_mut(),
+                    total_seq: loop_seq_len,
+                    seq_len: loop_seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("run_with_callbacks requires forward_config"),
+                };
+                match cb.dispatch_pre_node(&ctx) {
+                    super::layer_callback::CallbackAction::ExitEarly { logits } => {
+                        log::trace!("run_compiled: pre-node early exit at node {} (layer {})", node_idx, layer_idx);
+                        let mut out = HashMap::new();
+                        if !logits.is_empty() {
+                            let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            out.insert("logits".to_string(), bytes);
+                        } else if let Some(name) = cn.graph_input_names.first() {
+                            if let Some(data) = tensors.get(name) {
+                                out.insert("logits".to_string(), data.clone());
+                            }
+                        }
+                        return Ok(out);
+                    }
+                    super::layer_callback::CallbackAction::InjectHidden { data } => {
+                        if !cn.graph_input_names.is_empty() {
+                            tensors.insert(cn.graph_input_names[0].clone(), data);
+                        }
+                    }
+                    super::layer_callback::CallbackAction::SkipThisNode => {
+                        if !cn.graph_output_names.is_empty() && !cn.graph_input_names.is_empty() {
+                            if let Some(input_data) = tensors.get(&cn.graph_input_names[0]).cloned() {
+                                for out_name in &cn.graph_output_names {
+                                    tensors.insert(out_name.clone(), input_data.clone());
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // CompactMask is gate-skip specific and only applies to KV-cache path.
+                    super::layer_callback::CallbackAction::CompactMask { .. }
+                    | super::layer_callback::CallbackAction::Continue => {}
+                }
+            }
 
             let activation = Self::load_activation(cn, &tensors, false);
             let weight_blob = Self::pack_weight_blob(cn, &tensors, &weight_ptrs);
@@ -2626,8 +2785,7 @@ impl FusedGraphExecutor {
             let mut scratchpad = vec![0u8; cn.compiled.scratchpad_bytes.max(output_bytes).max(64)];
 
             // ARCH-SYMDIM-NO-CONST-DEGRADE: seq_len 从 shape_bindings 正向传递
-            let seq_len = *shape_bindings.get("seq_len")
-                .expect("shape_bindings must contain 'seq_len' (ARCH-SYMDIM-NO-CONST-DEGRADE)");
+            let seq_len = loop_seq_len;
 
             // ARCH-ROPE-CACHE: 无 KV cache 路径也要预填 cos/sin 表。
             // 没有外部 positions,使用 0..seq_len 作为默认 positions (prefill 语义)。
@@ -2734,6 +2892,43 @@ impl FusedGraphExecutor {
                     cn.graph_output_names.len(),
                 )));
             }
+
+            // §9-§18: Post-node callback — HR encode_to_layer / Guardrail / Intent
+            // fire here after the node's output has been stored. `ExitEarly`
+            // returns immediately with the provided logits bytes (or the current
+            // node output when `logits` is empty).
+            if let Some(ref mut cb) = callbacks {
+                let output_data = cn.graph_output_names.first()
+                    .and_then(|name| tensors.get(name))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let ctx = super::layer_callback::LayerContext {
+                    node_idx,
+                    layer_idx,
+                    node_op: &self.graph.nodes[node_idx].op,
+                    hidden_state: output_data,
+                    kv_cache_k: std::ptr::null_mut(),
+                    kv_cache_v: std::ptr::null_mut(),
+                    total_seq: loop_seq_len,
+                    seq_len: loop_seq_len,
+                    position: 0,
+                    request_id: 0,
+                    model_config: forward_config.expect("run_with_callbacks requires forward_config"),
+                };
+                if let super::layer_callback::CallbackAction::ExitEarly { logits } =
+                    cb.dispatch_post_node(&ctx, output_data)
+                {
+                    log::trace!("run_compiled: post-node early exit at node {} (layer {})", node_idx, layer_idx);
+                    let mut out = HashMap::new();
+                    if !logits.is_empty() {
+                        let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        out.insert("logits".to_string(), bytes);
+                    } else if let Some(last_output) = cn.graph_output_names.first().and_then(|n| tensors.get(n)) {
+                        out.insert("logits".to_string(), last_output.clone());
+                    }
+                    return Ok(out);
+                }
+            }
         }
 
         Ok(Self::collect_graph_outputs(&self.graph, &mut tensors))
@@ -2764,10 +2959,12 @@ impl FusedGraphExecutor {
         seq_len: usize,
         positions: *const u32,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
-        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, None)
+        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, None, None)
     }
 
     /// Variant that accepts `forward_config` (ARCH-ROPE-CACHE + KV write 需要 max_seq_len)。
+    ///
+    /// `kv_donor_map` 供 SharedKvRef (T43): consumer 层解析到 donor 层的物理 slot。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn run_with_kv_cache_with_config(
         &self,
@@ -2779,11 +2976,14 @@ impl FusedGraphExecutor {
         seq_len: usize,
         positions: *const u32,
         forward_config: &crate::engine::executor::GeneratorForwardConfig,
+        kv_donor_map: Option<&[Option<usize>]>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
-        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, Some(forward_config))
+        self.run_with_kv_cache_and_callbacks(inputs, kv_cache_k, kv_cache_v, layer, total_seq, seq_len, positions, None, Some(forward_config), kv_donor_map)
     }
 
     /// §9-§18: run_with_kv_cache with optional callback chain for Gate-First Skip / Residual Bypass / Early Exit.
+    ///
+    /// `kv_donor_map` 供 SharedKvRef (T43): consumer 层解析到 donor 层的物理 slot。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn run_with_kv_cache_and_callbacks(
         &self,
@@ -2796,6 +2996,7 @@ impl FusedGraphExecutor {
         positions: *const u32,
         mut callbacks: Option<&mut super::layer_callback::CallbackChain>,
         forward_config: Option<&crate::engine::executor::GeneratorForwardConfig>,
+        kv_donor_map: Option<&[Option<usize>]>,
     ) -> Result<HashMap<String, Vec<u8>>, ExecutionError> {
         if !self.is_compiled {
             return Err(ExecutionError::NotCompiled);
@@ -2954,6 +3155,7 @@ impl FusedGraphExecutor {
                 Self::merge_kv_cache_for_decode(
                     cn, &self.graph.nodes[node_idx].op, &self.graph.nodes[node_idx].name,
                     &mut tensors, kv_cache_k, kv_cache_v, forward_config, total_seq, seq_len,
+                    kv_donor_map,
                 )
             } else {
                 seq_len
@@ -2972,7 +3174,13 @@ impl FusedGraphExecutor {
             // 映射 (嵌套循环层数会违反 ARCH-REGALLOC-COUNTER-NOSPILL)。
             // build_gqa_graph 中 K/V 已声明为 q_dim 以匹配 expanded 张量布局。
             if is_mha_node {
-                Self::expand_gqa_heads(cn, &self.graph.nodes[node_idx].op, &mut tensors, mha_kv_seq_len);
+                Self::expand_gqa_heads(
+                    cn,
+                    &self.graph.nodes[node_idx].op,
+                    &mut tensors,
+                    mha_kv_seq_len,
+                    forward_config,
+                );
             }
 
             // Load activation and pad to max_seq_len size if needed.
@@ -3226,11 +3434,22 @@ impl FusedGraphExecutor {
                 )));
             }
 
-            // ── KV cache write: after FusedQkvRope, copy K/V to KV cache buffer ──
-            if let FusedOp::FusedQkvRope(ref config) = self.graph.nodes[node_idx].op {
+            // ── KV cache write: after Fused{Qkv,QkvNorm}Rope, copy K/V to KV cache buffer ──
+            //
+            // T43: Gemma 4 走 FusedQkvNormRope (gemma4.yaml:234 + FusionMode::FusedQkvNormRope),
+            // 非 Gemma 的 llama/qwen3/phi4/glm4/mistral3/deepseek 走 FusedQkvRope。
+            // 两种 op 的 KV 输出布局一致 (outputs[1]=k, outputs[2]=v)，使用相同的
+            // 写入逻辑，差异仅在维度参数来源。
+            let kv_write_dims = match self.graph.nodes[node_idx].op {
+                FusedOp::FusedQkvRope(ref c) => Some((c.num_kv_heads, c.head_dim)),
+                FusedOp::FusedQkvNormRope(ref c) => Some((c.num_kv_heads, c.head_dim)),
+                _ => None,
+            };
+            if let Some((num_kv_heads, head_dim)) = kv_write_dims {
                 Self::perform_kv_cache_write(
-                    cn, config, &self.graph.nodes[node_idx].name, &tensors,
+                    cn, num_kv_heads, head_dim, &self.graph.nodes[node_idx].name, &tensors,
                     kv_cache_k, kv_cache_v, forward_config, total_seq, seq_len,
+                    kv_donor_map,
                 );
             }
 
