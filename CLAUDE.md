@@ -26,7 +26,8 @@
 | `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) | ✅ |
 | `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补, §13.12 硬件感知融合拓扑 (12 Profile: SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ⚠️ §1-§8 ✅, §9-§12/§14-§16 🟡, §13 ⚠️ |
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) | ✅ |
-| `04-API-DESIGN.md` | 客户端公共 API (包含 Knowledge Injection & Intent SDK) | ✅ |
+| `04-API-DESIGN.md` | 客户端公共 API (§7-§8 Semantic Gatekeeper 隐藏状态知识注入 SDK) | ✅ |
+| `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、E2E 验收 (REQ-SG-001..008) | 🔴 待实现 |
 | `06-TESTING-STRATEGY.md` | 测试策略 (GGUF/ONNX/E2E/性能/观测/错误处理) | ✅ |
 | `07-OBSERVABILITY.md` | Epilogue 白嫖遥测扩展, AbsolutePolicy 护栏, KvPageHeader 40B 设计 | ✅ |
 | `ARCH-DETAILED-DESIGNS.md` | ISV integration, quantized GEMM, GPU backend, adaptive chunking | ✅ |

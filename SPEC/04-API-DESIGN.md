@@ -520,140 +520,241 @@ match GgufReader::open("model.gguf") {
 
 ---
 
-## 7. 意图提取与知识外挂 (API-KNOWLEDGE-INJECTION)
+## 7. Semantic Gatekeeper 用户接口 (API-SEMANTIC-GATEKEEPER)
 
-> **定位**: gllm 高阶商业特性（Residual Bus）开发者接口。
+> **定位**: gllm 零训练、纯运行时的结构化知识调度与注入 SDK。
 >
-> **关联架构**: ARCH-RESIDUAL-BUS
+> **关联协议**: `SPEC/SEMANTIC-GATEKEEPER.md`（技术协议 SSOT）
+>
+> **关联 Callback 集成**: `SPEC/05-OPTIMIZATIONS.md §2.9`
+>
+> **关联需求**: `SPEC/01-REQUIREMENTS.md §12` REQ-SG-001..008
 
-### 7.1 Semantic Anchors (语义锚点)
+### 7.1 注册 Semantic Gatekeeper
 
-摒弃死板的层号（如 `layer=15`），由引擎动态测算映射层深。
+`Client::register_semantic_gatekeeper()` 在模型加载后注册一个 Gatekeeper 实例。注册时触发 Level Keys 预计算（见 `SPEC/SEMANTIC-GATEKEEPER.md §3`）。
+
 ```rust
-pub enum LayerTarget {
-    ShallowSyntax, // 浅层词法区
-    MidSemantic,   // 中层语义区
-    DeepLogic,     // 深层逻辑区（爆词前夕）
+use gllm::semantic_gatekeeper::{
+    SemanticGatekeeperConfig, SemanticLevel, KnowledgeProvider, AstSentinel,
+    KnowledgeEntry, RetrieveContext, AstContext,
+};
+
+let gatekeeper_config = SemanticGatekeeperConfig {
+    // 三个层级的描述文本（默认见 §7.2 表，可覆写）
+    level_descriptors: [
+        "struct fields and method signatures".into(),
+        "validation rules and invariants".into(),
+        "module dependencies and design patterns".into(),
+    ],
+    // 检测层相对深度列表（如 [0.5, 0.75, 0.9]）
+    detection_depths: vec![0.5, 0.75, 0.9],
+    // 门控阈值 τ：best_score < τ 时不注入
+    gate_threshold: 0.35,
+    // 稳定性阈值：hidden 与锚点相似度 > 该值时复用缓存的 v_knowledge
+    stability_threshold: 0.95,
+    // 残差注入强度 α ∈ [0.1, 0.3]
+    alpha: 0.15,
+    // 用户实现的知识源（可返回本地 LSP 检索结果或远程服务结果）
+    knowledge_provider: Arc::new(MyProvider::new()),
+    // 可选：AST 哨兵（Tree-sitter 等），用于语法驱动的强制刷新
+    ast_sentinel: Some(Arc::new(MyAstSentinel::new())),
+};
+
+client.register_semantic_gatekeeper(gatekeeper_config)?;
+```
+
+注册后后续所有 `client.generate(...)` 调用自动启用 SG。通过 `client.unregister_semantic_gatekeeper()` 取消注册，或 `client.reset_gatekeeper_state()` 仅清空 ActiveState（保留 Level Keys 缓存）。
+
+### 7.2 SemanticLevel 枚举
+
+```rust
+pub enum SemanticLevel {
+    /// L1: 符号签名、类型成员
+    L1,
+    /// L2: 接口约束、业务规则
+    L2,
+    /// L3: 架构分层、模块职责
+    L3,
 }
 ```
 
-### 7.2 知识图谱挂载 API
+| 层级 | 默认描述文本 | 典型知识类型 |
+|------|--------------|--------------|
+| L1 | `"struct fields and method signatures"` | LSP `documentSymbol` 结果、类型成员列表 |
+| L2 | `"validation rules and invariants"` | 接口前置条件、运行时断言、业务规则 |
+| L3 | `"module dependencies and design patterns"` | 项目架构摘要、模块依赖图、设计模式约定 |
 
-使用零拷贝页表实现万字上下文极速加载。
-
-```rust
-use gllm::engine::knowledge::{KnowledgeSource, LayerTarget};
-
-// 将外挂知识挂入中层残差流
-client.inject_knowledge(
-    KnowledgeSource::from_frozen_kv("company_logs_dec_2025.kv"),
-    LayerTarget::MidSemantic 
-)?;
-```
-
-### 7.3 Multi-Intent 降维提取 API
-
-物理砍断后续层以加速判别式任务。
+### 7.3 KnowledgeProvider Trait
 
 ```rust
-// 仅计算至中层语义区即截断，强制返回特征向量
-let intent_embedding = client.encode_intent(
-    "Cancel my subscription",
-    LayerTarget::MidSemantic 
-)?;
+pub trait KnowledgeProvider: Send + Sync {
+    /// 根据 Query 向量、层级、上下文检索知识条目。
+    /// 返回 None 表示无匹配（SG 不注入，保持原 hidden_state）。
+    fn retrieve(
+        &self,
+        query: &[f32],
+        level: SemanticLevel,
+        ctx: &RetrieveContext<'_>,
+    ) -> Option<KnowledgeEntry>;
+}
 
-// intent_embedding 直接对接外部轻量分类器
+pub struct KnowledgeEntry {
+    /// 将被主模型 tokenizer + 冻结 embed 层编码的文本。
+    /// 保证与 hidden_state 处于同一语义空间。
+    pub text: String,
+    /// 置信度 ∈ [0.0, 1.0]，动态调节 α_effective = α × confidence
+    pub confidence: f32,
+}
+
+pub struct RetrieveContext<'a> {
+    pub generated_tokens: &'a [u32],
+    pub ast: Option<AstContext<'a>>,
+    pub step: u64,
+    pub request_id: RequestId,
+}
 ```
 
-### 7.4 In-Flight Guardrail (飞行物理护栏)
-
-底层挂载极小分类器，实现零延迟熔断。
+### 7.4 AstSentinel Trait（可选）
 
 ```rust
-use gllm::engine::guard::{GuardProbe, SafetyPolicy};
+pub trait AstSentinel: Send + Sync {
+    fn current_context<'a>(
+        &self,
+        generated_tokens: &'a [u32],
+        tokenizer: &dyn TokenizerLookup,
+    ) -> Option<AstContext<'a>>;
+}
 
-// 挂载安全头至深层，超过 95% 置信度将触发底层硬件中断
-client.attach_guardrail(
-    GuardProbe::from_safetensors("toxicity_classifier_v1.safetensors"),
-    LayerTarget::DeepLogic,
-    SafetyPolicy::HaltAndVeto { threshold: 0.95 }
-)?;
+pub struct AstContext<'a> {
+    /// Tree-sitter 节点 kind（如 "member_expression" / "call_expression"）
+    pub node_kind: &'a str,
+    pub cursor_line: u32,
+    pub cursor_column: u32,
+    pub prefix: &'a str,
+}
 ```
+
+**触发作用**：
+- AST `node_kind` 变更时 SG 强制刷新 ActiveState（§8.3）
+- 未注册 AST 哨兵时，SG 仅凭 Query 向量 + hidden 锚点做稳定性判断
+
+### 7.5 部署形态
+
+| 形态 | KnowledgeProvider 实现 | 适用场景 |
+|------|------------------------|---------|
+| **完全本地** | 同进程内的 LSP 客户端 + LSH 索引 + 向量查询 | 离线、高隐私、实时补全 |
+| **云端推理 + 本地知识库** | HTTP/gRPC 客户端回调到用户本地服务 | 代码隐私 + 云端大模型 + 任务级延迟容忍 |
+
+SG 内核对部署形态无感。Provider 实现者自由选择本地 vs 远程。
+
+> **详述**: `SPEC/SEMANTIC-GATEKEEPER.md §9`
 
 ---
 
-## §8 知识注入内部实现架构 (API-INJECTION-IMPL)
+## §8 Semantic Gatekeeper 内部实现架构 (API-SG-IMPL)
 
-> **关联**: unified-jit-architecture-master.md §9
-> **上层 API**: §7 定义了用户侧接口（`LayerTarget` 枚举、`inject_knowledge()` 等）
-> **核心使命**: 将三大物理注入形态（侧载 KV、残差硬插、多路 LoRA）在工程代码结构上抽象化。
+> **协议 SSOT**: `SPEC/SEMANTIC-GATEKEEPER.md`
+>
+> **上层 API**: §7 定义的用户侧接口
 
-### 8.1 `KnowledgeDataSource` Trait — 数据源的多态抽象
+### 8.1 整体管线
 
-开发者不需要理解底层什么是 `LDG.E` 或虚拟页表，只需和纯粹的数据接口打交道：
+```
+┌─ 模型加载期 ────────────────────────────────────────┐
+│ register_semantic_gatekeeper(config):              │
+│   1. 构造 EmbedLookupOnlyGraph + KProjOnlyGraph    │
+│      (ARCH-FULL-JIT 合规，CompilerGraph 小图)      │
+│   2. FusedGraphExecutor::new(graph).compile() ×2   │
+│   3. 对每个 detection_depth:                        │
+│        预计算 [K_L1, K_L2, K_L3] 存入 LevelKeysCache│
+│   4. 为检测层 FusedAttentionLayer 注入 q_tap 配置   │
+│      (重新编译受影响层的 FusedGraph)                │
+│   5. 注册 SemanticGatekeeperCallback 到 CallbackChain│
+│      优先级 90（SPEC/05-OPTIMIZATIONS.md §8）       │
+└────────────────────────────────────────────────────┘
 
-```rust
-/// 知识数据源的单一多态抽象
-pub trait KnowledgeDataSource {
-    /// 返回注入类型标识，供编译器分流
-    fn injection_kind(&self) -> InjectionKind;
-    
-    /// 将数据物理化至引擎可感知的格式
-    fn materialize(&self, engine: &EngineContext) -> Result<MaterializedPayload>;
-}
-
-pub enum InjectionKind {
-    /// 侧载 KV：业务端传入 SSD 文件柄或网络地址（预存的 4-bit 财报）
-    FrozenKvChunk,
-    /// 晚期插入：上游小模型（如 BERT）算好的密实特征向量列
-    LateFusionVector,
-    /// 领域特征挂载：带有特定领域特征缩放因子的极小权重片
-    DynamicLoRA,
-}
+┌─ 推理期（每 decode step，每个检测层） ──────────────┐
+│ SemanticGatekeeperCallback.pre_node(ctx, node_idx):│
+│   详见 SPEC/SEMANTIC-GATEKEEPER.md §2.1 和 §7.1     │
+└────────────────────────────────────────────────────┘
 ```
 
-### 8.2 语义锚点推断 — 引擎内部实现
+### 8.2 Level Keys 预计算（挑战 2 决策 B）
 
-> **枚举定义**: `LayerTarget` 已在 §7.1 定义，此处不重复。
+通过 `FusedGraphExecutor` 执行两个小 `CompilerGraph`：
 
-引擎根据加载的模型拓扑，通过"熵分布曲线"自动标定 `LayerTarget` 的物理层号映射。
+- **EmbedLookupOnlyGraph**：单个 `Gather(embed_weight)` 节点（`SPEC/08-EXECUTOR.md §4.3` ARCH-GATHER-JIT）
+- **KProjOnlyGraph@layer_L**：`RmsNorm(input_layernorm_weight_@L) → Gemm(k_proj_weight_@L)`
 
-### 8.3 编译器 IR 级标准拓扑扩展 (`InjectionHook` Nodes)
+> **ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED 合规**：小图与主推理图共享同一 `CompilerGraph` IR，Phase 3 codegen 按 `DeviceProfile` 生成 CPU/PTX/HIP/MSL 原生代码。不引入后端特化。
 
-当 JIT 编译器（`CompilerGraph`）遇到 `Op::InjectKnowledge` 这个特殊的 IR 节点时：
-1. 自动展开成符合当前硬件设备的汇编代码（如生成 `Vector Add` 微指令）
-2. 将 `source` 指针硬编码进 Mega-Kernel 的 Launch Parameters 中
-3. 开发者对硬件多态**绝对无感**
+`LevelKeysCache` 定义与一致性不变量见 `SPEC/SEMANTIC-GATEKEEPER.md §3.5`。
 
-### 8.4 零拷贝页表管理器 (`KvSideloadManager`)
+### 8.3 Q 向量截获（挑战 1 决策 B）
 
-实现超大财报 0 算力注入的核心支撑库：
-- 与主系统的 `GlobalMemoryManager` 紧密咬合
-- 当用户传入含有 10 万字 KV 数据的 `FrozenKvChunk` 时，**不开辟任何新显存、不执行任何 `memcpy`**
-- 只负责做一件事：拦截当前 Request 的**逻辑地址页表（Logical Page Table）**，并将预存的物理页（Physical Block IDs）原样插入
-- 对 LLM 后续的 Attention 算子来说，这跟自己前一秒算出来的数据存在那一模一样
+**FusedAttentionLayer Q-Tap 变体**：检测层的 `FusedAttentionLayer` 编译期携带 `q_tap: Some(QTapConfig)`，JIT codegen 在 `q_proj` GEMM 后尾段插入 STG 指令，将 Q 向量写入设备可见的 `GatekeeperRingBuffer`。
 
-### 8.5 跨并发上下文分流器 (`Injection_Routing_Table`)
+**关键属性**：
+- 融合完整性保持（未拆子算子）
+- 非检测层 `q_tap: None`，零额外指令开销
+- Ring buffer 双缓冲 + atomic step_index 协议防陈旧读
+- 全后端统一（x86_64 / AArch64 / PTX / HIP / MSL 均由 JIT 生成）
 
-在大吞吐 Continuous Batching 时，同时有 128 个请求。Request A 需要注入知识，Request B 不注入：
-- Mega-Kernel 启动参数携挂 `Injection_Routing_Table`（类似 MoE 路由结构）
-- Kernel 内部的 `ThreadIdx` / `BlockIdx` 走到注入节点时先查表确认身份
-- 属于 Request A 的线程块加载外部张量进行累加
-- 属于 Request B 的线程块在同一个时钟周期内进行空转（NOP）或旁路跳过
-- 完美兼容 Batching 与个性化知识挂载
+> **详述**: `SPEC/SEMANTIC-GATEKEEPER.md §4` + `SPEC/08-EXECUTOR.md §4.2`
 
-### 8.6 多模态 RAG 注入调度策略 (`InjectionScheduler`)
+### 8.4 ActiveState 稳定性追踪
 
-规范多轮对话中挂载对象的生命周期：
+跨 decode step 维护 `ActiveState { level, key_hash, anchor_hidden, v_knowledge, ast_node_kind, last_step }`。
 
-```rust
-pub struct InjectionScheduler {
-    /// 测算当前 RAG 注入对象的存活率，长时间不被访问进行异步卸载
-    pub ttl_policy: Duration,
-    /// 当请求到来时，快速探测是否存在需要被唤醒的休眠特征
-    pub hit_rate_monitor: HitRateTracker,
-}
+**状态转移**：
+- hidden 与 anchor 相似度 > `stability_threshold` && AST 节点未变 → **ReuseCache**（跳过 LSP 检索）
+- 否则 / AST 节点变更 / 新请求 → **FullCompute**（完整流程）
+
+> **详述**: `SPEC/SEMANTIC-GATEKEEPER.md §5`
+
+### 8.5 残差相加注入（挑战 4 决策 B）
+
+利用现有 `LayerContext.hidden_state: &'a mut [f32]`（`SPEC/05-OPTIMIZATIONS.md §1.2`），Callback 内部计算：
+
 ```
+new_hidden_last_token = hidden_state[-1] + α × confidence × v_knowledge
+```
+
+然后返回现有 `CallbackAction::InjectHidden { data }`。
+
+**零 API 扩展**：不改 `CallbackAction` 枚举；不改 `LayerCallback` trait 签名。
+
+### 8.6 文本编码（挑战 3 决策 B）
+
+`KnowledgeProvider.retrieve(...)` 返回的 `KnowledgeEntry.text` 在 Callback 内部流程：
+
+```
+tokens = main_model_tokenizer.encode(text)
+embed  = EmbedLookupOnlyGraph.run(tokens)       (复用 §8.2 预编译的小图)
+v_knowledge = mean_pool(embed, axis=seq)        (形状 hidden_size)
+```
+
+**同语义空间保证**：使用主模型冻结 Token Embedding，`v_knowledge` 与主推理流 hidden_state 处于同一向量空间，可直接相加无需任何投影。
+
+### 8.7 NO_ISLAND_MODULE 强制性
+
+注册的 Gatekeeper **必须**被真实推理路径触发。集成测试验收：
+
+- `SemanticGatekeeperCallback.pre_node` 在 `FusedGraphExecutor::run_with_kv_cache_with_callbacks` 中真实被调用（非 `#[cfg(test)]` 路径）
+- Mock Provider 返回固定文本时，生成 token 分布对比无 SG 基线存在可测量差异
+
+详见 `SPEC/SEMANTIC-GATEKEEPER.md §8`。
+
+### 8.8 与其他优化模块的协调
+
+| 场景 | SG 行为 |
+|------|---------|
+| 与 Early Exit 共存 | SG 在 `pre_node` 执行；Early Exit 在 `post_node`。若 Early Exit 在 SG 注入后的层触发，v_knowledge 的语义影响已被累积进 logits |
+| 与 Gate Skip 共存 | SG 优先级 90 > Gate Skip 60。若 SG 返回 `InjectHidden`，节点仍正常执行，下游 Gate Skip 可继续判定 |
+| 与 RAG Inject 共存 | SG 优先级 90 > RAG 80。两者都返回 `InjectHidden` 时，SG 先注入到 hidden_state，RAG 的后续注入在 SG 修改后的状态上叠加 |
+| 与 MoE 共存 | 检测层若同时是 MoE 层，SG 在 `pre_node` 完成注入后 MoE Dispatch 路由正常进行 |
+| 与 Speculative Decoding 共存 | Draft phase 跳过深层检测（复用 `SPEC/05-OPTIMIZATIONS.md §6.2 H11` 约定）。Verify phase 完整跑 SG |
 
 ---
 

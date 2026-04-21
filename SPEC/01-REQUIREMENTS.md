@@ -327,3 +327,39 @@
 | **KV Cache 压缩比** | ≥ 4x vs FP16 (即 4-bit 主池) | TurboQuant + QJL 双轨极化 |
 | **冷专家 Deopt 恢复延迟** | < 1ms (微冷冻) | Uncommon Trap / OSR Bailout |
 
+---
+
+## 12. Semantic Gatekeeper 知识注入 (REQ-SG)
+
+> **协议 SSOT**: `SPEC/SEMANTIC-GATEKEEPER.md`
+>
+> **API 定义**: `SPEC/04-API-DESIGN.md §7-§8`
+>
+> **Callback 集成**: `SPEC/05-OPTIMIZATIONS.md §2.9`
+>
+> **执行器扩展**: `SPEC/08-EXECUTOR.md §4.2.1`
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-SG-001** | Level Keys 预计算 | 模型加载期通过小 CompilerGraph 预计算 3 个层级键向量（每个检测层） | 1. `LevelKeysCache` 对每个 `detection_depth × num_layers` 填充 3 个非全零 finite 向量；2. 向量维度 = `num_kv_heads × head_dim`；3. 小图复用 `FusedGraphExecutor` 编译 / 运行（ARCH-FULL-JIT 合规）；4. 同一小图在 CPU/PTX/HIP/MSL 产出数值一致（容差 1e-4） | 🔴 待实现 |
+| **REQ-SG-002** | FusedAttentionLayer Q-Tap | 检测层 `FusedAttentionLayer` 编译期注入 `q_tap`；JIT codegen 在 `q_proj` 尾段追加 STG 写 ring buffer | 1. `q_tap: None` 时零额外指令（cargo-asm diff 对比）；2. `q_tap: Some(...)` 时主计算结果与无 tap 版本一致（L2 误差 < 1e-4）；3. Ring buffer 读出 Q 与 CPU 参考 `q_proj(hidden)[-1]` 一致；4. 双缓冲 atomic step_index 协议防陈旧读；5. 未拆融合 / 未引入后端特化 GraphType | 🔴 待实现 |
+| **REQ-SG-003** | 层级路由与门控 | `SemanticGatekeeperCallback.pre_node` 计算 cosine(Q, K_Lx) 路由；best_score < τ 时返回 Continue | 1. mock Provider 始终返回 None 时 hidden_state 保持不变（cosine 相似度 = 1.0）；2. best_score < gate_threshold 触发 Continue 分支；3. argmax 正确映射到 SemanticLevel::L1/L2/L3 | 🔴 待实现 |
+| **REQ-SG-004** | 稳定性追踪与 ActiveState 刷新 | hidden 相似度 > stability_threshold && AST 节点未变时复用 `v_knowledge`；否则 FullCompute；AST 节点变更强制刷新 | 1. 连续 20 步相同语义上下文，ActiveState 复用次数 ≥ 15（≥75%）；2. AST node_kind 变更时 FullCompute 在下一个检测层触发；3. `reset_gatekeeper_state()` 清空 ActiveState 但保留 LevelKeysCache；4. 跨请求边界自动刷新 | 🔴 待实现 |
+| **REQ-SG-005** | 残差相加注入（零 API 扩展） | Callback 内部计算 `h_new_last = h_last + α × confidence × v_knowledge`，通过现有 `CallbackAction::InjectHidden` 返回 | 1. 不修改 `CallbackAction` 枚举；2. 不修改 `LayerCallback` trait 签名；3. Provider 返回 confidence=0.0 时 hidden 未变；4. confidence=1.0 + α=0.15 时 hidden 最后 token 数值符合公式（逐元素误差 < 1e-6） | 🔴 待实现 |
+| **REQ-SG-006** | KnowledgeProvider + AstSentinel 契约 | 用户实现 trait，SG 内核 trait-object 调度；Provider 失败返回 None 时 SG 降级为 Continue | 1. `KnowledgeProvider::retrieve` 返回 None 时 SG Continue；2. AstSentinel 返回 None 时 SG 仅凭 hidden 锚点做稳定性判断；3. trait 签名严格匹配 `SPEC/04-API-DESIGN.md §7.3-§7.4` | 🔴 待实现 |
+| **REQ-SG-007** | 部署形态透明 | SG 对 KnowledgeProvider 的本地 / 远程实现形态无感 | 1. 同一 SG Callback 在本地 LSH Provider 和 HTTP Provider 下行为一致；2. Provider 延迟 0ms 与 500ms 场景下 SG 核心行为（路由、稳定性、注入）等价（仅端到端延迟差异） | 🔴 待实现 |
+| **REQ-SG-008** | E2E 行为差异验证 | 注册 SG 后生成的 token 分布与未注册基线有可测量差异，且差异方向与 Provider 返回的知识文本语义一致（NO_ISLAND_MODULE 合规） | 1. 固定 Provider 返回 `"Paris"`；询问 `"Capital of France is"`；对比无 SG 基线，`Paris` token logit 明显提升；2. `SemanticGatekeeperCallback.pre_node` 在真实推理路径（非 `#[cfg(test)]`）被调用 ≥1 次；3. grep `SemanticGatekeeperCallback::pre_node` 在 `src/` 非测试代码中有真实注册点 | 🔴 待实现 |
+
+### 12.1 测试文件规划
+
+| 测试文件 | 覆盖维度 | 状态 |
+|----------|----------|------|
+| `tests/test_e2e_semantic_gatekeeper.rs` | REQ-SG-001~008 端到端（TEST-SG-001~008 见 `SPEC/SEMANTIC-GATEKEEPER.md §8.2`） | 🔴 待实现 |
+
+### 12.2 实现路径（Destroy-Rebuild 铁律）
+
+- 旧 `src/knowledge.rs` + `src/compat/knowledge_injector.rs` 的 `InjectionKind::FrozenKvChunk / LateFusionVector / DynamicLoRA` 与 `LayerTarget::ShallowSyntax / MidSemantic / DeepLogic` 全部物理删除（CLAUDE.md §6 铁律2 禁止渐进式开发）
+- `Client::inject_knowledge(source, target)` 旧签名整体替换为 `Client::register_semantic_gatekeeper(config)`
+- 新增 `src/semantic_gatekeeper/` 模块（`level_keys.rs` / `small_graph.rs` / `callback.rs` / `ring_buffer.rs` / `active_state.rs`）
+- gllm-kernels 侧 `FusedAttentionLayerConfig` 扩展 `q_tap: Option<QTapConfig>`，Phase 3 codegen 扩展 Q-tap STG 指令生成（x86_64 / AArch64 / PTX / HIP / MSL 全后端）
+

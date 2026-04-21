@@ -219,6 +219,9 @@ step()
 
 | FusedOp | CompilerGraph 展开 | output_numel |
 |---------|-------------------|--------------|
+| `FusedAttentionLayer(cfg)` | RmsNorm → Gemm(Wq) → Gemm(Wk) → Gemm(Wv) → RoPE(Q) → RoPE(K) → Attention(Q,K,V) → Gemm(Wo) | seq_len × hidden_size |
+| `FusedAttentionLayer(cfg) with q_tap` | 同上 + `q_proj` GEMM 后尾段 STG 指令写 GatekeeperRingBuffer（见 §4.2.1） | 同上（tap 仅副作用写，不改主输出） |
+| `FusedFfnLayer(cfg)` | RmsNorm → Gemm(gate) → Silu → Gemm(up) → Mul → Gemm(down) | seq_len × hidden_size |
 | `FlashAttention(cfg)` | Reshape(Q) → Reshape(K) → Reshape(V) → MatMul(Q,K^T) → Softmax → MatMul(attn,V) → Reshape(out) | seq_len × num_heads × head_dim |
 | `GQA(cfg)` | 同 FlashAttention + scale + causal mask | seq_len × num_heads × head_dim |
 | `SwiGLU(cfg)` | Gemm(gate) → Silu → Gemm(up) → Mul → Gemm(down) | seq_len × hidden_size |
@@ -238,6 +241,40 @@ step()
 | `Atomic("Softmax")` | Softmax | 同输入 |
 | `Atomic("MeanPool")` | MeanPool(seq_len, hidden) | 1 × hidden |
 | `Atomic("L2Normalize")` | L2Normalize(hidden) | 同输入 |
+
+#### 4.2.1 FusedAttentionLayer Q-Tap 扩展 (ARCH-SG-QTAP)
+
+> **关联**: `SPEC/SEMANTIC-GATEKEEPER.md §4`（Q 截获协议）
+
+`FusedAttentionLayerConfig` 扩展可选字段 `q_tap: Option<QTapConfig>`。仅 Semantic Gatekeeper 注册时的"检测层"FusedAttentionLayer 节点携带 `Some(...)`，其他层保持 `None`，零额外指令开销。
+
+```rust
+pub struct QTapConfig {
+    /// Gatekeeper ring buffer 的设备可见指针
+    pub sink_ptr: u64,
+    /// 要写出的 token 位置
+    pub tap_position: QTapPosition,
+    /// 写出 dtype（默认 = q_proj 输出 dtype）
+    pub dtype: DType,
+}
+
+pub enum QTapPosition {
+    LastToken,    // 仅最后一个 token（decode step）
+    AllTokens,    // 全序列（prefill）
+}
+```
+
+**JIT codegen 行为**（ARCH-CPU-GPU-UNIFIED 合规，全后端统一）：
+
+- 编译期 `q_tap: Some(cfg)` → Phase 3 codegen 在 `q_proj` GEMM 的尾段追加 STG 指令写 `cfg.sink_ptr`
+- 主计算路径（`q_proj` → RoPE → Attention）不变，tap 仅是副作用写
+- Ring buffer 双缓冲 + atomic `step_index`（`release` 写 / `acquire` 读），防止 `pre_node` 回调读到陈旧值
+- 编译期 `q_tap: None` → codegen 不生成 tap 指令（零开销）
+
+**不允许的做法**：
+- ❌ 拆分 FusedAttentionLayer 为子节点以暴露 Q（违反 ARCH-CPU-GPU-UNIFIED "禁止子算子级 GraphType"）
+- ❌ 引入 Q-tap 专用的新 `GraphType` 变体（同上）
+- ❌ 为 Q-tap 单独分配 backend-specific 的辅助 buffer（违反 CPU/GPU 统一路径）
 
 ### 4.3 Gather JIT 内核 (ARCH-GATHER-JIT)
 

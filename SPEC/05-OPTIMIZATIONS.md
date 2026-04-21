@@ -139,11 +139,21 @@ FusedGraphExecutor::run_with_kv_cache_with_callbacks()
 
 **接入**: `SpecDecodingState` → `step()` draft/verify phase → `draft_budget` per sequence。
 
-### 2.9 Knowledge Injection (知识注入 SDK)
+### 2.9 Semantic Gatekeeper (隐藏状态驱动的免训练知识注入 SDK)
 
-**机制**: 外部知识（文档/向量/结构化数据）通过 `InjectHidden` 注入指定层。支持 Static（加载时注入）、Dynamic（运行时注入）、LoRA Adapter 等注入方式。
+> **SSOT**: `SPEC/SEMANTIC-GATEKEEPER.md`（技术协议）+ `SPEC/04-API-DESIGN.md §7-§8`（用户 API + 实现架构）
 
-**接入**: `pre_node(target_layer)` → `InjectHidden { data }`。框架就绪，具体注入内容由 SDK 用户定义。
+**机制**: 在模型加载期预计算 3 个固定层级键向量 `K_L1/K_L2/K_L3`（通过主模型 tokenizer → 冻结 embed → 指定检测层 `k_proj` 投影）。推理期每到检测层，`SemanticGatekeeperCallback.pre_node` 从 `FusedAttentionLayer` 的 Q-tap ring buffer 读取 Q 向量，与三个层级键做 cosine 相似度打分，触发 `KnowledgeProvider` 检索知识文本，用主模型冻结 embed 层编码成 `v_knowledge`，执行残差相加 `h_new = h + α × confidence × v_knowledge` 后通过 `InjectHidden { data }` 返回。ActiveState 追踪锚点，AST 节点未变且 hidden 相似度 > `stability_threshold` 时复用 `v_knowledge`，跳过 LSP 检索。
+
+**关键技术**:
+- **Level Keys 预计算** 通过小 `CompilerGraph`（EmbedLookupOnlyGraph + KProjOnlyGraph）走 `FusedGraphExecutor` 执行（ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED 合规）
+- **Q 截获** 通过检测层 `FusedAttentionLayer` 的 Q-tap epilogue 变体（复用 `§5` Epilogue 白嫖网络基础设施，不拆融合）
+- **残差注入** 复用现有 `CallbackAction::InjectHidden { data }` 零 API 扩展（`LayerContext.hidden_state` 已暴露当前 hidden）
+- **文本编码** 复用预编译的 EmbedLookupOnlyGraph，确保 `v_knowledge` 与 hidden_state 处于同一语义空间
+
+**接入**: `SemanticGatekeeperCallback` → `pre_node(detection_layer)` → `InjectHidden { data = h + α × v_k }`。用户需实现 `KnowledgeProvider` trait，可选实现 `AstSentinel` trait。
+
+**NO_ISLAND_MODULE 合规**: E2E 测试（`SPEC/SEMANTIC-GATEKEEPER.md §8.2` TEST-SG-001..008）必须验证行为差异，不仅是"API 可调用"。
 
 ## 3. Mega-Kernel 块级路由
 
@@ -308,7 +318,7 @@ lm_head GEMM ──── logits 范数 → 采样策略调整
 | Intent NLU | `IntentRecallCallback` | `post_node(target_layer)` | Recall extraction | — | Integrated |
 | MoE Dispatch | `MoeDispatchCallback` | `pre_node(moe_layers)` | Routing setup | MoE 模型 | Integrated |
 | Speculative Decoding | `SpecDecodingState` | `step()` draft→verify loop | PLD draft + argmax verify + EMA 自适应 | — | Integrated |
-| Knowledge Injection | `KnowledgeInjectCallback` | `pre_node(target_layer)` | `InjectHidden { data }` | 需调用 `inject_knowledge()` → `set_knowledge_payload()` | Integrated |
+| Semantic Gatekeeper | `SemanticGatekeeperCallback` | `pre_node(detection_layers)` | `InjectHidden { data = h + α × v_k }` | 需调用 `Client::register_semantic_gatekeeper(config)` + 实现 `KnowledgeProvider` trait；检测层 FusedAttentionLayer 携带 `q_tap` 配置（见 `SPEC/08-EXECUTOR.md §4.2`） | Integrated |
 | Embed+Rerank Fusion | `EmbeddingsBuilder.rerank_query()` → `Client::execute_embed_rerank_pipeline()` | `generate()` 内部 | `ReorderByScore` | 多模型管线 (02-ARCHITECTURE.md ARCH-MULTI-MODEL-PIPELINE) | Integrated |
 
 **铁律**: SPEC 审计时，任何 Not Integrated 的模块等同于未实现，不接受"逻辑正确但未接入"作为完成状态。
@@ -320,7 +330,7 @@ lm_head GEMM ──── logits 范数 → 采样策略调整
 | 优先级 | 回调 | 触发时机 |
 |--------|------|---------|
 | 100 | Prefetch | `pre_node` |
-| 90 | Knowledge Inject | `pre_node` |
+| 90 | Semantic Gatekeeper | `pre_node` |
 | 80 | RAG Inject | `pre_node` |
 | 70 | MoE Dispatch | `pre_node` |
 | 60 | Gate Skip | `pre_node` |
