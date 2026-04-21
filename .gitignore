@@ -8,9 +8,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# SPEC documents (managed separately)
-SPEC/
-
 # Model files
 ~/.gllm/
 test_models/
