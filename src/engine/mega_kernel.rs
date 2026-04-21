@@ -320,6 +320,23 @@ impl MegaKernelExecutor {
     /// 是否已编译
     pub fn is_compiled(&self) -> bool { self.is_compiled }
 
+    /// 尝试编译 true mega-kernel（单次 CALL 路径）。
+    ///
+    /// 如果编译成功，内部 `mega_compiled` 会被设置，后续推理走单次 CALL 路径。
+    /// 如果编译失败，保持 legacy 路径不变。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn try_compile_true_mega_kernel(
+        &mut self,
+        geometry: &crate::model_config::ModelGeometry,
+        weight_ptrs: &std::collections::HashMap<String, *const u8>,
+        weight_sizes: &std::collections::HashMap<String, usize>,
+        eos_token_id: u32,
+    ) -> Result<(), MegaKernelError> {
+        let compiled = Self::compile_from_geometry(geometry, weight_ptrs, weight_sizes, eos_token_id)?;
+        self.mega_compiled = compiled.mega_compiled;
+        Ok(())
+    }
+
     /// 是否有真正的 mega-kernel（单次 CALL 完成全部推理）
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     pub fn has_true_mega_kernel(&self) -> bool {

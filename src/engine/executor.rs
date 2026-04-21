@@ -1042,14 +1042,52 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mega_kernel = if let Some(ref ge) = graph_executor {
             if ge.is_compiled() {
                 log::info!("executor: §9.1 MegaKernelExecutor built from compiled graph_executor");
-                Some(super::mega_kernel::MegaKernelExecutor::from_graph_executor(
+
+                // Try to upgrade to true mega-kernel (single-CALL path)
+                let eos_id = model_config.eos_token_id.unwrap_or(2);
+                let mut mega = super::mega_kernel::MegaKernelExecutor::from_graph_executor(
                     crate::graph::executor::FusedGraphExecutor::new(ge.graph().clone()),
                     geometry.num_layers,
                     geometry.hidden_size,
                     geometry.vocab_size,
                     geometry.dtype,
-                    model_config.eos_token_id.unwrap_or(2),
-                ))
+                    eos_id,
+                );
+
+                // Collect weight pointers from FusedGraph's weight_bindings
+                let wb = &ge.graph().weight_bindings;
+                let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
+                let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for (name, binding) in wb {
+                    if let Some(ptr) = binding.ptr {
+                        weight_ptrs.insert(name.clone(), ptr as *const u8);
+                        let elem_bytes = match binding.dtype {
+                            safetensors::Dtype::F32 => 4,
+                            safetensors::Dtype::F16 => 2,
+                            safetensors::Dtype::BF16 => 2,
+                            _ => 4,
+                        };
+                        let size: usize = binding.shape.iter().product::<usize>() * elem_bytes;
+                        weight_sizes.insert(name.clone(), size);
+                    } else if let Some(ref data) = binding.data {
+                        weight_ptrs.insert(name.clone(), data.as_ptr());
+                        weight_sizes.insert(name.clone(), data.len());
+                    }
+                }
+
+                if !weight_ptrs.is_empty() {
+                    match mega.try_compile_true_mega_kernel(
+                        &geometry,
+                        &weight_ptrs,
+                        &weight_sizes,
+                        eos_id,
+                    ) {
+                        Ok(()) => log::info!("executor: true mega-kernel compiled successfully"),
+                        Err(e) => log::warn!("executor: true mega-kernel compilation skipped ({e})"),
+                    }
+                }
+
+                Some(mega)
             } else {
                 None
             }
