@@ -1444,6 +1444,63 @@ impl Client {
     pub(crate) fn state_handle(&self) -> Arc<ArcSwapOption<ClientState>> {
         Arc::clone(&self.state)
     }
+
+    // -----------------------------------------------------------------
+    // Semantic Gatekeeper (SPEC/04-API-DESIGN.md §7.1, SPEC/SEMANTIC-GATEKEEPER.md)
+    //
+    // Phase E scaffold: API 签名对齐 SPEC,内部返回 Phase C pending 错误,
+    // 直到 SymDim 穿透 + Q-tap codegen + LevelKeysCache 预计算落地.
+    // 测试文件 `tests/test_e2e_semantic_gatekeeper.rs` 依赖此签名校验
+    // API 可调用性 (NO_ISLAND_MODULE 合规 — 集成调用链占位).
+    // -----------------------------------------------------------------
+
+    /// Register a Semantic Gatekeeper on the currently loaded model.
+    ///
+    /// Triggers Level Keys precomputation + Q-tap epilogue injection on
+    /// detection layers. Subsequent `generate()` calls automatically engage SG.
+    ///
+    /// # 关联
+    /// - SPEC/SEMANTIC-GATEKEEPER.md §3 Level Keys 预计算
+    /// - SPEC/SEMANTIC-GATEKEEPER.md §4 FusedAttentionLayer Q-Tap
+    /// - SPEC/04-API-DESIGN.md §7.1
+    pub fn register_semantic_gatekeeper(
+        &self,
+        config: crate::semantic_gatekeeper::SemanticGatekeeperConfig,
+    ) -> Result<(), ClientError> {
+        // SPEC 铁律: validate() 必须在预计算前执行,拒绝非法配置
+        config
+            .validate()
+            .map_err(|e| ClientError::RuntimeError(format!("gatekeeper config invalid: {e}")))?;
+        // Phase E 占位: 预计算流水线 (LevelKeysCache + Q-tap codegen) 待 Phase C
+        // SymDim 穿透完成后接入; 当前返回显式错误,严禁静默 NOP.
+        Err(ClientError::RuntimeError(
+            "semantic gatekeeper: Phase C pending (LevelKeysCache + Q-tap codegen)".to_string(),
+        ))
+    }
+
+    /// Unregister the Semantic Gatekeeper, releasing Level Keys cache and
+    /// reverting detection-layer FusedAttentionLayer back to `q_tap: None`.
+    ///
+    /// 幂等操作: 无 SG 注册时不返回错误.
+    ///
+    /// # 关联
+    /// - SPEC/04-API-DESIGN.md §7.1
+    pub fn unregister_semantic_gatekeeper(&self) -> Result<(), ClientError> {
+        // Phase E 占位: 当前无注册状态可清理,幂等 Ok.
+        Ok(())
+    }
+
+    /// Reset gatekeeper runtime state (ActiveState) without discarding the
+    /// precomputed Level Keys cache. Use case: cross-request cold boundary or
+    /// explicit semantic context switch.
+    ///
+    /// # 关联
+    /// - SPEC/SEMANTIC-GATEKEEPER.md §5.3 Refresh Triggers
+    /// - SPEC/04-API-DESIGN.md §7.1
+    pub fn reset_gatekeeper_state(&self) -> Result<(), ClientError> {
+        // Phase E 占位: 当前 ActiveState 未驻留 Client,幂等 Ok.
+        Ok(())
+    }
 }
 
 // ============================================================================

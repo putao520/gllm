@@ -154,7 +154,7 @@ impl LayerCallback for SemanticGatekeeperCallback {
                 Ok(s) => s,
                 Err(_) => return CallbackAction::Continue,
             };
-            let req_id = RequestId(ctx.request_id);
+            let req_id: RequestId = ctx.request_id;
             if state.needs_request_boundary_refresh(req_id) {
                 state.clear();
             }
@@ -218,7 +218,7 @@ impl LayerCallback for SemanticGatekeeperCallback {
                 generated_tokens: &[],
                 ast: ast_ctx,
                 step,
-                request_id: RequestId(ctx.request_id),
+                request_id: ctx.request_id as RequestId,
             };
             let entry = match self.provider.retrieve(&q, level, &retrieve_ctx) {
                 Some(e) => e,
