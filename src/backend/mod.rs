@@ -962,6 +962,30 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => exec.set_rag_system(rag),
         }
     }
+
+    /// §9 Set the Semantic Gatekeeper callback shim for injection into
+    /// the per-forward CallbackChain (SPEC/SEMANTIC-GATEKEEPER.md Phase C).
+    pub fn set_sg_callback_shim(
+        &mut self,
+        shim: crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim,
+    ) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.set_sg_callback_shim(shim),
+            BackendExecutor::Rocm(exec) => exec.set_sg_callback_shim(shim),
+            BackendExecutor::Metal(exec) => exec.set_sg_callback_shim(shim),
+            BackendExecutor::Cpu(exec) => exec.set_sg_callback_shim(shim),
+        }
+    }
+
+    /// Remove the Semantic Gatekeeper callback shim from the executor.
+    pub fn clear_sg_callback_shim(&mut self) {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.clear_sg_callback_shim(),
+            BackendExecutor::Rocm(exec) => exec.clear_sg_callback_shim(),
+            BackendExecutor::Metal(exec) => exec.clear_sg_callback_shim(),
+            BackendExecutor::Cpu(exec) => exec.clear_sg_callback_shim(),
+        }
+    }
 }
 
 /// Backward-compatible type alias for f32 backend executor.

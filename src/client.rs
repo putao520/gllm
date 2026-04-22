@@ -340,6 +340,7 @@ impl ClientBuilder {
             multimodal_encoder: Arc::new(std::sync::Mutex::new(auto_encoder)),
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            sg_callback: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -670,6 +671,8 @@ pub struct Client {
     guardrails: Arc<std::sync::Mutex<HashMap<u64, GuardrailRegistration>>>,
     /// Monotonic id allocator for `attach_guardrail`.
     guardrail_next_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Registered Semantic Gatekeeper callback (SPEC/SEMANTIC-GATEKEEPER.md).
+    sg_callback: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<crate::semantic_gatekeeper::SemanticGatekeeperCallback>>>>>,
 }
 
 /// Internal storage for a registered Guardrail (kept inside the Client).
@@ -717,6 +720,7 @@ impl Client {
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            sg_callback: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -727,6 +731,7 @@ impl Client {
             multimodal_encoder: Arc::new(std::sync::Mutex::new(None)),
             guardrails: Arc::new(std::sync::Mutex::new(HashMap::new())),
             guardrail_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            sg_callback: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1240,6 +1245,19 @@ impl Client {
         hidden_size: usize,
     ) -> Option<crate::graph::layer_callback::CallbackChain> {
         let mut callbacks = extra;
+
+        // Semantic Gatekeeper callback (priority 90, pre_node) — SPEC §2.9
+        if let Ok(slot) = self.sg_callback.lock() {
+            if let Some(sg_arc) = slot.as_ref() {
+                callbacks.push(Box::new(
+                    crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim {
+                        inner: std::sync::Arc::clone(sg_arc),
+                        hidden_size,
+                    },
+                ));
+            }
+        }
+
         for reg in self.guardrail_registrations() {
             // Reset shared state so each forward produces a fresh snapshot.
             reg.shared.reset();
@@ -2075,6 +2093,20 @@ impl Client {
                 })
             }
         }
+        struct OwnedTokenizerAdapter(crate::tokenizer::TokenizerHandle);
+        impl crate::semantic_gatekeeper::TokenizerEncoder for OwnedTokenizerAdapter {
+            fn encode(
+                &self,
+                text: &str,
+            ) -> Result<Vec<u32>, crate::semantic_gatekeeper::TokenizerEncodeError> {
+                if text.trim().is_empty() {
+                    return Err(crate::semantic_gatekeeper::TokenizerEncodeError::EmptyText);
+                }
+                self.0.encode(text, false).map_err(|e| {
+                    crate::semantic_gatekeeper::TokenizerEncodeError::Backend(format!("{e}"))
+                })
+            }
+        }
         let adapter = TokenizerAdapter(executor.tokenizer());
         let level_keys = precompute_level_keys(
             &config,
@@ -2087,45 +2119,85 @@ impl Client {
             dtype,
         )
         .map_err(sg_err_to_client)?;
+
+        // Clone tokenizer BEFORE dropping executor — TokenizerHandle is Clone.
+        let tokenizer_clone = executor.tokenizer().clone();
         drop(executor);
 
-        // ── 7. 构造 Q-tap ring buffer (sink_ptr 将由 Phase C codegen 读取) ──
-        let _ring_buffer = std::sync::Arc::new(
+        // ── 7. 构造 Q-tap ring buffer ──
+        let ring_buffer = std::sync::Arc::new(
             crate::semantic_gatekeeper::GatekeeperRingBuffer::new(q_dim, dtype.size_bytes()),
         );
 
-        // ── 8. 断言预计算产物完整 (防御性 assert, 不构造 callback 因 Phase C pending) ──
+        // ── 8. 断言预计算产物完整 ──
         debug_assert_eq!(level_keys.detection_layers(), detection_layers.as_slice());
         debug_assert_eq!(level_keys.kv_dim(), kv_dim);
         debug_assert_eq!(level_keys.len(), detection_layers.len());
 
-        // ── 9-10. Phase C 依赖: FusedAttentionLayer q_tap codegen + callback 注入 ──
-        //
-        // 预计算 (steps 1-8) 走完证明 SG 在本模型上的可行性, 但注册流程未闭合:
-        // - executor 尚无 callback_chain_override 字段, 无法持有长寿命 callback
-        // - FusedAttentionLayer 的 q_tap sink_ptr 由 gllm-kernels Q-tap
-        //   epilogue codegen 注入, 该路径 Phase C 未落地
-        // 返回显式错误, 禁止以 "注册成功" 名义误导调用方.
-        Err(ClientError::RuntimeError(
-            "semantic gatekeeper: Phase C pending — FusedAttentionLayer q_tap codegen + \
-             executor callback chain injection not yet integrated, \
-             register_semantic_gatekeeper not operational \
-             (pre-registration JIT precompute validated)"
-                .to_string(),
-        ))
+        // ── 9. 构造 TextEncoder (使用 EmbedLookupOnlyGraph 走完整 JIT 管线) ──
+        let text_encoder: Arc<dyn crate::semantic_gatekeeper::callback::TextEncoder> =
+            Arc::new(crate::semantic_gatekeeper::small_graph::EmbedTextEncoder::new(
+                embed_graph,
+                Box::new(OwnedTokenizerAdapter(tokenizer_clone)),
+                hidden_size,
+                dtype,
+            ));
+
+        // ── 10. 构造 SemanticGatekeeperCallback ──
+        // TextEncoder + TokenizerLookup 都需要 tokenizer, 但 TokenizerHandle 不 Clone.
+        // 用已构造的 text_encoder 处理 encode, callback 的 tokenizer 字段用空实现
+        // (AST sentinel 暂不支持 — 用户提供时需自行处理 decode).
+        let sg_callback = crate::semantic_gatekeeper::SemanticGatekeeperCallback::new(
+            std::sync::Arc::new(level_keys),
+            ring_buffer,
+            config.knowledge_provider.clone(),
+            config.ast_sentinel.clone(),
+            text_encoder,
+            Arc::new(crate::semantic_gatekeeper::NoOpTokenizerLookup),
+            config.gate_threshold,
+            config.stability_threshold,
+            config.alpha,
+            hidden_size,
+        );
+
+        // ── 11. 持久化到 Client + 注入到 Executor ──
+        let sg_arc = Arc::new(std::sync::Mutex::new(sg_callback));
+        {
+            let mut slot = self.sg_callback.lock().map_err(|e| {
+                ClientError::RuntimeError(format!("semantic gatekeeper: lock poisoned: {e}"))
+            })?;
+            *slot = Some(Arc::clone(&sg_arc));
+        }
+
+        // Inject SG shim into executor so run_batch_forward includes it.
+        {
+            let mut executor = state.backend.executor_mut();
+            let shim = crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim {
+                inner: sg_arc,
+                hidden_size,
+            };
+            executor.set_sg_callback_shim(shim);
+        }
+
+        Ok(())
     }
 
     /// Unregister the Semantic Gatekeeper, releasing Level Keys cache and
-    /// reverting detection-layer FusedAttentionLayer back to `q_tap: None`.
+    /// clearing the SG callback from the Client.
     ///
-    /// 幂等操作 (SPEC §7.1): 无 SG 注册状态时 `Ok(())`. 由于当前
-    /// `register_semantic_gatekeeper` 于 Phase C 之前始终返回 Err (未正式注册),
-    /// Client 从未持有 SG 状态, 故本函数始终 `Ok(())`. Phase C 完成后
-    /// 若存在真实注册状态将清理 callback 链 + 恢复 q_tap: None.
+    /// 幂等操作 (SPEC §7.1): 无 SG 注册状态时 `Ok(())`.
     ///
     /// # 关联
     /// - SPEC/04-API-DESIGN.md §7.1
     pub fn unregister_semantic_gatekeeper(&self) -> Result<(), ClientError> {
+        if let Ok(mut slot) = self.sg_callback.lock() {
+            *slot = None;
+        }
+        // Clear SG shim from executor.
+        if let Some(state) = self.state.load().as_ref() {
+            let mut executor = state.backend.executor_mut();
+            executor.clear_sg_callback_shim();
+        }
         Ok(())
     }
 

@@ -595,6 +595,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     hot_patch_manager: Option<crate::moe::hot_patch::HotPatchManager>,
     /// §9.3 残差数据总线（Injection/Recall 端口）
     residual_bus: crate::routing::ResidualBus,
+    /// §9 Semantic Gatekeeper callback shim (set via set_sg_callback).
+    sg_callback_shim: Option<crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -1295,6 +1297,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 );
                 bus
             },
+            sg_callback_shim: None,
         })
     }
 
@@ -1758,9 +1761,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         callbacks.push(Box::new(bus_bridge));
 
         // §2.9 Semantic Gatekeeper callback (priority 90, pre_node)
-        // Real registration happens via Client::register_semantic_gatekeeper which
-        // inserts the SemanticGatekeeperCallback into the chain directly. Executor
-        // itself no longer holds knowledge-injection state.
+        if let Some(ref shim) = self.sg_callback_shim {
+            callbacks.push(Box::new(
+                crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim {
+                    inner: std::sync::Arc::clone(&shim.inner),
+                    hidden_size: shim.hidden_size,
+                },
+            ));
+        }
 
         // §16.1 RAG Inject callback (priority 80, pre_node)
         if let Some(rag) = self.rag_system.take() {
@@ -1811,6 +1819,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// §16.1 Set the Late-Fusion RAG system for RagInjectCallback.
     pub fn set_rag_system(&mut self, rag: crate::rag::LateFusionRag) {
         self.rag_system = Some(rag);
+    }
+
+    /// §9 Set the Semantic Gatekeeper callback shim for injection into the
+    /// per-forward CallbackChain.
+    pub fn set_sg_callback_shim(
+        &mut self,
+        shim: crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim,
+    ) {
+        self.sg_callback_shim = Some(shim);
+    }
+
+    /// Remove the Semantic Gatekeeper callback shim.
+    pub fn clear_sg_callback_shim(&mut self) {
+        self.sg_callback_shim = None;
     }
 
     /// Main Engine Step: Continuous Batching

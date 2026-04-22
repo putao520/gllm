@@ -17,7 +17,7 @@ pub enum TokenizerError {
 
 pub type TokenizerResult<T> = std::result::Result<T, TokenizerError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TokenizerHandle {
     tokenizer: Tokenizer,
 }

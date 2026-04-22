@@ -321,3 +321,39 @@ impl SemanticGatekeeperConfig {
         set.into_iter().collect()
     }
 }
+
+// ============================================================================
+// ClientTokenizer — bridge from gllm TokenizerHandle to SG traits
+// ============================================================================
+
+/// Wraps `crate::tokenizer::TokenizerHandle` to implement both
+/// `TokenizerEncoder` (for level key precomputation) and `TokenizerLookup`
+/// (for SG callback AST sentinel text decoding).
+pub struct ClientTokenizer(pub crate::tokenizer::TokenizerHandle);
+
+impl TokenizerEncoder for ClientTokenizer {
+    fn encode(&self, text: &str) -> Result<Vec<u32>, TokenizerEncodeError> {
+        if text.trim().is_empty() {
+            return Err(TokenizerEncodeError::EmptyText);
+        }
+        self.0.encode(text, false).map_err(|e| {
+            TokenizerEncodeError::Backend(format!("{e}"))
+        })
+    }
+}
+
+impl TokenizerLookup for ClientTokenizer {
+    fn decode(&self, tokens: &[u32]) -> String {
+        self.0.decode(tokens, false).unwrap_or_default()
+    }
+}
+
+/// Fallback tokenizer lookup that returns empty string.
+/// Used when the main model tokenizer is not available for callback's AST sentinel.
+pub struct NoOpTokenizerLookup;
+
+impl TokenizerLookup for NoOpTokenizerLookup {
+    fn decode(&self, _tokens: &[u32]) -> String {
+        String::new()
+    }
+}

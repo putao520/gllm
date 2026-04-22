@@ -231,6 +231,80 @@ impl EmbedLookupOnlyGraph {
 }
 
 // ============================================================================
+// EmbedTextEncoder — TextEncoder implementation using EmbedLookupOnlyGraph
+// ============================================================================
+
+/// Encodes text to `hidden_size`-dim f32 vector via tokenize → embed → mean-pool.
+///
+/// Uses the main model's frozen embedding table to ensure `v_knowledge`
+/// lives in the same semantic space as hidden states (SPEC §8.6).
+pub struct EmbedTextEncoder {
+    graph: EmbedLookupOnlyGraph,
+    tokenizer: Box<dyn super::TokenizerEncoder>,
+    hidden_size: usize,
+    dtype: DType,
+}
+
+impl EmbedTextEncoder {
+    pub fn new(
+        graph: EmbedLookupOnlyGraph,
+        tokenizer: Box<dyn super::TokenizerEncoder>,
+        hidden_size: usize,
+        dtype: DType,
+    ) -> Self {
+        Self { graph, tokenizer, hidden_size, dtype }
+    }
+}
+
+impl super::callback::TextEncoder for EmbedTextEncoder {
+    fn encode(&self, text: &str) -> Result<Vec<f32>, super::callback::TextEncoderError> {
+        let tokens = self.tokenizer.encode(text)
+            .map_err(|e| super::callback::TextEncoderError::Tokenize(format!("{e}")))?;
+        if tokens.is_empty() {
+            return Err(super::callback::TextEncoderError::Tokenize("empty tokens".into()));
+        }
+        let bytes = self.graph.encode_tokens(&tokens)
+            .map_err(|e| super::callback::TextEncoderError::Execute(format!("{e}")))?;
+        // Mean-pool: bytes layout is [seq_len, hidden_size] × dtype_size.
+        let seq_len = tokens.len();
+        let elem_size = self.dtype.size_bytes();
+        let hs = self.hidden_size;
+        let mut result = vec![0.0f32; hs];
+        for s in 0..seq_len {
+            for h in 0..hs {
+                let byte_off = (s * hs + h) * elem_size;
+                let val: f32 = match self.dtype {
+                    DType::F32 => {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(&bytes[byte_off..byte_off + 4]);
+                        f32::from_le_bytes(buf)
+                    }
+                    DType::F16 => {
+                        let mut buf = [0u8; 2];
+                        buf.copy_from_slice(&bytes[byte_off..byte_off + 2]);
+                        half::f16::from_le_bytes(buf).to_f32()
+                    }
+                    DType::BF16 => {
+                        let mut buf = [0u8; 2];
+                        buf.copy_from_slice(&bytes[byte_off..byte_off + 2]);
+                        half::bf16::from_le_bytes(buf).to_f32()
+                    }
+                    _ => return Err(super::callback::TextEncoderError::Execute(
+                        format!("unsupported dtype {:?}", self.dtype),
+                    )),
+                };
+                result[h] += val;
+            }
+        }
+        let inv = 1.0 / seq_len as f32;
+        for x in result.iter_mut() {
+            *x *= inv;
+        }
+        Ok(result)
+    }
+}
+
+// ============================================================================
 // KProjOnlyGraph
 // ============================================================================
 

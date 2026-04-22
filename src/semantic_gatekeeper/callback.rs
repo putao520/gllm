@@ -468,6 +468,43 @@ enum ExtractError {
 }
 
 // ============================================================================
+// SemanticGatekeeperCallbackShim — Arc wrapper for LayerCallback
+// ============================================================================
+
+/// Thin wrapper that allows `Arc<Mutex<SemanticGatekeeperCallback>>` to be used as
+/// `Box<dyn LayerCallback + Send>` in the per-forward `CallbackChain`.
+///
+/// Uses `std::sync::Mutex` to provide `&mut self` access through `Arc`.
+pub struct SemanticGatekeeperCallbackShim {
+    pub inner: Arc<std::sync::Mutex<SemanticGatekeeperCallback>>,
+    pub hidden_size: usize,
+}
+
+impl LayerCallback for SemanticGatekeeperCallbackShim {
+    fn pre_node(&mut self, ctx: &LayerContext) -> CallbackAction {
+        match self.inner.lock() {
+            Ok(mut cb) => cb.pre_node(ctx),
+            Err(_) => CallbackAction::Continue,
+        }
+    }
+
+    fn priority(&self) -> u32 {
+        SEMANTIC_GATEKEEPER_PRIORITY
+    }
+
+    fn target_layers(&self) -> Option<&[usize]> {
+        match self.inner.lock() {
+            Ok(cb) => Some(cb.detection_layers().to_vec().leak() as &[usize]),
+            Err(_) => None,
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SemanticGatekeeper"
+    }
+}
+
+// ============================================================================
 // 单元测试
 // ============================================================================
 
