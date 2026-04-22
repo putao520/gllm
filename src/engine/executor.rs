@@ -1037,62 +1037,51 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         };
 
-        // §9.1: 从 graph_executor 构建 MegaKernelExecutor（在 move 之前）
+        // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
+        // ARCH-RUST-IS-CODEGEN: 推理时 Rust 只做一次 CALL。
+        // 逐节点 legacy 路径已废弃，禁止回退。
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let mega_kernel = if let Some(ref ge) = graph_executor {
-            if ge.is_compiled() {
-                log::info!("executor: §9.1 MegaKernelExecutor built from compiled graph_executor");
+        let mega_kernel = {
+            let ge = graph_executor.as_ref()
+                .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                    "graph_executor not available for mega-kernel compilation".into(),
+                )))?;
 
-                // Try to upgrade to true mega-kernel (single-CALL path)
-                let eos_id = model_config.eos_token_id.unwrap_or(2);
-                let mut mega = super::mega_kernel::MegaKernelExecutor::from_graph_executor(
-                    crate::graph::executor::FusedGraphExecutor::new(ge.graph().clone()),
-                    geometry.num_layers,
-                    geometry.hidden_size,
-                    geometry.vocab_size,
-                    geometry.dtype,
-                    eos_id,
-                );
+            let eos_id = model_config.eos_token_id.unwrap_or(2);
 
-                // Collect weight pointers from FusedGraph's weight_bindings
-                let wb = &ge.graph().weight_bindings;
-                let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
-                let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-                for (name, binding) in wb {
-                    if let Some(ptr) = binding.ptr {
-                        weight_ptrs.insert(name.clone(), ptr as *const u8);
-                        let elem_bytes = match binding.dtype {
-                            safetensors::Dtype::F32 => 4,
-                            safetensors::Dtype::F16 => 2,
-                            safetensors::Dtype::BF16 => 2,
-                            _ => 4,
-                        };
-                        let size: usize = binding.shape.iter().product::<usize>() * elem_bytes;
-                        weight_sizes.insert(name.clone(), size);
-                    } else if let Some(ref data) = binding.data {
-                        weight_ptrs.insert(name.clone(), data.as_ptr());
-                        weight_sizes.insert(name.clone(), data.len());
-                    }
+            // Collect weight pointers from FusedGraph's weight_bindings
+            let wb = &ge.graph().weight_bindings;
+            let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
+            let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for (name, binding) in wb {
+                if let Some(ptr) = binding.ptr {
+                    weight_ptrs.insert(name.clone(), ptr as *const u8);
+                    let elem_bytes = match binding.dtype {
+                        safetensors::Dtype::F32 => 4,
+                        safetensors::Dtype::F16 => 2,
+                        safetensors::Dtype::BF16 => 2,
+                        _ => 4,
+                    };
+                    let size: usize = binding.shape.iter().product::<usize>() * elem_bytes;
+                    weight_sizes.insert(name.clone(), size);
+                } else if let Some(ref data) = binding.data {
+                    weight_ptrs.insert(name.clone(), data.as_ptr());
+                    weight_sizes.insert(name.clone(), data.len());
                 }
-
-                if !weight_ptrs.is_empty() {
-                    match mega.try_compile_true_mega_kernel(
-                        &geometry,
-                        &weight_ptrs,
-                        &weight_sizes,
-                        eos_id,
-                    ) {
-                        Ok(()) => log::info!("executor: true mega-kernel compiled successfully"),
-                        Err(e) => log::warn!("executor: true mega-kernel compilation skipped ({e})"),
-                    }
-                }
-
-                Some(mega)
-            } else {
-                None
             }
-        } else {
-            None
+
+            // 直接编译 true mega-kernel，失败则返回错误（不回退）
+            let mega = super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
+                &geometry,
+                &weight_ptrs,
+                &weight_sizes,
+                eos_id,
+            ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                format!("mega-kernel compilation failed (ARCH-RUST-IS-CODEGEN: no fallback): {}", e),
+            )))?;
+
+            log::info!("executor: true mega-kernel compiled — single-CALL inference path active");
+            Some(mega)
         };
 
         // MoE subsystem: read global ExecutionPlan once, initialize all three
@@ -1676,31 +1665,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     fn run_batch_forward(&mut self, batch_input: &BatchInput) -> ExecutorResult<(Vec<LogitsHandle>, f32, Vec<crate::scheduler::SequenceTelemetry>)> {
-        // §9.1: 优先走 Mega-Kernel 路径（单一 Launch）
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        if let Some(ref mega) = self.mega_kernel {
-            if mega.is_compiled() {
-                log::debug!("executor: using MegaKernel path ({} sequences)", batch_input.sequences.len());
-                // 准备 MegaBatch（RequestStateTable + 值域分组）
-                let request_ids: Vec<_> = (0..batch_input.sequences.len() as u64).collect();
-                let mega_batch = mega.prepare_batch(
-                    batch_input.clone(),
-                    request_ids,
-                    &self.telemetry_aggregator,
-                );
-                let outputs = mega.execute(&mega_batch)
-                    .map_err(|e| ExecutorError::Backend(BackendError::Other(
-                        format!("§9.1 MegaKernel execution failed: {}", e),
-                    )))?;
-                // 将 MegaKernel 输出转换为标准格式
-                let logits_list: Vec<LogitsHandle> = outputs.into_iter()
-                    .map(|data| LogitsHandle { data })
-                    .collect();
-                let sparsity = 0.0;
-                let telemetry = vec![Default::default(); logits_list.len()];
-                return Ok((logits_list, sparsity, telemetry));
-            }
-        }
+        // ARCH-RUST-IS-CODEGEN: mega-kernel 是唯一推理路径
+        // generate_with_sampling() 已通过 generate_single_sequence() 处理完整生成循环
+        // run_batch_forward() 仅在 step-by-step 连续批处理模式中被调用，
+        // 该模式尚未迁移到 mega-kernel（需要 per-step KV cache 管理）
 
         // 标准路径：逐层执行
         if let Some(plan) = self.onnx_generator_plan.as_ref() {
@@ -2807,23 +2775,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         top_p: f32,
         thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        // Mega-kernel 快速路径：单次 CALL 完成 prompt encode → N 层 → lm_head → sampling → generate loop
-        // 所有逻辑在 JIT 机器码中执行，Rust 仅做 tokenize + 一次 CALL + detokenize
+        // ARCH-RUST-IS-CODEGEN: 单次 CALL 完成 prompt encode → N 层 → lm_head → sampling → generate loop
         #[cfg(target_arch = "x86_64")]
         if let Some(ref mega) = self.mega_kernel {
-            if mega.is_compiled() && mega.has_true_mega_kernel() {
-                let prompt_tokens = self.encode_prompt(prompt)?;
-                let output_tokens = mega.generate_single_sequence(
-                    &prompt_tokens,
-                    max_tokens,
-                    temperature,
-                    top_k,
-                    top_p,
-                ).map_err(|e| ExecutorError::Backend(BackendError::Other(
-                    format!("mega-kernel generate failed: {}", e),
-                )))?;
-                return self.decode_tokens(&output_tokens);
-            }
+            let prompt_tokens = self.encode_prompt(prompt)?;
+            let output_tokens = mega.generate_single_sequence(
+                &prompt_tokens,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+            ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                format!("mega-kernel generate failed: {}", e),
+            )))?;
+            return self.decode_tokens(&output_tokens);
         }
 
         if prompt.trim().is_empty() {
