@@ -85,6 +85,7 @@ impl MegaKernelExecutor {
             max_seq_len: geometry.max_seq_len,
             num_eos_tokens: 1,
             rope_scaling: None,
+            business_config: gllm_kernels::compiler::MegaKernelBusinessConfig::default(),
         };
 
         // 单一函数编译: graph → fusion → VmProgram(generate loop + forward + argmax + EOS)
