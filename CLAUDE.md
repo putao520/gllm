@@ -68,6 +68,7 @@
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 | ✅ |
 | `../gllm-kernels/SPEC/ARCH-DATA-FLOW-CONTRACT.md` | **数据流唯一来源契约** — lower/executor 每个值的唯一数据源映射表，禁止独立计算/反推/硬编码 | ✅ |
+| `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md` | **全虚拟化编译管线 (SSOT)** — 元抽象: 编译时映射函数替代运行时物理操作; 八维全虚拟化图谱 (数据/寄存器/内存/控制/维度/计算/权重/激活); VTC 虚拟 tensor (OSDI'26 arXiv:2604.09558); PDT 拓扑融合; GEMM 融合优先级 (EpilogueInjection 3.0× > NormIntoGemm/TileLevelFusion 1.5-2.0× > LoopFusion 1.0×); 5 轮虚拟化求解; Phase 3 唯一物化点 | 🟡 设计完成，实施中 |
 
 ## Technology Stack
 

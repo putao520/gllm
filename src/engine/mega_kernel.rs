@@ -33,7 +33,7 @@ struct MegaKernelCompiled {
     buffer_layout: gllm_kernels::compiler::MegaKernelBufferLayout,
     /// 预打包的连续权重 blob
     weight_blob: Vec<u8>,
-    /// mmap'd 可执行缓冲区（mega-kernel 机器码）
+    /// mmap'd 完整 mega-kernel 机器码（generate loop + embedded forward code，单一连续函数）
     exec_code: gllm_kernels::compiler::CompiledLayer,
     /// MegaKernelFn 函数指针（指向 exec_code 的入口）
     entry_fn: gllm_kernels::compiler::MegaKernelFn,
@@ -59,9 +59,8 @@ pub struct MegaKernelExecutor {
 impl MegaKernelExecutor {
     /// 从 ModelGeometry 编译 true mega-kernel。
     ///
-    /// 1. 编译单层模板图 (CompiledLayerFn)
-    /// 2. 发射完整 mega-kernel wrapper（embedding → N 层循环 → lm_head → sampling → generate loop）
-    /// 3. 预打包所有权重到连续 blob
+    /// 单一函数管线: 整个 decoder 模型 (embed → N 层 → lm_head → argmax → generate loop)
+    /// 编译为单一 JIT 机器码函数，通过一次 `compile_mega_kernel` 调用完成。
     ///
     /// 编译失败直接返回错误，不 fallback。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
@@ -88,30 +87,16 @@ impl MegaKernelExecutor {
             rope_scaling: None,
         };
 
-        // Step 1: 编译单层模板图
+        // 单一函数编译: graph → fusion → VmProgram(generate loop + forward + argmax + EOS)
+        //                → opt → RegAlloc → StackFrame → X86Lower → assemble
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
-        let forward_fn = unsafe { output.layer_code.entry_point() };
-
-        // Step 2: Emit generate loop wrapper (calls forward_fn in a loop with argmax sampling)
-        let mega_code = gllm_kernels::compiler::codegen::vm::mega_kernel_emit::emit_mega_kernel_x86(
-            &config,
-            &output.weight_layout,
-            &output.buffer_layout,
-            forward_fn,
-        ).map_err(|e| MegaKernelError::Compilation(format!("mega-kernel emit: {}", e)))?;
-
-        let exec_code = gllm_kernels::compiler::CompiledLayer::from_code(
-            &mega_code,
-            output.buffer_layout.total_scratchpad_bytes,
-            0,
-        ).map_err(|e| MegaKernelError::Compilation(format!("mega-kernel exec buffer: {}", e)))?;
-
+        let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
 
-        // Step 3: 打包权重到连续 blob
+        // 打包权重到连续 blob
         let weight_blob = pack_mega_kernel_weights(
             &output.weight_layout,
             geometry.num_layers,
@@ -178,9 +163,9 @@ impl MegaKernelExecutor {
                 prompt_len,
                 scratchpad.as_mut_ptr(),
                 output_tokens.as_mut_ptr(),
-                temperature,
+                temperature.to_bits(),  // u32 for x86-64 SysV ABI stack passing
                 top_k as u32,
-                top_p,
+                top_p.to_bits(),        // u32 for x86-64 SysV ABI stack passing
                 max_new_tokens as u32,
                 self.eos_token_id,
                 std::ptr::null(),

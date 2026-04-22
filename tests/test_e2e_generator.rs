@@ -7,6 +7,10 @@
 
 use gllm::Client;
 
+fn install_segv_handler() {
+    // no-op — using RUST_BACKTRACE=1 + ulimit instead
+}
+
 // ============================================================================
 // Anti-cheating helpers
 // ============================================================================
