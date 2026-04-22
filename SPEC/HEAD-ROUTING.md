@@ -52,21 +52,26 @@
  │                                                                  │
  │  1. prompt → executor.encode_prompt() → tokens: Vec<u32>         │
  │                                                                  │
- │  2. 前向路径选择:                                                 │
- │     (binary/multiway) backend.score_tokens_forward_gpu_pure      │
- │       → FusedGraphExecutor::run() (完整前向)                     │
- │       → last_token_hidden × embed_tokens.T[target_ids]           │
- │       → Vec<f32> 原始 logits                                     │
+ │  2. Mega-Kernel 路径 (ARCH-RUST-IS-CODEGEN):                    │
+ │     output_mode_selector 参数驱动 JMP table:                     │
+ │     ├── 0: generate (argmax → store → check → loop)             │
+ │     ├── 1: classify_binary (WriteLogits → output buffer)        │
+ │     ├── 2: classify_multiway (WriteLogits → output buffer)      │
+ │     └── 3: encode_to_layer (EarlyExit → pool → output buffer)   │
  │                                                                  │
- │     (encode_to_layer) 需 FusedGraphExecutor 支持 mid-layer exit  │
- │       → Err(HeadRoutingError::MidLayerNotSupported) (explicit)   │
+ │     单一 mega-kernel CALL, 零重编译 (§2.2 铁律)                   │
  │                                                                  │
- │  3. 后处理:                                                       │
- │     binary   — softmax over {positive, negative} → P(positive)   │
- │     multiway — softmax over N tokens            → Vec<f32>       │
- │     encode   — PoolMode::{MeanPool,LastToken,ClsToken} → Vec<f32>│
+ │  3. Rust 后处理:                                                  │
+ │     binary   — softmax over output buffer logits → P(positive)   │
+ │     multiway — softmax over output buffer logits → Vec<f32>      │
+ │     encode   — Vec<f32> 直接返回 (pool 已在 JIT 内完成)          │
  └──────────────────────────────────────────────────────────────────┘
 ```
+
+> **Mega-Kernel 架构**: Head Routing 的 runtime switching 通过 MegaKernelFn ABI
+> 参数 `output_mode_selector` (u32) 驱动 JMP table 实现。所有 output modes 在加载时
+> 编译进单一 JIT 函数，运行时切换仅改变一个 ABI 参数值。详见
+> `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.5`。
 
 ### 2.2 关键不变量 (铁律)
 
@@ -249,14 +254,16 @@ Err(HeadRoutingError::MidLayerNotSupported)
 
 错误消息包含固定子串 `"MidLayerNotSupported"` 以便上层程序匹配 (REQ-HR-003 验收标准 #2)。
 
-### 5.4 未来扩展路径
+### 5.4 实现路径 (Mega-Kernel EarlyExit)
 
-当 `FusedGraphExecutor::run_with_early_exit(anchor_layer, pool: PoolMode)` 实现后:
+`encode_to_layer` 通过 mega-kernel 的 `EarlyExit` op 实现:
 
-1. 预编译期: 为每个 decoder layer 边界注册 `ExitEarlyCallback` 挂载点
-2. 运行时: `anchor_layer` 对应的 callback 收到 `post_node` 调用时返回 `CallbackAction::ExitEarly { logits: hidden_state_bytes }`
-3. `run_with_early_exit` 解析 bytes → `Vec<f32>`,pool 后返回
-4. `HeadRoutingError::MidLayerNotSupported` 从 `encode_to_layer` 实现中移除,统一走 JIT 管线
+1. 编译时: `decoder_model()` 在 `intent_anchor_layer` 对应的层循环位置插入 `EarlyExit` op
+2. VM lowering: `EarlyExit` 编译为 CMP layer_counter + JE .early_exit_path
+3. early_exit_path: 从当前 hidden state 做 pool (MeanPool/LastToken/ClsToken) → 写入 output buffer → BreakLoop
+4. 运行时: `output_mode_selector=3` + `anchor_layer` 参数传入 mega-kernel → JIT 内完成截断和 pool
+
+**依赖**: `GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.5` OutputModeDispatch JMP table + `EarlyExit` op 的 x86 lowering。
 
 ---
 
