@@ -93,16 +93,14 @@ impl MegaKernelExecutor {
         let output = compiler.compile_mega_kernel(&config)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
-        let layer_fn = unsafe { output.layer_code.entry_point() };
-        let lm_head_fn = layer_fn;
+        let forward_fn = unsafe { output.layer_code.entry_point() };
 
-        // Step 2: 发射完整 mega-kernel wrapper
+        // Step 2: Emit generate loop wrapper (calls forward_fn in a loop with argmax sampling)
         let mega_code = gllm_kernels::compiler::codegen::vm::mega_kernel_emit::emit_mega_kernel_x86(
             &config,
             &output.weight_layout,
             &output.buffer_layout,
-            layer_fn,
-            lm_head_fn,
+            forward_fn,
         ).map_err(|e| MegaKernelError::Compilation(format!("mega-kernel emit: {}", e)))?;
 
         let exec_code = gllm_kernels::compiler::CompiledLayer::from_code(
