@@ -709,20 +709,23 @@ Phase 4.5: OutputModeDispatch (JMP table)            ← 新增
 
 ```rust
 /// JMP table: 根据 output_mode_selector 分发到不同尾部路径。
-/// 仅在 business_config.output_modes.len() > 1 时由 compile_mega_kernel_vm 发射。
+/// HEAD-ROUTING 铁律: 零重编译 → 必须无条件发射（始终包含所有 4 条路径）。
+/// 即使模型只配置了 generate 模式，JMP table 仍然存在，3-5 条 CMP+JE 开销可忽略。
 ///
 /// x86 lower:
-///   Load [rbp+80] → CMP + JE 链 → 跳转到对应路径的 VmInstr 序列
+///   Load [rbp+80] → CMP + JE 链 → 跳转到 MarkLabel 标记的路径入口
+///   使用 dispatch_labels HashMap (label_id → CodeLabel) 机制，
+///   MarkLabel 在运行时 set_label 到实际代码位置。
 ///
 /// 寄存器需求: 1 GPR (selector value), 不使用 SIMD
 VmInstr::OutputModeDispatch {
     /// 从 ABI stack 读取的 selector VReg
     selector: VRegId,
-    /// 每条路径对应的 JMP 目标 (VmInstr 索引)
-    /// paths[0] = generate_path 起始索引
-    /// paths[1] = classify_binary_path 起始索引
-    /// paths[2] = classify_multiway_path 起始索引
-    /// paths[3] = encode_path 起始索引
+    /// 每条路径对应的 label ID (通过 MarkLabel 机制绑定到代码位置)
+    /// paths[0] = generate_path label ID
+    /// paths[1] = classify_binary_path label ID
+    /// paths[2] = classify_multiway_path label ID
+    /// paths[3] = encode_path label ID
     paths: Vec<usize>,
 }
 ```
@@ -744,31 +747,40 @@ VmInstr::BreakLoop {
 
 ```rust
 // Phase 4.5: Output mode dispatch (JMP table)
-if config.business_config.output_modes.len() > 1 {
-    let selector = prog.alloc_vreg(VRegKind::Scalar, SimdWidth::Scalar);
-    prog.emit(VmInstr::LoadPtr {
-        dst: selector,
-        src: PtrExpr::StackArg(80), // [rbp+80] = output_mode_selector
-    });
+// HEAD-ROUTING 铁律: 零重编译 → 无条件发射，所有 4 条路径始终存在
+const LABEL_GENERATE: usize = 0;
+const LABEL_CLASSIFY_BINARY: usize = 1;
+const LABEL_CLASSIFY_MULTIWAY: usize = 2;
+const LABEL_ENCODE: usize = 3;
 
-    // 记录各路径的起始指令索引
-    let generate_path_start = prog.instrs.len();
-    // ... emit argmax + store + check ...
-    let classify_binary_start = prog.instrs.len();
-    // ... emit WriteLogits ...
-    let classify_multiway_start = prog.instrs.len();
-    // ... emit WriteLogits ...
-    let encode_start = prog.instrs.len();
-    // ... emit Pool ...
+let selector = prog.alloc_vreg(VRegKind::Scalar, SimdWidth::Scalar);
+prog.emit(VmInstr::LoadPtr {
+    dst: selector,
+    src: PtrExpr::StackArg(80), // [rbp+80] = output_mode_selector
+});
 
-    prog.emit(VmInstr::OutputModeDispatch {
-        selector,
-        paths: vec![generate_path_start, classify_binary_start,
-                    classify_multiway_start, encode_start],
-    });
-} else {
-    // 单一模式: 直接走唯一路径 (现有逻辑不变)
-}
+prog.emit(VmInstr::OutputModeDispatch {
+    selector,
+    paths: vec![LABEL_GENERATE, LABEL_CLASSIFY_BINARY,
+                LABEL_CLASSIFY_MULTIWAY, LABEL_ENCODE],
+});
+
+// .generate_path
+prog.emit(VmInstr::MarkLabel { label_id: LABEL_GENERATE });
+// ... emit argmax + store + check ...
+prog.emit(VmInstr::LoopEnd); // Phase 8: generate loop end
+
+// .classify_binary_path
+prog.emit(VmInstr::MarkLabel { label_id: LABEL_CLASSIFY_BINARY });
+prog.emit(VmInstr::BreakLoop { return_value: 0 });
+
+// .classify_multiway_path
+prog.emit(VmInstr::MarkLabel { label_id: LABEL_CLASSIFY_MULTIWAY });
+prog.emit(VmInstr::BreakLoop { return_value: 0 });
+
+// .encode_path
+prog.emit(VmInstr::MarkLabel { label_id: LABEL_ENCODE });
+prog.emit(VmInstr::BreakLoop { return_value: 0 });
 ```
 
 #### 编译时条件 vs 运行时分发
