@@ -169,6 +169,7 @@ impl MegaKernelExecutor {
                 top_p.to_bits(),        // u32 for x86-64 SysV ABI stack passing
                 max_new_tokens as u32,
                 self.eos_token_id,
+                0,                      // output_mode_selector = 0 (Generate)
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
