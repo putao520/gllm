@@ -81,15 +81,13 @@ impl MegaKernelExecutor {
             rms_eps: geometry.norm_eps,
             rope_theta: geometry.rope_theta,
             rope_partial: geometry.rope_partial_ratio,
-            dtype: geometry.dtype,
-            max_seq_len: geometry.max_seq_len,
+            dtype: DType::F32,
+            max_seq_len: 1,
             num_eos_tokens: 1,
             rope_scaling: None,
             business_config: gllm_kernels::compiler::MegaKernelBusinessConfig::default(),
         };
 
-        // 单一函数编译: graph → fusion → VmProgram(generate loop + forward + argmax + EOS)
-        //                → opt → RegAlloc → StackFrame → X86Lower → assemble
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
@@ -97,7 +95,6 @@ impl MegaKernelExecutor {
         let exec_code = output.layer_code;
         let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
 
-        // 打包权重到连续 blob
         let weight_blob = pack_mega_kernel_weights(
             &output.weight_layout,
             geometry.num_layers,
@@ -108,7 +105,6 @@ impl MegaKernelExecutor {
             geometry.intermediate_size,
             weight_ptrs,
             weight_sizes,
-            geometry.dtype,
         );
 
         let mega_compiled = MegaKernelCompiled {
@@ -164,12 +160,12 @@ impl MegaKernelExecutor {
                 prompt_len,
                 scratchpad.as_mut_ptr(),
                 output_tokens.as_mut_ptr(),
-                temperature.to_bits(),  // u32 for x86-64 SysV ABI stack passing
-                top_k as u32,
-                top_p.to_bits(),        // u32 for x86-64 SysV ABI stack passing
-                max_new_tokens as u32,
-                self.eos_token_id,
-                0,                      // output_mode_selector = 0 (Generate)
+                temperature.to_bits() as usize,
+                top_k,
+                top_p.to_bits() as usize,
+                max_new_tokens,
+                self.eos_token_id as usize,
+                0,
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
@@ -188,6 +184,9 @@ impl MegaKernelExecutor {
 ///
 /// 按照 MegaKernelWeightLayout 定义的顺序:
 /// embed_weight → layer_0_weights → layer_1_weights → ... → lm_head_weight
+///
+/// ARCH-COMPUTE-F32: 所有权重在 upload_weights 阶段已被转为 F32。
+/// weight_ptrs 指向的数据全部是 F32，直接 memcpy。
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn pack_mega_kernel_weights(
     layout: &gllm_kernels::compiler::MegaKernelWeightLayout,
@@ -199,24 +198,37 @@ fn pack_mega_kernel_weights(
     intermediate: usize,
     weight_ptrs: &std::collections::HashMap<String, *const u8>,
     weight_sizes: &std::collections::HashMap<String, usize>,
-    dtype: DType,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; layout.total_bytes];
-    let _ = (hidden, num_heads, num_kv_heads, head_dim, intermediate, dtype);
+    let _ = (hidden, num_heads, num_kv_heads, head_dim, intermediate);
 
-    let mut copy_weight = |blob: &mut [u8], offset: usize, ptr: *const u8, size: usize, slot_size: usize| -> bool {
-        if ptr.is_null() || size == 0 { return true; }
-        let copy_size = size.min(slot_size).min(blob.len().saturating_sub(offset));
-        if copy_size == 0 || offset >= blob.len() { return false; }
+    fn copy_weight(
+        blob: &mut [u8],
+        offset: usize,
+        ptr: *const u8,
+        src_bytes: usize,
+        slot_size: usize,
+    ) -> bool {
+        if ptr.is_null() || src_bytes == 0 {
+            return true;
+        }
+        let copy_size = src_bytes.min(slot_size).min(blob.len().saturating_sub(offset));
+        if copy_size == 0 || offset >= blob.len() {
+            return false;
+        }
         let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
         blob[offset..offset + copy_size].copy_from_slice(src);
-        copy_size == size
-    };
+        true
+    }
 
     // Embedding weight
-    if let Some(&ptr) = weight_ptrs.get("embed_tokens.weight") {
-        let size = *weight_sizes.get("embed_tokens.weight").unwrap_or(&0);
-        copy_weight(&mut blob, layout.embed_offset, ptr, size, layout.embed_bytes);
+    let embed_key = weight_ptrs.keys().find(|k| k.ends_with("embed_tokens.weight"))
+        .map(|k| k.as_str());
+    if let Some(key) = embed_key {
+        if let Some(&ptr) = weight_ptrs.get(key) {
+            let size = *weight_sizes.get(key).unwrap_or(&0);
+            copy_weight(&mut blob, layout.embed_offset, ptr, size, layout.embed_bytes);
+        }
     }
 
     // Per-layer weights
@@ -245,9 +257,13 @@ fn pack_mega_kernel_weights(
     }
 
     // lm_head weight
-    if let Some(&ptr) = weight_ptrs.get("lm_head.weight") {
-        let size = *weight_sizes.get("lm_head.weight").unwrap_or(&0);
-        copy_weight(&mut blob, layout.lm_head_offset, ptr, size, layout.lm_head_bytes);
+    let lm_key = weight_ptrs.keys().find(|k| k.ends_with("lm_head.weight"))
+        .map(|k| k.as_str());
+    if let Some(key) = lm_key {
+        if let Some(&ptr) = weight_ptrs.get(key) {
+            let size = *weight_sizes.get(key).unwrap_or(&0);
+            copy_weight(&mut blob, layout.lm_head_offset, ptr, size, layout.lm_head_bytes);
+        }
     }
 
     blob
@@ -258,34 +274,20 @@ fn pack_mega_kernel_weights(
 // ============================================================================
 
 /// Structured observation extracted from Mega-Kernel epilogue telemetry buffer.
-///
-/// All signals are collected via zero-cost piggybacking in JIT-compiled
-/// kernels (§13 Epilogue 白嫖). This struct provides type-safe access
-/// to raw telemetry bytes written to KV Page Header padding.
 #[derive(Debug, Clone, Copy)]
 pub struct MegaKernelObservation {
-    /// Layer index this observation was collected from
     pub layer_idx: usize,
-    /// §13.9: Softmax sharpness (max/sum of softmax probabilities)
     pub entropy: f32,
-    /// §13.11: Residual energy ratio (||x_out|| / ||x_in||)
     pub residual_delta: f32,
-    /// §13.11: Direction alignment between residual input/output
     pub cosine_similarity: f32,
-    /// §13.5: Number of FFN gate neurons with sigmoid(x) < 0.01
     pub dead_neuron_count: u32,
-    /// §13.9: True if softmax_max > 0.5 (BOS token absorbing excess attention)
     pub is_attention_sink: bool,
-    /// §13.8: Per-channel max absolute value from RmsNorm
     pub per_channel_scale: f32,
-    /// §13.7: Row-level L1 norm from GEMM output
     pub row_l1_norm: f32,
-    /// §13.7: Row-level max value from GEMM output
     pub row_max: f32,
 }
 
 impl MegaKernelObservation {
-    /// Extract structured observation from raw telemetry buffer bytes.
     pub fn from_buffer(layer_idx: usize, buffer: &[u8]) -> Self {
         use gllm_kernels::compiler::graph::telemetry_offsets;
 
@@ -327,13 +329,11 @@ impl MegaKernelObservation {
         }
     }
 
-    /// Dead neuron ratio (0.0-1.0) relative to a given hidden size.
     pub fn dead_neuron_ratio(&self, hidden_size: usize) -> f32 {
         if hidden_size == 0 { return 0.0; }
         self.dead_neuron_count as f32 / hidden_size as f32
     }
 
-    /// Whether this layer is a candidate for residual bypass (§13.3).
     pub fn is_bypass_candidate(&self, delta_threshold: f32, cosine_threshold: f32) -> bool {
         self.residual_delta < delta_threshold && self.cosine_similarity > cosine_threshold
     }

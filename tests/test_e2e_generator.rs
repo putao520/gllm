@@ -8,7 +8,50 @@
 use gllm::Client;
 
 fn install_segv_handler() {
-    // no-op — using RUST_BACKTRACE=1 + ulimit instead
+    #[repr(C)]
+    struct SigAction {
+        sa_handler: usize,
+        sa_flags: i32,
+        sa_restorer: Option<unsafe extern "C" fn()>,
+        sa_mask: [u8; 128],
+    }
+    extern "C" {
+        fn sigaction(sig: i32, act: *const SigAction, oact: *mut SigAction) -> i32;
+    }
+    unsafe {
+        let mut sa: SigAction = std::mem::zeroed();
+        sa.sa_handler = segv_handler as usize;
+        sa.sa_flags = 4; // SA_SIGINFO
+        sigaction(11, &sa, std::ptr::null_mut());
+    }
+}
+
+extern "C" fn segv_handler(
+    _sig: i32,
+    info: *mut std::ffi::c_void,
+    uctx: *mut std::ffi::c_void,
+) {
+    // si_addr at offset 16 in siginfo_t on x86_64
+    let fault_addr = unsafe { *(info as *const u8).add(16) as *const std::ffi::c_void };
+    eprintln!("[SIGSEGV] fault_addr={:p}", fault_addr);
+    // x86_64 ucontext_t: uc_flags(8) + uc_link(8) + uc_stack(24) = 40 → mcontext_t
+    // mcontext_t.gregs is array of 19 long (8 bytes each)
+    // gregs indices: R8=0,R9=1,R10=2,R11=3,R12=4,R13=5,R14=6,R15=7,RDI=8,
+    //   RSI=9,RBP=10,RBX=11,RDX=12,RAX=13,RCX=14,RSP=15,RIP=16
+    unsafe {
+        let mc = (uctx as *const u8).add(40) as *const u64;
+        let r = |i: usize| *mc.add(i);
+        eprintln!("[SIGSEGV] RIP=0x{:x} RAX=0x{:x} RCX=0x{:x} RDX=0x{:x}",
+            r(16), r(13), r(14), r(12));
+        eprintln!("[SIGSEGV] RSI=0x{:x} RDI=0x{:x} R8=0x{:x} R9=0x{:x}",
+            r(9), r(8), r(0), r(1));
+        eprintln!("[SIGSEGV] R10=0x{:x} R11=0x{:x} R12=0x{:x} R13=0x{:x}",
+            r(2), r(3), r(4), r(5));
+        eprintln!("[SIGSEGV] R14=0x{:x} R15=0x{:x} RBP=0x{:x} RSP=0x{:x}",
+            r(6), r(7), r(10), r(15));
+        eprintln!("[SIGSEGV] RBX=0x{:x}", r(11));
+    }
+    std::process::exit(139);
 }
 
 // ============================================================================
@@ -95,6 +138,7 @@ fn assert_generation_sane(text: &str, label: &str) {
 /// **期望结果**: 成功加载 SafeTensors 模型并生成 token 序列
 #[test]
 fn e2e_generator_safetensors() {
+    install_segv_handler();
     const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
     let client = Client::new_chat(MODEL).expect("Failed to load SafeTensors model");

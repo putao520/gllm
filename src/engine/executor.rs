@@ -1058,14 +1058,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             for (name, binding) in wb {
                 if let Some(ptr) = binding.ptr {
                     weight_ptrs.insert(name.clone(), ptr as *const u8);
-                    let elem_bytes = match binding.dtype {
-                        safetensors::Dtype::F32 => 4,
-                        safetensors::Dtype::F16 => 2,
-                        safetensors::Dtype::BF16 => 2,
-                        _ => 4,
-                    };
-                    let size: usize = binding.shape.iter().product::<usize>() * elem_bytes;
-                    weight_sizes.insert(name.clone(), size);
+                    // binding.ptr always points to F32 data — upload_native_tensor_with_convert
+                    // converts BF16/F16 to F32 during upload. The original binding.dtype
+                    // reflects the safetensors source dtype, NOT the in-memory dtype.
+                    let num_elems: usize = binding.shape.iter().product();
+                    weight_sizes.insert(name.clone(), num_elems * 4);
                 } else if let Some(ref data) = binding.data {
                     weight_ptrs.insert(name.clone(), data.as_ptr());
                     weight_sizes.insert(name.clone(), data.len());
