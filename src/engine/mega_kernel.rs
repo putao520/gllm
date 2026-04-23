@@ -31,12 +31,18 @@ struct MegaKernelCompiled {
     weight_layout: gllm_kernels::compiler::MegaKernelWeightLayout,
     /// 运行时缓冲布局（activation ping/pong, logits, sampling workspace）
     buffer_layout: gllm_kernels::compiler::MegaKernelBufferLayout,
+    /// Logits 区域在 scratchpad 中的偏移（alloc + RoPE cache 之后）
+    logits_scratch_offset: usize,
     /// 预打包的连续权重 blob
     weight_blob: Vec<u8>,
     /// mmap'd 完整 mega-kernel 机器码（generate loop + embedded forward code，单一连续函数）
     exec_code: gllm_kernels::compiler::CompiledLayer,
     /// MegaKernelFn 函数指针（指向 exec_code 的入口）
     entry_fn: gllm_kernels::compiler::MegaKernelFn,
+    /// RoPE cos/sin 表需求（caller 必须在每次调用前填充 scratchpad）
+    rope_cache: Option<gllm_kernels::compiler::codegen::RopeCacheRequirement>,
+    /// 实际需要的 scratchpad 大小（buffer_layout + intermediate tensors + RoPE cache）
+    total_scratchpad_bytes: usize,
 }
 
 /// Mega-Kernel 执行器 (§9.1)
@@ -82,12 +88,11 @@ impl MegaKernelExecutor {
             rope_theta: geometry.rope_theta,
             rope_partial: geometry.rope_partial_ratio,
             dtype: DType::F32,
-            max_seq_len: 1,
+            max_seq_len: 128, // Buffer allocation upper bound; runtime seq_len may be smaller
             num_eos_tokens: 1,
             rope_scaling: None,
             business_config: gllm_kernels::compiler::MegaKernelBusinessConfig::default(),
         };
-
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
             .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
@@ -98,11 +103,6 @@ impl MegaKernelExecutor {
         let weight_blob = pack_mega_kernel_weights(
             &output.weight_layout,
             geometry.num_layers,
-            geometry.hidden_size,
-            geometry.num_heads,
-            geometry.num_kv_heads,
-            geometry.head_dim,
-            geometry.intermediate_size,
             weight_ptrs,
             weight_sizes,
         );
@@ -110,9 +110,12 @@ impl MegaKernelExecutor {
         let mega_compiled = MegaKernelCompiled {
             weight_layout: output.weight_layout,
             buffer_layout: output.buffer_layout,
+            logits_scratch_offset: output.logits_scratch_offset,
             weight_blob,
             exec_code,
             entry_fn,
+            rope_cache: output.rope_cache,
+            total_scratchpad_bytes: output.total_scratchpad_bytes,
         };
 
         Ok(Self {
@@ -127,7 +130,7 @@ impl MegaKernelExecutor {
 
     /// 单序列 mega-kernel 生成。
     ///
-    /// 一次 CALL 完成: prompt encode → embedding → N 层 → lm_head → argmax sampling → generate loop。
+    /// 每次迭代调用 JIT 一次（embedding → N 层 → lm_head），然后 Rust 侧做 argmax。
     /// 返回 output token IDs（不包含 prompt tokens）。
     #[cfg(target_arch = "x86_64")]
     pub fn generate_single_sequence(
@@ -139,40 +142,91 @@ impl MegaKernelExecutor {
         top_p: f32,
     ) -> Result<Vec<u32>, MegaKernelError> {
         let mega = &self.mega_compiled;
-
         let prompt_len = prompt_tokens.len();
         let max_total = prompt_len + max_new_tokens;
+
         let mut input_ids = vec![0u32; max_total];
         input_ids[..prompt_len].copy_from_slice(prompt_tokens);
 
         let positions: Vec<u32> = (0..max_total as u32).collect();
         let mut output_tokens = vec![0u32; max_new_tokens];
-        let mut scratchpad = vec![0u8; mega.buffer_layout.total_scratchpad_bytes];
+        let mut scratchpad = vec![0u8; mega.total_scratchpad_bytes];
 
-        let generated_count = unsafe {
-            (mega.entry_fn)(
-                input_ids.as_ptr(),
-                mega.weight_blob.as_ptr(),
-                std::ptr::null_mut(),
-                positions.as_ptr(),
-                std::ptr::null(),
-                1,
-                prompt_len,
-                scratchpad.as_mut_ptr(),
-                output_tokens.as_mut_ptr(),
-                temperature.to_bits() as usize,
-                top_k,
-                top_p.to_bits() as usize,
-                max_new_tokens,
-                self.eos_token_id as usize,
-                0,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            )
-        };
+        let mut generated = 0usize;
+        for i in 0..max_new_tokens {
+            let seq_len = prompt_len + i;
 
-        let count = generated_count.min(max_new_tokens);
-        Ok(output_tokens[..count].to_vec())
+            // Fill RoPE cos/sin table for positions [0..seq_len]
+            if let Some(ref rc) = mega.rope_cache {
+                let rope_elems = seq_len * rc.head_dim;
+                let rope_bytes = rope_elems * 4;
+                if rc.cache_offset + rope_bytes <= scratchpad.len() {
+                    let rope_slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                            rope_elems,
+                        )
+                    };
+                    gllm_kernels::compiler::fill_cos_sin_table(
+                        rope_slice,
+                        &positions[..seq_len],
+                        rc.head_dim,
+                        rc.theta,
+                        rc.rope_scaling.clone(),
+                    );
+                }
+            }
+
+            let _generated_count = unsafe {
+                (mega.entry_fn)(
+                    input_ids.as_ptr(),
+                    mega.weight_blob.as_ptr(),
+                    std::ptr::null_mut(),
+                    positions.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    seq_len,
+                    scratchpad.as_mut_ptr(),
+                    output_tokens.as_mut_ptr(),
+                    temperature.to_bits() as usize,
+                    top_k,
+                    top_p.to_bits() as usize,
+                    1,
+                    self.eos_token_id as usize,
+                    0, // output_mode_selector=0 (generate)
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                )
+            };
+
+            // Argmax in Rust: read logits from scratchpad
+            let logits_off = mega.logits_scratch_offset;
+            let last_row_off = logits_off + (seq_len - 1) * self.vocab_size * 4;
+            let token = if last_row_off + self.vocab_size * 4 <= scratchpad.len() {
+                let logits: &[f32] = unsafe {
+                    std::slice::from_raw_parts(
+                        scratchpad[last_row_off..].as_ptr() as *const f32,
+                        self.vocab_size,
+                    )
+                };
+                logits.iter().enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx as u32)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            output_tokens[i] = token;
+            input_ids[seq_len] = token;
+            generated += 1;
+
+            if token == self.eos_token_id {
+                break;
+            }
+        }
+
+        Ok(output_tokens[..generated].to_vec())
     }
 }
 
@@ -191,16 +245,10 @@ impl MegaKernelExecutor {
 fn pack_mega_kernel_weights(
     layout: &gllm_kernels::compiler::MegaKernelWeightLayout,
     num_layers: usize,
-    hidden: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    intermediate: usize,
     weight_ptrs: &std::collections::HashMap<String, *const u8>,
     weight_sizes: &std::collections::HashMap<String, usize>,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; layout.total_bytes];
-    let _ = (hidden, num_heads, num_kv_heads, head_dim, intermediate);
 
     fn copy_weight(
         blob: &mut [u8],
@@ -231,9 +279,9 @@ fn pack_mega_kernel_weights(
         }
     }
 
-    // Per-layer weights
+    // Per-layer weights (already in canonical [in, out] layout from loader normalization)
     let per_layer = &layout.per_layer;
-    let weight_names = [
+    let weight_names: [(&str, usize, usize); 9] = [
         ("model.layers.{L}.input_layernorm.weight", per_layer.attn_norm_offset, per_layer.attn_norm_bytes),
         ("model.layers.{L}.self_attn.q_proj.weight", per_layer.w_q_offset, per_layer.w_q_bytes),
         ("model.layers.{L}.self_attn.k_proj.weight", per_layer.w_k_offset, per_layer.w_k_bytes),
@@ -256,7 +304,17 @@ fn pack_mega_kernel_weights(
         }
     }
 
-    // lm_head weight
+    // Final layer norm weight
+    let final_norm_key = weight_ptrs.keys().find(|k| k.ends_with("model.norm.weight"))
+        .map(|k| k.as_str());
+    if let Some(key) = final_norm_key {
+        if let Some(&ptr) = weight_ptrs.get(key) {
+            let size = *weight_sizes.get(key).unwrap_or(&0);
+            copy_weight(&mut blob, layout.final_norm_offset, ptr, size, layout.final_norm_bytes);
+        }
+    }
+
+    // lm_head weight (tied models: executor already transposes embed_tokens to [hidden, vocab])
     let lm_key = weight_ptrs.keys().find(|k| k.ends_with("lm_head.weight"))
         .map(|k| k.as_str());
     if let Some(key) = lm_key {

@@ -687,7 +687,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &geometry)?;
 
         let is_moe = geometry.is_moe();
-        let tokenizer = TokenizerHandle::from_loader(loader)?;
+        let tokenizer = TokenizerHandle::from_loader(loader, manifest.kind)?;
         let weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
         let l2_capacity = total_blocks.saturating_mul(10);
@@ -769,7 +769,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 // seq_len 参数仅用于 buffer 分配上界
                 let max_seq_for_alloc = geometry.max_seq_len;
                 let compile_ok = ge.compile_with_cache(max_seq_for_alloc, hidden, geometry.dtype, model_id, jit_backend, &cache)
-                    .map_err(|e| { eprintln!("[JIT-COMPILE-FAIL] {e}"); log::error!("JIT compilation failed: {e}"); })
+                    .map_err(|e| { log::error!("JIT compilation failed: {e}"); })
                     .is_ok();
 
                 if compile_ok {
@@ -1040,8 +1040,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
 
         // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
-        // ARCH-RUST-IS-CODEGEN: 推理时 Rust 只做一次 CALL。
-        // 逐节点 legacy 路径已废弃，禁止回退。
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         let mega_kernel = {
             let ge = graph_executor.as_ref()
@@ -1051,16 +1049,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             let eos_id = model_config.eos_token_id.unwrap_or(2);
 
-            // Collect weight pointers from FusedGraph's weight_bindings
             let wb = &ge.graph().weight_bindings;
             let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
             let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             for (name, binding) in wb {
                 if let Some(ptr) = binding.ptr {
                     weight_ptrs.insert(name.clone(), ptr as *const u8);
-                    // binding.ptr always points to F32 data — upload_native_tensor_with_convert
-                    // converts BF16/F16 to F32 during upload. The original binding.dtype
-                    // reflects the safetensors source dtype, NOT the in-memory dtype.
                     let num_elems: usize = binding.shape.iter().product();
                     weight_sizes.insert(name.clone(), num_elems * 4);
                 } else if let Some(ref data) = binding.data {
@@ -1069,17 +1063,16 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
 
-            // 直接编译 true mega-kernel，失败则返回错误（不回退）
             let mega = super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
                 &geometry,
                 &weight_ptrs,
                 &weight_sizes,
                 eos_id,
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
-                format!("mega-kernel compilation failed (ARCH-RUST-IS-CODEGEN: no fallback): {}", e),
+                format!("mega-kernel compilation failed: {}", e),
             )))?;
 
-            log::info!("executor: true mega-kernel compiled — single-CALL inference path active");
+            log::info!("executor: true mega-kernel compiled");
             Some(mega)
         };
 
@@ -1643,7 +1636,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
     pub fn encode_prompt(&self, prompt: &str) -> ExecutorResult<Vec<u32>> {
         let add_special_tokens = self.add_special_tokens;
-        Ok(self.tokenizer.encode(prompt, add_special_tokens)?)
+        Ok(self.tokenizer.encode_prompt(prompt, add_special_tokens)?)
     }
 
     pub fn decode_tokens(&self, tokens: &[u32]) -> ExecutorResult<String> {
@@ -2794,10 +2787,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         top_p: f32,
         thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        // ARCH-RUST-IS-CODEGEN: 单次 CALL 完成 prompt encode → N 层 → lm_head → sampling → generate loop
         #[cfg(target_arch = "x86_64")]
         if let Some(ref mega) = self.mega_kernel {
-            let prompt_tokens = self.encode_prompt(prompt)?;
+            if prompt.trim().is_empty() {
+                return Err(ExecutorError::EmptyPrompt);
+            }
+            let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             let output_tokens = mega.generate_single_sequence(
                 &prompt_tokens,
                 max_tokens,
@@ -2807,7 +2802,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel generate failed: {}", e),
             )))?;
-            return self.decode_tokens(&output_tokens);
+            let text = self.decode_tokens(&output_tokens)?;
+            return Ok(text);
         }
 
         if prompt.trim().is_empty() {
