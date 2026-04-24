@@ -1018,7 +1018,7 @@ impl ModelConfig {
 
         // ── Gemma 4 specific fields ──
         let global_rope_theta = find_f32(value, &["global_rope_theta"]);
-        let rope_partial_ratio = find_f32(value, &["rope_partial_ratio", "global_rope_partial"]);
+        let rope_partial_ratio = find_f32(value, &["rope_partial_ratio", "global_rope_partial", "partial_rotary_factor"]);
         let attention_pattern = value.get("attention_pattern")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
