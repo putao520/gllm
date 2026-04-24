@@ -130,8 +130,10 @@ impl MegaKernelExecutor {
 
     /// 单序列 mega-kernel 生成。
     ///
-    /// 每次迭代调用 JIT 一次（embedding → N 层 → lm_head），然后 Rust 侧做 argmax。
-    /// 返回 output token IDs（不包含 prompt tokens）。
+    /// ARCH-RUST-IS-CODEGEN: 一次 CALL 完成。
+    /// JIT mega-kernel 内部执行完整的 generate loop:
+    ///   LoopBegin → embed → N 层 → lm_head → Argmax → StoreToken → CheckStopCondition → LoopEnd
+    /// Rust 只做：(1) 准备输入 (2) 预填 RoPE 表 (3) 一次 CALL (4) 读 output_tokens
     #[cfg(target_arch = "x86_64")]
     pub fn generate_single_sequence(
         &self,
@@ -152,81 +154,64 @@ impl MegaKernelExecutor {
         let mut output_tokens = vec![0u32; max_new_tokens];
         let mut scratchpad = vec![0u8; mega.total_scratchpad_bytes];
 
-        let mut generated = 0usize;
-        for i in 0..max_new_tokens {
-            let seq_len = prompt_len + i;
-
-            // Fill RoPE cos/sin table for positions [0..seq_len]
-            if let Some(ref rc) = mega.rope_cache {
-                let rope_elems = seq_len * rc.head_dim;
-                let rope_bytes = rope_elems * 4;
-                if rc.cache_offset + rope_bytes <= scratchpad.len() {
-                    let rope_slice = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
-                            rope_elems,
-                        )
-                    };
-                    gllm_kernels::compiler::fill_cos_sin_table(
-                        rope_slice,
-                        &positions[..seq_len],
-                        rc.head_dim,
-                        rc.theta,
-                        rc.rope_scaling.clone(),
-                    );
-                }
-            }
-
-            let _generated_count = unsafe {
-                (mega.entry_fn)(
-                    input_ids.as_ptr(),
-                    mega.weight_blob.as_ptr(),
-                    std::ptr::null_mut(),
-                    positions.as_ptr(),
-                    std::ptr::null(),
-                    1,
-                    seq_len,
-                    scratchpad.as_mut_ptr(),
-                    output_tokens.as_mut_ptr(),
-                    temperature.to_bits() as usize,
-                    top_k,
-                    top_p.to_bits() as usize,
-                    1,
-                    self.eos_token_id as usize,
-                    0, // output_mode_selector=0 (generate)
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                )
-            };
-
-            // Argmax in Rust: read logits from scratchpad
-            let logits_off = mega.logits_scratch_offset;
-            let last_row_off = logits_off + (seq_len - 1) * self.vocab_size * 4;
-            let token = if last_row_off + self.vocab_size * 4 <= scratchpad.len() {
-                let logits: &[f32] = unsafe {
-                    std::slice::from_raw_parts(
-                        scratchpad[last_row_off..].as_ptr() as *const f32,
-                        self.vocab_size,
+        // Pre-fill RoPE cos/sin table for all positions [0..max_total).
+        if let Some(ref rc) = mega.rope_cache {
+            let rope_elems = max_total * rc.head_dim;
+            let rope_bytes = rope_elems * 4;
+            if rc.cache_offset + rope_bytes <= scratchpad.len() {
+                let rope_slice = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        rope_elems,
                     )
                 };
-                logits.iter().enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(idx, _)| idx as u32)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            output_tokens[i] = token;
-            input_ids[seq_len] = token;
-            generated += 1;
-
-            if token == self.eos_token_id {
-                break;
+                gllm_kernels::compiler::fill_cos_sin_table(
+                    rope_slice,
+                    &positions[..max_total],
+                    rc.head_dim,
+                    rc.theta,
+                    rc.rope_scaling.clone(),
+                );
             }
         }
 
-        Ok(output_tokens[..generated].to_vec())
+        let generated_count = unsafe {
+            (mega.entry_fn)(
+                input_ids.as_ptr(),
+                mega.weight_blob.as_ptr(),
+                std::ptr::null_mut(),
+                positions.as_ptr(),
+                std::ptr::null(),
+                1,
+                prompt_len,
+                scratchpad.as_mut_ptr(),
+                output_tokens.as_mut_ptr(),
+                temperature.to_bits() as usize,
+                top_k,
+                top_p.to_bits() as usize,
+                max_new_tokens,
+                self.eos_token_id as usize,
+                0,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        log::debug!(
+            "[mega] prompt_len={} max_new_tokens={} generated_count={}",
+            prompt_len, max_new_tokens, generated_count,
+        );
+
+        // JIT may return 0 when gen_counter hasn't been incremented yet
+        // (EOS on first iteration). In that case check if output_tokens[0]
+        // was written (non-zero) to detect the off-by-one.
+        let actual_count = if generated_count == 0 && max_new_tokens > 0 && output_tokens[0] != 0 {
+            1
+        } else {
+            generated_count
+        };
+
+        Ok(output_tokens[..actual_count].to_vec())
     }
 }
 
