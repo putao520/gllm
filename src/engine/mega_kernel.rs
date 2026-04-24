@@ -198,8 +198,8 @@ impl MegaKernelExecutor {
         };
 
         log::debug!(
-            "[mega] prompt_len={} max_new_tokens={} generated_count={}",
-            prompt_len, max_new_tokens, generated_count,
+            "[mega] prompt_len={} max_new_tokens={} generated_count={} eos={}",
+            prompt_len, max_new_tokens, generated_count, self.eos_token_id,
         );
 
         // JIT may return 0 when gen_counter hasn't been incremented yet
