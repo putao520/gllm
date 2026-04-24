@@ -34,19 +34,21 @@ fn prepare_encoder_inputs(tokens: &[u32], config: &GeneratorForwardConfig) -> Ha
     let seq_len = tokens.len();
     let mut inputs = HashMap::new();
 
-    // input_ids: u32 token → f32（JIT Gather 节点从此读取索引）
-    let token_f32: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
-    inputs.insert("input_ids".to_string(), f32_to_bytes(&token_f32));
+    // input_ids: u32 token IDs，以 u32 LE 字节传递。
+    // JIT Gather 的 ScalarLoad (vmovss → vmovd) 将 u32 位模式直接加载到 GPR，
+    // IntMulStride 做整数乘法得到行偏移。
+    let token_bytes: Vec<u8> = tokens.iter().flat_map(|&t| t.to_le_bytes()).collect();
+    inputs.insert("input_ids".to_string(), token_bytes);
 
-    // position_ids: 从模型配置读取 position_offset（RoBERTa=2, BERT=0, GPT=0）
+    // position_ids: 整数位置，从模型配置读取 position_offset（RoBERTa=2, BERT=0, GPT=0）
     let position_offset = config.geometry.position_offset.unwrap_or(0);
-    let position_ids: Vec<f32> = (0..seq_len).map(|i| (i + position_offset) as f32).collect();
-    inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
+    let position_ids: Vec<u8> = (0..seq_len).flat_map(|i| ((i + position_offset) as u32).to_le_bytes()).collect();
+    inputs.insert("position_ids".to_string(), position_ids);
 
-    // token_type_ids: 从 tokenizer 获取（单段=0，双段=0/1 交替）
+    // token_type_ids: 整数类型 ID（单段=0，双段=0/1 交替）
     // 当前: 单段输入全 0（通用默认值，非硬编码特定模型）
-    let token_type_ids: Vec<f32> = vec![0.0f32; seq_len];
-    inputs.insert("token_type_ids".to_string(), f32_to_bytes(&token_type_ids));
+    let token_type_ids: Vec<u8> = (0..seq_len).flat_map(|_| 0u32.to_le_bytes()).collect();
+    inputs.insert("token_type_ids".to_string(), token_type_ids);
 
     inputs
 }
