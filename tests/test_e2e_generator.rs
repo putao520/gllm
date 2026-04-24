@@ -181,6 +181,7 @@ fn e2e_generator_safetensors() {
 /// (b) task #14 attention JIT 不确定性叠加 — Qwen3 推理依赖更多 attn 层。
 #[test]
 fn e2e_generator_gguf() {
+    install_segv_handler();
     const MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
 
     let client = Client::new_chat(MODEL).expect("Failed to load GGUF model");
