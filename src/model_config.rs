@@ -1015,6 +1015,8 @@ impl ModelConfig {
                 "layer_norm_eps",
                 "rms_norm_eps",
                 "norm_epsilon",
+                "text_config.rms_norm_eps",
+                "text_config.layer_norm_epsilon",
             ],
         )
         .filter(|v| v.is_finite() && *v > 0.0);
@@ -1026,13 +1028,32 @@ impl ModelConfig {
             "rope_partial_ratio", "global_rope_partial", "partial_rotary_factor",
             "text_config.rope_parameters.full_attention.partial_rotary_factor",
         ]);
+        // Gemma 4: layer_types=["sliding_attention","full_attention",...]
+        //           → attention_pattern=[0,0,0,0,1,...] (0=sliding,1=full)
         let attention_pattern = value.get("attention_pattern")
+            .or_else(|| value.get("text_config").and_then(|tc| tc.get("attention_pattern")))
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
-        let sliding_window = find_usize(value, &["sliding_window", "sliding_window_size"]);
-        let num_kv_shared_layers = find_usize(value, &["num_kv_shared_layers"]);
-        let global_head_dim = find_usize(value, &["global_head_dim"]);
-        let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input"]);
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect())
+            .or_else(|| {
+                // Fallback: parse layer_types string array
+                let lt = value.get("text_config").and_then(|tc| tc.get("layer_types"))
+                    .and_then(|v| v.as_array())?;
+                Some(lt.iter().filter_map(|v| {
+                    let s = v.as_str()?;
+                    Some(match s {
+                        "full_attention" => 1u8,
+                        _ => 0u8,
+                    })
+                }).collect())
+            });
+        let sliding_window = find_usize(value, &["sliding_window", "sliding_window_size",
+            "text_config.sliding_window", "text_config.sliding_window_size"]);
+        let num_kv_shared_layers = find_usize(value, &["num_kv_shared_layers",
+            "text_config.num_kv_shared_layers"]);
+        let global_head_dim = find_usize(value, &["global_head_dim",
+            "text_config.global_head_dim"]);
+        let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input",
+            "text_config.hidden_size_per_layer_input"]);
 
         // ── MTP (Multi-Token Prediction) ──
         let mtp_depth = find_usize(value, &["num_nextn_predict_layers", "mtp_depth"]);

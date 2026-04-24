@@ -1072,51 +1072,161 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
 
-            // Supplement fused weight bindings (qkv_proj, gate_up_proj) that the
-            // compat-layer graph may not reference (if the YAML template uses separate
-            // q/k/v names but the safetensors stores a fused qkv_proj). The mega-kernel
-            // packing code needs access to these fused weights for splitting.
+            // Supplement weight bindings that the compat-layer YAML template may not
+            // reference but the mega-kernel packing code needs. Two categories:
+            // 1. Fused weights (qkv_proj, gate_up_proj) — the template uses separate names
+            //    but the safetensors stores a single fused tensor.
+            // 2. Separate weights (gate_proj) — the template omits gate_proj for GeGLU
+            //    architectures (e.g., Gemma 4 template only references up_proj).
+            // The weights HashMap uses original safetensors names (e.g.,
+            // model.language_model.layers.X.*), so we try both the normalized
+            // name and prefixed variants.
+            // IMPORTANT: Linear weights in safetensors are [out, in]. The mega-kernel
+            // expects canonical [in, out]. We must transpose supplemented weights.
+            const MID_PREFIX_REPLACEMENTS: &[(&str, &str)] = &[
+                ("model.layers.", "model.language_model.layers."),
+            ];
+            // Keep transposed data alive until compile_from_geometry finishes.
+            let mut _supplement_owned: Vec<Vec<u8>> = Vec::new();
+            // WeightsHandle data is already canonical [in, out] (loader's
+            // normalize_linear_weight_layout physically transposes on upload).
+            // Just copy bytes — no transpose needed.
+            let supplement_weight = |name: &str, owned: &mut Vec<Vec<u8>>| -> Option<(*const u8, usize)> {
+                let mut candidates = vec![name.to_string()];
+                for (from, to) in MID_PREFIX_REPLACEMENTS {
+                    if let Some(idx) = name.find(from) {
+                        let mut replaced = name.to_string();
+                        replaced.replace_range(idx..idx + from.len(), to);
+                        candidates.push(replaced);
+                    }
+                }
+                for lookup in &candidates {
+                    if let Some(t) = TensorLookup::get_tensor(&weights, lookup) {
+                        let data: &[E] = t.as_ref();
+                        let size = data.len() * std::mem::size_of::<E>();
+                        let bytes: Vec<u8> = unsafe {
+                            std::slice::from_raw_parts(data.as_ptr() as *const u8, size).to_vec()
+                        };
+                        let ptr = bytes.as_ptr();
+                        owned.push(bytes);
+                        return Some((ptr, size));
+                    }
+                }
+                None
+            };
             for layer_idx in 0..geometry.num_layers {
                 // Fused QKV
                 let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
                 if !weight_ptrs.contains_key(&qkv_name) {
-                    if let Some(t) = TensorLookup::get_tensor(&weights, &qkv_name) {
-                        let ptr = t.as_ref().as_ptr() as *const u8;
-                        let num_elems: usize = t.as_ref().len();
+                    if let Some((ptr, size)) = supplement_weight(&qkv_name, &mut _supplement_owned) {
                         weight_ptrs.insert(qkv_name.clone(), ptr);
-                        weight_sizes.insert(qkv_name, num_elems * std::mem::size_of::<E>());
+                        weight_sizes.insert(qkv_name, size);
                     }
                 }
                 // Fused gate_up
                 let gu_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
                 if !weight_ptrs.contains_key(&gu_name) {
-                    if let Some(t) = TensorLookup::get_tensor(&weights, &gu_name) {
-                        let ptr = t.as_ref().as_ptr() as *const u8;
-                        let num_elems: usize = t.as_ref().len();
+                    if let Some((ptr, size)) = supplement_weight(&gu_name, &mut _supplement_owned) {
                         weight_ptrs.insert(gu_name.clone(), ptr);
-                        weight_sizes.insert(gu_name, num_elems * std::mem::size_of::<E>());
+                        weight_sizes.insert(gu_name, size);
+                    }
+                }
+                // Separate gate_proj (GeGLU architectures like Gemma 4 where the YAML
+                // template only references up_proj but the safetensors has gate_proj too).
+                let gate_name = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
+                if !weight_ptrs.contains_key(&gate_name) {
+                    if let Some((ptr, size)) = supplement_weight(&gate_name, &mut _supplement_owned) {
+                        weight_ptrs.insert(gate_name.clone(), ptr);
+                        weight_sizes.insert(gate_name, size);
                     }
                 }
             }
+            // ARCH-HETEROGENEOUS-LAYERS: MegaKernelWeightLayout assumes uniform
+            // per-layer weight shapes (single layer_stride). Models like Gemma 4
+            // have heterogeneous layers (global_attention uses larger head_dim;
+            // shared KV layers use different intermediate_size). Detect this early
+            // and fall back to step-by-step execution instead of silently producing
+            // garbage output from misaligned weight packing.
+            let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
+            let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
+            let mut heterogeneous = false;
+            if let Some(ref_q) = ref_size_q {
+                for layer_idx in 1..geometry.num_layers {
+                    let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
+                    if let Some(&sz) = weight_sizes.get(&q_key) {
+                        if sz != ref_q {
+                            log::warn!(
+                                "[mega] heterogeneous layer: L{} q_proj {} != L0 {} — mega-kernel disabled",
+                                layer_idx, sz, ref_q,
+                            );
+                            heterogeneous = true;
+                            break;
+                        }
+                    }
+                    if let Some(ref_gate) = ref_size_gate {
+                        let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
+                        if let Some(&sz) = weight_sizes.get(&gate_key) {
+                            if sz != ref_gate {
+                                log::warn!(
+                                    "[mega] heterogeneous layer: L{} gate_proj {} != L0 {} — mega-kernel disabled",
+                                    layer_idx, sz, ref_gate,
+                                );
+                                heterogeneous = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if heterogeneous {
+                log::info!("[mega] skipping mega-kernel due to heterogeneous layer shapes");
+                None::<super::mega_kernel::MegaKernelExecutor>
+            } else {
             let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
                 .unwrap_or_else(|| manifest.arch.clone());
-            let (has_head_rms_norm, head_rms_norm_eps) = crate::arch::get_template(&arch_for_template)
-                .map(|t| (t.has_head_rms_norm, t.head_rms_norm_eps))
-                .unwrap_or((false, 1e-6));
+            let template = crate::arch::get_template(&arch_for_template);
+
+            // Build mega-kernel business config from template + geometry.
+            use gllm_kernels::compiler::MegaKernelBusinessConfig;
+            use gllm_kernels::compiler::mega_kernel_abi::FfnActivation;
+            let business_config = MegaKernelBusinessConfig {
+                has_head_rms_norm: template.as_ref().map_or(false, |t| t.has_head_rms_norm),
+                head_rms_norm_eps: template.as_ref().map_or(1e-6, |t| t.head_rms_norm_eps),
+                ffn_activation: match template.as_ref().map(|t| t.name.as_str()).unwrap_or("") {
+                    "gemma4" => FfnActivation::GeGLU,
+                    _ => FfnActivation::SwiGLU,
+                },
+                has_qk_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
+                has_value_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
+                value_norm_eps: geometry.norm_eps,
+                // Gemma 4: final_logit_softcapping = 30.0
+                logit_softcapping: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
+                    Some(30.0)
+                } else {
+                    None
+                },
+                // Gemma models: embedding scaled by sqrt(hidden_size)
+                embedding_scale: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
+                    Some((geometry.hidden_size as f32).sqrt())
+                } else {
+                    None
+                },
+                ..MegaKernelBusinessConfig::default()
+            };
 
             let mega = super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
                 &geometry,
                 &weight_ptrs,
                 &weight_sizes,
                 eos_id,
-                has_head_rms_norm,
-                head_rms_norm_eps,
+                business_config,
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel compilation failed: {}", e),
             )))?;
 
             log::info!("executor: true mega-kernel compiled");
             Some(mega)
+            } // else (heterogeneous check)
         };
 
         // MoE subsystem: read global ExecutionPlan once, initialize all three

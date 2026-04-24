@@ -75,8 +75,7 @@ impl MegaKernelExecutor {
         weight_ptrs: &std::collections::HashMap<String, *const u8>,
         weight_sizes: &std::collections::HashMap<String, usize>,
         eos_token_id: u32,
-        has_head_rms_norm: bool,
-        head_rms_norm_eps: f32,
+        business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
     ) -> Result<Self, MegaKernelError> {
         log::info!(
             "[mega] compiling: layers={} hidden={} heads={} kv_heads={} head_dim={} vocab={} eps={} rope_theta={} rope_partial={}",
@@ -84,6 +83,7 @@ impl MegaKernelExecutor {
             geometry.head_dim, geometry.vocab_size, geometry.norm_eps, geometry.rope_theta,
             geometry.rope_partial_ratio,
         );
+        let embed_scale = business_config.embedding_scale;
         let config = gllm_kernels::compiler::ModelMegaConfig {
             num_layers: geometry.num_layers,
             hidden: geometry.hidden_size,
@@ -99,11 +99,7 @@ impl MegaKernelExecutor {
             max_seq_len: 128, // Buffer allocation upper bound; runtime seq_len may be smaller
             num_eos_tokens: 1,
             rope_scaling: None,
-            business_config: gllm_kernels::compiler::MegaKernelBusinessConfig {
-                has_head_rms_norm,
-                head_rms_norm_eps,
-                ..gllm_kernels::compiler::MegaKernelBusinessConfig::default()
-            },
+            business_config,
         };
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
@@ -118,6 +114,7 @@ impl MegaKernelExecutor {
             geometry.hidden_size,
             weight_ptrs,
             weight_sizes,
+            embed_scale,
         );
 
         let mega_compiled = MegaKernelCompiled {
@@ -247,6 +244,7 @@ fn pack_mega_kernel_weights(
     hidden_size: usize,
     weight_ptrs: &std::collections::HashMap<String, *const u8>,
     weight_sizes: &std::collections::HashMap<String, usize>,
+    embedding_scale: Option<f32>,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; layout.total_bytes];
 
@@ -269,13 +267,31 @@ fn pack_mega_kernel_weights(
         true
     }
 
-    // Embedding weight
+    // Embedding weight (with optional scaling for Gemma-style models)
     let embed_key = weight_ptrs.keys().find(|k| k.ends_with("embed_tokens.weight"))
         .map(|k| k.as_str());
     if let Some(key) = embed_key {
         if let Some(&ptr) = weight_ptrs.get(key) {
             let size = *weight_sizes.get(key).unwrap_or(&0);
-            copy_weight(&mut blob, layout.embed_offset, ptr, size, layout.embed_bytes);
+            if let Some(scale) = embedding_scale {
+                // Scale embedding weights in-place: each f32 element *= scale.
+                // Gemma models: embed *= sqrt(hidden_size).
+                let copy_size = size.min(layout.embed_bytes).min(blob.len().saturating_sub(layout.embed_offset));
+                let num_elems = copy_size / 4;
+                if num_elems > 0 {
+                    let src = unsafe { std::slice::from_raw_parts(ptr as *const f32, num_elems) };
+                    for (i, &val) in src.iter().enumerate() {
+                        let off = layout.embed_offset + i * 4;
+                        if off + 4 <= blob.len() {
+                            let scaled = val * scale;
+                            blob[off..off + 4].copy_from_slice(&scaled.to_le_bytes());
+                        }
+                    }
+                    log::info!("[mega] embedding scaled by {:.2} ({} elements)", scale, num_elems);
+                }
+            } else {
+                copy_weight(&mut blob, layout.embed_offset, ptr, size, layout.embed_bytes);
+            }
         }
     }
 
@@ -398,13 +414,42 @@ fn pack_mega_kernel_weights(
         }
     }
 
-    // lm_head weight (tied models: executor already transposes embed_tokens to [hidden, vocab])
+    // lm_head weight
     let lm_key = weight_ptrs.keys().find(|k| k.ends_with("lm_head.weight"))
         .map(|k| k.as_str());
     if let Some(key) = lm_key {
+        // Separate lm_head weight (non-tied models)
         if let Some(&ptr) = weight_ptrs.get(key) {
             let size = *weight_sizes.get(key).unwrap_or(&0);
             copy_weight(&mut blob, layout.lm_head_offset, ptr, size, layout.lm_head_bytes);
+        }
+    } else {
+        // Tied embeddings: no separate lm_head.weight — transpose embed_tokens
+        // from [vocab, hidden] (Gather layout) to [hidden, vocab] (GEMM canonical).
+        let embed_key = weight_ptrs.keys().find(|k| k.ends_with("embed_tokens.weight"))
+            .map(|k| k.as_str());
+        if let Some(key) = embed_key {
+            if let Some(&ptr) = weight_ptrs.get(key) {
+                let size = *weight_sizes.get(key).unwrap_or(&0);
+                let embed_elems = size / 4;
+                let vocab = if hidden_size > 0 { embed_elems / hidden_size } else { 0 };
+                if vocab > 0 && embed_elems == vocab * hidden_size {
+                    let src = unsafe { std::slice::from_raw_parts(ptr as *const f32, embed_elems) };
+                    for v in 0..vocab {
+                        for h in 0..hidden_size {
+                            let dst_off = layout.lm_head_offset + (h * vocab + v) * 4;
+                            if dst_off + 4 <= blob.len() {
+                                let bytes = src[v * hidden_size + h].to_le_bytes();
+                                blob[dst_off..dst_off + 4].copy_from_slice(&bytes);
+                            }
+                        }
+                    }
+                    log::info!(
+                        "[mega] tied embeddings: transposed embed_tokens [{}x{}] → lm_head [{}x{}]",
+                        vocab, hidden_size, hidden_size, vocab,
+                    );
+                }
+            }
         }
     }
 
