@@ -1042,12 +1042,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
         let mega_kernel = {
+            use crate::compat::backend_trait::TensorLookup;
             let ge = graph_executor.as_ref()
                 .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
                     "graph_executor not available for mega-kernel compilation".into(),
                 )))?;
 
-            let eos_id = model_config.eos_token_id.unwrap_or(2);
+            // Resolve EOS token ID: prefer tokenizer vocab (authoritative) over config.json
+            // (many ONNX/Community repos ship config.json with eos_token_id=0).
+            let eos_id = tokenizer.eos_token_id()
+                .or(model_config.eos_token_id)
+                .unwrap_or(2);
+            log::info!(
+                "mega-kernel eos_id={} (config={:?}, tokenizer={:?})",
+                eos_id, model_config.eos_token_id, tokenizer.eos_token_id(),
+            );
 
             let wb = &ge.graph().weight_bindings;
             let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
@@ -1063,11 +1072,45 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
 
+            // Supplement fused weight bindings (qkv_proj, gate_up_proj) that the
+            // compat-layer graph may not reference (if the YAML template uses separate
+            // q/k/v names but the safetensors stores a fused qkv_proj). The mega-kernel
+            // packing code needs access to these fused weights for splitting.
+            for layer_idx in 0..geometry.num_layers {
+                // Fused QKV
+                let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
+                if !weight_ptrs.contains_key(&qkv_name) {
+                    if let Some(t) = TensorLookup::get_tensor(&weights, &qkv_name) {
+                        let ptr = t.as_ref().as_ptr() as *const u8;
+                        let num_elems: usize = t.as_ref().len();
+                        weight_ptrs.insert(qkv_name.clone(), ptr);
+                        weight_sizes.insert(qkv_name, num_elems * std::mem::size_of::<E>());
+                    }
+                }
+                // Fused gate_up
+                let gu_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
+                if !weight_ptrs.contains_key(&gu_name) {
+                    if let Some(t) = TensorLookup::get_tensor(&weights, &gu_name) {
+                        let ptr = t.as_ref().as_ptr() as *const u8;
+                        let num_elems: usize = t.as_ref().len();
+                        weight_ptrs.insert(gu_name.clone(), ptr);
+                        weight_sizes.insert(gu_name, num_elems * std::mem::size_of::<E>());
+                    }
+                }
+            }
+            let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
+                .unwrap_or_else(|| manifest.arch.clone());
+            let (has_head_rms_norm, head_rms_norm_eps) = crate::arch::get_template(&arch_for_template)
+                .map(|t| (t.has_head_rms_norm, t.head_rms_norm_eps))
+                .unwrap_or((false, 1e-6));
+
             let mega = super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
                 &geometry,
                 &weight_ptrs,
                 &weight_sizes,
                 eos_id,
+                has_head_rms_norm,
+                head_rms_norm_eps,
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel compilation failed: {}", e),
             )))?;
@@ -2793,6 +2836,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 return Err(ExecutorError::EmptyPrompt);
             }
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
+            log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
             let output_tokens = mega.generate_single_sequence(
                 &prompt_tokens,
                 max_tokens,
@@ -2802,9 +2846,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel generate failed: {}", e),
             )))?;
+            log::debug!("[executor] mega-kernel output_tokens={:?}", output_tokens);
             let text = self.decode_tokens(&output_tokens)?;
             return Ok(text);
         }
+        log::debug!("[executor] no mega-kernel, using step-by-step path");
 
         if prompt.trim().is_empty() {
             return Err(ExecutorError::EmptyPrompt);
@@ -2990,12 +3036,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
         let is_decoder = self.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
         let tokens = if is_decoder {
-            // Decoder-based rerankers (Qwen3-Reranker) expect a chat-template formatted prompt
-            let prompt = format!(
-                "<|im_start|>system\nJudge whether the Document is relevant to the Query. Output only \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<query>{}</query>\n<document>{}</document><|im_end|>\n<|im_start|>assistant\n",
-                query, document
-            );
-            self.tokenizer.encode(&prompt, false)?
+            // Decoder-based rerankers: caller is responsible for prompt formatting.
+            // We just tokenize the concatenated query+document.
+            let prompt = format!("{} {}", query, document);
+            self.tokenizer.encode(&prompt, self.add_special_tokens)?
         } else {
             self.tokenizer.encode_pair(query, document, self.add_special_tokens)?
         };

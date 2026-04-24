@@ -2,6 +2,8 @@ name: qwen3
 version: "1.0"
 family: decoder
 moe_router: qwen
+has_head_rms_norm: true
+head_rms_norm_eps: 1e-6
 # qwen3 / qwen3ForCausalLM 由模板名自动派生
 extra_aliases:
   - qwen3moe        # Qwen3-MoE 共用同一模板

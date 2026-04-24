@@ -30,6 +30,13 @@ pub struct ArchTemplate {
     /// 值: "deepseek" / "qwen" / "mixtral"
     #[serde(default)]
     pub moe_router: Option<String>,
+    /// 是否使用 HeadRmsNorm (Qwen3 q_norm/k_norm)。
+    /// mega-kernel 编译时据此决定是否插入 HeadRmsNorm 节点。
+    #[serde(default)]
+    pub has_head_rms_norm: bool,
+    /// HeadRmsNorm epsilon (仅在 has_head_rms_norm=true 时有效)。
+    #[serde(default = "default_head_rms_norm_eps")]
+    pub head_rms_norm_eps: f32,
     /// 配置占位符映射
     #[serde(default)]
     pub config: HashMap<String, ConfigValue>,
@@ -45,6 +52,10 @@ pub struct ArchTemplate {
 
 fn default_family() -> String {
     "decoder".to_string()
+}
+
+fn default_head_rms_norm_eps() -> f32 {
+    1e-6
 }
 
 fn default_version() -> String {
