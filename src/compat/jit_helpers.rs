@@ -241,12 +241,13 @@ pub(crate) fn build_decoder_layer_graph(
     inter: usize,
     eps: f32,
     rope_theta: f64,
+    rope_partial: f32,
     dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::CompilerGraph;
 
     let mut g = CompilerGraph::decoder_layer(
-        seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, dtype,
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, inter, eps, rope_theta, rope_partial, dtype,
     );
 
     // Override inputs: CPU JIT path needs all weight tensors in g.inputs so
@@ -572,6 +573,7 @@ pub(crate) fn build_moe_pre_attention_graph(
     head_dim: usize,
     eps: f32,
     rope_theta: f64,
+    rope_partial: f32,
     dtype: DType,
 ) -> gllm_kernels::compiler::CompilerGraph {
     use gllm_kernels::compiler::{CompilerGraph, OpKind};
@@ -602,9 +604,9 @@ pub(crate) fn build_moe_pre_attention_graph(
     g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], ft);
-    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![q_out], vec![q_rope], "rope_q");
+    g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: rope_partial, rope_scaling: None }, vec![q_out], vec![q_rope], "rope_q");
     let k_rope = g.add_tensor_concrete("k_rope", &[s, kv_dim], ft);
-    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: 1.0, rope_scaling: None }, vec![k_out], vec![k_rope], "rope_k");
+    g.add_op(OpKind::RoPE { num_heads: num_kv_heads, head_dim, theta: rope_theta, partial: rope_partial, rope_scaling: None }, vec![k_out], vec![k_rope], "rope_k");
 
     // Output: q_rope (primary output). k_rope and v_out are extracted from scratchpad.
     g.outputs = vec![q_rope];
