@@ -67,17 +67,12 @@ fn build_alias_map(graph: &OnnxGraph) -> (
     HashMap<String, String>,
     HashMap<String, bool>,
 ) {
-    let mut alias_map = HashMap::new(); // semantic → onnx
-    let mut reverse_alias = HashMap::new(); // onnx → semantic
+    let mut alias_map: HashMap<String, String> = HashMap::new(); // semantic → onnx
+    let mut reverse_alias: HashMap<String, String> = HashMap::new(); // onnx → semantic
     let mut layout_hints: HashMap<String, bool> = HashMap::new(); // onnx_name → needs_transpose
 
+    // Pass 1: Build aliases from graph node analysis (anonymous + named initializers).
     for node in &graph.nodes {
-        // Determine which input index holds the weight and what suffix to use.
-        // Also record per-weight layout hint by node op_type + attributes:
-        //   MatMul: input[1] is canonical [K, N] (transpose=false)
-        //   Gemm:  input[1] is HF [out, in] if transB attribute == 1 (transpose=true),
-        //          otherwise canonical [K, N] (transpose=false)
-        //   Gather: input[0] is embedding table (no transpose semantics)
         let (candidates, weight_transpose): (Vec<(usize, &str)>, Option<bool>) = match node.op_type.as_str() {
             "MatMul" => (vec![(1, ".weight")], Some(false)),
             "Gemm" => {
@@ -86,7 +81,7 @@ fn build_alias_map(graph: &OnnxGraph) -> (
                         OnnxAttributeValue::Int(v) => Some(*v != 0),
                         _ => None,
                     })
-                    .unwrap_or(false); // ONNX Gemm default transB = 0
+                    .unwrap_or(false);
                 (vec![(1, ".weight")], Some(trans_b))
             }
             "Gather" => (vec![(0, ".weight")], None),
@@ -102,50 +97,112 @@ fn build_alias_map(graph: &OnnxGraph) -> (
             _ => continue,
         };
 
-        for (input_idx, suffix) in candidates {
+        for (input_idx, _suffix) in candidates {
             let Some(onnx_name) = node.inputs.get(input_idx) else {
                 continue;
             };
 
-            // Record layout hint for MatMul/Gemm weights regardless of naming
-            if let Some(trans) = weight_transpose {
-                if graph.initializers.contains_key(onnx_name.as_str())
-                    || onnx_name.starts_with("onnx::")
-                {
-                    layout_hints.entry(onnx_name.clone()).or_insert(trans);
-                }
-            }
-
-            // Only alias anonymous onnx:: names
-            if !onnx_name.starts_with("onnx::") {
-                continue;
-            }
-
-            // Must be an actual initializer
             if !graph.initializers.contains_key(onnx_name) {
                 continue;
             }
 
-            // Derive semantic name from node.name
-            let semantic = derive_semantic_name(&node.name, &node.op_type, suffix);
-            if semantic.is_empty() {
-                continue;
+            // Record layout hint for MatMul/Gemm weights regardless of naming
+            if let Some(trans) = weight_transpose {
+                layout_hints.entry(onnx_name.clone()).or_insert(trans);
             }
 
-            if graph.initializers.contains_key(&semantic) {
-                continue;
+            if onnx_name.starts_with("onnx::") {
+                // Anonymous: derive semantic name from node.name path
+                let semantic = derive_semantic_name(&node.name, &node.op_type, ".weight");
+                if !semantic.is_empty()
+                    && !graph.initializers.contains_key(&semantic)
+                    && !alias_map.contains_key(&semantic)
+                {
+                    alias_map.insert(semantic.clone(), onnx_name.clone());
+                    reverse_alias.insert(onnx_name.clone(), semantic);
+                }
+            } else {
+                // Named initializer: try to build a canonical alias.
+                // ONNX names may differ from canonical HF names in two ways:
+                //   1. ".MatMul.weight" / ".Gemm.weight" suffix → ".weight"
+                //   2. "attn" → "self_attn" (ONNX exporter shortens module names)
+                if let Some(canonical) = onnx_name_to_canonical(onnx_name) {
+                    if canonical != *onnx_name
+                        && !graph.initializers.contains_key(&canonical)
+                        && !alias_map.contains_key(&canonical)
+                    {
+                        alias_map.insert(canonical.clone(), onnx_name.clone());
+                        reverse_alias.insert(onnx_name.clone(), canonical);
+                    }
+                }
             }
+        }
+    }
 
-            if alias_map.contains_key(&semantic) {
-                continue;
+    // Pass 2: For any remaining initializers without canonical aliases,
+    // apply blanket ONNX→canonical normalization (covers norm weights etc.).
+    for onnx_name in graph.initializers.keys() {
+        if reverse_alias.contains_key(onnx_name.as_str()) {
+            continue;
+        }
+        if let Some(canonical) = onnx_name_to_canonical(onnx_name) {
+            if canonical != *onnx_name
+                && !graph.initializers.contains_key(&canonical)
+                && !alias_map.contains_key(&canonical)
+            {
+                alias_map.insert(canonical.clone(), onnx_name.clone());
+                reverse_alias.insert(onnx_name.clone(), canonical);
             }
-
-            alias_map.insert(semantic.clone(), onnx_name.clone());
-            reverse_alias.insert(onnx_name.clone(), semantic);
         }
     }
 
     (alias_map, reverse_alias, layout_hints)
+}
+
+/// Normalize an ONNX initializer name to canonical HuggingFace form.
+///
+/// Handles common ONNX export naming differences:
+/// 1. Op-type infix: `model.layers.0.attn.q_proj.MatMul.weight` → `model.layers.0.attn.q_proj.weight`
+/// 2. Module abbreviation: `attn` → `self_attn`
+/// 3. Final norm placement: `model.layers.{N}.final_norm_layernorm.weight` → `model.norm.weight`
+fn onnx_name_to_canonical(onnx_name: &str) -> Option<String> {
+    let ops = [".MatMul.", ".Gemm.", ".Add.", ".Mul.", ".Div.", ".Sub.", ".Reshape."];
+    let mut canonical = onnx_name.to_string();
+    let mut changed = false;
+
+    // Final norm: ONNX exporters place it as model.layers.{N}.final_norm_layernorm.weight
+    // instead of the canonical model.norm.weight.
+    if canonical.contains(".final_norm_") && canonical.ends_with(".weight") {
+        canonical = "model.norm.weight".to_string();
+        return Some(canonical);
+    }
+
+    // Strip op-type infix (e.g. ".MatMul." → ".")
+    for op in ops {
+        if let Some(idx) = canonical.find(op) {
+            // Verify the op infix is followed by "weight" or "bias"
+            let after_op = &canonical[idx + op.len()..];
+            if after_op.starts_with("weight") || after_op.starts_with("bias") {
+                canonical = format!("{}{}", &canonical[..idx], &canonical[idx + op.len() - 1..]);
+                // Remove the double-dot: "attn.q_proj..weight" → "attn.q_proj.weight"
+                canonical = canonical.replace("..", ".");
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    // Module name normalization: "attn" → "self_attn" (within "model.layers.N." prefix)
+    if canonical.contains(".layers.") {
+        for old_new in [(".attn.", ".self_attn.")] {
+            if canonical.contains(old_new.0) {
+                canonical = canonical.replace(old_new.0, old_new.1);
+                changed = true;
+            }
+        }
+    }
+
+    if changed { Some(canonical) } else { None }
 }
 
 /// Derive a semantic tensor name from an ONNX node name.
@@ -177,6 +234,8 @@ impl OnnxLoader {
         let model_proto = decode_model(path)?;
         let mut resolver = ExternalDataResolver::new(path);
         let model = OnnxModel::from_proto(model_proto, &mut resolver)?;
+        log::debug!("[onnx-loader] initializers: {}, nodes: {}, inputs: {}",
+            model.graph.initializers.len(), model.graph.nodes.len(), model.graph.inputs.len());
         let (alias_map, reverse_alias, layout_hints) = build_alias_map(&model.graph);
         Ok(Self {
             path: path.to_path_buf(),

@@ -139,6 +139,7 @@ fn assert_generation_sane(text: &str, label: &str) {
 #[test]
 fn e2e_generator_safetensors() {
     install_segv_handler();
+    let _ = env_logger::builder().is_test(true).try_init();
     const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
     let client = Client::new_chat(MODEL).expect("Failed to load SafeTensors model");
@@ -182,6 +183,7 @@ fn e2e_generator_safetensors() {
 #[test]
 fn e2e_generator_gguf() {
     install_segv_handler();
+    let _ = env_logger::builder().is_test(true).try_init();
     const MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
 
     let client = Client::new_chat(MODEL).expect("Failed to load GGUF model");
@@ -225,6 +227,7 @@ fn e2e_generator_gguf() {
 /// **期望结果**: 成功加载 ONNX 模型并生成 token 序列
 #[test]
 fn e2e_generator_onnx() {
+    let _ = env_logger::builder().is_test(true).try_init();
     const MODEL: &str = "onnx-community/SmolLM2-135M-ONNX";
 
     let client = Client::new_chat(MODEL).expect("Failed to load ONNX model");
@@ -302,6 +305,8 @@ fn e2e_generator_phi4_partial_rope() {
 /// **期望结果**: 成功加载 Gemma 4 E2B SafeTensors 模型并生成语义正确的 token 序列
 #[test]
 fn e2e_generator_gemma4_qknorm() {
+    install_segv_handler();
+    let _ = env_logger::builder().is_test(true).try_init();
     const MODEL: &str = "google/gemma-4-E2B";
 
     let client = Client::new_chat(MODEL).expect("Failed to load Gemma 4 model");

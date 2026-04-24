@@ -905,6 +905,9 @@ impl ModelConfig {
                 .as_ref()
                 .and_then(|cfg| cfg.base)
                 .or_else(|| find_f32(value, &["rope_theta", "rope_base", "rope_base_value", "text_config.rope_theta"]))
+                // Gemma 4 nested: text_config.rope_parameters.sliding_attention.rope_theta
+                .or_else(|| find_f32(value, &["text_config.rope_parameters.sliding_attention.rope_theta"]))
+                .or_else(|| find_f32(value, &["rope_parameters.sliding_attention.rope_theta"]))
                 .unwrap_or_else(|| {
                     log::debug!("rope_theta not found: defaulting to 0.0 (model uses absolute position embeddings)");
                     0.0 // LEGAL: encoder 模型（BERT/XLM-R）无 RoPE，0.0 表示不使用旋转位置编码
@@ -1017,8 +1020,12 @@ impl ModelConfig {
         .filter(|v| v.is_finite() && *v > 0.0);
 
         // ── Gemma 4 specific fields ──
-        let global_rope_theta = find_f32(value, &["global_rope_theta"]);
-        let rope_partial_ratio = find_f32(value, &["rope_partial_ratio", "global_rope_partial", "partial_rotary_factor"]);
+        let global_rope_theta = find_f32(value, &["global_rope_theta"])
+            .or_else(|| find_f32(value, &["text_config.rope_parameters.full_attention.rope_theta"]));
+        let rope_partial_ratio = find_f32(value, &[
+            "rope_partial_ratio", "global_rope_partial", "partial_rotary_factor",
+            "text_config.rope_parameters.full_attention.partial_rotary_factor",
+        ]);
         let attention_pattern = value.get("attention_pattern")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect());
