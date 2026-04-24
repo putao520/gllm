@@ -434,11 +434,13 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
             let position = seq.position;
 
             let mut inputs = HashMap::new();
-            let token_f32: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
-            inputs.insert("input_ids".to_string(), f32_to_bytes(&token_f32));
+            // input_ids: u32 LE 字节（与 JIT Gather 的 ScalarLoad+IntMulStride 一致）
+            let token_bytes: Vec<u8> = tokens.iter().flat_map(|&t| t.to_le_bytes()).collect();
+            inputs.insert("input_ids".to_string(), token_bytes);
 
-            let position_ids: Vec<f32> = (position..position + seq_len).map(|p| p as f32).collect();
-            inputs.insert("position_ids".to_string(), f32_to_bytes(&position_ids));
+            let position_ids: Vec<u8> = (position..position + seq_len)
+                .flat_map(|p| (p as u32).to_le_bytes()).collect();
+            inputs.insert("position_ids".to_string(), position_ids);
 
             // ARCH-MULTIMODAL-FUSION (SPEC/02-ARCHITECTURE.md):
             // When a multimodal request is dispatched, the Executor attaches a
