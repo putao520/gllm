@@ -76,6 +76,12 @@ impl MegaKernelExecutor {
         weight_sizes: &std::collections::HashMap<String, usize>,
         eos_token_id: u32,
     ) -> Result<Self, MegaKernelError> {
+        log::info!(
+            "[mega] compiling: layers={} hidden={} heads={} kv_heads={} head_dim={} vocab={} eps={} rope_theta={} rope_partial={}",
+            geometry.num_layers, geometry.hidden_size, geometry.num_heads, geometry.num_kv_heads,
+            geometry.head_dim, geometry.vocab_size, geometry.norm_eps, geometry.rope_theta,
+            geometry.rope_partial_ratio,
+        );
         let config = gllm_kernels::compiler::ModelMegaConfig {
             num_layers: geometry.num_layers,
             hidden: geometry.hidden_size,
