@@ -285,7 +285,80 @@ pub struct FusionPlan {
 
 ## 5. Phase 3: ISA Lowering
 
-### 5.1 TraceOp → 指令映射
+### 5.1 自动指令选择器 (Auto Instruction Selection)
+
+#### 5.1.1 设计原则
+
+Phase 3 的 TraceOp → VmInstr → ISA 映射必须是**完全自动的**，类似 LLVM SelectionDAG。禁止在 `emit_standalone_op` 中手写 `OpKind::*` match arm。
+
+```
+正确架构:
+  Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowering → Machine Code
+                                      ↑
+                                 类似 LLVM SelectionDAG
+                                 由 ComputePattern 驱动，算法保证正确性
+```
+
+**错误架构（已废弃）**:
+```
+  Scalar → SymExec → TraceOp → [plan_lower.rs 手写 emit] → VmInstr → ISA Lowering
+                                      ↑
+                                 人肉指令选择，bug 源头
+```
+
+#### 5.1.2 自动分发规则
+
+`emit_standalone_op` 必须按 `ComputePattern`（或等价的 `OpSemantics`）分类分发，不允许逐个 `OpKind` 手写 match arm：
+
+| ComputePattern | OpSemantics | 分发策略 | 自动化级别 |
+|----------------|-------------|---------|-----------|
+| Elementwise { body } | Elementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
+| BinaryElementwise { body } | Elementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
+| NormLike { reduce, finalize, transform } | Reduction | 专用 `lower_norm*` 函数 | 半自动 — trace 驱动 norm 公式 |
+| Gemm | Gemm | 专用 `lower_gemm*` 函数 | 半自动 — 硬件分块策略 |
+| Opaque (结构/控制) | Opaque | 专用 lower 函数或 NOP | 手写 — 控制流指令 |
+
+#### 5.1.3 自动分发实现要求
+
+1. **函数入口**: `emit_standalone_op` 函数顶部首先尝试 `try_auto_dispatch_elementwise()`
+2. **ComputePattern 路由**: elementwise 失败后，按 ComputePattern 类型路由到专用 lower 函数
+3. **禁止手写 OpKind match**: 不允许 `OpKind::Xxx => { ... }` 形式的逐算子分发
+4. **新增算子**: 注册 scalar impl → SymExec 提取 trace → elementwise 自动完成；复杂算子写一个 `lower_*` 函数 + 注册 ComputePattern 路由
+5. **缺失算子**: 走到 catch-all 时返回 `Err`，禁止静默 NOP（NO_SILENT_FALLBACK）
+
+#### 5.1.4 TraceOp → VmInstr 自动查表
+
+`auto_lower_trace()` 实现完全自动的 TraceOp → VmInstr 映射，每个 TraceOp 变体自带映射语义：
+
+| TraceOp | VmInstr | 辅助函数 |
+|---------|---------|---------|
+| Input(n) | 返回 inputs[n] | — |
+| Const(val) | Broadcast { ScalarExpr::Const(val) } | — |
+| Add(a,b) | VecBinOp { op: Add } | `emit_binop()` |
+| Sub/Mul/Div/Max/Min | VecBinOp { op: ... } | `emit_binop()` |
+| Neg/Abs/Sqrt/Rsqrt/Recip | VecUnaryOp { op: ... } | `emit_unary()` |
+| Fma(a,b,c) | Fma { ... } | — |
+| Exp/Tanh/Log | Transcendental { func: ... } | `emit_transcendental()` |
+| HReduce(a, op) | VecReduce { op } | `emit_hreduce()` (待实现) |
+| Compare(a, b, op) | VecCmp { op } | `emit_cmp()` (待实现) |
+| Cast(a, dtype) | VecCast { dtype } | `emit_cast()` (待实现) |
+
+**关键保证**: 新增 TraceOp 变体只需在 `auto_lower_trace` 的 match 中添加**一行**映射，不需要修改任何其他 lower 函数。
+
+#### 5.1.5 待扩展的 TraceOp（优先级排序）
+
+当前缺少的 TraceOp 变体阻止了 softmax/norm 的全自动 lowering：
+
+| 优先级 | TraceOp | 需要的 VmInstr | 解锁的算子 |
+|--------|---------|---------------|-----------|
+| P0 | Compare | VecCmp | 条件分支、if-else |
+| P0 | Cast | VecCast | dtype 转换 |
+| P1 | HReduce | VecReduce + VecStore | softmax、norm 归约 |
+| P1 | ConditionalBranch | 条件 JMP | 控制流 |
+| P2 | Permute | VecPermute | 向量重排 |
+| P2 | MaskedOp | MaskedLoad/Store | 掩码操作 |
+
+### 5.1.6 TraceOp → ISA 指令映射
 
 Phase 3 从 OpTrace 的 `Vec<TraceOp>` 直接映射到平台指令。不硬编码算子语义。
 
