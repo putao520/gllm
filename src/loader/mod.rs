@@ -1087,11 +1087,10 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
     }
 
     if is_f32_backend {
-        // Safety: we know E is f32 here
-        let as_e: &[E] =
-            unsafe { std::slice::from_raw_parts(converted_f32.as_ptr() as *const E, converted_f32.len()) };
+        // ARCH-ZERO-COPY-F32: 直接 move converted_f32 给 backend，避免 to_vec() 再拷贝一次。
+        // CPU backend 覆写了 upload_weights_f32_owned，直接接收 Vec<f32> 转为 Vec<E>。
         let tensor = backend
-            .upload_weights(as_e)
+            .upload_weights_f32_owned(converted_f32)
             .map_err(|e| LoaderError::Backend(e.to_string()))?;
         return Ok((cloned_meta, tensor, sp_meta_opt));
     }

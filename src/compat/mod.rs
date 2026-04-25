@@ -200,6 +200,12 @@ pub mod backend_trait {
 
         fn upload_weights(&self, data: &[E]) -> Result<Self::Tensor, BackendError>;
 
+        /// Upload weights from a pre-converted f32 Vec, avoiding an extra copy.
+        /// Only called when E == f32. CPU backend overrides to take ownership directly.
+        fn upload_weights_f32_owned(&self, _data: Vec<f32>) -> Result<Self::Tensor, BackendError> {
+            Err(BackendError::Unimplemented("upload_weights_f32_owned: backend does not support zero-copy f32 upload".into()))
+        }
+
         /// Quantized matrix multiplication dispatching to K-Quant/Classic/IQ kernels.
         #[allow(clippy::too_many_arguments)]
         fn quantized_matmul(

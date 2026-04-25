@@ -1100,6 +1100,16 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         Ok(data.to_vec())
     }
 
+    fn upload_weights_f32_owned(&self, data: Vec<f32>) -> Result<Self::Tensor, BE> {
+        // Safety: Self::Tensor = Vec<E>, and this is only called when E == f32.
+        // Transmute the Vec<f32> to Vec<E> without copying.
+        let tensor: Vec<E> = unsafe {
+            let mut v = std::mem::ManuallyDrop::new(data);
+            Vec::from_raw_parts(v.as_mut_ptr() as *mut E, v.len(), v.capacity())
+        };
+        Ok(tensor)
+    }
+
     fn quantized_matmul(
         &self,
         weight_blocks: &[u8],
