@@ -1244,31 +1244,15 @@ fn atomic_op_to_kind(
             "atomic op '{op_type}' 是 ONNX optimized model (O3/O4) 的 fused operator,\
              gllm JIT 不支持。建议: 用 model.onnx 原版 (非优化) 或 SafeTensors。"
         ))),
-        "MoERouter" => {
-            let num_experts = require_usize(attributes, "num_experts", "MoERouter")?;
-            let top_k = require_usize(attributes, "top_k", "MoERouter")?;
-            let hidden = if !input_shapes.is_empty() && input_shapes[0].len() >= 2 {
-                input_shapes[0][input_shapes[0].len() - 1].as_concrete().ok_or_else(|| {
-                    ExecutionError::ShapeMismatch(
-                        "MoERouter hidden 维度必须 Concrete".into())
-                })?
-            } else {
-                return Err(ExecutionError::ShapeMismatch(
-                    "atomic op 'MoERouter' 需要 hidden 输入至少 2D".into()));
-            };
-            let seq_len = input_shapes[0][input_shapes[0].len() - 2].clone();
-            Ok(OpKind::MoERouter { num_experts, top_k, hidden, seq_len })
-        }
         "MoEDispatchPacked" => {
             let num_experts = require_usize(attributes, "num_experts", "MoEDispatchPacked")?;
             let top_k = require_usize(attributes, "top_k", "MoEDispatchPacked")?;
             let mxfp4_block_size = require_usize(attributes, "mxfp4_block_size", "MoEDispatchPacked")?;
             let swiglu_limit = attr_f32(attributes, "swiglu_limit").unwrap_or(7.0);
-            let intermediate_size = if !input_shapes.is_empty() && input_shapes.len() > 3 {
-                // gate_up_blocks: [num_experts, 2*intermediate/block_size, hidden, bytes_per_block]
-                // intermediate_size = dim1 * block_size / 2
+            // inputs[3] = gate_up_blocks: [num_experts, 2*intermediate_size, hidden/block_size, bytes_per_block]
+            let intermediate_size = if input_shapes.len() > 3 {
                 input_shapes[3].get(1).and_then(|d| d.as_concrete())
-                    .map(|d| d * mxfp4_block_size / 2)
+                    .map(|d| d / 2)
                     .ok_or_else(|| ExecutionError::ShapeMismatch(
                         "MoEDispatchPacked: 无法从 gate_up_blocks shape 推导 intermediate_size".into()))?
             } else {
@@ -1332,19 +1316,6 @@ fn build_atomic_graph(
             let out_telemetry = g.add_tensor("telemetry", vec![seq_len_dim], dt);
             g.add_op(kind.clone(), input_ids.clone(), vec![out, out_telemetry], op_type);
             g.outputs = vec![out, out_telemetry];
-        }
-        gllm_kernels::compiler::OpKind::MoERouter { top_k, .. } => {
-            // MoERouter 有 2 个输出: router_weights[seq, top_k] + router_indices[seq, top_k]
-            let seq_len_dim = if !input_shapes.is_empty() {
-                input_shapes[0][0].clone()
-            } else {
-                gllm_kernels::compiler::SymDim::Concrete(1)
-            };
-            let top_k_dim = gllm_kernels::compiler::SymDim::Concrete(top_k);
-            let out_weights = g.add_tensor("router_weights", vec![seq_len_dim.clone(), top_k_dim.clone()], dt);
-            let out_indices = g.add_tensor("router_indices", vec![seq_len_dim, top_k_dim], dt);
-            g.add_op(kind.clone(), input_ids.clone(), vec![out_weights, out_indices], op_type);
-            g.outputs = vec![out_weights, out_indices];
         }
         _ => {
             g.add_op(kind.clone(), input_ids.clone(), vec![out], op_type);

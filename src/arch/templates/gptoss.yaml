@@ -204,23 +204,14 @@ graph:
           inputs: ["layer_${i}_residual", "model.layers.${i}.post_attention_layernorm.weight"]
           outputs: ["layer_${i}_post_normed"]
 
-        # MoE Router (32 local experts, top-4)
-        - name: "layer_${i}_router"
-          op_type: MoERouter
-          inputs: ["layer_${i}_post_normed", "model.layers.${i}.mlp.router.weight", "model.layers.${i}.mlp.router.bias"]
-          outputs: ["layer_${i}_router_weights", "layer_${i}_router_indices"]
-          attributes:
-            num_experts: 32
-            top_k: 4
-
-        # Packed-expert MoE dispatch (mxfp4 quantized, gate_up packed)
-        # 与 deepseek per-expert dispatch 不同: 单 packed tensor 含全部 32 experts
+        # Fused MoE: inline routing (GEMV + softmax + top-k) + packed-expert dispatch
+        # 路由结果驻留寄存器/scratch logits，不产出中间 tensor
         - name: "layer_${i}_moe_dispatch"
           op_type: MoEDispatchPacked
           inputs:
             - "layer_${i}_post_normed"
-            - "layer_${i}_router_weights"
-            - "layer_${i}_router_indices"
+            - "model.layers.${i}.mlp.router.weight"
+            - "model.layers.${i}.mlp.router.bias"
             - "model.layers.${i}.mlp.experts.gate_up_proj_blocks"
             - "model.layers.${i}.mlp.experts.gate_up_proj_scales"
             - "model.layers.${i}.mlp.experts.gate_up_proj_bias"
