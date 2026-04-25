@@ -152,14 +152,39 @@ Phase 3 代码生成时，每个 TraceOp 映射到对应 SIMD/GPU 指令：
 
 ```rust
 pub enum TraceOp {
+    // ── 数据访问 ──
     Input(u32), Const(f64),
+    // ── 二元算术 ──
     Add(u32, u32), Sub(u32, u32), Mul(u32, u32), Div(u32, u32),
     Fma(u32, u32, u32),
-    Neg(u32), Abs(u32),
-    Exp(u32), Sqrt(u32), Rsqrt(u32), Tanh(u32), Recip(u32),
     Max(u32, u32), Min(u32, u32),
+    // ── 一元算术 ──
+    Neg(u32), Abs(u32),
+    Exp(u32), Sqrt(u32), Rsqrt(u32), Tanh(u32), Recip(u32), Log(u32),
+    // ── 比较与类型转换 (ARCH-AUTO-INSTR-SELECT 待实现) ──
+    Compare { a: u32, b: u32, op: CmpOp },  // P0: 解锁条件分支
+    Cast { src: u32, target_dtype: DType },  // P0: 解锁 dtype 转换
+    // ── 横向归约 (ARCH-AUTO-INSTR-SELECT 待实现) ──
+    HReduce { src: u32, op: ReduceOp, width: usize },  // P1: 解锁 softmax/norm 全自动
+    // ── 控制流 (ARCH-AUTO-INSTR-SELECT 待实现) ──
+    ConditionalBranch { cond: u32, true_body: Vec<TraceOp>, false_body: Vec<TraceOp> },  // P1
+    // ── 向量重排 (P2) ──
+    Permute { src: u32, indices: Vec<u32> },
+    MaskedLoad { base: u32, mask: u32, offset: Offset },
+    MaskedStore { base: u32, src: u32, mask: u32, offset: Offset },
 }
 ```
+
+**TraceOp 扩展解锁矩阵**:
+
+| TraceOp | 解锁的算子 | 对应的 VmInstr |
+|---------|-----------|---------------|
+| Compare | if-else 条件, SelectOp | VecCmp |
+| Cast | dtype 转换 (f32↔f16↔bf16) | VecCast |
+| HReduce | softmax, norm 归约 (sum/max) | VecReduce |
+| ConditionalBranch | 条件执行路径 | 条件 JMP |
+| Permute | 向量重排 (shuffle) | VecPermute |
+| MaskedLoad/Store | 尾部掩码, 不对齐访问 | MaskedLoad/Store |
 
 ### 3.5 SemanticDAG
 

@@ -525,3 +525,43 @@
 | `tests/test_e2e_fusion.rs` | REQ-PIPELINE-001/004/005 融合管线（同架构+跨架构 embed+rerank、top_n 截断、RAG 生成） | ✅ |
 | `tests/test_e2e_rag_pipeline.rs` | REQ-PIPELINE-001/002/005 跨模型 RAG（独立 Client session 隔离、cosine 召回+rerank 精排+generator 生成） | ✅ |
 
+## 18. Mega-Kernel Session & Multimodal 支持 (REQ-MEGA)
+
+> **SSOT**: [SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.3, §6.5, §6.6]
+> **背景**: `generate_with_session` 和 `generate_with_multimodal` 已删除 step-by-step Rust 编排路径（`9fa0f51`），改为返回 Err。需要 mega-kernel 原生支持才能恢复。
+
+### 18.1 Session KV Cache 复用
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-MEGA-SESSION-001** | Mega-Kernel Session 模式 | mega-kernel 支持 KV cache 跨轮次复用 | 1. `MegaKernelBusinessConfig.session_enabled=true` 时图中插入 `SessionKvRestore` op<br>2. ABI 新增 `session_position` 参数 (StackArg(104))<br>3. session_position > 0 时跳过已处理 tokens，复用已有 KV cache<br>4. session_position == 0 时 NOP (全新生成)<br>5. `generate_with_session()` 不再返回 Err，改为调用 mega-kernel<br>6. 多轮对话中 KV cache 连续性正确（第二轮输出与第一轮衔接） | 🔴 待实现 |
+| **REQ-MEGA-SESSION-002** | Session 位置指针管理 | Executor 层维护 session position 跨轮次传递 | 1. `MegaKernelExecutor` 新增 `session_position: usize` 状态<br>2. 每次 mega-kernel 调用后更新: session_position += generated_tokens<br>3. session reset (新对话) 时 session_position = 0<br>4. 位置溢出保护 (session_position + prompt_len < max_seq_len) | 🔴 待实现 |
+
+### 18.2 Multimodal Fused Hidden 注入
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-MEGA-MM-001** | Mega-Kernel Multimodal 模式 | mega-kernel 支持预计算 fused hidden state 注入 | 1. `MegaKernelBusinessConfig.multimodal_enabled=true` 时图中插入 `MmHiddenInject` op<br>2. ABI 新增 `fused_hidden_ptr` (StackArg(112)) + `num_mm_tokens` (StackArg(120))<br>3. fused_hidden_ptr != NULL 时循环 ADD 到 embedding buffer<br>4. fused_hidden_ptr == NULL 时 NOP (纯文本)<br>5. `generate_with_multimodal()` 不再返回 Err，改为调用 mega-kernel<br>6. 多模态输入的生成结果语义正确 | 🔴 待实现 |
+| **REQ-MEGA-MM-002** | Fused Hidden 预计算 | Client 层在 mega-kernel 调用前预计算多模态 fused hidden | 1. `Client::generate_with_multimodal()` 内部先调用 vision/audio encoder 获取 hidden state<br>2. 预计算结果通过 fused_hidden_ptr 传入 mega-kernel<br>3. 编码过程不触发 JIT 重编译（复用已有 encoder mega-kernel） | 🔴 待实现 |
+
+## 19. 自动指令选择器 (REQ-AIS)
+
+> **SSOT**: [SPEC/01-JIT-PIPELINE.md §5.1], CLAUDE.md ARCH-AUTO-INSTR-SELECT
+> **背景**: TraceOp→VmInstr 和 OpKind→lower 的手写 match arms 是 bug 的系统性源头
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-AIS-001** | TraceOp→VmInstr 自动查表 | TraceOp body 编译为 VmInstr 序列无需手写 match | 1. `auto_lower_trace()` 覆盖全部 17 个已实现 TraceOp<br>2. 同类操作共享辅助函数（6 二元/5 一元/3 超越函数）<br>3. 未实现 TraceOp 返回 Err（NO_SILENT_FALLBACK）<br>4. 生成结果与原手写 `lower_trace_body` 数值 bit-exact | 🟡 Phase 1 已实现 |
+| **REQ-AIS-002** | OpKind→ComputePattern 自动分发 | `emit_standalone_op` 从 29 个手写 match arm 改为 ComputePattern 驱动分发 | 1. Elementwise ops 全部走 auto_dispatch_elementwise 路径<br>2. Norm/Gemm/Attention 等走专用 lower 函数<br>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）<br>4. 未实现 OpKind 返回 Err（不静默 NOP）<br>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B） | 🔴 待实现 |
+| **REQ-AIS-003** | TraceOp 扩展（Compare/Cast） | 新增 Compare/Cast TraceOp 解锁条件分支和 dtype 转换 | 1. TraceOp::Compare → VmInstr::VecCmp<br>2. TraceOp::Cast → VmInstr::VecCast<br>3. 对应 VmInstr 在 x86_64 和 AArch64 codegen 中实现<br>4. 单元测试验证数值正确性 | 🔴 待实现 |
+| **REQ-AIS-004** | TraceOp 扩展（HReduce） | 新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering | 1. TraceOp::HReduce → VmInstr::VecReduce<br>2. 支持 Sum/Max/Min 归约操作<br>3. Softmax 可完全通过 SymExec trace 自动 lowering<br>4. E2E 测试通过 | 🔴 待实现 |
+
+## 20. MoE 算子完善 (REQ-MOE)
+
+> **SSOT**: [SPEC/04-OPERATORS.md §4.6]
+> **背景**: MoERouter 无 JIT lowering，是 GPT-OSS-20B "CapCapCap" 根因
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-MOE-001** | MoERouter JIT Lowering | 实现 `lower_moe_router()` 分解为 GEMM + softmax + top-k | 1. `emit_standalone_op` 有 `OpKind::MoERouter` match arm<br>2. 内部调用 `emit_gemm_inline_with_hook()` + `lower_reduction_softmax()` + top-k<br>3. 输出 (router_weights, router_indices) 格式正确<br>4. GPT-OSS-20B E2E 测试输出非退化（不再是 "CapCapCap"） | 🔴 待实现 |
+| **REQ-MOE-002** | MoEDispatchPacked JIT Lowering | 实现专家分发+计算的融合 lowering | 1. `emit_standalone_op` 有 `OpKind::MoEDispatchPacked` match arm<br>2. 按 router_indices 分发 hidden 到对应专家 FFN<br>3. 加权求和输出<br>4. DeepSeek-V3 / GLM-5 MoE E2E 测试通过 | 🔴 待实现 |

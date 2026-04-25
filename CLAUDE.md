@@ -36,15 +36,15 @@
 
 | Document | Content | 状态 |
 |----------|---------|------|
-| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) | ✅ |
+| `01-REQUIREMENTS.md` | 极化硅晶与通信墙生存阈值要求 (包含 TurboQuant 静态极化与 NUMA/PCIe/RDMA 硬件拓扑探测约束) + §18 Mega-Kernel Session/Multimodal (REQ-MEGA-001~004) + §19 自动指令选择器 (REQ-AIS-001~004) + §20 MoE 算子 (REQ-MOE-001~002) | ✅ |
 | `02-ARCHITECTURE.md` | 4层物理架构, Mega-Kernel 块级路由, TurboQuant, Epilogue 白嫖, 热修补, §13.12 硬件感知融合拓扑 (12 Profile: SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ⚠️ §1-§8 ✅, §9-§12/§14-§16 🟡, §13 ⚠️ |
 | `03-DATA-STRUCTURE.md` | 全链路数据结构 (KV Cache, Paged Attention, HGAL, MoE, RDMA) | ✅ |
 | `04-API-DESIGN.md` | 客户端公共 API (§7-§8 Semantic Gatekeeper 隐藏状态知识注入 SDK) | ✅ |
 | `00-PHILOSOPHY.md` | 核心哲学原则 (Accuracy First, JIT Hot-Repair, No Pragmatic Hacks, ARCH-FULL-JIT) | ✅ |
-| `01-JIT-PIPELINE.md` | JIT 四阶段管线 (Scalar→SymExec→IR→ISA Lowering) + CompilerGraph + DeviceProfile | ✅ |
+| `01-JIT-PIPELINE.md` | JIT 四阶段管线 (Scalar→SymExec→IR→ISA Lowering) + CompilerGraph + DeviceProfile + §5.1 自动指令选择器 (ARCH-AUTO-INSTR-SELECT) + §3.4 TraceOp 扩展 (Compare/Cast/HReduce) | ✅ |
 | `02-HARDWARE.md` | 硬件探测与 DeviceProfile 12 Profile (SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ✅ |
 | `03-GRAPH-IR.md` | CompilerGraph IR 规范 + OpKind + SymDim + CallbackChain 契约 (pre_node/post_node/CallbackAction) | ✅ |
-| `04-OPERATORS.md` | 算子族清单与注册规范 (GEMM/RmsNorm/RoPE/Attention/MoE/PLE/Gather/...) | ✅ |
+| `04-OPERATORS.md` | 算子族清单与注册规范 (GEMM/RmsNorm/RoPE/Attention/MoE/PLE/Gather/...) + §4.6 MoE (MoEGate/MoERouter/MoEDispatchPacked) | ✅ |
 | `05-OPTIMIZATIONS.md` | 融合决策 + Epilogue 白嫖 + TileLevelFusion/ComputeRoot 寄存器约束 | ✅ |
 | `06-RUNTIME.md` | 运行时执行模型 (FusedGraphExecutor, run_with_callbacks, KV cache 数据流) | ✅ |
 | `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE) | ✅ |
@@ -68,7 +68,7 @@
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 | ✅ |
 | `../gllm-kernels/SPEC/ARCH-DATA-FLOW-CONTRACT.md` | **数据流唯一来源契约** — lower/executor 每个值的唯一数据源映射表，禁止独立计算/反推/硬编码 | ✅ |
-| `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md` | **全虚拟化编译管线 (SSOT)** — 元抽象: 编译时映射函数替代运行时物理操作; 八维全虚拟化图谱 (数据/寄存器/内存/控制/维度/计算/权重/激活); VTC 虚拟 tensor (OSDI'26 arXiv:2604.09558); PDT 拓扑融合; GEMM 融合优先级 (EpilogueInjection 3.0× > NormIntoGemm/TileLevelFusion 1.5-2.0× > LoopFusion 1.0×); 5 轮虚拟化求解; Phase 3 唯一物化点 | 🟡 设计完成，实施中 |
+| `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md` | **全虚拟化编译管线 (SSOT)** — 元抽象: 编译时映射函数替代运行时物理操作; 十维全虚拟化图谱; VTC 虚拟 tensor; PDT 拓扑融合; 7 轮虚拟化求解; Phase 3 唯一物化点; §1.5.3 Session KV Cache 复用 + Multimodal Fused Hidden 注入; §6.5/§6.6 Session/Multimodal 数据流契约; 后端无关 ABI 参数布局 (x86_64/AArch64/GPU) | 🟡 设计完成，实施中 |
 
 ## Technology Stack
 

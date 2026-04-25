@@ -137,6 +137,35 @@ BLIS GEMM 五层级循环: Pack A/B -> K-loop (MC) -> IR 循环 (NC) -> Tile (MR
 | `paged_attention` | 分页注意力: 虚拟内存管理 |
 | `sliding_window` | 滑动窗口注意力 |
 
+### 4.6 MoE (Mixture of Experts)
+
+| 算子 | 数学定义 | 输入 | 输出 |
+|------|---------|------|------|
+| `MoEGate` | `router_logits = hidden @ weight.T; probs = softmax(router_logits); top_k_indices, top_k_weights = topk(probs)` | hidden [seq, hidden_size], weight [hidden_size, num_experts] | router_weights [seq, top_k], router_indices [seq, top_k] |
+| `MoERouter` | `logits = hidden @ weight.T + bias; probs = softmax(logits); weights, indices = top_k(probs, k)` | hidden [seq, hidden_size], weight [hidden_size, num_experts], bias [num_experts] | router_weights [seq, top_k], router_indices [seq, top_k] |
+| `MoEDispatchPacked` | `for each token: selected_experts = indices[token]; for each expert: out += expert_ffn(hidden, expert_weights) * router_weight` | hidden_input, router_weights, router_indices, gate_up_blocks, gate_up_scales, gate_up_bias, down_blocks, down_scales, down_bias (9 个) | output [seq, hidden_size] |
+
+**MoERouter vs MoEGate**:
+- `MoEGate`: DeepSeek-V3 风格，无 bias，softmax 后 top-k。用于 `OpKind::MoEGate`
+- `MoERouter`: GPT-OSS-20B 风格，有 bias，softmax 后 top-k。用于 `OpKind::MoERouter`
+- 两者输出相同格式：(router_weights, router_indices)，供下游 `MoEDispatchPacked` 消费
+
+**MoERouter JIT lowering 策略**:
+```
+MoERouter 分解为 3 个子操作:
+  1. GEMM: hidden @ weight.T → router_logits [seq, num_experts]
+  2. Softmax: softmax(router_logits) → router_probs [seq, num_experts]
+  3. TopK: top_k(router_probs, k) → (weights, indices) [seq, top_k]
+
+JIT 实现: lower_moe_router() 内部依次调用:
+  - emit_gemm_inline_with_hook() (GEMM)
+  - lower_reduction_softmax() (Softmax)
+  - lower_topk() (TopK — 新增 VmInstr::TopK)
+```
+
+**ComputePattern 分类**: `OpSemantics::Gemm`（内含 GEMM 子操作）
+**lower 函数**: `lower::lower_moe_router()` — 专用 lower，内部组合 GEMM + softmax + top-k
+
 ## 5. 量化类型支持
 
 ### 5.1 GgmlDType 到 QuantType 映射
