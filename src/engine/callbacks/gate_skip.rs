@@ -209,6 +209,7 @@ mod tests {
                 global_rope_theta: 0.0, rope_partial_ratio: 1.0, attention_pattern: vec![],
                 sliding_window: 0, num_kv_shared_layers: 0, global_head_dim: 0, hidden_size_per_layer_input: 0,
                 position_offset: None,
+                rope_scaling: None,
             });
             crate::engine::executor::GeneratorForwardConfig {
                 geometry: geom,

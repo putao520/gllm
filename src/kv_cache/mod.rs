@@ -410,6 +410,7 @@ mod tests {
             global_head_dim: 0,
             hidden_size_per_layer_input: 0,
             position_offset: None,
+            rope_scaling: None,
         });
         KvCacheConfig {
             geometry,
