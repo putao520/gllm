@@ -1141,47 +1141,50 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     }
                 }
             }
-            // ARCH-HETEROGENEOUS-LAYERS: MegaKernelWeightLayout assumes uniform
-            // per-layer weight shapes (single layer_stride). Models like Gemma 4
-            // have heterogeneous layers (global_attention uses larger head_dim;
-            // shared KV layers use different intermediate_size). Detect this early
-            // and fall back to step-by-step execution instead of silently producing
-            // garbage output from misaligned weight packing.
-            let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
-            let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
-            let mut heterogeneous = false;
-            if let Some(ref_q) = ref_size_q {
-                for layer_idx in 1..geometry.num_layers {
-                    let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
-                    if let Some(&sz) = weight_sizes.get(&q_key) {
-                        if sz != ref_q {
-                            log::warn!(
-                                "[mega] heterogeneous layer: L{} q_proj {} != L0 {} — mega-kernel disabled",
-                                layer_idx, sz, ref_q,
-                            );
-                            heterogeneous = true;
-                            break;
-                        }
-                    }
-                    if let Some(ref_gate) = ref_size_gate {
-                        let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
-                        if let Some(&sz) = weight_sizes.get(&gate_key) {
-                            if sz != ref_gate {
-                                log::warn!(
-                                    "[mega] heterogeneous layer: L{} gate_proj {} != L0 {} — mega-kernel disabled",
-                                    layer_idx, sz, ref_gate,
-                                );
-                                heterogeneous = true;
+            // ARCH-HETEROGENEOUS-LAYERS: MegaKernelWeightLayout currently assumes
+            // uniform per-layer weight shapes (single layer_stride). Models like
+            // Gemma 4 have heterogeneous layers. Per NO_SILENT_FALLBACK 铁律，
+            // 检测到异构层时必须报错，不允许静默降级到 step-by-step path。
+            // TODO: 实现 per-layer stride table 支持异构层 (mega-kernel 重构)。
+            {
+                let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
+                let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
+                let mut hetero_layer = None;
+                if let Some(ref_q) = ref_size_q {
+                    for layer_idx in 1..geometry.num_layers {
+                        let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
+                        if let Some(&sz) = weight_sizes.get(&q_key) {
+                            if sz != ref_q {
+                                hetero_layer = Some(format!(
+                                    "L{} q_proj {} != L0 {} (head_dim 或 num_heads 不同)",
+                                    layer_idx, sz, ref_q,
+                                ));
                                 break;
+                            }
+                        }
+                        if let Some(ref_gate) = ref_size_gate {
+                            let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
+                            if let Some(&sz) = weight_sizes.get(&gate_key) {
+                                if sz != ref_gate {
+                                    hetero_layer = Some(format!(
+                                        "L{} gate_proj {} != L0 {} (intermediate_size 不同)",
+                                        layer_idx, sz, ref_gate,
+                                    ));
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                if let Some(reason) = hetero_layer {
+                    return Err(ExecutorError::Backend(BackendError::Other(format!(
+                        "异构层检测: {}。MegaKernelWeightLayout 当前不支持异构层 (需要 per-layer stride table)。\
+                         按 ARCH-RUST-IS-CODEGEN 铁律，不允许降级到 Rust 级别的 step-by-step 推理路径。",
+                        reason
+                    ))));
+                }
             }
-            if heterogeneous {
-                log::info!("[mega] skipping mega-kernel due to heterogeneous layer shapes");
-                None::<super::mega_kernel::MegaKernelExecutor>
-            } else {
+            {
             let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
                 .unwrap_or_else(|| manifest.arch.clone());
             let template = crate::arch::get_template(&arch_for_template);
@@ -2960,146 +2963,65 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let text = self.decode_tokens(&output_tokens)?;
             return Ok(text);
         }
-        log::debug!("[executor] no mega-kernel, using step-by-step path");
 
-        if prompt.trim().is_empty() {
-            return Err(ExecutorError::EmptyPrompt);
-        }
-        let sampling_config = SamplingConfig {
-            temperature,
-            top_k,
-            top_p,
-        };
-
-        let req_id =
-            self.enqueue_with_config(RequestKind::Chat, prompt, max_tokens, sampling_config, thinking_budget)?;
-
-        loop {
-            self.step()?;
-
-            if let Some(req) = self.requests.get(&req_id) {
-                if req.finished {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        let req = self
-            .requests
-            .get(&req_id)
-            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
-        let text = self.decode_tokens(&req.output_tokens)?;
-        Ok(text)
+        // ARCH-RUST-IS-CODEGEN: mega-kernel 是唯一合法的推理路径。
+        // 不存在 mega-kernel = 编译失败 = 致命错误 (NO_SILENT_FALLBACK)。
+        Err(ExecutorError::Backend(BackendError::Other(
+            "generate_with_sampling: mega-kernel 未编译。所有推理必须通过 JIT 融合 mega-kernel，\
+             不允许 Rust 级别编排 (ARCH-RUST-IS-CODEGEN)。\
+             可能原因: 模型异构层未支持、mega-kernel 编译失败、或模型架构未注册。".into(),
+        )))
     }
 
     /// Generate with multimodal-routed inputs (ARCH-MULTIMODAL-FUSION).
     ///
     /// Takes the pre-expanded token sequence and pre-computed fused hidden
     /// state (text positions: gathered from `embed_tokens`; media positions:
-    /// encoder output), runs the standard continuous-batching generation loop,
-    /// and returns the decoded text.
+    /// encoder output).
     ///
-    /// Pure text callers should continue to use `generate` / `generate_with_sampling`.
-    /// This entry point exists strictly for the `.image()` / `.audio()` path in
-    /// `GenerationBuilder` per SPEC 04-API-DESIGN §3.7.
+    /// ARCH-RUST-IS-CODEGEN: 需要支持 fused hidden state 注入的 mega-kernel 路径。
+    /// 当前 mega-kernel 仅支持纯文本 generate_single_sequence。
+    /// TODO: mega-kernel multimodal 支持 (fused hidden state → JIT 注入)
     #[allow(clippy::too_many_arguments)]
     pub fn generate_with_multimodal(
         &mut self,
-        token_ids: Vec<u32>,
-        fused_hidden: Vec<f32>,
-        max_tokens: usize,
-        temperature: f32,
-        top_k: usize,
-        top_p: f32,
-        thinking_budget: Option<usize>,
+        _token_ids: Vec<u32>,
+        _fused_hidden: Vec<f32>,
+        _max_tokens: usize,
+        _temperature: f32,
+        _top_k: usize,
+        _top_p: f32,
+        _thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        if token_ids.is_empty() {
-            return Err(ExecutorError::EmptyPrompt);
-        }
-        let sampling_config = SamplingConfig {
-            temperature,
-            top_k,
-            top_p,
-        };
-
-        let req_id = self.enqueue_with_multimodal(
-            RequestKind::Chat,
-            token_ids,
-            fused_hidden,
-            max_tokens,
-            sampling_config,
-            thinking_budget,
-        )?;
-
-        loop {
-            self.step()?;
-
-            if let Some(req) = self.requests.get(&req_id) {
-                if req.finished {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        let req = self
-            .requests
-            .get(&req_id)
-            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
-        let text = self.decode_tokens(&req.output_tokens)?;
-        Ok(text)
+        // ARCH-RUST-IS-CODEGEN: mega-kernel 尚未支持 multimodal (fused hidden 注入)
+        Err(ExecutorError::Backend(BackendError::Other(
+            "generate_with_multimodal: mega-kernel 尚未支持 multimodal 输入。\
+             需要扩展 generate_single_sequence 以接受 fused hidden state (ARCH-MULTIMODAL-FUSION)。\
+             当前仅支持纯文本路径 generate_with_sampling (ARCH-RUST-IS-CODEGEN)。".into(),
+        )))
     }
 
     /// Generate with session affinity for multi-turn conversation KV cache reuse.
+    ///
+    /// ARCH-RUST-IS-CODEGEN: 需要支持 session KV cache 复用的 mega-kernel 路径。
+    /// 当前 mega-kernel 仅支持单次 generate_single_sequence。
+    /// TODO: mega-kernel session 支持 (KV cache 跨轮次复用)
     pub fn generate_with_session(
         &mut self,
-        prompt: &str,
-        max_tokens: usize,
-        temperature: f32,
-        top_k: usize,
-        top_p: f32,
-        session_id: SessionId,
-        thinking_budget: Option<usize>,
+        _prompt: &str,
+        _max_tokens: usize,
+        _temperature: f32,
+        _top_k: usize,
+        _top_p: f32,
+        _session_id: SessionId,
+        _thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        if prompt.trim().is_empty() {
-            return Err(ExecutorError::EmptyPrompt);
-        }
-        let sampling_config = SamplingConfig {
-            temperature,
-            top_k,
-            top_p,
-        };
-
-        let req_id = self.enqueue_with_session(
-            RequestKind::Chat,
-            prompt,
-            max_tokens,
-            sampling_config,
-            session_id,
-            thinking_budget,
-        )?;
-
-        loop {
-            self.step()?;
-
-            if let Some(req) = self.requests.get(&req_id) {
-                if req.finished {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        let req = self
-            .requests
-            .get(&req_id)
-            .ok_or(ExecutorError::RequestNotFound { request_id: req_id })?;
-        let text = self.decode_tokens(&req.output_tokens)?;
-        Ok(text)
+        // ARCH-RUST-IS-CODEGEN: mega-kernel 尚未支持 session KV cache 复用
+        Err(ExecutorError::Backend(BackendError::Other(
+            "generate_with_session: mega-kernel 尚未支持 multi-turn session。\
+             需要扩展 generate_single_sequence 以支持 KV cache 跨轮次复用 (ARCH-SESSION)。\
+             当前仅支持单轮 generate_with_sampling (ARCH-RUST-IS-CODEGEN)。".into(),
+        )))
     }
 
     pub fn embed(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {

@@ -275,6 +275,7 @@ fn populate_rope_cache(
     partial: f32,
     positions: *const u32,
     effective_seq: usize,
+    rope_scaling: Option<gllm_kernels::compiler::graph::RopeScaling>,
 ) -> Result<(), ExecutionError> {
     if positions.is_null() {
         return Err(ExecutionError::Compilation(
@@ -282,7 +283,7 @@ fn populate_rope_cache(
     }
     let rot_dim = ((head_dim as f32 * partial) as usize) & !1;
     let rot_dim = rot_dim.max(2);
-    let half_rot = rot_dim / 2;
+    let _half_rot = rot_dim / 2;
     let elem = std::mem::size_of::<f32>();
     let row_bytes = head_dim * elem;
     let total_bytes = effective_seq * row_bytes;
@@ -295,19 +296,15 @@ fn populate_rope_cache(
     // SAFETY: scratchpad[cache_offset..cache_offset+total_bytes] 已 bound-check,
     // f32 写入 row-major, 无 aliasing。
     let cache_ptr = unsafe { scratchpad.as_mut_ptr().add(cache_offset) as *mut f32 };
-    for (row_idx, &pos) in positions_slice.iter().enumerate() {
-        let row_base = unsafe { cache_ptr.add(row_idx * head_dim) };
-        for i in 0..half_rot {
-            let freq = 1.0f64 / theta.powf(2.0 * i as f64 / head_dim as f64);
-            let angle = pos as f64 * freq;
-            let c = angle.cos() as f32;
-            let s = angle.sin() as f32;
-            unsafe {
-                *row_base.add(i) = c;
-                *row_base.add(half_rot + i) = s;
-            }
-        }
-    }
+    let cache_len = total_bytes / elem;
+    // SAFETY: cache_len bytes already validated above.
+    let cache_slice = unsafe { std::slice::from_raw_parts_mut(cache_ptr, cache_len) };
+    // Use gllm-kernels' reference implementation — handles YaRN / Linear scaling + mscale.
+    // Before this fix, the hand-written loop used standard 1/theta^(2i/d) which silently
+    // ignored rope_scaling, causing YaRN models (gpt-oss-20b) to produce garbage output.
+    gllm_kernels::compiler::rope_scaling::fill_cos_sin_table(
+        cache_slice, positions_slice, head_dim, theta, rope_scaling,
+    );
     Ok(())
 }
 
@@ -1335,6 +1332,19 @@ fn build_atomic_graph(
             let out_telemetry = g.add_tensor("telemetry", vec![seq_len_dim], dt);
             g.add_op(kind.clone(), input_ids.clone(), vec![out, out_telemetry], op_type);
             g.outputs = vec![out, out_telemetry];
+        }
+        gllm_kernels::compiler::OpKind::MoERouter { top_k, .. } => {
+            // MoERouter 有 2 个输出: router_weights[seq, top_k] + router_indices[seq, top_k]
+            let seq_len_dim = if !input_shapes.is_empty() {
+                input_shapes[0][0].clone()
+            } else {
+                gllm_kernels::compiler::SymDim::Concrete(1)
+            };
+            let top_k_dim = gllm_kernels::compiler::SymDim::Concrete(top_k);
+            let out_weights = g.add_tensor("router_weights", vec![seq_len_dim.clone(), top_k_dim.clone()], dt);
+            let out_indices = g.add_tensor("router_indices", vec![seq_len_dim, top_k_dim], dt);
+            g.add_op(kind.clone(), input_ids.clone(), vec![out_weights, out_indices], op_type);
+            g.outputs = vec![out_weights, out_indices];
         }
         _ => {
             g.add_op(kind.clone(), input_ids.clone(), vec![out], op_type);
@@ -2894,6 +2904,7 @@ impl FusedGraphExecutor {
                     req.partial,
                     positions_ptr_rope,
                     seq_len,
+                    req.rope_scaling,
                 )?;
             }
 
@@ -3320,6 +3331,7 @@ impl FusedGraphExecutor {
                     req.partial,
                     positions,
                     effective_seq,
+                    req.rope_scaling,
                 )?;
             }
 
