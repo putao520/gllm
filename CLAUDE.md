@@ -47,7 +47,7 @@
 | `04-OPERATORS.md` | 算子族清单与注册规范 (GEMM/RmsNorm/RoPE/Attention/MoE/PLE/Gather/...) + §4.6 MoE (MoEGate/MoERouter/MoEDispatchPacked) | ✅ |
 | `05-OPTIMIZATIONS.md` | 融合决策 + Epilogue 白嫖 + TileLevelFusion/ComputeRoot 寄存器约束 | ✅ |
 | `06-RUNTIME.md` | 运行时执行模型 (FusedGraphExecutor, run_with_callbacks, KV cache 数据流) | ✅ |
-| `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE) | ✅ |
+| `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE + §2.5 MXFP4 分离格式 ARCH-MXFP4-SEPARATE) | ✅ |
 | `08-EXECUTOR.md` | Executor 规范 (§1.2.1 ARCH-KV-EFFECTIVE-MAXSEQ + §1.2.2 ARCH-KV-EFFECTIVE-LAYER SSOT 映射) | ✅ |
 | `09-API.md` | 公共 API 契约（内部 trait/枚举/错误语义） | ✅ |
 | `10-QUALITY.md` | 质量保证与数值对齐要求 | ✅ |

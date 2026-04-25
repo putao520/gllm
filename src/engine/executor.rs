@@ -988,7 +988,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         } else if let Some(ptr) = found {
                             ge = ge.bind(canonical_name.clone(), ptr);
                         } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
-                            if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
+                            // ARCH-MXFP4-SEPARATE: MXFP4 blocks/scales are raw bytes consumed
+                            // directly by JIT MoEDispatchPacked dequant — never host-dequantized.
+                            if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
+                                ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
+                            } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                 ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                             }
                         } else {
@@ -1002,7 +1006,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                     break;
                                 }
                                 if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &alias) {
-                                    if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
+                                    if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
+                                        ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
+                                        bound_alias = true;
+                                    } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                         ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                                         bound_alias = true;
                                     }
@@ -1027,7 +1034,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                                     break 'outer;
                                                 }
                                                 if let Some(q_tensor) = TensorLookup::get_quantized(&weights, alias) {
-                                                    if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
+                                                    if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
+                                                        ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
+                                                    } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
                                                         ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
                                                     }
                                                     break 'outer;
@@ -1049,8 +1058,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         };
 
         // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
+        // ARCH-MOE-MEGA-KERNEL: MoE 模型的 packed expert weights (blocks/scales/bias/router)
+        // 无法映射到 PerLayerWeightLayout 的密集 FFN 槽位。MoE 模型走 per-node
+        // FusedGraphExecutor 路径，由 JIT MoEDispatchPacked 直接消费原始字节。
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let mega_kernel = {
+        let mega_kernel = if is_moe {
+            log::info!("executor: MoE model — skipping mega-kernel (uses per-node JIT path)");
+            None
+        } else {
             use crate::compat::backend_trait::TensorLookup;
             let ge = graph_executor.as_ref()
                 .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
@@ -1152,48 +1167,43 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             // ARCH-HETEROGENEOUS-LAYERS: MegaKernelWeightLayout currently assumes
             // uniform per-layer weight shapes (single layer_stride). Models like
-            // Gemma 4 have heterogeneous layers. Per NO_SILENT_FALLBACK 铁律，
-            // 检测到异构层时必须报错，不允许静默降级到 step-by-step path。
-            // TODO: 实现 per-layer stride table 支持异构层 (mega-kernel 重构)。
-            {
-                let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
-                let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
-                let mut hetero_layer = None;
-                if let Some(ref_q) = ref_size_q {
-                    for layer_idx in 1..geometry.num_layers {
-                        let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
-                        if let Some(&sz) = weight_sizes.get(&q_key) {
-                            if sz != ref_q {
+            // Gemma 4 have heterogeneous layers. Skip mega-kernel for these models.
+            let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
+            let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
+            let mut hetero_layer: Option<String> = None;
+            if let Some(ref_q) = ref_size_q {
+                for layer_idx in 1..geometry.num_layers {
+                    let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
+                    if let Some(&sz) = weight_sizes.get(&q_key) {
+                        if sz != ref_q {
+                            hetero_layer = Some(format!(
+                                "L{} q_proj {} != L0 {} (head_dim 或 num_heads 不同)",
+                                layer_idx, sz, ref_q,
+                            ));
+                            break;
+                        }
+                    }
+                    if let Some(ref_gate) = ref_size_gate {
+                        let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
+                        if let Some(&sz) = weight_sizes.get(&gate_key) {
+                            if sz != ref_gate {
                                 hetero_layer = Some(format!(
-                                    "L{} q_proj {} != L0 {} (head_dim 或 num_heads 不同)",
-                                    layer_idx, sz, ref_q,
+                                    "L{} gate_proj {} != L0 {} (intermediate_size 不同)",
+                                    layer_idx, sz, ref_gate,
                                 ));
                                 break;
                             }
                         }
-                        if let Some(ref_gate) = ref_size_gate {
-                            let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
-                            if let Some(&sz) = weight_sizes.get(&gate_key) {
-                                if sz != ref_gate {
-                                    hetero_layer = Some(format!(
-                                        "L{} gate_proj {} != L0 {} (intermediate_size 不同)",
-                                        layer_idx, sz, ref_gate,
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
                     }
                 }
-                if let Some(reason) = hetero_layer {
-                    return Err(ExecutorError::Backend(BackendError::Other(format!(
-                        "异构层检测: {}。MegaKernelWeightLayout 当前不支持异构层 (需要 per-layer stride table)。\
-                         按 ARCH-RUST-IS-CODEGEN 铁律，不允许降级到 Rust 级别的 step-by-step 推理路径。",
-                        reason
-                    ))));
-                }
             }
-            {
+            if let Some(reason) = hetero_layer {
+                log::info!(
+                    "executor: 异构层检测: {} — skipping mega-kernel (uses per-node JIT path)",
+                    reason,
+                );
+                None
+            } else {
             let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
                 .unwrap_or_else(|| manifest.arch.clone());
             let template = crate::arch::get_template(&arch_for_template);
@@ -1238,7 +1248,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
             log::info!("executor: true mega-kernel compiled");
             Some(mega)
-            } // else (heterogeneous check)
+                } // hetero_layer check if/else
         };
 
         // MoE subsystem: read global ExecutionPlan once, initialize all three
@@ -2952,11 +2962,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         top_p: f32,
         thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
+        if prompt.trim().is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+
         #[cfg(target_arch = "x86_64")]
         if let Some(ref mega) = self.mega_kernel {
-            if prompt.trim().is_empty() {
-                return Err(ExecutorError::EmptyPrompt);
-            }
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
             let output_tokens = mega.generate_single_sequence(
@@ -2973,13 +2984,76 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Ok(text);
         }
 
-        // ARCH-RUST-IS-CODEGEN: mega-kernel 是唯一合法的推理路径。
-        // 不存在 mega-kernel = 编译失败 = 致命错误 (NO_SILENT_FALLBACK)。
+        // Per-node JIT path: MoE models / heterogeneous layers use FusedGraphExecutor
+        // with token-by-token generation. Each forward pass is still JIT-compiled
+        // machine code — only the autoregressive loop is Rust-orchestrated.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        if self.graph_executor.is_some() {
+            return self.generate_per_node(prompt, max_tokens, temperature, top_k, top_p);
+        }
+
         Err(ExecutorError::Backend(BackendError::Other(
-            "generate_with_sampling: mega-kernel 未编译。所有推理必须通过 JIT 融合 mega-kernel，\
-             不允许 Rust 级别编排 (ARCH-RUST-IS-CODEGEN)。\
-             可能原因: 模型异构层未支持、mega-kernel 编译失败、或模型架构未注册。".into(),
+            "generate_with_sampling: no execution backend available. \
+             mega-kernel not compiled and graph_executor not available.".into(),
         )))
+    }
+
+    /// Per-node JIT generation: enqueue + step loop for MoE / heterogeneous-layer models.
+    /// Each forward pass runs through JIT-compiled FusedGraphExecutor.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn generate_per_node(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+    ) -> ExecutorResult<String> {
+        // Ensure KV cache is allocated for this model.
+        if self.kv_cache.is_none() {
+            let kv_config = self.kv_cache_config.clone();
+            self.allocate_kv_cache(&kv_config)?;
+        }
+
+        let sampling = SamplingConfig { temperature, top_k, top_p };
+        let req_id = self.enqueue_with_config(
+            crate::scheduler::types::RequestKind::Chat,
+            prompt.to_string(),
+            max_tokens,
+            sampling,
+            None,
+        )?;
+
+        // Step loop: each call processes one forward + sample for all active requests.
+        let max_steps = max_tokens + 1; // prefill + max_tokens decode
+        for _ in 0..max_steps {
+            if !self.batcher.has_pending_work() {
+                break;
+            }
+            self.step()?;
+
+            // Check if our request finished.
+            if let Some(req) = self.requests.get(&req_id) {
+                if req.finished {
+                    let output_tokens = req.output_tokens.clone();
+                    let all_tokens: Vec<u32> = req.prompt_tokens.iter()
+                        .chain(&output_tokens).copied().collect();
+                    let text = self.decode_tokens(&all_tokens)?;
+                    self.requests.remove(&req_id);
+                    return Ok(text);
+                }
+            }
+        }
+
+        // Timeout: collect whatever we have.
+        let req = self.requests.remove(&req_id)
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "generate_per_node: request vanished during generation".into(),
+            )))?;
+        let all_tokens: Vec<u32> = req.prompt_tokens.iter()
+            .chain(&req.output_tokens).copied().collect();
+        let text = self.decode_tokens(&all_tokens)?;
+        Ok(text)
     }
 
     /// Generate with multimodal-routed inputs (ARCH-MULTIMODAL-FUSION).

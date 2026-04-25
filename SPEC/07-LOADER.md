@@ -87,6 +87,92 @@ SafeTensors / PyTorch 权重通常以 BF16 / F16 存储，且 `nn.Linear.weight`
 - Naive 双层 `for r × for c` 转置（违反 ARCH-LOADER-CACHE-BLOCKED-TRANSPOSE）
 - 改变输出数值（不得以"SIMD fast-path"为借口破坏 bit-exactness）
 
+## 2.5 SafeTensors MXFP4 对处理 (ARCH-MXFP4-SEPARATE)
+
+OpenAI gpt-oss-20b 等模型在 SafeTensors 中将每个 MXFP4 逻辑权重存储为两个物理张量：
+
+| 张量后缀 | 内容 | DType |
+|----------|------|-------|
+| `<prefix>_blocks` | packed e2m1 nibbles | U8 |
+| `<prefix>_scales` | per-block e8m0 scale bytes | U8 |
+| `<prefix>_bias` | BF16 bias（不属于 MXFP4 对） | BF16 |
+
+### 2.5.1 规范行为：分离保持，禁止重打包
+
+**铁律**：SafeTensors loader **禁止**将 `_blocks` + `_scales` 重打包为 GGUF 交错格式。
+
+| 规则 | 说明 |
+|------|------|
+| **禁止 repack_to_gguf_layout** | 分离格式是规范内部格式（ARCH-MXFP4-SEPARATE），不需要也不允许转换为交错格式 |
+| **禁止隐藏 `_scales` 为 sidecar** | `_blocks` 和 `_scales` 都作为独立 U8 张量暴露给 `tensor_info()` 和 `iter_tensors()` |
+| **禁止 MXFP4 ggml_dtype 覆盖** | 两者都是普通 U8 张量，不经过 `WeightsHandle.quantized` 路径 |
+| **保持 `_blocks` 原始字节** | `load_tensor_data("_blocks")` 返回原始 packed nibbles，不做任何转换 |
+| **保持 `_scales` 原始字节** | `load_tensor_data("_scales")` 返回原始 scale bytes，不做任何转换 |
+
+### 2.5.2 对检测（仅诊断用途）
+
+`mxfp4_pairing.rs` 的 `scan_mxfp4_pairs()` 仍然检测 `_blocks`/`_scales` 对关系，但仅用于：
+- 诊断日志（标记 MXFP4 张量对）
+- `mxfp4_scale_map()` 查询（graph template 绑定参考）
+
+检测结果**不改变**任何加载行为。`_blocks` 和 `_scales` 各自作为独立 U8 张量走常规上传路径。
+
+### 2.5.3 数据流
+
+```
+SafeTensors 文件:
+  <prefix>_blocks  (U8, raw nibbles)
+  <prefix>_scales  (U8, raw scales)
+       ↓
+SafeTensorsLoader (无重打包):
+  tensor_info("_blocks")  → Some(U8, shape)
+  tensor_info("_scales")  → Some(U8, shape)
+  iter_tensors()          → 两者都出现
+  load_tensor_data("_blocks")  → raw nibbles bytes
+  load_tensor_data("_scales")  → raw scales bytes
+       ↓
+upload_weights (常规 U8 上传):
+  WeightsHandle.tensors["_blocks"]  → raw nibbles bytes
+  WeightsHandle.tensors["_scales"]  → raw scales bytes
+       ↓
+Graph Executor weight_binding:
+  weight_ptrs["_blocks"]  → *const u8 (zero-copy)
+  weight_ptrs["_scales"]  → *const u8 (zero-copy)
+       ↓
+JIT lower_moe_dispatch_packed():
+  gate_up_blocks_ptr  → 读 packed nibbles
+  gate_up_scales_ptr  → 读 scale bytes
+       ↓
+x86_lower emit_mxfp4_dequant(blocks_ptr, scales_ptr):
+  从 scales_ptr[block_idx] 读取 1 字节 scale
+  从 blocks_ptr[block_idx * 16] 读取 16 字节 nibbles
+  JIT 寄存器内 dequant → 32 f32 值
+```
+
+### 2.5.4 GPU 性能考量
+
+分离格式对 GPU 后端至关重要：
+
+| 格式 | Scales stride | Nibbles stride | GPU Coalescing | 有效带宽 |
+|------|--------------|----------------|----------------|---------|
+| 分离 | 1 (2 的幂) | 16 (2 的幂) | 完美 coalesced | ~100% |
+| 交错 | 17 (非 2 的幂) | — | 严重撕裂 | ~7.5% |
+
+GPU MoE dispatch 的瓶颈是 memory bandwidth。交错格式的 stride=17 导致 warp 内每个 thread 的读取地址不对齐，memory transaction 利用率暴跌。分离格式的 stride=1 和 stride=16 都满足 coalescing 要求。
+
+### 2.5.5 GGUF 源的处理
+
+GGUF 文件内部以交错格式存储 MXFP4 数据。GGUF loader 负责在加载时拆分：
+
+```
+GGUF file: [scale(1B) | nibbles(16B)] × num_blocks  (stride=17)
+    ↓ GGUF loader 拆分
+scales[]: [s0, s1, s2, ...]                           (stride=1)
+nibbles[]: [n0(16B), n1(16B), n2(16B), ...]           (stride=16)
+```
+
+拆分后的数据走与 SafeTensors 相同的后续路径。
+
 ## 3. GGUF 零拷贝解析器
 
 ### 3.1 文件结构

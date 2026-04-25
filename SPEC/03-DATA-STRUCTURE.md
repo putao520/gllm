@@ -92,12 +92,28 @@
 | 30 | BF16 | 1 | 2 | BFloat16 (可转 F32) |
 | 34 | TQ1_0 | 256 | 2 + 4*13 | Ternary 1.0 |
 | 35 | TQ2_0 | 256 | 2 + 64 | Ternary 2.0 |
-| 39 | MXFP4 | 32 | 1 + 16 | MXFP4 |
+| 39 | MXFP4 | 32 | 分离: scales(1B) + nibbles(16B) | MXFP4 e2m1/e8m0 |
+
+**MXFP4 数据格式规范 (ARCH-MXFP4-SEPARATE)**：
+
+MXFP4 的规范内部格式是**分离数组**（非 GGUF 交错格式）：
+- `scales[]`: 每个块 1 字节 e8m0 scale（OCP 标准 block_size=32）
+- `nibbles[]`: 每个块 16 字节 packed e2m1 值（低 nibble = 偶数索引，高 nibble = 奇数索引）
+- stride 分别为 1 和 16（2 的幂）
+
+分离格式在 GPU 上具有决定性优势：
+- Scales stride=1: warp 内 32 个 thread 连续读取 → 单条 coalesced transaction
+- Nibbles stride=16: 32 个 thread 各读 16B → 完美 coalesced（4 条 128B transaction）
+- 交错格式 stride=17（非 2 的幂）会导致严重的 memory transaction 撕裂
+
+GGUF 文件存储为交错格式 `[scale(1B) | nibbles(16B)]` = 17B/block。
+GGUF loader 负责在加载时拆分为分离数组。SafeTensors loader 的 `_blocks`/`_scales` 本身就是分离的，保持原样。
 
 **gllm-kernels 集成**：
 - 零拷贝传递量化数据给 gllm-kernels
 - gllm-kernels 负责所有量化数据的定点内积运算 (极化解码)
 - 解析器只负责正确读取文件格式
+- JIT `emit_mxfp4_dequant()` 接收两个独立指针：`blocks_ptr` 和 `scales_ptr`
 
 ### 2.5 GGUF 元数据 Key Registry (DATA-GGUF-KEYS)
 
