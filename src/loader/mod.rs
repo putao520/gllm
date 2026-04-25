@@ -934,6 +934,18 @@ impl Loader {
         let mut sparse_24 = HashMap::new();
 
         for meta in provider.iter_tensors() {
+            // ARCH-MULTIMODAL-FILTER: 多模态模型（如 Gemma 4）的 safetensors 包含
+            // vision_tower / audio_tower / embed_vision / embed_audio 等非文本组件权重。
+            // 当前 YAML 模板只处理文本解码器路径，跳过这些权重可节省 GB 级内存和加载时间。
+            if meta.name.contains("vision_tower")
+                || meta.name.contains("audio_tower")
+                || meta.name.contains("embed_vision")
+                || meta.name.contains("embed_audio")
+            {
+                log::debug!("upload_provider: skipping multimodal component tensor '{}'", meta.name);
+                continue;
+            }
+
             // Check if this tensor has a quantized GGML dtype
             if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {
                 if let Some(qt) = adapter::ggml_dtype_to_quant_type(ggml_dt) {
