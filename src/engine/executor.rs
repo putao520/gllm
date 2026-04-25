@@ -350,6 +350,7 @@ impl AttentionTopology {
             global_head_dim: 0,
             hidden_size_per_layer_input: 0,
             position_offset: None,
+            rope_scaling: None,
         });
         Self::bidirectional(geometry)
     }
@@ -720,19 +721,27 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             // 加 classifier head)。先走 KIND 查找, 未命中回落到基础模板。
             let effective_arch = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
                 .unwrap_or_else(|| manifest.arch.clone());
-            let uncompiled = get_template(&effective_arch)
-                .map(|tmpl| tmpl.name.clone())
-                .and_then(|arch_name| {
-                    build_uncompiled_executor_from_yaml(
+            let uncompiled = match get_template(&effective_arch) {
+                Some(tmpl) => {
+                    let arch_name = tmpl.name.clone();
+                    match build_uncompiled_executor_from_yaml(
                         &arch_name,
                         &resolved,
                         geometry.dtype,
                         manifest.family(),
-                    ).map_err(|e| {
-                        log::error!("Failed to build uncompiled executor: {}", e);
-                        e
-                    }).ok()
-                });
+                    ) {
+                        Ok(ge) => Some(ge),
+                        Err(e) => {
+                            log::error!("Failed to build uncompiled executor for '{}': {}", arch_name, e);
+                            None
+                        }
+                    }
+                }
+                None => {
+                    log::error!("No YAML template found for architecture '{}'", effective_arch);
+                    None
+                }
+            };
 
             if let Some(mut ge) = uncompiled {
                 // Phase 2: inject real weight shapes from loaded tensors
@@ -769,7 +778,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 // seq_len 参数仅用于 buffer 分配上界
                 let max_seq_for_alloc = geometry.max_seq_len;
                 let compile_ok = ge.compile_with_cache(max_seq_for_alloc, hidden, geometry.dtype, model_id, jit_backend, &cache)
-                    .map_err(|e| { log::error!("JIT compilation failed: {e}"); })
+                    .map_err(|e| { eprintln!("[EXECUTOR-JIT-ERR] JIT compilation failed for '{}': {e}", effective_arch); })
                     .is_ok();
 
                 if compile_ok {

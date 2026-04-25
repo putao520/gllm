@@ -89,6 +89,7 @@ pub fn build_executor_from_yaml(
         global_head_dim: 0,
         hidden_size_per_layer_input: 0,
         position_offset: None,
+        rope_scaling: None,
     });
     let ctx = crate::graph::optimizer::OptimizationContext {
         geometry,
@@ -151,6 +152,7 @@ pub fn build_uncompiled_executor_from_yaml(
         global_head_dim: 0,
         hidden_size_per_layer_input: 0,
         position_offset: None,
+        rope_scaling: None,
     });
     let ctx = crate::graph::optimizer::OptimizationContext {
         geometry,

@@ -76,6 +76,9 @@ pub struct ModelGeometry {
     pub num_experts: usize,
     pub moe_top_k: usize,
     pub expert_intermediate_size: usize,
+
+    // ── RoPE scaling ──
+    pub rope_scaling: Option<RopeScalingConfig>,
 }
 
 impl ModelGeometry {
@@ -114,6 +117,7 @@ impl ModelGeometry {
             num_experts,
             moe_top_k,
             expert_intermediate_size,
+            rope_scaling: config.rope_scaling.clone(),
         }
     }
 

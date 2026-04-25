@@ -84,6 +84,21 @@ impl MegaKernelExecutor {
             geometry.rope_partial_ratio,
         );
         let embed_scale = business_config.embedding_scale;
+        let rope_scaling = geometry.rope_scaling.as_ref().and_then(|cfg| {
+            use crate::model_config::RopeScalingType;
+            match cfg.scaling_type.as_ref()? {
+                RopeScalingType::Yarn => Some(gllm_kernels::compiler::graph::RopeScaling::Yarn {
+                    factor: cfg.factor.unwrap_or(1.0),
+                    beta_fast: cfg.beta_fast.unwrap_or(32.0),
+                    beta_slow: cfg.beta_slow.unwrap_or(1.0),
+                    original_max_position: cfg.original_max_position_embeddings.unwrap_or(4096),
+                }),
+                RopeScalingType::Linear => Some(gllm_kernels::compiler::graph::RopeScaling::Linear {
+                    factor: cfg.factor.unwrap_or(1.0),
+                }),
+                _ => None,
+            }
+        });
         let config = gllm_kernels::compiler::ModelMegaConfig {
             num_layers: geometry.num_layers,
             hidden: geometry.hidden_size,
@@ -98,7 +113,7 @@ impl MegaKernelExecutor {
             dtype: DType::F32,
             max_seq_len: 128, // Buffer allocation upper bound; runtime seq_len may be smaller
             num_eos_tokens: 1,
-            rope_scaling: None,
+            rope_scaling,
             business_config,
         };
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
