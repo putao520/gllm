@@ -775,6 +775,16 @@ impl Loader {
             None
         };
 
+        // GPT-OSS (openai/gpt-oss-20b): 独有特征是 `self_attn.sinks` (attention sinks)
+        // 和 `mlp.experts.gate_up_proj_blocks` (packed mxfp4 expert weights)。
+        // 张量前缀 `model.layers.*` 与 Mistral 相同,但 GPT-OSS 有 MoE packed layout。
+        // 必须在通用 check_name 之前检测,否则会被误识别为 mistral3。
+        let is_gptoss_name = |name: &str| -> bool {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("self_attn.sinks")
+                || lower.contains("mlp.experts.gate_up_proj_blocks")
+        };
+
         // Gemma 4 multi-modal SafeTensors 的张量布局是
         //   model.{audio_tower,vision_tower,embed_audio,embed_vision}.*
         //   model.language_model.{layers.*,embed_tokens,...}
@@ -791,6 +801,9 @@ impl Loader {
         };
 
         if let Some(st) = self.safetensors.as_ref() {
+            if st.iter_tensors().any(|m| is_gptoss_name(&m.name)) {
+                return Some("gptoss".to_string());
+            }
             if st.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
                 return Some("gemma4".to_string());
             }
@@ -801,6 +814,9 @@ impl Loader {
             }
         }
         if let Some(onnx) = self.onnx.as_ref() {
+            if onnx.iter_tensors().any(|m| is_gptoss_name(&m.name)) {
+                return Some("gptoss".to_string());
+            }
             if onnx.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
                 return Some("gemma4".to_string());
             }
@@ -811,6 +827,9 @@ impl Loader {
             }
         }
         if let Some(gguf) = self.gguf.as_ref() {
+            if gguf.iter_tensors().any(|m| is_gptoss_name(&m.name)) {
+                return Some("gptoss".to_string());
+            }
             if gguf.iter_tensors().any(|m| is_gemma4_name(&m.name)) {
                 return Some("gemma4".to_string());
             }

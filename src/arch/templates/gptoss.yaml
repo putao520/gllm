@@ -176,6 +176,9 @@ graph:
           inputs: ["layer_${i}_q_rope", "layer_${i}_k_rope", "layer_${i}_v", "model.layers.${i}.self_attn.sinks"]
           outputs: ["layer_${i}_attn_out"]
           attributes:
+            num_heads: "${num_heads}"
+            num_kv_heads: "${num_kv_heads}"
+            head_dim: "${head_dim}"
             sliding_window: 128
             attention_sinks: 1
             layer_index: "${i}"
