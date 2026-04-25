@@ -934,15 +934,21 @@ impl Loader {
         let mut sparse_24 = HashMap::new();
 
         for meta in provider.iter_tensors() {
-            // ARCH-MULTIMODAL-FILTER: 多模态模型（如 Gemma 4）的 safetensors 包含
-            // vision_tower / audio_tower / embed_vision / embed_audio 等非文本组件权重。
-            // 当前 YAML 模板只处理文本解码器路径，跳过这些权重可节省 GB 级内存和加载时间。
+            // ARCH-TENSOR-FILTER: 跳过当前推理管线不使用的 tensor，节省内存。
+            // (1) 多模态组件: vision_tower / audio_tower / embed_vision / embed_audio
+            // (2) PLE 组件: embed_tokens_per_layer / per_layer_embedding — YAML 模板中
+            //     PLE 节点被禁用 (JIT 未实现), 加载这个 9.4GB F32 tensor 纯属浪费。
+            //     同时跳过 per_layer_projection 和 post_mlp_projection (PLE 辅助权重)。
             if meta.name.contains("vision_tower")
                 || meta.name.contains("audio_tower")
                 || meta.name.contains("embed_vision")
                 || meta.name.contains("embed_audio")
+                || meta.name.contains("embed_tokens_per_layer")
+                || meta.name.contains("per_layer_embedding")
+                || meta.name.contains("per_layer_projection")
+                || meta.name.contains("post_mlp_projection")
             {
-                log::debug!("upload_provider: skipping multimodal component tensor '{}'", meta.name);
+                log::debug!("upload_provider: skipping unused tensor '{}'", meta.name);
                 continue;
             }
 

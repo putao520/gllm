@@ -1757,6 +1757,48 @@ impl FusedGraphExecutor {
     ///
     /// ARCH-TENSOR-SHAPE-PRE-SCAN: 修复 FFN intermediate_size (4096) 与 hidden_size
     /// (1024) 不同时, GELU/Add/etc 节点 feature_dim 被错误默认为 hidden 导致
+    /// Infer actual q_dim and kv_dim from weight bindings.
+    ///
+    /// Gemma-4 E2B has heterogeneous layers: sliding_attention (head_dim=256)
+    /// and full_attention (head_dim=512). The fusion config uses a global
+    /// head_dim from YAML template variables, but the actual dimensions come
+    /// from weight shapes. This function reads q_proj/k_proj weight shapes
+    /// and computes actual dimensions.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn infer_qkv_dims_from_weights(
+        inputs: &[String],
+        weight_bindings: &HashMap<String, crate::graph::types::WeightBinding>,
+        num_heads: usize,
+        _num_kv_heads: usize,
+    ) -> (usize, usize) {
+        // FusedQkvNormRope inputs: [activation, w_q, w_k, w_v]
+        // FusedQkvRope inputs:      [activation, w_q, w_k, w_v]
+        // q_proj weight shape: [hidden, q_out_dim] (after HF transpose: [q_out_dim, hidden])
+        // k_proj weight shape: [hidden, kv_out_dim]
+        let mut actual_q_dim = 0usize;
+        let mut actual_kv_dim = 0usize;
+
+        // inputs[1] = w_q name (or activation if only 1 input)
+        if inputs.len() >= 2 {
+            if let Some(wb) = weight_bindings.get(&inputs[1]) {
+                if !wb.shape.is_empty() {
+                    // HF SafeTensors: [out_dim, in_dim], shape_needs_transpose → true
+                    // The out_dim (index 0) is q_dim = num_heads * head_dim
+                    actual_q_dim = wb.shape[0];
+                }
+            }
+        }
+        if inputs.len() >= 3 {
+            if let Some(wb) = weight_bindings.get(&inputs[2]) {
+                if !wb.shape.is_empty() {
+                    actual_kv_dim = wb.shape[0];
+                }
+            }
+        }
+
+        (actual_q_dim, actual_kv_dim)
+    }
+
     /// output 只写部分元素, 下游 MatMul 读未初始化内存产生 NaN/Inf。
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_tensor_shape_map(&self, hidden: usize) -> HashMap<String, Vec<gllm_kernels::compiler::SymDim>> {
@@ -1953,19 +1995,46 @@ impl FusedGraphExecutor {
             }
 
             FusedOp::FusedQkvRope(config) => {
-                let g = build_fused_qkv_rope_graph(config, hidden, dtype);
-                let q_dim = config.num_heads * config.head_dim;
-                let kv_dim = config.num_kv_heads * config.head_dim;
+                // ARCH-HETEROGENEOUS-LAYERS: Gemma-4 E2B has sliding (head_dim=256)
+                // and full_attention (head_dim=512) layers sharing the same config.
+                // Infer actual q_dim/kv_dim from weight shape to handle per-layer differences.
+                let (actual_q_dim, actual_kv_dim) = Self::infer_qkv_dims_from_weights(
+                    &node.inputs, &self.graph.weight_bindings, config.num_heads, config.num_kv_heads,
+                );
+                let actual_head_dim = if actual_q_dim > 0 && config.num_heads > 0 {
+                    actual_q_dim / config.num_heads
+                } else {
+                    config.head_dim
+                };
+                let effective_config = FusedQkvRopeConfig {
+                    head_dim: actual_head_dim,
+                    ..config.clone()
+                };
+                let g = build_fused_qkv_rope_graph(&effective_config, hidden, dtype);
+                let q_dim = actual_q_dim.max(config.num_heads * config.head_dim);
+                let kv_dim = actual_kv_dim.max(config.num_kv_heads * config.head_dim);
                 let per = vec![max_seq_len * q_dim, max_seq_len * kv_dim, max_seq_len * kv_dim];
                 let total: usize = per.iter().sum();
                 Ok(make_node_build(g, node, total, per))
             }
 
             FusedOp::FusedQkvNormRope(config) => {
-                let g = build_fused_qkv_norm_rope_graph(config, hidden, dtype);
-                let q_dim = config.num_heads * config.head_dim;
-                let kv_dim = config.num_kv_heads * config.head_dim;
-                // 输出顺序与 graph.outputs 对齐: [q_rope, k_rope, v_normed]
+                // ARCH-HETEROGENEOUS-LAYERS: same as FusedQkvRope above.
+                let (actual_q_dim, actual_kv_dim) = Self::infer_qkv_dims_from_weights(
+                    &node.inputs, &self.graph.weight_bindings, config.num_heads, config.num_kv_heads,
+                );
+                let actual_head_dim = if actual_q_dim > 0 && config.num_heads > 0 {
+                    actual_q_dim / config.num_heads
+                } else {
+                    config.head_dim
+                };
+                let effective_config = FusedQkvNormRopeConfig {
+                    head_dim: actual_head_dim,
+                    ..config.clone()
+                };
+                let g = build_fused_qkv_norm_rope_graph(&effective_config, hidden, dtype);
+                let q_dim = actual_q_dim.max(config.num_heads * config.head_dim);
+                let kv_dim = actual_kv_dim.max(config.num_kv_heads * config.head_dim);
                 let per = vec![max_seq_len * q_dim, max_seq_len * kv_dim, max_seq_len * kv_dim];
                 let total: usize = per.iter().sum();
                 Ok(make_node_build(g, node, total, per))

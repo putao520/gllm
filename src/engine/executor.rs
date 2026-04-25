@@ -689,6 +689,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let is_moe = geometry.is_moe();
         let tokenizer = TokenizerHandle::from_loader(loader, manifest.kind)?;
+
+
         let mut weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
         let l2_capacity = total_blocks.saturating_mul(10);
