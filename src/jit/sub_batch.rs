@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::scheduler::types::RequestId;
 use crate::scheduler::chunked_prefill::BatchManifest;
-use super::compiler_constraints::{CompilerConstraints, GpuSmPartition};
+use super::compiler_constraints::CompilerConstraints;
 
 // ── 形状分类 (Shape Classification) ──
 

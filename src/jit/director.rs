@@ -14,11 +14,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::kv_cache::KvPageHeader;
-use super::epilogue::TelemetryAggregator;
-
 // ============================================================================
 // Decaying Reservoir — 半衰期积分池 (§9.2)
 // ============================================================================

@@ -12,8 +12,6 @@
 //! 2. 冷专家权重被 NOP/Deopt 跳转替换
 //! 3. 请求触发冷专家时 → Uncommon Trap → DEOPT_REQUEST → 微冷冻 → 回写 .text → 重算
 
-use super::routing::ExpertRouteConfig;
-
 /// 专家热度级别
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExpertHeatLevel {

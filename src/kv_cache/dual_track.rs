@@ -17,7 +17,6 @@
 //! }
 //! ```
 
-use super::quant::{KvQuantConfig, QuantMode, quantize_k_per_channel_with_config, dequantize_k_per_channel};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

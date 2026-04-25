@@ -18,8 +18,6 @@
 //! MoE 层只启动 1 个 Mega-Kernel，Thread Block 拿到 Softmax(Gate) 后
 //! 利用内置字典读出目标 Expert，Kernel 内部利用汇编 jmp 直接跃迁。
 
-use std::collections::HashMap;
-
 /// 专家路由配置
 #[derive(Debug, Clone)]
 pub struct ExpertRouteConfig {

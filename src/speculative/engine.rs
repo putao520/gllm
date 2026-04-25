@@ -15,12 +15,10 @@
 //! - ≥2 GPU → SAGUARO (独立 draft GPU, draft+verify 并行)
 
 use crate::jit::epilogue::SpecScheduleAdvice;
-use crate::scheduler::types::RequestId;
-
 use super::adapter::DraftAdapter;
 use super::cache::SpeculationCache;
 use super::tree::{NgramIndex, SpecTree, SpecTreeConfig};
-use super::verify::{VerifyResult, SequenceVerifyResult};
+use super::verify::{SequenceVerifyResult, VerifyResult};
 
 /// 推测解码模式
 ///
