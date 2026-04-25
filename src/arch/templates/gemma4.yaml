@@ -2,7 +2,7 @@ name: gemma4
 version: "1.0"
 family: decoder
 extra_aliases:
-  - gemma4forconditionalgeneration   # HuggingFace 多模态 token
+  - gemma4forconditionalgeneration   # HuggingFace multi-modal token
 
 config:
   num_layers: "${num_hidden_layers}"
@@ -25,11 +25,16 @@ tensor_patterns:
   k_proj: "self_attn.k_proj.weight"
   v_proj: "self_attn.v_proj.weight"
   o_proj: "self_attn.o_proj.weight"
+  q_norm: "self_attn.q_norm.weight"
+  k_norm: "self_attn.k_norm.weight"
   gate_proj: "mlp.gate_proj.weight"
   up_proj: "mlp.up_proj.weight"
   down_proj: "mlp.down_proj.weight"
   input_layernorm: "input_layernorm.weight"
   post_attention_layernorm: "post_attention_layernorm.weight"
+  pre_feedforward_layernorm: "pre_feedforward_layernorm.weight"
+  post_feedforward_layernorm: "post_feedforward_layernorm.weight"
+  layer_scalar: "layer_scalar"
   final_norm: "model.norm.weight"
 
 graph:
@@ -49,23 +54,23 @@ graph:
       inputs: [model.embed_tokens.weight, input_ids]
       outputs: [hidden_0]
 
-    # T33 (PLE 5-input signature 根治): main_embed 是 "token embedding 原始输出"
-    # 的别名,跨 transformer 层保持不变(hidden_0 会被每层重写)。通过
-    # 在 repeat 块外用额外 Gather 节点单独产出,保证后续所有层读到的都是
-    # 未被修改的初始 embedding。only_if 守卫避免无 PLE 的变体白付计算。
-    - name: embed_main
-      op_type: Gather
-      only_if: has_per_layer_embedding
-      inputs: [model.embed_tokens.weight, input_ids]
-      outputs: [main_embed]
-
-    # T33: ple_full [seq, num_layers * dim_per_layer] 是所有层共享的 PLE
-    # lookup 结果,每个 transformer 层在 repeat 展开时切出自己那段列区段。
-    - name: ple_embed_full
-      op_type: Gather
-      only_if: has_per_layer_embedding
-      inputs: [model.per_layer_embedding.embed_tokens.weight, input_ids]
-      outputs: [ple_full]
+    # ── PerLayerEmbedding (PLE) ──
+    # PLE nodes are disabled in the YAML template because the PLE JIT
+    # implementation is not yet complete (weight name mapping, expand
+    # function, JIT lower). Enabling them causes SIGSEGV due to NULL
+    # weight pointers. Re-enable when PLE JIT is fully implemented.
+    #
+    # - name: embed_main
+    #   op_type: Gather
+    #   only_if: has_per_layer_embedding
+    #   inputs: [model.embed_tokens.weight, input_ids]
+    #   outputs: [main_embed]
+    #
+    # - name: ple_embed_full
+    #   op_type: Gather
+    #   only_if: has_per_layer_embedding
+    #   inputs: [model.per_layer_embedding.embed_tokens.weight, input_ids]
+    #   outputs: [ple_full]
 
     - repeat: "${num_hidden_layers}"
       var: i
@@ -77,14 +82,6 @@ graph:
           outputs: ["layer_${i}_normed"]
 
         # ── Q/K/V Projections ──
-        # SharedKvRef (Gemma 4 E2B/E4B): consumer layers (the trailing
-        # `num_kv_shared_layers` indices) reuse the donor layer's K/V outputs
-        # instead of computing their own. The K/V projection, QK-norm K-half,
-        # V-norm, and K-rope are all guarded by `!is_kv_shared_layer_${i}` (or
-        # handled inside the corresponding `expand_*`). The attention node
-        # therefore reads `layer_${donor_i}_k_rope` / `layer_${donor_i}_v_normed`:
-        # the `${donor_i}` placeholder resolves to `i` on non-consumer layers
-        # (identity) and to the donor layer index on consumer layers.
         - name: "layer_${i}_q_proj"
           op_type: MatMul
           inputs: ["layer_${i}_normed", "model.layers.${i}.self_attn.q_proj.weight"]
@@ -106,24 +103,20 @@ graph:
           attributes:
             kv_shareable: 1
 
-        # ── QK-Norm (替代 softcap) ──
-        # On consumer layers `expand_qk_norm` emits only the Q half (K was
-        # skipped upstream); see template.rs for the branch.
+        # ── QK-Norm (L2 normalize + sqrt(head_dim) scale) ──
         - name: "layer_${i}_qk_norm"
           op_type: QkNorm
           inputs: ["layer_${i}_q", "layer_${i}_k"]
           outputs: ["layer_${i}_q_normed", "layer_${i}_k_normed"]
 
-        # ── Value Norm (无学习参数的 RMSNorm) ──
+        # ── Value Norm (weightless RMSNorm) ──
         - name: "layer_${i}_v_norm"
           op_type: ValueNorm
           only_if: "!is_kv_shared_layer_${i}"
           inputs: ["layer_${i}_v"]
           outputs: ["layer_${i}_v_normed"]
 
-        # ── Dual RoPE: sliding θ=10K / global θ=1M+partial=0.25 ──
-        # On consumer layers `expand_dual_rope` emits only the Q half (K rope
-        # comes from the donor layer); see template.rs for the branch.
+        # ── Dual RoPE: sliding theta=10K / global theta=1M+partial=0.25 ──
         - name: "layer_${i}_rope"
           op_type: DualRotaryEmbedding
           inputs: ["layer_${i}_q_normed", "layer_${i}_k_normed"]
@@ -133,11 +126,7 @@ graph:
             global_theta: "${global_rope_theta}"
             global_partial: 0.25
 
-        # ── Attention (per-layer: sliding-window 或 global) ──
-        # `${donor_i}` — identity for non-consumer layers, donor layer index for
-        # consumer layers. This keeps the attention-node shape uniform across
-        # the full layer stack (3 inputs, unchanged), with consumer layers
-        # transparently reading the donor's already-rotated K / normalised V.
+        # ── Attention (per-layer: sliding-window or global) ──
         - name: "layer_${i}_attn"
           op_type: Attention
           inputs: ["layer_${i}_q_rope", "layer_${donor_i}_k_rope", "layer_${donor_i}_v_normed"]
@@ -161,63 +150,78 @@ graph:
           inputs: ["hidden_0", "layer_${i}_attn_proj"]
           outputs: ["layer_${i}_residual"]
 
-        # ── Pre-FFN RMSNorm ──
-        - name: "layer_${i}_post_norm"
+        # ── Post-Attention RMSNorm ──
+        - name: "layer_${i}_post_attn_norm"
           op_type: SimplifiedLayerNormalization
           inputs: ["layer_${i}_residual", "model.layers.${i}.post_attention_layernorm.weight"]
-          outputs: ["layer_${i}_post_normed"]
+          outputs: ["layer_${i}_post_attn_normed"]
 
-        # ── FFN: Standard GELU (非 gated，非 GeGLU) ──
+        # ── Pre-FFN RMSNorm (Gemma 4 specific, separate from post_attention norm) ──
+        - name: "layer_${i}_pre_ffn_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["layer_${i}_post_attn_normed", "model.layers.${i}.pre_feedforward_layernorm.weight"]
+          outputs: ["layer_${i}_pre_ffn_normed"]
+
+        # ── FFN: GeGLU (gate_proj → GELU → * up_proj → down_proj) ──
+        # Gemma 4 uses gelu_pytorch_tanh activation in gated configuration
+        - name: "layer_${i}_gate_proj"
+          op_type: MatMul
+          inputs: ["layer_${i}_pre_ffn_normed", "model.layers.${i}.mlp.gate_proj.weight"]
+          outputs: ["layer_${i}_gate"]
+
+        - name: "layer_${i}_gate_gelu"
+          op_type: GELU
+          inputs: ["layer_${i}_gate"]
+          outputs: ["layer_${i}_gate_act"]
+
         - name: "layer_${i}_up_proj"
           op_type: MatMul
-          inputs: ["layer_${i}_post_normed", "model.layers.${i}.mlp.up_proj.weight"]
+          inputs: ["layer_${i}_pre_ffn_normed", "model.layers.${i}.mlp.up_proj.weight"]
           outputs: ["layer_${i}_up"]
 
-        - name: "layer_${i}_gelu"
-          op_type: GELU
-          inputs: ["layer_${i}_up"]
-          outputs: ["layer_${i}_act"]
+        - name: "layer_${i}_geglu_mul"
+          op_type: Mul
+          inputs: ["layer_${i}_gate_act", "layer_${i}_up"]
+          outputs: ["layer_${i}_geglu"]
 
         - name: "layer_${i}_down_proj"
           op_type: MatMul
-          inputs: ["layer_${i}_act", "model.layers.${i}.mlp.down_proj.weight"]
+          inputs: ["layer_${i}_geglu", "model.layers.${i}.mlp.down_proj.weight"]
           outputs: ["layer_${i}_mlp_out"]
+
+        # ── Post-FFN RMSNorm (Gemma 4 specific) ──
+        - name: "layer_${i}_post_ffn_norm"
+          op_type: SimplifiedLayerNormalization
+          inputs: ["layer_${i}_mlp_out", "model.layers.${i}.post_feedforward_layernorm.weight"]
+          outputs: ["layer_${i}_post_ffn_normed"]
 
         # ── Post-FFN Residual ──
         - name: "layer_${i}_output_add"
           op_type: Add
-          inputs: ["layer_${i}_residual", "layer_${i}_mlp_out"]
+          inputs: ["layer_${i}_residual", "layer_${i}_post_ffn_normed"]
+          outputs: ["layer_${i}_output"]
+
+        # ── Layer Scalar (per-layer multiplicative scaling) ──
+        - name: "layer_${i}_layer_scalar"
+          op_type: Mul
+          inputs: ["layer_${i}_output", "model.layers.${i}.layer_scalar"]
           outputs: ["hidden_0"]
 
-        # ── PerLayerEmbedding (仅 E2B / E4B 启用, 31B Dense / 26B MoE 跳过) ──
-        # T33 (5-input signature 根治): PerLayerEmbed JIT op 需要 5 inputs
-        # [hidden_0, main_embed, ple_slice, proj_w, post_mlp_w], 其中:
-        #   - main_embed: 初始 token embedding (graph 级别一次性产出, 见顶部 embed_main 节点)
-        #   - ple_slice:  当前层的 PLE token, 由模板 `expand_per_layer_embed` 从
-        #                 ple_full 切出 (列区段 [layer_idx*dim, (layer_idx+1)*dim))
-        #   - proj_w / post_mlp_w: 每层独立的投影权重
-        #
-        # YAML 此节点保持"逻辑 4 输入"(省略 main_embed, ple_slice 用 ple_full
-        # 引用), 由 `expand_per_layer_embed` 在模板展开时:
-        #   1) 插入 `layer_${i}_ple_slice = PleSlice(ple_full, layer_idx, dim_per_layer)` 节点
-        #   2) 改写本节点输入为 [hidden_0, main_embed, layer_${i}_ple_slice, proj_w, post_mlp_w]
-        #
-        # only_if 表达式来自 ResolvedConfig::has_per_layer_embedding (由
-        # hidden_size_per_layer_input > 0 推导)。E2B/E4B 此值 > 0, 31B/26B 为 0。
-        - name: "layer_${i}_ple"
-          op_type: PerLayerEmbed
-          only_if: has_per_layer_embedding
-          inputs:
-            - "hidden_0"
-            - "ple_full"
-            - "model.per_layer_embedding.per_layer_projection.weight"
-            - "model.layers.${i}.post_mlp_projection.weight"
-          outputs: ["hidden_0"]
-          attributes:
-            layer_idx: "${i}"
-            dim_per_layer: "${hidden_size_per_layer_input}"
-            num_layers: "${num_hidden_layers}"
-            hidden: "${hidden_size}"
+        # ── PerLayerEmbedding (disabled: PLE JIT not yet fully implemented) ──
+        # - name: "layer_${i}_ple"
+        #   op_type: PerLayerEmbed
+        #   only_if: has_per_layer_embedding
+        #   inputs:
+        #     - "hidden_0"
+        #     - "ple_full"
+        #     - "model.per_layer_embedding.per_layer_projection.weight"
+        #     - "model.layers.${i}.post_mlp_projection.weight"
+        #   outputs: ["hidden_0"]
+        #   attributes:
+        #     layer_idx: "${i}"
+        #     dim_per_layer: "${hidden_size_per_layer_input}"
+        #     num_layers: "${num_hidden_layers}"
+        #     hidden: "${hidden_size}"
 
     - name: final_norm
       op_type: SimplifiedLayerNormalization
@@ -232,7 +236,7 @@ graph:
 fusion_hints:
   - pattern: [q_proj, k_proj, v_proj, qk_norm, v_norm, rope]
     target: FusedQkvNormRope
-  - pattern: [up_proj, gelu, down_proj]
-    target: FusedLinearGELU
+  - pattern: [gate_proj, gate_gelu, up_proj, geglu_mul, down_proj]
+    target: GeGLU
   - pattern: [matmul, scale, softmax, matmul]
     target: FlashAttention
