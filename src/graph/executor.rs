@@ -3587,6 +3587,29 @@ impl FusedGraphExecutor {
         rest[..end].parse().ok()
     }
 
+    /// ARCH-WEIGHT-BLOB-REMAPPING: 返回已安全预打包到 CompiledNode.weight_blob 中的权重名集合。
+    ///
+    /// 只有这些权重的原始数据可以安全从 WeightsHandle.tensors 释放。
+    /// 非预打包节点（needs_runtime_weight_pack=true，如 attention 节点含 K/V cache 输入）
+    /// 的权重仍通过 weight_ptrs 在运行时读取，不能释放。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn pre_bound_weight_names(&self) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for cn in &self.compiled_nodes {
+            if cn.weight_blob.is_empty() || cn.needs_runtime_weight_pack {
+                continue;
+            }
+            if let Some(ref wl) = cn.compiled.weight_layout {
+                for (i, name) in cn.graph_input_names.iter().skip(1).enumerate() {
+                    if i < wl.offsets.len() {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+        }
+        names
+    }
+
     /// Returns a reference to the underlying graph.
     pub fn graph(&self) -> &FusedGraph {
         &self.graph

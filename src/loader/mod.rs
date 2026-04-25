@@ -1646,6 +1646,29 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
     pub fn tensor_shape(&self, name: &str) -> Option<&[usize]> {
         self.shapes.get(name).map(|v| v.as_slice())
     }
+
+    /// ARCH-WEIGHT-BLOB-REMAPPING: 精确释放已编译到 weight_blob 中的权重张量。
+    ///
+    /// 只释放 `safe_to_release` 集合中的权重（这些权重的数据已完整拷贝到
+    /// CompiledNode.weight_blob，运行时不再从 WeightsHandle.tensors 读取）。
+    /// 其他权重（attention 节点的 q/k/v/o_proj，因 needs_runtime_weight_pack=true
+    /// 而未预打包）必须保留。
+    pub fn release_compiled_weights(&mut self, safe_to_release: &std::collections::HashSet<String>) {
+        let before = self.tensors.len();
+        self.tensors.retain(|name, _| {
+            if safe_to_release.contains(name) {
+                return false;
+            }
+            true
+        });
+        let after = self.tensors.len();
+        if before > after {
+            log::info!(
+                "WeightsHandle::release_compiled_weights: released {}/{} tensors",
+                before - after, before
+            );
+        }
+    }
 }
 
 /// Backward-compatible type alias for f32 weights.

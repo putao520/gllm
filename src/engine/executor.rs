@@ -689,7 +689,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let is_moe = geometry.is_moe();
         let tokenizer = TokenizerHandle::from_loader(loader, manifest.kind)?;
-        let weights = loader.upload_weights(&backend)?;
+        let mut weights = loader.upload_weights(&backend)?;
         let l1_capacity = total_blocks;
         let l2_capacity = total_blocks.saturating_mul(10);
         let l3_capacity = total_blocks.saturating_mul(100);
@@ -1326,6 +1326,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
         };
+
+        // ARCH-WEIGHT-BLOB-REMAPPING: graph_executor 编译完成后，收集已预打包到
+        // weight_blob 的权重名集合，从 WeightsHandle.tensors 中精确释放这些权重。
+        // 只释放 pre_bound_weight_names() 中的权重（FFN 层的 gate/up/down_proj），
+        // 保留 attention 层权重（needs_runtime_weight_pack=true，运行时仍从 tensors 读取）。
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        if let Some(ref ge) = graph_executor {
+            let safe = ge.pre_bound_weight_names();
+            if !safe.is_empty() {
+                weights.release_compiled_weights(&safe);
+            }
+        }
 
         // §9.1: Detect CompactPlatform from topology for RaggedCompaction
         let compact_platform = crate::jit::ragged::CompactPlatform::detect(
