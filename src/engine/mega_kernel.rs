@@ -80,7 +80,7 @@ impl MegaKernelExecutor {
         business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
     ) -> Result<Self, MegaKernelError> {
-        log::info!(
+        eprintln!(
             "[mega] compiling: layers={} hidden={} heads={} kv_heads={} head_dim={} vocab={} eps={} rope_theta={} rope_partial={} hetero={}",
             geometry.num_layers, geometry.hidden_size, geometry.num_heads, geometry.num_kv_heads,
             geometry.head_dim, geometry.vocab_size, geometry.norm_eps, geometry.rope_theta,
@@ -250,6 +250,36 @@ impl MegaKernelExecutor {
                 std::ptr::null_mut(),
             )
         };
+
+        // Diagnostic: dump activation buffer (offset 0) and final_normed area
+        {
+            let embed_off = 0;
+            let embed_elems = prompt_len * 1536; // hidden=1536
+            let embed_data = unsafe {
+                std::slice::from_raw_parts(scratchpad[embed_off..].as_ptr() as *const f32, embed_elems.min(16))
+            };
+            eprintln!("[DIAG] embed[0..16]: {:?}", &embed_data[..16.min(embed_data.len())]);
+
+            // final_normed at offset 786432
+            let fnorm_off = 786432usize;
+            let fnorm_elems = prompt_len * 1536;
+            if fnorm_off + fnorm_elems * 4 <= scratchpad.len() {
+                let fnorm_data = unsafe {
+                    std::slice::from_raw_parts(scratchpad[fnorm_off..].as_ptr() as *const f32, fnorm_elems.min(16))
+                };
+                let has_nonzero = fnorm_data.iter().any(|&v| v != 0.0);
+                eprintln!("[DIAG] final_normed[0..16]: {:?} nonzero={}", &fnorm_data[..16.min(fnorm_data.len())], has_nonzero);
+            }
+
+            // logits at logits_scratch_offset
+            let logits_off = mega.logits_scratch_offset;
+            if logits_off + 4 <= scratchpad.len() {
+                let logits_data = unsafe {
+                    std::slice::from_raw_parts(scratchpad[logits_off..].as_ptr() as *const f32, 8)
+                };
+                eprintln!("[DIAG] logits_off={} logits[0..8]: {:?}", logits_off, logits_data);
+            }
+        }
 
         log::debug!(
             "[mega] prompt_len={} max_new_tokens={} generated_count={} eos={} output_first={}",
