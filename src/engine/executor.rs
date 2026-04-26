@@ -1167,45 +1167,107 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     }
                 }
             }
-            // ARCH-HETEROGENEOUS-LAYERS: MegaKernelWeightLayout currently assumes
-            // uniform per-layer weight shapes (single layer_stride). Models like
-            // Gemma 4 have heterogeneous layers. Skip mega-kernel for these models.
+            // Detect heterogeneous layers (e.g., Gemma-4 E2B with sliding + full attention).
+            // Build HeteroLayerConfig if detected, otherwise compile homogeneous mega-kernel.
             let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
             let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
-            let mut hetero_layer: Option<String> = None;
+            let mut full_attention_indices: Vec<usize> = Vec::new();
+            let mut hetero_q_dim_full: usize = 0;
+            let mut hetero_kv_dim_full: usize = 0;
+            let mut hetero_intermediate_differs = false;
             if let Some(ref_q) = ref_size_q {
                 for layer_idx in 1..geometry.num_layers {
                     let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
                     if let Some(&sz) = weight_sizes.get(&q_key) {
                         if sz != ref_q {
-                            hetero_layer = Some(format!(
-                                "L{} q_proj {} != L0 {} (head_dim 或 num_heads 不同)",
-                                layer_idx, sz, ref_q,
-                            ));
-                            break;
+                            full_attention_indices.push(layer_idx);
+                            if hetero_q_dim_full == 0 {
+                                let ref_q_dim = ref_q / (geometry.hidden_size * 4);
+                                let full_q_dim = sz / (geometry.hidden_size * 4);
+                                hetero_q_dim_full = full_q_dim;
+                                let k_key = format!("model.layers.{}.self_attn.k_proj.weight", layer_idx);
+                                if let Some(&k_sz) = weight_sizes.get(&k_key) {
+                                    hetero_kv_dim_full = k_sz / (geometry.hidden_size * 4);
+                                }
+                            }
                         }
                     }
                     if let Some(ref_gate) = ref_size_gate {
                         let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
                         if let Some(&sz) = weight_sizes.get(&gate_key) {
                             if sz != ref_gate {
-                                hetero_layer = Some(format!(
-                                    "L{} gate_proj {} != L0 {} (intermediate_size 不同)",
-                                    layer_idx, sz, ref_gate,
-                                ));
-                                break;
+                                hetero_intermediate_differs = true;
                             }
                         }
                     }
                 }
             }
-            if let Some(reason) = hetero_layer {
-                log::info!(
-                    "executor: 异构层检测: {} — skipping mega-kernel (uses per-node JIT path)",
-                    reason,
-                );
-                None
+
+            let hetero_config = if !full_attention_indices.is_empty() {
+                let num_full = full_attention_indices.len();
+                if num_full > 0 {
+                    let first_full = full_attention_indices[0];
+                    let sliding_per_segment = first_full;
+                    let num_segments = num_full;
+                    let total_expected = num_segments * (sliding_per_segment + 1);
+                    if total_expected == geometry.num_layers {
+                        let ref_q_dim = ref_size_q.unwrap_or(0) / (geometry.hidden_size * 4);
+                        let sliding_head_dim = ref_q_dim / geometry.num_heads;
+                        let full_head_dim = hetero_q_dim_full / geometry.num_heads;
+                        let full_kv_dim = hetero_kv_dim_full;
+                        let full_num_kv_heads = if full_head_dim > 0 { full_kv_dim / full_head_dim } else { geometry.num_kv_heads };
+
+                        // Detect FFN size transition: scan gate_proj sizes to find where large FFN starts.
+                        let ref_gate = ref_size_gate.unwrap_or(0);
+                        let small_intermediate = geometry.intermediate_size;
+                        let mut large_intermediate = small_intermediate;
+                        let mut large_ffn_start_segment = num_segments; // default: no large FFN
+                        if hetero_intermediate_differs && ref_gate > 0 {
+                            // Find first layer with different gate_proj size
+                            let first_large_layer = (1..geometry.num_layers).find(|&l| {
+                                let gk = format!("model.layers.{}.mlp.gate_proj.weight", l);
+                                weight_sizes.get(&gk).map_or(false, |&s| s != ref_gate)
+                            });
+                            if let Some(fl) = first_large_layer {
+                                let large_gate = weight_sizes.get(&format!("model.layers.{}.mlp.gate_proj.weight", fl)).copied().unwrap_or(ref_gate);
+                                large_intermediate = large_gate / (geometry.hidden_size * 4);
+                                // Convert layer index to segment index
+                                large_ffn_start_segment = fl / (sliding_per_segment + 1);
+                            }
+                        }
+
+                        log::info!(
+                            "executor: heterogeneous layers: {} segments of [{} sliding + 1 full], sliding_head_dim={}, full_head_dim={}, small_ffn={}, large_ffn={}, large_start_seg={}",
+                            num_segments, sliding_per_segment, sliding_head_dim, full_head_dim,
+                            small_intermediate, large_intermediate, large_ffn_start_segment,
+                        );
+
+                        Some(gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig {
+                            num_segments,
+                            sliding_per_segment,
+                            sliding_head_dim,
+                            sliding_num_kv_heads: geometry.num_kv_heads,
+                            full_head_dim,
+                            full_num_kv_heads,
+                            full_layer_indices: full_attention_indices,
+                            small_intermediate,
+                            large_intermediate,
+                            large_ffn_start_segment,
+                        })
+                    } else {
+                        log::info!(
+                            "executor: heterogeneous layers detected but pattern doesn't match [N+1]×M: total={} expected={} — skipping mega-kernel",
+                            geometry.num_layers, total_expected,
+                        );
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
+                None
+            };
+
             let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
                 .unwrap_or_else(|| manifest.arch.clone());
             let template = crate::arch::get_template(&arch_for_template);
@@ -1244,13 +1306,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 &weight_sizes,
                 eos_id,
                 business_config,
+                hetero_config,
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel compilation failed: {}", e),
             )))?;
 
             log::info!("executor: true mega-kernel compiled");
             Some(mega)
-                } // hetero_layer check if/else
         };
 
         // MoE subsystem: read global ExecutionPlan once, initialize all three

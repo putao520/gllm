@@ -43,6 +43,8 @@ struct MegaKernelCompiled {
     rope_cache: Option<gllm_kernels::compiler::codegen::RopeCacheRequirement>,
     /// 实际需要的 scratchpad 大小（buffer_layout + intermediate tensors + RoPE cache）
     total_scratchpad_bytes: usize,
+    /// Heterogeneous weight layout (for models like Gemma-4 E2B).
+    hetero_layout: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroWeightLayout>,
 }
 
 /// Mega-Kernel 执行器 (§9.1)
@@ -76,12 +78,13 @@ impl MegaKernelExecutor {
         weight_sizes: &std::collections::HashMap<String, usize>,
         eos_token_id: u32,
         business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
+        hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
     ) -> Result<Self, MegaKernelError> {
         log::info!(
-            "[mega] compiling: layers={} hidden={} heads={} kv_heads={} head_dim={} vocab={} eps={} rope_theta={} rope_partial={}",
+            "[mega] compiling: layers={} hidden={} heads={} kv_heads={} head_dim={} vocab={} eps={} rope_theta={} rope_partial={} hetero={}",
             geometry.num_layers, geometry.hidden_size, geometry.num_heads, geometry.num_kv_heads,
             geometry.head_dim, geometry.vocab_size, geometry.norm_eps, geometry.rope_theta,
-            geometry.rope_partial_ratio,
+            geometry.rope_partial_ratio, hetero_config.is_some(),
         );
         let embed_scale = business_config.embedding_scale;
         let rope_scaling = geometry.rope_scaling.as_ref().and_then(|cfg| {
@@ -99,6 +102,7 @@ impl MegaKernelExecutor {
                 _ => None,
             }
         });
+        let hetero_config_for_packing = hetero_config.clone();
         let config = gllm_kernels::compiler::ModelMegaConfig {
             num_layers: geometry.num_layers,
             hidden: geometry.hidden_size,
@@ -115,6 +119,7 @@ impl MegaKernelExecutor {
             num_eos_tokens: 1,
             rope_scaling,
             business_config,
+            hetero: hetero_config,
         };
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler.compile_mega_kernel(&config)
@@ -130,6 +135,8 @@ impl MegaKernelExecutor {
             weight_ptrs,
             weight_sizes,
             embed_scale,
+            output.hetero_layout.as_ref(),
+            hetero_config_for_packing.as_ref(),
         );
 
         let mega_compiled = MegaKernelCompiled {
@@ -141,6 +148,7 @@ impl MegaKernelExecutor {
             entry_fn,
             rope_cache: output.rope_cache,
             total_scratchpad_bytes: output.total_scratchpad_bytes,
+            hetero_layout: output.hetero_layout,
         };
 
         Ok(Self {
@@ -252,6 +260,27 @@ impl MegaKernelExecutor {
 ///
 /// ARCH-COMPUTE-F32: 所有权重在 upload_weights 阶段已被转为 F32。
 /// weight_ptrs 指向的数据全部是 F32，直接 memcpy。
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn copy_weight(
+    blob: &mut [u8],
+    offset: usize,
+    ptr: *const u8,
+    src_bytes: usize,
+    slot_size: usize,
+) -> bool {
+    if ptr.is_null() || src_bytes == 0 {
+        return true;
+    }
+    let copy_size = src_bytes.min(slot_size).min(blob.len().saturating_sub(offset));
+    if copy_size == 0 || offset >= blob.len() {
+        return false;
+    }
+    let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
+    blob[offset..offset + copy_size].copy_from_slice(src);
+    true
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn pack_mega_kernel_weights(
     layout: &gllm_kernels::compiler::MegaKernelWeightLayout,
@@ -260,27 +289,11 @@ fn pack_mega_kernel_weights(
     weight_ptrs: &std::collections::HashMap<String, *const u8>,
     weight_sizes: &std::collections::HashMap<String, usize>,
     embedding_scale: Option<f32>,
+    hetero_layout: Option<&gllm_kernels::compiler::mega_kernel_abi::HeteroWeightLayout>,
+    hetero_config: Option<&gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
+    // full_attention_layer_indices: original indices of full attention layers
 ) -> Vec<u8> {
     let mut blob = vec![0u8; layout.total_bytes];
-
-    fn copy_weight(
-        blob: &mut [u8],
-        offset: usize,
-        ptr: *const u8,
-        src_bytes: usize,
-        slot_size: usize,
-    ) -> bool {
-        if ptr.is_null() || src_bytes == 0 {
-            return true;
-        }
-        let copy_size = src_bytes.min(slot_size).min(blob.len().saturating_sub(offset));
-        if copy_size == 0 || offset >= blob.len() {
-            return false;
-        }
-        let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
-        blob[offset..offset + copy_size].copy_from_slice(src);
-        true
-    }
 
     // Embedding weight (with optional scaling for Gemma-style models)
     let embed_key = weight_ptrs.keys().find(|k| k.ends_with("embed_tokens.weight"))
@@ -311,111 +324,57 @@ fn pack_mega_kernel_weights(
     }
 
     // Per-layer weights (already in canonical [in, out] layout from loader normalization)
-    let per_layer = &layout.per_layer;
-    let q_row_bytes = per_layer.w_q_bytes / hidden_size;
-    let k_row_bytes = per_layer.w_k_bytes / hidden_size;
-    let v_row_bytes = per_layer.w_v_bytes / hidden_size;
-    let gate_row_bytes = per_layer.w_gate_bytes / hidden_size;
-    let up_row_bytes = per_layer.w_up_bytes / hidden_size;
-
-    for layer_idx in 0..num_layers {
-        let layer_base = layout.layer_base_offset(layer_idx);
-
-        // ── Norm + O-proj + down_proj: always separate weights, simple copy ──
-        let simple: [(&str, usize, usize); 4] = [
-            ("model.layers.{L}.input_layernorm.weight", per_layer.attn_norm_offset, per_layer.attn_norm_bytes),
-            ("model.layers.{L}.self_attn.o_proj.weight", per_layer.w_o_offset, per_layer.w_o_bytes),
-            ("model.layers.{L}.post_attention_layernorm.weight", per_layer.ffn_norm_offset, per_layer.ffn_norm_bytes),
-            ("model.layers.{L}.mlp.down_proj.weight", per_layer.w_down_offset, per_layer.w_down_bytes),
-        ];
-        for (tmpl, off, slot) in &simple {
-            let name = tmpl.replace("{L}", &layer_idx.to_string());
-            if let Some(&ptr) = weight_ptrs.get(&name) {
-                let size = *weight_sizes.get(&name).unwrap_or(slot);
-                copy_weight(&mut blob, layer_base + off, ptr, size, *slot);
-            }
-        }
-
-        // ── QKV projection: separate q/k/v or fused qkv_proj ──
-        // Fused weight is in canonical [hidden, q_dim+k_dim+v_dim] after loader transposition.
-        // Split columns per row: [0..q_dim) → Q, [q_dim..q_dim+k_dim) → K, [q_dim+k_dim..) → V
-        let q_name = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
-        let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
-        if let Some(&ptr) = weight_ptrs.get(&q_name) {
-            for (name, off, rb) in [
-                (&q_name, per_layer.w_q_offset, q_row_bytes),
-                (&format!("model.layers.{}.self_attn.k_proj.weight", layer_idx), per_layer.w_k_offset, k_row_bytes),
-                (&format!("model.layers.{}.self_attn.v_proj.weight", layer_idx), per_layer.w_v_offset, v_row_bytes),
-            ] {
-                if let Some(&p) = weight_ptrs.get(name) {
-                    let s = *weight_sizes.get(name).unwrap_or(&0);
-                    copy_weight(&mut blob, layer_base + off, p, s, rb * hidden_size);
-                }
-            }
-        } else if let Some(&ptr) = weight_ptrs.get(&qkv_name) {
-            let qkv_row_stride = q_row_bytes + k_row_bytes + v_row_bytes;
-            for r in 0..hidden_size {
-                let src_row = unsafe { ptr.add(r * qkv_row_stride) };
-                let q_dst = layer_base + per_layer.w_q_offset + r * q_row_bytes;
-                let k_dst = layer_base + per_layer.w_k_offset + r * k_row_bytes;
-                let v_dst = layer_base + per_layer.w_v_offset + r * v_row_bytes;
-                if q_dst + q_row_bytes <= blob.len() {
-                    let src = unsafe { std::slice::from_raw_parts(src_row, q_row_bytes) };
-                    blob[q_dst..q_dst + q_row_bytes].copy_from_slice(src);
-                }
-                if k_dst + k_row_bytes <= blob.len() {
-                    let src = unsafe { std::slice::from_raw_parts(src_row.add(q_row_bytes), k_row_bytes) };
-                    blob[k_dst..k_dst + k_row_bytes].copy_from_slice(src);
-                }
-                if v_dst + v_row_bytes <= blob.len() {
-                    let src = unsafe { std::slice::from_raw_parts(src_row.add(q_row_bytes + k_row_bytes), v_row_bytes) };
-                    blob[v_dst..v_dst + v_row_bytes].copy_from_slice(src);
+    if let (Some(hl), Some(hc)) = (hetero_layout, hetero_config) {
+        // ── Heterogeneous packing: segment layout [sliding×4 + full×1] × 7 ──
+        let full_set: std::collections::HashSet<usize> = hc.full_layer_indices.iter().copied().collect();
+        let mut original_layers: Vec<usize> = (0..num_layers).collect();
+        // Reorder into segment layout: sliding_per_segment sliding, then 1 full, repeat
+        let mut reordered = Vec::with_capacity(num_layers);
+        let mut sliding_buf: Vec<usize> = Vec::with_capacity(hc.sliding_per_segment);
+        for &idx in &original_layers {
+            if full_set.contains(&idx) {
+                // Flush sliding buffer + add full layer
+                reordered.extend(sliding_buf.drain(..));
+                reordered.push(idx);
+            } else {
+                sliding_buf.push(idx);
+                if sliding_buf.len() == hc.sliding_per_segment {
+                    reordered.extend(sliding_buf.drain(..));
                 }
             }
         }
+        reordered.extend(sliding_buf.drain(..));
 
-        // ── Head norm weights (Qwen3 q_norm/k_norm) ──
-        for (tmpl, off, slot) in [
-            ("model.layers.{L}.self_attn.q_norm.weight", per_layer.w_q_norm_offset, per_layer.w_q_norm_bytes),
-            ("model.layers.{L}.self_attn.k_norm.weight", per_layer.w_k_norm_offset, per_layer.w_k_norm_bytes),
-        ] {
-            let name = tmpl.replace("{L}", &layer_idx.to_string());
-            if let Some(&ptr) = weight_ptrs.get(&name) {
-                let size = *weight_sizes.get(&name).unwrap_or(&slot);
-                copy_weight(&mut blob, layer_base + off, ptr, size, slot);
-            }
+        for (seg_idx, (i, &orig_idx)) in reordered.iter().enumerate().enumerate() {
+            let is_full = full_set.contains(&orig_idx);
+            let pl = if is_full { &hl.full_per_layer } else { &hl.sliding_per_layer };
+            let stride = if is_full { hl.full_stride } else { hl.sliding_stride };
+
+            // Compute segment position
+            let segment_idx = seg_idx / (hc.sliding_per_segment + 1);
+            let pos_in_segment = seg_idx % (hc.sliding_per_segment + 1);
+            let layer_base = if is_full {
+                // Full layers come after all sliding layers in the segment
+                hl.layer_0_offset + segment_idx * hl.segment_stride
+                    + hc.sliding_per_segment * hl.sliding_stride
+            } else {
+                // Sliding layers at their position in the segment
+                hl.layer_0_offset + segment_idx * hl.segment_stride
+                    + pos_in_segment * hl.sliding_stride
+            };
+
+            pack_single_layer(
+                &mut blob, layer_base, orig_idx, hidden_size, pl, weight_ptrs, weight_sizes,
+            );
         }
-
-        // ── FFN gate/up: separate or fused gate_up_proj ──
-        // Fused weight is in canonical [hidden, 2*intermediate] after loader transposition.
-        // Split columns per row: [0..intermediate) → gate, [intermediate..) → up
-        let gate_name = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
-        let gate_up_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
-        if let Some(&ptr) = weight_ptrs.get(&gate_name) {
-            for (name, off, rb) in [
-                (&gate_name, per_layer.w_gate_offset, gate_row_bytes),
-                (&format!("model.layers.{}.mlp.up_proj.weight", layer_idx), per_layer.w_up_offset, up_row_bytes),
-            ] {
-                if let Some(&p) = weight_ptrs.get(name) {
-                    let s = *weight_sizes.get(name).unwrap_or(&0);
-                    copy_weight(&mut blob, layer_base + off, p, s, rb * hidden_size);
-                }
-            }
-        } else if let Some(&ptr) = weight_ptrs.get(&gate_up_name) {
-            let row_stride = gate_row_bytes + up_row_bytes;
-            for r in 0..hidden_size {
-                let src_row = unsafe { ptr.add(r * row_stride) };
-                let g_dst = layer_base + per_layer.w_gate_offset + r * gate_row_bytes;
-                let u_dst = layer_base + per_layer.w_up_offset + r * up_row_bytes;
-                if g_dst + gate_row_bytes <= blob.len() {
-                    let src = unsafe { std::slice::from_raw_parts(src_row, gate_row_bytes) };
-                    blob[g_dst..g_dst + gate_row_bytes].copy_from_slice(src);
-                }
-                if u_dst + up_row_bytes <= blob.len() {
-                    let src = unsafe { std::slice::from_raw_parts(src_row.add(gate_row_bytes), up_row_bytes) };
-                    blob[u_dst..u_dst + up_row_bytes].copy_from_slice(src);
-                }
-            }
+    } else {
+        // ── Homogeneous packing: uniform stride ──
+        let per_layer = &layout.per_layer;
+        for layer_idx in 0..num_layers {
+            let layer_base = layout.layer_base_offset(layer_idx);
+            pack_single_layer(
+                &mut blob, layer_base, layer_idx, hidden_size, per_layer, weight_ptrs, weight_sizes,
+            );
         }
     }
 
@@ -471,8 +430,116 @@ fn pack_mega_kernel_weights(
     blob
 }
 
-// ============================================================================
-// MegaKernelObservation — Type-Safe Telemetry Interface (SPEC §9.5)
+/// Pack a single layer's weights into the blob at the given base offset.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn pack_single_layer(
+    blob: &mut [u8],
+    layer_base: usize,
+    layer_idx: usize,
+    hidden_size: usize,
+    per_layer: &gllm_kernels::compiler::mega_kernel_abi::PerLayerWeightLayout,
+    weight_ptrs: &std::collections::HashMap<String, *const u8>,
+    weight_sizes: &std::collections::HashMap<String, usize>,
+) {
+    let q_row_bytes = per_layer.w_q_bytes / hidden_size;
+    let k_row_bytes = per_layer.w_k_bytes / hidden_size;
+    let v_row_bytes = per_layer.w_v_bytes / hidden_size;
+    let gate_row_bytes = per_layer.w_gate_bytes / hidden_size;
+    let up_row_bytes = per_layer.w_up_bytes / hidden_size;
+
+    // Simple weights: norm, o_proj, ffn_norm, down_proj
+    let simple: [(&str, usize, usize); 4] = [
+        ("model.layers.{L}.input_layernorm.weight", per_layer.attn_norm_offset, per_layer.attn_norm_bytes),
+        ("model.layers.{L}.self_attn.o_proj.weight", per_layer.w_o_offset, per_layer.w_o_bytes),
+        ("model.layers.{L}.post_attention_layernorm.weight", per_layer.ffn_norm_offset, per_layer.ffn_norm_bytes),
+        ("model.layers.{L}.mlp.down_proj.weight", per_layer.w_down_offset, per_layer.w_down_bytes),
+    ];
+    for (tmpl, off, slot) in &simple {
+        let name = tmpl.replace("{L}", &layer_idx.to_string());
+        if let Some(&ptr) = weight_ptrs.get(&name) {
+            let size = *weight_sizes.get(&name).unwrap_or(slot);
+            copy_weight(blob, layer_base + off, ptr, size, *slot);
+        }
+    }
+
+    // QKV: separate or fused
+    let q_name = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
+    let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
+    if weight_ptrs.contains_key(&q_name) {
+        for (name, off, rb) in [
+            (&q_name, per_layer.w_q_offset, q_row_bytes),
+            (&format!("model.layers.{}.self_attn.k_proj.weight", layer_idx), per_layer.w_k_offset, k_row_bytes),
+            (&format!("model.layers.{}.self_attn.v_proj.weight", layer_idx), per_layer.w_v_offset, v_row_bytes),
+        ] {
+            if let Some(&p) = weight_ptrs.get(name) {
+                let s = *weight_sizes.get(name).unwrap_or(&0);
+                copy_weight(blob, layer_base + off, p, s, rb * hidden_size);
+            }
+        }
+    } else if let Some(&ptr) = weight_ptrs.get(&qkv_name) {
+        let qkv_row_stride = q_row_bytes + k_row_bytes + v_row_bytes;
+        for r in 0..hidden_size {
+            let src_row = unsafe { ptr.add(r * qkv_row_stride) };
+            let q_dst = layer_base + per_layer.w_q_offset + r * q_row_bytes;
+            let k_dst = layer_base + per_layer.w_k_offset + r * k_row_bytes;
+            let v_dst = layer_base + per_layer.w_v_offset + r * v_row_bytes;
+            if q_dst + q_row_bytes <= blob.len() {
+                let src = unsafe { std::slice::from_raw_parts(src_row, q_row_bytes) };
+                blob[q_dst..q_dst + q_row_bytes].copy_from_slice(src);
+            }
+            if k_dst + k_row_bytes <= blob.len() {
+                let src = unsafe { std::slice::from_raw_parts(src_row.add(q_row_bytes), k_row_bytes) };
+                blob[k_dst..k_dst + k_row_bytes].copy_from_slice(src);
+            }
+            if v_dst + v_row_bytes <= blob.len() {
+                let src = unsafe { std::slice::from_raw_parts(src_row.add(q_row_bytes + k_row_bytes), v_row_bytes) };
+                blob[v_dst..v_dst + v_row_bytes].copy_from_slice(src);
+            }
+        }
+    }
+
+    // Head norm weights
+    for (tmpl, off, slot) in [
+        ("model.layers.{L}.self_attn.q_norm.weight", per_layer.w_q_norm_offset, per_layer.w_q_norm_bytes),
+        ("model.layers.{L}.self_attn.k_norm.weight", per_layer.w_k_norm_offset, per_layer.w_k_norm_bytes),
+    ] {
+        let name = tmpl.replace("{L}", &layer_idx.to_string());
+        if let Some(&ptr) = weight_ptrs.get(&name) {
+            let size = *weight_sizes.get(&name).unwrap_or(&slot);
+            copy_weight(blob, layer_base + off, ptr, size, slot);
+        }
+    }
+
+    // FFN gate/up: separate or fused
+    let gate_name = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
+    let gate_up_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
+    if weight_ptrs.contains_key(&gate_name) {
+        for (name, off, rb) in [
+            (&gate_name, per_layer.w_gate_offset, gate_row_bytes),
+            (&format!("model.layers.{}.mlp.up_proj.weight", layer_idx), per_layer.w_up_offset, up_row_bytes),
+        ] {
+            if let Some(&p) = weight_ptrs.get(name) {
+                let s = *weight_sizes.get(name).unwrap_or(&0);
+                copy_weight(blob, layer_base + off, p, s, rb * hidden_size);
+            }
+        }
+    } else if let Some(&ptr) = weight_ptrs.get(&gate_up_name) {
+        let row_stride = gate_row_bytes + up_row_bytes;
+        for r in 0..hidden_size {
+            let src_row = unsafe { ptr.add(r * row_stride) };
+            let g_dst = layer_base + per_layer.w_gate_offset + r * gate_row_bytes;
+            let u_dst = layer_base + per_layer.w_up_offset + r * up_row_bytes;
+            if g_dst + gate_row_bytes <= blob.len() {
+                let src = unsafe { std::slice::from_raw_parts(src_row, gate_row_bytes) };
+                blob[g_dst..g_dst + gate_row_bytes].copy_from_slice(src);
+            }
+            if u_dst + up_row_bytes <= blob.len() {
+                let src = unsafe { std::slice::from_raw_parts(src_row.add(gate_row_bytes), up_row_bytes) };
+                blob[u_dst..u_dst + up_row_bytes].copy_from_slice(src);
+            }
+        }
+    }
+}
 // ============================================================================
 
 /// Structured observation extracted from Mega-Kernel epilogue telemetry buffer.
