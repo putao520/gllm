@@ -256,6 +256,10 @@ impl MegaKernelExecutor {
             prompt_len, max_new_tokens, generated_count, self.eos_token_id,
             output_tokens.first().copied().unwrap_or(0),
         );
+        eprintln!(
+            "[mega] prompt_len={} generated_count={} output_tokens={:?}",
+            prompt_len, generated_count, &output_tokens[..generated_count.min(10) as usize]
+        );
 
         let actual_count = if generated_count == 0 && max_new_tokens > 0 && output_tokens[0] != 0 {
             1
