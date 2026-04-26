@@ -423,10 +423,17 @@ pub enum ComputeStrategy {
 | `Sm80MmaAsync { stages, split_k }` | NVIDIA SM80 | MMA.sync + cp.async 多 stage | BF16/F16 | F32 |
 | `Sm90WgmmaTma { num_waves, cluster_dims }` | NVIDIA SM90 | TMA + wgmma 协作式多 wave | BF16/F16 | F32 |
 | `Sm100Tcgen05 { ... }` | NVIDIA SM100+ | tcgen05 下一代 tensor core | BF16/FP8 | F32 |
-| `Rdna3Wmma { ... }` | AMD RDNA 3 | WMMA F16/BF16 | F16/BF16 | F32 |
+| `Rdna3WmmaF16 { ... }` | AMD RDNA 3 (gfx11) | WMMA F16 | F16 | F32 |
+| `Rdna3WmmaBf16 { ... }` | AMD RDNA 3 (gfx11) | WMMA BF16 | BF16 | F32 |
 | `Rdna4WmmaF16 { ... }` | AMD RDNA 4 (GFX12) | WMMA F16 | F16 | F32 |
 | `Rdna4WmmaBf16 { ... }` | AMD RDNA 4 (GFX12) | WMMA BF16 | BF16 | F32 |
 | `Rdna4WmmaA4W8 { ... }` | AMD RDNA 4 (GFX12) | WMMA a4w8 硬件隐式 dequant | A4+W8 | F32 |
+| `Cdna2MfmaBf16 { ... }` | AMD CDNA 2 (gfx90a, MI250) | MFMA 32×32×8 BF16, Wave64 | BF16 | F32 |
+| `Cdna2MfmaF16 { ... }` | AMD CDNA 2 (gfx90a, MI250) | MFMA 32×32×16 F16, Wave64 | F16 | F32 |
+| `Cdna3MfmaBf16 { ... }` | AMD CDNA 3 (gfx942, MI300X) | MFMA 32×32×16 BF16, Wave64 | BF16 | F32 |
+| `Cdna3MfmaF16 { ... }` | AMD CDNA 3 (gfx942, MI300X) | MFMA 32×32×32 F16, Wave64 | F16 | F32 |
+| `Cdna3MfmaInt8 { ... }` | AMD CDNA 3 (gfx942, MI300X) | IMMA 32×32×32 INT8, Wave64 | INT8 | INT32 |
+| `Cdna3MfmaFp8 { ... }` | AMD CDNA 3 (gfx942, MI300X) | FP8 BF8×BF8 MFMA, Wave64 | FP8 BF8 | F32 |
 
 **多 wave 并发**: `Sm90WgmmaTma { num_waves: 2 }` 表示 2 个 wave 协作处理同一 GEMM tile。`cluster_dims` 控制 Thread Block Cluster 维度。
 
@@ -520,8 +527,12 @@ fn select_gemm_strategy(
             => Sm90Fp8TensorCore,
         (Sm80, INT8 | UINT8, INT8 | UINT8) if hw.has_int8_tensor_cores()
             => Sm80Int8TensorCore,
+        (Gfx942, INT8, INT8) if hw.has_mfma_int8()
+            => Cdna3MfmaInt8,
+        (Gfx942, FP8, FP8) if hw.has_mfma_fp8()
+            => Cdna3MfmaFp8,
 
-        // ── GPU 标准 tensor core 路径 ──
+        // ── GPU 标准 tensor core / MFMA 路径 ──
         (Sm100, BF16, BF16) => Sm100Tcgen05 { .. },
         (Sm90, BF16 | F16, BF16 | F16)
             => Sm90WgmmaTma { num_waves: 2, cluster_dims: (1,1,1) },
@@ -530,7 +541,12 @@ fn select_gemm_strategy(
         (Sm70, F16, F16) => Sm70Wmma { stages: 2 },
         (Gfx12, F16, F16) => Rdna4WmmaF16 { .. },
         (Gfx12, BF16, BF16) => Rdna4WmmaBf16 { .. },
-        (Gfx11, F16, F16) => Rdna3Wmma { .. },
+        (Gfx11, F16, F16) => Rdna3WmmaF16 { .. },
+        (Gfx11, BF16, BF16) => Rdna3WmmaBf16 { .. },
+        (Gfx942, BF16, BF16) => Cdna3MfmaBf16 { .. },
+        (Gfx942, F16, F16) => Cdna3MfmaF16 { .. },
+        (Gfx90A, BF16, BF16) => Cdna2MfmaBf16 { .. },
+        (Gfx90A, F16, F16) => Cdna2MfmaF16 { .. },
 
         // ── CPU fused dequant 路径 ──
         (_, Q4_K | Q4_0, F32) => FusedQ4Gemm { block_size: quant_a.block_size() },
