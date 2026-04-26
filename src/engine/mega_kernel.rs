@@ -251,33 +251,53 @@ impl MegaKernelExecutor {
             )
         };
 
-        // Diagnostic: dump activation buffer (offset 0) and final_normed area
+        // Diagnostic: verify logits and argmax consistency
         {
-            let embed_off = 0;
-            let embed_elems = prompt_len * 1536; // hidden=1536
-            let embed_data = unsafe {
-                std::slice::from_raw_parts(scratchpad[embed_off..].as_ptr() as *const f32, embed_elems.min(16))
-            };
-            eprintln!("[DIAG] embed[0..16]: {:?}", &embed_data[..16.min(embed_data.len())]);
-
-            // final_normed at offset 786432
-            let fnorm_off = 786432usize;
-            let fnorm_elems = prompt_len * 1536;
-            if fnorm_off + fnorm_elems * 4 <= scratchpad.len() {
-                let fnorm_data = unsafe {
-                    std::slice::from_raw_parts(scratchpad[fnorm_off..].as_ptr() as *const f32, fnorm_elems.min(16))
-                };
-                let has_nonzero = fnorm_data.iter().any(|&v| v != 0.0);
-                eprintln!("[DIAG] final_normed[0..16]: {:?} nonzero={}", &fnorm_data[..16.min(fnorm_data.len())], has_nonzero);
-            }
-
-            // logits at logits_scratch_offset
             let logits_off = mega.logits_scratch_offset;
-            if logits_off + 4 <= scratchpad.len() {
-                let logits_data = unsafe {
-                    std::slice::from_raw_parts(scratchpad[logits_off..].as_ptr() as *const f32, 8)
+            let vocab = self.vocab_size;
+            let hidden = self.hidden_size;
+            let row_bytes = vocab * 4;
+            // JIT argmax reads row (prompt_len + gen_counter - 1) for first iteration
+            // gen_counter=0 at start, so row = prompt_len - 1 = 5
+            let jit_row = prompt_len - 1;
+            let jit_row_offset = jit_row * row_bytes;
+            if logits_off + (jit_row + 1) * row_bytes <= scratchpad.len() {
+                let row0_data = unsafe {
+                    std::slice::from_raw_parts(scratchpad[logits_off..].as_ptr() as *const f32, vocab)
                 };
-                eprintln!("[DIAG] logits_off={} logits[0..8]: {:?}", logits_off, logits_data);
+                let row5_data = unsafe {
+                    std::slice::from_raw_parts(scratchpad[logits_off + jit_row_offset..].as_ptr() as *const f32, vocab)
+                };
+                let (row0_max_idx, row0_max_val) = row0_data.iter().enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
+                        if v > acc.1 { (i, v) } else { acc }
+                    });
+                let (row5_max_idx, row5_max_val) = row5_data.iter().enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
+                        if v > acc.1 { (i, v) } else { acc }
+                    });
+                let jit_token = output_tokens.get(0).copied().unwrap_or(999);
+                let nonzero_r5 = row5_data.iter().filter(|&&v| v != 0.0).count();
+                eprintln!(
+                    "[DIAG] logits_off={} vocab={} jit_row={}",
+                    logits_off, vocab, jit_row
+                );
+                eprintln!(
+                    "[DIAG] row0_max: idx={} val={:.4} data={:?}",
+                    row0_max_idx, row0_max_val, &row0_data[..8.min(row0_data.len())]
+                );
+                eprintln!(
+                    "[DIAG] row{}_max: idx={} val={:.4} nonzero={}/{} data={:?}",
+                    jit_row, row5_max_idx, row5_max_val, nonzero_r5, vocab,
+                    &row5_data[..8.min(row5_data.len())]
+                );
+                eprintln!(
+                    "[DIAG] jit_token={} output_tokens={:?}",
+                    jit_token, &output_tokens[..generated_count.min(10) as usize]
+                );
+                // Check if row5 has all-same pattern (indicating GEMM didn't write row 5)
+                let row5_all_same = row5_data.windows(2).all(|w| w[0] == w[1]);
+                eprintln!("[DIAG] row5_all_same={}", row5_all_same);
             }
         }
 
