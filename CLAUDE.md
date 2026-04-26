@@ -43,11 +43,12 @@
 | `00-PHILOSOPHY.md` | 核心哲学原则 (Accuracy First, JIT Hot-Repair, No Pragmatic Hacks, ARCH-FULL-JIT) | ✅ |
 | `01-JIT-PIPELINE.md` | JIT 四阶段管线 (Scalar→SymExec→IR→ISA Lowering) + CompilerGraph + DeviceProfile + §5.1 自动指令选择器 (ARCH-AUTO-INSTR-SELECT) + §3.4 TraceOp 扩展 (Compare/Cast/HReduce) | ✅ |
 | `02-HARDWARE.md` | 硬件探测与 DeviceProfile 12 Profile (SM100+/SM90/SM80/SM70/AVX10.2/AVX10.1/AMX/AVX-512/AVX2/SME2/SVE2/NEON) | ✅ |
+| `14-HW-INTRINSICS.md` | 硬件指令能力矩阵 (x86/ARM/NVIDIA/AMD/Apple GEMM+Attention+Dequant+Norm 指令 + 设备探测方法) | ✅ |
 | `03-GRAPH-IR.md` | CompilerGraph IR 规范 + OpKind + SymDim + CallbackChain 契约 (pre_node/post_node/CallbackAction) | ✅ |
 | `04-OPERATORS.md` | 算子族清单与注册规范 (GEMM/RmsNorm/RoPE/Attention/MoE/PLE/Gather/...) + §4.6 MoE (MoEGate/MoERouter/MoEDispatchPacked) | ✅ |
 | `05-OPTIMIZATIONS.md` | 融合决策 + Epilogue 白嫖 + TileLevelFusion/ComputeRoot 寄存器约束 | ✅ |
 | `06-RUNTIME.md` | 运行时执行模型 (FusedGraphExecutor, run_with_callbacks, KV cache 数据流) | ✅ |
-| `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE + §2.5 MXFP4 分离格式 ARCH-MXFP4-SEPARATE) | ✅ |
+| `07-LOADER.md` | 模型加载规范 (safetensors/GGUF/ONNX/PyTorch .bin + BF16→F32 并行化 + cache-blocked transpose §2.4 ARCH-LOADER-NORMALIZE + §2.5 MXFP4 分离格式 + §7.5 YAML Schema) | ✅ |
 | `08-EXECUTOR.md` | Executor 规范 (§1.2.1 ARCH-KV-EFFECTIVE-MAXSEQ + §1.2.2 ARCH-KV-EFFECTIVE-LAYER SSOT 映射) | ✅ |
 | `09-API.md` | 公共 API 契约（内部 trait/枚举/错误语义） | ✅ |
 | `10-QUALITY.md` | 质量保证与数值对齐要求 | ✅ |

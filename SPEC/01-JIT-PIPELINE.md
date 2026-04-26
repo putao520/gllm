@@ -434,6 +434,9 @@ pub enum ComputeStrategy {
 | `Cdna3MfmaF16 { ... }` | AMD CDNA 3 (gfx942, MI300X) | MFMA 32×32×32 F16, Wave64 | F16 | F32 |
 | `Cdna3MfmaInt8 { ... }` | AMD CDNA 3 (gfx942, MI300X) | IMMA 32×32×32 INT8, Wave64 | INT8 | INT32 |
 | `Cdna3MfmaFp8 { ... }` | AMD CDNA 3 (gfx942, MI300X) | FP8 BF8×BF8 MFMA, Wave64 | FP8 BF8 | F32 |
+| `MetalSimdMM { tile_m, tile_n }` | Apple GPU 8+ (M3/M4) | `simd_matrix_multiply` 8×8×8 | FP16 | F32 |
+| `MetalSimdMmBf16 { tile_m, tile_n }` | Apple GPU 9+ (M4) | `simd_matrix_multiply` BF16 | BF16 | F32 |
+| `MetalTiled { tile_m, tile_n }` | Apple GPU 7 (M1/M2) | Tiled GEMM + SIMD 向量化 | FP32 | FP32 |
 
 **多 wave 并发**: `Sm90WgmmaTma { num_waves: 2 }` 表示 2 个 wave 协作处理同一 GEMM tile。`cluster_dims` 控制 Thread Block Cluster 维度。
 
@@ -547,6 +550,14 @@ fn select_gemm_strategy(
         (Gfx942, F16, F16) => Cdna3MfmaF16 { .. },
         (Gfx90A, BF16, BF16) => Cdna2MfmaBf16 { .. },
         (Gfx90A, F16, F16) => Cdna2MfmaF16 { .. },
+
+        // ── Apple GPU 路径 ──
+        (AppleGpu, BF16, BF16) if hw.apple_gpu_gen() >= 9
+            => MetalSimdMmBf16 { tile_m: 64, tile_n: 64 },
+        (AppleGpu, F16, F16) if hw.apple_gpu_gen() >= 8
+            => MetalSimdMM { tile_m: 64, tile_n: 64 },
+        (AppleGpu, F32, F32) if hw.apple_gpu_gen() >= 7
+            => MetalTiled { tile_m: 32, tile_n: 32 },
 
         // ── CPU fused dequant 路径 ──
         (_, Q4_K | Q4_0, F32) => FusedQ4Gemm { block_size: quant_a.block_size() },

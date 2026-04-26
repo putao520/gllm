@@ -315,6 +315,71 @@ Stage 2 (加载): cp.async(B_tile[next], B_global[next_k])
   - Scale/zp 需要 extra register 存放 (per-block)
 ```
 
+### 1.5 Apple GPU (Metal)
+
+Apple GPU 通过 Metal 着色语言 (MSL) 编程，JIT 生成 `.air` (Apple Intermediate Representation) → `.metallib` 编译产物。
+
+#### 1.5.1 SIMD 矩阵乘 — Apple GPU 8代+ (M3/M4/M4 Pro/M4 Max/Ultra)
+
+| 参数 | 值 |
+|------|---|
+| **指令** | `simd_matrix_multiply` (MSL intrinsics) |
+| **矩阵尺寸** | 8×8×8 (M×N×K) per SIMD group |
+| **输入精度** | FP16 / BF16 |
+| **累加精度** | FP32 |
+| **线程模型** | SIMD group (32 lanes) 协作 |
+| **检测** | `MTLDevice.supportsFamily(.appleGPUX)` where X ≥ 8 |
+
+```
+// MSL GEMM 微核 — SIMD group 矩阵乘
+// 8×8×8 FP16 输入 → FP32 累加
+half8x8 a = ...; // 8×8 FP16 矩阵 A (从 device memory 加载)
+half8x8 b = ...; // 8×8 FP16 矩阵 B (从 device memory 加载)
+float8x8 c = simd_matrix_multiply(a, b); // FP32 累加结果
+```
+
+#### 1.5.2 Apple GPU 7代 (M1/M2/M2 Pro/M2 Max/Ultra)
+
+| 参数 | 值 |
+|------|---|
+| **指令** | 无专用矩阵指令，使用 `simd_mul` + `simd_add` |
+| **矩阵策略** | Tiled GEMM + SIMD 向量化 (8-lane float4 向量) |
+| **输入精度** | FP32 / FP16 (via half-precision conversion) |
+| **累加精度** | FP32 |
+| **线程模型** | SIMD group (32 lanes) |
+| **检测** | `MTLDevice.supportsFamily(.appleGPU7)` |
+
+#### 1.5.3 Apple GPU 硬件特性矩阵
+
+| 特性 | Apple 7 (M1/M2) | Apple 8 (M3) | Apple 9 (M4) | Apple 10+ (M5+) |
+|------|-----------------|--------------|--------------|-----------------|
+| SIMD 矩阵乘 | ❌ | ✅ `simd_matrix_multiply` | ✅ | ✅ |
+| FP16 原生 | ✅ | ✅ | ✅ | ✅ |
+| BF16 原生 | ❌ | ❌ | ✅ | ✅ |
+| FP8 支持 | ❌ | ❌ | ❌ | 🟡 (待公开) |
+| Threadgroup Memory | 32 KB | 32 KB | 64 KB | 64 KB+ |
+| Wave (SIMD group) | 32 lanes | 32 lanes | 32 lanes | 32 lanes |
+| Ray Tracing | ❌ | ✅ | ✅ | ✅ |
+| Mesh Shaders | ❌ | ❌ | ✅ | ✅ |
+
+#### 1.5.4 Metal GEMM 策略变体
+
+| 变体 | 硬件 | 核心技术 | 输入精度 | 累加精度 |
+|------|------|---------|---------|---------|
+| `MetalSimdMM { tile_m, tile_n }` | Apple GPU 8+ (M3/M4) | `simd_matrix_multiply` 8×8×8 | FP16 | FP32 |
+| `MetalSimdMmBf16 { tile_m, tile_n }` | Apple GPU 9+ (M4) | `simd_matrix_multiply` BF16 | BF16 | FP32 |
+| `MetalTiled { tile_m, tile_n }` | Apple GPU 7 (M1/M2) | Tiled GEMM + `simd_mul/add` | FP32 | FP32 |
+
+#### 1.5.5 Apple GPU 内存层级
+
+| 层级 | 大小 | 带宽 | 延迟 | 用途 |
+|------|------|------|------|------|
+| Registers (per thread) | ~256 × 32-bit | 即时 | 0 cycle | 累加器、微核 tile |
+| Threadgroup (shared) | 32-64 KB | ~2 TB/s | ~10 cycle | A/B tile 预取 |
+| Device (unified) | 8-192 GB | 100-800 GB/s | ~100 cycle | 权重、激活值 |
+
+**统一内存优势**: Apple Silicon CPU/GPU 共享物理内存，无需显式拷贝。`MTLBuffer` 可同时被 CPU 和 GPU 访问（zero-copy）。
+
 ## 2. Attention 微核指令矩阵
 
 ### 2.1 CPU Tiled Attention
@@ -559,6 +624,28 @@ for i in 0..n:
 | gfx90a | CDNA 2 (MI250/MI210) | 64 | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | gfx942 | CDNA 3 (MI300X/MI300A) | 64 | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 
+### 5.5 Apple GPU 属性探测
+
+| 能力 | Metal API | 对应 DeviceProfile 字段 |
+|------|----------|----------------------|
+| GPU 代数 | `MTLDevice.supportsFamily(.appleGPUX)` | `apple_gpu_gen` (7/8/9/10) |
+| SIMD 矩阵乘 | `MTLDevice.supportsFamily(.apple8GPU)` | `has_simd_matrix_multiply` |
+| BF16 原生 | `MTLDevice.supportsBFloat16` (Metal 3.1+) | `has_bf16` |
+| Threadgroup Memory | `MTLDevice.maxThreadgroupMemoryLength` | `threadgroup_memory_bytes` |
+| Max Threads/Group | `MTLDevice.maxThreadsPerThreadgroup` | `max_threads_per_group` |
+| 统一内存 | `MTLDevice.hasUnifiedMemory` (固定 true) | `unified_memory` |
+| 注册块大小 | `MTLDevice.registryID` | (调试用) |
+| 内存大小 | `MTLDevice.recommendedMaxWorkingSetSize` | `gpu_memory_bytes` |
+
+**Apple GPU 代数推导**:
+
+| 代数 | 芯片 | 产品 | SIMD MM | BF16 | Threadgroup |
+|------|------|------|---------|------|-------------|
+| 7 | M1, M2, M2 Pro/Max/Ultra | 2020-2023 | ❌ | ❌ | 32 KB |
+| 8 | M3, M3 Pro/Max | 2023-2024 | ✅ | ❌ | 32 KB |
+| 9 | M4, M4 Pro/Max/Ultra | 2024-2025 | ✅ | ✅ | 64 KB |
+| 10+ | M5 系列 (预计) | 2026+ | ✅ | ✅ | 64 KB+ |
+
 ## 6. 策略选择→指令发射映射总结
 
 完整映射链: `ComputeStrategy variant → 具体硬件指令 → DeviceProfile 检测字段`
@@ -580,6 +667,15 @@ for i in 0..n:
 | `Rdna4WmmaF16` | `v_wmma_f32_16x16x16_f16` | `gfx_arch == "gfx12*"` |
 | `Rdna4WmmaBf16` | `v_wmma_f32_16x16x16_bf16` | `gfx_arch == "gfx12*"` |
 | `Rdna4WmmaA4W8` | `v_wmma_i32_16x16x16_iu4_iu8` | `gfx_arch == "gfx12*" && has_wmma_a4w8` |
+| `Cdna2MfmaBf16` | `v_mfma_f32_32x32x8bf16_1k` | `gfx_arch == "gfx90a"` |
+| `Cdna2MfmaF16` | `v_mfma_f32_32x32x16f16_1k` | `gfx_arch == "gfx90a"` |
+| `Cdna3MfmaBf16` | `v_mfma_f32_32x32x16bf16_1k` | `gfx_arch == "gfx942"` |
+| `Cdna3MfmaF16` | `v_mfma_f32_32x32x32f16_1k` | `gfx_arch == "gfx942"` |
+| `Cdna3MfmaInt8` | `v_mfma_i32_32x32x32i8` | `gfx_arch == "gfx942" && has_mfma_int8` |
+| `Cdna3MfmaFp8` | `v_mfma_f32_32x32x32_bf8_bf8` | `gfx_arch == "gfx942" && has_mfma_fp8` |
+| `MetalSimdMM` | `simd_matrix_multiply(half8x8)` | `apple_gpu_gen >= 8` |
+| `MetalSimdMmBf16` | `simd_matrix_multiply(bfloat8x8)` | `apple_gpu_gen >= 9` |
+| `MetalTiled` | `simd_mul + simd_add` tiled | `apple_gpu_gen >= 7` |
 | `FusedQ4Gemm` | 解包(VPSLLD+VPSRLD) + `vfmadd231ps` | `has_avx2` (或等价) |
 | `FusedQ8Gemm` | 转换(VPMOVSXBD+VCVTDQ2PS) + `vfmadd231ps` | `has_avx2` (或等价) |
 | `FusedMxfp4Gemm` | 双指针加载 + 解码 + `vfmadd231ps` | `has_avx2` (或等价) |
