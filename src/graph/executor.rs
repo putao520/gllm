@@ -2935,7 +2935,7 @@ impl FusedGraphExecutor {
             } else {
                 std::ptr::null()
             };
-            if let Some(req) = cn.compiled.rope_cache {
+            if let Some(ref req) = cn.compiled.rope_cache {
                 populate_rope_cache(
                     &mut scratchpad,
                     req.cache_offset,
@@ -3220,7 +3220,7 @@ impl FusedGraphExecutor {
                 cn_output_numel = cn.output_numel;
                 cn_per_output_numel = cn.per_output_numel.clone();
                 cn_per_output_feature_dims = cn.per_output_feature_dims.clone();
-                cn_rope_cache = cn.compiled.rope_cache;
+                cn_rope_cache = cn.compiled.rope_cache.clone();
                 cn_scratchpad_bytes = cn.compiled.scratchpad_bytes;
                 cn_weight_blob_len = cn.weight_blob.len();
                 cn_output_buf_len = cn.output_buf.len();
