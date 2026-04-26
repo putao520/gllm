@@ -455,15 +455,23 @@ cd ../gllm-kernels && cargo test --test decision_audit
 - ❌ E2E 测试禁止并行运行（`--test-threads=1` 强制）
 - ✅ E2E 测试必须串行执行，避免资源竞争
 
-**理由**：E2E 测试涉及真实模型下载、文件 I/O、CPU 推理，并行运行会导致：
-- 磁盘 I/O 竞争
-- 模型缓存冲突
-- CPU 内存超限
-- 测试结果不可预测
+**单实例强制要求（ARCH-SINGLE-MODEL-INSTANCE）**：
+- ❌ **禁止同时加载超过 1 个模型实例运行测试**
+- ❌ 禁止在后台跑一个 E2E 测试的同时，前台又启动另一个 E2E 测试
+- ❌ 禁止通过多个 `Bash` 调用并行启动不同模型的 E2E 测试
+- ✅ 同一时刻只能有 **一个** 模型加载在内存中
+- ✅ 上一个测试完成后才能启动下一个
+- ✅ `cargo test --test test_e2e_generator -- --test-threads=1` 自动串行
+
+**理由**：
+- 大模型（GPT-OSS 20B）仅权重就占 ~40GB 内存
+- 同时加载两个模型会导致 OOM 或 swap thrashing
+- 系统物理内存有限，单实例已接近上限
+- E2E 测试涉及真实模型下载、文件 I/O、CPU 推理
 
 **运行命令**：
 ```bash
-# 正确：E2E 测试单线程运行
+# 正确：E2E 测试单线程运行（一次只跑一个）
 cargo test --test test_e2e_embedding -- --test-threads=1
 cargo test --test test_e2e_generator -- --test-threads=1
 cargo test --test test_e2e_reranker -- --test-threads=1
