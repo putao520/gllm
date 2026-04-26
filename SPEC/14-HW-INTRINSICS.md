@@ -431,6 +431,8 @@ for k_block in (0..K).step_by(block_size=32):
 | 硬件 | 指令 | 输入格式 | 累加格式 | 额外软件开销 |
 |------|------|---------|---------|-------------|
 | AMD GFX12 | `v_wmma_i32_16x16x16_iu4_iu8` | Q4 × Q8 | INT32→FP32 | 0 — 硬件完成 |
+| AMD CDNA 3 (gfx942) | `v_mfma_i32_32x32x32i8` | INT8 × INT8 | INT32→FP32 | 0 — 硬件完成 |
+| AMD CDNA 3 (gfx942) | `v_mfma_f32_32x32x32_bf8_bf8` | FP8 BF8 × BF8 | FP32 | 0 — 硬件完成 |
 | NVIDIA SM80 | `mma.sync...s32.u8.u8.s32` | INT8 × INT8 | INT32→FP32 | 0 — 硬件完成 |
 | NVIDIA SM90 | `wgmma...f32.e4m3.e4m3` | FP8 × FP8 | FP32 | 0 — 硬件完成 |
 | Intel AMX | `TDPBSSD` | INT8 × INT8 | INT32→FP32 | 0 — 硬件完成 |
@@ -541,18 +543,21 @@ for i in 0..n:
 | Shared Memory / Block | `sharedMemPerBlock` | `smem_per_block` |
 | L2 Cache | `l2CacheSize` | `l2_cache_bytes` |
 | WMMA 支持 | 从 `gcnArch` 推导 | `has_wmma`, `wmma_formats` |
+| MFMA 支持 | 从 `gcnArch` 推导 (gfx90a/gfx942) | `has_mfma`, `mfma_formats` |
+| MFMA INT8 | 从 `gcnArch` 推导 (gfx942+) | `has_mfma_int8` |
+| MFMA FP8 | 从 `gcnArch` 推导 (gfx942+) | `has_mfma_fp8` |
 
 **AMD GPU 架构矩阵**:
 
-| gfx 架构 | 产品代号 | Wavefront | WMMA | BF16 | a4w8 | INT8 |
-|---------|---------|-----------|------|------|------|------|
-| gfx1100 | RDNA 3 (Navi 31) | 32 | ✅ | ✅ | ❌ | ❌ |
-| gfx1101 | RDNA 3 (Navi 32) | 32 | ✅ | ✅ | ❌ | ❌ |
-| gfx1102 | RDNA 3 (Navi 33) | 32 | ✅ | ✅ | ❌ | ❌ |
-| gfx1200 | RDNA 4 (Navi 48) | 32 | ✅ | ✅ | ✅ | ✅ |
-| gfx1201 | RDNA 4 (Navi 44) | 32 | ✅ | ✅ | ✅ | ✅ |
-| gfx940 | CDNA 2 (MI250) | 64 | ✅ | ✅ | ❌ | ✅ |
-| gfx942 | CDNA 3 (MI300) | 64 | ✅ | ✅ | ❌ | ✅ |
+| gfx 架构 | 产品代号 | Wavefront | WMMA | MFMA | BF16 | FP8 | a4w8 | INT8 MFMA | FP8 MFMA |
+|---------|---------|-----------|------|------|------|-----|------|-----------|-----------|
+| gfx1100 | RDNA 3 (Navi 31) | 32 | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| gfx1101 | RDNA 3 (Navi 32) | 32 | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| gfx1102 | RDNA 3 (Navi 33) | 32 | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| gfx1200 | RDNA 4 (Navi 48) | 32 | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ |
+| gfx1201 | RDNA 4 (Navi 44) | 32 | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ |
+| gfx90a | CDNA 2 (MI250/MI210) | 64 | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| gfx942 | CDNA 3 (MI300X/MI300A) | 64 | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 
 ## 6. 策略选择→指令发射映射总结
 
