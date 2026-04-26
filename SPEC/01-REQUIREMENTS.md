@@ -565,3 +565,15 @@
 |----|----------|------|----------|------|
 | **REQ-MOE-001** | MoERouter JIT Lowering | 实现 `lower_moe_router()` 分解为 GEMM + softmax + top-k | 1. `emit_standalone_op` 有 `OpKind::MoERouter` match arm<br>2. 内部调用 `emit_gemm_inline_with_hook()` + `lower_reduction_softmax()` + top-k<br>3. 输出 (router_weights, router_indices) 格式正确<br>4. GPT-OSS-20B E2E 测试输出非退化（不再是 "CapCapCap"） | 🔴 待实现 |
 | **REQ-MOE-002** | MoEDispatchPacked JIT Lowering | 实现专家分发+计算的融合 lowering | 1. `emit_standalone_op` 有 `OpKind::MoEDispatchPacked` match arm<br>2. 按 router_indices 分发 hidden 到对应专家 FFN<br>3. 加权求和输出<br>4. DeepSeek-V3 / GLM-5 MoE E2E 测试通过 | 🔴 待实现 |
+
+## 21. 统一图来源：YAML 模板驱动 mega-kernel (REQ-UGS)
+
+> **SSOT**: [gllm-kernels SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §2.4-2.6]
+> **背景**: `graph_builders.rs` 中的手写图构建函数与 YAML 模板不同步，导致 Gemma-4 E2B 的 8 个系统性 BUG（缺失 3 个 norm + layer_scalar + RoPE cache theta 错误 + 权重布局不匹配）
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-UGS-001** | OnnxGraph→CompilerGraph 转换器 | 新增转换器将 YAML 模板展开的 OnnxGraph 转为 CompilerGraph | 1. `OnnxGraphConverter::convert()` 实现完整的 op_type→OpKind 映射<br>2. 所有已有 YAML 模板（Llama/Qwen3/Gemma4/Phi4/Mistral/DeepSeek）转换结果正确<br>3. 转换器处理条件节点（only_if）、repeat 展开、残差连接 | 🔴 待实现 |
+| **REQ-UGS-002** | 异构层模板折叠 | 转换器自动检测重复层模式，折叠为 K 个模板 + hetero_loop | 1. Gemma-4 E2B 35 层折叠为 4 模板 (sliding_small/full_small/sliding_large/full_large)<br>2. 权重布局自动推导（14 个权重 vs 11 个）<br>3. PerLayerWeightLayout 从 YAML nodes 自动计算，替代手写 `compute_per_layer_bytes`<br>4. HeteroLayerLoopConfig 从 config.json layer_types 自动生成 | 🔴 待实现 |
+| **REQ-UGS-003** | 删除 graph_builders.rs 手写图构建 | 废弃 `decoder_model()`, `decoder_model_hetero()`, `build_layer_body()` | 1. `graph_builders.rs` 中以上函数删除<br>2. mega-kernel 编译改为消费 OnnxGraphConverter 产出<br>3. 所有 E2E 测试通过（SmolLM2, Gemma-4 E2B）<br>4. 新增模型只需写 YAML 模板 + 标量算子注册 | 🔴 待实现 |
+| **REQ-UGS-004** | ModelConfig 缺失字段补全 | 补全 config.json 中未解析的模型配置字段 | 1. `use_double_wide_mlp` → 控制 FFN intermediate 倍率<br>2. `final_logit_softcapping` → 替代 executor 硬编码 30.0<br>3. `hidden_activation` → 自动选择 FfnActivation 枚举<br>4. 这些字段从 config.json → ModelConfig → ModelGeometry 全链路传递 | 🔴 待实现 |

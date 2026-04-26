@@ -115,7 +115,7 @@ impl MegaKernelExecutor {
             rope_theta: geometry.rope_theta,
             rope_partial: geometry.rope_partial_ratio,
             dtype: DType::F32,
-            max_seq_len: 128, // Buffer allocation upper bound; runtime seq_len may be smaller
+            max_seq_len: geometry.max_seq_len,
             num_eos_tokens: 1,
             rope_scaling,
             business_config,
@@ -208,22 +208,22 @@ impl MegaKernelExecutor {
                 );
             }
             // Secondary cache (for heterogeneous models with 2 head_dim values)
-            if let Some((sec_head_dim, sec_offset)) = rc.secondary_cache {
-                let sec_elems = max_total * sec_head_dim;
+            if let Some(ref sec) = rc.secondary_cache {
+                let sec_elems = max_total * sec.head_dim;
                 let sec_bytes = sec_elems * 4;
-                if sec_offset + sec_bytes <= scratchpad.len() {
+                if sec.cache_offset + sec_bytes <= scratchpad.len() {
                     let sec_slice = unsafe {
                         std::slice::from_raw_parts_mut(
-                            scratchpad[sec_offset..].as_mut_ptr() as *mut f32,
+                            scratchpad[sec.cache_offset..].as_mut_ptr() as *mut f32,
                             sec_elems,
                         )
                     };
                     gllm_kernels::compiler::fill_cos_sin_table(
                         sec_slice,
                         &positions[..max_total],
-                        sec_head_dim,
-                        rc.theta,
-                        rc.rope_scaling.clone(),
+                        sec.head_dim,
+                        sec.theta,
+                        sec.rope_scaling.clone(),
                     );
                 }
             }
@@ -251,54 +251,33 @@ impl MegaKernelExecutor {
             )
         };
 
-        // Diagnostic: verify logits and argmax consistency
+        // Diagnostic: check logits for last few rows
         {
             let logits_off = mega.logits_scratch_offset;
             let vocab = self.vocab_size;
-            let hidden = self.hidden_size;
             let row_bytes = vocab * 4;
-            // JIT argmax reads row (prompt_len + gen_counter - 1) for first iteration
-            // gen_counter=0 at start, so row = prompt_len - 1 = 5
-            let jit_row = prompt_len - 1;
-            let jit_row_offset = jit_row * row_bytes;
-            if logits_off + (jit_row + 1) * row_bytes <= scratchpad.len() {
-                let row0_data = unsafe {
-                    std::slice::from_raw_parts(scratchpad[logits_off..].as_ptr() as *const f32, vocab)
-                };
-                let row5_data = unsafe {
-                    std::slice::from_raw_parts(scratchpad[logits_off + jit_row_offset..].as_ptr() as *const f32, vocab)
-                };
-                let (row0_max_idx, row0_max_val) = row0_data.iter().enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
-                        if v > acc.1 { (i, v) } else { acc }
-                    });
-                let (row5_max_idx, row5_max_val) = row5_data.iter().enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
-                        if v > acc.1 { (i, v) } else { acc }
-                    });
-                let jit_token = output_tokens.get(0).copied().unwrap_or(999);
-                let nonzero_r5 = row5_data.iter().filter(|&&v| v != 0.0).count();
-                eprintln!(
-                    "[DIAG] logits_off={} vocab={} jit_row={}",
-                    logits_off, vocab, jit_row
-                );
-                eprintln!(
-                    "[DIAG] row0_max: idx={} val={:.4} data={:?}",
-                    row0_max_idx, row0_max_val, &row0_data[..8.min(row0_data.len())]
-                );
-                eprintln!(
-                    "[DIAG] row{}_max: idx={} val={:.4} nonzero={}/{} data={:?}",
-                    jit_row, row5_max_idx, row5_max_val, nonzero_r5, vocab,
-                    &row5_data[..8.min(row5_data.len())]
-                );
-                eprintln!(
-                    "[DIAG] jit_token={} output_tokens={:?}",
-                    jit_token, &output_tokens[..generated_count.min(10) as usize]
-                );
-                // Check if row5 has all-same pattern (indicating GEMM didn't write row 5)
-                let row5_all_same = row5_data.windows(2).all(|w| w[0] == w[1]);
-                eprintln!("[DIAG] row5_all_same={}", row5_all_same);
+            let total_rows = (generated_count as usize) + prompt_len;
+            for row_idx in [prompt_len - 1, prompt_len, prompt_len + 1] {
+                if row_idx < total_rows {
+                    let row_off = logits_off + row_idx * row_bytes;
+                    if row_off + row_bytes <= scratchpad.len() {
+                        let row_data = unsafe {
+                            std::slice::from_raw_parts(scratchpad[row_off..].as_ptr() as *const f32, vocab)
+                        };
+                        let (max_idx, max_val) = row_data.iter().enumerate()
+                            .fold((0usize, f32::NEG_INFINITY), |acc, (i, &v)| {
+                                if v > acc.1 { (i, v) } else { acc }
+                            });
+                        let nonzero = row_data.iter().filter(|&&v| v != 0.0).count();
+                        eprintln!(
+                            "[DIAG] row{}: argmax={} max={:.4} nonzero={}/{} first8={:?}",
+                            row_idx, max_idx, max_val, nonzero, vocab,
+                            &row_data[..8.min(row_data.len())]
+                        );
+                    }
+                }
             }
+            eprintln!("[DIAG] output_tokens={:?}", &output_tokens[..generated_count.min(10) as usize]);
         }
 
         log::debug!(

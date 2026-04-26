@@ -2,6 +2,27 @@
 
 > **SSOT**: 本文件定义 gllm-kernels JIT 编译器的四阶段管线架构、融合规则、缓存协议。硬件探测与 DeviceProfile 定义见 `SPEC/02-HARDWARE.md`。核心铁律见 `SPEC/00-PHILOSOPHY.md`。
 
+## 0. CompilerGraph 来源 (ARCH-UNIFIED-GRAPH-SOURCE)
+
+**铁律：CompilerGraph 的唯一来源是 gllm 侧 YAML 架构模板。gllm-kernels 不包含独立的图构建逻辑。**
+
+```
+gllm: config.json → ModelConfig → ResolvedConfig
+    ↓
+gllm: YAML 模板 (arch/templates/{arch}.yaml) → ArchTemplate::to_onnx_graph() → OnnxGraph
+    ↓
+gllm-kernels: OnnxGraphConverter::convert(onnx_graph, geometry) → CompilerGraph
+    ↓
+gllm-kernels: Phase 0-3 JIT 管线 (§1)
+```
+
+详细设计见 `SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §2.4-2.6`。
+
+**禁止**：
+- ❌ 在 `graph_builders.rs` 中手写 `decoder_model()` / `decoder_model_hetero()` / `build_layer_body()`
+- ❌ 手写 `compute_per_layer_bytes()` 硬编码权重布局
+- ❌ 新增模型时修改 gllm-kernels 代码（只需写 YAML 模板 + 标量算子注册）
+
 ## 1. 管线总览
 
 算子的唯一定义来源是 `extern "C"` 纯标量函数。编译器通过二进制符号执行自动提取计算结构（OpTrace），然后根据 DeviceProfile 生成最优融合 SIMD/GPU 代码。

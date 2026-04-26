@@ -955,6 +955,157 @@ pub struct LayerLoopConfig {
 
 生成循环由 `compile_mega_kernel_vm()` 在 `emit_fusion_groups()` 前后发射。
 
+### §2.4 图来源：YAML 模板驱动 (ARCH-UNIFIED-GRAPH-SOURCE)
+
+**铁律：CompilerGraph 的唯一来源是 gllm YAML 架构模板。禁止在 `graph_builders.rs` 中独立手写图构建函数。**
+
+#### §2.4.1 数据流
+
+```
+模型文件 (safetensors/GGUF/ONNX)
+    │
+    ├─ config.json → ModelConfig → ModelGeometry (几何常量)
+    │
+    └─ YAML 模板 (gllm/src/arch/templates/{arch}.yaml)
+        │
+        ├─ 描述完整层结构：norm 数量/位置/类型、激活函数、残差连接
+        ├─ 条件节点 (only_if): 按模型配置选择性启用
+        ├─ repeat: 层循环展开
+        │
+        └─ ArchTemplate::to_onnx_graph(config) → OnnxGraph (35 层展开)
+              │
+              └─ OnnxGraphConverter::convert(onnx_graph, geometry, business_config)
+                    │
+                    ├─ op_type 字符串 → OpKind 枚举映射
+                    ├─ OnnxGraph Value → CompilerGraph Tensor
+                    ├─ 重复层模式检测 → 层模板折叠 (§2.5)
+                    │
+                    └─ CompilerGraph (4 模板 + hetero_loop 或 均匀 loop)
+```
+
+#### §2.4.2 op_type → OpKind 映射表
+
+转换器的核心职责是将 OnnxGraph 的 `op_type` 字符串映射为 `OpKind` 枚举：
+
+| YAML op_type / OnnxGraph op_type | OpKind | 分类 |
+|----------------------------------|--------|------|
+| `Gather` | `OpKind::Gather` | Structural |
+| `SimplifiedLayerNormalization` | `OpKind::RmsNorm` | Norm |
+| `MatMul` | `OpKind::Gemm` | Complex |
+| `QkNorm` | `OpKind::QkNorm` | Norm |
+| `ValueNorm` | `OpKind::ValueNorm` | Norm |
+| `DualRotaryEmbedding` | `OpKind::RoPE` | Complex |
+| `Attention` | `OpKind::MultiHeadAttention` | Complex |
+| `Add` (残差) | `OpKind::Residual` | Structural |
+| `GELU` | `OpKind::Gelu` | Elementwise |
+| `GeGLU` | `OpKind::GeGlu` | Elementwise |
+| `SwiGLU` | `OpKind::SwiGlu` | Elementwise |
+| `Mul` (layer_scalar) | `OpKind::ElementwiseMul` | Elementwise |
+| `LogitSoftcap` | `OpKind::LogitSoftcap` | Elementwise |
+
+**未识别的 op_type → 编译报错 (NO_SILENT_FALLBACK)**。转换器不做猜测，新增算子必须在此表注册。
+
+#### §2.4.3 Gemma-4 层结构 (参考实现)
+
+Gemma-4 E2B 的 YAML 模板定义了以下层结构（与 `gemma4.yaml` 一致）：
+
+```
+input_layernorm → Q_proj → K_proj → V_proj → QkNorm → ValueNorm
+    → DualRoPE → Attention → O_proj → Residual₁ (post-attention)
+    → post_attention_layernorm → pre_feedforward_layernorm
+    → gate_proj → GELU → up_proj → GeGLU → down_proj
+    → post_feedforward_layernorm → Residual₂ → layer_scalar
+```
+
+与通用 Llama/Qwen 模型的差异：
+- 4 个 norm（vs 2 个）：input_layernorm, post_attention_layernorm, pre_feedforward_layernorm, post_feedforward_layernorm
+- layer_scalar：每层乘性缩放因子
+- GeGLU（vs SwiGLU）：gate_proj 用 GELU 激活
+- QkNorm + ValueNorm：Q/K L2 归一化 + V 无参数 RMSNorm
+
+#### §2.4.4 ModelConfig 缺失字段补充
+
+当前 `ModelConfig` 未解析以下 config.json 字段，必须补全：
+
+| config.json 字段 | ModelConfig 新增字段 | 说明 |
+|------------------|---------------------|------|
+| `use_double_wide_mlp` | `use_double_wide_mlp: Option<bool>` | Gemma-4 segments ≥3 用 2× intermediate |
+| `final_logit_softcapping` | `final_logit_softcapping: Option<f32>` | Gemma-4 logit 缩放 (30.0) |
+| `hidden_activation` | 已有 `hidden_act`，需映射到 FfnActivation | GeGLU vs SwiGLU 选择 |
+
+### §2.5 异构层模板折叠
+
+异构模型（如 Gemma-4 E2B）有多种层类型。YAML 模板展开为 35 个独立层节点，
+转换器通过模式检测折叠为 K 个模板 + 异构层循环：
+
+#### §2.5.1 折叠算法
+
+```
+输入: OnnxGraph (35 层展开)
+输出: CompilerGraph (4 模板 + HeteroLayerLoopConfig)
+
+1. 按层索引分组，检测层内算子序列是否相同
+2. 按 (attention_type × ffn_size) 分类为 4 种模板
+3. 对每种模板，取第一个实例的图结构作为模板图
+4. 生成 HeteroLayerLoopConfig 描述循环结构
+```
+
+Gemma-4 E2B 的 4 种模板：
+
+| 模板 | attention | FFN intermediate | 层数 | 权重布局 |
+|------|-----------|------------------|------|---------|
+| sliding_small | sliding (head_dim=256) | 6144 | 4×5=20 | PerLayerWeightLayout (sliding_small) |
+| full_small | global (head_dim=512) | 6144 | 1×5=5 | PerLayerWeightLayout (full_small) |
+| sliding_large | sliding (head_dim=256) | 12288 | 4×2=8 | PerLayerWeightLayout (sliding_large) |
+| full_large | global (head_dim=512) | 12288 | 1×2=2 | PerLayerWeightLayout (full_large) |
+
+#### §2.5.2 HeteroLayerLoopConfig
+
+```rust
+pub struct HeteroLayerLoopConfig {
+    pub num_segments: usize,
+    pub sliding_per_segment: usize,
+    pub templates: Vec<LayerTemplate>,
+    pub segment_schedule: Vec<SegmentDescriptor>,
+    pub activation_aliases: Vec<(TensorId, TensorId)>,
+}
+
+pub struct LayerTemplate {
+    pub attention_type: AttentionType,  // Sliding / Global
+    pub ffn_size: FfnSize,              // Small / Large
+    pub ops: Vec<OpId>,                 // 模板图内的算子 ID
+    pub weight_layout: PerLayerWeightLayout,
+    pub weight_stride: usize,
+}
+
+pub struct SegmentDescriptor {
+    pub template_indices: Vec<usize>,   // 本段内的模板序列索引
+}
+```
+
+#### §2.5.3 权重布局同步
+
+`PerLayerWeightLayout` 的字段数量和顺序**完全由 YAML 模板决定**：
+- 通用 Llama: 11 个权重 (attn_norm, w_q, w_k, w_v, w_o, ffn_norm, w_gate, w_up, w_down)
+- Gemma-4: 14 个权重 (+w_q_norm, w_k_norm, pre_ffn_norm, post_ffn_norm, layer_scalar)
+
+转换器从模板的 `tensor_patterns` + `nodes` 自动推导权重布局，不需要手写 `compute_per_layer_bytes`。
+
+### §2.6 废弃代码清除
+
+以下代码在 SPEC 统一后**必须删除**：
+
+| 文件 | 删除内容 | 原因 |
+|------|---------|------|
+| `graph_builders.rs` | `decoder_model()`, `decoder_model_hetero()`, `build_layer_body()` | 被 OnnxGraphConverter 替代 |
+| `mega_kernel_abi.rs` | `compute_per_layer_bytes()` 手写字节计算 | 由模板自动推导权重布局替代 |
+| `mega_kernel_abi.rs` | `MegaKernelWeightLayout::from_config()` 手写偏移计算 | 由 HeteroWeightLayout 从模板自动生成替代 |
+
+**保留的代码**：
+- `mega_kernel_abi.rs`: `ModelMegaConfig`, `HeteroLayerConfig`, ABI 参数布局定义
+- `mega_kernel_abi.rs`: `MegaKernelBufferLayout` (运行时 scratchpad 布局)
+- `mod.rs`: `compile_mega_kernel_hetero()` (JIT 编译入口，改为消费 OnnxGraphConverter 产出的 CompilerGraph)
+
 ## §3 多轮全局优化算法 — 7 轮虚拟化求解 (R0-R5 + R1.5)
 
 ### §3.1 管线总览
@@ -2401,7 +2552,8 @@ MmHiddenInject 行为:
 
 | 文件 | 变更 | 交叉引用 |
 |------|------|---------|
-| `graph_builders.rs` | `decoder_model(business_config)` 条件插入业务 ops | HEAD-ROUTING.md, GUARDRAIL.md, SEMANTIC-GATEKEEPER.md, INTENT.md, COT-REASONER.md |
+| `graph_builders.rs` | **待删除** — 被 OnnxGraphConverter 替代 (§2.4, §2.6) | — |
+| **`onnx_to_compiler.rs`** | **新增: OnnxGraph → CompilerGraph 转换器 (§2.4)** | gllm `arch/template.rs` |
 | `graph.rs` | 新增 OpKind: `WriteLogits` / `EarlyExit` / `GuardrailCheck` / `SgInject` / `SgDetect` / `CotStepCheck` | — |
 
 **编译管线 (§3-§5)**:
