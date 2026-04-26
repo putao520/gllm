@@ -189,6 +189,7 @@ impl MegaKernelExecutor {
 
         // Pre-fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
+            // Primary cache
             let rope_elems = max_total * rc.head_dim;
             let rope_bytes = rope_elems * 4;
             if rc.cache_offset + rope_bytes <= scratchpad.len() {
@@ -205,6 +206,26 @@ impl MegaKernelExecutor {
                     rc.theta,
                     rc.rope_scaling.clone(),
                 );
+            }
+            // Secondary cache (for heterogeneous models with 2 head_dim values)
+            if let Some((sec_head_dim, sec_offset)) = rc.secondary_cache {
+                let sec_elems = max_total * sec_head_dim;
+                let sec_bytes = sec_elems * 4;
+                if sec_offset + sec_bytes <= scratchpad.len() {
+                    let sec_slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            scratchpad[sec_offset..].as_mut_ptr() as *mut f32,
+                            sec_elems,
+                        )
+                    };
+                    gllm_kernels::compiler::fill_cos_sin_table(
+                        sec_slice,
+                        &positions[..max_total],
+                        sec_head_dim,
+                        rc.theta,
+                        rc.rope_scaling.clone(),
+                    );
+                }
             }
         }
 
@@ -235,6 +256,183 @@ impl MegaKernelExecutor {
             prompt_len, max_new_tokens, generated_count, self.eos_token_id,
             output_tokens.first().copied().unwrap_or(0),
         );
+        eprintln!(
+            "[mega] prompt_len={} generated_count={} output_tokens={:?}",
+            prompt_len, generated_count, &output_tokens[..generated_count.min(10) as usize]
+        );
+
+        // DIAG: comprehensive post-JIT diagnostics
+        {
+            let logits_off = mega.logits_scratch_offset;
+            // 1. Logits: dump first 10 + find max
+            let logits_count = self.vocab_size.min(scratchpad.len().saturating_sub(logits_off) / 4);
+            let logits_ptr = unsafe { scratchpad.as_ptr().add(logits_off) as *const f32 };
+            // The last row of logits: row = decode_seq_len - 1 = (prompt_len + generated_count - 1)
+            let last_row_idx = prompt_len + generated_count as usize;
+            let row_byte_off = (last_row_idx.saturating_sub(1)) * self.vocab_size * 4;
+            let last_row_ptr = if row_byte_off + self.vocab_size * 4 <= logits_count * 4 {
+                unsafe { logits_ptr.add(row_byte_off / 4) }
+            } else {
+                logits_ptr
+            };
+            let logits_first10: Vec<f32> = unsafe {
+                std::slice::from_raw_parts(last_row_ptr, 10.min(self.vocab_size))
+            }.to_vec();
+            let mut max_logit = f32::NEG_INFINITY;
+            let mut max_idx = 0usize;
+            for i in 0..self.vocab_size.min(logits_count) {
+                let v = unsafe { *last_row_ptr.add(i) };
+                if v > max_logit { max_logit = v; max_idx = i; }
+            }
+            log::debug!(
+                "[DIAG] logits_off={} logits_count={} last_row_idx={} row_byte_off={}",
+                logits_off, logits_count, last_row_idx, row_byte_off,
+            );
+            log::debug!(
+                "[DIAG] logits_first10={:?} max_logit={} at idx={}",
+                logits_first10, max_logit, max_idx,
+            );
+
+            // 2. Check if all logits are the same
+            let first_logit = unsafe { *last_row_ptr };
+            let mut all_same = true;
+            for i in 1..self.vocab_size.min(logits_count).min(1000) {
+                let v = unsafe { *last_row_ptr.add(i) };
+                if v != first_logit { all_same = false; break; }
+            }
+            log::debug!("[DIAG] all_logits_same={} first_logit={}", all_same, first_logit);
+            eprintln!(
+                "[DIAG] logits_first10={:?} max_logit={:.4} at idx={} all_same={}",
+                logits_first10, max_logit, max_idx, all_same,
+            );
+
+            // 3. Weight blob verification
+            let blob = &mega.weight_blob;
+            // Embedding: first 8 f32 values
+            let embed_f32: Vec<f32> = blob.iter().take(32).map(|&b| b as f32).collect();
+            let embed_vals: Vec<f32> = unsafe {
+                std::slice::from_raw_parts(blob.as_ptr() as *const f32, 8.min(blob.len() / 4))
+            }.to_vec();
+            log::debug!("[DIAG] weight_blob_len={} embed_first8={:?}", blob.len(), embed_vals);
+
+            // First layer attn_norm (at layer_blob_base_offset)
+            let layer_base_off = mega.hetero_layout.as_ref()
+                .map(|hl| hl.layer_0_offset)
+                .unwrap_or(mega.weight_layout.layer_0_offset);
+            let norm_vals: Vec<f32> = if layer_base_off + 32 <= blob.len() {
+                unsafe {
+                    std::slice::from_raw_parts(blob.as_ptr().add(layer_base_off) as *const f32, 8)
+                }.to_vec()
+            } else { vec![] };
+            log::debug!("[DIAG] layer_base_off={} first_layer_norm_first8={:?}", layer_base_off, norm_vals);
+
+            // lm_head (transposed embed): check first few values
+            let lm_off = mega.weight_layout.lm_head_offset;
+            let lm_vals: Vec<f32> = if lm_off + 32 <= blob.len() {
+                unsafe {
+                    std::slice::from_raw_parts(blob.as_ptr().add(lm_off) as *const f32, 8)
+                }.to_vec()
+            } else { vec![] };
+            log::debug!("[DIAG] lm_head_off={} lm_head_first8={:?}", lm_off, lm_vals);
+
+            // 4. CRITICAL: Read final_normed at BufferAllocation offset 0
+            // But argmax_token_id also maps to offset 0, overwriting first 512 bytes.
+            // Read from offset 512 to get the actual final_normed data.
+            let sp = scratchpad.as_ptr();
+            let hidden = self.hidden_size;
+            let final_normed_off = 0usize;
+            let after_argmax = 512usize; // Skip argmax_token_id region
+
+            // Read final_normed data after the argmax region
+            let fn_vals: Vec<f32> = if after_argmax + 64 <= scratchpad.len() {
+                unsafe {
+                    std::slice::from_raw_parts(sp.add(after_argmax) as *const f32, 16)
+                }.to_vec()
+            } else { vec![] };
+            log::debug!("[DIAG] final_normed@{}+{} first16={:?}", final_normed_off, after_argmax, fn_vals);
+
+            // Check if final_normed is all zeros or has diverse values
+            let fn_ptr = unsafe { sp.add(after_argmax) as *const f32 };
+            let mut nonzero_count = 0usize;
+            let mut sum_sq = 0.0f64;
+            let check_count = (hidden.min(1536) - after_argmax / 4).max(0);
+            for i in 0..check_count {
+                let v = unsafe { *fn_ptr.add(i) };
+                if v != 0.0 { nonzero_count += 1; }
+                sum_sq += (v as f64) * (v as f64);
+            }
+            let rms = if check_count > 0 { (sum_sq / check_count as f64).sqrt() } else { 0.0 };
+            log::debug!("[DIAG] final_normed@{} nonzero={}/{} rms={:.6}", after_argmax, nonzero_count, check_count, rms);
+
+            // Also check offset 0 directly (argmax result)
+            let argmax_vals: Vec<f32> = if 16 * 4 <= scratchpad.len() {
+                unsafe {
+                    std::slice::from_raw_parts(sp as *const f32, 16)
+                }.to_vec()
+            } else { vec![] };
+            log::debug!("[DIAG] offset0_argmax_result first16={:?}", argmax_vals);
+
+            // Check what the GEMM actually read: the scratchpad offset 0 after argmax
+            // The GEMM input (final_normed) was at offset 0 BEFORE argmax overwrote it.
+            // Since the diagnostic runs AFTER JIT, we can't see the original final_normed.
+            // But we can check the BufferAllocation logits area (where the ACTUAL logits were written
+            // by the JIT, which is Output { offset: 0 } = scratchpad + logits_scratch_offset).
+            // Note: logits tensor in BufferAllocation is at offset 786432, but the mega-kernel
+            // override redirects it to Output { offset: 0 }.
+
+            // 5. Logits for ALL rows from Rust's logits_off (where Rust reads)
+            if logits_off + self.vocab_size * 4 * 16 <= scratchpad.len() {
+                let mut row_firsts = Vec::new();
+                for row in 0..16usize {
+                    let row_off = logits_off + row * self.vocab_size * 4;
+                    let val = unsafe { *(sp.add(row_off) as *const f32) };
+                    row_firsts.push(val);
+                }
+                log::debug!("[DIAG] logits_row_first_element={:?}", row_firsts);
+            }
+
+            // 6. Manual GEMV from final_normed@512 to see if the layer output was diverse
+            if after_argmax + hidden * 4 <= scratchpad.len() && lm_off + hidden * 4 <= blob.len() {
+                let act_ptr = unsafe { sp.add(after_argmax) as *const f32 };
+                let act_first16: Vec<f32> = unsafe {
+                    std::slice::from_raw_parts(act_ptr, 16)
+                }.to_vec();
+
+                let w_ptr = unsafe { blob.as_ptr().add(lm_off) as *const f32 };
+
+                let mut dot_full = 0.0f64;
+                for i in 0..check_count {
+                    let a = unsafe { *act_ptr.add(i) } as f64;
+                    let w = unsafe { *w_ptr.add(after_argmax / 4 + i) } as f64;
+                    dot_full += a * w;
+                }
+                log::debug!(
+                    "[DIAG] manual_gemv_from_final_normed@{}: act_first16={:?} dot(partial={})={:.8}",
+                    after_argmax, act_first16, check_count, dot_full,
+                );
+            }
+
+            // 7. Check if the layer loop produced any intermediate results
+            // Read from the layer_sliding_small_attn_normed offset (786432)
+            let attn_norm_off = 786432usize;
+            if attn_norm_off + 32 <= scratchpad.len() {
+                let vals: Vec<f32> = unsafe {
+                    std::slice::from_raw_parts(sp.add(attn_norm_off) as *const f32, 8)
+                }.to_vec();
+                log::debug!("[DIAG] attn_normed@786432 first8={:?}", vals);
+            }
+
+            // 8. Check if there's actual data further into the scratchpad (layer intermediates)
+            for off in &[0usize, 786432, 2359296, 5505024, 8650752, 21233664] {
+                if *off + 32 <= scratchpad.len() {
+                    let vals: Vec<f32> = unsafe {
+                        std::slice::from_raw_parts(sp.add(*off) as *const f32, 4)
+                    }.to_vec();
+                    let non_zero = vals.iter().filter(|&&v| v != 0.0).count();
+                    log::debug!("[DIAG] sp@{} first4={:?} nonzero={}", off, vals, non_zero);
+                }
+            }
+        }
 
         // JIT may return 0 when gen_counter hasn't been incremented yet
         // (EOS on first iteration). In that case check if output_tokens[0]
@@ -325,7 +523,7 @@ fn pack_mega_kernel_weights(
 
     // Per-layer weights (already in canonical [in, out] layout from loader normalization)
     if let (Some(hl), Some(hc)) = (hetero_layout, hetero_config) {
-        // ── Heterogeneous packing: segment layout [sliding×4 + full×1] × 7 ──
+        // ── Heterogeneous packing: 4-type layout [sliding/full × small/large] × 7 segments ──
         let full_set: std::collections::HashSet<usize> = hc.full_layer_indices.iter().copied().collect();
         let mut original_layers: Vec<usize> = (0..num_layers).collect();
         // Reorder into segment layout: sliding_per_segment sliding, then 1 full, repeat
@@ -345,22 +543,34 @@ fn pack_mega_kernel_weights(
         }
         reordered.extend(sliding_buf.drain(..));
 
-        for (seg_idx, (i, &orig_idx)) in reordered.iter().enumerate().enumerate() {
-            let is_full = full_set.contains(&orig_idx);
-            let pl = if is_full { &hl.full_per_layer } else { &hl.sliding_per_layer };
-            let stride = if is_full { hl.full_stride } else { hl.sliding_stride };
+        // Compute cumulative segment base offsets (variable per segment type).
+        let mut seg_base_offsets = Vec::with_capacity(hc.num_segments);
+        let mut offset = hl.layer_0_offset;
+        for seg in 0..hc.num_segments {
+            seg_base_offsets.push(offset);
+            if seg < hl.large_ffn_start_segment {
+                offset += hl.small_segment_stride;
+            } else {
+                offset += hl.large_segment_stride;
+            }
+        }
 
-            // Compute segment position
+        for (seg_idx, &orig_idx) in reordered.iter().enumerate() {
+            let is_full = full_set.contains(&orig_idx);
             let segment_idx = seg_idx / (hc.sliding_per_segment + 1);
             let pos_in_segment = seg_idx % (hc.sliding_per_segment + 1);
-            let layer_base = if is_full {
-                // Full layers come after all sliding layers in the segment
-                hl.layer_0_offset + segment_idx * hl.segment_stride
-                    + hc.sliding_per_segment * hl.sliding_stride
+            let is_small_seg = segment_idx < hl.large_ffn_start_segment;
+
+            let (sliding_stride, full_stride, pl_sliding, pl_full) = if is_small_seg {
+                (hl.sliding_small_stride, hl.full_small_stride, &hl.sliding_small_per_layer, &hl.full_small_per_layer)
             } else {
-                // Sliding layers at their position in the segment
-                hl.layer_0_offset + segment_idx * hl.segment_stride
-                    + pos_in_segment * hl.sliding_stride
+                (hl.sliding_large_stride, hl.full_large_stride, &hl.sliding_large_per_layer, &hl.full_large_per_layer)
+            };
+
+            let (pl, layer_base) = if is_full {
+                (pl_full, seg_base_offsets[segment_idx] + hc.sliding_per_segment * sliding_stride)
+            } else {
+                (pl_sliding, seg_base_offsets[segment_idx] + pos_in_segment * sliding_stride)
             };
 
             pack_single_layer(
