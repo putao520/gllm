@@ -2,7 +2,7 @@
 
 > **SSOT**: 本文档是 gllm + gllm-kernels 统一项目计算图 IR（中间表示）的唯一真源。定义三种图表示、FusedOp 高层语义、优化 Pass 管线、SymDim 动态维度系统和 FusedGraphExecutor。
 >
-> 交叉引用: `01-JIT-PIPELINE.md`（JIT 管线、FusionStrategy kernel 级融合、CompilerOp 原子算子、FusedOp→CompilerOp 展开映射）、`02-HARDWARE.md`（DeviceProfile）、`04-OPERATORS.md`（算子库与硬件特化）
+> 交叉引用: `01-JIT-PIPELINE.md`（JIT 管线、StrategySelector §5、FusionStrategy kernel 级融合、CompilerOp 原子算子、FusedOp→CompilerOp 展开映射）、`02-HARDWARE.md`（DeviceProfile）、`04-OPERATORS.md`（算子库与硬件特化）
 
 ## 1. 三种图表示
 
@@ -33,7 +33,7 @@ pub struct OnnxGraph {
 
 ### 1.2 CompilerGraph
 
-CompilerGraph 是 JIT 四阶段管线的核心数据结构。张量通过 `SymDim` 表达形状，算子通过 `CompilerOp` 表达语义。`CompilerOp` 完整定义和 FusedOp→CompilerOp 展开映射见 `SPEC/01-JIT-PIPELINE.md` §7。
+CompilerGraph 是 JIT 四阶段管线的核心数据结构。张量通过 `SymDim` 表达形状，算子通过 `CompilerOp` 表达语义。`CompilerOp` 完整定义和 FusedOp→CompilerOp 展开映射见 `SPEC/01-JIT-PIPELINE.md` §8。
 
 ```rust
 pub struct CompilerGraph {
@@ -42,7 +42,37 @@ pub struct CompilerGraph {
     pub inputs: Vec<TensorId>,
     pub outputs: Vec<TensorId>,
 }
+
+/// 张量描述 — 携带量化元数据供 StrategySelector 使用 (ARCH-COMPUTE-TIME-DEQUANT)
+pub struct TensorDesc {
+    pub shape: Vec<SymDim>,
+    pub dtype: DType,                // 计算精度 (F32 累加)
+    pub source_quant: QuantType,     // 原始量化格式 (Q4_K / BF16 / F32 原生 / MXFP4)
+    pub block_size: Option<usize>,   // 量化块大小 (MXFP4=32, Q4_K=256, F32=None)
+}
 ```
+
+**量化元数据流 (ARCH-COMPUTE-TIME-DEQUANT)**:
+
+```
+Loader: GGUF Q4_K → QuantType::Q4_K { block_size: 256 }
+    ↓
+gllm: OnnxGraphConverter → TensorDesc { dtype: F32, source_quant: Q4_K, block_size: Some(256) }
+    ↓
+gllm-kernels: StrategySelector 读 TensorDesc.source_quant
+    → 匹配 DequantComputeVariant::FusedQ4Gemm { block_size: 256 }
+    ↓
+Phase 3: 生成融合 "读 4bit → 解包 → F32 乘累加" 代码
+```
+
+| source_quant | JIT 行为 |
+|-------------|---------|
+| `F32` | 直接计算，无 dequant 步骤 |
+| `BF16` | 硬件有 BF16 指令 (VDPBF16PS / BF16 WMMA) → 原生路径；否则 → 软件转换 |
+| `Q4_K` / `Q4_0` | FusedQ4Gemm: 微核内循环解包 4bit + scale → 乘累加 |
+| `Q8_0` / `Q8_K` | FusedQ8Gemm: 微核内循环 8bit × scale → 乘累加 |
+| `MXFP4` | FusedMxfp4Gemm: 双指针 (blocks + scales) 读取 |
+| `Q4_K × Q8_0` on GFX12 | Rdna4WmmaA4W8: 硬件隐式 dequant，零软件开销 |
 
 ### 1.3 FusedGraph
 
@@ -281,7 +311,11 @@ CallbackAction 和 CallbackChain 完整定义见 `SPEC/05-OPTIMIZATIONS.md` §1 
 | 主题 | 位置 |
 |------|------|
 | JIT 四阶段管线 + Kernel 级 FusionStrategy | `SPEC/01-JIT-PIPELINE.md` |
-| CompilerOp 原子算子 + FusedOp→CompilerOp 映射 | `SPEC/01-JIT-PIPELINE.md` §7 |
+| StrategySelector 硬件策略选择 | `SPEC/01-JIT-PIPELINE.md` §5 |
+| ComputeStrategy 枚举族 (GemmVariant/AttentionVariant/...) | `SPEC/01-JIT-PIPELINE.md` §5.3-5.10 |
+| CompilerOp 原子算子 + FusedOp→CompilerOp 映射 | `SPEC/01-JIT-PIPELINE.md` §8 |
+| 策略选择与融合决策交互规则 | `SPEC/05-OPTIMIZATIONS.md` §12 |
+| 算子覆盖率审计 | `SPEC/05-OPTIMIZATIONS.md` §13 |
 | 硬件探测与 DeviceProfile | `SPEC/02-HARDWARE.md` |
 | 算子库 + 硬件特化路径 + 融合策略差异矩阵 | `SPEC/04-OPERATORS.md` |
 | Per-Node Callback 架构 | `SPEC/05-OPTIMIZATIONS.md` §1 |

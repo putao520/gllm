@@ -642,3 +642,100 @@ pub struct PrefetchQueue {
 | Softmax max / 锐度 | 采样策略调整 (§5.2) | logits 范数 → 温度补偿 |
 
 Centroid 数据从 Epilogue STG 指令写入的 KV Page Header padding bytes 中读取，无独立通信通道。
+
+## 12. 策略选择与融合决策交互规则
+
+### 12.1 StrategySelector 在管线中的位置
+
+StrategySelector (详见 `SPEC/01-JIT-PIPELINE.md` §5) 位于 Phase 2 (FusionPlan) 和 Phase 3 (ISA Lowering) 之间。本节定义策略选择与融合决策之间的交互约束。
+
+### 12.2 融合策略影响策略选择
+
+融合决策决定了策略选择的粒度：
+
+| FusionStrategy | 策略选择粒度 | 交互规则 |
+|----------------|------------|---------|
+| `Single` | 单个 OpClass | 独立选择策略 |
+| `LoopFusion` | 融合链整体 | 所有 elemwise ops 共享 `SimdLoop { width }` 策略 |
+| `EpilogueInjection` | GEMM + epilogue | GEMM 策略为主，epilogue 在 GEMM 累加器上原地执行 |
+| `TileLevelFusion` | 前驱 + GEMM | 前驱策略必须支持逐行独立计算（Norm 的两遍扫描不能嵌入 tile 循环） |
+| `ComputeRoot` | 前驱 + GEMM | 前驱完整计算后结果驻留 L1，GEMM 从 L1 读取 |
+| `NormIntoGemm` | Norm + GEMM | Norm 策略必须输出连续内存（不能是 stream 模式） |
+| `FFNBlock` | Gate+Up GEMM + 激活 + Down GEMM | 三个 GEMM 可独立选策略，激活在累加器上执行 |
+
+### 12.3 量化格式影响融合决策
+
+ARCH-COMPUTE-TIME-DEQUANT 引入的量化元数据影响融合可行性：
+
+| 场景 | 量化约束 | 融合决策 |
+|------|---------|---------|
+| Q4_K 权重 GEMM + SiLU epilogue | GEMM 输入是压缩格式 | EpilogueInjection 可用 — dequant 在 GEMM 微核内完成，累加器为 F32，SiLU 在 F32 上执行 |
+| BF16 权重 GEMM + Bias add | 硬件 BF16 支持 | EpilogueInjection 可用 — BF16→F32 在累加器中隐式完成 |
+| MXFP4 权重 + MXFP4 权重 | 两个输入都是 MXFP4 | 需要 FusedMxfp4Gemm — 双指针 blocks+scales 读取，不能标准分块 |
+| 混合量化 Q4 attention + BF16 FFN | 不同层不同量化 | 策略按层独立选择，不影响跨层融合 |
+
+### 12.4 策略选择不能违反融合决策
+
+StrategySelector 的选择必须与 FusionPlan 兼容：
+
+- **禁止**: FusionPlan 决定 `EpilogueInjection`，但 StrategySelector 选择了需要写回内存的策略
+- **禁止**: FusionPlan 决定 `TileLevelFusion`，但 StrategySelector 选择了不支持逐 tile 计算的策略
+- **允许**: FusionPlan 决定 `LoopFusion`，StrategySelector 可以选择任意 `SimdLoop { width }`
+- **允许**: FusionPlan 决定 `Single`，StrategySelector 独立选择任何策略
+
+### 12.5 策略降级链
+
+当首选策略不可用时，StrategySelector 按以下优先级降级：
+
+```
+GPU 硬件 dequant (Rdna4WmmaA4W8 / Sm90Fp8TensorCore)
+  → GPU tensor core (Sm90WgmmaTma / Sm80MmaAsync)
+  → CPU fused dequant (FusedQ4Gemm / FusedQ8Gemm)
+  → CPU standard SIMD (Avx512Bf16 / Avx2Fma / NeonFmla)
+  → Scalar fallback
+```
+
+每级降级必须在 `rationale` 中记录原因。
+
+## 13. 算子覆盖率审计
+
+### 13.1 审计算法
+
+自动化覆盖率审计确保所有 YAML 模板定义的算子都有完整的 JIT 管线支持：
+
+```
+1. 扫描 gllm/src/arch/templates/*.yaml → 提取所有 graph.nodes 中的 op_type
+2. 对每个 op_type 检查:
+   a. OpKind 枚举有对应变体?          (Phase 0 入口)
+   b. ScalarOpRegistry 有 scalar 注册?  (Phase 0 实现)
+   c. SymExec 能完整 trace?             (Phase 0→1)
+   d. ComputePattern 正确识别?           (Phase 1)
+   e. FusionPlan 有融合路径?             (Phase 2)
+   f. StrategySelector 有策略?           (Phase 2.5)
+   g. ISA Codegen 有 lowering?           (Phase 3)
+3. 输出覆盖率矩阵
+```
+
+### 13.2 覆盖率矩阵格式
+
+| op_type | OpKind | Scalar | SymExec | ComputePattern | FusionPath | Strategy | Codegen | 状态 |
+|---------|--------|--------|---------|---------------|------------|----------|---------|------|
+| `MatMul` | `Gemm` | ✅ | ✅ | Gemm | EpilogueInjection | GemmVariant | ✅ | 完整 |
+| `Softmax` | `Softmax` | ✅ | ✅ | Elementwise | LoopFusion | SimdLoop | ✅ | 完整 |
+| `MoERouter` | `MoERouter` | ✅ | ✅ | Opaque | Single | MoeVariant | ❌ | 缺 lowering |
+| `Gather` | `Gather` | ✅ | ✅ | Opaque | Single | GatherVariant | ✅ | 完整 |
+
+### 13.3 自动化测试
+
+```bash
+# 编译时覆盖率审计测试
+cargo test --test op_coverage_audit
+
+# 输出:
+# [PASS] qwen3.yaml: 18/18 ops fully covered
+# [PASS] llama4.yaml: 17/17 ops fully covered
+# [FAIL] gpt-oss-20b.yaml: MoERouter missing codegen lowering
+# [PASS] gemma4.yaml: 23/23 ops fully covered
+```
+
+**铁律**: 新增 YAML 模板或新增 OpKind 变体时，覆盖率审计必须通过才能合入主分支。任何 `❌` 状态等同于未实现。
