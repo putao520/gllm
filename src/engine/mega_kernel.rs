@@ -245,9 +245,12 @@ impl MegaKernelExecutor {
                 top_p.to_bits() as usize,
                 max_new_tokens,
                 self.eos_token_id as usize,
-                0,
+                0,  // output_mode_selector: Generate
                 std::ptr::null(),
                 std::ptr::null_mut(),
+                0,  // session_position: new session
+                std::ptr::null(),  // fused_hidden_ptr: no multimodal
+                0,  // num_mm_tokens: no multimodal tokens
             )
         };
 

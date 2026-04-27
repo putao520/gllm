@@ -8,17 +8,17 @@
 //! E2E 测试必须单线程运行:
 //!   cargo test --test test_e2e_semantic_gatekeeper -- --test-threads=1
 //!
-//! ## Phase 状态
+//! ## 实现状态
 //!
-//! 当前处于 **Phase E (API 接入占位期)**:
-//! - `SemanticGatekeeperConfig` / `SemanticLevel` / trait 契约已就绪
-//! - `Client::register_semantic_gatekeeper` 返回 `Err(RuntimeError("... Phase C pending ..."))`
-//!   直到 SymDim 穿透 + Q-tap JIT codegen + LevelKeysCache 预计算落地
+//! REQ-SG-001/003-007 已实现:
+//! - Level Keys 预计算 (小 CompilerGraph JIT 编译)
+//! - SG Callback 注入 executor callback chain
+//! - 层级路由、稳定性追踪、残差注入、KnowledgeProvider/AstSentinel trait 契约
 //!
-//! 测试策略:
-//! - TEST-SG-005/006/007/008: 纯类型契约与配置解析,**当前必定 PASS**
-//! - TEST-SG-001/002/003/004: 调用 `register_semantic_gatekeeper`,
-//!   当前断言返回 `Phase C pending` 错误;Phase C 完成后必须改写为 `Ok(())` 断言
+//! REQ-SG-002 (QTapSTG graph 插入 + ABI ring buffer) 仍 🟡:
+//! - Q-tap JIT lowering 已实现，但 graph builder 尚未插入 QTapSTG 节点
+//! - ring buffer 写入由 QTapSTG JIT 完成，当前 ring buffer 无数据源
+//! - SG callback 在 ring buffer 读取失败时降级为 Continue（不影响正确性）
 //!
 //! 所有测试**禁止** `#[ignore]` / 条件跳过 (CLAUDE.md NO_SILENT_FALLBACK).
 
