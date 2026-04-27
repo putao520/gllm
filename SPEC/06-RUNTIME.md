@@ -789,6 +789,33 @@ L1i budget 来自 `CompilerConstraints.l1i_size`，通过 `VariantRegistry::with
 
 在单个 `step()` 内，多个计算 wave 在不同硬件单元上空间并行执行。每个 wave 是一个独立的 prefill chunk 或 decode token 集合，分配到不同的 SM 组或 NUMA 节点。
 
+**Multi-Wave 是 Mega-Kernel 内部执行路径**：
+
+```
+Rust 调用: executor.step(requests)
+  → 一次 CALL 进入 Mega-Kernel 入口函数
+  → Mega-Kernel 内部:
+      ├── 读取 WaveSchedule (已由 Scheduler 预计算)
+      ├── GPU: 启动 grid launch，每个 Thread Block 处理一个 wave
+      │         Thread Block 0: Wave 1 (SM 0-39)
+      │         Thread Block 1: Wave 2 (SM 40-79)
+      │         → 内部自行调度 wave partitioning，无需 Rust 介入
+      ├── CPU: 每个 NUMA 节点的线程执行一个 wave
+      │         Thread 0-7 (Node 0): Wave 1
+      │         Thread 8-15 (Node 1): Wave 2
+      └── 所有 wave 完成后返回 Rust
+
+→ 调度器负责生成 WaveSchedule (请求→wave 分配)
+→ Mega-Kernel 负责执行 WaveSchedule (内部 wave 并行)
+→ Rust 层只做一次 CALL，不参与 wave 级编排
+```
+
+**架构原则**：
+- Mega-Kernel 是单一的编译单元，内部包含所有 wave 的代码路径
+- WaveSchedule 通过 ABI 参数传入 Mega-Kernel（非运行时动态调度）
+- 每个 wave 的 KV cache 指针、权重指针、激活 buffer 在 ABI 中预分配
+- wave 间无运行时同步需求（各自独立处理请求），仅在最终写回 output_buffer 时通过原子操作协调
+
 **GPU Multi-Wave**:
 
 ```

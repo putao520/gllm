@@ -87,7 +87,31 @@
 §0.2.10 虚拟并行  ParallelismDesc → DeviceProfile → ParallelSchedule
   (Parallelism)   逻辑并行度 → 物理 SIMD/warp/wavefront 映射
                   编译时: "这个循环向量化宽度 = W"      运行时: W = simd_width
+                  编译时: "Multi-Wave 并行度 = N"       运行时: N = num_waves
                   [Phase D 深化]
+```
+
+**§0.2.10 虚拟并行 — Multi-Wave 内部调度机制**
+
+虚拟并行编码并行度意图，由 DeviceProfile 决定物化方式。Multi-Wave 是 Mega-Kernel 内部执行路径——Rust 只做一次 CALL，Mega-Kernel 内部自行调度 wave partitioning。
+
+```
+意图 (Virtual)             CPU 物化                    GPU 物化
+────────────────────────────────────────────────────────────────────────
+SimdLoop {                  for lane in 0..simd_width   PTX: 单条 vector 指令
+  width: Symbolic("W")      向量化循环 (ymm/zmm)        HIP: 单条 DS 指令
+}                           NEON/SVE 向量寄存器         MSL: simd_vector
+
+WaveParallel {              NUMA 绑定多线程              Grid launch 多 Thread Block
+  num_waves: usize          每个线程处理一个 wave        每个 TB 处理一个 wave
+  partition: PartitionDesc  跨 NUMA 节点独立执行         跨 SM 分区独立执行
+}                           wave 间共享权重 (本地 L3)    wave 间共享权重 (global mem)
+
+WarpCooperative {           N/A (单线程)                 Thread Block Cluster
+  producer: WarpRole        —                           SM 0-1: producer (TMA)
+  consumer: WarpRole        —                           SM 2-3: consumer (WGMMA)
+}                           —                           warp barrier 同步
+```
 ```
 
 **§0.2.9 虚拟执行模式 — 硬件感知物化的关键**
