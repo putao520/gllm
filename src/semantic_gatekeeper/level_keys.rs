@@ -236,8 +236,6 @@ pub fn precompute(
 
             // Step 2: embed lookup (走 JIT).
             let embed_bytes = embed_graph.encode_tokens(&tokens)?;
-
-            // Step 3: RmsNorm → k_proj (走 JIT).
             let k_bytes = kproj.run_on_embed(&embed_bytes)?;
 
             // Step 4: decode bytes → f32 seq_len × kv_dim.

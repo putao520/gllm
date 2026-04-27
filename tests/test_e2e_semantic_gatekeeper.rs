@@ -12,13 +12,19 @@
 //!
 //! REQ-SG-001/003-007 已实现:
 //! - Level Keys 预计算 (小 CompilerGraph JIT 编译)
-//! - SG Callback 注入 executor callback chain
+//! - SG Callback 注入 executor callback chain (真实 pre_node 调用)
 //! - 层级路由、稳定性追踪、残差注入、KnowledgeProvider/AstSentinel trait 契约
 //!
 //! REQ-SG-002 (QTapSTG graph 插入 + ABI ring buffer) 仍 🟡:
 //! - Q-tap JIT lowering 已实现，但 graph builder 尚未插入 QTapSTG 节点
 //! - ring buffer 写入由 QTapSTG JIT 完成，当前 ring buffer 无数据源
 //! - SG callback 在 ring buffer 读取失败时降级为 Continue（不影响正确性）
+//!
+//! 因此:
+//! - TEST-SG-001: 验证 register 成功 + LevelKeysCache 预计算
+//! - TEST-SG-002/003/004: 验证 API 契约 (register + generate 不崩溃),
+//!   但 provider 不会被调用 (ring buffer 无数据 → pre_node 返回 Continue)
+//! - 完整的行为差异验证 (Paris logit 提升) 等 Q-tap graph 插入完成后补充
 //!
 //! 所有测试**禁止** `#[ignore]` / 条件跳过 (CLAUDE.md NO_SILENT_FALLBACK).
 
@@ -30,7 +36,7 @@ use gllm::semantic_gatekeeper::{
     SemanticGatekeeperConfig, SemanticGatekeeperError, SemanticLevel, TokenizerLookup,
     DEFAULT_LEVEL_DESCRIPTORS,
 };
-use gllm::{Client, GllmError};
+use gllm::Client;
 
 const MODEL: &str = "HuggingFaceTB/SmolLM2-135M-Instruct";
 
@@ -141,60 +147,56 @@ fn base_config(provider: Arc<dyn KnowledgeProvider>) -> SemanticGatekeeperConfig
     SemanticGatekeeperConfig::with_defaults(provider)
 }
 
-/// 断言 `Err` 错误消息包含 `"Phase C pending"`. Phase C 完成后改为断言 `Ok(())`.
-fn assert_phase_c_pending(result: Result<(), GllmError>) {
-    match result {
-        Ok(()) => panic!(
-            "register_semantic_gatekeeper unexpectedly returned Ok \
-             — 若 Phase C 已完成请将断言改为 assert!(result.is_ok())"
-        ),
-        Err(GllmError::RuntimeError(msg)) => {
-            assert!(
-                msg.contains("Phase C pending"),
-                "expected Phase C pending placeholder error, got: {msg}"
-            );
-        }
-        Err(other) => panic!(
-            "expected RuntimeError(Phase C pending), got: {other:?}"
-        ),
-    }
-}
 
 // ============================================================================
 // TEST-SG-001: Level Keys 预计算 (REQ-SG-001)
 // ============================================================================
 
 /// TEST-SG-001: 加载 SmolLM2-135M + SG config,验证 `register_semantic_gatekeeper`
-/// 调用路径. Phase C 完成后应验证 `LevelKeysCache` 对每个 detection layer 填充
-/// 3 个非全零 finite 向量 (REQ-SG-001 验收 1/2/3/4).
+/// 成功 (LevelKeysCache 预计算 + KProjOnlyGraph JIT 编译 + callback 注入).
 ///
-/// 当前 Phase E: 断言返回 `Phase C pending` 占位错误,证明 API 真实接入.
+/// 验收 (REQ-SG-001):
+/// 1. register 返回 Ok(())
+/// 2. unregister 幂等
+/// 3. 重复注册也成功 (覆盖旧 SG 状态)
 #[test]
 fn test_sg_001_level_keys_precompute() {
     let client = Client::new_chat(MODEL).expect("failed to load SmolLM2-135M");
 
     let provider: Arc<dyn KnowledgeProvider> = Arc::new(AlwaysNoneProvider::default());
     let mut config = base_config(provider);
-    // 单一 detection depth 简化预计算规模
     config.detection_depths = vec![0.5];
 
-    // Phase E: 断言占位错误.
-    // Phase C 完成后替换为:
-    //   assert!(result.is_ok(), "register failed: {:?}", result);
-    //   // 进一步断言 LevelKeysCache 内容 (需要公开查询 API).
-    let result = client.register_semantic_gatekeeper(config);
-    assert_phase_c_pending(result);
+    client
+        .register_semantic_gatekeeper(config)
+        .expect("register_semantic_gatekeeper must succeed with valid config");
+
+    // 幂等反注册
+    client
+        .unregister_semantic_gatekeeper()
+        .expect("unregister must be idempotent Ok");
+
+    // 重复注册也成功
+    let provider2: Arc<dyn KnowledgeProvider> = Arc::new(AlwaysNoneProvider::default());
+    let config2 = base_config(provider2);
+    client
+        .register_semantic_gatekeeper(config2)
+        .expect("re-register must succeed");
+
+    client
+        .unregister_semantic_gatekeeper()
+        .expect("unregister after re-register");
 }
 
 // ============================================================================
 // TEST-SG-002: Q-tap 读写 (REQ-SG-002)
 // ============================================================================
 
-/// TEST-SG-002: 注册 SG(无 Provider),调用 `generate`,验证 ring buffer Q 向量
-/// 与 CPU 参考 `q_proj(hidden)[-1]` 数值一致 (L2 误差 < 1e-4).
+/// TEST-SG-002: 注册 SG,调用 generate,验证不崩溃.
 ///
-/// **Blocked on Phase C**: Q-tap JIT codegen (FusedAttentionLayer STG 指令注入)
-/// 待 SymDim 穿透完成后实现. 当前仅验证 API 契约 + 占位错误合规.
+/// Q-tap ring buffer 当前无数据源 (QTapSTG graph 插入未完成),
+/// pre_node 在 ring buffer 读取失败时返回 Continue (不影响推理正确性).
+/// 完整 Q-tap 数值验证等 graph 插入完成后补充.
 #[test]
 fn test_sg_002_qtap_read_write() {
     let client = Client::new_chat(MODEL).expect("failed to load SmolLM2-135M");
@@ -202,29 +204,32 @@ fn test_sg_002_qtap_read_write() {
     let provider: Arc<dyn KnowledgeProvider> = Arc::new(AlwaysNoneProvider::default());
     let config = base_config(provider);
 
-    // Phase E: 注册返回 Phase C pending,generate 路径不会走 Q-tap.
-    // Phase C 完成后替换为:
-    //   client.register_semantic_gatekeeper(config).expect("register");
-    //   let resp = client.generate("...").max_tokens(4).temperature(0.0).generate().response()?;
-    //   // 从 GatekeeperRingBuffer.read_latest 读 Q,与 scalar q_proj 对比 L2 < 1e-4.
-    let result = client.register_semantic_gatekeeper(config);
-    assert_phase_c_pending(result);
+    client
+        .register_semantic_gatekeeper(config)
+        .expect("register must succeed");
 
-    // 幂等反注册 (SPEC §7.1: "取消注册"),Phase E 亦应 Ok.
+    let resp = client
+        .generate("Hello")
+        .max_tokens(4)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("generate with SG registered must not crash");
+    assert!(!resp.text.is_empty(), "generate must produce output");
+
     client
         .unregister_semantic_gatekeeper()
-        .expect("unregister must be idempotent Ok in Phase E");
+        .expect("unregister must be idempotent Ok");
 }
 
 // ============================================================================
 // TEST-SG-003: 层级路由门控 (REQ-SG-003)
 // ============================================================================
 
-/// TEST-SG-003: Mock Provider 始终返回 None,验证 SG `pre_node` 被触发 ≥1 次
-/// 但 hidden_state 未被修改 (cosine 相似度 = 1.0) — 证明 gate/Continue 分支.
+/// TEST-SG-003: 注册 SG + generate,验证 Provider 不被调用 (因为 Q-tap ring buffer
+/// 无数据 → pre_node 返回 Continue). 同时验证幂等反注册.
 ///
-/// **Blocked on Phase C**: 真实 `pre_node` 调用需要 Q-tap + LevelKeysCache 就绪.
-/// 当前仅验证 API 契约 + 占位错误.
+/// 完整的 Provider 调用验证等 Q-tap graph 插入完成后补充.
 #[test]
 fn test_sg_003_level_routing_gate() {
     let client = Client::new_chat(MODEL).expect("failed to load SmolLM2-135M");
@@ -233,22 +238,30 @@ fn test_sg_003_level_routing_gate() {
     let provider_handle: Arc<dyn KnowledgeProvider> = provider.clone();
     let config = base_config(provider_handle);
 
-    let result = client.register_semantic_gatekeeper(config);
-    assert_phase_c_pending(result);
+    client
+        .register_semantic_gatekeeper(config)
+        .expect("register must succeed");
 
-    // Phase C 完成后: 此处应有 generate() 调用 + 断言 provider.calls > 0
-    // + 断言 hidden_state 未被修改 (cosine = 1.0).
-    // 当前 Phase E 仅可验证 provider 未被调用 (注册失败时不会触发 retrieve).
+    let resp = client
+        .generate("Hello")
+        .max_tokens(4)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("generate must succeed");
+    assert!(!resp.text.is_empty());
+
+    // Q-tap ring buffer 无数据 → pre_node 返回 Continue → Provider 不被调用
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
         0,
-        "Phase E: Provider 不应被调用 (register 失败)"
+        "Provider must not be called (Q-tap ring buffer has no data source)"
     );
 
     // 幂等反注册验证.
     client
         .unregister_semantic_gatekeeper()
-        .expect("unregister idempotent in Phase E");
+        .expect("unregister idempotent");
     client
         .unregister_semantic_gatekeeper()
         .expect("unregister must remain idempotent on repeated calls");
@@ -258,12 +271,14 @@ fn test_sg_003_level_routing_gate() {
 // TEST-SG-004: 残差注入行为差异 (REQ-SG-004 / REQ-SG-008)
 // ============================================================================
 
-/// TEST-SG-004: Provider 返回固定文本 `"Paris"`,询问 `"Capital of France is"`;
-/// 对比无 SG 基线,验证 `"Paris"` token logit 明显提升.
+/// TEST-SG-004: Provider 返回固定文本 "Paris",验证注册 + generate 不崩溃,
+/// 以及 Client 状态机 (register → reset → unregister 幂等性).
 ///
-/// **Blocked on Phase C**: 残差注入需要完整流水线 (Q-tap + LevelKeysCache +
-/// SmallGraph embed lookup). 当前仅验证 Client 状态机 (register → reset →
-/// unregister 幂等性).
+/// 完整的行为差异验证 (Paris logit 提升) 等 Q-tap graph 插入完成后补充:
+/// 1. baseline_resp = client.generate("Capital of France is").run()
+/// 2. client.register_semantic_gatekeeper(config)
+/// 3. sg_resp = client.generate("Capital of France is").run()
+/// 4. 对比 sg_resp.text 中 "Paris" 出现位置/概率 vs baseline
 #[test]
 fn test_sg_004_residual_injection_behavior_diff() {
     let client = Client::new_chat(MODEL).expect("failed to load SmolLM2-135M");
@@ -271,21 +286,27 @@ fn test_sg_004_residual_injection_behavior_diff() {
     let provider: Arc<dyn KnowledgeProvider> = Arc::new(FixedTextProvider::new("Paris", 1.0));
     let config = base_config(provider);
 
-    // Phase E: 注册路径可达,返回 Phase C pending.
-    let result = client.register_semantic_gatekeeper(config);
-    assert_phase_c_pending(result);
+    client
+        .register_semantic_gatekeeper(config)
+        .expect("register must succeed");
 
-    // 即使 register 失败,reset_gatekeeper_state 应幂等 Ok
-    // (SPEC §5.3: reset 仅清 ActiveState,无状态时不视为错误).
+    // reset 幂等 (SPEC §5.3)
     client
         .reset_gatekeeper_state()
-        .expect("reset must be idempotent in Phase E");
+        .expect("reset must be idempotent");
 
-    // Phase C 完成后此测试需扩展为:
-    // 1. baseline_resp = client.generate("Capital of France is").generate()?
-    // 2. client.register_semantic_gatekeeper(config)?
-    // 3. sg_resp = client.generate("Capital of France is").generate()?
-    // 4. 对比 sg_resp.text 中 "Paris" 出现位置/概率 vs baseline.
+    let resp = client
+        .generate("Capital of France is")
+        .max_tokens(8)
+        .temperature(0.0)
+        .generate()
+        .response()
+        .expect("generate with SG registered must succeed");
+    assert!(!resp.text.is_empty());
+
+    client
+        .unregister_semantic_gatekeeper()
+        .expect("unregister must succeed");
 }
 
 // ============================================================================

@@ -6,14 +6,12 @@
 //! - **EmbedLookupOnlyGraph**: `Gather(embed_weight)`
 //!   用于 (1) Level Keys 预计算的首段,(2) 运行时知识文本编码.
 //!
-//! - **KProjOnlyGraph@layer_L**: `FusedRmsNormGemm(input_layernorm @L, k_proj @L)`
-//!   仅用于 Level Keys 预计算的末段 (复用融合算子而非手动拆分 RmsNorm→Gemm).
+//! - **KProjOnlyGraph@layer_L**: `RmsNorm(input_layernorm @L) → Gemm(k_proj @L)`
+//!   仅用于 Level Keys 预计算的末段. 拆分为两个 ops 以利用现有 codegen 路径.
 //!
 //! 所有维度严格使用 `SymDim::Symbolic { name: "seq_len", ... }` 穿透执行期,
 //! 描述文本 token 数以 ABI `seq_len` 参数运行时绑定 (SPEC §3.4, SymDim 穿透
-//! 铁律). 维度名称复用 `"seq_len"` 是因为 `SymDimSlotMap` 仅识别 ABI 内
-//! 固有标识符作为 NamedArg 解析源 —— SG 描述文本的 seq 长度语义通过同一
-//! ABI 槽位注入.
+//! 铁律).
 
 use std::sync::Arc;
 
@@ -34,15 +32,15 @@ fn sym_seq() -> SymDim {
     }
 }
 
-/// 编码 u32 token id 序列为 JIT Gather 期待的 f32 索引字节流.
+/// 编码 u32 token id 序列为 JIT Gather 期待的索引字节流.
 ///
-/// `lower_gather` (gllm-kernels) 将索引按 f32 载入后 `ScalarToIndex` 转整,
-/// 因此 host 侧必须按 f32 布局传入.
-fn encode_indices_as_f32_bytes(tokens: &[u32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(tokens.len() * std::mem::size_of::<f32>());
+/// `lower_gather` (gllm-kernels) 的 ScalarLoad 使用 `vmovss → vmovd` 将
+/// 4 字节原封不动搬到 GPR 作为整数值使用 (IntMulStride 做整数乘法).
+/// 因此 host 侧必须写入原始 u32 位模式, 不能转为 f32 浮点值.
+fn encode_indices_as_u32_bytes(tokens: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tokens.len() * std::mem::size_of::<u32>());
     for &t in tokens {
-        // Token id 直接转 f32 — 现代 tokenizer vocab ≤ 2²⁴ 可精确表示.
-        out.extend_from_slice(&(t as f32).to_le_bytes());
+        out.extend_from_slice(&t.to_le_bytes());
     }
     out
 }
@@ -204,7 +202,7 @@ impl EmbedLookupOnlyGraph {
         }
 
         let seq_len = tokens.len();
-        let indices_bytes = encode_indices_as_f32_bytes(tokens);
+        let indices_bytes = encode_indices_as_u32_bytes(tokens);
         let out_bytes = seq_len * self.hidden_size * self.dtype.size_bytes();
         let mut output = vec![0u8; out_bytes];
         let mut scratchpad = alloc_scratchpad(self.compiled.scratchpad_bytes);
@@ -308,17 +306,20 @@ impl super::callback::TextEncoder for EmbedTextEncoder {
 // KProjOnlyGraph
 // ============================================================================
 
-/// `FusedRmsNormGemm` 算子的全 JIT 小图, 对应某检测层的 `k_proj(RmsNorm(hidden))`.
+/// `RmsNorm → Gemm` 两阶段小图, 对应某检测层的 `k_proj(RmsNorm(hidden))`.
+///
+/// 内部拆为两个独立的单 op JIT 图 (RmsNorm + Gemm), 分别编译执行,
+/// 避免 multi-op 图的 scratchpad intermediate tensor ABI 映射问题.
 pub struct KProjOnlyGraph {
     pub(super) layer_idx: usize,
     pub(super) hidden_size: usize,
     pub(super) kv_dim: usize,
     pub(super) rms_eps: f32,
     pub(super) dtype: DType,
-    compiled: CompiledLayer,
-    /// 打包权重: `[input_layernorm_weight (hidden,), k_proj_weight (hidden, kv_dim)]`
-    /// 按 CompilerGraph.inputs 声明顺序紧凑排列 (FusedRmsNormGemm 默认输入顺序).
-    weight_blob: Arc<[u8]>,
+    norm_compiled: CompiledLayer,
+    gemm_compiled: CompiledLayer,
+    norm_weight: Arc<[u8]>,
+    gemm_weight: Arc<[u8]>,
 }
 
 impl std::fmt::Debug for KProjOnlyGraph {
@@ -329,18 +330,14 @@ impl std::fmt::Debug for KProjOnlyGraph {
             .field("kv_dim", &self.kv_dim)
             .field("rms_eps", &self.rms_eps)
             .field("dtype", &self.dtype)
-            .field("scratchpad_bytes", &self.compiled.scratchpad_bytes)
-            .field("weight_blob_bytes", &self.weight_blob.len())
+            .field("norm_scratchpad", &self.norm_compiled.scratchpad_bytes)
+            .field("gemm_scratchpad", &self.gemm_compiled.scratchpad_bytes)
             .finish()
     }
 }
 
 impl KProjOnlyGraph {
-    /// 构造 `CompilerGraph` 并走完整 JIT 管线.
-    ///
-    /// - `input_layernorm_weight`: `[hidden_size]` row-major 字节流.
-    /// - `k_proj_weight`: `[hidden_size, kv_dim]` row-major 字节流 (已按 Gemm
-    ///   K×N 布局, 即 K=hidden, N=kv_dim).
+    /// 构造两个独立的单 op CompilerGraph 并走完整 JIT 管线.
     pub fn build_and_compile(
         layer_idx: usize,
         hidden_size: usize,
@@ -385,48 +382,67 @@ impl KProjOnlyGraph {
             )));
         }
 
-        let mut g = CompilerGraph::new();
-
-        let input = g.add_tensor(
-            "sg_kproj_input",
+        // ── Stage 1: RmsNorm(input, norm_w) → norm_out ──
+        let mut gn = CompilerGraph::new();
+        let norm_in = gn.add_tensor(
+            "sg_norm_input",
             vec![sym_seq(), SymDim::Concrete(hidden_size)],
             dtype,
         );
-        let norm_w = g.add_tensor_concrete("sg_kproj_rn_w", &[hidden_size], dtype);
-        let k_w = g.add_tensor_concrete("sg_kproj_k_w", &[hidden_size, kv_dim], dtype);
-        let k_out = g.add_tensor(
-            "sg_kproj_out",
-            vec![sym_seq(), SymDim::Concrete(kv_dim)],
+        let norm_w = gn.add_tensor_concrete("sg_norm_w", &[hidden_size], dtype);
+        let norm_out = gn.add_tensor(
+            "sg_norm_out",
+            vec![sym_seq(), SymDim::Concrete(hidden_size)],
             dtype,
         );
-
-        g.inputs = vec![input, norm_w, k_w];
-        g.outputs = vec![k_out];
-
-        g.add_op(
-            OpKind::FusedRmsNormGemm {
-                m: sym_seq(),
-                n: kv_dim,
-                k: hidden_size,
-                eps: rms_eps,
-                dtype,
-            },
-            vec![input, norm_w, k_w],
-            vec![k_out],
-            "sg_kproj_fused_rmsnorm_gemm",
+        gn.inputs = vec![norm_in, norm_w];
+        gn.outputs = vec![norm_out];
+        gn.add_op(
+            OpKind::RmsNorm { eps: rms_eps },
+            vec![norm_in, norm_w],
+            vec![norm_out],
+            "sg_rmsnorm",
         );
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).map_err(|e| {
+        let norm_compiled = compiler.compile_graph(&gn).map_err(|e| {
             SemanticGatekeeperError::SmallGraph(format!(
-                "FusedRmsNormGemm compile failed for layer {layer_idx}: {e}"
+                "RmsNorm compile failed for layer {layer_idx}: {e}"
             ))
         })?;
 
-        // 按 graph.inputs 顺序紧凑打包 weight blob (norm_w → k_w).
-        let mut blob = Vec::with_capacity(ln_expected + kp_expected);
-        blob.extend_from_slice(input_layernorm_weight);
-        blob.extend_from_slice(k_proj_weight);
+        // ── Stage 2: Gemm(norm_out, k_w) → k_out ──
+        let mut gg = CompilerGraph::new();
+        let gemm_in = gg.add_tensor(
+            "sg_gemm_input",
+            vec![sym_seq(), SymDim::Concrete(hidden_size)],
+            dtype,
+        );
+        let k_w = gg.add_tensor_concrete("sg_gemm_k_w", &[hidden_size, kv_dim], dtype);
+        let k_out = gg.add_tensor(
+            "sg_gemm_out",
+            vec![sym_seq(), SymDim::Concrete(kv_dim)],
+            dtype,
+        );
+        gg.inputs = vec![gemm_in, k_w];
+        gg.outputs = vec![k_out];
+        gg.add_op(
+            OpKind::Gemm {
+                m: sym_seq(),
+                n: kv_dim,
+                k: hidden_size,
+                dtype,
+            },
+            vec![gemm_in, k_w],
+            vec![k_out],
+            "sg_gemm",
+        );
+
+        let gemm_compiled = compiler.compile_graph(&gg).map_err(|e| {
+            SemanticGatekeeperError::SmallGraph(format!(
+                "Gemm compile failed for layer {layer_idx}: {e}"
+            ))
+        })?;
 
         Ok(Self {
             layer_idx,
@@ -434,8 +450,10 @@ impl KProjOnlyGraph {
             kv_dim,
             rms_eps,
             dtype,
-            compiled,
-            weight_blob: Arc::<[u8]>::from(blob.into_boxed_slice()),
+            norm_compiled,
+            gemm_compiled,
+            norm_weight: Arc::<[u8]>::from(input_layernorm_weight.to_vec().into_boxed_slice()),
+            gemm_weight: Arc::<[u8]>::from(k_proj_weight.to_vec().into_boxed_slice()),
         })
     }
 
@@ -455,7 +473,7 @@ impl KProjOnlyGraph {
         self.dtype
     }
 
-    /// 对 embedding 张量执行 `FusedRmsNormGemm`, 返回 `seq_len × kv_dim` 字节.
+    /// 对 embedding 张量执行 `RmsNorm → Gemm`, 返回 `seq_len × kv_dim` 字节.
     ///
     /// `embed_bytes` 必须是 `[seq_len, hidden_size]` row-major, `dtype` 元素布局,
     /// 通常由 `EmbedLookupOnlyGraph::encode_tokens` 产出.
@@ -487,24 +505,42 @@ impl KProjOnlyGraph {
             )));
         }
 
+        // Stage 1: RmsNorm
+        let norm_out_bytes = seq_len * self.hidden_size * elem;
+        let mut norm_output = vec![0u8; norm_out_bytes];
+        let mut norm_scratch = alloc_scratchpad(self.norm_compiled.scratchpad_bytes);
+        unsafe {
+            self.norm_compiled.execute(
+                embed_bytes.as_ptr(),
+                self.norm_weight.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                seq_len,
+                norm_output.as_mut_ptr(),
+                norm_scratch.as_mut_ptr(),
+            );
+        }
+
+        // Stage 2: Gemm
         let out_bytes = seq_len * self.kv_dim * elem;
         let mut output = vec![0u8; out_bytes];
-        let mut scratchpad = alloc_scratchpad(self.compiled.scratchpad_bytes);
-
-        // SAFETY: 见 EmbedLookupOnlyGraph::encode_tokens 的 SAFETY 注释.
+        let mut gemm_scratch = alloc_scratchpad(self.gemm_compiled.scratchpad_bytes);
         unsafe {
-            self.compiled.execute(
-                embed_bytes.as_ptr(),
-                self.weight_blob.as_ptr(),
+            self.gemm_compiled.execute(
+                norm_output.as_ptr(),
+                self.gemm_weight.as_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null(),
                 std::ptr::null(),
                 1,
                 seq_len,
                 output.as_mut_ptr(),
-                scratchpad.as_mut_ptr(),
+                gemm_scratch.as_mut_ptr(),
             );
         }
+
         Ok(output)
     }
 }

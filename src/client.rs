@@ -1971,20 +1971,15 @@ impl Client {
                 "semantic gatekeeper: expected f32 embed bytes, got {embed_dtype:?}"
             )));
         }
-        let embed_bytes_model_dtype = if dtype == DType::F32 {
-            embed_bytes
-        } else {
-            let f32_slice = crate::compat::jit_helpers::typed_bytes_to_f32(&embed_bytes, DType::F32);
-            crate::compat::weight_helpers::f32_to_typed_bytes(&f32_slice, dtype)
-        };
+        // JIT codegen 管线硬编码 computation_elem_bytes() = 4 (F32 stride),
+        // 因此小图必须始终使用 F32 格式的 embed weight, 不做 F32→model_dtype 转换.
         let embed_graph = EmbedLookupOnlyGraph::build_and_compile(
             hidden_size,
             vocab_size,
-            dtype,
-            &embed_bytes_model_dtype,
+            DType::F32,
+            &embed_bytes,
         )
         .map_err(sg_err_to_client)?;
-
         // ── 5. 每个检测层构造 KProjOnlyGraph ──
         let mut kproj_graphs: Vec<KProjOnlyGraph> = Vec::with_capacity(detection_layers.len());
         for &layer_idx in &detection_layers {
@@ -2040,34 +2035,20 @@ impl Client {
                 })?
             };
 
-            // Convert both weight blobs to target dtype bytes.
-            let ln_bytes = if dtype == DType::F32 {
-                ln_bytes_f32
-            } else {
-                let f = crate::compat::jit_helpers::typed_bytes_to_f32(&ln_bytes_f32, DType::F32);
-                crate::compat::weight_helpers::f32_to_typed_bytes(&f, dtype)
-            };
-            let k_bytes = if dtype == DType::F32 {
-                k_bytes_f32
-            } else {
-                let f = crate::compat::jit_helpers::typed_bytes_to_f32(&k_bytes_f32, DType::F32);
-                crate::compat::weight_helpers::f32_to_typed_bytes(&f, dtype)
-            };
-
+            // JIT codegen 管线硬编码 computation_elem_bytes() = 4 (F32 stride),
+            // 因此小图必须始终使用 F32 格式的 weight, 不做 F32→model_dtype 转换.
             let kpg = KProjOnlyGraph::build_and_compile(
                 layer_idx,
                 hidden_size,
                 kv_dim,
                 rms_eps,
-                dtype,
-                &ln_bytes,
-                &k_bytes,
+                DType::F32,
+                &ln_bytes_f32,
+                &k_bytes_f32,
             )
             .map_err(sg_err_to_client)?;
             kproj_graphs.push(kpg);
         }
-
-        // ── 6. 预计算 LevelKeysCache (真实 JIT) ──
         struct TokenizerAdapter<'a>(&'a crate::tokenizer::TokenizerHandle);
         impl<'a> crate::semantic_gatekeeper::TokenizerEncoder for TokenizerAdapter<'a> {
             fn encode(
@@ -2105,17 +2086,15 @@ impl Client {
             &detection_layers,
             hidden_size,
             kv_dim,
-            dtype,
+            DType::F32, // 小图始终使用 F32, 与 JIT codegen stride 一致
         )
         .map_err(sg_err_to_client)?;
-
-        // Clone tokenizer BEFORE dropping executor — TokenizerHandle is Clone.
         let tokenizer_clone = executor.tokenizer().clone();
         drop(executor);
 
         // ── 7. 构造 Q-tap ring buffer ──
         let ring_buffer = std::sync::Arc::new(
-            crate::semantic_gatekeeper::GatekeeperRingBuffer::new(q_dim, dtype.size_bytes()),
+            crate::semantic_gatekeeper::GatekeeperRingBuffer::new(q_dim, DType::F32.size_bytes()),
         );
 
         // ── 8. 断言预计算产物完整 ──
@@ -2129,7 +2108,7 @@ impl Client {
                 embed_graph,
                 Box::new(OwnedTokenizerAdapter(tokenizer_clone)),
                 hidden_size,
-                dtype,
+                DType::F32, // 小图始终使用 F32, 与 JIT codegen stride 一致
             ));
 
         // ── 10. 构造 SemanticGatekeeperCallback ──
