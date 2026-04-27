@@ -652,59 +652,6 @@ impl Loader {
     /// 获取统一的 OnnxGraph 表示 (REQ-EXEC-001)
     ///
     /// 无论原始格式是 ONNX、SafeTensors 还是 GGUF，都转换为统一的 OnnxGraph。
-    /// 对于 ONNX 文件，直接返回解析的图。
-    /// 对于其他格式，使用架构模板生成图。
-    pub fn to_unified_graph(&mut self) -> Result<onnx::OnnxGraph> {
-        match self.format {
-            WeightFormat::Onnx => {
-                let onnx = self.onnx()?;
-                Ok(onnx.graph().clone())
-            }
-            WeightFormat::SafeTensors | WeightFormat::Gguf => {
-                // 使用架构模板系统生成图
-                use crate::arch::{
-                    get_template, register_builtin_templates, resolve_config,
-                };
-
-                register_builtin_templates();
-
-                // 1. 检测架构
-                let arch = self.detect_architecture();
-
-                // 2. 获取模板
-                let template = get_template(&arch).ok_or_else(|| {
-                    LoaderError::Onnx(format!("No template for arch: {}", arch))
-                })?;
-
-                // 3. 解析配置 - 需要获取 TensorProvider
-                let config = match self.format {
-                    WeightFormat::SafeTensors => {
-                        let st = self
-                            .safetensors
-                            .as_ref()
-                            .ok_or(LoaderError::MissingWeights)?;
-                        resolve_config(template, st, self.gguf.as_ref()).map_err(|e| {
-                            LoaderError::Onnx(format!("Config resolve failed: {}", e))
-                        })?
-                    }
-                    WeightFormat::Gguf => {
-                        let gguf = self.gguf.as_ref().ok_or(LoaderError::MissingWeights)?;
-                        resolve_config(template, gguf, Some(gguf)).map_err(|e| {
-                            LoaderError::Onnx(format!("Config resolve failed: {}", e))
-                        })?
-                    }
-                    _ => unreachable!(),
-                };
-
-                // 4. 生成图
-                template
-                    .to_onnx_graph(&config)
-                    .map_err(|e| LoaderError::Onnx(format!("Template to graph failed: {}", e)))
-            }
-            _ => unreachable!("PyTorch is converted to SafeTensors by load()"),
-        }
-    }
-
     /// 检测模型架构（统一入口）
     ///
     /// 优先级：GGUF metadata > 张量名称模式匹配 > manifest fallback

@@ -252,124 +252,10 @@ impl ArchTemplate {
         Ok(Self::from_yaml(&content)?)
     }
 
-    /// 将架构模板转换为 OnnxGraph (REQ-EXEC-001)
-    ///
-    /// 使用已解析的配置替换占位符，展开重复块，生成可执行的图。
-    pub fn to_onnx_graph(
-        &self,
-        config: &super::resolve::ResolvedConfig,
-    ) -> Result<crate::loader::onnx::OnnxGraph, TemplateError> {
-        use crate::loader::onnx::{OnnxGraph, OnnxValueInfo};
-        use std::collections::HashMap;
-
-        // 1. 构建输入
-        let inputs: Vec<OnnxValueInfo> = self
-            .graph
-            .inputs
-            .iter()
-            .map(|def| OnnxValueInfo {
-                name: super::resolve::substitute_placeholders(&def.name, config),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            })
-            .collect();
-
-        // 2. 构建输出
-        let outputs: Vec<OnnxValueInfo> = self
-            .graph
-            .outputs
-            .iter()
-            .map(|def| OnnxValueInfo {
-                name: super::resolve::substitute_placeholders(&def.name, config),
-                value_type: None,
-                doc_string: String::new(),
-                metadata_props: HashMap::new(),
-            })
-            .collect();
-
-        // 3. 展开节点（处理重复块）
-        let mut nodes = Vec::new();
-        for graph_node in &self.graph.nodes {
-            match graph_node {
-                GraphNode::Node(node_def) => {
-                    if !Self::eval_only_if_with_loop(node_def.only_if.as_deref(), config, None)? {
-                        continue;
-                    }
-                    nodes.push(self.node_def_to_onnx(node_def, config, None)?);
-                }
-                GraphNode::Repeat(repeat_block) => {
-                    let repeat_count = self.resolve_repeat_count(&repeat_block.repeat, config)?;
-                    for i in 0..repeat_count {
-                        for node_def in &repeat_block.nodes {
-                            if !Self::eval_only_if_with_loop(
-                                node_def.only_if.as_deref(),
-                                config,
-                                Some((&repeat_block.var, i)),
-                            )? {
-                                continue;
-                            }
-                            // DualRotaryEmbedding 是 per-layer 双轨 RoPE 的逻辑节点,按
-                            // `config.attention_pattern[i]` 在模板展开时解析为标准
-                            // RotaryEmbedding + 对应 (theta, partial)。
-                            //
-                            //   attention_pattern[i] == 0 → sliding: theta=sliding_theta, partial=1.0
-                            //   attention_pattern[i] == 1 → global : theta=global_theta, partial=global_partial
-                            //
-                            // 展开为一个 RotaryEmbedding 节点,其 attributes 由 sliding/global
-                            // 两组属性中选一组注入。这保持"YAML 为 SSOT + 模板引擎做语义展开"
-                            // 原则,不在 Rust 源码里硬编码层映射。
-                            if node_def.op_type == "DualRotaryEmbedding" {
-                                let expanded = self.expand_dual_rope(node_def, config, &repeat_block.var, i)?;
-                                nodes.extend(expanded);
-                            } else if node_def.op_type == "QkNorm" {
-                                // QkNorm op 单 input 单 output,但 YAML 常写成 (q, k) → (q_normed, k_normed)
-                                // 的高级抽象。展开为两个独立 QkNorm 节点,注入 head_dim (从
-                                // ResolvedConfig) 供 atomic_op_to_kind 按 require_usize 读取。
-                                let expanded = self.expand_qk_norm(node_def, config, &repeat_block.var, i)?;
-                                nodes.extend(expanded);
-                            } else if node_def.op_type == "PerLayerEmbed" {
-                                // T33: PerLayerEmbed JIT op 需要 5 inputs
-                                // [hidden, main_embed, ple_slice, proj_w, post_mlp_w]。
-                                // YAML 保持 4 inputs (隐藏 main_embed, ple_slice 用 ple_full 引用),
-                                // 本 expander:
-                                //  1) 插入 PleSlice 节点将 ple_full 切出当前层 ple_slice
-                                //  2) 重写 PLE 节点为 5 inputs
-                                let expanded = self.expand_per_layer_embed(node_def, config, &repeat_block.var, i)?;
-                                nodes.extend(expanded);
-                            } else {
-                                nodes.push(self.node_def_to_onnx(
-                                    node_def,
-                                    config,
-                                    Some((&repeat_block.var, i)),
-                                )?);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(OnnxGraph {
-            name: self.name.clone(),
-            doc_string: format!("Generated from template {} v{}", self.name, self.version),
-            nodes,
-            inputs,
-            outputs,
-            value_info: Vec::new(),
-            initializers: HashMap::new(),
-            sparse_initializers: Vec::new(),
-            quantization_annotation: Vec::new(),
-            metadata_props: HashMap::new(),
-        })
-    }
-
-    /// 将架构模板直接转换为 CompilerGraph (REQ-UGS-001)。
-    ///
-    /// 绕过 OnnxGraph 中间层，直接从 YAML 模板构建
-    /// `gllm_kernels::compiler::CompilerGraph`。与 `to_onnx_graph()` 共享
-    /// 相同的模板展开逻辑（repeat、only_if、DualRotaryEmbedding/QkNorm/PerLayerEmbed 展开器），
-    /// 但直接产出 `OpKind` 枚举而非 OnnxNode 字符串。
+    /// 使用模板展开逻辑直接从 YAML 模板构建
+    /// `gllm_kernels::compiler::CompilerGraph`。处理 repeat、only_if、
+    /// DualRotaryEmbedding/QkNorm/PerLayerEmbed 展开器，
+    /// 直接产出 `OpKind` 枚举。
     ///
     /// mega-kernel 独有节点（SgInject, SessionKvRestore, MmHiddenInject, GenerateLoop）
     /// 由 `business_config` 驱动注入，不在 YAML 中声明。
@@ -720,7 +606,7 @@ impl ArchTemplate {
             }
 
             // ── Activations ──
-            "SiLU" => OpKind::Silu,
+            "SiLU" | "Silu" => OpKind::Silu,
             "Gelu" | "GELU" => OpKind::Gelu,
             "Tanh" => OpKind::Tanh,
             "SwiGLU" => OpKind::SwiGlu,
@@ -800,6 +686,34 @@ impl ArchTemplate {
                     hidden: dims.hidden,
                     seq_len: s.clone(),
                 }
+            }
+
+            // ── Vision / Audio ops ──
+            "PatchEmbed" => {
+                let patch_size = read_attr_usize(node_def, config, loop_var, "patch_size")
+                    .ok_or_else(|| TemplateError::Invalid("PatchEmbed missing patch_size".into()))?;
+                let embed_dim = read_attr_usize(node_def, config, loop_var, "embed_dim")
+                    .unwrap_or(dims.hidden);
+                let in_channels = read_attr_usize(node_def, config, loop_var, "in_channels")
+                    .unwrap_or(3);
+                let image_size = read_attr_usize(node_def, config, loop_var, "image_size")
+                    .unwrap_or(224);
+                OpKind::PatchEmbed { patch_size, embed_dim, in_channels, image_size }
+            }
+            "LearnedPos2D" => {
+                let num_patches = read_attr_usize(node_def, config, loop_var, "num_patches")
+                    .ok_or_else(|| TemplateError::Invalid("LearnedPos2D missing num_patches".into()))?;
+                let embed_dim = read_attr_usize(node_def, config, loop_var, "embed_dim")
+                    .unwrap_or(dims.hidden);
+                OpKind::LearnedPos2D { num_patches, embed_dim }
+            }
+            "DepthwiseConv1D" => {
+                let channels = read_attr_usize(node_def, config, loop_var, "channels")
+                    .unwrap_or(dims.hidden);
+                let kernel_size = read_attr_usize(node_def, config, loop_var, "kernel_size")
+                    .unwrap_or(32);
+                let causal = read_attr_bool(node_def, config, loop_var, "causal").unwrap_or(true);
+                OpKind::DepthwiseConv1D { channels, kernel_size, causal }
             }
 
             // ── Layout ops ──
@@ -1040,72 +954,6 @@ impl ArchTemplate {
         Ok(())
     }
 
-    /// 将 NodeDef 转换为 OnnxNode
-    fn node_def_to_onnx(
-        &self,
-        node_def: &NodeDef,
-        config: &super::resolve::ResolvedConfig,
-        loop_var: Option<(&str, usize)>,
-    ) -> Result<crate::loader::onnx::OnnxNode, TemplateError> {
-        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
-        use std::collections::HashMap;
-
-        let substitute = |s: &str| -> Result<String, TemplateError> {
-            Self::substitute_with_donor(s, config, loop_var)
-        };
-
-        let inputs: Vec<String> = node_def.inputs.iter()
-            .map(|s| substitute(s))
-            .collect::<Result<Vec<_>, _>>()?;
-        let outputs: Vec<String> = node_def.outputs.iter()
-            .map(|s| substitute(s))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut attributes = HashMap::new();
-        for (key, value) in &node_def.attributes {
-            let attr_value = match value {
-                AttributeValue::Int(v) => OnnxAttributeValue::Int(*v),
-                AttributeValue::Float(v) => OnnxAttributeValue::Float(*v as f32),
-                AttributeValue::String(s) => {
-                    // YAML 的 `attr: "${i}"` / `attr: "${num_hidden_layers}"` 经占位符替换
-                    // 后得到纯数字字符串(如 "3" / "32"),下游 `atomic_op_to_kind::require_usize`
-                    // 要求 `AttrValue::Int`,如果保留为 String 会导致 "缺少必需属性" 错误。
-                    //
-                    // 规则: 替换后的字符串若能解析为 i64,则以 Int 发射; 否则保留为 String。
-                    // 这样既保持 YAML 语法简洁性(不需要额外类型标签),又让属性在下游以
-                    // 正确类型传递。对真正需要字符串语义的属性(如 dtype="f32")无影响。
-                    let substituted = substitute(s)?;
-                    if let Ok(n) = substituted.parse::<i64>() {
-                        OnnxAttributeValue::Int(n)
-                    } else {
-                        OnnxAttributeValue::String(substituted)
-                    }
-                }
-                AttributeValue::Ints(v) => OnnxAttributeValue::Ints(v.clone()),
-                AttributeValue::Floats(v) => {
-                    OnnxAttributeValue::Floats(v.iter().map(|f| *f as f32).collect())
-                }
-            };
-            let attr = OnnxAttribute {
-                name: key.clone(),
-                value: attr_value,
-                doc_string: String::new(),
-                ref_attr_name: None,
-                attr_type: None,
-            };
-            attributes.insert(key.clone(), attr);
-        }
-
-        Ok(OnnxNode {
-            name: substitute(&node_def.name)?,
-            op_type: node_def.op_type.clone(),
-            domain: String::new(),
-            inputs,
-            outputs,
-            attributes,
-        })
-    }
-
     /// Perform full placeholder substitution with donor-aware extension.
     ///
     /// Resolves (in order):
@@ -1146,348 +994,6 @@ impl ArchTemplate {
             result = result.replace(&format!("${}$", var), &idx.to_string());
         }
         Ok(result)
-    }
-
-    /// 按 `config.attention_pattern[layer_idx]` 把 DualRotaryEmbedding 展开为
-    /// **两个独立的** RotaryEmbedding 节点 (分别作用于 Q / K),并把 sliding/global
-    /// 其中一组属性物化到 theta/partial。
-    ///
-    /// 拆分成两个节点是下游 FusedQkvNormRope pattern_fusion 的要求 —
-    /// gllm-kernels 的 `FusionMode::FusedQkvNormRope` 显式要求 `rope_q` 和 `rope_k`
-    /// 为两个独立的 OpId,因此图层必须结构化地暴露 Q-RoPE 与 K-RoPE 两个节点。
-    ///
-    /// 输入 DualRotaryEmbedding 节点形态 (由 gemma4.yaml 提供):
-    ///   inputs  = [q_normed, k_normed]
-    ///   outputs = [q_rope,   k_rope]
-    ///
-    /// 展开后 (节点名在原名基础上加 `_q` / `_k` 后缀):
-    ///   RotaryEmbedding("{name}_q"): inputs=[q_normed], outputs=[q_rope]
-    ///   RotaryEmbedding("{name}_k"): inputs=[k_normed], outputs=[k_rope]
-    ///
-    /// 输入 YAML attributes 约定:
-    /// - `sliding_theta`, `sliding_partial` (缺省 1.0)
-    /// - `global_theta`, `global_partial` (缺省 0.25)
-    ///
-    /// 若 `config.attention_pattern` 为空或 layer_idx 越界,默认为 sliding 语义。
-    fn expand_dual_rope(
-        &self,
-        node_def: &NodeDef,
-        config: &super::resolve::ResolvedConfig,
-        var: &str,
-        layer_idx: usize,
-    ) -> Result<Vec<crate::loader::onnx::OnnxNode>, TemplateError> {
-        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
-
-        let substitute = |s: &str| -> String {
-            let mut result = super::resolve::substitute_placeholders(s, config);
-            result = result.replace(&format!("${{{}}}", var), &layer_idx.to_string());
-            result = result.replace(&format!("${}$", var), &layer_idx.to_string());
-            result
-        };
-
-        // 读原始 attributes 的两组 (sliding / global) 参数,与 node_def_to_onnx 一致地
-        // 做占位符替换。AttributeValue::String 的 sliding_theta=${rope_theta} 会被解析。
-        let read_f32 = |key: &str| -> Option<f32> {
-            match node_def.attributes.get(key)? {
-                AttributeValue::Float(v) => Some(*v as f32),
-                AttributeValue::Int(v) => Some(*v as f32),
-                AttributeValue::String(s) => {
-                    let resolved = super::resolve::substitute_placeholders(s, config);
-                    resolved.parse::<f32>().ok()
-                }
-                _ => None,
-            }
-        };
-
-        let sliding_theta = read_f32("sliding_theta").ok_or_else(|| TemplateError::Invalid(
-            format!("DualRotaryEmbedding '{}' 缺少 sliding_theta 属性", node_def.name)))?;
-        let sliding_partial = read_f32("sliding_partial").unwrap_or(1.0);
-        let global_theta = read_f32("global_theta").ok_or_else(|| TemplateError::Invalid(
-            format!("DualRotaryEmbedding '{}' 缺少 global_theta 属性", node_def.name)))?;
-        let global_partial = read_f32("global_partial").unwrap_or(0.25);
-
-        // 选择层变体: 0=sliding, 1=global。attention_pattern 缺失时按 sliding 处理。
-        let is_global = config.attention_pattern.get(layer_idx).copied().unwrap_or(0) == 1;
-        let (theta, partial) = if is_global {
-            (global_theta, global_partial)
-        } else {
-            (sliding_theta, sliding_partial)
-        };
-
-        // num_heads / head_dim: RoPE 标量参数,从模型几何推导
-        let num_heads = config.get_int("num_attention_heads").ok_or_else(|| TemplateError::Invalid(
-            "DualRotaryEmbedding 展开时配置缺少 num_attention_heads".into()))? as i64;
-        let head_dim = config.get_int("head_dim").ok_or_else(|| TemplateError::Invalid(
-            "DualRotaryEmbedding 展开时配置缺少 head_dim".into()))? as i64;
-
-        let mk_attrs = || -> HashMap<String, OnnxAttribute> {
-            let mut attributes = HashMap::new();
-            let mk_attr = |name: &str, value: OnnxAttributeValue| OnnxAttribute {
-                name: name.to_string(), value, doc_string: String::new(),
-                ref_attr_name: None, attr_type: None,
-            };
-            attributes.insert("num_heads".into(), mk_attr("num_heads", OnnxAttributeValue::Int(num_heads)));
-            attributes.insert("head_dim".into(),  mk_attr("head_dim",  OnnxAttributeValue::Int(head_dim)));
-            attributes.insert("theta".into(),     mk_attr("theta",     OnnxAttributeValue::Float(theta)));
-            attributes.insert("partial".into(),   mk_attr("partial",   OnnxAttributeValue::Float(partial)));
-            attributes
-        };
-
-        // DualRotaryEmbedding 必须形态: inputs=[q, k], outputs=[q_rope, k_rope]
-        if node_def.inputs.len() != 2 || node_def.outputs.len() != 2 {
-            return Err(TemplateError::Invalid(format!(
-                "DualRotaryEmbedding '{}' 必须有 2 个输入 (q, k) 和 2 个输出 (q_rope, k_rope), 实际 inputs={} outputs={}",
-                node_def.name, node_def.inputs.len(), node_def.outputs.len(),
-            )));
-        }
-
-        let base_name = substitute(&node_def.name);
-        let q_in = substitute(&node_def.inputs[0]);
-        let q_out = substitute(&node_def.outputs[0]);
-
-        let q_node = OnnxNode {
-            name: format!("{}_q", base_name),
-            op_type: "RotaryEmbedding".into(),
-            domain: String::new(),
-            inputs: vec![q_in],
-            outputs: vec![q_out],
-            attributes: mk_attrs(),
-        };
-
-        // SharedKvRef: on consumer layers, the K projection / K-norm path has
-        // been skipped upstream, so emitting a K-rope here would dangle on a
-        // non-existent `layer_${i}_k_normed`. Attention on consumer layers
-        // reads `layer_${donor_i}_k_rope` instead (see gemma4.yaml).
-        if config.is_kv_shared_layer(layer_idx) {
-            return Ok(vec![q_node]);
-        }
-
-        let k_in = substitute(&node_def.inputs[1]);
-        let k_out = substitute(&node_def.outputs[1]);
-        let k_node = OnnxNode {
-            name: format!("{}_k", base_name),
-            op_type: "RotaryEmbedding".into(),
-            domain: String::new(),
-            inputs: vec![k_in],
-            outputs: vec![k_out],
-            attributes: mk_attrs(),
-        };
-
-        Ok(vec![q_node, k_node])
-    }
-
-    /// 把 YAML 里高级 `QkNorm` 节点(2 输入 2 输出, q/k 同时 L2 归一化)
-    /// 展开为两个独立 `QkNorm` OnnxNode,每个 1 input 1 output,并注入
-    /// `head_dim` 属性(从 `ResolvedConfig`)。
-    ///
-    /// 跟 expand_dual_rope 同模式: YAML 保持高层意图,模板引擎做语义展开。
-    /// `OpKind::QkNorm { head_dim }` 只接受单路输入,atomic_op_to_kind 要求
-    /// `head_dim` 属性强制存在 (require_usize)。
-    fn expand_qk_norm(
-        &self,
-        node_def: &NodeDef,
-        config: &super::resolve::ResolvedConfig,
-        var: &str,
-        layer_idx: usize,
-    ) -> Result<Vec<crate::loader::onnx::OnnxNode>, TemplateError> {
-        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
-
-        let substitute = |s: &str| -> String {
-            let mut result = super::resolve::substitute_placeholders(s, config);
-            result = result.replace(&format!("${{{}}}", var), &layer_idx.to_string());
-            result = result.replace(&format!("${}$", var), &layer_idx.to_string());
-            result
-        };
-
-        if node_def.inputs.len() != 2 || node_def.outputs.len() != 2 {
-            return Err(TemplateError::Invalid(format!(
-                "QkNorm '{}' 必须有 2 个输入 (q, k) 和 2 个输出 (q_normed, k_normed), 实际 inputs={} outputs={}",
-                node_def.name, node_def.inputs.len(), node_def.outputs.len(),
-            )));
-        }
-
-        let head_dim = config.get_int("head_dim").ok_or_else(|| TemplateError::Invalid(
-            "QkNorm 展开时配置缺少 head_dim".into()))? as i64;
-
-        let base_name = substitute(&node_def.name);
-        let q_in  = substitute(&node_def.inputs[0]);
-        let q_out = substitute(&node_def.outputs[0]);
-
-        let mk_attrs = || -> std::collections::HashMap<String, OnnxAttribute> {
-            let mut attrs = std::collections::HashMap::new();
-            attrs.insert("head_dim".into(), OnnxAttribute {
-                name: "head_dim".into(),
-                value: OnnxAttributeValue::Int(head_dim),
-                doc_string: String::new(), ref_attr_name: None, attr_type: None,
-            });
-            attrs
-        };
-
-        let q_node = OnnxNode {
-            name: format!("{}_q", base_name),
-            op_type: "QkNorm".into(),
-            domain: String::new(),
-            inputs: vec![q_in],
-            outputs: vec![q_out],
-            attributes: mk_attrs(),
-        };
-
-        // SharedKvRef: consumer layers skip the K projection, so there is no
-        // `layer_${i}_k` to normalise. The attention node pulls the donor
-        // layer's pre-computed `layer_${donor_i}_k_rope` instead.
-        if config.is_kv_shared_layer(layer_idx) {
-            return Ok(vec![q_node]);
-        }
-
-        let k_in  = substitute(&node_def.inputs[1]);
-        let k_out = substitute(&node_def.outputs[1]);
-        let k_node = OnnxNode {
-            name: format!("{}_k", base_name),
-            op_type: "QkNorm".into(),
-            domain: String::new(),
-            inputs: vec![k_in],
-            outputs: vec![k_out],
-            attributes: mk_attrs(),
-        };
-        Ok(vec![q_node, k_node])
-    }
-
-    /// T33 展开 PerLayerEmbed 逻辑节点:
-    ///
-    /// YAML 输入 (4 inputs):
-    ///   inputs  = [hidden, ple_full, proj_w, post_mlp_w]
-    ///   outputs = [hidden_next]
-    ///   attributes: layer_idx, dim_per_layer, num_layers, hidden
-    ///
-    /// 展开后 (2 个 OnnxNode):
-    ///   1. PleSlice("{name}_slice"):  inputs=[ple_full], outputs=[layer_{i}_ple_slice]
-    ///      attributes = { layer_idx, dim_per_layer, num_layers }
-    ///   2. PerLayerEmbed("{name}"):   inputs=[hidden, main_embed, layer_{i}_ple_slice, proj_w, post_mlp_w]
-    ///                                  outputs=[hidden_next]
-    ///      attributes = 原 attributes
-    ///
-    /// main_embed 是 graph 层面的共享张量 (由顶层 embed_main Gather 节点产出,跨层保持不变)。
-    /// ple_slice 是每层独立的窄切片,从 ple_full [seq, num_layers*dim] 按 layer_idx 切出 [seq, dim]。
-    ///
-    /// PleSlice 作为 atomic op 在 mega-kernel executor 的 atomic op 路径处理:
-    /// 按 layer_idx × dim_per_layer × elem_bytes 的列偏移从 ple_full 逐行拷贝 dim_per_layer
-    /// 个 f32 到独立的输出 buffer (紧凑 [seq, dim] 布局)。
-    fn expand_per_layer_embed(
-        &self,
-        node_def: &NodeDef,
-        config: &super::resolve::ResolvedConfig,
-        var: &str,
-        layer_idx: usize,
-    ) -> Result<Vec<crate::loader::onnx::OnnxNode>, TemplateError> {
-        use crate::loader::onnx::{OnnxAttribute, OnnxAttributeValue, OnnxNode};
-
-        let substitute = |s: &str| -> String {
-            let mut result = super::resolve::substitute_placeholders(s, config);
-            result = result.replace(&format!("${{{}}}", var), &layer_idx.to_string());
-            result = result.replace(&format!("${}$", var), &layer_idx.to_string());
-            result
-        };
-
-        if node_def.inputs.len() != 4 {
-            return Err(TemplateError::Invalid(format!(
-                "PerLayerEmbed '{}' 必须有 4 个 YAML 输入 [hidden, ple_full, proj_w, post_mlp_w], 实际 {}",
-                node_def.name,
-                node_def.inputs.len(),
-            )));
-        }
-        if node_def.outputs.len() != 1 {
-            return Err(TemplateError::Invalid(format!(
-                "PerLayerEmbed '{}' 必须有 1 个输出, 实际 {}",
-                node_def.name,
-                node_def.outputs.len(),
-            )));
-        }
-
-        // 展开占位符: YAML 写成 ${hidden_size_per_layer_input} / ${num_hidden_layers} / ${i}
-        // → AttributeValue::String 需要替换, AttributeValue::Int 直接取。
-        let read_usize = |key: &str| -> Result<i64, TemplateError> {
-            match node_def.attributes.get(key) {
-                Some(AttributeValue::Int(v)) => Ok(*v),
-                Some(AttributeValue::String(s)) => {
-                    let resolved = substitute(s);
-                    resolved.parse::<i64>().map_err(|_| TemplateError::Invalid(format!(
-                        "PerLayerEmbed '{}' attr '{}' 无法解析为 int: {}",
-                        node_def.name, key, resolved,
-                    )))
-                }
-                _ => Err(TemplateError::Invalid(format!(
-                    "PerLayerEmbed '{}' 缺少属性 '{}' (应为 Int 或 String 占位符)",
-                    node_def.name, key,
-                ))),
-            }
-        };
-
-        let resolved_layer_idx = read_usize("layer_idx")?;
-        let dim_per_layer = read_usize("dim_per_layer")?;
-        let num_layers = read_usize("num_layers")?;
-        let hidden = read_usize("hidden")?;
-
-        let base_name = substitute(&node_def.name);
-        let hidden_in = substitute(&node_def.inputs[0]);
-        let ple_full_in = substitute(&node_def.inputs[1]);
-        let proj_w_in = substitute(&node_def.inputs[2]);
-        let post_mlp_w_in = substitute(&node_def.inputs[3]);
-        let hidden_out = substitute(&node_def.outputs[0]);
-
-        // ── Node 1: PleSlice ──
-        // 切片输出 tensor 名按层命名 (e.g. "layer_0_ple_slice"),保持跨层唯一。
-        let slice_output = format!("layer_{}_ple_slice", layer_idx);
-        let mk_attr = |name: &str, v: OnnxAttributeValue| OnnxAttribute {
-            name: name.to_string(), value: v,
-            doc_string: String::new(), ref_attr_name: None, attr_type: None,
-        };
-        let mut slice_attrs = std::collections::HashMap::new();
-        slice_attrs.insert("layer_idx".into(),
-            mk_attr("layer_idx", OnnxAttributeValue::Int(resolved_layer_idx)));
-        slice_attrs.insert("dim_per_layer".into(),
-            mk_attr("dim_per_layer", OnnxAttributeValue::Int(dim_per_layer)));
-        slice_attrs.insert("num_layers".into(),
-            mk_attr("num_layers", OnnxAttributeValue::Int(num_layers)));
-
-        let slice_node = OnnxNode {
-            name: format!("layer_{}_ple_slice", layer_idx),
-            op_type: "PleSlice".into(),
-            domain: String::new(),
-            inputs: vec![ple_full_in],
-            outputs: vec![slice_output.clone()],
-            attributes: slice_attrs,
-        };
-
-        // ── Node 2: PerLayerEmbed with 5 inputs ──
-        // main_embed 是顶层 Gather 节点 `embed_main` 的输出 (固定名字)。
-        let ple_inputs = vec![
-            hidden_in,
-            "main_embed".into(),
-            slice_output,
-            proj_w_in,
-            post_mlp_w_in,
-        ];
-
-        let mut ple_attrs = std::collections::HashMap::new();
-        ple_attrs.insert("layer_idx".into(),
-            mk_attr("layer_idx", OnnxAttributeValue::Int(resolved_layer_idx)));
-        ple_attrs.insert("dim_per_layer".into(),
-            mk_attr("dim_per_layer", OnnxAttributeValue::Int(dim_per_layer)));
-        ple_attrs.insert("num_layers".into(),
-            mk_attr("num_layers", OnnxAttributeValue::Int(num_layers)));
-        ple_attrs.insert("hidden".into(),
-            mk_attr("hidden", OnnxAttributeValue::Int(hidden)));
-
-        let ple_node = OnnxNode {
-            name: base_name,
-            op_type: "PerLayerEmbed".into(),
-            domain: String::new(),
-            inputs: ple_inputs,
-            outputs: vec![hidden_out],
-            attributes: ple_attrs,
-        };
-
-        Ok(vec![slice_node, ple_node])
     }
 
     /// Wrapper over [`Self::eval_only_if`] that first substitutes the active
@@ -2253,6 +1759,9 @@ fn infer_output_shape(
         OpKind::MoERouter { .. } => vec![s.clone()],
         OpKind::MoEDispatchPacked { hidden, .. } => vec![s.clone(), SymDim::Concrete(*hidden)],
         OpKind::Reshape { .. } | OpKind::Transpose { .. } => vec![s.clone()],
+        OpKind::PatchEmbed { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
+        OpKind::LearnedPos2D { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
+        OpKind::DepthwiseConv1D { .. } => vec![s.clone()],
         _ => vec![s.clone()],
     }
 }
@@ -2268,9 +1777,43 @@ pub enum TemplateError {
     Invalid(String),
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
+
+    /// Helper: get a tensor name from a CompilerGraph by TensorId.
+    fn tensor_name(g: &gllm_kernels::compiler::CompilerGraph, tid: gllm_kernels::compiler::graph::TensorId) -> String {
+        g.tensor(tid).expect("tensor should exist").name.clone()
+    }
+
+    /// Helper: find a CompilerOp by label prefix within repeat-expanded ops (those with "layer." prefix).
+    fn find_layer_op<'a>(g: &'a gllm_kernels::compiler::CompilerGraph, suffix: &str) -> Option<&'a gllm_kernels::compiler::graph::CompilerOp> {
+        g.ops.iter().find(|op| op.label == format!("layer.{}", suffix))
+    }
+
+    /// Helper: find a CompilerOp by exact label.
+    fn find_op<'a>(g: &'a gllm_kernels::compiler::CompilerGraph, label: &str) -> Option<&'a gllm_kernels::compiler::graph::CompilerOp> {
+        g.ops.iter().find(|op| op.label == label)
+    }
+
+    /// Helper: count ops whose label contains the given suffix.
+    fn count_ops_with_suffix(g: &gllm_kernels::compiler::CompilerGraph, suffix: &str) -> usize {
+        g.ops.iter().filter(|op| op.label.ends_with(suffix)).count()
+    }
+
+    /// Helper: build a test config with reasonable defaults.
+    fn make_test_config() -> super::super::resolve::ResolvedConfig {
+        let mut config = super::super::resolve::ResolvedConfig::default();
+        config.num_hidden_layers = 2;
+        config.hidden_size = 1024;
+        config.num_attention_heads = 8;
+        config.head_dim = 128;
+        config.vocab_size = 32000;
+        config.dtype = "f32".to_string();
+        config
+    }
 
     #[test]
     fn parse_minimal_template() {
@@ -2335,38 +1878,10 @@ graph:
         }
     }
 
+    /// to_compiler_graph expands repeat blocks and auto-adds embed/norm/lm_head/generate ops.
     #[test]
-    fn to_onnx_graph_expands_repeat_blocks() {
+    fn to_compiler_graph_expands_repeat_blocks() {
         let yaml = r#"
-name: test_model
-graph:
-  inputs:
-    - name: input_ids
-      dtype: int64
-  outputs:
-    - name: logits
-      dtype: f32
-  nodes:
-    - name: embed
-      op_type: Gather
-      inputs: ["weights", "input_ids"]
-      outputs: ["hidden_0"]
-    - repeat: "${num_hidden_layers}"
-      var: i
-      nodes:
-        - name: "layer_${i}_attn"
-          op_type: Attention
-          inputs: ["hidden_${i}"]
-          outputs: ["attn_${i}"]
-        - name: "layer_${i}_ffn"
-          op_type: FFN
-          inputs: ["attn_${i}"]
-          outputs: ["hidden_${ next }"]
-          attributes:
-            layer_idx: ${i}
-"#;
-        // Note: The template uses ${i} which won't parse as attribute, so simplify
-        let yaml_simple = r#"
 name: test_model
 graph:
   inputs:
@@ -2388,31 +1903,41 @@ graph:
           inputs: ["hidden_${i}"]
           outputs: ["hidden_next_${i}"]
 "#;
-        let template = ArchTemplate::from_yaml(yaml_simple).unwrap();
-
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let template = ArchTemplate::from_yaml(yaml).unwrap();
+        let mut config = make_test_config();
         config.num_hidden_layers = 2;
-        config.hidden_size = 768;
-        config.vocab_size = 50000;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
 
-        // embed + 2 layers * 1 node = 3 nodes
-        assert_eq!(graph.nodes.len(), 3);
-        assert_eq!(graph.nodes[0].name, "embed");
-        assert_eq!(graph.nodes[1].name, "layer_0_attn");
-        assert_eq!(graph.nodes[2].name, "layer_1_attn");
+        // Auto-added: embed_gather + final_norm + lm_head + argmax + store_token + check_stop = 6
+        // YAML top-level: embed (Gather) = 1
+        // Repeat: 2 layers * 1 Attention = 2
+        // Total = 6 + 1 + 2 = 9
+        assert_eq!(graph.ops.len(), 9);
 
-        // Check inputs were substituted
-        assert_eq!(graph.nodes[1].inputs, vec!["hidden_0".to_string()]);
-        assert_eq!(graph.nodes[2].inputs, vec!["hidden_1".to_string()]);
+        // Verify YAML's embed node
+        let embed_op = find_op(&graph, "embed").expect("YAML embed node");
+        assert!(matches!(embed_op.kind, gllm_kernels::compiler::graph::OpKind::Gather { .. }));
+
+        // Verify auto-added embed_gather
+        let embed_gather = find_op(&graph, "embed_gather").expect("auto embed_gather");
+        assert!(matches!(embed_gather.kind, gllm_kernels::compiler::graph::OpKind::Gather { .. }));
+
+        // Verify repeat-expanded attention ops have "layer." prefix
+        let attn0 = find_layer_op(&graph, "layer_0_attn").expect("layer 0 attn");
+        assert!(matches!(attn0.kind, gllm_kernels::compiler::graph::OpKind::MultiHeadAttention { .. }));
+        let attn1 = find_layer_op(&graph, "layer_1_attn").expect("layer 1 attn");
+        assert!(matches!(attn1.kind, gllm_kernels::compiler::graph::OpKind::MultiHeadAttention { .. }));
+
+        // Check input names were substituted: hidden_0 and hidden_1
+        assert_eq!(tensor_name(&graph, attn0.inputs[0]), "hidden_0");
+        assert_eq!(tensor_name(&graph, attn1.inputs[0]), "hidden_1");
     }
 
-    /// DualRotaryEmbedding 按 attention_pattern[i] 展开为 sliding / global
-    /// 对应参数的 RotaryEmbedding 节点。
+    /// DualRotaryEmbedding per attention_pattern[i] expands into sliding / global RoPE ops.
     #[test]
     fn dual_rope_expands_per_attention_pattern() {
-        use crate::loader::onnx::OnnxAttributeValue;
+        use gllm_kernels::compiler::graph::OpKind;
 
         let yaml = r#"
 name: gemma4_test
@@ -2438,63 +1963,73 @@ graph:
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
 
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 4;
         config.num_attention_heads = 8;
         config.head_dim = 128;
-        // 4 层: sliding, sliding, sliding, global
+        // 4 layers: sliding, sliding, sliding, global
         config.attention_pattern = vec![0, 0, 0, 1];
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // 每层展开为两个 RoPE 节点 (Q / K), 4 层 × 2 = 8 个节点
-        assert_eq!(graph.nodes.len(), 8, "每层应展开为两个独立的 RoPE 节点 (Q + K)");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
 
-        // 每个节点 op_type 都应是 RotaryEmbedding (被 expand 改写)
-        for n in &graph.nodes {
-            assert_eq!(n.op_type, "RotaryEmbedding",
-                "DualRotaryEmbedding 必须展开为 RotaryEmbedding,实际 op_type={}", n.op_type);
+        // Collect RoPE ops from layer-expanded nodes
+        let rope_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, OpKind::RoPE { .. }) && op.label.contains("_rope_"))
+            .collect();
+
+        // Each layer expands into two RoPE ops (Q + K), 4 layers x 2 = 8
+        assert_eq!(rope_ops.len(), 8, "each layer should expand into two independent RoPE ops (Q + K)");
+
+        // Verify all are RoPE
+        for op in &rope_ops {
+            assert!(matches!(op.kind, OpKind::RoPE { .. }),
+                "DualRotaryEmbedding must expand into RoPE ops, got {:?}", op.kind);
         }
 
-        // 成对验证每层的 Q / K 节点 (节点名 `layer_{i}_rope_q` / `layer_{i}_rope_k`)
+        // Verify paired Q / K labels per layer
         for i in 0..4 {
-            let q = &graph.nodes[i * 2];
-            let k = &graph.nodes[i * 2 + 1];
-            assert_eq!(q.name, format!("layer_{i}_rope_q"));
-            assert_eq!(k.name, format!("layer_{i}_rope_k"));
-            assert_eq!(q.inputs, vec![format!("q_{i}")]);
-            assert_eq!(q.outputs, vec![format!("q_rope_{i}")]);
-            assert_eq!(k.inputs, vec![format!("k_{i}")]);
-            assert_eq!(k.outputs, vec![format!("k_rope_{i}")]);
+            let q = find_layer_op(&graph, &format!("layer_{i}_rope_q")).expect("Q RoPE");
+            let k = find_layer_op(&graph, &format!("layer_{i}_rope_k")).expect("K RoPE");
+            assert_eq!(tensor_name(&graph, q.inputs[0]), format!("q_{i}"));
+            assert_eq!(tensor_name(&graph, q.outputs[0]), format!("q_rope_{i}"));
+            assert_eq!(tensor_name(&graph, k.inputs[0]), format!("k_{i}"));
+            assert_eq!(tensor_name(&graph, k.outputs[0]), format!("k_rope_{i}"));
         }
 
-        let read_f32 = |attr_map: &std::collections::HashMap<String, crate::loader::onnx::OnnxAttribute>, key: &str| {
-            match attr_map.get(key).map(|a| &a.value) {
-                Some(OnnxAttributeValue::Float(v)) => *v,
-                other => panic!("属性 {key} 缺失或类型错误: {:?}", other),
-            }
-        };
-
-        // 前三层 (attention_pattern=0) → sliding; Q / K 节点 attributes 一致
+        // First 3 layers (attention_pattern=0) -> sliding: theta=10000, partial=1.0
         for layer in 0..3 {
-            for node_idx in [layer * 2, layer * 2 + 1] {
-                assert!((read_f32(&graph.nodes[node_idx].attributes, "theta") - 10000.0).abs() < 1e-3,
-                    "layer {layer} node {node_idx} sliding theta 不正确");
-                assert!((read_f32(&graph.nodes[node_idx].attributes, "partial") - 1.0).abs() < 1e-6,
-                    "layer {layer} node {node_idx} sliding partial 应为 1.0");
+            for suffix in ["rope_q", "rope_k"] {
+                let op = find_layer_op(&graph, &format!("layer_{layer}_{suffix}")).unwrap();
+                match op.kind {
+                    OpKind::RoPE { theta, partial, .. } => {
+                        assert!((theta - 10000.0).abs() < 1e-3,
+                            "layer {layer} sliding theta incorrect");
+                        assert!((partial - 1.0).abs() < 1e-6,
+                            "layer {layer} sliding partial should be 1.0");
+                    }
+                    _ => panic!("expected RoPE"),
+                }
             }
         }
-        // 第 4 层 (attention_pattern=1) → global
-        for node_idx in [6, 7] {
-            assert!((read_f32(&graph.nodes[node_idx].attributes, "theta") - 1_000_000.0).abs() < 1e-2);
-            assert!((read_f32(&graph.nodes[node_idx].attributes, "partial") - 0.25).abs() < 1e-6);
+
+        // 4th layer (attention_pattern=1) -> global: theta=1M, partial=0.25
+        for suffix in ["rope_q", "rope_k"] {
+            let op = find_layer_op(&graph, &format!("layer_3_{suffix}")).unwrap();
+            match op.kind {
+                OpKind::RoPE { theta, partial, .. } => {
+                    assert!((theta - 1_000_000.0).abs() < 1e-2, "global theta incorrect");
+                    assert!((partial - 0.25).abs() < 1e-6, "global partial should be 0.25");
+                }
+                _ => panic!("expected RoPE"),
+            }
         }
     }
 
-    /// QkNorm YAML 节点 (2in2out) 展开为两个独立 1in1out QkNorm 节点,
-    /// 每个带 head_dim 属性。
+    /// QkNorm YAML node (2in2out) expands into two independent 1in1out QkNorm ops,
+    /// each with head_dim embedded in OpKind.
     #[test]
     fn qk_norm_expands_to_two_nodes_with_head_dim() {
-        use crate::loader::onnx::OnnxAttributeValue;
+        use gllm_kernels::compiler::graph::OpKind;
 
         let yaml = r#"
 name: gemma4_qk_test
@@ -2516,32 +2051,36 @@ graph:
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
 
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 2;
         config.head_dim = 128;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        assert_eq!(graph.nodes.len(), 4, "2 层 × 2 节点 = 4 个 QkNorm");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
+        // Collect QkNorm ops
+        let qk_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, OpKind::QkNorm { .. }))
+            .collect();
+        assert_eq!(qk_ops.len(), 4, "2 layers x 2 ops = 4 QkNorm");
 
         for i in 0..2 {
-            let q = &graph.nodes[i * 2];
-            let k = &graph.nodes[i * 2 + 1];
-            assert_eq!(q.op_type, "QkNorm");
-            assert_eq!(k.op_type, "QkNorm");
-            assert_eq!(q.name, format!("layer_{i}_qk_norm_q"));
-            assert_eq!(k.name, format!("layer_{i}_qk_norm_k"));
-            assert_eq!(q.inputs, vec![format!("q_{i}")]);
-            assert_eq!(q.outputs, vec![format!("q_normed_{i}")]);
-            assert_eq!(k.inputs, vec![format!("k_{i}")]);
-            assert_eq!(k.outputs, vec![format!("k_normed_{i}")]);
-            match q.attributes.get("head_dim").map(|a| &a.value) {
-                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 128),
-                other => panic!("head_dim 属性缺失或类型错误: {:?}", other),
+            let q = find_layer_op(&graph, &format!("layer_{i}_qk_norm_q")).expect("Q QkNorm");
+            let k = find_layer_op(&graph, &format!("layer_{i}_qk_norm_k")).expect("K QkNorm");
+            assert!(matches!(q.kind, OpKind::QkNorm { .. }));
+            assert!(matches!(k.kind, OpKind::QkNorm { .. }));
+            assert_eq!(tensor_name(&graph, q.inputs[0]), format!("q_{i}"));
+            assert_eq!(tensor_name(&graph, q.outputs[0]), format!("q_normed_{i}"));
+            assert_eq!(tensor_name(&graph, k.inputs[0]), format!("k_{i}"));
+            assert_eq!(tensor_name(&graph, k.outputs[0]), format!("k_normed_{i}"));
+            // Verify head_dim = 128
+            match q.kind {
+                OpKind::QkNorm { head_dim } => assert_eq!(head_dim, 128),
+                _ => panic!("expected QkNorm"),
             }
         }
     }
 
-    /// serde 正确解析 `only_if` 字段 (存在 / 缺省都能 round-trip)。
+    /// serde correctly parses `only_if` field (present / absent both round-trip).
     #[test]
     fn only_if_field_parsed_by_serde() {
         let yaml = r#"
@@ -2564,14 +2103,14 @@ graph:
         assert_eq!(template.graph.nodes.len(), 2);
         match (&template.graph.nodes[0], &template.graph.nodes[1]) {
             (GraphNode::Node(a), GraphNode::Node(b)) => {
-                assert!(a.only_if.is_none(), "节点 a 缺省 only_if 应为 None");
+                assert!(a.only_if.is_none(), "node a should have None only_if");
                 assert_eq!(b.only_if.as_deref(), Some("has_per_layer_embedding"));
             }
-            _ => panic!("期望两个 Node"),
+            _ => panic!("Expected two Nodes"),
         }
     }
 
-    /// `has_per_layer_embedding = false` 时带 only_if 的节点被跳过。
+    /// When has_per_layer_embedding = false, nodes with only_if are skipped.
     #[test]
     fn only_if_skips_node_when_false() {
         let yaml = r#"
@@ -2600,30 +2139,34 @@ graph:
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
 
-        // has_per_layer_embedding 必须基于 hidden_size_per_layer_input > 0 推导
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 2;
-        config.hidden_size = 1024;
-        config.num_attention_heads = 8;
-        config.head_dim = 128;
-        config.vocab_size = 32000;
         config.hidden_size_per_layer_input = 0;
         config.has_per_layer_embedding = false;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // 只有核心 Add 节点, PLE 被跳过
-        assert_eq!(graph.nodes.len(), 2, "PLE 节点必须在 only_if=false 时跳过");
-        assert_eq!(graph.nodes[0].name, "layer_0_core");
-        assert_eq!(graph.nodes[1].name, "layer_1_core");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
+        // Only core Add nodes survive; PLE skipped by only_if=false
+        let layer_adds: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_core"))
+            .collect();
+        assert_eq!(layer_adds.len(), 2, "PLE nodes must be skipped when only_if=false");
+
+        assert_eq!(layer_adds[0].label, "layer.layer_0_core");
+        assert_eq!(layer_adds[1].label, "layer.layer_1_core");
+
+        // No PLE ops should exist
+        let ple_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_ple"))
+            .collect();
+        assert!(ple_ops.is_empty(), "PLE ops must not exist when only_if=false");
     }
 
-    /// `has_per_layer_embedding = true` 时 only_if 节点正常展开。
-    ///
-    /// T33: PerLayerEmbed 现在要求 4 输入 [hidden, ple_full, proj_w, post_mlp_w],
-    /// 并且会被 `expand_per_layer_embed` 展开为 PleSlice + 5-input PerLayerEmbed 两个节点。
+    /// When has_per_layer_embedding = true, only_if nodes expand normally.
+    /// PerLayerEmbed expands into ColumnSlice + PerLayerEmbed (2 ops per layer).
     #[test]
     fn only_if_expands_node_when_true() {
-        use crate::loader::onnx::OnnxAttributeValue;
+        use gllm_kernels::compiler::graph::OpKind;
 
         let yaml = r#"
 name: test
@@ -2651,41 +2194,48 @@ graph:
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
 
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 2;
-        config.hidden_size = 1024;
-        config.num_attention_heads = 8;
-        config.head_dim = 128;
-        config.vocab_size = 32000;
         config.hidden_size_per_layer_input = 256;
         config.has_per_layer_embedding = true;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // 每层: core + (PleSlice + PerLayerEmbed) = 3 节点, 2 层共 6 节点
-        assert_eq!(graph.nodes.len(), 6);
-        assert_eq!(graph.nodes[0].name, "layer_0_core");
-        assert_eq!(graph.nodes[1].name, "layer_0_ple_slice");
-        assert_eq!(graph.nodes[1].op_type, "PleSlice");
-        assert_eq!(graph.nodes[2].name, "layer_0_ple");
-        assert_eq!(graph.nodes[2].op_type, "PerLayerEmbed");
-        assert_eq!(graph.nodes[3].name, "layer_1_core");
-        assert_eq!(graph.nodes[4].name, "layer_1_ple_slice");
-        assert_eq!(graph.nodes[5].name, "layer_1_ple");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
 
-        // layer_idx / num_layers 占位符替换后必须以 Int 形式发射 (否则下游
-        // atomic_op_to_kind::require_usize 会因 AttrValue::String 失败)。
-        let read_int = |attrs: &std::collections::HashMap<String, crate::loader::onnx::OnnxAttribute>, key: &str| {
-            match attrs.get(key).map(|a| &a.value) {
-                Some(OnnxAttributeValue::Int(v)) => *v,
-                other => panic!("属性 {key} 期望 Int, 实际: {:?}", other),
+        // Each layer: core(Add) + ColumnSlice + PerLayerEmbed = 3 ops, 2 layers = 6 YAML ops
+        let core_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_core"))
+            .collect();
+        let slice_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_ple_slice"))
+            .collect();
+        let ple_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, OpKind::PerLayerEmbed { .. }))
+            .collect();
+
+        assert_eq!(core_ops.len(), 2);
+        assert_eq!(slice_ops.len(), 2, "ColumnSlice per layer");
+        assert_eq!(ple_ops.len(), 2, "PerLayerEmbed per layer");
+
+        // Verify ColumnSlice kind
+        assert!(matches!(slice_ops[0].kind, OpKind::ColumnSlice { .. }));
+
+        // Verify PerLayerEmbed has layer_idx and num_layers from OpKind
+        match &ple_ops[0].kind {
+            OpKind::PerLayerEmbed { layer_idx, num_layers, .. } => {
+                assert_eq!(*layer_idx, 0);
+                assert_eq!(*num_layers, 2);
             }
-        };
-        assert_eq!(read_int(&graph.nodes[2].attributes, "layer_idx"), 0);
-        assert_eq!(read_int(&graph.nodes[2].attributes, "num_layers"), 2);
-        assert_eq!(read_int(&graph.nodes[5].attributes, "layer_idx"), 1);
+            _ => panic!("expected PerLayerEmbed"),
+        }
+        match &ple_ops[1].kind {
+            OpKind::PerLayerEmbed { layer_idx, .. } => {
+                assert_eq!(*layer_idx, 1);
+            }
+            _ => panic!("expected PerLayerEmbed"),
+        }
     }
 
-    /// 三段比较语法 `field op value` 按整数比较求值。
+    /// Three-segment comparison syntax `field op value` evaluated by integer comparison.
     #[test]
     fn only_if_comparison_expression() {
         let yaml = r#"
@@ -2711,21 +2261,23 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 4;
         config.hidden_size = 1024;
-        config.num_attention_heads = 8;
-        config.head_dim = 128;
-        config.vocab_size = 32000;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // a: hidden_size > 0 → true; b: num_hidden_layers == 0 → false; c: != 0 → true
-        assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.nodes[0].name, "a");
-        assert_eq!(graph.nodes[1].name, "c");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
+        // a: hidden_size > 0 -> true; b: num_hidden_layers == 0 -> false; c: != 0 -> true
+        // "a" and "c" are YAML top-level Add ops (no "layer." prefix)
+        let a_op = find_op(&graph, "a").expect("node a");
+        let c_op = find_op(&graph, "c").expect("node c");
+        assert!(matches!(a_op.kind, gllm_kernels::compiler::graph::OpKind::Add));
+        assert!(matches!(c_op.kind, gllm_kernels::compiler::graph::OpKind::Add));
+        // b should not exist
+        assert!(find_op(&graph, "b").is_none(), "node b should be skipped");
     }
 
-    /// 未知 only_if 字段必须返回错误 (禁止静默 false 掩盖拼写错误)。
+    /// Unknown only_if field must return error (no silent false masking typos).
     #[test]
     fn only_if_unknown_field_errors() {
         let yaml = r#"
@@ -2741,22 +2293,22 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 1;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
         config.vocab_size = 1;
 
-        let err = template.to_onnx_graph(&config).unwrap_err();
+        let err = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("typo_field_that_does_not_exist"),
-            "错误消息应包含未知字段名, 实际: {msg}");
+            "error should contain unknown field name, got: {msg}");
     }
 
-    /// T33: expand_per_layer_embed 将 4-input YAML 节点拆成 PleSlice + 5-input PerLayerEmbed。
+    /// PerLayerEmbed with 4 inputs expands into ColumnSlice + 5-input PerLayerEmbed.
     #[test]
     fn expand_per_layer_embed_injects_slice_node_and_main_embed() {
-        use crate::loader::onnx::OnnxAttributeValue;
+        use gllm_kernels::compiler::graph::OpKind;
 
         let yaml = r#"
 name: gemma4_ple_test
@@ -2787,58 +2339,64 @@ graph:
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
 
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 3;
-        config.hidden_size = 1024;
-        config.num_attention_heads = 8;
-        config.head_dim = 128;
-        config.vocab_size = 32000;
         config.hidden_size_per_layer_input = 256;
         config.has_per_layer_embedding = true;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // 每层展开为 2 节点 (PleSlice + PerLayerEmbed), 3 层共 6 节点
-        assert_eq!(graph.nodes.len(), 6, "PerLayerEmbed 展开后每层 2 节点");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
 
+        // Each layer expands into 2 ops (ColumnSlice + PerLayerEmbed), 3 layers = 6 YAML ops
         for layer in 0..3 {
-            let slice_node = &graph.nodes[layer * 2];
-            let ple_node = &graph.nodes[layer * 2 + 1];
+            let slice_op = find_layer_op(&graph, &format!("layer_{layer}_ple_slice"))
+                .unwrap_or_else(|| panic!("ColumnSlice for layer {layer}"));
+            let ple_op = find_layer_op(&graph, &format!("layer_{layer}_ple"))
+                .unwrap_or_else(|| panic!("PerLayerEmbed for layer {layer}"));
 
-            // PleSlice 节点
-            assert_eq!(slice_node.op_type, "PleSlice");
-            assert_eq!(slice_node.name, format!("layer_{layer}_ple_slice"));
-            assert_eq!(slice_node.inputs, vec!["ple_full".to_string()]);
-            assert_eq!(slice_node.outputs, vec![format!("layer_{layer}_ple_slice")]);
-            // layer_idx 属性必须是 Int(layer), 非 String("{layer}")
-            match slice_node.attributes.get("layer_idx").map(|a| &a.value) {
-                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, layer as i64),
-                other => panic!("layer_idx expected Int, got {:?}", other),
-            }
-            match slice_node.attributes.get("dim_per_layer").map(|a| &a.value) {
-                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 256),
-                other => panic!("dim_per_layer expected Int 256, got {:?}", other),
-            }
-            match slice_node.attributes.get("num_layers").map(|a| &a.value) {
-                Some(OnnxAttributeValue::Int(v)) => assert_eq!(*v, 3),
-                other => panic!("num_layers expected Int 3, got {:?}", other),
+            // ColumnSlice op
+            assert!(matches!(slice_op.kind, OpKind::ColumnSlice { .. }));
+            // ColumnSlice reads ple_full
+            assert_eq!(tensor_name(&graph, slice_op.inputs[0]), "ple_full");
+
+            // PerLayerEmbed op
+            assert!(matches!(ple_op.kind, OpKind::PerLayerEmbed { .. }));
+            // 5 inputs: [hidden_state, main_embed, layer_{i}_ple_slice, proj_w, post_mlp_w]
+            // Layer 0's hidden_state is the auto-added "embedding" tensor (tensor_map["hidden_0"]
+            // initially points to it). Layer 1+ read "hidden_0" (output of layer 0 overwrote the map).
+            assert_eq!(ple_op.inputs.len(), 5, "PerLayerEmbed must have 5 inputs");
+            let expected_hidden_name = if layer == 0 { "embedding" } else { "hidden_0" };
+            assert_eq!(tensor_name(&graph, ple_op.inputs[0]), expected_hidden_name,
+                "layer {layer} input[0] hidden state mismatch");
+            assert_eq!(tensor_name(&graph, ple_op.inputs[1]), "main_embed",
+                "input[1] must be main_embed");
+            assert_eq!(tensor_name(&graph, ple_op.inputs[2]), format!("layer_{layer}_ple_slice"),
+                "input[2] must be current layer slice");
+            assert_eq!(tensor_name(&graph, ple_op.inputs[3]),
+                "model.per_layer_embedding.per_layer_projection.weight");
+            assert_eq!(tensor_name(&graph, ple_op.inputs[4]),
+                format!("model.layers.{layer}.post_mlp_projection.weight"));
+
+            // Verify OpKind fields
+            match &ple_op.kind {
+                OpKind::PerLayerEmbed { layer_idx, dim_per_layer, num_layers, .. } => {
+                    assert_eq!(*layer_idx, layer);
+                    assert_eq!(*dim_per_layer, 256);
+                    assert_eq!(*num_layers, 3);
+                }
+                _ => panic!("expected PerLayerEmbed"),
             }
 
-            // PerLayerEmbed 节点
-            assert_eq!(ple_node.op_type, "PerLayerEmbed");
-            assert_eq!(ple_node.name, format!("layer_{layer}_ple"));
-            // 5 inputs: [hidden_0, main_embed, layer_{i}_ple_ple_slice, proj_w, post_mlp_w]
-            assert_eq!(ple_node.inputs.len(), 5, "PerLayerEmbed 必须有 5 inputs");
-            assert_eq!(ple_node.inputs[0], "hidden_0");
-            assert_eq!(ple_node.inputs[1], "main_embed",
-                "input[1] 必须是 main_embed (顶层 embed_main Gather 的输出)");
-            assert_eq!(ple_node.inputs[2], format!("layer_{layer}_ple_slice"),
-                "input[2] 必须是当前层切片 layer_{layer}_ple_slice");
-            assert_eq!(ple_node.inputs[3], "model.per_layer_embedding.per_layer_projection.weight");
-            assert_eq!(ple_node.inputs[4], format!("model.layers.{layer}.post_mlp_projection.weight"));
+            match &slice_op.kind {
+                OpKind::ColumnSlice { start, slice_dim, .. } => {
+                    assert_eq!(*start, layer * 256);
+                    assert_eq!(*slice_dim, 256);
+                }
+                _ => panic!("expected ColumnSlice"),
+            }
         }
     }
 
-    /// 现有无 only_if 的节点始终展开 (向前兼容验证)。
+    /// Nodes without only_if always expand (forward compatibility).
     #[test]
     fn only_if_absent_expands_unconditionally() {
         let yaml = r#"
@@ -2853,29 +2411,18 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 1;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
         config.vocab_size = 1;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].name, "a");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+        assert!(find_op(&graph, "a").is_some());
     }
 
     // ============================================================================
     // T43: SharedKvRef graph-layer integration tests.
-    //
-    // These cover the template-engine primitives that make shared-KV routing work
-    // without Rust-side per-model branching:
-    //   - `!<field>` negation prefix in `only_if`
-    //   - per-layer `is_kv_shared_layer_{N}` lookup (from `${i}` substitution)
-    //   - `${donor_i}` placeholder resolution (identity / donor index)
-    //
-    // And the end-to-end expansion against the real gemma4.yaml for an E2B config
-    // (26 layers, 20 shared): k_proj / v_proj / v_norm / k-rope / k-qk-norm must
-    // disappear for the 20 consumer layers, attention reads donor tensors.
     // ============================================================================
 
     /// `!<field>` negates a boolean field lookup in `only_if`.
@@ -2899,22 +2446,22 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 1;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
         config.vocab_size = 1;
         config.has_per_layer_embedding = false;
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        // has_per_layer_embedding = false → `!has_...` = true, `has_...` = false.
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].name, "a");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+        // has_per_layer_embedding = false -> `!has_...` = true, `has_...` = false.
+        assert!(find_op(&graph, "a").is_some());
+        assert!(find_op(&graph, "b").is_none());
 
         config.has_per_layer_embedding = true;
-        let graph = template.to_onnx_graph(&config).unwrap();
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].name, "b");
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+        assert!(find_op(&graph, "a").is_none());
+        assert!(find_op(&graph, "b").is_some());
     }
 
     /// `!<field>` on empty / malformed field returns an error (no silent defaults).
@@ -2933,19 +2480,17 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 1;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
         config.vocab_size = 1;
 
-        let err = template.to_onnx_graph(&config).unwrap_err();
+        let err = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap_err();
         assert!(format!("{err}").contains("缺少字段名") || format!("{err}").contains("`!`"));
     }
 
-    /// Per-layer `is_kv_shared_layer_${i}` lookup inside a repeat block:
-    /// the repeat variable is substituted *before* field lookup so
-    /// `is_kv_shared_layer_3` hits the dynamic branch of `get_bool`.
+    /// Per-layer `is_kv_shared_layer_${i}` lookup inside a repeat block.
     #[test]
     fn only_if_per_layer_shared_kv_lookup() {
         let yaml = r#"
@@ -2964,7 +2509,7 @@ graph:
           outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         // 10 layers, last 4 are consumers: layers 6..10 skipped.
         config.num_hidden_layers = 10;
         config.hidden_size = 1;
@@ -2973,11 +2518,15 @@ graph:
         config.num_kv_shared_layers = 4;
         config.attention_pattern = vec![0u8; 10];
 
-        let graph = template.to_onnx_graph(&config).unwrap();
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
         // Only 6 non-consumer layers keep their KV node.
-        assert_eq!(graph.nodes.len(), 6, "consumer layers must skip the KV node");
-        for (idx, node) in graph.nodes.iter().enumerate() {
-            assert_eq!(node.name, format!("layer_{idx}_kv"));
+        let kv_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_kv"))
+            .collect();
+        assert_eq!(kv_ops.len(), 6, "consumer layers must skip the KV node");
+        for (idx, op) in kv_ops.iter().enumerate() {
+            assert_eq!(op.label, format!("layer.layer_{idx}_kv"));
         }
     }
 
@@ -3000,15 +2549,15 @@ graph:
           outputs: ["layer_${i}_out"]
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         // 8 layers, last 4 shared. attention_pattern: alternating 0/1.
-        //   layer 0 → 0, layer 1 → 1, layer 2 → 0, layer 3 → 1   (non-consumer)
-        //   layer 4 → 0, layer 5 → 1, layer 6 → 0, layer 7 → 1   (consumer)
+        //   layer 0 -> 0, layer 1 -> 1, layer 2 -> 0, layer 3 -> 1   (non-consumer)
+        //   layer 4 -> 0, layer 5 -> 1, layer 6 -> 0, layer 7 -> 1   (consumer)
         // donor bucket-matched latest non-consumer:
-        //   layer 4 (bucket 0) → donor 2
-        //   layer 5 (bucket 1) → donor 3
-        //   layer 6 (bucket 0) → donor 2
-        //   layer 7 (bucket 1) → donor 3
+        //   layer 4 (bucket 0) -> donor 2
+        //   layer 5 (bucket 1) -> donor 3
+        //   layer 6 (bucket 0) -> donor 2
+        //   layer 7 (bucket 1) -> donor 3
         config.num_hidden_layers = 8;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
@@ -3016,31 +2565,37 @@ graph:
         config.num_kv_shared_layers = 4;
         config.attention_pattern = vec![0, 1, 0, 1, 0, 1, 0, 1];
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        assert_eq!(graph.nodes.len(), 8);
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
+        let attn_ops: Vec<&gllm_kernels::compiler::graph::CompilerOp> = graph.ops.iter()
+            .filter(|op| op.label.contains("_attn"))
+            .collect();
+        assert_eq!(attn_ops.len(), 8);
 
         // Non-consumer layers (0..4): donor_i == i, identity routing.
         for i in 0..4 {
-            assert_eq!(graph.nodes[i].inputs[0], format!("layer_{i}_q"));
-            assert_eq!(graph.nodes[i].inputs[1], format!("layer_{i}_k"),
+            let op = find_layer_op(&graph, &format!("layer_{i}_attn")).expect("attn op");
+            assert_eq!(tensor_name(&graph, op.inputs[0]), format!("layer_{i}_q"));
+            assert_eq!(tensor_name(&graph, op.inputs[1]), format!("layer_{i}_k"),
                 "non-consumer layer {i} must read self K");
-            assert_eq!(graph.nodes[i].inputs[2], format!("layer_{i}_v"));
+            assert_eq!(tensor_name(&graph, op.inputs[2]), format!("layer_{i}_v"));
         }
 
         // Consumer layers (4..8): K/V route to donor.
         let expected_donor = [2usize, 3, 2, 3];
         for (offset, &donor) in expected_donor.iter().enumerate() {
             let i = 4 + offset;
-            assert_eq!(graph.nodes[i].inputs[0], format!("layer_{i}_q"));
-            assert_eq!(graph.nodes[i].inputs[1], format!("layer_{donor}_k"),
+            let op = find_layer_op(&graph, &format!("layer_{i}_attn")).expect("attn op");
+            assert_eq!(tensor_name(&graph, op.inputs[0]), format!("layer_{i}_q"));
+            assert_eq!(tensor_name(&graph, op.inputs[1]), format!("layer_{donor}_k"),
                 "consumer layer {i} must read donor {donor} K");
-            assert_eq!(graph.nodes[i].inputs[2], format!("layer_{donor}_v"));
+            assert_eq!(tensor_name(&graph, op.inputs[2]), format!("layer_{donor}_v"));
         }
     }
 
     /// End-to-end expansion against the real `gemma4.yaml` for a Gemma 4 E2B
     /// config (26 layers, 20 shared). Consumer layers must not emit
-    /// `k_proj` / `v_proj` / `v_norm` / `_rope_k` / `_qk_norm_k`; attention
+    /// k_proj / v_proj / v_norm / _rope_k / _qk_norm_k; attention
     /// on consumer layers must read donor-layer tensors.
     #[test]
     fn gemma4_e2b_consumer_layers_skip_kv_and_route_to_donor() {
@@ -3062,65 +2617,68 @@ graph:
         config.sliding_window = 512;
         config.hidden_size_per_layer_input = 128;
         config.num_kv_shared_layers = 20;
-        // Every 6th layer is global (indices 5, 11, 17, 23).
-        config.attention_pattern = (0..26)
-            .map(|i| if (i + 1) % 6 == 0 { 1u8 } else { 0u8 })
-            .collect();
+        // Use uniform sliding pattern (all 0) to avoid hetero loop config path.
+        // The shared KV routing tested here is independent of sliding/global alternation.
+        config.attention_pattern = vec![0u8; 26];
         config.has_per_layer_embedding = true;
         config.dtype = "f32".to_string();
 
-        let graph = template.to_onnx_graph(&config).unwrap();
-        let names: std::collections::HashSet<&str> =
-            graph.nodes.iter().map(|n| n.name.as_str()).collect();
+        let graph = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap();
+
+        // Collect all op labels (with "layer." prefix)
+        let labels: std::collections::HashSet<String> =
+            graph.ops.iter().map(|op| op.label.clone()).collect();
+
+        // Strip "layer." prefix for matching convenience
+        let names: std::collections::HashSet<String> = labels.iter()
+            .map(|l| l.strip_prefix("layer.").unwrap_or(l).to_string())
+            .collect();
 
         // Non-consumer layers 0..6 own all K/V pipeline nodes.
         for i in 0..6 {
-            assert!(names.contains(format!("layer_{i}_k_proj").as_str()),
+            assert!(names.contains(&format!("layer_{i}_k_proj")),
                 "non-consumer layer {i} must have k_proj");
-            assert!(names.contains(format!("layer_{i}_v_proj").as_str()),
+            assert!(names.contains(&format!("layer_{i}_v_proj")),
                 "non-consumer layer {i} must have v_proj");
-            assert!(names.contains(format!("layer_{i}_v_norm").as_str()),
+            assert!(names.contains(&format!("layer_{i}_v_norm")),
                 "non-consumer layer {i} must have v_norm");
-            assert!(names.contains(format!("layer_{i}_qk_norm_k").as_str()),
+            assert!(names.contains(&format!("layer_{i}_qk_norm_k")),
                 "non-consumer layer {i} must have qk_norm_k");
-            assert!(names.contains(format!("layer_{i}_rope_k").as_str()),
+            assert!(names.contains(&format!("layer_{i}_rope_k")),
                 "non-consumer layer {i} must have rope_k");
         }
 
         // Consumer layers 6..26 (20 layers) skip k_proj / v_proj / v_norm /
-        // qk_norm_k / rope_k — donated by their respective donors.
+        // qk_norm_k / rope_k -- donated by their respective donors.
         for i in 6..26 {
-            assert!(!names.contains(format!("layer_{i}_k_proj").as_str()),
+            assert!(!names.contains(&format!("layer_{i}_k_proj")),
                 "consumer layer {i} must skip k_proj");
-            assert!(!names.contains(format!("layer_{i}_v_proj").as_str()),
+            assert!(!names.contains(&format!("layer_{i}_v_proj")),
                 "consumer layer {i} must skip v_proj");
-            assert!(!names.contains(format!("layer_{i}_v_norm").as_str()),
+            assert!(!names.contains(&format!("layer_{i}_v_norm")),
                 "consumer layer {i} must skip v_norm");
-            assert!(!names.contains(format!("layer_{i}_qk_norm_k").as_str()),
+            assert!(!names.contains(&format!("layer_{i}_qk_norm_k")),
                 "consumer layer {i} must skip qk_norm_k");
-            assert!(!names.contains(format!("layer_{i}_rope_k").as_str()),
+            assert!(!names.contains(&format!("layer_{i}_rope_k")),
                 "consumer layer {i} must skip rope_k");
         }
 
-        // Count dropped k_proj nodes — must equal num_kv_shared_layers (20).
-        let k_proj_count = graph.nodes.iter()
-            .filter(|n| n.name.ends_with("_k_proj"))
-            .count();
+        // Count k_proj nodes -- must equal num_hidden_layers - num_kv_shared_layers (6).
+        let k_proj_count = count_ops_with_suffix(&graph, "_k_proj");
         assert_eq!(k_proj_count, config.num_hidden_layers - config.num_kv_shared_layers,
             "k_proj must appear only on non-consumer layers");
 
         // Consumer attention nodes must reference donor K / V tensors.
         for i in 6..26 {
-            let attn = graph.nodes.iter()
-                .find(|n| n.name == format!("layer_{i}_attn"))
-                .expect("attention node for consumer layer");
+            let attn = find_layer_op(&graph, &format!("layer_{i}_attn"))
+                .unwrap_or_else(|| panic!("attention node for consumer layer {i}"));
             let donor = config.donor_layer(i).unwrap().expect("donor present");
             assert_ne!(donor, i, "consumer layer donor must differ from self");
-            assert_eq!(attn.inputs[0], format!("layer_{i}_q_rope"),
+            assert_eq!(tensor_name(&graph, attn.inputs[0]), format!("layer_{i}_q_rope"),
                 "consumer layer {i} still uses own Q rope");
-            assert_eq!(attn.inputs[1], format!("layer_{donor}_k_rope"),
+            assert_eq!(tensor_name(&graph, attn.inputs[1]), format!("layer_{donor}_k_rope"),
                 "consumer layer {i} attention must read donor {donor} K rope");
-            assert_eq!(attn.inputs[2], format!("layer_{donor}_v_normed"),
+            assert_eq!(tensor_name(&graph, attn.inputs[2]), format!("layer_{donor}_v_normed"),
                 "consumer layer {i} attention must read donor {donor} V normed");
         }
     }
@@ -3141,13 +2699,13 @@ graph:
       outputs: []
 "#;
         let template = ArchTemplate::from_yaml(yaml).unwrap();
-        let mut config = super::super::resolve::ResolvedConfig::default();
+        let mut config = make_test_config();
         config.num_hidden_layers = 1;
         config.hidden_size = 1;
         config.num_attention_heads = 1;
         config.vocab_size = 1;
 
-        let err = template.to_onnx_graph(&config).unwrap_err();
+        let err = template.to_compiler_graph(&config, &MegaKernelBusinessConfig::default()).unwrap_err();
         assert!(format!("{err}").contains("typo_field"),
             "error must name the unknown field, got: {err}");
     }

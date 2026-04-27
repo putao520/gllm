@@ -264,13 +264,12 @@ mod tests {
         assert!(get_template("nonexistent-template-name").is_none());
     }
 
-    /// T45: USM Conformer YAML 解析 + to_onnx_graph 展开。
+    /// T45: USM Conformer YAML 解析 + to_compiler_graph 展开。
     /// 给定 mock config (num_layers=2), 验证节点总数与 DepthwiseConv1D 出现次数。
-    /// 不硬编码模板名 (若未来重命名, SCANNED_TEMPLATES 扫描自动跟进),
-    /// 直接基于注册表反查确认模板存在。
     #[test]
     fn builtin_usm_conformer_parses_and_expands() {
         use super::super::resolve::ResolvedConfig;
+        use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
 
         register_builtin_templates();
         let template = get_template("usm_conformer")
@@ -279,7 +278,6 @@ mod tests {
         assert!(template.config.contains_key("num_layers"));
         assert!(template.tensor_patterns.layer_prefix.is_some());
 
-        // Mock Conformer 配置: 2 层 Conformer, channels=512, heads=8, inter=2048
         let config = ResolvedConfig {
             num_hidden_layers: 2,
             hidden_size: 512,
@@ -287,50 +285,45 @@ mod tests {
             num_key_value_heads: 8,
             head_dim: 64,
             intermediate_size: Some(2048),
-            vocab_size: 1, // 音频编码器不涉及 vocab, 占位
+            vocab_size: 1,
             rope_theta: 10000.0,
             dtype: "f32".to_string(),
             ..Default::default()
         };
 
         let graph = template
-            .to_onnx_graph(&config)
-            .expect("to_onnx_graph 必须成功");
+            .to_compiler_graph(&config, &MegaKernelBusinessConfig::default())
+            .expect("to_compiler_graph 必须成功");
 
-        // 每个 Conformer block 展开为:
-        //   FF1: norm + matmul + silu + matmul + add  (5)
-        //   MHA: norm + q + k + v + mha + o + add    (7)
-        //   Conv: norm + pw1 + glu + dw + bn + act + pw2 + add (8)
-        //   FF2: norm + matmul + silu + matmul + add  (5)
-        //   Block-end: norm                           (1)
-        // 每层 26 个节点; 2 层 → 52, 加顶层 final_norm → 53
+        // 每个 Conformer block 展开为 26 ops; 2 层 → 52, 加顶层 1 + auto-added 6
+        // (embed_gather, final_norm, lm_head, argmax, store_token, check_stop) → 总计 59
         let expected_per_layer = 26;
-        let expected_total = expected_per_layer * config.num_hidden_layers + 1;
+        let auto_added = 6;
+        let expected_total = expected_per_layer * config.num_hidden_layers + 1 + auto_added;
         assert_eq!(
-            graph.nodes.len(),
+            graph.ops.len(),
             expected_total,
             "USM Conformer 展开节点数应为 {expected_total} (每层 {expected_per_layer} + 1 final_norm)",
         );
 
         // 每层必须包含 1 个 DepthwiseConv1D
-        let dw_nodes: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.op_type == "DepthwiseConv1D")
+        let dw_ops: Vec<_> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, gllm_kernels::compiler::graph::OpKind::DepthwiseConv1D { .. }))
             .collect();
         assert_eq!(
-            dw_nodes.len(),
+            dw_ops.len(),
             config.num_hidden_layers,
-            "每层 Conformer 必须包含 1 个 DepthwiseConv1D 节点, 共 {} 层",
+            "每层 Conformer 必须包含 1 个 DepthwiseConv1D, 共 {} 层",
             config.num_hidden_layers,
         );
 
-        // 验证 DepthwiseConv1D 节点命名与权重引用 (第 0 层)
-        let dw0 = &dw_nodes[0];
-        assert_eq!(dw0.name, "layer_0_conv_dw");
+        // 验证 DepthwiseConv1D 命名 (第 0 层, repeat ops get "layer." prefix)
+        let dw0 = &dw_ops[0];
+        assert_eq!(dw0.label, "layer.layer_0_conv_dw");
         assert_eq!(dw0.inputs.len(), 2, "DepthwiseConv1D 需要 2 个输入 (x, weight)");
+        let weight_name = graph.tensor(dw0.inputs[1]).map(|t| t.name.as_str()).unwrap_or("");
         assert_eq!(
-            dw0.inputs[1],
+            weight_name,
             "audio_tower.encoder.layers.0.conv_module.depthwise_conv.weight",
         );
     }
@@ -345,12 +338,13 @@ mod tests {
         );
     }
 
-    /// T44: SigLIP ViT YAML 解析 + to_onnx_graph 展开。
+    /// T44: SigLIP ViT YAML 解析 + to_compiler_graph 展开。
     /// 给定 mock config (num_layers=2, patch=14, image=28 → num_patches=4),
     /// 验证节点总数 / PatchEmbed / LearnedPos2D 节点存在 + 命名 + 权重引用。
     #[test]
     fn builtin_siglip_parses_and_expands() {
         use super::super::resolve::ResolvedConfig;
+        use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
         use std::collections::HashMap;
 
         register_builtin_templates();
@@ -362,8 +356,6 @@ mod tests {
         assert!(template.config.contains_key("image_size"));
         assert!(template.tensor_patterns.layer_prefix.is_some());
 
-        // Mock SigLIP 配置: 2 层 ViT, embed=128, heads=4, patch=14, image=28,
-        // in_channels=3 → num_patches = (28/14)^2 = 4
         let mut extra: HashMap<String, i64> = HashMap::new();
         extra.insert("patch_size".into(), 14);
         extra.insert("image_size".into(), 28);
@@ -376,7 +368,7 @@ mod tests {
             num_key_value_heads: 4,
             head_dim: 32,
             intermediate_size: Some(512),
-            vocab_size: 1, // 视觉 encoder 不涉及 vocab
+            vocab_size: 1,
             rope_theta: 10000.0,
             dtype: "f32".to_string(),
             extra,
@@ -384,45 +376,42 @@ mod tests {
         };
 
         let graph = template
-            .to_onnx_graph(&config)
-            .expect("to_onnx_graph 必须成功");
+            .to_compiler_graph(&config, &MegaKernelBusinessConfig::default())
+            .expect("to_compiler_graph 必须成功");
 
-        // 每层 ViT block 展开:
-        //   attn_norm + q + k + v + attn + o + attn_residual = 7
-        //   ffn_norm + fc1 + gelu + fc2 + ffn_residual       = 5
-        // 每层 12 个节点, 2 层 → 24,
-        // 顶层: patch_embed + pos_embed + final_norm        = 3
-        // 总计 24 + 3 = 27
+        // 每层 12 ops, 2 层 → 24, 顶层 3 + auto-added 6 (embed_gather, final_norm, lm_head,
+        // argmax, store_token, check_stop) → 总计 33
         let expected_per_layer = 12;
         let expected_top = 3;
-        let expected_total = expected_per_layer * config.num_hidden_layers + expected_top;
+        let auto_added = 6;
+        let expected_total = expected_per_layer * config.num_hidden_layers + expected_top + auto_added;
         assert_eq!(
-            graph.nodes.len(),
+            graph.ops.len(),
             expected_total,
             "SigLIP 展开节点数应为 {expected_total} \
              (每层 {expected_per_layer} + 顶层 {expected_top})",
         );
 
-        // PatchEmbed 节点存在 + 命名 + 输入/权重引用
-        let patch_nodes: Vec<_> = graph.nodes.iter()
-            .filter(|n| n.op_type == "PatchEmbed")
+        let patch_ops: Vec<_> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, gllm_kernels::compiler::graph::OpKind::PatchEmbed { .. }))
             .collect();
-        assert_eq!(patch_nodes.len(), 1, "SigLIP 必须有且仅有 1 个 PatchEmbed 节点");
-        let patch = patch_nodes[0];
-        assert_eq!(patch.name, "patch_embed");
+        assert_eq!(patch_ops.len(), 1, "SigLIP 必须有且仅有 1 个 PatchEmbed");
+        let patch = patch_ops[0];
+        assert_eq!(patch.label, "patch_embed");
         assert_eq!(patch.inputs.len(), 2, "PatchEmbed 需要 2 个输入 (image, kernel)");
-        assert_eq!(patch.inputs[1], "vision_tower.patch_embed.proj.weight");
+        let kernel_name = graph.tensor(patch.inputs[1]).map(|t| t.name.as_str()).unwrap_or("");
+        assert_eq!(kernel_name, "vision_tower.patch_embed.proj.weight");
 
-        // LearnedPos2D 节点存在 + 命名 + 权重引用
-        let pos_nodes: Vec<_> = graph.nodes.iter()
-            .filter(|n| n.op_type == "LearnedPos2D")
+        let pos_ops: Vec<_> = graph.ops.iter()
+            .filter(|op| matches!(op.kind, gllm_kernels::compiler::graph::OpKind::LearnedPos2D { .. }))
             .collect();
-        assert_eq!(pos_nodes.len(), 1, "SigLIP 必须有且仅有 1 个 LearnedPos2D 节点");
-        let pos = pos_nodes[0];
-        assert_eq!(pos.name, "pos_embed");
+        assert_eq!(pos_ops.len(), 1, "SigLIP 必须有且仅有 1 个 LearnedPos2D");
+        let pos = pos_ops[0];
+        assert_eq!(pos.label, "pos_embed");
         assert_eq!(pos.inputs.len(), 2, "LearnedPos2D 需要 2 个输入 (patches, pos_table)");
+        let pos_name = graph.tensor(pos.inputs[1]).map(|t| t.name.as_str()).unwrap_or("");
         assert_eq!(
-            pos.inputs[1],
+            pos_name,
             "vision_tower.embeddings.position_embedding.weight",
         );
     }

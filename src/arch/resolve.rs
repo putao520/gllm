@@ -401,6 +401,12 @@ pub fn substitute_placeholders(template: &str, config: &ResolvedConfig) -> Strin
     // 字符串占位符
     result = result.replace("${dtype}", &config.dtype);
 
+    // Extra KV pairs (e.g., patch_size, image_size, in_channels from vision/audio models)
+    for (key, value) in &config.extra {
+        let placeholder = format!("${{{}}}", key);
+        result = result.replace(&placeholder, &value.to_string());
+    }
+
     result
 }
 
