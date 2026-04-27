@@ -2473,12 +2473,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Some(ref mega) = self.mega_kernel {
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
+            // SG hook_ctx_ptr: NULL when no SG registered, non-NULL with SgSharedMemory
+            let sg_hook_ptr = std::ptr::null(); // TODO: wire to SgSharedMemory when SG is registered
             let output_tokens = mega.generate_single_sequence(
                 &prompt_tokens,
                 max_tokens,
                 temperature,
                 top_k,
                 top_p,
+                sg_hook_ptr,
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel generate failed: {}", e),
             )))?;

@@ -282,6 +282,7 @@ impl MegaKernelExecutor {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        hook_ctx_ptr: *const u8,
     ) -> Result<Vec<u32>, MegaKernelError> {
         let mega = &self.mega_compiled;
         let prompt_len = prompt_tokens.len();
@@ -353,7 +354,7 @@ impl MegaKernelExecutor {
                 max_new_tokens,
                 self.eos_token_id as usize,
                 0,  // output_mode_selector: Generate
-                std::ptr::null(),
+                hook_ctx_ptr,  // hook_ctx_ptr: SG shared memory (NULL = disabled)
                 std::ptr::null_mut(),
                 0,  // session_position: new session
                 std::ptr::null(),  // fused_hidden_ptr: no multimodal

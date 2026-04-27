@@ -418,6 +418,29 @@ impl ArchTemplate {
                                 )?;
                             }
                         }
+
+                        // SgDetect: insert at the detection layer after all layer ops
+                        if let Some(ref sg) = business_config.semantic_gatekeeper {
+                            if i == sg.detect_layer {
+                                let layer_out = tensor_map.get("hidden_0")
+                                    .copied()
+                                    .ok_or_else(|| TemplateError::Invalid(
+                                        "SgDetect: no hidden_0 tensor in layer loop".into()
+                                    ))?;
+                                let detected = g.add_tensor(
+                                    &format!("sg_detected_L{}", i),
+                                    vec![s.clone(), SymDim::Concrete(hidden)],
+                                    dt,
+                                );
+                                g.add_op(
+                                    OpKind::SgDetect { detect_offset: sg.detect_offset },
+                                    vec![layer_out],
+                                    vec![detected],
+                                    &format!("sg_detect_L{}", i),
+                                );
+                                tensor_map.insert("hidden_0".to_string(), detected);
+                            }
+                        }
                     }
                 }
             }
