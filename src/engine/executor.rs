@@ -823,6 +823,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     None
                 },
+                // SG integration: disabled by default. SG is a runtime feature that
+                // uses hook_ctx_ptr shared memory, not a compile-time graph change.
+                // See SPEC/SEMANTIC-GATEKEEPER.md §7.4 for the correct architecture.
+                semantic_gatekeeper: None,
                 ..MegaKernelBusinessConfig::default()
             };
 

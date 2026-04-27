@@ -419,7 +419,7 @@ impl ArchTemplate {
                             }
                         }
 
-                        // SgDetect: insert at the detection layer after all layer ops
+                        // SgDetect: side-channel copy of hidden state to scratchpad at detection layer.
                         if let Some(ref sg) = business_config.semantic_gatekeeper {
                             if i == sg.detect_layer {
                                 let layer_out = tensor_map.get("hidden_0")
