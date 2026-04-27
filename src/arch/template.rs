@@ -543,6 +543,31 @@ impl ArchTemplate {
             .copied()
             .ok_or_else(|| TemplateError::Invalid("no hidden_0 tensor found after layer expansion".into()))?;
 
+        // ── Layer loop config for mega-kernel compilation ──
+        // The JIT compiler needs to know weight stride and activation aliasing
+        // to emit LoopBegin/LoopEnd with correct weight pointer advancement.
+        {
+            let num_layers = config.num_hidden_layers;
+            let is_hetero = config.attention_pattern.iter().any(|&p| p != config.attention_pattern.first().copied().unwrap_or(0));
+            let elem_bytes = dt.size_bytes();
+            let embed_weight_bytes = vocab_size * hidden * elem_bytes;
+            let default_dims = LayerDims::for_layer(config, 0);
+
+            if is_hetero {
+                // Heterogeneous: compute 4-type stride layout (sliding/full × small/large FFN)
+                Self::set_hetero_loop_config(
+                    &mut g, config, business_config, &default_dims,
+                    embed_weight_bytes, elem_bytes, post_embed, final_hidden,
+                )?;
+            } else {
+                // Homogeneous: single stride for all layers
+                Self::set_homogeneous_loop_config(
+                    &mut g, config, &default_dims,
+                    embed_weight_bytes, elem_bytes, post_embed, final_hidden,
+                )?;
+            }
+        }
+
         // ── Final norm ──
         let final_norm_w = g.add_tensor_concrete("final_norm_w", &[hidden], dt);
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -647,6 +672,14 @@ impl ArchTemplate {
             .collect::<Result<Vec<_>, _>>()?;
 
         let label = substitute(&node_def.name)?;
+        // Layer ops inside repeat blocks get "layer." prefix for mega-kernel layer loop detection.
+        // YAML uses "layer_${i}_xxx" → becomes "layer.{i}_xxx" to match
+        // emit_fusion_groups' starts_with("layer.") check.
+        let label = if loop_var.is_some() {
+            format!("layer.{}", label)
+        } else {
+            label
+        };
 
         let input_ids: Vec<gllm_kernels::compiler::graph::TensorId> = input_names.iter()
             .map(|name| {
@@ -849,7 +882,7 @@ impl ArchTemplate {
         tensor_map.insert(q_out_name.clone(), q_out_id);
         g.add_op(
             OpKind::RoPE { num_heads: dims.num_heads, head_dim: dims.head_dim, theta: theta as f64, partial, rope_scaling: None },
-            vec![q_in_id], vec![q_out_id], &format!("layer_{layer_idx}_rope_q"),
+            vec![q_in_id], vec![q_out_id], &format!("layer.layer_{layer_idx}_rope_q"),
         );
 
         // K-RoPE: skip on shared KV consumer layers
@@ -863,7 +896,7 @@ impl ArchTemplate {
         tensor_map.insert(k_out_name.clone(), k_out_id);
         g.add_op(
             OpKind::RoPE { num_heads: dims.num_kv_heads, head_dim: dims.head_dim, theta: theta as f64, partial, rope_scaling: None },
-            vec![k_in_id], vec![k_out_id], &format!("layer_{layer_idx}_rope_k"),
+            vec![k_in_id], vec![k_out_id], &format!("layer.layer_{layer_idx}_rope_k"),
         );
 
         Ok(())
@@ -899,7 +932,7 @@ impl ArchTemplate {
         tensor_map.insert(q_out_name.clone(), q_out_id);
         g.add_op(
             OpKind::QkNorm { head_dim: dims.head_dim },
-            vec![q_in_id], vec![q_out_id], &format!("layer_{layer_idx}_qk_norm_q"),
+            vec![q_in_id], vec![q_out_id], &format!("layer.layer_{layer_idx}_qk_norm_q"),
         );
 
         // K-QkNorm: skip on shared KV consumer layers
@@ -913,7 +946,7 @@ impl ArchTemplate {
         tensor_map.insert(k_out_name.clone(), k_out_id);
         g.add_op(
             OpKind::QkNorm { head_dim: dims.head_dim },
-            vec![k_in_id], vec![k_out_id], &format!("layer_{layer_idx}_qk_norm_k"),
+            vec![k_in_id], vec![k_out_id], &format!("layer.layer_{layer_idx}_qk_norm_k"),
         );
 
         Ok(())
@@ -973,7 +1006,7 @@ impl ArchTemplate {
                 start: layer_idx * dim_per_layer,
                 slice_dim: dim_per_layer,
             },
-            vec![ple_full_id], vec![slice_out_id], &format!("layer_{layer_idx}_ple_slice"),
+            vec![ple_full_id], vec![slice_out_id], &format!("layer.layer_{layer_idx}_ple_slice"),
         );
 
         // Node 2: PerLayerEmbed (5 inputs)
@@ -1001,7 +1034,7 @@ impl ArchTemplate {
             },
             vec![hidden_in_id, main_embed_id, slice_out_id, proj_w_id, post_mlp_w_id],
             vec![hidden_out_id],
-            &format!("layer_{layer_idx}_ple"),
+            &format!("layer.layer_{layer_idx}_ple"),
         );
 
         Ok(())
@@ -1582,6 +1615,165 @@ impl ArchTemplate {
             .parse()
             .map_err(|_| TemplateError::Invalid(format!("Invalid repeat count: {}", repeat_expr)))
     }
+
+    /// Set homogeneous layer loop config on CompilerGraph.
+    ///
+    /// Computes weight stride from layer dimensions, identifies weight input indices,
+    /// and sets activation alias for in-place residual updates.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn set_homogeneous_loop_config(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        config: &super::resolve::ResolvedConfig,
+        dims: &LayerDims,
+        embed_weight_bytes: usize,
+        elem_bytes: usize,
+        activation_input: gllm_kernels::compiler::graph::TensorId,
+        activation_output: gllm_kernels::compiler::graph::TensorId,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::{LayerLoopConfig, WeightLayout};
+
+        let h = dims.hidden;
+        let stride = compute_layer_stride(
+            h, dims.q_dim, dims.kv_dim, dims.q_dim,
+            dims.head_dim, dims.intermediate, elem_bytes,
+        );
+
+        // Find per-layer weight input indices: scan graph.inputs for tensors
+        // whose names match layer 0 weight patterns.
+        let layer_weight_indices: Vec<usize> = find_layer_weight_indices(g, 0);
+
+        g.layer_loop_config = Some(LayerLoopConfig {
+            num_layers: config.num_hidden_layers,
+            weight_stride: stride,
+            layer_blob_base_offset: embed_weight_bytes,
+            layer_weight_input_indices: layer_weight_indices,
+            activation_alias: Some((activation_input, activation_output)),
+        });
+
+        // Custom weight layout: per-layer weights use relative offsets,
+        // global weights use absolute offsets.
+        set_custom_weight_layout_homogeneous(
+            g, dims, embed_weight_bytes, elem_bytes,
+        );
+
+        Ok(())
+    }
+
+    /// Set heterogeneous layer loop config on CompilerGraph.
+    ///
+    /// Computes 4-type stride layout for models with alternating attention types
+    /// (e.g., Gemma-4 E2B: 7 segments × [4 sliding + 1 full]).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn set_hetero_loop_config(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        config: &super::resolve::ResolvedConfig,
+        _business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+        default_dims: &LayerDims,
+        embed_weight_bytes: usize,
+        elem_bytes: usize,
+        activation_input: gllm_kernels::compiler::graph::TensorId,
+        activation_output: gllm_kernels::compiler::graph::TensorId,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::HeteroLayerLoopConfig;
+
+        let pat = &config.attention_pattern;
+        let h = config.hidden_size;
+        let num_heads = config.num_attention_heads;
+        let num_kv_heads = config.num_key_value_heads;
+        let head_dim = config.head_dim;
+        let global_head_dim = if config.global_head_dim > 0 { config.global_head_dim } else { head_dim };
+        let default_intermediate = config.intermediate_size.unwrap_or(h * 4);
+
+        // Derive segment structure from attention_pattern.
+        // Pattern is like [0,0,0,0,1, 0,0,0,0,1, ...] where 0=sliding, 1=full.
+        let full_indices: Vec<usize> = pat.iter().enumerate()
+            .filter(|&(_, &p)| p == 1)
+            .map(|(i, _)| i)
+            .collect();
+        if full_indices.is_empty() {
+            // No full attention layers found — treat as homogeneous
+            return Self::set_homogeneous_loop_config(
+                g, config, default_dims, embed_weight_bytes, elem_bytes,
+                activation_input, activation_output,
+            );
+        }
+
+        let sliding_per_segment = full_indices[0];
+        let num_segments = full_indices.len();
+        let total_expected = num_segments * (sliding_per_segment + 1);
+        if total_expected != config.num_hidden_layers {
+            return Err(TemplateError::Invalid(format!(
+                "hetero pattern inconsistent: {} segments × {} + 1 = {} but num_layers = {}",
+                num_segments, sliding_per_segment, total_expected, config.num_hidden_layers,
+            )));
+        }
+
+        // Detect FFN size transition from attention_pattern position
+        let sliding_head_dim = head_dim;
+        let full_head_dim = global_head_dim;
+        let sliding_q_dim = num_heads * sliding_head_dim;
+        let full_q_dim = num_heads * full_head_dim;
+        let sliding_kv_dim = num_kv_heads * sliding_head_dim;
+        let full_kv_dim = num_kv_heads * full_head_dim;
+        // Assume uniform intermediate for now (can be extended to detect per-segment sizes)
+        let small_intermediate = default_intermediate;
+        let large_intermediate = default_intermediate;
+        let large_ffn_start_segment = num_segments; // no large FFN distinction by default
+
+        let ss_stride = compute_layer_stride(
+            h, sliding_q_dim, sliding_kv_dim, sliding_q_dim,
+            sliding_head_dim, small_intermediate, elem_bytes,
+        );
+        let fs_stride = compute_layer_stride(
+            h, full_q_dim, full_kv_dim, full_q_dim,
+            full_head_dim, small_intermediate, elem_bytes,
+        );
+        let sl_stride = compute_layer_stride(
+            h, sliding_q_dim, sliding_kv_dim, sliding_q_dim,
+            sliding_head_dim, large_intermediate, elem_bytes,
+        );
+        let fl_stride = compute_layer_stride(
+            h, full_q_dim, full_kv_dim, full_q_dim,
+            full_head_dim, large_intermediate, elem_bytes,
+        );
+
+        let small_seg_stride = sliding_per_segment * ss_stride + fs_stride;
+        let large_seg_stride = sliding_per_segment * sl_stride + fl_stride;
+
+        // Weight input indices: for now, use layer 0's indices for all 4 types.
+        // The JIT codegen treats per-type weights as having the same relative offset
+        // structure (just different strides).
+        let layer_weight_indices = find_layer_weight_indices(g, 0);
+
+        g.hetero_layer_loop_config = Some(HeteroLayerLoopConfig {
+            num_segments,
+            sliding_per_segment,
+            sliding_small_stride: ss_stride,
+            full_small_stride: fs_stride,
+            sliding_large_stride: sl_stride,
+            full_large_stride: fl_stride,
+            small_segment_stride: small_seg_stride,
+            large_segment_stride: large_seg_stride,
+            large_ffn_start_segment,
+            layer_blob_base_offset: embed_weight_bytes,
+            sliding_small_weight_input_indices: layer_weight_indices.clone(),
+            full_small_weight_input_indices: layer_weight_indices.clone(),
+            sliding_large_weight_input_indices: layer_weight_indices.clone(),
+            full_large_weight_input_indices: layer_weight_indices,
+            activation_aliases: vec![
+                (activation_input, activation_output),
+            ],
+        });
+
+        // Custom weight layout with per-type relative offsets
+        set_custom_weight_layout_heterogeneous(
+            g, config, embed_weight_bytes, elem_bytes,
+            sliding_head_dim, full_head_dim, num_heads, num_kv_heads,
+            small_intermediate, large_intermediate,
+        );
+
+        Ok(())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1589,6 +1781,285 @@ impl ArchTemplate {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Per-layer dimension context for heterogeneous models.
+// ═══════════════════════════════════════════════════════════════════════
+// Layer loop config helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Compute per-layer weight byte stride from dimension parameters.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn compute_layer_stride(
+    hidden: usize,
+    q_dim: usize,
+    kv_dim: usize,
+    o_in_dim: usize,
+    head_dim: usize,
+    intermediate: usize,
+    elem_bytes: usize,
+) -> usize {
+    let attn_norm = hidden * elem_bytes;
+    let w_q = q_dim * hidden * elem_bytes;
+    let w_k = kv_dim * hidden * elem_bytes;
+    let w_v = kv_dim * hidden * elem_bytes;
+    let w_o = hidden * o_in_dim * elem_bytes;
+    let w_q_norm = head_dim * elem_bytes;
+    let w_k_norm = head_dim * elem_bytes;
+    let ffn_norm = hidden * elem_bytes;
+    let w_gate = intermediate * hidden * elem_bytes;
+    let w_up = intermediate * hidden * elem_bytes;
+    let w_down = hidden * intermediate * elem_bytes;
+    attn_norm + w_q + w_k + w_v + w_o + w_q_norm + w_k_norm + ffn_norm + w_gate + w_up + w_down
+}
+
+/// Find graph input indices that correspond to per-layer weights for the given layer index.
+/// Matches tensor names against "model.layers.{layer_idx}.*" pattern.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn find_layer_weight_indices(
+    g: &gllm_kernels::compiler::CompilerGraph,
+    layer_idx: usize,
+) -> Vec<usize> {
+    let prefix = format!("model.layers.{}.", layer_idx);
+    g.inputs.iter().enumerate()
+        .filter(|(_, &tid)| {
+            g.tensors.get(tid.0 as usize)
+                .map(|t| t.name.starts_with(&prefix))
+                .unwrap_or(false)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Set custom weight layout for homogeneous models.
+/// Per-layer weights use relative offsets; global weights use absolute offsets.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn set_custom_weight_layout_homogeneous(
+    g: &mut gllm_kernels::compiler::CompilerGraph,
+    dims: &LayerDims,
+    embed_weight_bytes: usize,
+    elem_bytes: usize,
+) {
+    use gllm_kernels::compiler::graph::WeightLayout;
+
+    let h = dims.hidden;
+    let num_layers = {
+        // Count layer ops to get actual number of layers
+        g.ops.iter().filter(|op| op.label.starts_with("layer_")).count()
+    };
+    if num_layers == 0 {
+        return;
+    }
+
+    // Compute relative offsets within one layer
+    let o0 = 0;
+    let o1 = o0 + h * elem_bytes;
+    let o2 = o1 + dims.q_dim * h * elem_bytes;
+    let o3 = o2 + dims.kv_dim * h * elem_bytes;
+    let o4 = o3 + dims.kv_dim * h * elem_bytes;
+    let o5 = o4 + h * dims.q_dim * elem_bytes;
+    let o6 = o5 + dims.head_dim * elem_bytes;
+    let o7 = o6 + dims.head_dim * elem_bytes;
+    let o8 = o7 + h * elem_bytes;
+    let o9 = o8 + dims.intermediate * h * elem_bytes;
+    let o10 = o9 + dims.intermediate * h * elem_bytes;
+
+    let layer_stride = compute_layer_stride(
+        h, dims.q_dim, dims.kv_dim, dims.q_dim,
+        dims.head_dim, dims.intermediate, elem_bytes,
+    );
+    let final_norm_off = embed_weight_bytes + num_layers * layer_stride;
+    let lm_head_off = final_norm_off + h * elem_bytes;
+    let total = lm_head_off + dims.hidden * /* vocab */ g.tensors.iter()
+        .find(|t| t.name == "embed_w")
+        .map(|t| {
+            if t.shape.len() >= 1 {
+                match &t.shape[0] {
+                    gllm_kernels::compiler::graph::SymDim::Concrete(v) => *v,
+                    _ => 0,
+                }
+            } else { 0 }
+        })
+        .unwrap_or(0) * elem_bytes;
+
+    // Collect all weight tensor IDs with their offsets
+    let mut offsets: Vec<(gllm_kernels::compiler::graph::TensorId, usize)> = Vec::new();
+
+    // Global weights (absolute offsets)
+    for (i, &tid) in g.inputs.iter().enumerate() {
+        if let Some(t) = g.tensors.get(tid.0 as usize) {
+            let name = &t.name;
+            if name == "embed_w" {
+                offsets.push((tid, 0));
+            } else if name == "final_norm_w" {
+                offsets.push((tid, final_norm_off));
+            } else if name == "lm_head_w" {
+                offsets.push((tid, lm_head_off));
+            }
+        }
+    }
+
+    // Per-layer weights (relative offsets from layer base)
+    // Use layer 0's weight tensors as the template
+    let prefix = "model.layers.0.";
+    let layer_weight_offsets: Vec<(gllm_kernels::compiler::graph::TensorId, usize)> = g.inputs.iter()
+        .filter(|&&tid| {
+            g.tensors.get(tid.0 as usize)
+                .map(|t| t.name.starts_with(prefix))
+                .unwrap_or(false)
+        })
+        .map(|&tid| {
+            let t = g.tensors.get(tid.0 as usize).unwrap();
+            let name = &t.name;
+            let rel_off = if name.contains("input_layernorm") { o0 }
+                else if name.contains("q_proj") { o1 }
+                else if name.contains("k_proj") { o2 }
+                else if name.contains("v_proj") { o3 }
+                else if name.contains("o_proj") { o4 }
+                else if name.contains("q_norm") { o5 }
+                else if name.contains("k_norm") { o6 }
+                else if name.contains("post_attention_layernorm") || name.contains("pre_feedforward_layernorm") { o7 }
+                else if name.contains("gate_proj") { o8 }
+                else if name.contains("up_proj") { o9 }
+                else if name.contains("down_proj") { o10 }
+                else { 0 }; // unknown weights default to offset 0
+            (tid, rel_off)
+        })
+        .collect();
+
+    offsets.extend(layer_weight_offsets);
+
+    g.set_custom_weight_layout(WeightLayout {
+        offsets,
+        total_bytes: total,
+    });
+}
+
+/// Set custom weight layout for heterogeneous models.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn set_custom_weight_layout_heterogeneous(
+    g: &mut gllm_kernels::compiler::CompilerGraph,
+    config: &super::resolve::ResolvedConfig,
+    embed_weight_bytes: usize,
+    elem_bytes: usize,
+    sliding_head_dim: usize,
+    full_head_dim: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    small_intermediate: usize,
+    large_intermediate: usize,
+) {
+    use gllm_kernels::compiler::graph::WeightLayout;
+
+    let h = config.hidden_size;
+    let vocab = config.vocab_size;
+    let num_layers = config.num_hidden_layers;
+
+    let sliding_q_dim = num_heads * sliding_head_dim;
+    let full_q_dim = num_heads * full_head_dim;
+    let sliding_kv_dim = num_kv_heads * sliding_head_dim;
+    let full_kv_dim = num_kv_heads * full_head_dim;
+
+    // Compute per-type offsets and strides
+    let ss_stride = compute_layer_stride(h, sliding_q_dim, sliding_kv_dim, sliding_q_dim, sliding_head_dim, small_intermediate, elem_bytes);
+    let fs_stride = compute_layer_stride(h, full_q_dim, full_kv_dim, full_q_dim, full_head_dim, small_intermediate, elem_bytes);
+    let sl_stride = compute_layer_stride(h, sliding_q_dim, sliding_kv_dim, sliding_q_dim, sliding_head_dim, large_intermediate, elem_bytes);
+    let fl_stride = compute_layer_stride(h, full_q_dim, full_kv_dim, full_q_dim, full_head_dim, large_intermediate, elem_bytes);
+
+    let pat = &config.attention_pattern;
+    let full_indices: Vec<usize> = pat.iter().enumerate()
+        .filter(|&(_, &p)| p == 1).map(|(i, _)| i).collect();
+    let sliding_per_segment = full_indices.get(0).copied().unwrap_or(4);
+    let num_segments = full_indices.len().max(1);
+    let small_seg_stride = sliding_per_segment * ss_stride + fs_stride;
+    let large_seg_stride = sliding_per_segment * sl_stride + fl_stride;
+    let large_ffn_start_segment = num_segments;
+    let num_small_segs = large_ffn_start_segment;
+    let num_large_segs = num_segments - num_small_segs;
+    let total_layers_bytes = num_small_segs * small_seg_stride + num_large_segs * large_seg_stride;
+
+    let final_norm_off = embed_weight_bytes + total_layers_bytes;
+    let lm_head_off = final_norm_off + h * elem_bytes;
+    let total_bytes = lm_head_off + vocab * h * elem_bytes;
+
+    // For the template-based graph, all per-layer weights use the same relative offset
+    // structure. The stride difference is captured in the HeteroLayerLoopConfig.
+    // Here we just set the template offsets (using layer 0 as reference).
+    let prefix = "model.layers.0.";
+    let default_dims = LayerDims::for_layer(config, 0);
+    let rel_offsets = compute_type_offsets_array(&default_dims, elem_bytes);
+
+    let mut offsets: Vec<(gllm_kernels::compiler::graph::TensorId, usize)> = Vec::new();
+
+    // Global weights
+    for &tid in &g.inputs {
+        if let Some(t) = g.tensors.get(tid.0 as usize) {
+            match t.name.as_str() {
+                "embed_w" => offsets.push((tid, 0)),
+                "final_norm_w" => offsets.push((tid, final_norm_off)),
+                "lm_head_w" => offsets.push((tid, lm_head_off)),
+                _ => {}
+            }
+        }
+    }
+
+    // Per-layer weights (relative offsets from layer base)
+    for &tid in &g.inputs {
+        if let Some(t) = g.tensors.get(tid.0 as usize) {
+            if t.name.starts_with(prefix) {
+                let rel_off = map_weight_name_to_offset(&t.name, &rel_offsets);
+                offsets.push((tid, rel_off));
+            }
+        }
+    }
+
+    g.set_custom_weight_layout(WeightLayout {
+        offsets,
+        total_bytes,
+    });
+}
+
+/// Compute per-type relative weight offsets array [attn_norm, w_q, w_k, w_v, w_o, w_q_norm, w_k_norm, ffn_norm, w_gate, w_up, w_down].
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn compute_type_offsets_array(dims: &LayerDims, elem_bytes: usize) -> [usize; 11] {
+    let h = dims.hidden;
+    let o0 = 0;
+    let o1 = o0 + h * elem_bytes;
+    let o2 = o1 + dims.q_dim * h * elem_bytes;
+    let o3 = o2 + dims.kv_dim * h * elem_bytes;
+    let o4 = o3 + dims.kv_dim * h * elem_bytes;
+    let o5 = o4 + h * dims.q_dim * elem_bytes;
+    let o6 = o5 + dims.head_dim * elem_bytes;
+    let o7 = o6 + dims.head_dim * elem_bytes;
+    let o8 = o7 + h * elem_bytes;
+    let o9 = o8 + dims.intermediate * h * elem_bytes;
+    let o10 = o9 + dims.intermediate * h * elem_bytes;
+    [o0, o1, o2, o3, o4, o5, o6, o7, o8, o9, o10]
+}
+
+/// Map a weight tensor name to its relative offset within the per-type offsets array.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn map_weight_name_to_offset(name: &str, offsets: &[usize; 11]) -> usize {
+    // Strip "model.layers.X." prefix to get the relative part
+    let parts: Vec<&str> = name.splitn(4, '.').collect();
+    if parts.len() < 4 {
+        return 0;
+    }
+    // parts = ["model", "layers", "0", "self_attn.q_proj.weight"]
+    let relative = parts[3];
+    let idx = if relative.contains("input_layernorm") { 0 }
+        else if relative.contains("q_proj") { 1 }
+        else if relative.contains("k_proj") { 2 }
+        else if relative.contains("v_proj") { 3 }
+        else if relative.contains("o_proj") { 4 }
+        else if relative.contains("q_norm") { 5 }
+        else if relative.contains("k_norm") { 6 }
+        else if relative.contains("post_attention_layernorm") || relative.contains("pre_feedforward_layernorm") { 7 }
+        else if relative.contains("gate_proj") { 8 }
+        else if relative.contains("up_proj") { 9 }
+        else if relative.contains("down_proj") { 10 }
+        else { 0 };
+    offsets[idx]
+}
+
+/// Per-layer dimension context for CompilerGraph construction.
 ///
 /// For homogeneous models, all layers share the same dimensions.
 /// For heterogeneous models (Gemma-4 E2B), different layer templates have
