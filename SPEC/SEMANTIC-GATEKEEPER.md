@@ -511,6 +511,90 @@ impl LayerCallback for SemanticGatekeeperCallback {
 - 高于 RAG Inject（80），因 SG 是精细化层级注入，RAG 是粗粒度 Prompt 融合，两者并存时 SG 先执行
 - 低于 Prefetch（100），因 Prefetch 是内存调度，与 SG 语义正交
 
+### 7.4 Mega-Kernel 路径集成 (ARCH-RUST-IS-CODEGEN 合规)
+
+> **铁律**: mega-kernel 路径中 Rust 不参与推理循环。SG 的路由/检索/注入
+> 全部编译为 JIT 机器码，通过 `hook_ctx_ptr` 共享内存通信。
+
+#### 7.4.1 架构差异
+
+| 路径 | SG 实现 | 通信机制 |
+|------|---------|---------|
+| **batch_forward_gpu_pure** (非 mega-kernel) | Rust `LayerCallback::pre_node()` | Rust `CallbackChain::dispatch_pre_node()` |
+| **mega-kernel generate_single_sequence** | JIT 内嵌 `SgDetect` + `SgInject` OpKind | `hook_ctx_ptr` 共享内存 |
+
+非 mega-kernel 路径中，executor 的 `run_batch_forward()` 将 `SemanticGatekeeperCallbackShim` 注册到 `CallbackChain`，JIT 层循环通过 FFI 回调到 Rust 的 `dispatch_pre_node()`。
+
+Mega-kernel 路径中，JIT 编译期根据 `MegaKernelBusinessConfig.semantic_gatekeeper` 配置，在 CompilerGraph 中插入 `SgDetect`/`SgInject` OpKind，这些 OpKind 被 JIT codegen 编译为直接操作共享内存的机器码 — 无 Rust 回调。
+
+#### 7.4.2 共享内存布局 (hook_ctx_ptr)
+
+`hook_ctx_ptr`（ABI arg 15）指向以下结构体，由 Rust 侧在每次 `generate_single_sequence` 调用前填充：
+
+```rust
+#[repr(C)]
+pub struct SgSharedMemory {
+    /// SG 控制标志
+    /// bit 0: sg_enabled (1=激活, 0=不注入, SgDetect/SgInject 编译为 NOP)
+    /// bit 1-31: reserved
+    pub control: u32,
+    /// 当前检测层的检测偏移 (由 Rust 侧 KnowledgeProvider 写入)
+    pub knowledge_offset: u32,
+    /// 知识向量维度 (= hidden_size)
+    pub knowledge_dim: u32,
+    /// 知识置信度 (IEEE 754 f32 位模式, 0.0 表示无注入)
+    pub confidence: u32,
+    /// 检测层提取的 hidden state (由 JIT SgDetect 写入, Rust 侧读)
+    pub detect_hidden: [f32; 0], // 动态长度 = hidden_size
+    /// 知识残差向量 (由 Rust 侧 KnowledgeProvider 写入, JIT SgInject 读取)
+    pub knowledge_vector: [f32; 0], // 动态长度 = hidden_size
+}
+```
+
+#### 7.4.3 Mega-Kernel SG 数据流
+
+```
+每次 generate_single_sequence 调用:
+
+1. Rust 侧 (generate 前准备):
+   a. Client 调用 register_semantic_gatekeeper() → 设置 sg_config
+   b. Executor.generate_with_sampling() 准备 SgSharedMemory:
+      - sg_enabled = 1
+      - knowledge_dim = hidden_size
+      - 分配 detect_hidden + knowledge_vector 缓冲
+
+2. Mega-Kernel JIT 层循环 (每层):
+   a. [if SgDetect layer] SgDetect OpKind:
+      - 从当前 activation 提取最后 token hidden → 写入 detect_hidden
+      - release 内存序确保 Rust 可见
+   b. 层循环末尾检查:
+      - CMP sg_shared->control, 0 → JE .skip_sg (零开销快速路径)
+
+3. Mega-Kernel generate 循环 (每 decode step):
+   a. 每次 generate loop 迭代开始:
+      - Rust 通过 hook_ctx_ptr 读 detect_hidden
+      - KnowledgeProvider.retrieve() 生成 knowledge_vector
+      - 写入 knowledge_vector + confidence 到 SgSharedMemory
+   b. 下一层循环迭代的 SgInject 读取 knowledge_vector:
+      - hidden[-1] += alpha * confidence * knowledge_vector
+      - acq 内存序确保读到最新 knowledge_vector
+
+4. Rust 侧 (generate 后清理):
+   - SgSharedMemory 随 scratchpad 生命周期结束
+```
+
+#### 7.4.4 NO_ISLAND_MODULE 验证
+
+Mega-kernel 路径的 NO_ISLAND_MODULE 验证通过 `pre_node_detection_layer_count` 原子计数器实现：
+
+1. **非 mega-kernel 路径**: `SemanticGatekeeperCallback.pre_node()` 中的 `AtomicUsize` 递增
+2. **Mega-kernel 路径**: SgDetect OpKind 在 JIT 编译期静态存在（由 CompilerGraph 拓扑决定），运行时不需要动态计数器
+
+E2E 测试通过以下方式验证 mega-kernel 路径:
+- 验证 `hook_ctx_ptr` 非空（SG 配置传递到 mega-kernel ABI）
+- 验证 JIT 编译的 CompilerGraph 包含 `SgDetect`/`SgInject` OpKind
+- 验证 generate 输出在有 SG 时产生可测量差异
+
 ---
 
 ## 8. E2E 行为差异验证协议

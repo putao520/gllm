@@ -577,14 +577,38 @@ OpKind::EarlyExit { anchor_layer: usize }
 
 **Semantic Gatekeeper (SEMANTIC-GATEKEEPER.md)**:
 ```
-两层干预:
+两层干预 (通过 hook_ctx_ptr 共享内存通信):
+
   1. 注入层 (embed 后): OpKind::SgInject { knowledge_offset, dim }
      ├── 将预计算的知识残差加到 hidden state
-     └── 编译为: 从共享内存 load 知识向量 → ADD 到 activation
+     ├── 编译为:
+     │   1. 从 hook_ctx_ptr + knowledge_offset 读 knowledge_vector
+     │   2. 从 hook_ctx_ptr 读 confidence
+     │   3. alpha = 常量 (编译时从 MegaKernelBusinessConfig 读取)
+     │   4. activation[last_token] += alpha * confidence * knowledge_vector
+     │   5. 零向量检测: if confidence == 0.0 → NOP (无注入)
+     └── sg_enabled=false → 此 op 不插入图 → 零指令开销
 
   2. 检测层 (指定层 GEMM 后): OpKind::SgDetect { detect_offset }
-     ├── 提取当前层 hidden state → 写入共享内存供 Rust 消费
-     └── 编译为: STORE hidden 到共享内存 buffer
+     ├── 提取当前层 hidden state 最后 token → 写入共享内存
+     ├── 编译为:
+     │   1. 从 activation + (seq_len - 1) * hidden_size 读最后 token
+     │   2. STORE 到 hook_ctx_ptr + detect_offset
+     │   3. release 内存序确保 Rust 侧可见
+     └── sg_enabled=false → 此 op 不插入图 → 零指令开销
+
+数据流 (每 decode step):
+  generate loop 迭代:
+    ├── 层循环 → SgDetect 写入 detect_hidden
+    ├── Rust 通过 hook_ctx_ptr 读 detect_hidden → KnowledgeProvider.retrieve()
+    ├── Rust 写入 knowledge_vector + confidence 到 hook_ctx_ptr
+    └── 下一层循环 → SgInject 读取并注入 knowledge_vector
+
+注意: mega-kernel 的 generate loop 在 JIT 内部循环，每 decode step
+不返回到 Rust。SG 的 knowledge 更新需要在 generate loop 的每轮迭代
+开始时通过 hook_ctx_ptr 交换数据。Rust 侧在 SgSharedMemory 中
+预计算 knowledge_vector（基于上一步的 detect_hidden），JIT 侧在
+当前步的 SgInject 中消费。
 ```
 
 **Intent Recall (INTENT.md)**:
@@ -765,7 +789,7 @@ MegaKernelFn 完整签名 (19 参数, 含 Session + Multimodal):
   12. max_new_tokens:       usize      — 最大生成 token 数
   13. eos_token_id:         u32        — 终止 token ID
   14. output_mode_selector: u32        — 输出模式 (0=generate, 1=classify_binary, 2=classify_multiway, 3=encode)
-  15. hook_ctx_ptr:         *mut u8    — Hook 共享内存指针
+  15. hook_ctx_ptr:         *mut u8    — Hook/SG 共享内存指针 (SEMANTIC-GATEKEEPER.md §7.4.2 SgSharedMemory 布局)
   16. telemetry_ptr:        *mut u8    — 遥测数据指针
   17. session_position:     usize      — Session KV cache 已处理位置 (0=全新)
   18. fused_hidden_ptr:     *const f32 — 多模态 fused hidden state (NULL=禁用)

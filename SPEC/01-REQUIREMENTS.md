@@ -544,6 +544,16 @@
 | **REQ-MEGA-MM-001** | Mega-Kernel Multimodal 模式 | mega-kernel 支持预计算 fused hidden state 注入 | 1. `MegaKernelBusinessConfig.multimodal_enabled=true` 时图中插入 `MmHiddenInject` op<br>2. ABI 新增 `fused_hidden_ptr` (StackArg(112)) + `num_mm_tokens` (StackArg(120))<br>3. fused_hidden_ptr != NULL 时循环 ADD 到 embedding buffer<br>4. fused_hidden_ptr == NULL 时 NOP (纯文本)<br>5. `generate_with_multimodal()` 不再返回 Err，改为调用 mega-kernel<br>6. 多模态输入的生成结果语义正确 | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
 | **REQ-MEGA-MM-002** | Fused Hidden 预计算 | Client 层在 mega-kernel 调用前预计算多模态 fused hidden | 1. `Client::generate_with_multimodal()` 内部先调用 vision/audio encoder 获取 hidden state<br>2. 预计算结果通过 fused_hidden_ptr 传入 mega-kernel<br>3. 编码过程不触发 JIT 重编译（复用已有 encoder mega-kernel） | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
 
+### 18.3 Mega-Kernel Semantic Gatekeeper 集成
+
+> **SSOT**: [SPEC/SEMANTIC-GATEKEEPER.md §7.4], [SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §1.5.3 SgDetect/SgInject]
+> **背景**: 当前 mega-kernel `generate_single_sequence` 不传递 `hook_ctx_ptr`（传 `null`），SG Callback 只在非 mega-kernel 的 `run_batch_forward` 路径中生效。需要让 mega-kernel 原生支持 SG。
+
+| ID | 需求标题 | 描述 | 验收标准 | 状态 |
+|----|----------|------|----------|------|
+| **REQ-MEGA-SG-001** | Mega-Kernel SG 共享内存 | mega-kernel 通过 `hook_ctx_ptr` (ABI arg 15) 传递 `SgSharedMemory`，JIT 内嵌 SgDetect/SgInject OpKind 操作共享内存 | 1. `MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)` 时图中插入 `SgDetect` + `SgInject` op<br>2. ABI `hook_ctx_ptr` 非 NULL 时激活 SG 路径<br>3. `hook_ctx_ptr == NULL` 时 SgDetect/SgInject 编译为 NOP<br>4. SgDetect: 从 activation 提取最后 token hidden → STORE 到 `hook_ctx_ptr + detect_offset`<br>5. SgInject: 从 `hook_ctx_ptr + knowledge_offset` 读 knowledge_vector → ADD 到 activation<br>6. `pre_node_detection_layer_count > 0`（NO_ISLAND_MODULE） | 🔴 待实现 |
+| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. `SgSharedMemory` 布局遵循 `SEMANTIC-GATEKEEPER.md §7.4.2`<br>2. 每次 `generate_single_sequence` 调用前: Rust 侧写入 control/knowledge_dim<br>3. 每次 generate loop 迭代间: Rust 侧读 detect_hidden → 调用 KnowledgeProvider → 写 knowledge_vector<br>4. 内存随 scratchpad 生命周期自动释放 | 🔴 待实现 |
+
 ## 19. 自动指令选择器 (REQ-AIS)
 
 > **SSOT**: [SPEC/01-JIT-PIPELINE.md §6.1], CLAUDE.md ARCH-AUTO-INSTR-SELECT
