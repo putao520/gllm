@@ -563,8 +563,8 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-MOE-001** | MoERouter JIT Lowering | 实现 `lower_moe_router()` 分解为 GEMM + softmax + top-k | 1. `emit_standalone_op` 有 `OpKind::MoERouter` match arm<br>2. 内部调用 `emit_gemm_inline_with_hook()` + `lower_reduction_softmax()` + top-k<br>3. 输出 (router_weights, router_indices) 格式正确<br>4. GPT-OSS-20B E2E 测试输出非退化（不再是 "CapCapCap"） | 🔴 待实现 |
-| **REQ-MOE-002** | MoEDispatchPacked JIT Lowering | 实现专家分发+计算的融合 lowering | 1. `emit_standalone_op` 有 `OpKind::MoEDispatchPacked` match arm<br>2. 按 router_indices 分发 hidden 到对应专家 FFN<br>3. 加权求和输出<br>4. DeepSeek-V3 / GLM-5 MoE E2E 测试通过 | 🔴 待实现 |
+| **REQ-MOE-001** | MoERouter JIT Lowering | 实现 `lower_moe_router()` 分解为 GEMM + softmax + top-k | 1. `dispatch_compute_pattern` 有 `OpKind::MoERouter` match arm<br>2. 内部调用 `lower_moe_router()` (GEMV + softmax + top-k, 128 行)<br>3. 输出 (router_weights, router_indices) 格式正确<br>4. GPT-OSS-20B E2E 测试输出非退化（不再是 "CapCapCap"） | ✅ 已实现 [gllm-kernels lower.rs:2464-2608, E2E passed] |
+| **REQ-MOE-002** | MoEDispatchPacked JIT Lowering | 实现专家分发+计算的融合 lowering | 1. `dispatch_compute_pattern` 有 `OpKind::MoEDispatchPacked` match arm<br>2. 内部调用 `lower_moe_dispatch_packed()` (路由+MXFP4 dequant+SwiGLU+down GEMV, 417 行)<br>3. 加权求和输出<br>4. GPT-OSS-20B E2E 测试通过 (2219s) | ✅ 已实现 [gllm-kernels lower.rs:3660-4123, E2E passed] |
 
 ## 21. 统一图来源：YAML 模板驱动 mega-kernel (REQ-UGS)
 
