@@ -210,6 +210,8 @@ mod tests {
                 sliding_window: 0, num_kv_shared_layers: 0, global_head_dim: 0, hidden_size_per_layer_input: 0,
                 position_offset: None,
                 rope_scaling: None,
+                final_logit_softcapping: None,
+                hidden_act: None,
             });
             crate::engine::executor::GeneratorForwardConfig {
                 geometry: geom,

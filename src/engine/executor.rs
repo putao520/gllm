@@ -351,6 +351,8 @@ impl AttentionTopology {
             hidden_size_per_layer_input: 0,
             position_offset: None,
             rope_scaling: None,
+            final_logit_softcapping: None,
+            hidden_act: None,
         });
         Self::bidirectional(geometry)
     }
@@ -1278,19 +1280,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let business_config = MegaKernelBusinessConfig {
                 has_head_rms_norm: template.as_ref().map_or(false, |t| t.has_head_rms_norm),
                 head_rms_norm_eps: template.as_ref().map_or(1e-6, |t| t.head_rms_norm_eps),
-                ffn_activation: match template.as_ref().map(|t| t.name.as_str()).unwrap_or("") {
-                    "gemma4" => FfnActivation::GeGLU,
+                ffn_activation: match geometry.hidden_act.as_ref().map(|a| a.as_str()).unwrap_or("") {
+                    "gelu_new" | "gelu_pytorch_tanh" | "gelu" => FfnActivation::GeGLU,
                     _ => FfnActivation::SwiGLU,
                 },
                 has_qk_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
                 has_value_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
                 value_norm_eps: geometry.norm_eps,
-                // Gemma 4: final_logit_softcapping = 30.0
-                logit_softcapping: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
-                    Some(30.0)
-                } else {
-                    None
-                },
+                logit_softcapping: geometry.final_logit_softcapping,
                 // Gemma models: embedding scaled by sqrt(hidden_size)
                 embedding_scale: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
                     Some((geometry.hidden_size as f32).sqrt())

@@ -411,6 +411,8 @@ mod tests {
             hidden_size_per_layer_input: 0,
             position_offset: None,
             rope_scaling: None,
+            final_logit_softcapping: None,
+            hidden_act: None,
         });
         KvCacheConfig {
             geometry,

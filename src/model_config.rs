@@ -79,13 +79,27 @@ pub struct ModelGeometry {
 
     // ── RoPE scaling ──
     pub rope_scaling: Option<RopeScalingConfig>,
+
+    // ── Logit softcapping ──
+    /// Final logit softcapping value from config.json.
+    pub final_logit_softcapping: Option<f32>,
+
+    // ── FFN activation type ──
+    /// From config.json hidden_act / hidden_activation.
+    pub hidden_act: Option<HiddenAct>,
 }
 
 impl ModelGeometry {
     /// Create from ModelConfig + manifest MoE info.
     /// This is the ONLY place model geometry is derived.
     pub fn from_config(config: &ModelConfig, moe_config: Option<crate::manifest::MoEConfig>) -> Self {
-        let intermediate_size = config.intermediate_size.unwrap_or(config.hidden_size * 4);
+        let intermediate_size = match config.intermediate_size {
+            Some(is) => is,
+            None if config.use_double_wide_mlp.unwrap_or(false) => {
+                ((config.hidden_size as f64 * 8.0 / 3.0).round() as usize / 256) * 256
+            }
+            None => config.hidden_size * 4,
+        };
         let num_experts = moe_config.map(|c| c.num_experts).unwrap_or(0);
         let moe_top_k = moe_config.map(|c| c.num_experts_per_tok).unwrap_or(0);
         let expert_intermediate_size = config.expert_intermediate_size.unwrap_or(intermediate_size);
@@ -118,6 +132,8 @@ impl ModelGeometry {
             moe_top_k,
             expert_intermediate_size,
             rope_scaling: config.rope_scaling.clone(),
+            final_logit_softcapping: config.final_logit_softcapping,
+            hidden_act: config.hidden_act.clone(),
         }
     }
 
@@ -274,6 +290,18 @@ impl HiddenAct {
             other => Self::Unknown(other.to_string()),
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Silu => "silu",
+            Self::Gelu => "gelu",
+            Self::GeluNew => "gelu_new",
+            Self::Relu => "relu",
+            Self::Swish => "swish",
+            Self::QuickGelu => "quick_gelu",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +373,14 @@ pub struct ModelConfig {
     /// `.image()` / `.audio()` on the generation builder fail fast with
     /// `ClientError::InvalidModelType`.
     pub multimodal_token_ids: Option<crate::compat::multimodal::MultimodalTokenIds>,
+
+    /// Final logit softcapping value (Gemma 4: 30.0, GPT-OSS: 24.0).
+    /// From config.json `final_logit_softcapping`.
+    pub final_logit_softcapping: Option<f32>,
+
+    /// Whether FFN uses double-wide MLP (intermediate = hidden * 8/3 rounded).
+    /// From config.json `use_double_wide_mlp`.
+    pub use_double_wide_mlp: Option<bool>,
 }
 
 impl ModelConfig {
@@ -792,6 +828,8 @@ impl ModelConfig {
             vision_config: None,
             audio_config: None,
             multimodal_token_ids: None,
+            final_logit_softcapping: None,
+            use_double_wide_mlp: None,
         };
         apply_tensor_derived(base, derived)
     }
@@ -1179,6 +1217,8 @@ impl ModelConfig {
             vision_config,
             audio_config,
             multimodal_token_ids,
+            final_logit_softcapping: find_f32(value, &["final_logit_softcapping"]),
+            use_double_wide_mlp: find_bool(value, &["use_double_wide_mlp"]),
         })
     }
 
@@ -2234,6 +2274,8 @@ mod tests {
             vision_config: None,
             audio_config: None,
             multimodal_token_ids: None,
+            final_logit_softcapping: None,
+            use_double_wide_mlp: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -2460,6 +2502,8 @@ mod tests {
             vision_config: None,
             audio_config: None,
             multimodal_token_ids: None,
+            final_logit_softcapping: None,
+            use_double_wide_mlp: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }
