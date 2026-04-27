@@ -2182,6 +2182,23 @@ impl Client {
     pub fn reset_gatekeeper_state(&self) -> Result<(), ClientError> {
         Ok(())
     }
+
+    /// Returns the number of times `pre_node` was called on a detection layer
+    /// by the active SemanticGatekeeperCallback. Returns 0 if no SG is registered.
+    /// For NO_ISLAND_MODULE verification (REQ-SG-008).
+    pub fn sg_pre_node_detection_layer_count(&self) -> usize {
+        let guard = match self.sg_callback.lock() {
+            Ok(g) => g,
+            Err(_) => return 0,
+        };
+        match guard.as_ref() {
+            Some(arc) => arc
+                .lock()
+                .map(|cb| cb.pre_node_detection_layer_count.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0),
+            None => 0,
+        }
+    }
 }
 
 fn sg_err_to_client(err: crate::semantic_gatekeeper::SemanticGatekeeperError) -> ClientError {

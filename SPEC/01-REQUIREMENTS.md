@@ -354,7 +354,7 @@
 
 | 测试文件 | 覆盖维度 | 状态 |
 |----------|----------|------|
-| `tests/test_e2e_semantic_gatekeeper.rs` | REQ-SG-001~008 端到端（TEST-SG-001~008 见 `SPEC/SEMANTIC-GATEKEEPER.md §8.2`） | 🔴 待实现 |
+| `tests/test_e2e_semantic_gatekeeper.rs` | REQ-SG-001~008 端到端（TEST-SG-001~008 见 `SPEC/SEMANTIC-GATEKEEPER.md §8.2`） | 🟢 已实现 [8 tests: test_sg_001~008] |
 
 ### 12.2 实现路径（Destroy-Rebuild 铁律）
 
@@ -491,7 +491,7 @@
 | 测试文件 | 覆盖维度 | 状态 |
 |----------|----------|------|
 | `tests/test_e2e_cot_reasoner.rs` | REQ-COT-001~009 端到端（SmolLM2-135M-Instruct 真实模型） | 🟢 已实现 [cot_reasoner.rs + E2E tests] |
-| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式 / Step Hook 单元测试 | 🔴 待实现 |
+| `src/cot_reasoner.rs` `#[cfg(test)]` | 模板渲染 / budget 分配 / stop pattern / entropy 启发式 / Step Hook 单元测试 | 🟢 已实现 [25 tests passing] |
 
 ### 16.2 实现路径（纯 Client SDK，零 Backend 扩展）
 

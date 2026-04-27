@@ -14,6 +14,7 @@
 //!     通过现有 `CallbackAction::InjectHidden { data }` 返回.
 //!  8. 更新 ActiveState.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use gllm_kernels::types::DType;
@@ -71,6 +72,8 @@ pub struct SemanticGatekeeperCallback {
     pub(super) stability_threshold: f32,
     pub(super) alpha: f32,
     pub(super) hidden_size: usize,
+    /// Number of times `pre_node` was called on a detection layer (for NO_ISLAND_MODULE verification).
+    pub pre_node_detection_layer_count: AtomicUsize,
 }
 
 impl SemanticGatekeeperCallback {
@@ -99,6 +102,7 @@ impl SemanticGatekeeperCallback {
             stability_threshold,
             alpha,
             hidden_size,
+            pre_node_detection_layer_count: AtomicUsize::new(0),
         }
     }
 
@@ -130,6 +134,7 @@ impl LayerCallback for SemanticGatekeeperCallback {
         if !self.is_detection_layer(ctx.layer_idx) {
             return CallbackAction::Continue;
         }
+        self.pre_node_detection_layer_count.fetch_add(1, Ordering::Relaxed);
 
         // 2. Level Keys cache 未填充该层时返回 Continue (未完成预计算).
         let keys = match self.level_keys.get(ctx.layer_idx) {
