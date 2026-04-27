@@ -546,15 +546,18 @@
 
 ## 19. 自动指令选择器 (REQ-AIS)
 
-> **SSOT**: [SPEC/01-JIT-PIPELINE.md §5.1], CLAUDE.md ARCH-AUTO-INSTR-SELECT
-> **背景**: TraceOp→VmInstr 和 OpKind→lower 的手写 match arms 是 bug 的系统性源头
+> **SSOT**: [SPEC/01-JIT-PIPELINE.md §6.1], CLAUDE.md ARCH-AUTO-INSTR-SELECT
+> **背景**: TraceOp→VmInstr 和 OpKind→lower 的手写 match arms 是 bug 的系统性源头。正确架构类似 LLVM SelectionDAG — 指令选择完全由算法驱动。
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-AIS-001** | TraceOp→VmInstr 自动查表 | TraceOp body 编译为 VmInstr 序列无需手写 match | 1. `auto_lower_trace()` 覆盖全部 17 个已实现 TraceOp<br>2. 同类操作共享辅助函数（6 二元/5 一元/3 超越函数）<br>3. 未实现 TraceOp 返回 Err（NO_SILENT_FALLBACK）<br>4. 生成结果与原手写 `lower_trace_body` 数值 bit-exact | 🟡 Phase 1 已实现 |
-| **REQ-AIS-002** | OpKind→ComputePattern 自动分发 | `emit_standalone_op` 从 29 个手写 match arm 改为 ComputePattern 驱动分发 | 1. Elementwise ops 全部走 auto_dispatch_elementwise 路径<br>2. Norm/Gemm/Attention 等走专用 lower 函数<br>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）<br>4. 未实现 OpKind 返回 Err（不静默 NOP）<br>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B） | ✅ 已实现 [commit: gllm-kernels e8ee8460] |
+| **REQ-AIS-001** | TraceOp→VmInstr 自动查表 | TraceOp body 编译为 VmInstr 序列无需手写 match | 1. `auto_lower_trace()` 覆盖全部已实现 TraceOp<br>2. 同类操作共享辅助函数（6 二元/5 一元/3 超越函数）<br>3. 未实现 TraceOp 返回 Err（NO_SILENT_FALLBACK）<br>4. 生成结果与原手写 `lower_trace_body` 数值 bit-exact | ✅ 已实现 |
+| **REQ-AIS-002** | OpKind→ComputePattern 自动分发 | `emit_standalone_op` 从手写 match arm 改为 ComputePattern 驱动分发 | 1. Elementwise ops 全部走 auto_dispatch_elementwise 路径<br>2. Norm/Gemm/Attention 等走专用 lower 函数<br>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）<br>4. 未实现 OpKind 返回 Err（不静默 NOP）<br>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B） | ✅ 已实现 [commit: gllm-kernels e8ee8460] |
 | **REQ-AIS-003** | TraceOp 扩展（Compare/Cast） | 新增 Compare/Cast TraceOp 解锁条件分支和 dtype 转换 | 1. TraceOp::Compare → VmInstr::VecCmp<br>2. TraceOp::Cast → VmInstr::VecCast<br>3. 对应 VmInstr 在 x86_64 和 AArch64 codegen 中实现<br>4. 单元测试验证数值正确性 | ✅ 已实现 [auto_select.rs emit_cmp/VecCast] |
-| **REQ-AIS-004** | TraceOp 扩展（HReduce） | 新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering | 1. TraceOp::HReduce → VmInstr::VecReduce<br>2. 支持 Sum/Max/Min 归约操作<br>3. Softmax 可完全通过 SymExec trace 自动 lowering<br>4. E2E 测试通过 | ✅ 已实现 [auto_select.rs HReduce Sum/Max/Min/Prod] |
+| **REQ-AIS-004** | TraceOp 扩展（HReduce） | 新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering | 1. TraceOp::HReduce → VmInstr::VecReduce<br>2. 支持 Sum/Max/Min/Prod 归约操作<br>3. Softmax 可完全通过 SymExec trace 自动 lowering<br>4. E2E 测试通过 | ✅ 已实现 [auto_select.rs HReduce Sum/Max/Min/Prod] |
+| **REQ-AIS-005** | Category D 消除 | `emit_standalone_op` 中所有手写 OpKind match arm 消除，全部改为 ComputePattern 驱动路由 | 1. Silu/Residual/LogitSoftcap 走 auto elementwise（已有 scalar 注册，无需额外代码）<br>2. Argmax 走 Reduction pattern + VmInstr::Argmax<br>3. StoreToken/WriteLogits 走 structural VecStore（带偏移计算）<br>4. CheckStopCondition/EarlyExit/GuardrailCheck/CotStepCheck 走 structural 控制流 VmInstr<br>5. SgInject/SgDetect 走 structural 共享内存 VmInstr<br>6. `emit_standalone_op` 中零 `OpKind::Xxx =>` 非 NOP match arm<br>7. 所有 E2E 测试通过 | 🔴 待实现 |
+| **REQ-AIS-006** | ConditionalBranch VmInstr | 实现 VecConditional VmInstr 解锁条件执行路径 | 1. TraceOp::ConditionalBranch → VmInstr::VecConditional<br>2. x86_64: vcmpps→blendvps (AVX2) / vcmpps{k}→vblendmps (AVX-512)<br>3. AArch64: fcmp→fcsel (NEON) / whilelo+sel (SVE)<br>4. GPU: setp→selp (PTX)<br>5. SelectOp 可完全通过 SymExec trace 自动 lowering | 🔴 待实现 |
+| **REQ-AIS-007** | 全覆盖验证 | 新增 OpKind 只需注册 scalar impl，零额外 codegen 代码 | 1. 新增 elementwise OpKind 只写 scalar fn + registry，`auto_lower_trace` 自动覆盖<br>2. `dispatch_compute_pattern` 按 ComputePattern 自动路由，路由键不是 OpKind<br>3. `grep 'OpKind::' plan_lower.rs` 在 `emit_standalone_op` 中返回零非 NOP 匹配<br>4. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B, Qwen3-7B） | 🔴 待实现 |
 
 ## 20. MoE 算子完善 (REQ-MOE)
 

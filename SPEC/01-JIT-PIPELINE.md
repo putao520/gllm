@@ -776,6 +776,59 @@ Phase 3 的 TraceOp → VmInstr → ISA 映射必须是**完全自动的**，类
 
 **ConditionalBranch 替代路径**: 当前 Silu/Sigmoid/Gelu 等 trace 不使用 ConditionalBranch，而是通过 Exp+Add+Div 算术等价实现。这使得这些算子的全自动 lowering 不依赖 ConditionalBranch 的实现。
 
+### 5.1.7 Category D 消除 (REQ-AIS-005)
+
+`emit_standalone_op` 当前仍存在 ~13 个手写 `OpKind::Xxx =>` match arm（Category D）。REQ-AIS-005 要求全部消除，改为 ComputePattern 驱动路由。
+
+**消除策略矩阵**:
+
+| OpKind | 消除策略 | 目标路径 | 依赖 |
+|--------|---------|---------|------|
+| Silu | auto elementwise | 已有 scalar 注册，SymExec trace 含 Exp+Add+Div | 无 |
+| Residual | auto elementwise (BinaryElementwise) | Add 操作，已有 scalar 注册 | 无 |
+| LogitSoftcap | auto elementwise | tanh + mul，已有 scalar 注册 | 无 |
+| Argmax | Reduction pattern | VmInstr::Argmax 已存在 | 无 |
+| StoreToken | structural VecStore | 带 output buffer 偏移计算的 VecStore | 无 |
+| WriteLogits | structural VecStore | 带 logits buffer 偏移的 VecStore | 无 |
+| CheckStopCondition | structural 控制流 | 比较+条件跳转 VmInstr | 无 |
+| EarlyExit | structural 控制流 | ConditionalSkip/ConditionalExit VmInstr 已存在 | 无 |
+| GuardrailCheck | structural 控制流 | 比较共享内存 veto 标志 + ConditionalSkip | 无 |
+| CotStepCheck | structural 共享内存 | 读共享内存 step counter + 条件跳转 | 无 |
+| SgInject | structural 共享内存 | 写共享内存 ring buffer | 无 |
+| SgDetect | structural 共享内存 | 读共享内存 ring buffer + 计算 | 无 |
+| Reshape/Transpose/SliceView | NOP | 纯元数据操作 | 无 |
+
+**目标架构**:
+
+```
+emit_standalone_op(op_id)
+  │
+  ├─ 1. try_auto_dispatch_elementwise()
+  │    ComputePattern::Elementwise | BinaryElementwise | Injective
+  │    → auto_lower_trace() 自动完成
+  │    覆盖: Silu, Residual, LogitSoftcap, 所有激活函数
+  │
+  ├─ 2. dispatch_compute_pattern()
+  │    ComputePattern::NormLike → lower_norm / lower_layernorm / lower_qk_norm
+  │    ComputePattern::Gemm → emit_gemm_inline_with_hook
+  │    ComputePattern::Reduction → lower_reduction / lower_argmax
+  │    ComputePattern::QuantDecode → lower_quant_decode
+  │    (路由键是 ComputePattern，不是 OpKind)
+  │
+  └─ 3. structural_ops()
+       Reshape/Transpose/SliceView → NOP
+       StoreToken/WriteLogits → VecStore (带偏移)
+       CheckStopCondition/EarlyExit/GuardrailCheck → 控制流 VmInstr
+       SgInject/SgDetect/CotStepCheck → 共享内存 VmInstr
+       未匹配 → Err (NO_SILENT_FALLBACK)
+```
+
+**关键约束**:
+- `dispatch_compute_pattern` 路由键必须是 ComputePattern 变体，不是 OpKind
+- 每个 ComputePattern 变体对应一个专用 lower 函数
+- 新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由
+- `structural_ops` 按 OpKind 语义特征（内存/控制流/元数据）分发，非逐个 OpKind 手写
+
 ### 5.1.6 TraceOp → ISA 指令映射
 
 Phase 3 从 OpTrace 的 `Vec<TraceOp>` 直接映射到平台指令。不硬编码算子语义。

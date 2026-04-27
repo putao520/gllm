@@ -648,9 +648,9 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
 6. ✅ **新增算子只需**：注册 scalar impl → SymExec 提取 trace → 如为 elementwise 则零额外代码；如为复杂算子则写一个 `lower_*` 辅助函数 + 注册 ComputePattern 路由
 
 **实现状态**：
-- Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` — TraceOp → VmInstr 自动查表
-- Phase 2 (ComputePattern dispatch): 🟡 elementwise 自动分发已完成，复杂算子仍用手写 match arm
-- Phase 3 (TraceOp 扩展): 🟡 HReduce/Compare/Cast 等尚未实现，阻止了 softmax/norm 的全自动 lowering
+- Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` — TraceOp → VmInstr 自动查表 (含 Compare/Cast/HReduce)
+- Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Norm/Gemm/Attention/MoE 专用 lower；🔴 Category D ~13 个手写 match arm 待消除 (REQ-AIS-005)
+- Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce 已实现；🔴 ConditionalBranch 待实现 (REQ-AIS-006)
 
 **核心验证标准**：整图融合后的 JIT 机器码中，堆栈、寄存器分配、内存布局错误必须为零。通过符号执行 + 自动指令选择从根本上保证正确性，而非逐个修具体 bug。
 
