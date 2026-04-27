@@ -552,9 +552,9 @@
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-AIS-001** | TraceOp→VmInstr 自动查表 | TraceOp body 编译为 VmInstr 序列无需手写 match | 1. `auto_lower_trace()` 覆盖全部 17 个已实现 TraceOp<br>2. 同类操作共享辅助函数（6 二元/5 一元/3 超越函数）<br>3. 未实现 TraceOp 返回 Err（NO_SILENT_FALLBACK）<br>4. 生成结果与原手写 `lower_trace_body` 数值 bit-exact | 🟡 Phase 1 已实现 |
-| **REQ-AIS-002** | OpKind→ComputePattern 自动分发 | `emit_standalone_op` 从 29 个手写 match arm 改为 ComputePattern 驱动分发 | 1. Elementwise ops 全部走 auto_dispatch_elementwise 路径<br>2. Norm/Gemm/Attention 等走专用 lower 函数<br>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）<br>4. 未实现 OpKind 返回 Err（不静默 NOP）<br>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B） | 🔴 待实现 |
-| **REQ-AIS-003** | TraceOp 扩展（Compare/Cast） | 新增 Compare/Cast TraceOp 解锁条件分支和 dtype 转换 | 1. TraceOp::Compare → VmInstr::VecCmp<br>2. TraceOp::Cast → VmInstr::VecCast<br>3. 对应 VmInstr 在 x86_64 和 AArch64 codegen 中实现<br>4. 单元测试验证数值正确性 | 🔴 待实现 |
-| **REQ-AIS-004** | TraceOp 扩展（HReduce） | 新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering | 1. TraceOp::HReduce → VmInstr::VecReduce<br>2. 支持 Sum/Max/Min 归约操作<br>3. Softmax 可完全通过 SymExec trace 自动 lowering<br>4. E2E 测试通过 | 🔴 待实现 |
+| **REQ-AIS-002** | OpKind→ComputePattern 自动分发 | `emit_standalone_op` 从 29 个手写 match arm 改为 ComputePattern 驱动分发 | 1. Elementwise ops 全部走 auto_dispatch_elementwise 路径<br>2. Norm/Gemm/Attention 等走专用 lower 函数<br>3. MoERouter 有专用 lower（修复 GPT-OSS "CapCapCap"）<br>4. 未实现 OpKind 返回 Err（不静默 NOP）<br>5. 所有 E2E 测试通过（SmolLM2, GPT-OSS-20B） | ✅ 已实现 [commit: gllm-kernels e8ee8460] |
+| **REQ-AIS-003** | TraceOp 扩展（Compare/Cast） | 新增 Compare/Cast TraceOp 解锁条件分支和 dtype 转换 | 1. TraceOp::Compare → VmInstr::VecCmp<br>2. TraceOp::Cast → VmInstr::VecCast<br>3. 对应 VmInstr 在 x86_64 和 AArch64 codegen 中实现<br>4. 单元测试验证数值正确性 | ✅ 已实现 [auto_select.rs emit_cmp/VecCast] |
+| **REQ-AIS-004** | TraceOp 扩展（HReduce） | 新增 HReduce TraceOp 解锁 softmax/norm 全自动 lowering | 1. TraceOp::HReduce → VmInstr::VecReduce<br>2. 支持 Sum/Max/Min 归约操作<br>3. Softmax 可完全通过 SymExec trace 自动 lowering<br>4. E2E 测试通过 | ✅ 已实现 [auto_select.rs HReduce Sum/Max/Min/Prod] |
 
 ## 20. MoE 算子完善 (REQ-MOE)
 
