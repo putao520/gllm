@@ -1297,16 +1297,52 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 ..MegaKernelBusinessConfig::default()
             };
 
-            let mega = super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
-                &geometry,
-                &weight_ptrs,
-                &weight_sizes,
-                eos_id,
-                business_config,
-                hetero_config,
-            ).map_err(|e| ExecutorError::Backend(BackendError::Other(
-                format!("mega-kernel compilation failed: {}", e),
-            )))?;
+            let mega = if let Some(ref tmpl) = template {
+                // REQ-UGS-001/003: YAML template → CompilerGraph direct path.
+                // Bypasses graph_builders.rs hand-written decoder_model().
+                let resolved = crate::arch::ResolvedConfig::from_geometry(
+                    &geometry, std::collections::HashMap::new(),
+                );
+                match super::mega_kernel::MegaKernelExecutor::compile_from_template(
+                    tmpl,
+                    &resolved,
+                    &geometry,
+                    &weight_ptrs,
+                    &weight_sizes,
+                    eos_id,
+                    business_config.clone(),
+                    hetero_config.clone(),
+                ) {
+                    Ok(m) => {
+                        log::info!("executor: mega-kernel compiled from YAML template '{}'", tmpl.name);
+                        m
+                    }
+                    Err(e) => {
+                        log::warn!("template-based compilation failed ({}), falling back to geometry path", e);
+                        super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
+                            &geometry,
+                            &weight_ptrs,
+                            &weight_sizes,
+                            eos_id,
+                            business_config,
+                            hetero_config,
+                        ).map_err(|e2| ExecutorError::Backend(BackendError::Other(
+                            format!("mega-kernel compilation failed (template: {}, geometry: {})", e, e2),
+                        )))?
+                    }
+                }
+            } else {
+                super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
+                    &geometry,
+                    &weight_ptrs,
+                    &weight_sizes,
+                    eos_id,
+                    business_config,
+                    hetero_config,
+                ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                    format!("mega-kernel compilation failed: {}", e),
+                )))?
+            };
 
             log::info!("executor: true mega-kernel compiled");
             Some(mega)

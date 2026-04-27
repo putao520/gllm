@@ -161,6 +161,113 @@ impl MegaKernelExecutor {
         })
     }
 
+    /// 从 YAML 模板编译 true mega-kernel (REQ-UGS-001/003)。
+    ///
+    /// 使用 `ArchTemplate::to_compiler_graph()` 直接构建 CompilerGraph，
+    /// 绕过 `graph_builders.rs` 中的手写 `decoder_model()` / `decoder_model_hetero()`。
+    /// 新增模型只需写 YAML 模板 + 标量算子注册，零 Rust 代码修改。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn compile_from_template(
+        template: &crate::arch::ArchTemplate,
+        resolved_config: &crate::arch::ResolvedConfig,
+        geometry: &crate::model_config::ModelGeometry,
+        weight_ptrs: &std::collections::HashMap<String, *const u8>,
+        weight_sizes: &std::collections::HashMap<String, usize>,
+        eos_token_id: u32,
+        business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
+        hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
+    ) -> Result<Self, MegaKernelError> {
+        eprintln!(
+            "[mega] compiling from YAML template: layers={} hidden={} heads={} hetero={}",
+            geometry.num_layers, geometry.hidden_size, geometry.num_heads,
+            hetero_config.is_some(),
+        );
+
+        // Build CompilerGraph directly from YAML template
+        let graph = template.to_compiler_graph(resolved_config, &business_config)
+            .map_err(|e| MegaKernelError::Compilation(format!("template→CompilerGraph: {e}")))?;
+
+        let rope_scaling = geometry.rope_scaling.as_ref().and_then(|cfg| {
+            use crate::model_config::RopeScalingType;
+            match cfg.scaling_type.as_ref()? {
+                RopeScalingType::Yarn => Some(gllm_kernels::compiler::graph::RopeScaling::Yarn {
+                    factor: cfg.factor.unwrap_or(1.0),
+                    beta_fast: cfg.beta_fast.unwrap_or(32.0),
+                    beta_slow: cfg.beta_slow.unwrap_or(1.0),
+                    original_max_position: cfg.original_max_position_embeddings.unwrap_or(4096),
+                }),
+                RopeScalingType::Linear => Some(gllm_kernels::compiler::graph::RopeScaling::Linear {
+                    factor: cfg.factor.unwrap_or(1.0),
+                }),
+                _ => None,
+            }
+        });
+
+        let config = gllm_kernels::compiler::ModelMegaConfig {
+            num_layers: geometry.num_layers,
+            hidden: geometry.hidden_size,
+            num_heads: geometry.num_heads,
+            num_kv_heads: geometry.num_kv_heads,
+            head_dim: geometry.head_dim,
+            intermediate: geometry.intermediate_size,
+            vocab_size: geometry.vocab_size,
+            rms_eps: geometry.norm_eps,
+            rope_theta: geometry.rope_theta,
+            rope_partial: geometry.rope_partial_ratio,
+            dtype: DType::F32,
+            max_seq_len: geometry.max_seq_len,
+            num_eos_tokens: 1,
+            rope_scaling,
+            business_config,
+            hetero: hetero_config.clone(),
+        };
+
+        // Compute hetero layout if applicable
+        let hetero_layout = hetero_config.as_ref().map(|hc| {
+            gllm_kernels::compiler::mega_kernel_abi::HeteroWeightLayout::from_config(&config, hc)
+        });
+
+        let embed_scale = config.business_config.embedding_scale;
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let output = compiler.compile_mega_kernel_from_graph(graph, &config, hetero_layout)
+            .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
+
+        let exec_code = output.layer_code;
+        let entry_fn = unsafe { exec_code.entry_point_as_mega_kernel() };
+
+        let weight_blob = pack_mega_kernel_weights(
+            &output.weight_layout,
+            geometry.num_layers,
+            geometry.hidden_size,
+            weight_ptrs,
+            weight_sizes,
+            embed_scale,
+            output.hetero_layout.as_ref(),
+            hetero_config.as_ref(),
+        );
+
+        let mega_compiled = MegaKernelCompiled {
+            weight_layout: output.weight_layout,
+            buffer_layout: output.buffer_layout,
+            logits_scratch_offset: output.logits_scratch_offset,
+            weight_blob,
+            exec_code,
+            entry_fn,
+            rope_cache: output.rope_cache,
+            total_scratchpad_bytes: output.total_scratchpad_bytes,
+            hetero_layout: output.hetero_layout,
+        };
+
+        Ok(Self {
+            mega_compiled,
+            num_layers: geometry.num_layers,
+            hidden_size: geometry.hidden_size,
+            vocab_size: geometry.vocab_size,
+            dtype: geometry.dtype,
+            eos_token_id,
+        })
+    }
+
     /// 单序列 mega-kernel 生成。
     ///
     /// ARCH-RUST-IS-CODEGEN: 一次 CALL 完成。

@@ -364,6 +364,649 @@ impl ArchTemplate {
         })
     }
 
+    /// 将架构模板直接转换为 CompilerGraph (REQ-UGS-001)。
+    ///
+    /// 绕过 OnnxGraph/FusedGraph 中间层，直接从 YAML 模板构建
+    /// `gllm_kernels::compiler::CompilerGraph`。与 `to_onnx_graph()` 共享
+    /// 相同的模板展开逻辑（repeat、only_if、DualRotaryEmbedding/QkNorm/PerLayerEmbed 展开器），
+    /// 但直接产出 `OpKind` 枚举而非 OnnxNode 字符串。
+    ///
+    /// mega-kernel 独有节点（SgInject, SessionKvRestore, MmHiddenInject, GenerateLoop）
+    /// 由 `business_config` 驱动注入，不在 YAML 中声明。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn to_compiler_graph(
+        &self,
+        config: &super::resolve::ResolvedConfig,
+        business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+    ) -> Result<gllm_kernels::compiler::CompilerGraph, TemplateError> {
+        use gllm_kernels::compiler::graph::{CompilerGraph, OpKind, SymDim};
+        use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
+        use gllm_kernels::compiler::mega_kernel_abi::OutputMode;
+        use gllm_kernels::types::DType;
+
+        let mut g = CompilerGraph::new();
+
+        let hidden = config.hidden_size;
+        let num_heads = config.num_attention_heads;
+        let num_kv_heads = config.num_key_value_heads;
+        let head_dim = config.head_dim;
+        let vocab_size = config.vocab_size;
+        let eps = 1e-5f32;
+        let dt = match config.dtype.as_str() {
+            "f16" => DType::F16,
+            "bf16" => DType::BF16,
+            _ => DType::F32,
+        };
+
+        let s = SymDim::Symbolic {
+            name: "seq_len".to_string(),
+            max_value: Some(SYMDIM_MAX_SEQ_LEN),
+        };
+
+        // ── Embedding lookup (Gather) ──
+        let token_ids = g.add_tensor("token_ids", vec![s.clone()], dt);
+        let embed_w = g.add_tensor_concrete("embed_w", &[vocab_size, hidden], dt);
+        let embedding = g.add_tensor("embedding", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+        g.add_op(
+            OpKind::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone() },
+            vec![token_ids, embed_w],
+            vec![embedding],
+            "embed_gather",
+        );
+
+        // ── Mega-kernel business nodes (not in YAML) ──
+        let mut post_embed = embedding;
+
+        // Embedding scaling (Gemma: sqrt(hidden_size))
+        if let Some(scale) = business_config.embedding_scale {
+            let scaled = g.add_tensor("embed_scaled", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            g.add_op(
+                OpKind::Mul,
+                vec![post_embed],
+                vec![scaled],
+                "embed_scale",
+            );
+            post_embed = scaled;
+            // scale value is a scalar broadcast; the JIT lower handles this via
+            // immediate constant embedding (the scale is baked into the machine code).
+            // For now, we record the intent via tensor name convention.
+            // The actual scaling is done by the JIT lower reading embedding_scale from business_config.
+        }
+
+        // Semantic Gatekeeper knowledge injection
+        if let Some(ref sg) = business_config.semantic_gatekeeper {
+            let sg_injected = g.add_tensor("sg_injected", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            g.add_op(
+                OpKind::SgInject { knowledge_offset: sg.inject_offset, dim: hidden },
+                vec![post_embed],
+                vec![sg_injected],
+                "sg_inject",
+            );
+            post_embed = sg_injected;
+        }
+
+        // Session KV Cache restore
+        if business_config.session_enabled {
+            let restored = g.add_tensor("session_restored", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            g.add_op(
+                OpKind::SessionKvRestore,
+                vec![post_embed],
+                vec![restored],
+                "session_kv_restore",
+            );
+            post_embed = restored;
+        }
+
+        // Multimodal fused hidden injection
+        if business_config.multimodal_enabled {
+            let mm_injected = g.add_tensor("mm_injected", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            g.add_op(
+                OpKind::MmHiddenInject { hidden_dim: hidden },
+                vec![post_embed],
+                vec![mm_injected],
+                "mm_hidden_inject",
+            );
+            post_embed = mm_injected;
+        }
+
+        // ── Layer loop: expand YAML repeat block into CompilerGraph ops ──
+        let mut layer_input = post_embed;
+        let mut tensor_map: HashMap<String, gllm_kernels::compiler::graph::TensorId> = HashMap::new();
+
+        // Register initial tensors
+        tensor_map.insert("embedding".to_string(), embedding);
+        tensor_map.insert("hidden_0".to_string(), layer_input);
+
+        // Default dims for top-level (non-repeat) nodes
+        let default_dims = LayerDims::for_layer(config, 0);
+
+        for graph_node in &self.graph.nodes {
+            match graph_node {
+                GraphNode::Node(node_def) => {
+                    if !Self::eval_only_if_with_loop(node_def.only_if.as_deref(), config, None)? {
+                        continue;
+                    }
+                    Self::emit_compiler_node(
+                        &mut g, node_def, config, business_config,
+                        &s, &default_dims, eps, dt, None,
+                        &self.tensor_patterns,
+                        &mut tensor_map,
+                    )?;
+                }
+                GraphNode::Repeat(repeat_block) => {
+                    let repeat_count = self.resolve_repeat_count(&repeat_block.repeat, config)?;
+                    for i in 0..repeat_count {
+                        let layer_dims = LayerDims::for_layer(config, i);
+                        for node_def in &repeat_block.nodes {
+                            if !Self::eval_only_if_with_loop(
+                                node_def.only_if.as_deref(), config, Some((&repeat_block.var, i)),
+                            )? {
+                                continue;
+                            }
+
+                            if node_def.op_type == "DualRotaryEmbedding" {
+                                Self::emit_dual_rope_compiler(
+                                    &mut g, node_def, config, business_config,
+                                    &s, &layer_dims,
+                                    eps, dt, &repeat_block.var, i,
+                                    &mut tensor_map,
+                                )?;
+                            } else if node_def.op_type == "QkNorm" {
+                                Self::emit_qk_norm_compiler(
+                                    &mut g, node_def, config, business_config,
+                                    &s, &layer_dims, dt, &repeat_block.var, i,
+                                    &mut tensor_map,
+                                )?;
+                            } else if node_def.op_type == "PerLayerEmbed" {
+                                Self::emit_per_layer_embed_compiler(
+                                    &mut g, node_def, config,
+                                    &s, &layer_dims, dt, &repeat_block.var, i,
+                                    &mut tensor_map,
+                                )?;
+                            } else {
+                                Self::emit_compiler_node(
+                                    &mut g, node_def, config, business_config,
+                                    &s, &layer_dims, eps, dt, Some((&repeat_block.var, i)),
+                                    &self.tensor_patterns,
+                                    &mut tensor_map,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find the final hidden tensor — it's the last "hidden_0" in the tensor map
+        // (updated in-place by residual connections in YAML templates).
+        let final_hidden = tensor_map.get("hidden_0")
+            .copied()
+            .ok_or_else(|| TemplateError::Invalid("no hidden_0 tensor found after layer expansion".into()))?;
+
+        // ── Final norm ──
+        let final_norm_w = g.add_tensor_concrete("final_norm_w", &[hidden], dt);
+        let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+        g.add_op(OpKind::RmsNorm { eps }, vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
+
+        // ── lm_head ──
+        let lm_head_w = g.add_tensor_concrete("lm_head_w", &[hidden, vocab_size], dt);
+        let logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+        g.add_op(
+            OpKind::Gemm { m: s.clone(), n: vocab_size, k: hidden, dtype: dt },
+            vec![final_normed, lm_head_w],
+            vec![logits],
+            "lm_head",
+        );
+
+        // ── Logit softcapping ──
+        let logits_for_loop = if let Some(cap) = business_config.logit_softcapping {
+            let capped = g.add_tensor("logits_capped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+            g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![capped], "logit_softcapping");
+            capped
+        } else {
+            logits
+        };
+
+        // ── Generate loop (only for Generate output mode) ──
+        for mode in &business_config.output_modes {
+            match mode {
+                OutputMode::Generate { .. } => {
+                    let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
+                    g.add_op(
+                        OpKind::Argmax { vocab_size },
+                        vec![logits_for_loop],
+                        vec![token_id],
+                        "argmax",
+                    );
+                    g.add_op(OpKind::StoreToken, vec![token_id], vec![], "store_token");
+                    g.add_op(OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
+                }
+                OutputMode::ClassifyBinary { positive_token_id, negative_token_id } => {
+                    let indices = vec![*positive_token_id, *negative_token_id];
+                    g.add_op(
+                        OpKind::WriteLogits { target_indices: indices },
+                        vec![logits_for_loop],
+                        vec![],
+                        "write_classify_logits",
+                    );
+                }
+                OutputMode::ClassifyMultiway { ref label_token_ids } => {
+                    g.add_op(
+                        OpKind::WriteLogits { target_indices: label_token_ids.clone() },
+                        vec![logits_for_loop],
+                        vec![],
+                        "write_classify_logits",
+                    );
+                }
+                OutputMode::EncodeToLayer { anchor_layer, .. } => {
+                    g.add_op(
+                        OpKind::EarlyExit { anchor_layer: *anchor_layer },
+                        vec![],
+                        vec![],
+                        "early_exit",
+                    );
+                }
+            }
+        }
+
+        Ok(g)
+    }
+
+    /// Map a single YAML NodeDef to a CompilerGraph OpKind + tensor registration.
+    ///
+    /// `dims` provides per-layer dimensions (handles hetero models).
+    /// `tensor_patterns` provides weight name conventions for MatMul dimension inference.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn emit_compiler_node(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+        s: &gllm_kernels::compiler::graph::SymDim,
+        dims: &LayerDims,
+        eps: f32,
+        dt: gllm_kernels::types::DType,
+        loop_var: Option<(&str, usize)>,
+        tensor_patterns: &super::template::TensorPatterns,
+        tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::{OpKind, SymDim};
+
+        let substitute = |s_in: &str| -> Result<String, TemplateError> {
+            Self::substitute_with_donor(s_in, config, loop_var)
+        };
+
+        let op_type = &node_def.op_type;
+
+        // Resolve input tensor ids — register weights as concrete tensors if not seen.
+        let input_names: Vec<String> = node_def.inputs.iter()
+            .map(|s| substitute(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_names: Vec<String> = node_def.outputs.iter()
+            .map(|s| substitute(s))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let label = substitute(&node_def.name)?;
+
+        let input_ids: Vec<gllm_kernels::compiler::graph::TensorId> = input_names.iter()
+            .map(|name| {
+                *tensor_map.entry(name.clone()).or_insert_with(|| {
+                    // Auto-register unseen tensors as concrete weight tensors.
+                    // Shape is inferred from OpKind context during lowering.
+                    g.add_tensor_concrete(name, &[0], dt)
+                })
+            })
+            .collect();
+
+        let op_kind = match op_type.as_str() {
+            // ── Embedding ──
+            "Gather" => OpKind::Gather {
+                table_rows: config.vocab_size,
+                embed_dim: dims.hidden,
+                index_dim: s.clone(),
+            },
+
+            // ── Linear algebra ──
+            "MatMul" => {
+                let (n, k) = infer_matmul_dims(&input_names, node_def, config, loop_var, dims);
+                OpKind::Gemm { m: s.clone(), n, k, dtype: dt }
+            }
+
+            // ── Normalization ──
+            "SimplifiedLayerNormalization" | "RmsNorm" => {
+                OpKind::RmsNorm { eps: read_attr_f32(node_def, config, loop_var, "eps").unwrap_or(eps) }
+            }
+            "LayerNormalization" => {
+                OpKind::LayerNorm { eps: read_attr_f32(node_def, config, loop_var, "eps").unwrap_or(eps) }
+            }
+            "ValueNorm" => {
+                OpKind::ValueNorm {
+                    eps: read_attr_f32(node_def, config, loop_var, "eps")
+                        .unwrap_or(business_config.value_norm_eps),
+                }
+            }
+
+            // ── Activations ──
+            "SiLU" => OpKind::Silu,
+            "Gelu" | "GELU" => OpKind::Gelu,
+            "Tanh" => OpKind::Tanh,
+            "SwiGLU" => OpKind::SwiGlu,
+
+            // ── Attention ──
+            "Attention" | "MultiHeadAttention" => {
+                let causal = read_attr_bool(node_def, config, loop_var, "causal").unwrap_or(true);
+                let attn_sinks = read_attr_bool(node_def, config, loop_var, "attention_sinks").unwrap_or(false);
+                OpKind::MultiHeadAttention {
+                    seq_len: s.clone(),
+                    num_heads: dims.num_heads,
+                    num_kv_heads: dims.num_kv_heads,
+                    head_dim: dims.head_dim,
+                    causal,
+                    attention_sinks: attn_sinks,
+                }
+            }
+
+            // ── Elementwise ──
+            "Add" => OpKind::Add,
+            "Mul" => OpKind::Mul,
+
+            // ── RotaryEmbedding is handled by expand_dual_rope_compiler for DualRoPE,
+            //    but may appear standalone in simpler templates. ──
+            "RotaryEmbedding" => {
+                let rope_num_heads = read_attr_usize(node_def, config, loop_var, "num_heads")
+                    .unwrap_or(dims.num_heads);
+                let rope_head_dim = read_attr_usize(node_def, config, loop_var, "head_dim")
+                    .unwrap_or(dims.head_dim);
+                let theta = read_attr_f32(node_def, config, loop_var, "theta")
+                    .map(|v| v as f64)
+                    .unwrap_or(config.rope_theta);
+                let partial = read_attr_f32(node_def, config, loop_var, "partial")
+                    .unwrap_or(config.rope_partial_ratio);
+                OpKind::RoPE {
+                    num_heads: rope_num_heads,
+                    head_dim: rope_head_dim,
+                    theta,
+                    partial,
+                    rope_scaling: None,
+                }
+            }
+
+            // ── HeadRmsNorm (Qwen3 q_norm/k_norm) ──
+            "HeadRmsNorm" => {
+                let h_dim = read_attr_usize(node_def, config, loop_var, "head_dim")
+                    .unwrap_or(dims.head_dim);
+                let h_eps = read_attr_f32(node_def, config, loop_var, "eps")
+                    .unwrap_or(business_config.head_rms_norm_eps);
+                OpKind::HeadRmsNorm { head_dim: h_dim, eps: h_eps }
+            }
+
+            // ── MoE ops ──
+            "MoERouter" => {
+                let num_experts = read_attr_usize(node_def, config, loop_var, "num_experts")
+                    .ok_or_else(|| TemplateError::Invalid("MoERouter missing num_experts".into()))?;
+                let top_k = read_attr_usize(node_def, config, loop_var, "top_k")
+                    .ok_or_else(|| TemplateError::Invalid("MoERouter missing top_k".into()))?;
+                OpKind::MoERouter {
+                    num_experts,
+                    top_k,
+                    hidden: dims.hidden,
+                    seq_len: s.clone(),
+                }
+            }
+            "MoEDispatchPacked" => {
+                let num_experts = read_attr_usize(node_def, config, loop_var, "num_experts")
+                    .ok_or_else(|| TemplateError::Invalid("MoEDispatchPacked missing num_experts".into()))?;
+                let top_k = read_attr_usize(node_def, config, loop_var, "top_k")
+                    .ok_or_else(|| TemplateError::Invalid("MoEDispatchPacked missing top_k".into()))?;
+                OpKind::MoEDispatchPacked {
+                    num_experts,
+                    top_k,
+                    mxfp4_block_size: 32,
+                    swiglu_limit: 7.0,
+                    intermediate_size: dims.intermediate,
+                    hidden: dims.hidden,
+                    seq_len: s.clone(),
+                }
+            }
+
+            // ── Layout ops ──
+            "Reshape" => OpKind::Reshape { target_shape: vec![] },
+            "Transpose" => OpKind::Transpose { perm: vec![] },
+
+            other => {
+                return Err(TemplateError::Invalid(format!(
+                    "to_compiler_graph: unsupported op_type '{}' (node '{}')",
+                    other, label
+                )));
+            }
+        };
+
+        // Create output tensors and register them
+        let output_ids: Vec<gllm_kernels::compiler::graph::TensorId> = output_names.iter()
+            .map(|name| {
+                let shape = infer_output_shape(&op_kind, s, dt);
+                let tid = g.add_tensor(name, shape, dt);
+                tensor_map.insert(name.clone(), tid);
+                tid
+            })
+            .collect();
+
+        g.add_op(op_kind, input_ids, output_ids, &label);
+        Ok(())
+    }
+
+    /// Expand DualRotaryEmbedding into two OpKind::RoPE ops for CompilerGraph.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn emit_dual_rope_compiler(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        _business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+        s: &gllm_kernels::compiler::graph::SymDim,
+        dims: &LayerDims,
+        _eps: f32,
+        dt: gllm_kernels::types::DType,
+        var: &str,
+        layer_idx: usize,
+        tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::{OpKind, SymDim};
+
+        let read_f32 = |key: &str| -> Option<f32> {
+            match node_def.attributes.get(key)? {
+                AttributeValue::Float(v) => Some(*v as f32),
+                AttributeValue::Int(v) => Some(*v as f32),
+                AttributeValue::String(s_val) => {
+                    let resolved = super::resolve::substitute_placeholders(s_val, config);
+                    resolved.parse::<f32>().ok()
+                }
+                _ => None,
+            }
+        };
+
+        let sliding_theta = read_f32("sliding_theta").ok_or_else(|| TemplateError::Invalid(
+            format!("DualRotaryEmbedding '{}' missing sliding_theta", node_def.name)))?;
+        let global_theta = read_f32("global_theta").ok_or_else(|| TemplateError::Invalid(
+            format!("DualRotaryEmbedding '{}' missing global_theta", node_def.name)))?;
+        let sliding_partial = read_f32("sliding_partial").unwrap_or(1.0);
+        let global_partial = read_f32("global_partial").unwrap_or(0.25);
+
+        let is_global = config.attention_pattern.get(layer_idx).copied().unwrap_or(0) == 1;
+        let (theta, partial) = if is_global { (global_theta, global_partial) } else { (sliding_theta, sliding_partial) };
+
+        let substitute = |s_in: &str| -> String {
+            let mut r = super::resolve::substitute_placeholders(s_in, config);
+            r = r.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+            r = r.replace(&format!("{}$", var), &layer_idx.to_string());
+            r
+        };
+
+        // Q-RoPE
+        let q_in_name = substitute(&node_def.inputs[0]);
+        let q_out_name = substitute(&node_def.outputs[0]);
+        let q_in_id = *tensor_map.entry(q_in_name.clone()).or_insert_with(|| g.add_tensor_concrete(&q_in_name, &[0], dt));
+        let q_out_id = g.add_tensor(&q_out_name, vec![s.clone(), SymDim::Concrete(dims.q_dim)], dt);
+        tensor_map.insert(q_out_name.clone(), q_out_id);
+        g.add_op(
+            OpKind::RoPE { num_heads: dims.num_heads, head_dim: dims.head_dim, theta: theta as f64, partial, rope_scaling: None },
+            vec![q_in_id], vec![q_out_id], &format!("layer_{layer_idx}_rope_q"),
+        );
+
+        // K-RoPE: skip on shared KV consumer layers
+        if config.is_kv_shared_layer(layer_idx) {
+            return Ok(());
+        }
+        let k_in_name = substitute(&node_def.inputs[1]);
+        let k_out_name = substitute(&node_def.outputs[1]);
+        let k_in_id = *tensor_map.entry(k_in_name.clone()).or_insert_with(|| g.add_tensor_concrete(&k_in_name, &[0], dt));
+        let k_out_id = g.add_tensor(&k_out_name, vec![s.clone(), SymDim::Concrete(dims.kv_dim)], dt);
+        tensor_map.insert(k_out_name.clone(), k_out_id);
+        g.add_op(
+            OpKind::RoPE { num_heads: dims.num_kv_heads, head_dim: dims.head_dim, theta: theta as f64, partial, rope_scaling: None },
+            vec![k_in_id], vec![k_out_id], &format!("layer_{layer_idx}_rope_k"),
+        );
+
+        Ok(())
+    }
+
+    /// Expand QkNorm into two OpKind::QkNorm ops for CompilerGraph.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn emit_qk_norm_compiler(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        _business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+        s: &gllm_kernels::compiler::graph::SymDim,
+        dims: &LayerDims,
+        dt: gllm_kernels::types::DType,
+        var: &str,
+        layer_idx: usize,
+        tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::{OpKind, SymDim};
+
+        let substitute = |s_in: &str| -> String {
+            let mut r = super::resolve::substitute_placeholders(s_in, config);
+            r = r.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+            r = r.replace(&format!("{}$", var), &layer_idx.to_string());
+            r
+        };
+
+        let q_in_name = substitute(&node_def.inputs[0]);
+        let q_out_name = substitute(&node_def.outputs[0]);
+        let q_in_id = *tensor_map.entry(q_in_name.clone()).or_insert_with(|| g.add_tensor_concrete(&q_in_name, &[0], dt));
+        let q_out_id = g.add_tensor(&q_out_name, vec![s.clone()], dt);
+        tensor_map.insert(q_out_name.clone(), q_out_id);
+        g.add_op(
+            OpKind::QkNorm { head_dim: dims.head_dim },
+            vec![q_in_id], vec![q_out_id], &format!("layer_{layer_idx}_qk_norm_q"),
+        );
+
+        // K-QkNorm: skip on shared KV consumer layers
+        if config.is_kv_shared_layer(layer_idx) {
+            return Ok(());
+        }
+        let k_in_name = substitute(&node_def.inputs[1]);
+        let k_out_name = substitute(&node_def.outputs[1]);
+        let k_in_id = *tensor_map.entry(k_in_name.clone()).or_insert_with(|| g.add_tensor_concrete(&k_in_name, &[0], dt));
+        let k_out_id = g.add_tensor(&k_out_name, vec![s.clone()], dt);
+        tensor_map.insert(k_out_name.clone(), k_out_id);
+        g.add_op(
+            OpKind::QkNorm { head_dim: dims.head_dim },
+            vec![k_in_id], vec![k_out_id], &format!("layer_{layer_idx}_qk_norm_k"),
+        );
+
+        Ok(())
+    }
+
+    /// Expand PerLayerEmbed into PleSlice + PerLayerEmbed ops for CompilerGraph.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn emit_per_layer_embed_compiler(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        node_def: &NodeDef,
+        config: &super::resolve::ResolvedConfig,
+        s: &gllm_kernels::compiler::graph::SymDim,
+        dims: &LayerDims,
+        dt: gllm_kernels::types::DType,
+        var: &str,
+        layer_idx: usize,
+        tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::{OpKind, SymDim};
+
+        let read_usize = |key: &str| -> Result<usize, TemplateError> {
+            match node_def.attributes.get(key) {
+                Some(AttributeValue::Int(v)) => Ok(*v as usize),
+                Some(AttributeValue::String(s_val)) => {
+                    let mut resolved = super::resolve::substitute_placeholders(s_val, config);
+                    resolved = resolved.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+                    resolved.parse::<usize>().map_err(|_| TemplateError::Invalid(format!(
+                        "PerLayerEmbed attr '{}' parse failed: {}", key, resolved
+                    )))
+                }
+                _ => Err(TemplateError::Invalid(format!(
+                    "PerLayerEmbed '{}' missing attr '{}'", node_def.name, key
+                ))),
+            }
+        };
+
+        let dim_per_layer = read_usize("dim_per_layer")?;
+        let num_layers = read_usize("num_layers")?;
+
+        let substitute = |s_in: &str| -> String {
+            let mut r = super::resolve::substitute_placeholders(s_in, config);
+            r = r.replace(&format!("${{{}}}", var), &layer_idx.to_string());
+            r = r.replace(&format!("{}$", var), &layer_idx.to_string());
+            r
+        };
+
+        // Node 1: ColumnSlice (PleSlice)
+        let ple_full_name = substitute(&node_def.inputs[1]);
+        let slice_out_name = format!("layer_{layer_idx}_ple_slice");
+        let ple_full_id = *tensor_map.entry(ple_full_name.clone()).or_insert_with(|| g.add_tensor_concrete(&ple_full_name, &[0], dt));
+        let slice_out_id = g.add_tensor(&slice_out_name, vec![s.clone(), SymDim::Concrete(dim_per_layer)], dt);
+        tensor_map.insert(slice_out_name.clone(), slice_out_id);
+        g.add_op(
+            OpKind::ColumnSlice {
+                seq_len: s.clone(),
+                input_inner: num_layers * dim_per_layer,
+                start: layer_idx * dim_per_layer,
+                slice_dim: dim_per_layer,
+            },
+            vec![ple_full_id], vec![slice_out_id], &format!("layer_{layer_idx}_ple_slice"),
+        );
+
+        // Node 2: PerLayerEmbed (5 inputs)
+        let hidden_in_name = substitute(&node_def.inputs[0]);
+        let proj_w_name = substitute(&node_def.inputs[2]);
+        let post_mlp_w_name = substitute(&node_def.inputs[3]);
+        let hidden_out_name = substitute(&node_def.outputs[0]);
+
+        let hidden_in_id = *tensor_map.get(&hidden_in_name).ok_or_else(|| TemplateError::Invalid(
+            format!("PerLayerEmbed: input '{}' not found in tensor_map", hidden_in_name)))?;
+        let main_embed_id = *tensor_map.entry("main_embed".to_string()).or_insert_with(|| g.add_tensor_concrete("main_embed", &[0], dt));
+        let proj_w_id = *tensor_map.entry(proj_w_name.clone()).or_insert_with(|| g.add_tensor_concrete(&proj_w_name, &[0], dt));
+        let post_mlp_w_id = *tensor_map.entry(post_mlp_w_name.clone()).or_insert_with(|| g.add_tensor_concrete(&post_mlp_w_name, &[0], dt));
+
+        let hidden_out_id = g.add_tensor(&hidden_out_name, vec![s.clone(), SymDim::Concrete(dims.hidden)], dt);
+        tensor_map.insert(hidden_out_name.clone(), hidden_out_id);
+
+        g.add_op(
+            OpKind::PerLayerEmbed {
+                seq_len: s.clone(),
+                layer_idx,
+                dim_per_layer,
+                num_layers,
+                hidden: dims.hidden,
+            },
+            vec![hidden_in_id, main_embed_id, slice_out_id, proj_w_id, post_mlp_w_id],
+            vec![hidden_out_id],
+            &format!("layer_{layer_idx}_ple"),
+        );
+
+        Ok(())
+    }
+
     /// 将 NodeDef 转换为 OnnxNode
     fn node_def_to_onnx(
         &self,
@@ -938,6 +1581,208 @@ impl ArchTemplate {
         repeat_expr
             .parse()
             .map_err(|_| TemplateError::Invalid(format!("Invalid repeat count: {}", repeat_expr)))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Helper functions for to_compiler_graph (REQ-UGS-001)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Per-layer dimension context for heterogeneous models.
+///
+/// For homogeneous models, all layers share the same dimensions.
+/// For heterogeneous models (Gemma-4 E2B), different layer templates have
+/// different head_dim / num_kv_heads / intermediate_size.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+struct LayerDims {
+    hidden: usize,
+    num_heads: usize,
+    head_dim: usize,
+    num_kv_heads: usize,
+    intermediate: usize,
+    q_dim: usize,
+    kv_dim: usize,
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+impl LayerDims {
+    /// Derive per-layer dimensions from config + layer index.
+    ///
+    /// For hetero models, `attention_pattern[i]` selects the head_dim variant:
+    /// - 0 (sliding): uses config.head_dim + config.num_key_value_heads
+    /// - 1 (global): uses config.global_head_dim (if > 0) + config.num_key_value_heads
+    ///
+    /// FFN intermediate_size is model-level (same for all layers in current models).
+    fn for_layer(config: &super::resolve::ResolvedConfig, layer_idx: usize) -> Self {
+        let hidden = config.hidden_size;
+        let num_heads = config.num_attention_heads;
+        let num_kv_heads = config.num_key_value_heads;
+
+        let is_global = config.attention_pattern.get(layer_idx).copied().unwrap_or(0) == 1;
+        let head_dim = if is_global && config.global_head_dim > 0 {
+            config.global_head_dim
+        } else {
+            config.head_dim
+        };
+
+        let intermediate = config.intermediate_size.unwrap_or(hidden * 4);
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+
+        Self { hidden, num_heads, head_dim, num_kv_heads, intermediate, q_dim, kv_dim }
+    }
+}
+
+/// Infer MatMul (n, k) from weight tensor name + per-layer dimension context.
+///
+/// Matches the weight input name against `tensor_patterns` conventions:
+/// - q_proj → n = q_dim, k = hidden
+/// - k_proj → n = kv_dim, k = hidden
+/// - v_proj → n = kv_dim, k = hidden
+/// - o_proj → n = hidden, k = q_dim
+/// - gate_proj → n = intermediate, k = hidden
+/// - up_proj → n = intermediate, k = hidden
+/// - down_proj → n = hidden, k = intermediate
+///
+/// Falls back to YAML `n`/`k` attributes, then to (hidden, hidden) as last resort.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn infer_matmul_dims(
+    input_names: &[String],
+    node_def: &NodeDef,
+    config: &super::resolve::ResolvedConfig,
+    loop_var: Option<(&str, usize)>,
+    dims: &LayerDims,
+) -> (usize, usize) {
+    // Try YAML attributes first (explicit override)
+    if let (Some(n), Some(k)) = (
+        read_attr_usize(node_def, config, loop_var, "n"),
+        read_attr_usize(node_def, config, loop_var, "k"),
+    ) {
+        return (n, k);
+    }
+
+    // Match weight tensor name against projection conventions
+    let weight_name = input_names.get(1).map(|s| s.as_str()).unwrap_or("");
+
+    // Projection dimension table: (n, k)
+    let dims_table: &[(&str, (usize, usize))] = &[
+        ("q_proj.weight",          (dims.q_dim, dims.hidden)),
+        ("k_proj.weight",          (dims.kv_dim, dims.hidden)),
+        ("v_proj.weight",          (dims.kv_dim, dims.hidden)),
+        ("o_proj.weight",          (dims.hidden, dims.q_dim)),
+        ("gate_proj.weight",       (dims.intermediate, dims.hidden)),
+        ("up_proj.weight",         (dims.intermediate, dims.hidden)),
+        ("down_proj.weight",       (dims.hidden, dims.intermediate)),
+        // gate_up_fused (MoE packed)
+        ("gate_up_proj.weight",    (dims.intermediate * 2, dims.hidden)),
+        // lm_head
+        ("lm_head.weight",         (config.vocab_size, dims.hidden)),
+    ];
+
+    for (suffix, nk) in dims_table {
+        if weight_name.contains(suffix) {
+            return *nk;
+        }
+    }
+
+    // Fallback: use YAML attributes partially, or default to (hidden, hidden)
+    let n = read_attr_usize(node_def, config, loop_var, "n").unwrap_or(dims.hidden);
+    let k = read_attr_usize(node_def, config, loop_var, "k").unwrap_or(dims.hidden);
+    (n, k)
+}
+
+/// Read a usize attribute from NodeDef, with placeholder substitution.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn read_attr_usize(
+    node_def: &NodeDef,
+    config: &super::resolve::ResolvedConfig,
+    loop_var: Option<(&str, usize)>,
+    key: &str,
+) -> Option<usize> {
+    match node_def.attributes.get(key)? {
+        AttributeValue::Int(v) => Some(*v as usize),
+        AttributeValue::String(s) => {
+            let resolved = super::resolve::substitute_placeholders(s, config);
+            let resolved = if let Some((var, idx)) = loop_var {
+                resolved.replace(&format!("${{{}}}", var), &idx.to_string())
+            } else {
+                resolved
+            };
+            resolved.parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// Read a f32 attribute from NodeDef, with placeholder substitution.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn read_attr_f32(
+    node_def: &NodeDef,
+    config: &super::resolve::ResolvedConfig,
+    loop_var: Option<(&str, usize)>,
+    key: &str,
+) -> Option<f32> {
+    match node_def.attributes.get(key)? {
+        AttributeValue::Float(v) => Some(*v as f32),
+        AttributeValue::Int(v) => Some(*v as f32),
+        AttributeValue::String(s) => {
+            let resolved = super::resolve::substitute_placeholders(s, config);
+            let resolved = if let Some((var, idx)) = loop_var {
+                resolved.replace(&format!("${{{}}}", var), &idx.to_string())
+            } else {
+                resolved
+            };
+            resolved.parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// Read a bool attribute from NodeDef.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn read_attr_bool(
+    node_def: &NodeDef,
+    _config: &super::resolve::ResolvedConfig,
+    _loop_var: Option<(&str, usize)>,
+    key: &str,
+) -> Option<bool> {
+    match node_def.attributes.get(key)? {
+        AttributeValue::Int(v) => Some(*v != 0),
+        _ => None,
+    }
+}
+
+/// Infer output tensor shape from OpKind.
+
+/// Infer output tensor shape from OpKind.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn infer_output_shape(
+    op_kind: &gllm_kernels::compiler::graph::OpKind,
+    seq_len: &gllm_kernels::compiler::graph::SymDim,
+    dt: gllm_kernels::types::DType,
+) -> Vec<gllm_kernels::compiler::graph::SymDim> {
+    use gllm_kernels::compiler::graph::{OpKind, SymDim};
+
+    let s = seq_len.clone();
+    match op_kind {
+        OpKind::Gather { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
+        OpKind::Gemm { n, .. } => vec![s.clone(), SymDim::Concrete(*n)],
+        OpKind::RmsNorm { .. } | OpKind::LayerNorm { .. } => vec![s.clone()],
+        OpKind::ValueNorm { .. } => vec![s.clone()],
+        OpKind::Silu | OpKind::Gelu | OpKind::Tanh | OpKind::Add | OpKind::Mul => vec![s.clone()],
+        OpKind::SwiGlu | OpKind::SwiGluClipped { .. } | OpKind::GeGlu => vec![s.clone()],
+        OpKind::RoPE { .. } => vec![s.clone()],
+        OpKind::MultiHeadAttention { .. } => vec![s.clone()],
+        OpKind::QkNorm { .. } => vec![s.clone()],
+        OpKind::HeadRmsNorm { .. } => vec![s.clone()],
+        OpKind::LogitSoftcap { .. } => vec![s.clone()],
+        OpKind::Argmax { .. } => vec![SymDim::Concrete(1)],
+        OpKind::ColumnSlice { slice_dim, .. } => vec![s.clone(), SymDim::Concrete(*slice_dim)],
+        OpKind::PerLayerEmbed { hidden, .. } => vec![s.clone(), SymDim::Concrete(*hidden)],
+        OpKind::MoERouter { .. } => vec![s.clone()],
+        OpKind::MoEDispatchPacked { hidden, .. } => vec![s.clone(), SymDim::Concrete(*hidden)],
+        OpKind::Reshape { .. } | OpKind::Transpose { .. } => vec![s.clone()],
+        _ => vec![s.clone()],
     }
 }
 
