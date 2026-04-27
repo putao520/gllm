@@ -319,16 +319,16 @@ impl ArchTemplate {
             // The actual scaling is done by the JIT lower reading embedding_scale from business_config.
         }
 
-        // Semantic Gatekeeper knowledge injection
+        // Semantic Gatekeeper knowledge injection (side-channel)
         if let Some(ref sg) = business_config.semantic_gatekeeper {
-            let sg_injected = g.add_tensor("sg_injected", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            let sg_side_out = g.add_tensor("sg_inject_side", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             g.add_op(
                 OpKind::SgInject { knowledge_offset: sg.inject_offset, dim: hidden },
                 vec![post_embed],
-                vec![sg_injected],
+                vec![sg_side_out],
                 "sg_inject",
             );
-            post_embed = sg_injected;
+            // post_embed unchanged — SgInject is a side-channel op
         }
 
         // Session KV Cache restore
@@ -420,6 +420,7 @@ impl ArchTemplate {
                         }
 
                         // SgDetect: side-channel copy of hidden state to scratchpad at detection layer.
+                        // post_attn unchanged — SgDetect is a side-channel op.
                         if let Some(ref sg) = business_config.semantic_gatekeeper {
                             if i == sg.detect_layer {
                                 let layer_out = tensor_map.get("hidden_0")
@@ -427,18 +428,18 @@ impl ArchTemplate {
                                     .ok_or_else(|| TemplateError::Invalid(
                                         "SgDetect: no hidden_0 tensor in layer loop".into()
                                     ))?;
-                                let detected = g.add_tensor(
-                                    &format!("sg_detected_L{}", i),
+                                let detect_side = g.add_tensor(
+                                    &format!("sg_detect_side_L{}", i),
                                     vec![s.clone(), SymDim::Concrete(hidden)],
                                     dt,
                                 );
                                 g.add_op(
                                     OpKind::SgDetect { detect_offset: sg.detect_offset },
                                     vec![layer_out],
-                                    vec![detected],
+                                    vec![detect_side],
                                     &format!("sg_detect_L{}", i),
                                 );
-                                tensor_map.insert("hidden_0".to_string(), detected);
+                                // tensor_map["hidden_0"] unchanged
                             }
                         }
                     }

@@ -8,6 +8,7 @@ use crate::compat::backend_trait::{Backend, Element};
 use crate::compat::CpuBackend;
 use crate::scheduler::types::{PageId, RequestId, StorageKey};
 use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
+use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 use gllm_kernels::types::DType;
 use thiserror::Error;
 
@@ -823,9 +824,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     None
                 },
-                // SG disabled until offset alignment with buffer_alloc is resolved.
-                // GprSkipIfNull infrastructure is ready; need correct scratchpad offsets.
-                semantic_gatekeeper: None,
+                // SG config present but ops disabled for testing.
+                semantic_gatekeeper: Some(SgConfig {
+                    detect_layer: geometry.num_layers / 2,
+                    detect_offset: 0,
+                    inject_offset: 0,
+                }),
                 ..MegaKernelBusinessConfig::default()
             };
 
@@ -848,7 +852,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         m
                     }
                     Err(e) => {
-                        log::warn!("template-based compilation failed ({}), falling back to geometry path", e);
+                        log::warn!("[executor] template compilation failed ({}), falling back to geometry path", e);
                         super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
                             &geometry,
                             &weight_ptrs,
