@@ -215,12 +215,12 @@ pub enum HeadRoutingError {
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
-    /// encode_to_layer 当前不支持 mid-layer 截断(FusedGraphExecutor 扩展 pending)。
+    /// encode_to_layer 当前不支持 mid-layer 截断(mega-kernel path 扩展 pending)。
     ///
     /// **非 stub/fallback**: 这是**显式拒绝**,而非静默降级。一旦
-    /// FusedGraphExecutor 扩展 `run_with_early_exit(anchor_layer)` 落地,
+    /// mega-kernel path 扩展 `run_with_early_exit(anchor_layer)` 落地,
     /// `encode_to_layer` 将走真实 JIT 路径,该错误变体永不返回。
-    #[error("MidLayerNotSupported: FusedGraphExecutor single-forward path does not yet expose mid-layer exit via CallbackChain; see SPEC/HEAD-ROUTING.md §5.3")]
+    #[error("MidLayerNotSupported: mega-kernel path does not yet expose mid-layer exit via CallbackChain; see SPEC/HEAD-ROUTING.md §5.3")]
     MidLayerNotSupported,
 
     /// 下游 backend / tokenizer / executor 错误传播。

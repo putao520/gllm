@@ -1,7 +1,7 @@
 //! Per-Node Callback Infrastructure (SPEC §9-§18)
 //!
 //! Provides a zero-overhead callback mechanism for mid-layer optimization hooks.
-//! The FusedGraphExecutor's node loop calls `pre_node()` / `post_node()` between
+//! The mega-kernel node loop calls `pre_node()` / `post_node()` between
 //! each JIT-compiled kernel, enabling:
 //!
 //! - **Early Exit** (§16.2): Stop execution after confidence threshold
@@ -18,7 +18,6 @@
 //! When no callbacks are registered, the execution path is identical to the
 //! original `run_with_kv_cache()` — a single `if callbacks.is_empty()` guard.
 
-use super::types::FusedOp;
 use crate::engine::executor::GeneratorForwardConfig;
 
 // ============================================================================
@@ -82,8 +81,8 @@ pub struct LayerContext<'a> {
     /// For typical transformer graphs: attention_node → layer = node_idx / 2,
     /// ffn_node → same layer = node_idx / 2.
     pub layer_idx: usize,
-    /// Reference to the node's fused operation type.
-    pub node_op: &'a FusedOp,
+    /// Reference to the node's operation name.
+    pub node_op: &'a str,
     /// Current hidden state tensor (byte representation, model dtype).
     pub hidden_state: &'a [u8],
     /// KV cache K-half pointer (all layers, flat buffer).
@@ -113,7 +112,7 @@ unsafe impl Send for LayerContext<'_> {}
 /// Trait for mid-layer optimization callbacks.
 ///
 /// Implementations are called between graph node executions in
-/// `FusedGraphExecutor::run_with_kv_cache_with_callbacks()`.
+/// `run_with_kv_cache_with_callbacks()` on the mega-kernel path.
 ///
 /// # Priority
 ///
@@ -348,7 +347,7 @@ mod tests {
     // ── Holder struct to own data that LayerContext borrows ──
 
     struct CtxHolder {
-        op: FusedOp,
+        op: &'static str,
         config: GeneratorForwardConfig,
         hidden_state: Vec<u8>,
     }
@@ -356,9 +355,7 @@ mod tests {
     impl CtxHolder {
         fn new() -> Self {
             Self {
-                op: FusedOp::Atomic(crate::graph::types::AtomicOp {
-                    op_type: "Test".to_string(),
-                }),
+                op: "Test",
                 config: GeneratorForwardConfig {
                     geometry: std::sync::Arc::new(crate::model_config::ModelGeometry {
                         hidden_size: 256,
@@ -404,7 +401,6 @@ mod tests {
                         page_table: None,
                         page_size: 16,
                     },
-                    graph_executor_ptr: std::ptr::null_mut(),
                     callback_chain_ptr: std::ptr::null_mut(),
                 },
                 hidden_state: vec![0u8; 256 * 4],

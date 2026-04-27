@@ -1665,6 +1665,11 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
         self.shapes.get(name).map(|v| v.as_slice())
     }
 
+    /// Return an iterator over all tensor names.
+    pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
+        self.tensors.keys()
+    }
+
     /// ARCH-WEIGHT-BLOB-REMAPPING: 精确释放已编译到 weight_blob 中的权重张量。
     ///
     /// 只释放 `safe_to_release` 集合中的权重（这些权重的数据已完整拷贝到

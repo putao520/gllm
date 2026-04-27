@@ -280,7 +280,7 @@ pub use metal_backend::MetalBackend;
 // none of which exist in current gllm-kernels. The replacement path is
 // `gllm_kernels::compiler::InferenceCompiler::compile_graph` driving the
 // `vm::plan_lower::compile_layer` → CodegenOutput pipeline, integrated via
-// `FusedGraphExecutor::run_gpu_with_kv_cache` (not yet implemented).
+// mega-kernel GPU launch (not yet implemented).
 
 /// Pooling mode for BERT-family encoder output.
 #[derive(Debug, Clone, Copy, PartialEq)]

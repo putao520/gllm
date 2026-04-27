@@ -27,7 +27,7 @@ pub const GUARDRAIL_PROBE_PRIORITY: u32 = 40;
 
 /// Runtime GuardrailProbe callback.
 ///
-/// Invoked by `FusedGraphExecutor::run_with_callbacks` at the anchor layer's
+/// Invoked by the mega-kernel node loop at the anchor layer's
 /// `post_node` hook. Reads the last token hidden state, runs a linear
 /// classifier, and either triggers a veto (HaltAndVeto) or records telemetry.
 pub struct GuardrailProbeCallback {
@@ -111,7 +111,7 @@ impl LayerCallback for GuardrailProbeCallback {
                     log::warn!("{reason}");
                     self.shared.trigger_veto(reason);
                     // SPEC/GUARDRAIL.md §5.1 step 2-3: emit `ExitEarly` with
-                    // empty logits; `FusedGraphExecutor` returns empty outputs;
+                    // empty logits; the mega-kernel path returns empty outputs;
                     // backend surfaces this as an empty hidden vector; Client
                     // reads `GuardrailAttachment::is_vetoed()`.
                     CallbackAction::ExitEarly { logits: Vec::new() }

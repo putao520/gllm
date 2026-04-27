@@ -1,16 +1,15 @@
 //! Macroscopic Unified Graph Execution Cache Protocol
-//! 
+//!
 //! Replaces legacy operator-level cache lock mechanism.
-//! 
+//!
 //! Implements REQ-JIT-CACHE-003~007: persistent disk hashing
-//! for the unified FusedGraph execution pipeline.
+//! for the unified mega-kernel execution pipeline.
 
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, Duration};
-use crate::graph::types::FusedGraph;
 
 pub struct ArtifactCache {
     cache_dir: PathBuf,
@@ -26,30 +25,26 @@ impl ArtifactCache {
             p.push("jit_cache");
             p
         });
-        
+
         let mut ac = Self { cache_dir: dir };
-        
+
         #[cfg(not(debug_assertions))]
         let _ = ac.cleanup_ttl_cache(Duration::from_secs(7 * 24 * 3600)); // 7 days TTL
 
         ac
     }
 
-    /// Calculate model hash (excluding backend) for the L3 cache filename.
+    /// Calculate model hash for the L3 cache filename.
     ///
     /// Returns a short hash (first 16 chars of SHA256) for the model structure.
     /// REQ-ARB-009: includes inference_mode so Latency/Throughput caches don't collide.
-    pub fn get_model_hash(&self, model_id: &str, graph: &FusedGraph, inference_mode: &str) -> String {
+    pub fn get_model_hash(&self, model_id: &str, structural_key: &str, inference_mode: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(model_id.as_bytes());
         hasher.update(b"|");
         hasher.update(inference_mode.as_bytes());
         hasher.update(b"|");
-
-        // Use Debug print of the graph structure as structural unique key
-        // This inherently binds to all node connections and parameters mapped in FusedOps.
-        let graph_content = format!("{:?}", graph);
-        hasher.update(graph_content.as_bytes());
+        hasher.update(structural_key.as_bytes());
 
         let full_hash = format!("{:x}", hasher.finalize());
         // Return first 16 characters for filename (128 bits of entropy is sufficient)
@@ -60,17 +55,13 @@ impl ArtifactCache {
     ///
     /// This is used internally to verify that a cached binary matches the current hardware.
     /// REQ-ARB-009: includes inference_mode in hash.
-    pub fn get_blueprint_hash(&self, model_id: &str, graph: &FusedGraph, hardware_fingerprint: &str, inference_mode: &str) -> String {
+    pub fn get_blueprint_hash(&self, model_id: &str, structural_key: &str, hardware_fingerprint: &str, inference_mode: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(model_id.as_bytes());
         hasher.update(b"|");
         hasher.update(inference_mode.as_bytes());
         hasher.update(b"|");
-
-        // Use Debug print of the graph structure as structural unique key
-        // This inherently binds to all node connections and parameters mapped in FusedOps.
-        let graph_content = format!("{:?}", graph);
-        hasher.update(graph_content.as_bytes());
+        hasher.update(structural_key.as_bytes());
         hasher.update(b"|");
         hasher.update(hardware_fingerprint.as_bytes());
         format!("{:x}", hasher.finalize())
@@ -130,7 +121,7 @@ impl ArtifactCache {
         if !self.cache_dir.exists() {
             return Ok(());
         }
-        
+
         let now = SystemTime::now();
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;

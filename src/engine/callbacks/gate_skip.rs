@@ -194,8 +194,7 @@ mod tests {
     // We use a leaked MaybeUninit to satisfy the type without constructing a real config.
     fn make_test_ctx(layer_idx: usize) -> crate::graph::layer_callback::LayerContext<'static> {
         use std::sync::LazyLock;
-        use crate::graph::types::{FusedOp, AtomicOp};
-        static TEST_OP: LazyLock<FusedOp> = LazyLock::new(|| FusedOp::Atomic(AtomicOp { op_type: "test".to_string() }));
+        static TEST_OP: &str = "test";
         // SAFETY: model_config is never dereferenced by GateSkipCallback.pre_node().
         // It only reads ctx.layer_idx. This is test-only code.
         static FAKE_CONFIG: LazyLock<crate::engine::executor::GeneratorForwardConfig> = LazyLock::new(|| {
@@ -221,8 +220,6 @@ mod tests {
                 rerank_yes_token_id: None, rerank_no_token_id: None,
                 moe_config: None,
                 paged_kv: crate::engine::executor::PagedKvConfig { page_table: None, page_size: 16 },
-                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-                graph_executor_ptr: std::ptr::null_mut(),
                 callback_chain_ptr: std::ptr::null_mut(),
             }
         });

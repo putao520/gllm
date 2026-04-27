@@ -19,7 +19,7 @@
 //!
 //! Intent Recall wraps [`Client::encode_to_layer`](crate::client::Client::encode_to_layer)
 //! with semantically clearer naming. Both paths share the same underlying
-//! implementation (FusedGraphExecutor + `run_with_callbacks` +
+//! implementation (mega-kernel path + `run_with_callbacks` +
 //! `MidLayerEncodeCallback`). `encode_intent` exists mainly so
 //! intent-classification call sites read intuitively — there is zero
 //! behavioral difference versus `encode_to_layer`.

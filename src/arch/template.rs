@@ -366,7 +366,7 @@ impl ArchTemplate {
 
     /// 将架构模板直接转换为 CompilerGraph (REQ-UGS-001)。
     ///
-    /// 绕过 OnnxGraph/FusedGraph 中间层，直接从 YAML 模板构建
+    /// 绕过 OnnxGraph 中间层，直接从 YAML 模板构建
     /// `gllm_kernels::compiler::CompilerGraph`。与 `to_onnx_graph()` 共享
     /// 相同的模板展开逻辑（repeat、only_if、DualRotaryEmbedding/QkNorm/PerLayerEmbed 展开器），
     /// 但直接产出 `OpKind` 枚举而非 OnnxNode 字符串。
@@ -1369,7 +1369,7 @@ impl ArchTemplate {
     /// main_embed 是 graph 层面的共享张量 (由顶层 embed_main Gather 节点产出,跨层保持不变)。
     /// ple_slice 是每层独立的窄切片,从 ple_full [seq, num_layers*dim] 按 layer_idx 切出 [seq, dim]。
     ///
-    /// PleSlice 作为 atomic op 在 gllm/executor.rs 的 FusedOp::Atomic 路径处理:
+    /// PleSlice 作为 atomic op 在 mega-kernel executor 的 atomic op 路径处理:
     /// 按 layer_idx × dim_per_layer × elem_bytes 的列偏移从 ple_full 逐行拷贝 dim_per_layer
     /// 个 f32 到独立的输出 buffer (紧凑 [seq, dim] 布局)。
     fn expand_per_layer_embed(

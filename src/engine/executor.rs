@@ -63,7 +63,7 @@ impl Default for SamplingConfig {
 }
 
 /// RoPE (Rotary Position Embedding) configuration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoPEConfig {
     pub theta: f64,
     pub scale: f64,
@@ -115,9 +115,6 @@ pub struct GeneratorForwardConfig {
     pub moe_config: Option<crate::manifest::MoEConfig>,
     /// Paged KV cache configuration.
     pub paged_kv: PagedKvConfig,
-    /// YAML→JIT graph executor pointer.
-    /// Points into the Executor's `graph_executor` Option; null when not available.
-    pub graph_executor_ptr: *mut crate::graph::executor::FusedGraphExecutor,
     /// §9-§18: Callback chain pointer for Gate-First Skip / Residual Bypass / Early Exit.
     /// Points into the Executor's callback chain; null when no callbacks active.
     pub callback_chain_ptr: *mut crate::graph::layer_callback::CallbackChain,
@@ -158,7 +155,7 @@ impl GeneratorForwardConfig {
     pub fn rope_scale(&self) -> f64 { self.rope.scale }
 }
 
-// SAFETY: graph_executor_ptr is only written/read while the Executor's Mutex is held,
+// SAFETY: callback_chain_ptr is only written/read while the Executor's Mutex is held,
 // and the Executor itself is not Send across threads without synchronization.
 unsafe impl Send for GeneratorForwardConfig {}
 unsafe impl Sync for GeneratorForwardConfig {}
@@ -393,8 +390,6 @@ pub struct BatchInput {
     pub sequences: Vec<SequenceInput>,
 }
 
-use crate::graph::optimizer::{GraphOptimizer, OptimizationContext};
-use crate::graph::types::FusedOp;
 use crate::kv_cache::{KvCacheDoubleBuffer, KvCacheError, KvCacheSlot, KvCacheState};
 use crate::loader::WeightsHandle;
 use crate::loader::{Loader, LoaderError, WeightFormat};
@@ -437,71 +432,6 @@ pub struct RequestData {
     pub fused_prefill_hidden: Option<Vec<f32>>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct OnnxFusedKernelStats {
-    flash_attention: usize,
-    swiglu: usize,
-    rope: usize,
-    fused_qkv_rope: usize,
-    gqa: usize,
-    moe_routing: usize,
-    fused_rms_linear: usize,
-    ple: usize,
-    atomic: usize,
-}
-
-impl OnnxFusedKernelStats {
-    fn fused_total(&self) -> usize {
-        self.flash_attention
-            + self.swiglu
-            + self.rope
-            + self.fused_qkv_rope
-            + self.gqa
-            + self.moe_routing
-            + self.fused_rms_linear
-            + self.ple
-    }
-
-    fn from_fused_graph(fused_graph: &crate::graph::FusedGraph) -> Self {
-        let mut stats = Self::default();
-        for node in &fused_graph.nodes {
-            match &node.op {
-                FusedOp::FlashAttention(_) => stats.flash_attention += 1,
-                FusedOp::SwiGLU(_) => stats.swiglu += 1,
-                FusedOp::RoPE(_) => stats.rope += 1,
-                FusedOp::FusedQkvRope(_) => stats.fused_qkv_rope += 1,
-                FusedOp::FusedQkvNormRope(_) => stats.fused_qkv_rope += 1,
-                FusedOp::GQA(_) => stats.gqa += 1,
-                FusedOp::MoERouting(_) => stats.moe_routing += 1,
-                FusedOp::FusedRMSLinear(_) => stats.fused_rms_linear += 1,
-                FusedOp::PerLayerEmbed(_) => stats.ple += 1,
-                FusedOp::Atomic(_) => stats.atomic += 1,
-            }
-        }
-        stats
-    }
-}
-
-#[derive(Debug, Clone)]
-struct OnnxGeneratorPlan {
-    fused_kernels: OnnxFusedKernelStats,
-    graph_outputs: Vec<String>,
-    kv_outputs: Vec<String>,
-    execution_order: Vec<OnnxKernelExecutionOp>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OnnxKernelExecutionOp {
-    FlashAttention,
-    SwiGlu,
-    Rope,
-    FusedQkvRope,
-    Gqa,
-    MoERouting,
-    FusedRMSLinear,
-    PerLayerEmbed,
-    Atomic,
-}
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -525,8 +455,8 @@ pub enum ExecutorError {
     EmptySample,
     #[error("request not found: {request_id}")]
     RequestNotFound { request_id: RequestId },
-    #[error("onnx generator plan error: {0}")]
-    OnnxPlan(String),
+    #[error("inference plan error: {0}")]
+    Plan(String),
 }
 
 pub type ExecutorResult<T> = std::result::Result<T, ExecutorError>;
@@ -549,13 +479,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     kv_cache: Option<KvCacheDoubleBuffer>,
     kv_cache_slot: KvCacheSlot,
     memory_manager: GlobalMemoryManager,
-    onnx_generator_plan: Option<OnnxGeneratorPlan>,
     topology: AttentionTopology,
 
-    /// YAML→JIT graph executor (built at load time, used preferentially in forward pass).
-    /// None when the architecture template is not registered or JIT compilation fails.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    graph_executor: Option<crate::graph::executor::FusedGraphExecutor>,
     /// Tracks stability telemetries to trigger Re-Fusion (Tier V.3)
     pub profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator,
     /// Generation hooks (guardrails, probes) called after each decode step.
@@ -658,7 +583,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 page_table: None,
                 page_size: model_config.kv_cache_block_size,
             },
-            graph_executor_ptr: std::ptr::null_mut(),
             callback_chain_ptr: std::ptr::null_mut(),
         };
 
@@ -687,8 +611,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             page_size,
             swap_config: None,
         };
-        let onnx_generator_plan = Self::build_onnx_generator_plan(manifest.as_ref(), loader, &geometry)?;
-
         let is_moe = geometry.is_moe();
         let tokenizer = TokenizerHandle::from_loader(loader, manifest.kind)?;
 
@@ -704,380 +626,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ModelKind::Embedding | ModelKind::Reranker | ModelKind::Classifier => AttentionTopology::bidirectional(geometry.clone()),
         };
 
-        // Build YAML→JIT graph executor: 3-phase pipeline
-        // Phase 1: template → OnnxGraph → optimize → FusedGraph (uncompiled)
-        // Phase 2: inject real weight shapes from loaded tensors (fixes GEMM dimensions)
-        // Phase 3: JIT-compile + bind weight pointers
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let graph_executor = {
-            use crate::arch::{build_uncompiled_executor_from_yaml, register_builtin_templates, get_template, ResolvedConfig};
-            use crate::compat::backend_trait::TensorLookup;
-            register_builtin_templates();
-            let resolved = ResolvedConfig::from_geometry(&geometry, std::collections::HashMap::new());
-            let hidden = geometry.hidden_size;
-            let cache = crate::compat::artifact_cache::ArtifactCache::new(None);
-            let jit_backend = "cpu";
-            let model_id = &manifest.model_id;
-
-            // Phase 1: build uncompiled executor (template expand + graph optimize, NO JIT)
-            // ARCH-TEMPLATE-KIND-OVERRIDE: manifest.arch 是 encoder/decoder 基础模板,
-            // ModelKind (Reranker/Embedding) 可能需要专用模板 (如 xlmr → xlmr-reranker
-            // 加 classifier head)。先走 KIND 查找, 未命中回落到基础模板。
-            let effective_arch = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
-                .unwrap_or_else(|| manifest.arch.clone());
-            let uncompiled = match get_template(&effective_arch) {
-                Some(tmpl) => {
-                    let arch_name = tmpl.name.clone();
-                    match build_uncompiled_executor_from_yaml(
-                        &arch_name,
-                        &resolved,
-                        geometry.dtype,
-                        manifest.family(),
-                    ) {
-                        Ok(ge) => Some(ge),
-                        Err(e) => {
-                            log::error!("Failed to build uncompiled executor for '{}': {}", arch_name, e);
-                            None
-                        }
-                    }
-                }
-                None => {
-                    log::error!("No YAML template found for architecture '{}'", effective_arch);
-                    None
-                }
-            };
-
-            if let Some(mut ge) = uncompiled {
-                // Phase 2: inject real weight shapes from loaded tensors
-                // This MUST happen BEFORE JIT compilation so that build_node_graph
-                // uses correct GEMM dimensions (K, N) instead of defaulting to hidden_size.
-                // Inject real weight shapes by trying each format's TensorProvider
-                // ARCH-WEIGHT-CANONICAL-LAYOUT: shape_needs_transpose 按格式设置:
-                //   SafeTensors/PyTorch: HF 原生 [out, in], 需语义转置到 [K, N]
-                //   ONNX: 原生 [K, N] canonical
-                //   GGUF: 走独立量化路径, 存储布局与 ONNX 一致
-                if let Some(st) = loader.safetensors_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(st, true);
-                } else if let Some(onnx) = loader.onnx_ref() {
-                    ge.graph_mut().bind_weight_shapes_fuzzy(onnx, false);
-                } else if let Some(gguf) = loader.gguf_ref() {
-                    // ARCH-WEIGHT-CANONICAL-LAYOUT (GGUF): GGUF stores Linear weights
-                    // as [out_features, in_features] (same row-major layout as HF
-                    // SafeTensors). Linear weight roles need a metadata swap to
-                    // canonical [K=in, N=out] just like SafeTensors. Embedding tables
-                    // (Gather role) and 1D norm/bias weights are excluded by
-                    // `is_linear_matmul_weight` so they keep their raw [vocab, hidden]
-                    // / [hidden] shapes — matching the dequant path below which only
-                    // physically transposes 2D Linear weights.
-                    ge.graph_mut().bind_weight_shapes_fuzzy(gguf, true);
-                }
-
-                // Phase 3a: JIT-compile with correct weight shapes.
-                // Use max_seq_len as compile-time M to force BLIS 5-loop path which
-                // reads runtime seq_len from [rbp+16] for the M dimension loop.
-                // Using seq_len=1 would trigger the direct (fully-unrolled) path
-                // ARCH-SYMDIM-NO-CONST-DEGRADE: seq_len 不再是编译时参数。
-                // 所有 Symbolic 维度在 JIT 中通过 BoundExpr::Symbolic 从运行时读取。
-                // compile() 的 seq_len 参数仅用于 buffer 分配上界（max_for_allocation）。
-                // seq_len 参数仅用于 buffer 分配上界
-                let max_seq_for_alloc = geometry.max_seq_len;
-                let compile_ok = ge.compile_with_cache(max_seq_for_alloc, hidden, geometry.dtype, model_id, jit_backend, &cache)
-                    .map_err(|e| { eprintln!("[EXECUTOR-JIT-ERR] JIT compilation failed for '{}': {e}", effective_arch); })
-                    .is_ok();
-
-                if compile_ok {
-                    // Phase 3b: bind weight pointers for runtime execution
-                    let mut expected_names = std::collections::HashSet::new();
-                    for key in ge.graph().weight_bindings.keys() {
-                        expected_names.insert(key.clone());
-                    }
-                    let graph_inputs: std::collections::HashSet<String> = ge.graph().inputs.iter().cloned().collect();
-                    for node in &ge.graph().nodes {
-                        for input_name in &node.inputs {
-                            if !graph_inputs.contains(input_name) && input_name.contains('.') {
-                                expected_names.insert(input_name.clone());
-                            }
-                        }
-                    }
-                    // ARCH-GGUF-DEQUANT-ROLE-AWARE: build a name→needs_transpose
-                    // set mirroring `bind_weight_shapes_fuzzy`'s role-based logic
-                    // so dequant can decide per canonical_name whether to
-                    // physically transpose the f32 payload. Linear MatMul weights
-                    // (q/k/v/o/gate/up/down/lm_head) need [out, in] → [in, out];
-                    // Gather embedding tables and 1D norm/bias weights must NOT
-                    // be transposed.
-                    //
-                    // Snapshot to an owned `HashSet<String>` so we don't keep
-                    // a borrow of `ge` while mutating it via `bind`/`bind_bytes`.
-                    let needs_transpose_set: std::collections::HashSet<String> = {
-                        let mut role_map: std::collections::HashMap<&str, Vec<(&FusedOp, usize)>> =
-                            std::collections::HashMap::new();
-                        for node in &ge.graph().nodes {
-                            for (i, input) in node.inputs.iter().enumerate() {
-                                role_map.entry(input.as_str()).or_default().push((&node.op, i));
-                            }
-                        }
-                        role_map
-                            .keys()
-                            .filter(|name| {
-                                crate::graph::types::is_linear_matmul_weight(name, &role_map)
-                            })
-                            .map(|name| name.to_string())
-                            .collect()
-                    };
-                    for canonical_name in expected_names {
-                        let needs_transpose = needs_transpose_set.contains(&canonical_name);
-                        let found = TensorLookup::get_tensor(&weights, &canonical_name)
-                            .map(|t| t.as_ref().as_ptr() as *const f32);
-                        let found = found.or_else(|| {
-                            // Multi-modal models (e.g. Gemma 4 `Gemma4ForConditionalGeneration`)
-                            // nest the text decoder weights under `model.language_model.` while
-                            // the YAML template names them with the bare `model.` prefix. Include
-                            // both add/strip directions for these multi-modal nesting variants.
-                            const PREFIXES: &[&str] = &[
-                                "roberta.",
-                                "bert.",
-                                "model.",
-                                "encoder.",
-                                "transformer.",
-                                "language_model.",
-                                "model.language_model.",
-                            ];
-                            for prefix in PREFIXES {
-                                if let Some(stripped) = canonical_name.strip_prefix(prefix) {
-                                    if let Some(t) = TensorLookup::get_tensor(&weights, stripped) {
-                                        return Some(t.as_ref().as_ptr() as *const f32);
-                                    }
-                                }
-                            }
-                            for prefix in PREFIXES {
-                                let prefixed = format!("{prefix}{canonical_name}");
-                                if let Some(t) = TensorLookup::get_tensor(&weights, &prefixed) {
-                                    return Some(t.as_ref().as_ptr() as *const f32);
-                                }
-                            }
-                            // tie_word_embeddings: lm_head.weight → model.embed_tokens.weight
-                            // (也处理 GGUF weight tying via token_embd.weight)
-                            //
-                            // ARCH-TIED-EMBED-TRANSPOSE: embed_tokens 作为 Gather 的 table
-                            // 被加载为 [vocab, hidden] (HF 原始 layout, shape_needs_transpose=false)。
-                            // 但 lm_head 是 MatMul 权重 (shape_needs_transpose=true),
-                            // 需要 canonical [hidden, vocab]。
-                            // 直接把 embed_tokens 的 ptr 绑给 lm_head.weight 会让 MatMul
-                            // 按 [hidden, vocab] 解读 [vocab, hidden] 字节流 → logits 完全错误。
-                            // 正确做法: 同一块数据需要两份视图 — 原样给 Gather,
-                            // 转置后给 lm_head。这里返回 None 让下方的专门处理分支
-                            // 通过 bind_bytes 材化出 transpose 后的字节。
-                            if canonical_name == "lm_head.weight" {
-                                return None;  // 交给下方 lm_head 专用转置分支处理
-                            }
-                            // Decoder layer HF → GGUF name translation.
-                            // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
-                            for alias in crate::weight_names::all_decoder_weight_aliases(&canonical_name) {
-                                if let Some(t) = TensorLookup::get_tensor(&weights, &alias) {
-                                    return Some(t.as_ref().as_ptr() as *const f32);
-                                }
-                            }
-                            // Global decoder weight aliases (final norm, lm_head, embedding).
-                            // E.g. model.norm.weight → output_norm.weight (GGUF)
-                            //      lm_head.weight   → token_embd.weight (tied embedding)
-                            let global_alias_groups: &[&dyn Fn() -> Vec<String>] = &[
-                                &crate::weight_names::decoder_final_norm_aliases,
-                                &crate::weight_names::lm_head_aliases,
-                                &crate::weight_names::decoder_embed_aliases,
-                            ];
-                            for alias_fn in global_alias_groups {
-                                let aliases = alias_fn();
-                                if aliases.contains(&canonical_name) {
-                                    for alias in &aliases {
-                                        if alias != &canonical_name {
-                                            if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
-                                                return Some(t.as_ref().as_ptr() as *const f32);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None
-                        });
-                        // Dequantize a QuantizedTensor to f32 bytes using the backend.
-                        //
-                        // ARCH-GGUF-DEQUANT-ROLE-AWARE: GGUF/HF store 2D weights as
-                        // `[out_features, in_features]` row-major. Linear MatMul
-                        // operands need a physical transpose to canonical
-                        // `[K=in, N=out]` (matching `format_needs_transpose=true` in
-                        // `bind_weight_shapes_fuzzy`). Gather embedding tables MUST
-                        // be left as `[vocab, hidden]` row-major so the JIT Gather
-                        // reads `table[token_id * embed_dim + j]` correctly.
-                        // 1D weights (norm/bias) never get transposed.
-                        let dequant = |q_tensor: &crate::loader::QuantizedTensor,
-                                       transpose: bool|
-                         -> Option<Vec<u8>> {
-                            let numel: usize = q_tensor.shape.iter().product();
-                            let mut f32_out = vec![0.0f32; numel];
-                            backend.dequantize(&q_tensor.data, &mut f32_out, q_tensor.quant_type)
-                                .ok()?;
-                            let shape = &q_tensor.shape;
-                            let f32_to_bytes = |v: &[f32]| -> Vec<u8> {
-                                v.iter().flat_map(|f| f.to_le_bytes()).collect()
-                            };
-                            if transpose && shape.len() == 2 {
-                                let rows = shape[0]; // out_features = N
-                                let cols = shape[1]; // in_features = K
-                                let mut transposed = vec![0.0f32; numel];
-                                for r in 0..rows {
-                                    for c in 0..cols {
-                                        transposed[c * rows + r] = f32_out[r * cols + c];
-                                    }
-                                }
-                                Some(f32_to_bytes(&transposed))
-                            } else {
-                                Some(f32_to_bytes(&f32_out))
-                            }
-                        };
-                        // ARCH-TIED-EMBED-TRANSPOSE: lm_head.weight 在 tied-embed 情况下
-                        // 需从 embed_tokens [vocab, hidden] 转置到 canonical [hidden, vocab]。
-                        let lm_head_tied_bytes: Option<Vec<u8>> = if found.is_none()
-                            && canonical_name == "lm_head.weight"
-                        {
-                            const EMBED_ALIASES: &[&str] = &[
-                                "model.embed_tokens.weight", "embed_tokens.weight",
-                                "transformer.wte.weight", "embeddings.word_embeddings.weight",
-                                "token_embd.weight",
-                                // Gemma 4 multi-modal nesting
-                                "model.language_model.embed_tokens.weight",
-                                "language_model.embed_tokens.weight",
-                            ];
-                            let mut result: Option<Vec<u8>> = None;
-                            for alias in EMBED_ALIASES {
-                                if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
-                                    // E 可能是 f32/f16/bf16; CPU backend 实际是 f32。
-                                    // 用 ptr 强转为 &[f32] — 条件: E size == f32 size (CPU 路径).
-                                    let data_slice_e: &[E] = t.as_ref();
-                                    if std::mem::size_of::<E>() != std::mem::size_of::<f32>() {
-                                        continue;
-                                    }
-                                    let data: &[f32] = unsafe {
-                                        std::slice::from_raw_parts(
-                                            data_slice_e.as_ptr() as *const f32,
-                                            data_slice_e.len(),
-                                        )
-                                    };
-                                    let shape = TensorLookup::tensor_shape(&weights, alias).unwrap_or(&[][..]);
-                                    if shape.len() == 2 {
-                                        let vocab = shape[0];
-                                        let hidden = shape[1];
-                                        if data.len() == vocab * hidden {
-                                            // Transpose [vocab, hidden] → [hidden, vocab]
-                                            let mut transposed = vec![0.0f32; vocab * hidden];
-                                            for v in 0..vocab {
-                                                for h in 0..hidden {
-                                                    transposed[h * vocab + v] = data[v * hidden + h];
-                                                }
-                                            }
-                                            let bytes: Vec<u8> = transposed.iter()
-                                                .flat_map(|f| f.to_le_bytes())
-                                                .collect();
-                                            result = Some(bytes);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            result
-                        } else { None };
-
-                        if let Some(bytes) = lm_head_tied_bytes {
-                            ge = ge.bind_bytes(canonical_name.clone(), bytes);
-                        } else if let Some(ptr) = found {
-                            ge = ge.bind(canonical_name.clone(), ptr);
-                        } else if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &canonical_name) {
-                            // ARCH-MXFP4-SEPARATE: MXFP4 blocks/scales are raw bytes consumed
-                            // directly by JIT MoEDispatchPacked dequant — never host-dequantized.
-                            if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
-                                ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
-                            } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
-                                ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
-                            }
-                        } else {
-                            // Try decoder layer GGUF aliases for quantized tensors.
-                            // E.g. model.layers.0.self_attn.q_proj.weight → blk.0.attn_q.weight
-                            let mut bound_alias = false;
-                            for alias in crate::weight_names::all_decoder_weight_aliases(&canonical_name) {
-                                if let Some(t) = TensorLookup::get_tensor(&weights, &alias) {
-                                    ge = ge.bind(canonical_name.clone(), t.as_ref().as_ptr() as *const f32);
-                                    bound_alias = true;
-                                    break;
-                                }
-                                if let Some(q_tensor) = TensorLookup::get_quantized(&weights, &alias) {
-                                    if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
-                                        ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
-                                        bound_alias = true;
-                                    } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
-                                        ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
-                                        bound_alias = true;
-                                    }
-                                    break;
-                                }
-                            }
-                            // Try global decoder weight aliases (final norm, lm_head, embedding).
-                            // E.g. model.norm.weight → output_norm.weight (GGUF)
-                            if !bound_alias {
-                                let global_alias_groups: &[&dyn Fn() -> Vec<String>] = &[
-                                    &crate::weight_names::decoder_final_norm_aliases,
-                                    &crate::weight_names::lm_head_aliases,
-                                    &crate::weight_names::decoder_embed_aliases,
-                                ];
-                                'outer: for alias_fn in global_alias_groups {
-                                    let aliases = alias_fn();
-                                    if aliases.contains(&canonical_name) {
-                                        for alias in &aliases {
-                                            if alias != &canonical_name {
-                                                if let Some(t) = TensorLookup::get_tensor(&weights, alias) {
-                                                    ge = ge.bind(canonical_name.clone(), t.as_ref().as_ptr() as *const f32);
-                                                    break 'outer;
-                                                }
-                                                if let Some(q_tensor) = TensorLookup::get_quantized(&weights, alias) {
-                                                    if matches!(q_tensor.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
-                                                        ge = ge.bind_bytes(canonical_name.clone(), q_tensor.data.clone());
-                                                    } else if let Some(f32_bytes) = dequant(q_tensor, needs_transpose) {
-                                                        ge = ge.bind_bytes(canonical_name.clone(), f32_bytes);
-                                                    }
-                                                    break 'outer;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(ge)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
         // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
-        // ARCH-MOE-MEGA-KERNEL: MoE 模型的 packed expert weights (blocks/scales/bias/router)
-        // 无法映射到 PerLayerWeightLayout 的密集 FFN 槽位。MoE 模型走 per-node
-        // FusedGraphExecutor 路径，由 JIT MoEDispatchPacked 直接消费原始字节。
+        // 所有模型（包括 MoE）统一走 mega-kernel 路径 (REQ-UGS-005/006)。
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        let mega_kernel = if is_moe {
-            log::info!("executor: MoE model — skipping mega-kernel (uses per-node JIT path)");
-            None
-        } else {
+        let mega_kernel = {
             use crate::compat::backend_trait::TensorLookup;
-            let ge = graph_executor.as_ref()
-                .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
-                    "graph_executor not available for mega-kernel compilation".into(),
-                )))?;
 
             // Resolve EOS token ID: prefer tokenizer vocab (authoritative) over config.json
-            // (many ONNX/Community repos ship config.json with eos_token_id=0).
             let eos_id = tokenizer.eos_token_id()
                 .or(model_config.eos_token_id)
                 .unwrap_or(2);
@@ -1086,39 +641,23 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 eos_id, model_config.eos_token_id, tokenizer.eos_token_id(),
             );
 
-            let wb = &ge.graph().weight_bindings;
+            // Build weight_ptrs/weight_sizes directly from executor's weights HashMap
             let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
             let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-            for (name, binding) in wb {
-                if let Some(ptr) = binding.ptr {
-                    weight_ptrs.insert(name.clone(), ptr as *const u8);
-                    let num_elems: usize = binding.shape.iter().product();
-                    weight_sizes.insert(name.clone(), num_elems * 4);
-                } else if let Some(ref data) = binding.data {
-                    weight_ptrs.insert(name.clone(), data.as_ptr());
-                    weight_sizes.insert(name.clone(), data.len());
+            for name in weights.tensor_names() {
+                if let Some(t) = TensorLookup::get_tensor(&weights, &name) {
+                    let data: &[E] = t.as_ref();
+                    let size = data.len() * std::mem::size_of::<E>();
+                    weight_ptrs.insert(name.clone(), data.as_ptr() as *const u8);
+                    weight_sizes.insert(name.clone(), size);
                 }
             }
 
-            // Supplement weight bindings that the compat-layer YAML template may not
-            // reference but the mega-kernel packing code needs. Two categories:
-            // 1. Fused weights (qkv_proj, gate_up_proj) — the template uses separate names
-            //    but the safetensors stores a single fused tensor.
-            // 2. Separate weights (gate_proj) — the template omits gate_proj for GeGLU
-            //    architectures (e.g., Gemma 4 template only references up_proj).
-            // The weights HashMap uses original safetensors names (e.g.,
-            // model.language_model.layers.X.*), so we try both the normalized
-            // name and prefixed variants.
-            // IMPORTANT: Linear weights in safetensors are [out, in]. The mega-kernel
-            // expects canonical [in, out]. We must transpose supplemented weights.
+            // Supplement with prefix aliases (multi-modal nesting, GGUF aliases)
             const MID_PREFIX_REPLACEMENTS: &[(&str, &str)] = &[
                 ("model.layers.", "model.language_model.layers."),
             ];
-            // Keep transposed data alive until compile_from_geometry finishes.
             let mut _supplement_owned: Vec<Vec<u8>> = Vec::new();
-            // WeightsHandle data is already canonical [in, out] (loader's
-            // normalize_linear_weight_layout physically transposes on upload).
-            // Just copy bytes — no transpose needed.
             let supplement_weight = |name: &str, owned: &mut Vec<Vec<u8>>| -> Option<(*const u8, usize)> {
                 let mut candidates = vec![name.to_string()];
                 for (from, to) in MID_PREFIX_REPLACEMENTS {
@@ -1143,7 +682,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 None
             };
             for layer_idx in 0..geometry.num_layers {
-                // Fused QKV
                 let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
                 if !weight_ptrs.contains_key(&qkv_name) {
                     if let Some((ptr, size)) = supplement_weight(&qkv_name, &mut _supplement_owned) {
@@ -1151,7 +689,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         weight_sizes.insert(qkv_name, size);
                     }
                 }
-                // Fused gate_up
                 let gu_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
                 if !weight_ptrs.contains_key(&gu_name) {
                     if let Some((ptr, size)) = supplement_weight(&gu_name, &mut _supplement_owned) {
@@ -1159,8 +696,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         weight_sizes.insert(gu_name, size);
                     }
                 }
-                // Separate gate_proj (GeGLU architectures like Gemma 4 where the YAML
-                // template only references up_proj but the safetensors has gate_proj too).
                 let gate_name = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
                 if !weight_ptrs.contains_key(&gate_name) {
                     if let Some((ptr, size)) = supplement_weight(&gate_name, &mut _supplement_owned) {
@@ -1170,7 +705,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
             // Detect heterogeneous layers (e.g., Gemma-4 E2B with sliding + full attention).
-            // Build HeteroLayerConfig if detected, otherwise compile homogeneous mega-kernel.
             let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
             let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
             let mut full_attention_indices: Vec<usize> = Vec::new();
@@ -1219,13 +753,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         let full_kv_dim = hetero_kv_dim_full;
                         let full_num_kv_heads = if full_head_dim > 0 { full_kv_dim / full_head_dim } else { geometry.num_kv_heads };
 
-                        // Detect FFN size transition: scan gate_proj sizes to find where large FFN starts.
                         let ref_gate = ref_size_gate.unwrap_or(0);
                         let small_intermediate = geometry.intermediate_size;
                         let mut large_intermediate = small_intermediate;
-                        let mut large_ffn_start_segment = num_segments; // default: no large FFN
+                        let mut large_ffn_start_segment = num_segments;
                         if hetero_intermediate_differs && ref_gate > 0 {
-                            // Find first layer with different gate_proj size
                             let first_large_layer = (1..geometry.num_layers).find(|&l| {
                                 let gk = format!("model.layers.{}.mlp.gate_proj.weight", l);
                                 weight_sizes.get(&gk).map_or(false, |&s| s != ref_gate)
@@ -1233,7 +765,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             if let Some(fl) = first_large_layer {
                                 let large_gate = weight_sizes.get(&format!("model.layers.{}.mlp.gate_proj.weight", fl)).copied().unwrap_or(ref_gate);
                                 large_intermediate = large_gate / (geometry.hidden_size * 4);
-                                // Convert layer index to segment index
                                 large_ffn_start_segment = fl / (sliding_per_segment + 1);
                             }
                         }
@@ -1274,7 +805,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 .unwrap_or_else(|| manifest.arch.clone());
             let template = crate::arch::get_template(&arch_for_template);
 
-            // Build mega-kernel business config from template + geometry.
             use gllm_kernels::compiler::MegaKernelBusinessConfig;
             use gllm_kernels::compiler::mega_kernel_abi::FfnActivation;
             let business_config = MegaKernelBusinessConfig {
@@ -1288,7 +818,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 has_value_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
                 value_norm_eps: geometry.norm_eps,
                 logit_softcapping: geometry.final_logit_softcapping,
-                // Gemma models: embedding scaled by sqrt(hidden_size)
                 embedding_scale: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
                     Some((geometry.hidden_size as f32).sqrt())
                 } else {
@@ -1298,8 +827,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             };
 
             let mega = if let Some(ref tmpl) = template {
-                // REQ-UGS-001/003: YAML template → CompilerGraph direct path.
-                // Bypasses graph_builders.rs hand-written decoder_model().
                 let resolved = crate::arch::ResolvedConfig::from_geometry(
                     &geometry, std::collections::HashMap::new(),
                 );
@@ -1424,18 +951,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
         };
 
-        // ARCH-WEIGHT-BLOB-REMAPPING: graph_executor 编译完成后，收集已预打包到
-        // weight_blob 的权重名集合，从 WeightsHandle.tensors 中精确释放这些权重。
-        // 只释放 pre_bound_weight_names() 中的权重（FFN 层的 gate/up/down_proj），
-        // 保留 attention 层权重（needs_runtime_weight_pack=true，运行时仍从 tensors 读取）。
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        if let Some(ref ge) = graph_executor {
-            let safe = ge.pre_bound_weight_names();
-            if !safe.is_empty() {
-                weights.release_compiled_weights(&safe);
-            }
-        }
-
         // §9.1: Detect CompactPlatform from topology for RaggedCompaction
         let compact_platform = crate::jit::ragged::CompactPlatform::detect(
             if pre_topology.has_gpu() { "cuda" } else { "cpu" },
@@ -1459,7 +974,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             kv_cache: None,
             kv_cache_slot: KvCacheSlot::Front,
             memory_manager,
-            onnx_generator_plan,
             batcher: ContinuousBatcher::new().with_chunked(
                 crate::scheduler::vllm2024::ChunkedConfig::default(),
             ),
@@ -1467,7 +981,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             policy: PolicyVariant::default(),
             requests: HashMap::new(),
             topology,
-            graph_executor,
             profile_accumulator: crate::scheduler::telemetry::ProfileAccumulator::new(),
             hooks: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
             system_topology: {
@@ -1573,73 +1086,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             },
             sg_callback_shim: None,
         })
-    }
-
-    fn build_onnx_generator_plan(
-        manifest: &ModelManifest,
-        loader: &mut Loader,
-        geometry: &Arc<crate::model_config::ModelGeometry>,
-    ) -> ExecutorResult<Option<OnnxGeneratorPlan>> {
-        if manifest.kind != ModelKind::Chat || loader.weight_format() != WeightFormat::Onnx {
-            return Ok(None);
-        }
-
-        let onnx = loader.onnx()?;
-        let onnx_graph = onnx.graph();
-
-        // Use the new GraphOptimizer to generate FusedGraph
-        let ctx = OptimizationContext {
-            geometry: geometry.clone(),
-            arch_family: manifest.family(),
-            ..Default::default()
-        };
-        let optimizer = GraphOptimizer::new(ctx);
-        let fused_graph = optimizer
-            .optimize(onnx_graph)
-            .map_err(|e| ExecutorError::OnnxPlan(format!("graph optimization failed: {e}")))?;
-
-        let fused_kernels = OnnxFusedKernelStats::from_fused_graph(&fused_graph);
-        let execution_order = fused_graph
-            .nodes
-            .iter()
-            .map(|node| match &node.op {
-                FusedOp::FlashAttention(_) => OnnxKernelExecutionOp::FlashAttention,
-                FusedOp::SwiGLU(_) => OnnxKernelExecutionOp::SwiGlu,
-                FusedOp::RoPE(_) => OnnxKernelExecutionOp::Rope,
-                FusedOp::FusedQkvRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
-                FusedOp::FusedQkvNormRope(_) => OnnxKernelExecutionOp::FusedQkvRope,
-                FusedOp::GQA(_) => OnnxKernelExecutionOp::Gqa,
-                FusedOp::MoERouting(_) => OnnxKernelExecutionOp::MoERouting,
-                FusedOp::FusedRMSLinear(_) => OnnxKernelExecutionOp::FusedRMSLinear,
-                FusedOp::PerLayerEmbed(_) => OnnxKernelExecutionOp::PerLayerEmbed,
-                FusedOp::Atomic(_) => OnnxKernelExecutionOp::Atomic,
-            })
-            .collect::<Vec<_>>();
-        if execution_order.is_empty() {
-            return Err(ExecutorError::OnnxPlan(
-                "graph optimizer produced an empty execution plan".to_string(),
-            ));
-        }
-
-        let graph_outputs = onnx_graph
-            .outputs
-            .iter()
-            .map(|value| value.name.clone())
-            .collect::<Vec<_>>();
-        let kv_outputs = extract_onnx_kv_outputs(&graph_outputs);
-        if kv_outputs.is_empty() {
-            return Err(ExecutorError::OnnxPlan(
-                "ONNX graph does not expose identifiable KV cache outputs; \
-                 cannot proceed without KV cache (O(n²) fallback is not authorized)".into(),
-            ));
-        }
-
-        Ok(Some(OnnxGeneratorPlan {
-            fused_kernels,
-            graph_outputs,
-            kv_outputs,
-            execution_order,
-        }))
     }
 
     pub fn backend(&self) -> &B {
@@ -1947,55 +1393,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // run_batch_forward() 仅在 step-by-step 连续批处理模式中被调用，
         // 该模式尚未迁移到 mega-kernel（需要 per-step KV cache 管理）
 
-        // 标准路径：逐层执行
-        if let Some(plan) = self.onnx_generator_plan.as_ref() {
-            if plan.execution_order.is_empty() {
-                return Err(ExecutorError::OnnxPlan(
-                    "ONNX execution plan is empty".to_string(),
-                ));
-            }
-            let total_kernels = plan.fused_kernels.fused_total() + plan.fused_kernels.atomic;
-            if total_kernels != plan.execution_order.len() {
-                return Err(ExecutorError::OnnxPlan(
-                    "ONNX execution plan kernel accounting mismatch".to_string(),
-                ));
-            }
-            let has_logits_output = plan
-                .graph_outputs
-                .iter()
-                .any(|name| is_onnx_logits_output(name))
-                || plan
-                    .graph_outputs
-                    .len()
-                    .saturating_sub(plan.kv_outputs.len())
-                    == 1;
-            if !has_logits_output {
-                return Err(ExecutorError::OnnxPlan(
-                    "ONNX execution plan has no logits output".to_string(),
-                ));
-            }
-
-            // Validate KV cache layer count matches ONNX graph KV outputs
-            if !plan.kv_outputs.is_empty() {
-                let onnx_layers = onnx_kv_layer_count(&plan.kv_outputs);
-                if onnx_layers > 0 && onnx_layers != self.kv_cache_config.num_layers() {
-                    log::warn!(
-                        "ONNX KV output layers ({}) differs from model config layers ({}); \
-                         KV cache managed by compat layer using model config",
-                        onnx_layers,
-                        self.kv_cache_config.num_layers()
-                    );
-                }
-            }
-        }
-
         let kv_handle = self.active_kv_handle()?;
         let mut kv_caches = vec![kv_handle; batch_input.sequences.len()];
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
 
         // §9-§18: 构建完整 callback chain 并通过 forward_config 传递给 decoder_forward
         let num_layers = self.geometry.num_layers;
@@ -2625,7 +2024,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         // §13.1: 将 Epilogue gate_skip 决策写入 forward_config，
-        // 供下一步 run_batch_forward() 的 graph_executor callback chain 消费。
+        // 供下一步 run_batch_forward() 消费。
         // 每个请求的 gate_skip 决策映射到层级 skip_flags。
         {
             use crate::jit::epilogue::GateSkipDecision;
@@ -3027,11 +2426,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mut kv_cache = self.active_kv_handle()?;
 
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         // Profiling/test execution (run pure forward manually without inserting into metrics stream)
         let (logits_list, _sparsity, _telemetries) = self.backend.batch_forward_gpu_pure(
             &batch_input,
@@ -3093,76 +2487,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Ok(text);
         }
 
-        // Per-node JIT path: MoE models / heterogeneous layers use FusedGraphExecutor
-        // with token-by-token generation. Each forward pass is still JIT-compiled
-        // machine code — only the autoregressive loop is Rust-orchestrated.
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-        if self.graph_executor.is_some() {
-            return self.generate_per_node(prompt, max_tokens, temperature, top_k, top_p);
-        }
-
         Err(ExecutorError::Backend(BackendError::Other(
-            "generate_with_sampling: no execution backend available. \
-             mega-kernel not compiled and graph_executor not available.".into(),
+            "generate_with_sampling: mega-kernel not compiled for this platform.".into(),
         )))
-    }
-
-    /// Per-node JIT generation: enqueue + step loop for MoE / heterogeneous-layer models.
-    /// Each forward pass runs through JIT-compiled FusedGraphExecutor.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    fn generate_per_node(
-        &mut self,
-        prompt: &str,
-        max_tokens: usize,
-        temperature: f32,
-        top_k: usize,
-        top_p: f32,
-    ) -> ExecutorResult<String> {
-        // Ensure KV cache is allocated for this model.
-        if self.kv_cache.is_none() {
-            let kv_config = self.kv_cache_config.clone();
-            self.allocate_kv_cache(&kv_config)?;
-        }
-
-        let sampling = SamplingConfig { temperature, top_k, top_p };
-        let req_id = self.enqueue_with_config(
-            crate::scheduler::types::RequestKind::Chat,
-            prompt.to_string(),
-            max_tokens,
-            sampling,
-            None,
-        )?;
-
-        // Step loop: each call processes one forward + sample for all active requests.
-        let max_steps = max_tokens + 1; // prefill + max_tokens decode
-        for _ in 0..max_steps {
-            if !self.batcher.has_pending_work() {
-                break;
-            }
-            self.step()?;
-
-            // Check if our request finished.
-            if let Some(req) = self.requests.get(&req_id) {
-                if req.finished {
-                    let output_tokens = req.output_tokens.clone();
-                    let all_tokens: Vec<u32> = req.prompt_tokens.iter()
-                        .chain(&output_tokens).copied().collect();
-                    let text = self.decode_tokens(&all_tokens)?;
-                    self.requests.remove(&req_id);
-                    return Ok(text);
-                }
-            }
-        }
-
-        // Timeout: collect whatever we have.
-        let req = self.requests.remove(&req_id)
-            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
-                "generate_per_node: request vanished during generation".into(),
-            )))?;
-        let all_tokens: Vec<u32> = req.prompt_tokens.iter()
-            .chain(&req.output_tokens).copied().collect();
-        let text = self.decode_tokens(&all_tokens)?;
-        Ok(text)
     }
 
     /// Generate with multimodal-routed inputs (ARCH-MULTIMODAL-FUSION).
@@ -3222,11 +2549,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Err(ExecutorError::EmptyPrompt);
         }
         let embedding = {
-            self.forward_config.graph_executor_ptr = self
-                .graph_executor
-                .as_mut()
-                .map(|ge| ge as *mut _)
-                .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
             self.backend.embedding_forward_gpu_pure(
                 &tokens,
                 &self.topology,
@@ -3242,11 +2564,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,
@@ -3285,11 +2602,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
         }
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut()); // LEGAL: GPU 指针在 CPU 路径下为 null
         let scores = self.backend.rerank_forward_gpu_pure(
             &tokens,
             &self.topology,
@@ -3305,11 +2617,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
         let logits = self.backend.classify_forward_gpu_pure(
             &tokens,
             &self.topology,
@@ -3341,8 +2648,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// `ExitEarly` (HR encode_to_layer) / veto (Guardrail) semantics.
     ///
     /// The chain is attached via `forward_config.callback_chain_ptr` — the
-    /// backend consumes this pointer when calling
-    /// `FusedGraphExecutor::run_with_callbacks`.
+    /// backend consumes this pointer during the forward pass.
     pub fn score_tokens_for_prompt_with_callbacks(
         &mut self,
         prompt: &str,
@@ -3353,11 +2659,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
         self.forward_config.callback_chain_ptr = callbacks
             .map(|c| c as *mut _)
             .unwrap_or(std::ptr::null_mut());
@@ -3392,11 +2693,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        self.forward_config.graph_executor_ptr = self
-            .graph_executor
-            .as_mut()
-            .map(|ge| ge as *mut _)
-            .unwrap_or(std::ptr::null_mut());
 
         let mut chain = CallbackChain::new(vec![Box::new(
             crate::engine::callbacks::mid_layer_encode::MidLayerEncodeCallback::new(anchor_layer),
@@ -3744,49 +3040,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 }
 
-fn extract_onnx_kv_outputs(graph_outputs: &[String]) -> Vec<String> {
-    graph_outputs
-        .iter()
-        .filter(|name| is_onnx_kv_output(name))
-        .cloned()
-        .collect()
-}
-
-fn is_onnx_kv_output(name: &str) -> bool {
-    let normalized = name
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['/', '.', '-', ' '], "_");
-    let has_cache_hint = normalized.contains("past")
-        || normalized.contains("present")
-        || normalized.contains("cache")
-        || normalized.contains("key_values")
-        || normalized.contains("kv");
-    let has_kv_axis = normalized.contains("key") || normalized.contains("value");
-    has_cache_hint && has_kv_axis
-}
-
-fn is_onnx_logits_output(name: &str) -> bool {
-    let normalized = name
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['/', '.', '-', ' '], "_");
-    normalized.contains("logits")
-}
-
-/// Extract the number of KV cache layers from ONNX KV output names.
-///
-/// ONNX models typically expose KV outputs as `present.{layer}.key` and
-/// `present.{layer}.value`. Each layer has exactly one key and one value
-/// output, so the layer count is `kv_outputs.len() / 2`.
-fn onnx_kv_layer_count(kv_outputs: &[String]) -> usize {
-    if kv_outputs.is_empty() {
-        return 0;
-    }
-    // Each layer produces a key + value pair
-    kv_outputs.len() / 2
-}
-
 /// Extract the top-k token IDs from a logits vector, sorted by descending probability.
 ///
 /// Used by §17.3 to seed the SpecTree with adapter top-k candidates.
@@ -3838,27 +3091,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_kv_outputs_from_onnx_names() {
-        let outputs = vec![
-            "logits".to_string(),
-            "present.0.key".to_string(),
-            "present.0.value".to_string(),
-            "present.1.key".to_string(),
-            "present.1.value".to_string(),
-        ];
-        let kv_outputs = extract_onnx_kv_outputs(&outputs);
-        assert_eq!(kv_outputs.len(), 4);
-        assert!(kv_outputs.iter().all(|name| name.contains("present")));
-    }
-
-    #[test]
-    fn detects_logits_output_name() {
-        assert!(is_onnx_logits_output("logits"));
-        assert!(is_onnx_logits_output("model/logits_output"));
-        assert!(!is_onnx_logits_output("present.0.key"));
-    }
-
-    #[test]
     fn shannon_entropy_uniform_distribution() {
         // Uniform distribution over 4 classes: entropy = ln(4) ≈ 1.386
         let logits = vec![0.0, 0.0, 0.0, 0.0];
@@ -3878,34 +3110,6 @@ mod tests {
     fn shannon_entropy_empty() {
         let h = super::shannon_entropy(&[]);
         assert_eq!(h, 0.0);
-    }
-
-    #[test]
-    fn onnx_kv_layer_count_from_outputs() {
-        // 2 layers × (key + value) = 4 outputs → 2 layers
-        let kv = vec![
-            "present.0.key".to_string(),
-            "present.0.value".to_string(),
-            "present.1.key".to_string(),
-            "present.1.value".to_string(),
-        ];
-        assert_eq!(super::onnx_kv_layer_count(&kv), 2);
-    }
-
-    #[test]
-    fn onnx_kv_layer_count_empty() {
-        assert_eq!(super::onnx_kv_layer_count(&[]), 0);
-    }
-
-    #[test]
-    fn onnx_kv_layer_count_odd_outputs() {
-        // 3 outputs (malformed) → floor(3/2) = 1
-        let kv = vec![
-            "present.0.key".to_string(),
-            "present.0.value".to_string(),
-            "present.1.key".to_string(),
-        ];
-        assert_eq!(super::onnx_kv_layer_count(&kv), 1);
     }
 
     #[test]

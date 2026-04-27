@@ -3,11 +3,8 @@
 pub mod arbiter;
 pub mod attention_contracts;
 pub mod executor;
-pub mod pipeline;
 pub mod mega_kernel;
 pub mod callbacks;
-
-pub use pipeline::{PipelineError, UnifiedPipeline};
 
 /// 引擎上下文。提供给各类 runtime hook 的引擎访问接口。
 ///
@@ -72,7 +69,7 @@ pub use executor::{
 // Re-export attention contract types (ARCH-ATTN-UNIFIED)
 pub use attention_contracts::{
     AttentionSemantics, HeadMode, KvAppendSemantics, KvLayoutContract, KvSplitMode,
-    KvStorageKind, KvView, MaskMode, PackingDescriptor, PositionContract, ScalingMode,
+    KvStorageKind, KvView, MaskMode, PackingDescriptor, PositionContract, RoPEConfig as AttnRoPEConfig, ScalingMode,
     VisibilityMode, WeightBacking, WeightView,
 };
 

@@ -5,7 +5,7 @@
 //! `SPEC/INTENT.md §3`.
 //!
 //! Registered by `Client::encode_to_layer` / `Client::encode_intent` onto a
-//! fresh `CallbackChain` passed to `FusedGraphExecutor::run_with_callbacks`.
+//! fresh `CallbackChain` passed to the mega-kernel execution path.
 //!
 //! # 语义 (SPEC/HEAD-ROUTING.md §5.1)
 //!
@@ -228,7 +228,7 @@ impl LayerCallback for MidLayerEncodeCallback {
         // *pre_node of the first node after* `target_layer` to emit
         // `ExitEarly`, and post-decoder nodes (`final_norm` / `lm_head`)
         // report `layer_idx = node_idx` (fallback from
-        // `FusedGraphExecutor::extract_layer_index`), so their layer index
+        // mega-kernel extract_layer_index), so their layer index
         // is not known in advance. A bounded filter would risk missing the
         // transition.
         None

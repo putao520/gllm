@@ -1030,7 +1030,7 @@ impl Client {
     /// `anchor` and pool the captured hidden state.
     ///
     /// Implementation: attaches a `MidLayerEncodeCallback` at the resolved
-    /// physical layer via `FusedGraphExecutor::run_with_callbacks`. The
+    /// physical layer via the mega-kernel path with callbacks. The
     /// callback returns `CallbackAction::ExitEarly { logits: <hidden as f32> }`
     /// when the anchor layer's `post_node` fires. `encode_at_layer_for_prompt`
     /// then reshapes to `[seq_len, hidden_size]` and applies `pool`.

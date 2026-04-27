@@ -34,7 +34,7 @@ pub const SEMANTIC_GATEKEEPER_PRIORITY: u32 = 90;
 /// `KnowledgeProvider` 返回文本后由此 trait 编码为 `v_knowledge` 向量.
 ///
 /// Phase D 的 `small_graph` + `LevelKeysCache::precompute` 会提供一个
-/// 默认实现 (小 CompilerGraph 走 FusedGraphExecutor 编码, ARCH-FULL-JIT 合规).
+/// 默认实现 (小 CompilerGraph 走 mega-kernel path 编码, ARCH-FULL-JIT 合规).
 /// 本文件用 trait 而非具体类型以便单元测试注入 mock.
 pub trait TextEncoder: Send + Sync {
     /// 将文本编码为 `hidden_size` 维向量.
@@ -56,7 +56,7 @@ pub enum TextEncoderError {
 
 /// SG 运行时主体.
 ///
-/// 注册到 `CallbackChain` 后由 `FusedGraphExecutor::run_with_kv_cache_with_callbacks`
+/// 注册到 `CallbackChain` 后由 mega-kernel node loop
 /// 在每个检测层 `pre_node` 触发.
 pub struct SemanticGatekeeperCallback {
     pub(super) level_keys: Arc<LevelKeysCache>,

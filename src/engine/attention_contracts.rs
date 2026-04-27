@@ -1,7 +1,16 @@
-use crate::graph::types::RoPEConfig;
 use crate::loader::adapter::DType;
 use crate::loader::QuantizedTensor;
 use std::ops::Range;
+
+/// RoPE configuration for attention semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoPEConfig {
+    pub head_dim: usize,
+    pub rope_theta: f64,
+    pub max_seq_len: usize,
+    pub interleaved: bool,
+    pub partial_ratio: f64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WeightBacking {

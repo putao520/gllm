@@ -1,7 +1,7 @@
 //! Per-Node Callback Implementations (SPEC §9-§18)
 //!
 //! Concrete LayerCallback implementations that bridge existing optimization
-//! modules to the FusedGraphExecutor's node loop via the callback system.
+//! modules to the mega-kernel node loop via the callback system.
 //!
 //! ## Callback Priority Table (per SPEC/05-OPTIMIZATIONS.md §8)
 //!

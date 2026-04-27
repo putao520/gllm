@@ -3,11 +3,11 @@
 //! **ARCH-FULL-JIT + ARCH-CPU-GPU-UNIFIED migration (in progress)**:
 //! - Hand-written GPU decoder/encoder forwards have been deleted from `gpu_compile`
 //!   (violated ARCH-FULL-JIT).
-//! - GPU backend forward paths must go through the same `FusedGraphExecutor`
+//! - GPU backend forward paths must go through the same mega-kernel
 //!   pipeline as CPU, with JIT codegen driven by `DeviceProfile` producing
 //!   PTX/AMDGPU/AIR kernels.
-//! - The required host-side glue (GPU KV-cache binding, `run_gpu_with_kv_cache`
-//!   on `FusedGraphExecutor`, multi-layer GPU execution across symbolic dims)
+//! - The required host-side glue (GPU KV-cache binding, mega-kernel launch,
+//!   multi-layer GPU execution across symbolic dims)
 //!   is pending a dedicated SPEC workstream. Until that lands, forward methods
 //!   return an explicit `Err(BE::Unimplemented(...))` — this is not a fallback
 //!   (no silent degradation) but an explicit contractual "not yet implemented"
@@ -71,7 +71,7 @@ macro_rules! impl_gpu_backend {
                 let _ = (input, topology, weights, kv_caches, config);
                 Err(BE::Unimplemented(concat!(
                     $feature_label,
-                    " decoder forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu_with_kv_cache not implemented)"
+                    " decoder forward pending ARCH-CPU-GPU-UNIFIED migration (mega-kernel GPU launch not implemented)"
                 )))
             }
 
@@ -105,7 +105,7 @@ macro_rules! impl_gpu_backend {
                 let _ = (tokens, weights, config);
                 Err(BE::Unimplemented(concat!(
                     $feature_label,
-                    " encoder forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                    " encoder forward pending ARCH-CPU-GPU-UNIFIED migration (mega-kernel GPU host glue not implemented)"
                 )))
             }
 
@@ -119,7 +119,7 @@ macro_rules! impl_gpu_backend {
                 let _ = (tokens, weights, config);
                 Err(BE::Unimplemented(concat!(
                     $feature_label,
-                    " rerank forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                    " rerank forward pending ARCH-CPU-GPU-UNIFIED migration (mega-kernel GPU host glue not implemented)"
                 )))
             }
 
@@ -133,7 +133,7 @@ macro_rules! impl_gpu_backend {
                 let _ = (tokens, weights, config);
                 Err(BE::Unimplemented(concat!(
                     $feature_label,
-                    " classify forward pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                    " classify forward pending ARCH-CPU-GPU-UNIFIED migration (mega-kernel GPU host glue not implemented)"
                 )))
             }
 
@@ -148,7 +148,7 @@ macro_rules! impl_gpu_backend {
                 let _ = (tokens, target_token_ids, weights, config);
                 Err(BE::Unimplemented(concat!(
                     $feature_label,
-                    " score_tokens forward (Head Routing SDK) pending ARCH-CPU-GPU-UNIFIED migration (FusedGraphExecutor::run_gpu host glue not implemented)"
+                    " score_tokens forward (Head Routing SDK) pending ARCH-CPU-GPU-UNIFIED migration (mega-kernel GPU host glue not implemented)"
                 )))
             }
 
