@@ -534,15 +534,15 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-MEGA-SESSION-001** | Mega-Kernel Session 模式 | mega-kernel 支持 KV cache 跨轮次复用 | 1. `MegaKernelBusinessConfig.session_enabled=true` 时图中插入 `SessionKvRestore` op<br>2. ABI 新增 `session_position` 参数 (StackArg(104))<br>3. session_position > 0 时跳过已处理 tokens，复用已有 KV cache<br>4. session_position == 0 时 NOP (全新生成)<br>5. `generate_with_session()` 不再返回 Err，改为调用 mega-kernel<br>6. 多轮对话中 KV cache 连续性正确（第二轮输出与第一轮衔接） | 🔴 待实现 |
-| **REQ-MEGA-SESSION-002** | Session 位置指针管理 | Executor 层维护 session position 跨轮次传递 | 1. `MegaKernelExecutor` 新增 `session_position: usize` 状态<br>2. 每次 mega-kernel 调用后更新: session_position += generated_tokens<br>3. session reset (新对话) 时 session_position = 0<br>4. 位置溢出保护 (session_position + prompt_len < max_seq_len) | 🔴 待实现 |
+| **REQ-MEGA-SESSION-001** | Mega-Kernel Session 模式 | mega-kernel 支持 KV cache 跨轮次复用 | 1. `MegaKernelBusinessConfig.session_enabled=true` 时图中插入 `SessionKvRestore` op<br>2. ABI 新增 `session_position` 参数 (StackArg(104))<br>3. session_position > 0 时跳过已处理 tokens，复用已有 KV cache<br>4. session_position == 0 时 NOP (全新生成)<br>5. `generate_with_session()` 不再返回 Err，改为调用 mega-kernel<br>6. 多轮对话中 KV cache 连续性正确（第二轮输出与第一轮衔接） | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
+| **REQ-MEGA-SESSION-002** | Session 位置指针管理 | Executor 层维护 session position 跨轮次传递 | 1. `MegaKernelExecutor` 新增 `session_position: usize` 状态<br>2. 每次 mega-kernel 调用后更新: session_position += generated_tokens<br>3. session reset (新对话) 时 session_position = 0<br>4. 位置溢出保护 (session_position + prompt_len < max_seq_len) | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
 
 ### 18.2 Multimodal Fused Hidden 注入
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-MEGA-MM-001** | Mega-Kernel Multimodal 模式 | mega-kernel 支持预计算 fused hidden state 注入 | 1. `MegaKernelBusinessConfig.multimodal_enabled=true` 时图中插入 `MmHiddenInject` op<br>2. ABI 新增 `fused_hidden_ptr` (StackArg(112)) + `num_mm_tokens` (StackArg(120))<br>3. fused_hidden_ptr != NULL 时循环 ADD 到 embedding buffer<br>4. fused_hidden_ptr == NULL 时 NOP (纯文本)<br>5. `generate_with_multimodal()` 不再返回 Err，改为调用 mega-kernel<br>6. 多模态输入的生成结果语义正确 | 🔴 待实现 |
-| **REQ-MEGA-MM-002** | Fused Hidden 预计算 | Client 层在 mega-kernel 调用前预计算多模态 fused hidden | 1. `Client::generate_with_multimodal()` 内部先调用 vision/audio encoder 获取 hidden state<br>2. 预计算结果通过 fused_hidden_ptr 传入 mega-kernel<br>3. 编码过程不触发 JIT 重编译（复用已有 encoder mega-kernel） | 🔴 待实现 |
+| **REQ-MEGA-MM-001** | Mega-Kernel Multimodal 模式 | mega-kernel 支持预计算 fused hidden state 注入 | 1. `MegaKernelBusinessConfig.multimodal_enabled=true` 时图中插入 `MmHiddenInject` op<br>2. ABI 新增 `fused_hidden_ptr` (StackArg(112)) + `num_mm_tokens` (StackArg(120))<br>3. fused_hidden_ptr != NULL 时循环 ADD 到 embedding buffer<br>4. fused_hidden_ptr == NULL 时 NOP (纯文本)<br>5. `generate_with_multimodal()` 不再返回 Err，改为调用 mega-kernel<br>6. 多模态输入的生成结果语义正确 | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
+| **REQ-MEGA-MM-002** | Fused Hidden 预计算 | Client 层在 mega-kernel 调用前预计算多模态 fused hidden | 1. `Client::generate_with_multimodal()` 内部先调用 vision/audio encoder 获取 hidden state<br>2. 预计算结果通过 fused_hidden_ptr 传入 mega-kernel<br>3. 编码过程不触发 JIT 重编译（复用已有 encoder mega-kernel） | 🟢 已实现 [commit: gllm-kernels df91b8a0] |
 
 ## 19. 自动指令选择器 (REQ-AIS)
 
@@ -576,4 +576,4 @@
 | **REQ-UGS-001** | OnnxGraph→CompilerGraph 转换器 | 新增转换器将 YAML 模板展开的 OnnxGraph 转为 CompilerGraph | 1. `OnnxGraphConverter::convert()` 实现完整的 op_type→OpKind 映射<br>2. 所有已有 YAML 模板（Llama/Qwen3/Gemma4/Phi4/Mistral/DeepSeek）转换结果正确<br>3. 转换器处理条件节点（only_if）、repeat 展开、残差连接 | 🔴 待实现 |
 | **REQ-UGS-002** | 异构层模板折叠 | 转换器自动检测重复层模式，折叠为 K 个模板 + hetero_loop | 1. Gemma-4 E2B 35 层折叠为 4 模板 (sliding_small/full_small/sliding_large/full_large)<br>2. 权重布局自动推导（14 个权重 vs 11 个）<br>3. PerLayerWeightLayout 从 YAML nodes 自动计算，替代手写 `compute_per_layer_bytes`<br>4. HeteroLayerLoopConfig 从 config.json layer_types 自动生成 | 🔴 待实现 |
 | **REQ-UGS-003** | 删除 graph_builders.rs 手写图构建 | 废弃 `decoder_model()`, `decoder_model_hetero()`, `build_layer_body()` | 1. `graph_builders.rs` 中以上函数删除<br>2. mega-kernel 编译改为消费 OnnxGraphConverter 产出<br>3. 所有 E2E 测试通过（SmolLM2, Gemma-4 E2B）<br>4. 新增模型只需写 YAML 模板 + 标量算子注册 | 🔴 待实现 |
-| **REQ-UGS-004** | ModelConfig 缺失字段补全 | 补全 config.json 中未解析的模型配置字段 | 1. `use_double_wide_mlp` → 控制 FFN intermediate 倍率<br>2. `final_logit_softcapping` → 替代 executor 硬编码 30.0<br>3. `hidden_activation` → 自动选择 FfnActivation 枚举<br>4. 这些字段从 config.json → ModelConfig → ModelGeometry 全链路传递 | 🔴 待实现 |
+| **REQ-UGS-004** | ModelConfig 缺失字段补全 | 补全 config.json 中未解析的模型配置字段 | 1. `use_double_wide_mlp` → 控制 FFN intermediate 倍率<br>2. `final_logit_softcapping` → 替代 executor 硬编码 30.0<br>3. `hidden_activation` → 自动选择 FfnActivation 枚举<br>4. 这些字段从 config.json → ModelConfig → ModelGeometry 全链路传递 | 🟢 已实现 [commit: 9aa58c7] |
