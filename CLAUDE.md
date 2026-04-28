@@ -53,7 +53,7 @@
 | `09-API.md` | 公共 API 契约（内部 trait/枚举/错误语义） | ✅ |
 | `10-QUALITY.md` | 质量保证与数值对齐要求 | ✅ |
 | `11-MODELS.md` | 支持的模型架构详细规范（全量索引） | ✅ |
-| `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、Mega-Kernel SgDetect/SgInject 共享内存、Callback Table (ABI arg 20) JIT 内 CALL 外部函数指针、E2E 验收 (REQ-SG-001..008) | ✅ REQ-SG-001~007 已实现; ✅ REQ-MEGA-SG-001 已实现 (hook_ctx_ptr + SgSharedMemory); 🟡 REQ-SG-008 E2E 测试存在，行为差异验证待加强; 🟡 REQ-MEGA-SG-002 Callback Table 设计完成，VmInstr::NativeCall 实现中 |
+| `SEMANTIC-GATEKEEPER.md` | **Semantic Gatekeeper 技术协议 (SSOT)** — Level Keys 预计算、Q-tap 截获、稳定性追踪、KnowledgeProvider trait、CallbackChain 集成、Mega-Kernel SgDetect/SgInject 共享内存、Callback Table (ABI arg 20) JIT 内 CALL 外部函数指针、E2E 验收 (REQ-SG-001..008) | ✅ REQ-SG-001~007 已实现; ✅ REQ-MEGA-SG-001 已实现 (hook_ctx_ptr + SgSharedMemory); ✅ REQ-MEGA-SG-002 已实现 (Callback Table + NativeCall + SgDetect/SgInject FMA + KnowledgeProvider bridge); 🟡 REQ-SG-008 E2E 行为差异验证待加强 |
 | `HEAD-ROUTING.md` | **Head Routing SDK 技术协议 (SSOT)** — 同一 generator LLM 多头 API (generate/classify_binary/classify_multiway/encode_to_layer) 运行时切换,零权重重载、零 JIT 重编译,E2E 验收 (REQ-HR-001..005) | ✅ |
 | `GUARDRAIL.md` | **Guardrail SDK 技术协议 (SSOT)** — in-flight 安全 veto 探针,`attach_guardrail` + `GuardrailProbeCallback` (post_node),SafetyPolicy (HaltAndVeto/LogOnly/SampleDowngrade),正交于 SG/HR,E2E 验收 (REQ-GR-001..005) | ✅ |
 | `INTENT.md` | **Intent Recall SDK 技术协议 (SSOT)** — `encode_intent` 截断前向至 anchor 层 pool hidden 作为意图识别向量,delegate 到 `encode_to_layer` (DRY),E2E 验收 (REQ-INTENT-001..003) | ✅ |

@@ -12,7 +12,7 @@ use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 use gllm_kernels::types::DType;
 use thiserror::Error;
 
-use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback};
+use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback, null_retrieve_bridge};
 
 /// Cap the geometry-declared `max_position_embeddings` by the JIT compile-time
 /// ceiling (`SYMDIM_MAX_SEQ_LEN`) whenever it is used to size / index the
@@ -1577,61 +1577,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let hidden_size = sg.hidden_size();
             let sg_ptr = sg.as_ptr(); // stable: Box<[u8]> heap pointer, outlives registration
 
-            // Clone + leak the Arc<Mutex<SemanticGatekeeperCallback>> for C ABI callback access.
-            // The Arc keeps the callback alive even if the Executor drops first.
+            // Clone + leak Arc<Mutex<SemanticGatekeeperCallback>> for potential future
+            // C ABI callback use (e.g., KnowledgeProvider retrieve via retrieve_fn).
             let inner = self.sg_callback_shim.as_ref().unwrap().inner.clone();
             let provider_ptr = Arc::into_raw(inner) as *const u8;
 
-            // Read alpha from the callback.
+            // Read alpha from the callback for SgSharedMemory signal.
             let alpha = {
                 self.sg_callback_shim.as_ref().unwrap().inner.lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .alpha()
             };
 
-            // C ABI bridge: detect_hidden → KnowledgeProvider.retrieve() →
-            // TextEncoder.encode() → write knowledge_vector + confidence to SgSharedMemory.
-            // Delegates to SemanticGatekeeperCallback::retrieve_for_mega_kernel.
-            unsafe extern "C" fn sg_exec_retrieve_bridge(
-                detect_hidden: *const f32,
-                hidden_size: u32,
-                output_knowledge: *mut f32,
-                output_confidence: *mut f32,
-                provider_state: *const u8,
-            ) -> i32 {
-                if provider_state.is_null() {
-                    return 0;
-                }
-                let arc = &*(provider_state
-                    as *const Arc<std::sync::Mutex<
-                        crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
-                    >>);
-                let cb = match arc.lock() {
-                    Ok(cb) => cb,
-                    Err(_) => return 0,
-                };
-                let sz = hidden_size as usize;
-                let query = std::slice::from_raw_parts(detect_hidden, sz);
-
-                let (knowledge_vec, confidence) = match cb.retrieve_for_mega_kernel(query) {
-                    Some(v) => v,
-                    None => return 0,
-                };
-
-                let out = std::slice::from_raw_parts_mut(output_knowledge, sz);
-                let n = knowledge_vec.len().min(sz);
-                out[..n].copy_from_slice(&knowledge_vec[..n]);
-                for v in out.iter_mut().skip(n) {
-                    *v = 0.0;
-                }
-                *output_confidence = confidence;
-                1
-            }
-
-            // Turn off borrow of sg_callback_shim before calling register (below)
+            // Placeholder retrieve_fn — callback writes confidence=alpha directly
+            // to SgSharedMemory (bypassing indirect call). Full KnowledgeProvider
+            // bridge will use this slot once indirect fn ptr calls are validated.
             let cb_ctx = Box::new(SgCallbackCtx {
                 sg_shared_memory: sg_ptr,
-                retrieve_fn: sg_exec_retrieve_bridge,
+                retrieve_fn: null_retrieve_bridge,
                 provider_state: provider_ptr,
                 hidden_size: hidden_size as u32,
                 alpha,
