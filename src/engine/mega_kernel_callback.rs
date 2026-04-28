@@ -162,27 +162,40 @@ pub unsafe extern "C" fn null_retrieve_bridge(
 /// `ctx` must point to a valid, properly aligned `SgCallbackCtx`.
 #[no_mangle]
 pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
-    // Called from JIT mega-kernel via NativeCall after SgDetect writes detect_hidden.
-    // Returns 1 to signal SgInject that knowledge_vector + confidence are available.
-    //
-    // Full KnowledgeProvider bridge (via retrieve_fn in SgCallbackCtx) will be
-    // activated once NativeCall x86_64 lowering properly preserves XMM registers
-    // and handles indirect function pointer calls from within JIT context.
     if ctx.is_null() { return 0; }
     let cb_ctx = &*(ctx as *const SgCallbackCtx);
+    if cb_ctx.sg_shared_memory.is_null() || cb_ctx.provider_state.is_null() { return 0; }
     let hidden = cb_ctx.hidden_size as usize;
-    if hidden == 0 || cb_ctx.sg_shared_memory.is_null() { return 0; }
+    if hidden == 0 { return 0; }
 
-    // Write confidence=alpha signal to SgSharedMemory so SgInject produces a
-    // measurable but small perturbation for NO_ISLAND_MODULE verification.
-    // The knowledge_vector is left zero to minimize actual output perturbation.
-    let alpha = cb_ctx.alpha;
+    const SG_HEADER_BYTES: usize = 16;
+    let sg_ptr = cb_ctx.sg_shared_memory;
+    let detect = std::slice::from_raw_parts(sg_ptr.add(SG_HEADER_BYTES) as *const f32, hidden);
+    let knowledge = sg_ptr.add(SG_HEADER_BYTES + hidden * 4) as *mut f32;
+    let confidence_ptr = sg_ptr.add(12) as *mut f32;
+
+    let mutex = &*(cb_ctx.provider_state
+        as *const std::sync::Mutex<
+            crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
+        >);
+    let cb = match mutex.lock() { Ok(cb) => cb, Err(_) => return 0 };
+
+    // Write confidence=alpha signal to SgSharedMemory. SgInject reads this
+    // and computes hidden += confidence × knowledge_vector. Since knowledge_vector
+    // is left zero, the injection is an identity (no perturbation).
+    //
+    // Full KnowledgeProvider pipeline (retrieve + TextEncoder) requires vtable
+    // dispatch to work within NativeCall context. Current status:
+    //   ✅ static fn call    ✅ heap alloc     ✅ field access
+    //   ❌ vtable dispatch   ❌ nested JIT (TextEncoder)
+    // Root cause: indirect CALL through memory-loaded fn pointer (vtable entry)
+    // clobbers state not covered by GPR/YMM save/restore.
+    // TODO: investigate NativeCall + irelative (or equivalent) for safe indirect calls.
+    let alpha = cb.alpha();
     if alpha > 0.0 {
-        let confidence_ptr = cb_ctx.sg_shared_memory.add(12) as *mut f32;
         *confidence_ptr = alpha;
     }
-    // Don't write knowledge_vector (leave as zeros) — the injection will be
-    // hidden += alpha * 0 = hidden (effectively a no-op).
+    drop(cb);
     1
 }
 

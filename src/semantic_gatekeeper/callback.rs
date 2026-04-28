@@ -146,6 +146,29 @@ impl SemanticGatekeeperCallback {
         Some((knowledge, entry.confidence * self.alpha))
     }
 
+    /// Same as retrieve_for_mega_kernel but uses detect_hidden directly as
+    /// knowledge_vector (identity injection). Bypasses TextEncoder JIT graph
+    /// to avoid nested JIT call issues.
+    ///
+    /// Returns `None` if the provider declines.
+    pub fn retrieve_identity_for_mega_kernel(
+        &self,
+        detect_hidden: &[f32],
+    ) -> Option<(Vec<f32>, f32)> {
+        let ctx = RetrieveContext {
+            generated_tokens: &[],
+            ast: None,
+            step: 0,
+            request_id: 0,
+        };
+        let entry = self.provider.retrieve(detect_hidden, SemanticLevel::L1, &ctx)?;
+        // Use detect_hidden as knowledge direction (identity injection).
+        // The JIT SgInject will push hidden += confidence × alpha × detect_hidden,
+        // which amplifies existing hidden direction by confidence × alpha.
+        let knowledge = detect_hidden.to_vec();
+        Some((knowledge, entry.confidence * self.alpha))
+    }
+
     /// 当前检测层是否登记 (快速查找).
     fn is_detection_layer(&self, layer_idx: usize) -> bool {
         self.detection_layers().contains(&layer_idx)
