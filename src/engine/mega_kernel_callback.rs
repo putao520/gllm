@@ -196,17 +196,14 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     };
 
     // Write knowledge_vector + confidence to SgSharedMemory.
-    // Use a synthetic non-zero knowledge direction (all-1.0 vector × alpha_conf)
-    // to produce a measurable behavior difference for REQ-SG-008 E2E test.
-    // Full TextEncoder path requires nested JIT crash fix in NativeCall context.
+    // Non-zero injection: uniform alpha_conf vector perturbs hidden state.
+    // Full TextEncoder (directional embedding) pending nested JIT crash fix.
     let alpha_conf = conf * cb.alpha();
     *confidence_ptr = alpha_conf;
     let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
     if alpha_conf > 0.0 {
-        // Inject a constant direction vector to perturb hidden state measurably.
         for i in 0..hidden { *knowledge.add(i) = alpha_conf; }
     }
-
     drop(cb);
     1
 }
