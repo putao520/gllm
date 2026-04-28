@@ -544,44 +544,90 @@ pub struct SgSharedMemory {
     pub knowledge_dim: u32,
     /// 知识置信度 (IEEE 754 f32 位模式, 0.0 表示无注入)
     pub confidence: u32,
-    /// 检测层提取的 hidden state (由 JIT SgDetect 写入, Rust 侧读)
+    /// 检测层提取的 hidden state (由 JIT SgDetect 写入, 回调函数读)
     pub detect_hidden: [f32; 0], // 动态长度 = hidden_size
-    /// 知识残差向量 (由 Rust 侧 KnowledgeProvider 写入, JIT SgInject 读取)
+    /// 知识残差向量 (由回调函数写入, JIT SgInject 读取)
     pub knowledge_vector: [f32; 0], // 动态长度 = hidden_size
 }
 ```
 
-#### 7.4.3 Mega-Kernel SG 数据流
+#### 7.4.2.1 Mega-Kernel Callback Table (ABI arg 20)
+
+Mega-kernel 新增 `callback_table_ptr`（ABI arg 20）传递一个 C 风格函数指针表。JIT 在 SgDetect 完成后通过 `CALL [table[slot].fn_ptr](table[slot].ctx)` 回调外部函数，外部函数读 `SgSharedMemory.detect_hidden`，写 `knowledge_vector` + `confidence`，JIT 返回后执行 SgInject。
+
+```c
+// 统一回调签名：纯 C ABI
+typedef u32 (*mega_kernel_callback_fn)(const void* ctx);
+
+// 一个 slot = 16 字节 (fn_ptr + ctx)
+struct callback_entry {
+    mega_kernel_callback_fn fn_ptr;  // NULL = 未注册，JIT 跳过 (零开销)
+    const void* ctx;                 // 回调专属数据
+};
+
+// callback table = 扁平指针数组
+struct mega_kernel_callback_table {
+    struct callback_entry entries[8]; // 8 slots，每 slot 16B，共 128B
+};
+```
+
+**Slot 分配**：
+
+| Slot ID | 名称 | 用途 | SPEC |
+|---------|------|------|------|
+| 0 | SG_KNOWLEDGE_RETRIEVE | SG 知识检索回调 | §7.4 |
+| 1 | GUARDRAIL_CHECK | Guardrail veto 探针 | §14 |
+| 2 | COT_STEP_CHECK | CoT 步骤检查 | §15 |
+| 3 | EARLY_EXIT_QUERY | Early Exit 层查询 | §16 |
+| 4..7 | 保留 | 未来扩展 | — |
+
+**Slot 0 (SG) ctx 布局**：
+
+```c
+struct sg_callback_ctx {
+    void* sg_shared_memory;  // SgSharedMemory 指针（detect_hidden + knowledge_vector）
+    void* provider_state;    // KnowledgeProvider 的具体实现状态（由注册者提供）
+    u32   hidden_size;
+    float alpha;
+};
+```
+
+#### 7.4.3 Mega-Kernel SG 数据流（Callback Table 架构）
 
 ```
 每次 generate_single_sequence 调用:
 
 1. Rust 侧 (generate 前准备):
    a. Client 调用 register_semantic_gatekeeper() → 设置 sg_config
-   b. Executor.generate_with_sampling() 准备 SgSharedMemory:
-      - sg_enabled = 1
-      - knowledge_dim = hidden_size
-      - 分配 detect_hidden + knowledge_vector 缓冲
+   b. Executor 准备:
+      - SgSharedMemory: sg_enabled=1, knowledge_dim=hidden_size
+      - MegaKernelCallbackTable: slot[0] = {sg_knowledge_retrieve_callback, &sg_callback_ctx}
 
-2. Mega-Kernel JIT 层循环 (每层):
+2. Mega-Kernel JIT 层循环 (每 decode step):
    a. [if SgDetect layer] SgDetect OpKind:
-      - 从当前 activation 提取最后 token hidden → 写入 detect_hidden
-      - release 内存序确保 Rust 可见
-   b. 层循环末尾检查:
-      - CMP sg_shared->control, 0 → JE .skip_sg (零开销快速路径)
+      - 从当前 activation 提取最后 token hidden → 写入 SgSharedMemory.detect_hidden
+      - MemFence(Release) — 保证 detect_hidden 对回调可见
+   b. [if callback_table_ptr != NULL && slot[0].fn_ptr != NULL]:
+      - LoadCallbackEntry(table, 0, fn_ptr, ctx)
+      - GprSkipIfNull(fn_ptr) — 零开销快速路径
+      - NativeCall(ret_val, fn_ptr, ctx) — CALL sg_knowledge_retrieve_callback
+        回调内部: 读 detect_hidden → KnowledgeProvider.retrieve() → 写 knowledge_vector + confidence
+      - MemFence(Acquire) — 保证 JIT 读到最新 knowledge_vector
+   c. [if SgInject layer] SgInject OpKind:
+      - 读 SgSharedMemory.confidence → CMP 0.0 → JE skip (无注入)
+      - 读 SgSharedMemory.knowledge_vector
+      - hidden[-1] += alpha * confidence * knowledge_vector (SIMD FMA)
+      - MemFence(Release)
 
-3. Mega-Kernel generate 循环 (每 decode step):
-   a. 每次 generate loop 迭代开始:
-      - Rust 通过 hook_ctx_ptr 读 detect_hidden
-      - KnowledgeProvider.retrieve() 生成 knowledge_vector
-      - 写入 knowledge_vector + confidence 到 SgSharedMemory
-   b. 下一层循环迭代的 SgInject 读取 knowledge_vector:
-      - hidden[-1] += alpha * confidence * knowledge_vector
-      - acq 内存序确保读到最新 knowledge_vector
-
-4. Rust 侧 (generate 后清理):
+3. Rust 侧 (generate 后清理):
+   - callback_table slot[0].fn_ptr = NULL (注销)
    - SgSharedMemory 随 scratchpad 生命周期结束
 ```
+
+**零开销保证**：
+- `callback_table_ptr` 为 NULL → `GprSkipIfNull` 跳过全部 callback + SG 代码（1 条 TEST + 1 条 JZ）
+- `slot[0].fn_ptr` 为 NULL → 同样跳过（未注册 SG 时）
+- 符合 ARCH-FULL-JIT：回调是 JIT 发出的 CALL 指令，不经过 Rust 调度
 
 #### 7.4.4 NO_ISLAND_MODULE 验证
 

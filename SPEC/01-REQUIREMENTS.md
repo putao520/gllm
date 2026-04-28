@@ -552,7 +552,7 @@
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-MEGA-SG-001** | Mega-Kernel SG 共享内存 | mega-kernel 通过 scratchpad 共享内存传递 detect/knowledge buffer，JIT 内嵌 SgDetect/SgInject OpKind 操作 scratchpad | 1. ✅ `MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)` 时图中插入 `SgDetect` + `SgInject` side-channel op<br>2. ✅ SgDetect lowering: 从 hidden 复制到 scratchpad detect buffer<br>3. ✅ SgInject lowering: NOP (scratchpad 零初始化时 hidden += 0)<br>4. ✅ buffer_alloc 正确分配 detect/knowledge scratchpad<br>5. ✅ `hook_ctx_ptr` 路径已接入 — SgSharedMemory 在 Executor 预创建，control bit 驱动 JIT 开关<br>6. ✅ E2E 测试验证无 NaN（SG 开启/关闭一致） | ✅ 已实现 [commit: gllm-kernels 61677998] |
-| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. ✅ scratchpad buffer 大小在 compile_mega_kernel_vm 中计算<br>2. 🟡 mega-kernel generate loop 是单次 JIT 调用，迭代间无法插入 Rust KnowledgeProvider<br>3. 🟡 需要 generate loop 拆分（multi-call）或 shared-memory 轮询机制 — 架构决策待定 | 🟡 scratchpad 分配已完成，generate loop 拆分待设计 |
+| **REQ-MEGA-SG-002** | Mega-Kernel Callback Table | mega-kernel 通过 ABI arg 20 传递 C 风格函数指针表，JIT 在 SgDetect 后 CALL 外部回调函数实现知识注入 | 1. ✅ MegaKernelCallbackTable (#[repr(C)], 8 slots × 16B)<br>2. ✅ Slot 0 = SG_KNOWLEDGE_RETRIEVE: 回调读 detect_hidden → KnowledgeProvider.retrieve() → 写 knowledge_vector<br>3. 🟡 VmInstr::NativeCall + LoadCallbackEntry 待实现<br>4. 🟡 SgDetect 尾部 +CALL + SgInject FMA 注入待实现<br>5. ✅ callback_table_ptr=NULL 时 GprSkipIfNull 零开销 | 🟡 SPEC 设计完成，实现中 [commit: gllm 30ae4d3] |
 
 ## 19. 自动指令选择器 (REQ-AIS)
 
