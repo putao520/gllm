@@ -63,7 +63,7 @@ pub struct SemanticGatekeeperCallback {
     pub(super) level_keys: Arc<LevelKeysCache>,
     pub(super) ring_buffer: Arc<GatekeeperRingBuffer>,
     pub(super) active_state: RwLock<ActiveState>,
-    pub(super) provider: Arc<dyn KnowledgeProvider>,
+    pub provider: Arc<dyn KnowledgeProvider>,
     pub(super) ast_sentinel: Option<Arc<dyn AstSentinel>>,
     pub(super) text_encoder: Arc<dyn TextEncoder>,
     pub(super) tokenizer: Arc<dyn TokenizerLookup>,
@@ -121,6 +121,11 @@ impl SemanticGatekeeperCallback {
     /// SG injection strength alpha.
     pub fn alpha(&self) -> f32 {
         self.alpha
+    }
+
+    /// Encode knowledge text via TextEncoder (pub for NativeCall debug).
+    pub fn retrieve_encode_text(&self, text: &str) -> Result<Vec<f32>, TextEncoderError> {
+        self.text_encoder.encode(text)
     }
 
     /// Mega-kernel callback bridge: detect_hidden → KnowledgeProvider → TextEncoder

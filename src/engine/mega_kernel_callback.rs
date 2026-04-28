@@ -168,33 +168,45 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let hidden = cb_ctx.hidden_size as usize;
     if hidden == 0 { return 0; }
 
-    const SG_HEADER_BYTES: usize = 16;
     let sg_ptr = cb_ctx.sg_shared_memory;
-    let detect = std::slice::from_raw_parts(sg_ptr.add(SG_HEADER_BYTES) as *const f32, hidden);
-    let knowledge = sg_ptr.add(SG_HEADER_BYTES + hidden * 4) as *mut f32;
     let confidence_ptr = sg_ptr.add(12) as *mut f32;
 
+    // Step 1: lock mutex + read alpha (tested OK).
     let mutex = &*(cb_ctx.provider_state
         as *const std::sync::Mutex<
             crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         >);
     let cb = match mutex.lock() { Ok(cb) => cb, Err(_) => return 0 };
 
-    // Write confidence=alpha signal to SgSharedMemory. SgInject reads this
-    // and computes hidden += confidence × knowledge_vector. Since knowledge_vector
-    // is left zero, the injection is an identity (no perturbation).
-    //
-    // Full KnowledgeProvider pipeline (retrieve + TextEncoder) requires vtable
-    // dispatch to work within NativeCall context. Current status:
-    //   ✅ static fn call    ✅ heap alloc     ✅ field access
-    //   ❌ vtable dispatch   ❌ nested JIT (TextEncoder)
-    // Root cause: indirect CALL through memory-loaded fn pointer (vtable entry)
-    // clobbers state not covered by GPR/YMM save/restore.
-    // TODO: investigate NativeCall + irelative (or equivalent) for safe indirect calls.
-    let alpha = cb.alpha();
-    if alpha > 0.0 {
-        *confidence_ptr = alpha;
+    // Alloc before vtable dispatch (works around allocator ordering issue).
+    let _a64 = vec![0u8; 64];
+    let _a256 = vec![0u8; 256];
+
+    // Minimal vtable dispatch isolated in its own fn.
+    fn retrieve_conf(
+        provider: &dyn crate::semantic_gatekeeper::KnowledgeProvider,
+        detect: &[f32],
+    ) -> Option<f32> {
+        let ctx = crate::semantic_gatekeeper::RetrieveContext {
+            generated_tokens: &[], ast: None, step: 0, request_id: 0,
+        };
+        provider.retrieve(detect, crate::semantic_gatekeeper::SemanticLevel::L1, &ctx)
+            .map(|e| e.confidence)
     }
+
+    let detect = std::slice::from_raw_parts(sg_ptr.add(16) as *const f32, hidden);
+    let conf = match retrieve_conf(&*cb.provider, detect) {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    let alpha_conf = conf * cb.alpha();
+    *confidence_ptr = alpha_conf;
+    // Write 8 elems of knowledge vector
+    let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
+    let n = 8.min(hidden);
+    for i in 0..n { *knowledge.add(i) = detect[i] * alpha_conf; }
+
     drop(cb);
     1
 }
