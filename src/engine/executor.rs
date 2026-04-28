@@ -2643,10 +2643,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Some(ref mega) = self.mega_kernel {
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
-            // SG hook_ctx_ptr: pass SgSharedMemory pointer when available (SPEC §7.4.2).
-            // SgSharedMemory.control bit 0 determines whether JIT SgDetect/SgInject
-            // are active. Even when SG is not registered the pointer is non-NULL —
-            // the JIT checks control=0 and skips SG ops (zero overhead).
+            // SG hook_ctx_ptr: always pass SgSharedMemory pointer (SPEC §7.4.2).
+            // SgSharedMemory is zero-initialized → confidence=0 → SgInject is identity.
+            // Zero overhead for non-SG models (no callback registered, no injection).
             let sg_hook_ptr = match self.sg_shared_memory {
                 Some(ref mx) => {
                     let sg = mx.lock().unwrap_or_else(|e| e.into_inner());
