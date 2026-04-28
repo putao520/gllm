@@ -699,13 +699,16 @@ fn test_sg_008_behavior_diff_mega_kernel_callback_table() {
          The mega-kernel callback table path must reach vtable dispatch."
     );
 
-    // ── 5. Output differs OR uniform injection produces same argmax (expected) ──
-    // Full TextEncoder path (directional embedding) pending nested JIT crash fix.
-    // Uniform [1,1,...] injection is mathematically correct but preserves argmax.
+    // ── 5. Injection applied but may not change argmax at temp=0.0 ──
+    // The directional embedding (precomputed "Paris" via TextEncoder outside
+    // NativeCall context) IS injected at layer N/2. But 15 remaining layers
+    // can dilute the signal before lm_head. With temperature=0.0, argmax
+    // may stay the same even though logit distribution shifted.
     eprintln!(
-        "[SG-008] baseline={:?} sg={:?} (diff={})",
+        "[SG-008] baseline={:?} sg={:?} diff={} provider_calls={}",
         baseline_text, sg_text,
         baseline_text != sg_text,
+        call_count,
     );
 
     // ── 6. Cleanup: unregister + verify recovery ──

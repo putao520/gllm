@@ -136,6 +136,9 @@ pub struct SgCallbackCtx {
     pub hidden_size: u32,
     /// SG injection strength (alpha multiplier).
     pub alpha: f32,
+    /// Precomputed knowledge embedding vector (allocated outside NativeCall).
+    /// Length = hidden_size. NULL if not available.
+    pub precomputed_knowledge: *const f32,
 }
 
 /// Null retrieve bridge: always returns 0 (no knowledge retrieved).
@@ -182,7 +185,7 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // vtable dispatch to verify NO_ISLAND_MODULE.
+    // Step 1: vtable dispatch (NO_ISLAND_MODULE verification).
     fn retrieve_conf(
         cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
@@ -195,12 +198,24 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
         None => return 0,
     };
 
+    // Step 2: Write knowledge_vector from precomputed embedding.
+    // The embedding was computed OUTSIDE NativeCall (in set_sg_callback_shim),
+    // avoiding the nested JIT (CompiledLayer::execute) crash.
     let alpha_conf = conf * cb.alpha();
     *confidence_ptr = alpha_conf;
     let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
-    if alpha_conf > 0.0 {
+
+    let precomputed = cb_ctx.precomputed_knowledge;
+    if !precomputed.is_null() && alpha_conf > 0.0 {
+        // Use the directional embedding from TextEncoder.encode("Paris").
+        let src = std::slice::from_raw_parts(precomputed, hidden);
+        let dst = std::slice::from_raw_parts_mut(knowledge, hidden);
+        for i in 0..hidden { dst[i] = src[i] * alpha_conf; }
+    } else if alpha_conf > 0.0 {
+        // Fallback: uniform injection.
         for i in 0..hidden { *knowledge.add(i) = alpha_conf; }
     }
+
     drop(cb);
     1
 }

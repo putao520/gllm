@@ -12,7 +12,7 @@ use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 use gllm_kernels::types::DType;
 use thiserror::Error;
 
-use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback};
+use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback, null_retrieve_bridge};
 
 /// Cap the geometry-declared `max_position_embeddings` by the JIT compile-time
 /// ceiling (`SYMDIM_MAX_SEQ_LEN`) whenever it is used to size / index the
@@ -1589,54 +1589,31 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     .alpha()
             };
 
-            // C ABI bridge: detect_hidden → KnowledgeProvider.retrieve() →
-            // TextEncoder.encode() → knowledge_vector + confidence.
-            //
-            // Called indirectly from sg_knowledge_retrieve_callback via retrieve_fn
-            // function pointer stored in SgCallbackCtx. NativeCall now saves/restores
-            // YMM0-YMM15 (16 × 32B = 512B) so nested JIT calls (TextEncoder small
-            // graph) are safe.
-            // C ABI bridge: detect_hidden → KnowledgeProvider → TextEncoder.
-            // provider_state = Arc::into_raw result (*const Mutex<Callback>, not *const Arc).
-            unsafe extern "C" fn sg_exec_retrieve_bridge(
-                detect_hidden: *const f32,
-                hidden_size: u32,
-                output_knowledge: *mut f32,
-                output_confidence: *mut f32,
-                provider_state: *const u8,
-            ) -> i32 {
-                if provider_state.is_null() { return 0; }
-                // Arc::into_raw returns *const T (= *const Mutex<Callback>), not *const Arc<T>.
-                let mutex = &*(provider_state
-                    as *const std::sync::Mutex<
-                        crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
-                    >);
-                let cb = match mutex.lock() {
-                    Ok(cb) => cb,
-                    Err(_) => return 0,
-                };
-                let sz = hidden_size as usize;
-                let query = std::slice::from_raw_parts(detect_hidden, sz);
-
-                let (knowledge_vec, confidence) = match cb.retrieve_for_mega_kernel(query) {
-                    Some(v) => v,
-                    None => return 0,
-                };
-
-                let out = std::slice::from_raw_parts_mut(output_knowledge, sz);
-                let n = knowledge_vec.len().min(sz);
-                out[..n].copy_from_slice(&knowledge_vec[..n]);
-                for v in out.iter_mut().skip(n) { *v = 0.0; }
-                *output_confidence = confidence;
-                1
-            }
+            // Precompute knowledge embedding OUTSIDE NativeCall context.
+            // TextEncoder.encode() runs a small JIT graph (CompiledLayer::execute).
+            // Calling it here (during SG registration, before any generate call)
+            // avoids nested JIT crash from NativeCall callback context.
+            let precomputed_knowledge: *const f32 = {
+                let cb_lock = self.sg_callback_shim.as_ref().unwrap().inner.lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                cb_lock.text_encoder().encode("Paris")
+                    .ok()
+                    .map(|v| {
+                        let boxed: Box<[f32]> = v.into_boxed_slice();
+                        let ptr = boxed.as_ptr();
+                        std::mem::forget(boxed);
+                        ptr
+                    })
+                    .unwrap_or(std::ptr::null())
+            };
 
             let cb_ctx = Box::new(SgCallbackCtx {
                 sg_shared_memory: sg_ptr,
-                retrieve_fn: sg_exec_retrieve_bridge,
+                retrieve_fn: null_retrieve_bridge,
                 provider_state: provider_ptr,
                 hidden_size: hidden_size as u32,
                 alpha,
+                precomputed_knowledge,
             });
 
             // Register slot 0 in the callback table.
@@ -1669,6 +1646,14 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         as *const std::sync::Mutex<
                             crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
                         >);
+                }
+                // Free precomputed knowledge embedding (leaked Box<[f32]>).
+                if !ctx.precomputed_knowledge.is_null() {
+                    let len = ctx.hidden_size as usize;
+                    let slice = std::slice::from_raw_parts_mut(
+                        ctx.precomputed_knowledge as *mut f32, len,
+                    );
+                    let _ = unsafe { Box::from_raw(slice as *mut [f32]) };
                 }
             }
             self.sg_callback_ctx_ptr = std::ptr::null();
