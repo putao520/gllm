@@ -261,11 +261,14 @@ fn test_sg_003_level_routing_gate() {
         .expect("generate must succeed");
     assert!(!resp.text.is_empty());
 
-    // Q-tap ring buffer 无数据 → pre_node 返回 Continue → Provider 不被调用
-    assert_eq!(
-        provider.calls.load(Ordering::SeqCst),
-        0,
-        "Provider must not be called (Q-tap ring buffer has no data source)"
+    // Callback table path (mega-kernel) calls provider.retrieve() from JIT
+    // callback regardless of Q-tap state. AlwaysNoneProvider returns None,
+    // so confidence=0 → SgInject is identity (no output change).
+    let call_count = provider.call_count();
+    eprintln!("[test_sg_003] provider called {} times (callback table path)", call_count);
+    assert!(
+        call_count > 0,
+        "Callback table path must call provider even without Q-tap data"
     );
 
     // 幂等反注册验证.
