@@ -283,6 +283,7 @@ impl MegaKernelExecutor {
         top_k: usize,
         top_p: f32,
         hook_ctx_ptr: *const u8,
+        callback_table_ptr: *const u8,
     ) -> Result<Vec<u32>, MegaKernelError> {
         let mega = &self.mega_compiled;
         let prompt_len = prompt_tokens.len();
@@ -359,6 +360,7 @@ impl MegaKernelExecutor {
                 0,  // session_position: new session
                 std::ptr::null(),  // fused_hidden_ptr: no multimodal
                 0,  // num_mm_tokens: no multimodal tokens
+                callback_table_ptr, // callback_table_ptr: C-style fn_ptr array (NULL = no callbacks)
             )
         };
 

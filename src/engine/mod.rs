@@ -4,6 +4,7 @@ pub mod arbiter;
 pub mod attention_contracts;
 pub mod executor;
 pub mod mega_kernel;
+pub mod mega_kernel_callback;
 pub mod callbacks;
 
 /// 引擎上下文。提供给各类 runtime hook 的引擎访问接口。
