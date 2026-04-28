@@ -182,7 +182,7 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // Vtable dispatch (isolated fn — 5/5 stable with 14 GPR + YMM + RFLAGS save).
+    // Vtable dispatch (isolated fn — stable 5/5).
     fn retrieve_conf(
         cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
