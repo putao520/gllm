@@ -208,8 +208,8 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
     let kv = std::slice::from_raw_parts_mut(knowledge, hidden);
     let n = knowledge_vec.len().min(hidden);
-    kv[..n].copy_from_slice(&knowledge_vec[..n]);
-    for v in kv.iter_mut().skip(n) { *v = 0.0; }
+    // Write directional knowledge_vector scaled by confidence × alpha.
+    for i in 0..n { kv[i] = knowledge_vec[i] * alpha_conf; }
     *confidence_ptr = alpha_conf;
 
     drop(cb);

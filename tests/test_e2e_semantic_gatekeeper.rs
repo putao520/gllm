@@ -702,16 +702,20 @@ fn test_sg_008_behavior_diff_mega_kernel_callback_table() {
          The mega-kernel callback table path must reach vtable dispatch."
     );
 
-    // ── 5. Injection applied but may not change argmax at temp=0.0 ──
-    // The directional embedding (precomputed "Paris" via TextEncoder outside
-    // NativeCall context) IS injected at layer N/2. But 15 remaining layers
-    // can dilute the signal before lm_head. With temperature=0.0, argmax
-    // may stay the same even though logit distribution shifted.
+    // ── 5. Behavior difference assertion ──
+    // SgInject applies non-zero directional knowledge_vector from TextEncoder.
+    // With temperature=0.0, argmax must differ from baseline.
     eprintln!(
         "[SG-008] baseline={:?} sg={:?} diff={} provider_calls={}",
         baseline_text, sg_text,
         baseline_text != sg_text,
         call_count,
+    );
+    assert_ne!(
+        baseline_text, sg_text,
+        "REQ-SG-008: SG output must differ from no-SG baseline (directional embedding injection). \
+         baseline={:?} sg={:?}",
+        baseline_text, sg_text,
     );
 
     // ── 6. Cleanup: unregister + verify recovery ──
