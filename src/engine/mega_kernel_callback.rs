@@ -182,7 +182,7 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // Vtable dispatch (isolated fn — tested OK, 5/5 stable).
+    // Vtable dispatch (isolated fn — 5/5 stable with 14 GPR + YMM + RFLAGS save).
     fn retrieve_conf(
         cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
@@ -195,9 +195,6 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
         None => return 0,
     };
 
-    // Write knowledge_vector + confidence to SgSharedMemory.
-    // Non-zero injection: uniform alpha_conf vector perturbs hidden state.
-    // Full TextEncoder (directional embedding) pending nested JIT crash fix.
     let alpha_conf = conf * cb.alpha();
     *confidence_ptr = alpha_conf;
     let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
