@@ -136,6 +136,17 @@ impl SemanticGatekeeperCallback {
             .map(|e| e.confidence)
     }
 
+    /// Encode a single token via TextEncoder (bypasses tokenizer).
+    /// Isolated to allow testing nested JIT call separately.
+    pub fn encode_single(&self, token_id: u32) -> Option<Vec<f32>> {
+        self.text_encoder.encode(&token_id.to_string()).ok()
+    }
+
+    /// Direct access to text_encoder for nested JIT debugging.
+    pub fn text_encoder(&self) -> &Arc<dyn TextEncoder> {
+        &self.text_encoder
+    }
+
     /// Mega-kernel callback bridge: detect_hidden → KnowledgeProvider → TextEncoder
     /// → (knowledge_vector, confidence).
     ///

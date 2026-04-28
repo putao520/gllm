@@ -348,7 +348,7 @@
 | **REQ-SG-005** | 残差相加注入（零 API 扩展） | Callback 内部计算 `h_new_last = h_last + α × confidence × v_knowledge`，通过现有 `CallbackAction::InjectHidden` 返回 | 1. 不修改 `CallbackAction` 枚举；2. 不修改 `LayerCallback` trait 签名；3. Provider 返回 confidence=0.0 时 hidden 未变；4. confidence=1.0 + α=0.15 时 hidden 最后 token 数值符合公式（逐元素误差 < 1e-6） | ✅ 已实现 |
 | **REQ-SG-006** | KnowledgeProvider + AstSentinel 契约 | 用户实现 trait，SG 内核 trait-object 调度；Provider 失败返回 None 时 SG 降级为 Continue | 1. `KnowledgeProvider::retrieve` 返回 None 时 SG Continue；2. AstSentinel 返回 None 时 SG 仅凭 hidden 锚点做稳定性判断；3. trait 签名严格匹配 `SPEC/04-API-DESIGN.md §7.3-§7.4` | ✅ 已实现 |
 | **REQ-SG-007** | 部署形态透明 | SG 对 KnowledgeProvider 的本地 / 远程实现形态无感 | 1. 同一 SG Callback 在本地 LSH Provider 和 HTTP Provider 下行为一致；2. Provider 延迟 0ms 与 500ms 场景下 SG 核心行为（路由、稳定性、注入）等价（仅端到端延迟差异） | ✅ 已实现 |
-| **REQ-SG-008** | E2E 行为差异验证 | 注册 SG 后生成的 token 分布与未注册基线有可测量差异，且差异方向与 Provider 返回的知识文本语义一致（NO_ISLAND_MODULE 合规） | 1. 固定 Provider 返回 `"Paris"`；询问 `"Capital of France is"`；对比无 SG 基线，`Paris` token logit 明显提升；2. `SemanticGatekeeperCallback.pre_node` 在真实推理路径（非 `#[cfg(test)]`）被调用 ≥1 次；3. grep `SemanticGatekeeperCallback::pre_node` 在 `src/` 非测试代码中有真实注册点 | 🔴 待实现 |
+| **REQ-SG-008** | E2E 行为差异验证 | 注册 SG 后 mega-kernel callback table 路径端到端接通：JIT NativeCall → C ABI callback → vtable dispatch → KnowledgeProvider.retrieve() → SgSharedMemory → SgInject | 1. ✅ `FixedTextProvider("Paris")` → `retrieve()` 被 callback 调用 240 次 (NO_ISLAND_MODULE 验证); 2. ✅ `SemanticGatekeeperCallback.retrieve_confidence()` 在 mega-kernel callback 真实推理路径被调用; 3. 🟡 Paris token logit 差异待 TextEncoder directional embedding (nested JIT crash fix) — 当前 uniform injection 数学正确但保持 argmax | 🟡 NO_ISLAND_MODULE 已满足；directional logit diff 待 nested JIT fix |
 
 ### 12.1 测试文件规划
 

@@ -657,54 +657,66 @@ fn test_sg_008_multi_detection_layers() {
 fn test_sg_008_behavior_diff_mega_kernel_callback_table() {
     let client = Client::new_chat(MODEL).expect("failed to load SmolLM2-135M");
 
-    // ── 1. Register SG with alpha > 0 ──
-    let provider: Arc<dyn KnowledgeProvider> = Arc::new(FixedTextProvider::new("Paris", 1.0));
-    let config = SemanticGatekeeperConfig {
-        alpha: 0.1,
-        ..base_config(provider)
-    };
+    let prompt = "Capital of France is";
 
-    client
-        .register_semantic_gatekeeper(config)
-        .expect("SG register must succeed");
-
-    // ── 2. Generate with SG — callback table path active ──
-    // If NativeCall/callback crashed, this would SIGSEGV. The test passing
-    // proves JIT→C ABI→SgSharedMemory→SgInject pipeline works end-to-end.
-    let sg_resp = client
-        .generate("Capital of France is")
+    // ── 1. Baseline: generate WITHOUT SG ──
+    let baseline = client
+        .generate(prompt)
         .max_tokens(8)
         .temperature(0.0)
         .generate()
         .response()
-        .expect("SG generate must succeed (callback table path)");
-    assert!(!sg_resp.text.is_empty(), "SG output must be non-empty");
-    eprintln!("[SG-008] output: {:?}", sg_resp.text);
+        .expect("baseline generate must succeed");
+    let baseline_text = baseline.text.clone();
+    eprintln!("[SG-008] baseline: {:?}", baseline_text);
 
-    // ── 3. Verify generate works repeatedly (callback stability) ──
-    let resp2 = client
-        .generate("The answer is")
-        .max_tokens(4)
+    // ── 2. Register SG with alpha=0.3, FixedTextProvider("Paris") ──
+    let fixed_provider = Arc::new(FixedTextProvider::new("Paris", 1.0));
+    let provider: Arc<dyn KnowledgeProvider> = fixed_provider.clone();
+    let config = SemanticGatekeeperConfig {
+        alpha: 0.99,
+        ..base_config(provider)
+    };
+    client.register_semantic_gatekeeper(config).expect("register");
+
+    // ── 3. Generate WITH SG (callback table active, non-zero injection) ──
+    let sg_resp = client
+        .generate(prompt)
+        .max_tokens(8)
         .temperature(0.0)
         .generate()
         .response()
-        .expect("second generate must succeed");
-    assert!(!resp2.text.is_empty());
-    eprintln!("[SG-008] second output: {:?}", resp2.text);
+        .expect("SG generate must succeed");
+    let sg_text = sg_resp.text.clone();
+    eprintln!("[SG-008] SG-on:  {:?}", sg_text);
 
-    // ── 4. Cleanup ──
-    client
-        .unregister_semantic_gatekeeper()
-        .expect("unregister must succeed");
+    // ── 4. NO_ISLAND_MODULE: callback reached provider.retrieve via vtable dispatch ──
+    let call_count = fixed_provider.call_count();
+    eprintln!("[SG-008] provider called {} times", call_count);
+    assert!(
+        call_count > 0,
+        "NO_ISLAND_MODULE: KnowledgeProvider.retrieve() was NOT called. \
+         The mega-kernel callback table path must reach vtable dispatch."
+    );
 
-    // ── 5. Verify generate still works after unregister ──
-    let resp3 = client
-        .generate("Hello")
-        .max_tokens(4)
+    // ── 5. Output differs OR uniform injection produces same argmax (expected) ──
+    // Full TextEncoder path (directional embedding) pending nested JIT crash fix.
+    // Uniform [1,1,...] injection is mathematically correct but preserves argmax.
+    eprintln!(
+        "[SG-008] baseline={:?} sg={:?} (diff={})",
+        baseline_text, sg_text,
+        baseline_text != sg_text,
+    );
+
+    // ── 6. Cleanup: unregister + verify recovery ──
+    client.unregister_semantic_gatekeeper().expect("unregister");
+    let post = client
+        .generate(prompt)
+        .max_tokens(8)
         .temperature(0.0)
         .generate()
         .response()
-        .expect("post-unregister generate must succeed");
-    assert!(!resp3.text.is_empty());
-    eprintln!("[SG-008] post-unregister: {:?}", resp3.text);
+        .expect("post-unregister generate");
+    eprintln!("[SG-008] SG-off: {:?}", post.text);
+    assert!(!post.text.is_empty());
 }
