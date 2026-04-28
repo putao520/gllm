@@ -182,20 +182,17 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // Minimal vtable dispatch isolated in its own fn.
+    // Isolate vtable dispatch in its own fn to avoid register conflicts
+    // with NativeCall context. Returns only value type (f32), not heap-allocated.
     fn retrieve_conf(
-        provider: &dyn crate::semantic_gatekeeper::KnowledgeProvider,
+        cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
     ) -> Option<f32> {
-        let ctx = crate::semantic_gatekeeper::RetrieveContext {
-            generated_tokens: &[], ast: None, step: 0, request_id: 0,
-        };
-        provider.retrieve(detect, crate::semantic_gatekeeper::SemanticLevel::L1, &ctx)
-            .map(|e| e.confidence)
+        cb.retrieve_confidence(detect)
     }
 
     let detect = std::slice::from_raw_parts(sg_ptr.add(16) as *const f32, hidden);
-    let conf = match retrieve_conf(&*cb.provider, detect) {
+    let conf = match retrieve_conf(&*cb, detect) {
         Some(c) => c,
         None => return 0,
     };

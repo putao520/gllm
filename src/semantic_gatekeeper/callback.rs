@@ -63,7 +63,7 @@ pub struct SemanticGatekeeperCallback {
     pub(super) level_keys: Arc<LevelKeysCache>,
     pub(super) ring_buffer: Arc<GatekeeperRingBuffer>,
     pub(super) active_state: RwLock<ActiveState>,
-    pub provider: Arc<dyn KnowledgeProvider>,
+    pub(super) provider: Arc<dyn KnowledgeProvider>,
     pub(super) ast_sentinel: Option<Arc<dyn AstSentinel>>,
     pub(super) text_encoder: Arc<dyn TextEncoder>,
     pub(super) tokenizer: Arc<dyn TokenizerLookup>,
@@ -123,9 +123,17 @@ impl SemanticGatekeeperCallback {
         self.alpha
     }
 
-    /// Encode knowledge text via TextEncoder (pub for NativeCall debug).
-    pub fn retrieve_encode_text(&self, text: &str) -> Result<Vec<f32>, TextEncoderError> {
-        self.text_encoder.encode(text)
+    /// Call KnowledgeProvider.retrieve and return confidence only.
+    /// Used by mega-kernel callback to avoid String crossing NativeCall boundary.
+    pub fn retrieve_confidence(&self, detect_hidden: &[f32]) -> Option<f32> {
+        let ctx = RetrieveContext {
+            generated_tokens: &[],
+            ast: None,
+            step: 0,
+            request_id: 0,
+        };
+        self.provider.retrieve(detect_hidden, SemanticLevel::L1, &ctx)
+            .map(|e| e.confidence)
     }
 
     /// Mega-kernel callback bridge: detect_hidden → KnowledgeProvider → TextEncoder
