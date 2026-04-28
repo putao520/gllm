@@ -439,6 +439,30 @@ impl ArchTemplate {
                                     vec![detect_side],
                                     &format!("sg_detect_L{}", i),
                                 );
+
+                                // Q-Tap STG: extract Q vector after q_proj for SG callback.
+                                // The Q tensor is named "layer_{i}_q" in all YAML templates.
+                                if let Some(ref qtap_cfg) = sg.q_tap {
+                                    let q_tensor_key = format!("layer_{}_q", i);
+                                    if let Some(&q_tid) = tensor_map.get(&q_tensor_key) {
+                                        let qtap_sentinel = g.add_tensor_concrete(
+                                            &format!("qtap_sentinel_L{}", i), &[1], dt,
+                                        );
+                                        g.add_op(
+                                            OpKind::QTapSTG {
+                                                sink_ptr: qtap_cfg.sink_ptr,
+                                                step_index_ptr: qtap_cfg.step_index_ptr,
+                                                dtype: qtap_cfg.dtype,
+                                                q_dim: SymDim::Concrete(layer_dims.q_dim),
+                                                position: qtap_cfg.position,
+                                                num_slots: qtap_cfg.num_slots,
+                                            },
+                                            vec![q_tid],
+                                            vec![qtap_sentinel],
+                                            &format!("layer_{}_qtap_stg", i),
+                                        );
+                                    }
+                                }
                                 // tensor_map["hidden_0"] unchanged
                             }
                         }
@@ -772,7 +796,7 @@ impl ArchTemplate {
         g: &mut gllm_kernels::compiler::CompilerGraph,
         node_def: &NodeDef,
         config: &super::resolve::ResolvedConfig,
-        _business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
+        business_config: &gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig,
         s: &gllm_kernels::compiler::graph::SymDim,
         dims: &LayerDims,
         _eps: f32,
@@ -781,7 +805,7 @@ impl ArchTemplate {
         layer_idx: usize,
         tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
     ) -> Result<(), TemplateError> {
-        use gllm_kernels::compiler::graph::{OpKind, SymDim};
+        use gllm_kernels::compiler::graph::{OpKind, SymDim, QTapPosition};
 
         let read_f32 = |key: &str| -> Option<f32> {
             match node_def.attributes.get(key)? {
@@ -816,6 +840,31 @@ impl ArchTemplate {
         let q_in_name = substitute(&node_def.inputs[0]);
         let q_out_name = substitute(&node_def.outputs[0]);
         let q_in_id = *tensor_map.entry(q_in_name.clone()).or_insert_with(|| g.add_tensor_concrete(&q_in_name, &[0], dt));
+
+        // Q-Tap STG: insert after q_proj, before RoPE consumes Q (REQ-SG-002)
+        if let Some(ref sg) = business_config.semantic_gatekeeper {
+            if layer_idx == sg.detect_layer {
+                if let Some(ref qtap_cfg) = sg.q_tap {
+                    let qtap_sentinel = g.add_tensor_concrete(
+                        &format!("qtap_sentinel_L{}", layer_idx), &[1], dt,
+                    );
+                    g.add_op(
+                        OpKind::QTapSTG {
+                            sink_ptr: qtap_cfg.sink_ptr,
+                            step_index_ptr: qtap_cfg.step_index_ptr,
+                            dtype: qtap_cfg.dtype,
+                            q_dim: SymDim::Concrete(dims.q_dim),
+                            position: qtap_cfg.position,
+                            num_slots: qtap_cfg.num_slots,
+                        },
+                        vec![q_in_id],
+                        vec![qtap_sentinel],
+                        &format!("layer.layer_{layer_idx}_qtap_stg"),
+                    );
+                }
+            }
+        }
+
         let q_out_id = g.add_tensor(&q_out_name, vec![s.clone(), SymDim::Concrete(dims.q_dim)], dt);
         tensor_map.insert(q_out_name.clone(), q_out_id);
         g.add_op(

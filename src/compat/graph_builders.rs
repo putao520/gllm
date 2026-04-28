@@ -322,7 +322,7 @@ pub(crate) fn build_fused_attention_layer_graph(
     dtype: DType,
 ) -> CompilerGraph {
     CompilerGraph::fused_attention_layer(
-        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, rope_partial, dtype,
+        seq_len, hidden, num_heads, num_kv_heads, head_dim, eps, rope_theta, rope_partial, dtype, None,
     )
 }
 

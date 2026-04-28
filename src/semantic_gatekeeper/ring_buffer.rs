@@ -63,6 +63,12 @@ impl GatekeeperRingBuffer {
         self.data.as_ptr() as u64
     }
 
+    /// 返回 step_index AtomicU64 的宿主指针, 供 JIT codegen 作为
+    /// `QTapConfig.step_index_ptr`.
+    pub fn step_index_ptr(&self) -> u64 {
+        &self.step_index as *const AtomicU64 as u64
+    }
+
     /// Q 向量维度.
     pub fn q_dim(&self) -> usize {
         self.q_dim

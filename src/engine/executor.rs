@@ -829,6 +829,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     detect_layer: geometry.num_layers / 2,
                     detect_offset: 0,
                     inject_offset: 0,
+                    q_tap: None,
                 }),
                 ..MegaKernelBusinessConfig::default()
             };
