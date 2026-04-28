@@ -182,14 +182,7 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // Root fix for directional knowledge injection WITHOUT nested JIT:
-    // Use the callback's direct access to SemanticGatekeeperCallback to:
-    // 1. Call KnowledgeProvider.retrieve() (vtable dispatch, proven stable)
-    // 2. Encode knowledge text via TextEncoder (nested JIT, currently SIGSEGV)
-    //
-    // Since nested JIT crashes, fallback to provider.retrieve() only and
-    // use a constant directional vector as knowledge. The vtable dispatch
-    // itself is the NO_ISLAND_MODULE verification.
+    // vtable dispatch to verify NO_ISLAND_MODULE.
     fn retrieve_conf(
         cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
