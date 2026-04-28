@@ -986,6 +986,19 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => exec.clear_sg_callback_shim(),
         }
     }
+
+    /// Returns the pre-created SG Q-tap ring buffer.
+    /// Delegates to `Executor::sg_ring_buffer()`.
+    pub fn sg_ring_buffer(
+        &self,
+    ) -> Option<std::sync::Arc<crate::semantic_gatekeeper::GatekeeperRingBuffer>> {
+        match self {
+            BackendExecutor::Cuda(exec) => exec.sg_ring_buffer(),
+            BackendExecutor::Rocm(exec) => exec.sg_ring_buffer(),
+            BackendExecutor::Metal(exec) => exec.sg_ring_buffer(),
+            BackendExecutor::Cpu(exec) => exec.sg_ring_buffer(),
+        }
+    }
 }
 
 /// Backward-compatible type alias for f32 backend executor.

@@ -526,6 +526,14 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     residual_bus: crate::routing::ResidualBus,
     /// §9 Semantic Gatekeeper callback shim (set via set_sg_callback).
     sg_callback_shim: Option<crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim>,
+    /// Pre-created SG Q-tap ring buffer. Created at model load time so the
+    /// mega-kernel can compile with QTapSTG (sink_ptr + step_index_ptr baked
+    /// into JIT code). Shared with `SemanticGatekeeperCallback` when SG is
+    /// registered via `register_semantic_gatekeeper`.
+    sg_ring_buffer: Option<std::sync::Arc<crate::semantic_gatekeeper::GatekeeperRingBuffer>>,
+    /// SG shared memory for mega-kernel hook_ctx_ptr (SPEC §7.4.2).
+    /// Passed as ABI arg 15; SgDetect writes detect_hidden, SgInject reads knowledge_vector.
+    sg_shared_memory: Option<std::sync::Mutex<crate::semantic_gatekeeper::SgSharedMemory>>,
 }
 
 /// Backward-compatible type alias for f32 executor.
@@ -626,6 +634,35 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ModelKind::Chat => AttentionTopology::causal(geometry.clone()),
             ModelKind::Embedding | ModelKind::Reranker | ModelKind::Classifier => AttentionTopology::bidirectional(geometry.clone()),
         };
+
+        // Pre-create SG Q-tap ring buffer at model load time so the
+        // mega-kernel compiles with QTapSTG (sink_ptr / step_index_ptr
+        // baked into JIT code).  When SG is never registered the ring
+        // buffer is harmless — the JIT code writes into it but nothing
+        // reads; when SG *is* registered the callback reuses this same
+        // buffer via `executor.sg_ring_buffer()`.
+        let sg_ring_buffer: std::sync::Arc<crate::semantic_gatekeeper::GatekeeperRingBuffer> = {
+            let q_dim = geometry.num_heads * geometry.head_dim;
+            std::sync::Arc::new(
+                crate::semantic_gatekeeper::GatekeeperRingBuffer::new(
+                    q_dim,
+                    DType::F32.size_bytes(),
+                ),
+            )
+        };
+        let qtap_cfg = gllm_kernels::compiler::graph::QTapGraphConfig {
+            sink_ptr: sg_ring_buffer.sink_ptr(),
+            step_index_ptr: sg_ring_buffer.step_index_ptr(),
+            dtype: DType::F32,
+            position: gllm_kernels::compiler::graph::QTapPosition::LastToken,
+            num_slots: 2,
+        };
+
+        // SG shared memory for mega-kernel hook_ctx_ptr (SPEC §7.4.2).
+        // Created at model load time; SG registration enables it via .enable().
+        let sg_shared_memory = std::sync::Mutex::new(
+            crate::semantic_gatekeeper::SgSharedMemory::new(geometry.hidden_size),
+        );
 
         // §9.1: 编译 true mega-kernel（铁律: 无 fallback，编译失败 = 致命错误）
         // 所有模型（包括 MoE）统一走 mega-kernel 路径 (REQ-UGS-005/006)。
@@ -824,12 +861,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     None
                 },
-                // SG config present but ops disabled for testing.
+                // SG config: QTapSTG always compiled in; callback activation is
+                // orthogonal (via register_semantic_gatekeeper).
                 semantic_gatekeeper: Some(SgConfig {
                     detect_layer: geometry.num_layers / 2,
                     detect_offset: 0,
                     inject_offset: 0,
-                    q_tap: None,
+                    q_tap: Some(qtap_cfg.clone()),
                 }),
                 ..MegaKernelBusinessConfig::default()
             };
@@ -1093,6 +1131,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 bus
             },
             sg_callback_shim: None,
+            sg_ring_buffer: Some(sg_ring_buffer),
+            sg_shared_memory: Some(sg_shared_memory),
         })
     }
 
@@ -1503,17 +1543,37 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     /// §9 Set the Semantic Gatekeeper callback shim for injection into the
-    /// per-forward CallbackChain.
+    /// per-forward CallbackChain. Also enables SgSharedMemory for mega-kernel path.
     pub fn set_sg_callback_shim(
         &mut self,
         shim: crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim,
     ) {
         self.sg_callback_shim = Some(shim);
+        // Enable mega-kernel SG shared memory (control bit 0 = 1).
+        if let Some(ref mx) = self.sg_shared_memory {
+            let mut sg = mx.lock().unwrap_or_else(|e| e.into_inner());
+            sg.enable();
+        }
     }
 
     /// Remove the Semantic Gatekeeper callback shim.
+    /// Also disables SgSharedMemory for mega-kernel path.
     pub fn clear_sg_callback_shim(&mut self) {
         self.sg_callback_shim = None;
+        if let Some(ref mx) = self.sg_shared_memory {
+            let mut sg = mx.lock().unwrap_or_else(|e| e.into_inner());
+            sg.disable();
+        }
+    }
+
+    /// Returns the pre-created SG Q-tap ring buffer (if present).
+    /// The ring buffer is created at model load time so that mega-kernel JIT
+    /// can compile with QTapSTG; the `register_semantic_gatekeeper` API reuses
+    /// this same buffer for its callback.
+    pub fn sg_ring_buffer(
+        &self,
+    ) -> Option<std::sync::Arc<crate::semantic_gatekeeper::GatekeeperRingBuffer>> {
+        self.sg_ring_buffer.clone()
     }
 
     /// Main Engine Step: Continuous Batching
@@ -2481,8 +2541,17 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Some(ref mega) = self.mega_kernel {
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
-            // SG hook_ctx_ptr: NULL when no SG registered, non-NULL with SgSharedMemory
-            let sg_hook_ptr = std::ptr::null(); // TODO: wire to SgSharedMemory when SG is registered
+            // SG hook_ctx_ptr: pass SgSharedMemory pointer when available (SPEC §7.4.2).
+            // SgSharedMemory.control bit 0 determines whether JIT SgDetect/SgInject
+            // are active. Even when SG is not registered the pointer is non-NULL —
+            // the JIT checks control=0 and skips SG ops (zero overhead).
+            let sg_hook_ptr = match self.sg_shared_memory {
+                Some(ref mx) => {
+                    let sg = mx.lock().unwrap_or_else(|e| e.into_inner());
+                    sg.as_ptr()
+                }
+                None => std::ptr::null(),
+            };
             let output_tokens = mega.generate_single_sequence(
                 &prompt_tokens,
                 max_tokens,

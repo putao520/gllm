@@ -2092,10 +2092,22 @@ impl Client {
         let tokenizer_clone = executor.tokenizer().clone();
         drop(executor);
 
-        // ── 7. 构造 Q-tap ring buffer ──
-        let ring_buffer = std::sync::Arc::new(
-            crate::semantic_gatekeeper::GatekeeperRingBuffer::new(q_dim, DType::F32.size_bytes()),
-        );
+        // ── 7. Reuse pre-created Q-tap ring buffer from Executor ──
+        // The ring buffer is pre-created at model load time so the mega-kernel
+        // compiles with QTapSTG. We must reuse the same instance because JIT
+        // code has its sink_ptr/step_index_ptr baked in.
+        let ring_buffer = state.backend.executor().sg_ring_buffer().ok_or_else(|| {
+            ClientError::RuntimeError(
+                "semantic gatekeeper: executor has no pre-created ring buffer".to_string(),
+            )
+        })?;
+        // Validate geometry consistency (ring buffer was created with the same q_dim).
+        if ring_buffer.q_dim() != q_dim {
+            return Err(ClientError::RuntimeError(format!(
+                "semantic gatekeeper: ring buffer q_dim mismatch: buffer={} expected={}",
+                ring_buffer.q_dim(), q_dim,
+            )));
+        }
 
         // ── 8. 断言预计算产物完整 ──
         debug_assert_eq!(level_keys.detection_layers(), detection_layers.as_slice());

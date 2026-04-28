@@ -25,12 +25,14 @@ pub mod active_state;
 pub mod callback;
 pub mod level_keys;
 pub mod ring_buffer;
+pub mod sg_shared_memory;
 pub mod small_graph;
 
 pub use active_state::ActiveState;
 pub use callback::SemanticGatekeeperCallback;
 pub use level_keys::{precompute as precompute_level_keys, LevelKeysCache, LevelKeysError};
 pub use ring_buffer::{GatekeeperRingBuffer, QTapReadError};
+pub use sg_shared_memory::SgSharedMemory;
 pub use small_graph::{EmbedLookupOnlyGraph, KProjOnlyGraph};
 
 // ============================================================================
