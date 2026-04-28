@@ -12,7 +12,7 @@ use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 use gllm_kernels::types::DType;
 use thiserror::Error;
 
-use super::mega_kernel_callback::{slot, MegaKernelCallbackTable};
+use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback};
 
 /// Cap the geometry-declared `max_position_embeddings` by the JIT compile-time
 /// ceiling (`SYMDIM_MAX_SEQ_LEN`) whenever it is used to size / index the
@@ -1559,6 +1559,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// §9 Set the Semantic Gatekeeper callback shim for injection into the
     /// per-forward CallbackChain. Also enables SgSharedMemory for mega-kernel path
     /// and registers SG_KNOWLEDGE_RETRIEVE (slot 0) in the callback table.
+    ///
+    /// Slot 0 bridge: JIT SgDetect → SgSharedMemory.detect_hidden → C ABI callback →
+    /// KnowledgeProvider.retrieve() → TextEncoder.encode() → SgSharedMemory.knowledge_vector
+    /// → JIT SgInject (hidden += confidence × knowledge_vector).
     pub fn set_sg_callback_shim(
         &mut self,
         shim: crate::semantic_gatekeeper::callback::SemanticGatekeeperCallbackShim,
@@ -1570,14 +1574,25 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let mut sg = mx.lock().unwrap_or_else(|e| e.into_inner());
             sg.enable();
 
-            // Build SgCallbackCtx for callback table slot 0.
-            // The provider_state is a leaked boxed closure that calls the
-            // SemanticGatekeeperCallback's KnowledgeProvider in simplified form.
             let hidden_size = sg.hidden_size();
             let sg_ptr = sg.as_ptr(); // stable: Box<[u8]> heap pointer, outlives registration
 
-            // Retrieve bridge function: casts provider_state back to the closure and calls it.
-            unsafe extern "C" fn sg_retrieve_bridge_fn(
+            // Clone + leak the Arc<Mutex<SemanticGatekeeperCallback>> for C ABI callback access.
+            // The Arc keeps the callback alive even if the Executor drops first.
+            let inner = self.sg_callback_shim.as_ref().unwrap().inner.clone();
+            let provider_ptr = Arc::into_raw(inner) as *const u8;
+
+            // Read alpha from the callback.
+            let alpha = {
+                self.sg_callback_shim.as_ref().unwrap().inner.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .alpha()
+            };
+
+            // C ABI bridge: detect_hidden → KnowledgeProvider.retrieve() →
+            // TextEncoder.encode() → write knowledge_vector + confidence to SgSharedMemory.
+            // Delegates to SemanticGatekeeperCallback::retrieve_for_mega_kernel.
+            unsafe extern "C" fn sg_exec_retrieve_bridge(
                 detect_hidden: *const f32,
                 hidden_size: u32,
                 output_knowledge: *mut f32,
@@ -1587,47 +1602,39 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 if provider_state.is_null() {
                     return 0;
                 }
-                let hidden_sz = hidden_size as usize;
-                let query = std::slice::from_raw_parts(detect_hidden, hidden_sz);
+                let arc = &*(provider_state
+                    as *const Arc<std::sync::Mutex<
+                        crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
+                    >>);
+                let cb = match arc.lock() {
+                    Ok(cb) => cb,
+                    Err(_) => return 0,
+                };
+                let sz = hidden_size as usize;
+                let query = std::slice::from_raw_parts(detect_hidden, sz);
 
-                // provider_state = leaked Box<dyn Fn(&[f32]) -> Option<(Vec<f32>, f32)>>
-                let retrieve_fn = &*(provider_state as *const Box<
-                    dyn Fn(&[f32]) -> Option<(Vec<f32>, f32)> + Send + Sync,
-                >);
+                let (knowledge_vec, confidence) = match cb.retrieve_for_mega_kernel(query) {
+                    Some(v) => v,
+                    None => return 0,
+                };
 
-                match retrieve_fn(query) {
-                    Some((knowledge, confidence)) => {
-                        let out = std::slice::from_raw_parts_mut(output_knowledge, hidden_sz);
-                        let n = knowledge.len().min(out.len());
-                        out[..n].copy_from_slice(&knowledge[..n]);
-                        *output_confidence = confidence;
-                        1
-                    }
-                    None => 0,
+                let out = std::slice::from_raw_parts_mut(output_knowledge, sz);
+                let n = knowledge_vec.len().min(sz);
+                out[..n].copy_from_slice(&knowledge_vec[..n]);
+                for v in out.iter_mut().skip(n) {
+                    *v = 0.0;
                 }
+                *output_confidence = confidence;
+                1
             }
 
-            // For Phase 3, the retrieve closure always returns None (no injection).
-            // Full KnowledgeProvider integration via the SemanticGatekeeperCallback's
-            // provider is a follow-up task — it requires adapting the existing
-            // Level-Keys-based retrieval to the simplified detect_hidden → knowledge interface.
-            let retrieve_fn: Box<
-                dyn Fn(&[f32]) -> Option<(Vec<f32>, f32)> + Send + Sync,
-            > = Box::new(|_detect_hidden| {
-                // Phase 3: no active knowledge retrieval.
-                // The SgInject JIT code checks confidence and skips injection when 0,
-                // so returning None is safe — it keeps the existing hidden state unchanged.
-                None
-            });
-
-            let provider_state = Box::into_raw(Box::new(retrieve_fn)) as *const u8;
-
-            let cb_ctx = Box::new(super::mega_kernel_callback::SgCallbackCtx {
+            // Turn off borrow of sg_callback_shim before calling register (below)
+            let cb_ctx = Box::new(SgCallbackCtx {
                 sg_shared_memory: sg_ptr,
-                retrieve_fn: sg_retrieve_bridge_fn,
-                provider_state,
+                retrieve_fn: sg_exec_retrieve_bridge,
+                provider_state: provider_ptr,
                 hidden_size: hidden_size as u32,
-                alpha: 0.0, // Phase 3: zero alpha = no injection
+                alpha,
             });
 
             // Register slot 0 in the callback table.
@@ -1635,8 +1642,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             unsafe {
                 self.callback_table.register(
                     slot::SG_KNOWLEDGE_RETRIEVE,
-                    super::mega_kernel_callback::sg_knowledge_retrieve_callback
-                        as *const u8,
+                    sg_knowledge_retrieve_callback as *const u8,
                     cb_ctx_ptr,
                 );
             }
@@ -1649,23 +1655,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     /// Also disables SgSharedMemory for mega-kernel path and clears
     /// SG_KNOWLEDGE_RETRIEVE (slot 0) from the callback table.
     pub fn clear_sg_callback_shim(&mut self) {
-        self.sg_callback_shim = None;
-
         // Clear slot 0 and reclaim leaked ctx.
         self.callback_table.clear(slot::SG_KNOWLEDGE_RETRIEVE);
         if !self.sg_callback_ctx_ptr.is_null() {
-            // Reclaim the SgCallbackCtx and recursively drop the provider_state closure.
+            // Reclaim the SgCallbackCtx and recursively drop the provider_state Arc.
             unsafe {
-                let ctx = Box::from_raw(self.sg_callback_ctx_ptr as *mut
-                    super::mega_kernel_callback::SgCallbackCtx);
-                // provider_state was Box::into_raw'd — reclaim and drop it.
+                let ctx = Box::from_raw(self.sg_callback_ctx_ptr as *mut SgCallbackCtx);
+                // provider_state was Arc::into_raw'd — reclaim Arc to decrement strong count.
                 if !ctx.provider_state.is_null() {
-                    let _ = Box::from_raw(ctx.provider_state as *mut
-                        Box<dyn Fn(&[f32]) -> Option<(Vec<f32>, f32)> + Send + Sync>);
+                    let _ = Arc::from_raw(ctx.provider_state
+                        as *const Arc<std::sync::Mutex<
+                            crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
+                        >>);
                 }
             }
             self.sg_callback_ctx_ptr = std::ptr::null();
         }
+
+        self.sg_callback_shim = None;
 
         // Disable SG shared memory.
         if let Some(ref mx) = self.sg_shared_memory {

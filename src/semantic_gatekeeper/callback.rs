@@ -118,6 +118,34 @@ impl SemanticGatekeeperCallback {
         self.level_keys.detection_layers()
     }
 
+    /// SG injection strength alpha.
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// Mega-kernel callback bridge: detect_hidden → KnowledgeProvider → TextEncoder
+    /// → (knowledge_vector, confidence).
+    ///
+    /// Called from within the JIT mega-kernel via callback table slot 0
+    /// (C ABI → `sg_knowledge_retrieve_callback` → this method).
+    ///
+    /// Returns `None` if the provider declines or encoding fails.
+    pub fn retrieve_for_mega_kernel(
+        &self,
+        detect_hidden: &[f32],
+    ) -> Option<(Vec<f32>, f32)> {
+        let ctx = RetrieveContext {
+            generated_tokens: &[],
+            ast: None,
+            step: 0,
+            request_id: 0,
+        };
+        let entry = self.provider.retrieve(detect_hidden, SemanticLevel::L1, &ctx)?;
+        let knowledge = self.text_encoder.encode(&entry.text).ok()?;
+        // Effective confidence = entry.confidence × alpha.
+        Some((knowledge, entry.confidence * self.alpha))
+    }
+
     /// 当前检测层是否登记 (快速查找).
     fn is_detection_layer(&self, layer_idx: usize) -> bool {
         self.detection_layers().contains(&layer_idx)
