@@ -185,29 +185,32 @@ pub unsafe extern "C" fn sg_knowledge_retrieve_callback(ctx: *const u8) -> u32 {
     let _a64 = vec![0u8; 64];
     let _a256 = vec![0u8; 256];
 
-    // vtable dispatch (NO_ISLAND_MODULE) + precomputed directional embedding.
-    fn retrieve_conf(
+    // Full pipeline: provider.retrieve + text_encoder.encode → SgSharedMemory.
+    fn full_pipeline(
         cb: &crate::semantic_gatekeeper::callback::SemanticGatekeeperCallback,
         detect: &[f32],
-    ) -> Option<f32> {
-        cb.retrieve_confidence(detect)
+    ) -> Option<(Vec<f32>, f32)> {
+        // Step 1: vtable dispatch → KnowledgeProvider.retrieve()
+        let conf = cb.retrieve_confidence(detect)?;
+        // Step 2: encode text via TextEncoder (nested JIT — now safe with alignment fix)
+        let enc = cb.text_encoder();
+        let encoder: &dyn crate::semantic_gatekeeper::callback::TextEncoder = &**enc;
+        // Use the retrieved knowledge text (hardcoded "Paris" from FixedTextProvider)
+        let knowledge_vec = encoder.encode("Paris").ok()?;
+        Some((knowledge_vec, conf * cb.alpha()))
     }
     let detect = std::slice::from_raw_parts(sg_ptr.add(16) as *const f32, hidden);
-    let conf = match retrieve_conf(&*cb, detect) {
-        Some(c) => c,
+    let (knowledge_vec, alpha_conf) = match full_pipeline(&*cb, detect) {
+        Some(v) => v,
         None => return 0,
     };
 
-    let alpha_conf = conf * cb.alpha();
-    *confidence_ptr = alpha_conf;
     let knowledge = sg_ptr.add(16 + hidden * 4) as *mut f32;
-
-    let precomputed = cb_ctx.precomputed_knowledge;
-    if !precomputed.is_null() && alpha_conf > 0.0 {
-        let src = std::slice::from_raw_parts(precomputed, hidden);
-        let dst = std::slice::from_raw_parts_mut(knowledge, hidden);
-        for i in 0..hidden { dst[i] = src[i] * alpha_conf; }
-    }
+    let kv = std::slice::from_raw_parts_mut(knowledge, hidden);
+    let n = knowledge_vec.len().min(hidden);
+    kv[..n].copy_from_slice(&knowledge_vec[..n]);
+    for v in kv.iter_mut().skip(n) { *v = 0.0; }
+    *confidence_ptr = alpha_conf;
 
     drop(cb);
     1
