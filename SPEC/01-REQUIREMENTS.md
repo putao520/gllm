@@ -342,7 +342,7 @@
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-SG-001** | Level Keys 预计算 | 模型加载期通过小 CompilerGraph 预计算 3 个层级键向量（每个检测层） | 1. `LevelKeysCache` 对每个 `detection_depth × num_layers` 填充 3 个非全零 finite 向量；2. 向量维度 = `num_kv_heads × head_dim`；3. 小图复用 `FusedGraphExecutor` 编译 / 运行（ARCH-FULL-JIT 合规）；4. 同一小图在 CPU/PTX/HIP/MSL 产出数值一致（容差 1e-4） | ✅ 已实现 |
-| **REQ-SG-002** | FusedAttentionLayer Q-Tap | 检测层 `FusedAttentionLayer` 编译期注入 `q_tap`；JIT codegen 在 `q_proj` 尾段追加 STG 写 ring buffer | 1. `q_tap: None` 时零额外指令（cargo-asm diff 对比）；2. `q_tap: Some(...)` 时主计算结果与无 tap 版本一致（L2 误差 < 1e-4）；3. Ring buffer 读出 Q 与 CPU 参考 `q_proj(hidden)[-1]` 一致；4. 双缓冲 atomic step_index 协议防陈旧读；5. 未拆融合 / 未引入后端特化 GraphType | 🟡 lowering 已实现，graph 插入 + ABI 传递待完成 |
+| **REQ-SG-002** | FusedAttentionLayer Q-Tap | 检测层 `FusedAttentionLayer` 编译期注入 `q_tap`；JIT codegen 在 `q_proj` 尾段追加 STG 写 ring buffer | 1. `q_tap: None` 时零额外指令（cargo-asm diff 对比）；2. `q_tap: Some(...)` 时主计算结果与无 tap 版本一致（L2 误差 < 1e-4）；3. Ring buffer 读出 Q 与 CPU 参考 `q_proj(hidden)[-1]` 一致；4. 双缓冲 atomic step_index 协议防陈旧读；5. 未拆融合 / 未引入后端特化 GraphType | 🟡 lowering + graph 插入已完成；ring buffer 生命周期与模型加载时序耦合待解 (QTapGraphConfig→compile-time vs ring buffer→post-load) [commit: gllm-kernels 777c3b52, gllm d6ec8c0] |
 | **REQ-SG-003** | 层级路由与门控 | `SemanticGatekeeperCallback.pre_node` 计算 cosine(Q, K_Lx) 路由；best_score < τ 时返回 Continue | 1. mock Provider 始终返回 None 时 hidden_state 保持不变（cosine 相似度 = 1.0）；2. best_score < gate_threshold 触发 Continue 分支；3. argmax 正确映射到 SemanticLevel::L1/L2/L3 | ✅ 已实现 |
 | **REQ-SG-004** | 稳定性追踪与 ActiveState 刷新 | hidden 相似度 > stability_threshold && AST 节点未变时复用 `v_knowledge`；否则 FullCompute；AST 节点变更强制刷新 | 1. 连续 20 步相同语义上下文，ActiveState 复用次数 ≥ 15（≥75%）；2. AST node_kind 变更时 FullCompute 在下一个检测层触发；3. `reset_gatekeeper_state()` 清空 ActiveState 但保留 LevelKeysCache；4. 跨请求边界自动刷新 | ✅ 已实现 |
 | **REQ-SG-005** | 残差相加注入（零 API 扩展） | Callback 内部计算 `h_new_last = h_last + α × confidence × v_knowledge`，通过现有 `CallbackAction::InjectHidden` 返回 | 1. 不修改 `CallbackAction` 枚举；2. 不修改 `LayerCallback` trait 签名；3. Provider 返回 confidence=0.0 时 hidden 未变；4. confidence=1.0 + α=0.15 时 hidden 最后 token 数值符合公式（逐元素误差 < 1e-6） | ✅ 已实现 |
@@ -552,7 +552,7 @@
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
 | **REQ-MEGA-SG-001** | Mega-Kernel SG 共享内存 | mega-kernel 通过 scratchpad 共享内存传递 detect/knowledge buffer，JIT 内嵌 SgDetect/SgInject OpKind 操作 scratchpad | 1. ✅ `MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)` 时图中插入 `SgDetect` + `SgInject` side-channel op<br>2. ✅ SgDetect lowering: 从 hidden 复制到 scratchpad detect buffer<br>3. ✅ SgInject lowering: NOP (scratchpad 零初始化时 hidden += 0)<br>4. ✅ buffer_alloc 正确分配 detect/knowledge scratchpad<br>5. 🟡 `hook_ctx_ptr` 仍硬编码 NULL — scratchpad 路径已替代<br>6. ✅ E2E 测试验证无 NaN（SG 开启/关闭一致） | 🟡 scratchpad 路径已完成，hook_ctx_ptr 路径待接入 [commit: gllm-kernels 61677998] |
-| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. ✅ scratchpad buffer 大小在 compile_mega_kernel_vm 中计算<br>2. 🟡 Executor 层尚未在 generate loop 迭代间读写 detect/knowledge<br>3. 🟡 KnowledgeProvider 写入 knowledge_vector 到 scratchpad 待实现 | 🟡 scratchpad 分配已完成，Rust 侧交互待实现 |
+| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. ✅ scratchpad buffer 大小在 compile_mega_kernel_vm 中计算<br>2. 🟡 mega-kernel generate loop 是单次 JIT 调用，迭代间无法插入 Rust KnowledgeProvider<br>3. 🟡 需要 generate loop 拆分（multi-call）或 shared-memory 轮询机制 — 架构决策待定 | 🟡 scratchpad 分配已完成，generate loop 拆分待设计 |
 
 ## 19. 自动指令选择器 (REQ-AIS)
 
