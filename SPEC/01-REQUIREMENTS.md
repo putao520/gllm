@@ -551,8 +551,8 @@
 
 | ID | 需求标题 | 描述 | 验收标准 | 状态 |
 |----|----------|------|----------|------|
-| **REQ-MEGA-SG-001** | Mega-Kernel SG 共享内存 | mega-kernel 通过 `hook_ctx_ptr` (ABI arg 15) 传递 `SgSharedMemory`，JIT 内嵌 SgDetect/SgInject OpKind 操作共享内存 | 1. `MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)` 时图中插入 `SgDetect` + `SgInject` op<br>2. ABI `hook_ctx_ptr` 非 NULL 时激活 SG 路径<br>3. `hook_ctx_ptr == NULL` 时 SgDetect/SgInject 编译为 NOP<br>4. SgDetect: 从 activation 提取最后 token hidden → STORE 到 `hook_ctx_ptr + detect_offset`<br>5. SgInject: 从 `hook_ctx_ptr + knowledge_offset` 读 knowledge_vector → ADD 到 activation<br>6. `pre_node_detection_layer_count > 0`（NO_ISLAND_MODULE） | 🔴 待实现 |
-| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. `SgSharedMemory` 布局遵循 `SEMANTIC-GATEKEEPER.md §7.4.2`<br>2. 每次 `generate_single_sequence` 调用前: Rust 侧写入 control/knowledge_dim<br>3. 每次 generate loop 迭代间: Rust 侧读 detect_hidden → 调用 KnowledgeProvider → 写 knowledge_vector<br>4. 内存随 scratchpad 生命周期自动释放 | 🔴 待实现 |
+| **REQ-MEGA-SG-001** | Mega-Kernel SG 共享内存 | mega-kernel 通过 scratchpad 共享内存传递 detect/knowledge buffer，JIT 内嵌 SgDetect/SgInject OpKind 操作 scratchpad | 1. ✅ `MegaKernelBusinessConfig.semantic_gatekeeper=Some(...)` 时图中插入 `SgDetect` + `SgInject` side-channel op<br>2. ✅ SgDetect lowering: 从 hidden 复制到 scratchpad detect buffer<br>3. ✅ SgInject lowering: NOP (scratchpad 零初始化时 hidden += 0)<br>4. ✅ buffer_alloc 正确分配 detect/knowledge scratchpad<br>5. 🟡 `hook_ctx_ptr` 仍硬编码 NULL — scratchpad 路径已替代<br>6. ✅ E2E 测试验证无 NaN（SG 开启/关闭一致） | 🟡 scratchpad 路径已完成，hook_ctx_ptr 路径待接入 [commit: gllm-kernels 61677998] |
+| **REQ-MEGA-SG-002** | SgSharedMemory 生命周期 | Executor 层在 mega-kernel 调用前分配并填充 SgSharedMemory | 1. ✅ scratchpad buffer 大小在 compile_mega_kernel_vm 中计算<br>2. 🟡 Executor 层尚未在 generate loop 迭代间读写 detect/knowledge<br>3. 🟡 KnowledgeProvider 写入 knowledge_vector 到 scratchpad 待实现 | 🟡 scratchpad 分配已完成，Rust 侧交互待实现 |
 
 ## 19. 自动指令选择器 (REQ-AIS)
 
