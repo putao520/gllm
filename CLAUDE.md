@@ -633,7 +633,7 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
                                     ↑
                                这一步必须是自动的
                                (类似 LLVM SelectionDAG)
-                               由算法驱动，非人手 match arm
+                               由 ComputePattern 驱动，算法保证正确性
 ```
 
 **问题根因**：`gllm-kernels/src/compiler/codegen/vm/plan_lower.rs` 中 `emit_standalone_op` 的 50+ 手写 `OpKind::*` match arm 是 JIT 层 bug 的系统性源头。每个 arm 手动管理寄存器分配、指针算术、内存布局，极易引入堆栈/寄存器/内存偏移错误。
@@ -643,14 +643,18 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
 1. ❌ **禁止手写 TraceOp → VmInstr 映射**：必须使用 `auto_select.rs` 中的 `auto_lower_trace()` 查表法，每个 TraceOp 变体自带 VmInstr 映射语义
 2. ❌ **禁止手写 OpKind → VmInstr match arm**：`emit_standalone_op` 必须基于 `ComputePattern` 自动分发，不允许逐个 OpKind 手写 lowering
 3. ❌ **禁止 opaque 算子跳过 trace**：所有 OpKind 必须在 `ScalarOpRegistry` 注册 scalar 参考实现，SymExec 必须能提取 trace
-4. ✅ **Elementwise/BinaryElementwise**：通过 `try_auto_dispatch_elementwise()` → `auto_lower_trace()` 自动完成（已实现）
-5. ✅ **Norm/GEMM/Attention/MoE 等复杂算子**：由 `ComputePattern` 自动路由到专用 lower 函数，`emit_standalone_op` 中不出现具体 OpKind match arm
-6. ✅ **新增算子只需**：注册 scalar impl → SymExec 提取 trace → 如为 elementwise 则零额外代码；如为复杂算子则写一个 `lower_*` 辅助函数 + 注册 ComputePattern 路由
+4. ❌ **禁止创建 per-OpKind 手写函数**：不允许创建 `emit_meanpool_auto` / `emit_rope_auto` / `lower_layernorm` / `lower_rope_full` / `lower_meanpool` 等按 OpKind 命名的 VmInstr 发射函数。每种 ComputePattern 只有**一个**通用处理器
+5. ✅ **Elementwise/BinaryElementwise**：`try_auto_dispatch_by_pattern()` → `auto_lower_trace()` 自动完成
+6. ✅ **Injective（多输入多输出逐元素）**：`emit_injective_inline` + `auto_lower_trace_multi`，覆盖 RoPE 等所有多输出逐元素变换
+7. ✅ **Reduction（归约+归一化）**：`emit_reduction_inline` + `auto_lower_trace`，覆盖 MeanPool/L2Normalize/Argmax 等所有归约算子
+8. ✅ **NormLike（三阶段归一化）**：`emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi`，覆盖 RmsNorm/LayerNorm/QkNorm/ValueNorm
+9. ✅ **Gemm**：`emit_gemm_inline_with_hook`，硬件分块策略
+10. ✅ **新增算子只需**：注册 scalar impl → SymExec 提取 ComputePattern → 自动路由到对应通用处理器，零额外代码
 
 **实现状态**：
-- Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` — TraceOp → VmInstr 自动查表 (含 Compare/Cast/HReduce)
-- Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Norm/Gemm/Attention/MoE 专用 lower + dispatch_structural (REQ-AIS-005)
-- Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce/ConditionalBranch 全部已实现 (REQ-AIS-003~006)
+- Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` / `auto_lower_trace_raw()` / `auto_lower_trace_multi()` — TraceOp → VmInstr 自动查表
+- Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Reduction/Injective/NormLike/Gemm 通用处理器 + dispatch_structural
+- Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce/ConditionalBranch 全部已实现
 
 **核心验证标准**：整图融合后的 JIT 机器码中，堆栈、寄存器分配、内存布局错误必须为零。通过符号执行 + 自动指令选择从根本上保证正确性，而非逐个修具体 bug。
 

@@ -706,21 +706,25 @@ Phase 3 的 TraceOp → VmInstr → ISA 映射必须是**完全自动的**，类
 
 `emit_standalone_op` 必须按 `ComputePattern`（或等价的 `OpSemantics`）分类分发，不允许逐个 `OpKind` 手写 match arm：
 
-| ComputePattern | OpSemantics | 分发策略 | 自动化级别 |
-|----------------|-------------|---------|-----------|
-| Elementwise { body } | Elementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
-| BinaryElementwise { body } | Elementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
-| NormLike { reduce, finalize, transform } | Reduction | 专用 `lower_norm*` 函数 | 半自动 — trace 驱动 norm 公式 |
-| Gemm | Gemm | 专用 `lower_gemm*` 函数 | 半自动 — 硬件分块策略 |
-| Opaque (结构/控制) | Opaque | 专用 lower 函数或 NOP | 手写 — 控制流指令 |
+| ComputePattern | 分发策略 | 自动化级别 |
+|----------------|---------|-----------|
+| Elementwise / BinaryElementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
+| Injective { body, num_inputs, num_outputs } | `emit_injective_inline` + `auto_lower_trace_multi` | **全自动** — trace 驱动，多输入多输出 |
+| Reduction { identity, combine, normalize } | `emit_reduction_inline` + `auto_lower_trace` | **全自动** — trace 驱动，归约+归一化 |
+| NormLike { reduce, finalize, transform } | `emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi` | **全自动** — trace 驱动，reduce→finalize→transform |
+| Gemm | `emit_gemm_inline_with_hook` | 半自动 — 硬件分块策略 |
+| Opaque (结构/控制) | `dispatch_structural` | 手写 — 控制流指令 |
+
+**关键约束**：每个 ComputePattern 变体对应**一个**通用处理器函数，同类型的所有 OpKind 共享该处理器。禁止为特定 OpKind 创建 `emit_xxx_auto` 或 `lower_xxx` 等独立函数。
 
 #### 5.1.3 自动分发实现要求
 
-1. **函数入口**: `emit_standalone_op` 函数顶部首先尝试 `try_auto_dispatch_elementwise()`
-2. **ComputePattern 路由**: elementwise 失败后，按 ComputePattern 类型路由到专用 lower 函数
-3. **禁止手写 OpKind match**: 不允许 `OpKind::Xxx => { ... }` 形式的逐算子分发
-4. **新增算子**: 注册 scalar impl → SymExec 提取 trace → elementwise 自动完成；复杂算子写一个 `lower_*` 函数 + 注册 ComputePattern 路由
-5. **缺失算子**: 走到 catch-all 时返回 `Err`，禁止静默 NOP（NO_SILENT_FALLBACK）
+1. **函数入口**: `emit_standalone_op` 函数顶部首先尝试 `try_auto_dispatch_by_pattern()`
+2. **ComputePattern 路由**: 按 ComputePattern 类型路由到通用处理器（`emit_normlike_inline` / `emit_reduction_inline` / `emit_injective_inline` / `emit_gemm_inline_with_hook`）
+3. **禁止手写 OpKind match**: 不允许 `OpKind::Xxx => { ... }` 形式的逐算子分发（仅 Opaque 类 `dispatch_structural` 允许按语义特征分组）
+4. **禁止 per-OpKind 手写函数**: 不允许创建 `emit_layernorm_auto` / `emit_meanpool_auto` / `emit_rope_auto` / `lower_layernorm` / `lower_rope_full` / `lower_meanpool` 等按 OpKind 命名的手写 VmInstr 发射函数。所有算术表达式必须通过 `auto_lower_trace` / `auto_lower_trace_multi` 自动生成。现有 `emit_layernorm_auto` 为过渡实现，后续应并入 `emit_normlike_inline`
+5. **新增算子**: 注册 scalar impl → SymExec 提取 trace → ComputePattern 自动分类 → 自动路由到对应通用处理器。无需编写任何额外代码
+6. **缺失算子**: 走到 catch-all 时返回 `Err`，禁止静默 NOP（NO_SILENT_FALLBACK）
 
 #### 5.1.4 TraceOp → VmInstr 自动查表
 
@@ -803,15 +807,22 @@ Phase 3 的 TraceOp → VmInstr → ISA 映射必须是**完全自动的**，类
 ```
 emit_standalone_op(op_id)
   │
-  ├─ 1. try_auto_dispatch_elementwise()
-  │    ComputePattern::Elementwise | BinaryElementwise | Injective
-  │    → auto_lower_trace() 自动完成
-  │    覆盖: Silu, Residual, LogitSoftcap, 所有激活函数
+  ├─ 1. try_auto_dispatch_by_pattern()
+  │    ├─ Elementwise / BinaryElementwise
+  │    │    → auto_lower_trace() 自动完成
+  │    │    覆盖: Silu, Residual, LogitSoftcap, 所有激活函数
+  │    │
+  │    ├─ Injective { body, num_inputs, num_outputs }
+  │    │    → emit_injective_inline + auto_lower_trace_multi
+  │    │    覆盖: RoPE, 所有多输入多输出逐元素变换
+  │    │
+  │    └─ Reduction { identity, combine, normalize }
+  │         → emit_reduction_inline + auto_lower_trace
+  │         覆盖: MeanPool, L2Normalize, Argmax, 所有归约算子
   │
   ├─ 2. dispatch_compute_pattern()
-  │    ComputePattern::NormLike → lower_norm / lower_layernorm / lower_qk_norm
+  │    ComputePattern::NormLike → emit_normlike_inline
   │    ComputePattern::Gemm → emit_gemm_inline_with_hook
-  │    ComputePattern::Reduction → lower_reduction / lower_argmax
   │    ComputePattern::QuantDecode → lower_quant_decode
   │    (路由键是 ComputePattern，不是 OpKind)
   │
@@ -824,9 +835,9 @@ emit_standalone_op(op_id)
 ```
 
 **关键约束**:
-- `dispatch_compute_pattern` 路由键必须是 ComputePattern 变体，不是 OpKind
-- 每个 ComputePattern 变体对应一个专用 lower 函数
-- 新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由
+- 每个 ComputePattern 变体对应一个**通用处理器**（不是 per-OpKind 函数）
+- 禁止创建 `emit_layernorm_auto` / `emit_meanpool_auto` / `emit_rope_auto` / `lower_layernorm` 等 per-OpKind 手写函数
+- 新增 OpKind 只需注册 scalar impl → SymExec 提取 ComputePattern → 自动路由到对应通用处理器
 - `structural_ops` 按 OpKind 语义特征（内存/控制流/元数据）分发，非逐个 OpKind 手写
 
 ### 5.1.6 TraceOp → ISA 指令映射
