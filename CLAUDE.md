@@ -655,6 +655,7 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
 - Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` / `auto_lower_trace_raw()` / `auto_lower_trace_multi()` — TraceOp → VmInstr 自动查表
 - Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Reduction/Injective/NormLike/Gemm 通用处理器 + dispatch_structural
 - Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce/ConditionalBranch 全部已实现
+- Phase 4 (结构算子分类): ✅ Gather/ColumnSlice → dispatch_structural; MoEGate/MoERouter softmax → emit_softmax_inline (auto-driven); Top-K 提取为 lower_moe_topk_dispatch (MoEGate/MoERouter 共享); QuantGemm/MHA/MoEDispatchPacked → structural (算术嵌入 emit_loop 闭包)
 
 **核心验证标准**：整图融合后的 JIT 机器码中，堆栈、寄存器分配、内存布局错误必须为零。通过符号执行 + 自动指令选择从根本上保证正确性，而非逐个修具体 bug。
 
