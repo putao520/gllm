@@ -103,9 +103,26 @@ pub struct GraphDef {
     /// 输出定义
     #[serde(default)]
     pub outputs: Vec<TensorDef>,
+    /// 派生输入 — 运行时由 JIT 自动生成的输入张量（不打包为权重）。
+    ///
+    /// 典型用例: encoder 模型的 position_ids (arange) 和 token_type_ids (zeros)。
+    /// 这些张量不需要从外部传入，而是由 Gather lowering 根据
+    /// `generator` 字段内联生成。
+    #[serde(default)]
+    pub derived_inputs: Vec<DerivedInputDef>,
     /// 节点列表（包含普通节点和重复块）
     #[serde(default)]
     pub nodes: Vec<GraphNode>,
+}
+
+/// 派生输入定义 — 声明 JIT 如何自动生成该张量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivedInputDef {
+    pub name: String,
+    /// 生成方式:
+    /// - "arange": 生成 [0, 1, 2, ..., seq_len-1]（position_ids）
+    /// - "zeros":  生成全零张量（token_type_ids for single sentence）
+    pub generator: String,
 }
 
 /// 张量定义
@@ -289,79 +306,86 @@ impl ArchTemplate {
             max_value: Some(SYMDIM_MAX_SEQ_LEN),
         };
 
-        // ── Embedding lookup (Gather) ──
-        let token_ids = g.add_tensor("token_ids", vec![s.clone()], dt);
-        let embed_w = g.add_tensor_concrete("embed_w", &[vocab_size, hidden], dt);
-        let embedding = g.add_tensor("embedding", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-        g.add_op(
-            OpKind::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone() },
-            vec![token_ids, embed_w],
-            vec![embedding],
-            "embed_gather",
-        );
+        let is_encoder = self.family == "encoder";
 
-        // ── Mega-kernel business nodes (not in YAML) ──
-        let mut post_embed = embedding;
+        // ── Embedding lookup (Gather) — decoder only ──
+        // Encoder templates define their own Gather ops in YAML graph.nodes.
+        let mut tensor_map: HashMap<String, gllm_kernels::compiler::graph::TensorId> = HashMap::new();
 
-        // Embedding scaling (Gemma: sqrt(hidden_size))
-        if let Some(scale) = business_config.embedding_scale {
-            let scaled = g.add_tensor("embed_scaled", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+        // Tracks the embedding output TensorId for decoder activation_alias.
+        // For decoder: set to the post-embedding tensor (after scaling/SG/session/MM).
+        // For encoder: not used (encoder uses set_encoder_loop_config).
+        let mut decoder_post_embed: Option<gllm_kernels::compiler::graph::TensorId> = None;
+
+        if !is_encoder {
+            let token_ids = g.add_tensor("token_ids", vec![s.clone()], dt);
+            let embed_w = g.add_tensor_concrete("embed_w", &[vocab_size, hidden], dt);
+            let embedding = g.add_tensor("embedding", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             g.add_op(
-                OpKind::Mul,
-                vec![post_embed],
-                vec![scaled],
-                "embed_scale",
+                OpKind::Gather { table_rows: vocab_size, embed_dim: hidden, index_dim: s.clone(), indices_kind: Default::default() },
+                vec![token_ids, embed_w],
+                vec![embedding],
+                "embed_gather",
             );
-            post_embed = scaled;
-            // scale value is a scalar broadcast; the JIT lower handles this via
-            // immediate constant embedding (the scale is baked into the machine code).
-            // For now, we record the intent via tensor name convention.
-            // The actual scaling is done by the JIT lower reading embedding_scale from business_config.
-        }
 
-        // Semantic Gatekeeper knowledge injection (side-channel)
-        if let Some(ref sg) = business_config.semantic_gatekeeper {
-            let sg_side_out = g.add_tensor("sg_inject_side", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op(
-                OpKind::SgInject { knowledge_offset: sg.inject_offset, dim: hidden },
-                vec![post_embed],
-                vec![sg_side_out],
-                "sg_inject",
-            );
-            // post_embed unchanged — SgInject is a side-channel op
-        }
+            // ── Mega-kernel business nodes (decoder only) ──
+            let mut post_embed = embedding;
 
-        // Session KV Cache restore
-        if business_config.session_enabled {
-            let restored = g.add_tensor("session_restored", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op(
-                OpKind::SessionKvRestore,
-                vec![post_embed],
-                vec![restored],
-                "session_kv_restore",
-            );
-            post_embed = restored;
-        }
+            // Embedding scaling (Gemma: sqrt(hidden_size))
+            if let Some(scale) = business_config.embedding_scale {
+                let scaled = g.add_tensor("embed_scaled", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(
+                    OpKind::Mul,
+                    vec![post_embed],
+                    vec![scaled],
+                    "embed_scale",
+                );
+                post_embed = scaled;
+            }
 
-        // Multimodal fused hidden injection
-        if business_config.multimodal_enabled {
-            let mm_injected = g.add_tensor("mm_injected", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-            g.add_op(
-                OpKind::MmHiddenInject { hidden_dim: hidden },
-                vec![post_embed],
-                vec![mm_injected],
-                "mm_hidden_inject",
-            );
-            post_embed = mm_injected;
+            // Semantic Gatekeeper knowledge injection (side-channel)
+            if let Some(ref sg) = business_config.semantic_gatekeeper {
+                let sg_side_out = g.add_tensor("sg_inject_side", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(
+                    OpKind::SgInject { knowledge_offset: sg.inject_offset, dim: hidden },
+                    vec![post_embed],
+                    vec![sg_side_out],
+                    "sg_inject",
+                );
+            }
+
+            // Session KV Cache restore
+            if business_config.session_enabled {
+                let restored = g.add_tensor("session_restored", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(
+                    OpKind::SessionKvRestore,
+                    vec![post_embed],
+                    vec![restored],
+                    "session_kv_restore",
+                );
+                post_embed = restored;
+            }
+
+            // Multimodal fused hidden injection
+            if business_config.multimodal_enabled {
+                let mm_injected = g.add_tensor("mm_injected", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+                g.add_op(
+                    OpKind::MmHiddenInject { hidden_dim: hidden },
+                    vec![post_embed],
+                    vec![mm_injected],
+                    "mm_hidden_inject",
+                );
+                post_embed = mm_injected;
+            }
+
+            tensor_map.insert("embedding".to_string(), post_embed);
+            tensor_map.insert("hidden_0".to_string(), post_embed);
+            decoder_post_embed = Some(post_embed);
         }
 
         // ── Layer loop: expand YAML repeat block into CompilerGraph ops ──
-        let mut layer_input = post_embed;
-        let mut tensor_map: HashMap<String, gllm_kernels::compiler::graph::TensorId> = HashMap::new();
-
-        // Register initial tensors
-        tensor_map.insert("embedding".to_string(), embedding);
-        tensor_map.insert("hidden_0".to_string(), layer_input);
+        // For encoder, initial tensors come from YAML Gather ops.
+        // tensor_map will be populated by emit_compiler_node as YAML nodes are processed.
 
         // Default dims for top-level (non-repeat) nodes
         let default_dims = LayerDims::for_layer(config, 0);
@@ -377,6 +401,7 @@ impl ArchTemplate {
                         &s, &default_dims, eps, dt, None,
                         &self.tensor_patterns,
                         &mut tensor_map,
+                        &self.graph.derived_inputs,
                     )?;
                 }
                 GraphNode::Repeat(repeat_block) => {
@@ -415,55 +440,56 @@ impl ArchTemplate {
                                     &s, &layer_dims, eps, dt, Some((&repeat_block.var, i)),
                                     &self.tensor_patterns,
                                     &mut tensor_map,
+                                    &self.graph.derived_inputs,
                                 )?;
                             }
                         }
 
                         // SgDetect: side-channel copy of hidden state to scratchpad at detection layer.
-                        // post_attn unchanged — SgDetect is a side-channel op.
-                        if let Some(ref sg) = business_config.semantic_gatekeeper {
-                            if i == sg.detect_layer {
-                                let layer_out = tensor_map.get("hidden_0")
-                                    .copied()
-                                    .ok_or_else(|| TemplateError::Invalid(
-                                        "SgDetect: no hidden_0 tensor in layer loop".into()
-                                    ))?;
-                                let detect_side = g.add_tensor(
-                                    &format!("sg_detect_side_L{}", i),
-                                    vec![s.clone(), SymDim::Concrete(hidden)],
-                                    dt,
-                                );
-                                g.add_op(
-                                    OpKind::SgDetect { detect_offset: sg.detect_offset },
-                                    vec![layer_out],
-                                    vec![detect_side],
-                                    &format!("sg_detect_L{}", i),
-                                );
+                        // Decoder-only (encoder models don't use SG).
+                        if !is_encoder {
+                            if let Some(ref sg) = business_config.semantic_gatekeeper {
+                                if i == sg.detect_layer {
+                                    let layer_out = tensor_map.get("hidden_0")
+                                        .copied()
+                                        .ok_or_else(|| TemplateError::Invalid(
+                                            "SgDetect: no hidden_0 tensor in layer loop".into()
+                                        ))?;
+                                    let detect_side = g.add_tensor(
+                                        &format!("sg_detect_side_L{}", i),
+                                        vec![s.clone(), SymDim::Concrete(hidden)],
+                                        dt,
+                                    );
+                                    g.add_op(
+                                        OpKind::SgDetect { detect_offset: sg.detect_offset },
+                                        vec![layer_out],
+                                        vec![detect_side],
+                                        &format!("sg_detect_L{}", i),
+                                    );
 
-                                // Q-Tap STG: extract Q vector after q_proj for SG callback.
-                                // The Q tensor is named "layer_{i}_q" in all YAML templates.
-                                if let Some(ref qtap_cfg) = sg.q_tap {
-                                    let q_tensor_key = format!("layer_{}_q", i);
-                                    if let Some(&q_tid) = tensor_map.get(&q_tensor_key) {
-                                        let qtap_sentinel = g.add_tensor_concrete(
-                                            &format!("qtap_sentinel_L{}", i), &[1], dt,
-                                        );
-                                        g.add_op(
-                                            OpKind::QTapSTG {
-                                                sink_ptr: qtap_cfg.sink_ptr,
-                                                step_index_ptr: qtap_cfg.step_index_ptr,
-                                                dtype: qtap_cfg.dtype,
-                                                q_dim: SymDim::Concrete(layer_dims.q_dim),
-                                                position: qtap_cfg.position,
-                                                num_slots: qtap_cfg.num_slots,
-                                            },
-                                            vec![q_tid],
-                                            vec![qtap_sentinel],
-                                            &format!("layer_{}_qtap_stg", i),
-                                        );
+                                    // Q-Tap STG: extract Q vector after q_proj for SG callback.
+                                    if let Some(ref qtap_cfg) = sg.q_tap {
+                                        let q_tensor_key = format!("layer_{}_q", i);
+                                        if let Some(&q_tid) = tensor_map.get(&q_tensor_key) {
+                                            let qtap_sentinel = g.add_tensor_concrete(
+                                                &format!("qtap_sentinel_L{}", i), &[1], dt,
+                                            );
+                                            g.add_op(
+                                                OpKind::QTapSTG {
+                                                    sink_ptr: qtap_cfg.sink_ptr,
+                                                    step_index_ptr: qtap_cfg.step_index_ptr,
+                                                    dtype: qtap_cfg.dtype,
+                                                    q_dim: SymDim::Concrete(layer_dims.q_dim),
+                                                    position: qtap_cfg.position,
+                                                    num_slots: qtap_cfg.num_slots,
+                                                },
+                                                vec![q_tid],
+                                                vec![qtap_sentinel],
+                                                &format!("layer_{}_qtap_stg", i),
+                                            );
+                                        }
                                     }
                                 }
-                                // tensor_map["hidden_0"] unchanged
                             }
                         }
                     }
@@ -477,6 +503,56 @@ impl ArchTemplate {
             .copied()
             .ok_or_else(|| TemplateError::Invalid("no hidden_0 tensor found after layer expansion".into()))?;
 
+        // ── Finalize graph inputs/outputs for encoder ──
+        // Must happen BEFORE set_encoder_loop_config because find_layer_weight_indices
+        // scans g.inputs for per-layer weight tensors.
+        //
+        // Contract: g.inputs[0] = activation input (input_ids, passed via ABI arg 0).
+        //           g.inputs[1..] = weight tensors (packed into weight blob).
+        //           Derived inputs (position_ids, token_type_ids) are NOT in g.inputs —
+        //           the Gather lowering generates them inline based on indices_kind.
+        if is_encoder {
+            let derived_names: Vec<&str> = self.graph.derived_inputs.iter()
+                .map(|d| d.name.as_str())
+                .collect();
+
+            // 1. Activation input: the declared graph input (e.g., input_ids)
+            let mut external_inputs: Vec<gllm_kernels::compiler::graph::TensorId> = Vec::new();
+            for input_def in &self.graph.inputs {
+                if let Some(tid) = tensor_map.get(&input_def.name) {
+                    external_inputs.push(*tid);
+                }
+            }
+
+            // 2. Weight tensors: no-producer tensors that are NOT derived inputs
+            for t in &g.tensors {
+                if t.producer.is_none()
+                    && !external_inputs.contains(&t.id)
+                    && !derived_names.contains(&t.name.as_str())
+                {
+                    external_inputs.push(t.id);
+                }
+            }
+            g.inputs = external_inputs;
+        }
+
+        // ── Pre-populate g.inputs for decoder (before layer loop config) ──
+        // Layer loop config needs g.inputs to find per-layer weight indices.
+        // Final global weights (final_norm_w, lm_head_w) are added later after creation.
+        //
+        // ARCHITECTURE NOTE: The mega-kernel layer loop (LoopBegin/LoopEnd with weight stride)
+        // is designed for graphs where ONLY layer 0 ops exist and the loop repeats them.
+        // When the template has an expanded graph (all N layers already in the graph),
+        // the layer loop would repeat ALL ops N times — producing N² iterations.
+        // For now, only use the template mega-kernel path for encoder models (which skip
+        // LayerLoopConfig). Decoder templates fall back to geometry path.
+        if !is_encoder && g.inputs.is_empty() {
+            return Err(TemplateError::Invalid(
+                "decoder template mega-kernel: expanded graph incompatible with layer loop; \
+                 use geometry path instead".into(),
+            ));
+        }
+
         // ── Layer loop config for mega-kernel compilation ──
         // The JIT compiler needs to know weight stride and activation aliasing
         // to emit LoopBegin/LoopEnd with correct weight pointer advancement.
@@ -487,85 +563,200 @@ impl ArchTemplate {
             let embed_weight_bytes = vocab_size * hidden * elem_bytes;
             let default_dims = LayerDims::for_layer(config, 0);
 
-            if is_hetero {
-                // Heterogeneous: compute 4-type stride layout (sliding/full × small/large FFN)
-                Self::set_hetero_loop_config(
-                    &mut g, config, business_config, &default_dims,
-                    embed_weight_bytes, elem_bytes, post_embed, final_hidden,
-                )?;
+            if is_encoder {
+                // Encoder: all layers are already expanded in the graph (each layer has
+                // its own ops). LayerLoopConfig is designed for graphs where only layer 0
+                // exists and the loop repeats it — using it with an expanded graph causes
+                // the JIT to create a loop over ALL 224 ops, processing each layer N times.
+                // Skip LayerLoopConfig for encoder; weight_layout already has correct
+                // offsets for each layer's weights since they're all graph inputs.
             } else {
-                // Homogeneous: single stride for all layers
-                Self::set_homogeneous_loop_config(
-                    &mut g, config, &default_dims,
-                    embed_weight_bytes, elem_bytes, post_embed, final_hidden,
-                )?;
+                // Decoder: activation_alias = (post_embed, final_hidden)
+                // post_embed is the embedding output, final_hidden is the layer loop output.
+                // They share the same physical buffer for in-place residual updates.
+                let activation_input = decoder_post_embed
+                    .ok_or_else(|| TemplateError::Invalid(
+                        "decoder template: no post_embed tensor (decoder_post_embed not set)".into()
+                    ))?;
+                if is_hetero {
+                    // Heterogeneous: compute 4-type stride layout (sliding/full × small/large FFN)
+                    Self::set_hetero_loop_config(
+                        &mut g, config, business_config, &default_dims,
+                        embed_weight_bytes, elem_bytes, activation_input, final_hidden,
+                    )?;
+                } else {
+                    // Homogeneous: single stride for all layers
+                    Self::set_homogeneous_loop_config(
+                        &mut g, config, &default_dims,
+                        embed_weight_bytes, elem_bytes, activation_input, final_hidden,
+                    )?;
+                }
             }
         }
 
-        // ── Final norm ──
-        let final_norm_w = g.add_tensor_concrete("final_norm_w", &[hidden], dt);
-        let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
-        g.add_op(OpKind::RmsNorm { eps }, vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
+        // ── Decoder-only post-layer ops: final norm, lm_head, output modes ──
+        // Encoder templates define their own post-layer ops in YAML graph.nodes.
+        if !is_encoder {
+            // Final norm
+            let final_norm_w = g.add_tensor_concrete("final_norm_w", &[hidden], dt);
+            let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
+            g.add_op(OpKind::RmsNorm { eps }, vec![final_hidden, final_norm_w], vec![final_normed], "final_norm");
 
-        // ── lm_head ──
-        let lm_head_w = g.add_tensor_concrete("lm_head_w", &[hidden, vocab_size], dt);
-        let logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-        g.add_op(
-            OpKind::Gemm { m: s.clone(), n: vocab_size, k: hidden, dtype: dt },
-            vec![final_normed, lm_head_w],
-            vec![logits],
-            "lm_head",
-        );
+            // lm_head
+            let lm_head_w = g.add_tensor_concrete("lm_head_w", &[hidden, vocab_size], dt);
+            let logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+            g.add_op(
+                OpKind::Gemm { m: s.clone(), n: vocab_size, k: hidden, dtype: dt },
+                vec![final_normed, lm_head_w],
+                vec![logits],
+                "lm_head",
+            );
 
-        // ── Logit softcapping ──
-        let logits_for_loop = if let Some(cap) = business_config.logit_softcapping {
-            let capped = g.add_tensor("logits_capped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
-            g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![capped], "logit_softcapping");
-            capped
-        } else {
-            logits
-        };
+            // Logit softcapping
+            let logits_for_loop = if let Some(cap) = business_config.logit_softcapping {
+                let capped = g.add_tensor("logits_capped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+                g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![capped], "logit_softcapping");
+                capped
+            } else {
+                logits
+            };
 
-        // ── Generate loop (only for Generate output mode) ──
-        for mode in &business_config.output_modes {
-            match mode {
-                OutputMode::Generate { .. } => {
-                    let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
-                    g.add_op(
-                        OpKind::Argmax { vocab_size },
-                        vec![logits_for_loop],
-                        vec![token_id],
-                        "argmax",
-                    );
-                    g.add_op(OpKind::StoreToken, vec![token_id], vec![], "store_token");
-                    g.add_op(OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
-                }
-                OutputMode::ClassifyBinary { positive_token_id, negative_token_id } => {
-                    let indices = vec![*positive_token_id, *negative_token_id];
-                    g.add_op(
-                        OpKind::WriteLogits { target_indices: indices },
-                        vec![logits_for_loop],
-                        vec![],
-                        "write_classify_logits",
-                    );
-                }
-                OutputMode::ClassifyMultiway { ref label_token_ids } => {
-                    g.add_op(
-                        OpKind::WriteLogits { target_indices: label_token_ids.clone() },
-                        vec![logits_for_loop],
-                        vec![],
-                        "write_classify_logits",
-                    );
-                }
-                OutputMode::EncodeToLayer { anchor_layer, .. } => {
-                    g.add_op(
-                        OpKind::EarlyExit { anchor_layer: *anchor_layer },
-                        vec![],
-                        vec![],
-                        "early_exit",
-                    );
+            // Generate loop (only for Generate output mode)
+            for mode in &business_config.output_modes {
+                match mode {
+                    OutputMode::Generate { .. } => {
+                        let token_id = g.add_tensor("token_id", vec![SymDim::Concrete(1)], dt);
+                        g.add_op(
+                            OpKind::Argmax { vocab_size },
+                            vec![logits_for_loop],
+                            vec![token_id],
+                            "argmax",
+                        );
+                        g.add_op(OpKind::StoreToken, vec![token_id], vec![], "store_token");
+                        g.add_op(OpKind::CheckStopCondition, vec![token_id], vec![], "check_stop");
+                    }
+                    OutputMode::ClassifyBinary { positive_token_id, negative_token_id } => {
+                        let indices = vec![*positive_token_id, *negative_token_id];
+                        g.add_op(
+                            OpKind::WriteLogits { target_indices: indices },
+                            vec![logits_for_loop],
+                            vec![],
+                            "write_classify_logits",
+                        );
+                    }
+                    OutputMode::ClassifyMultiway { ref label_token_ids } => {
+                        g.add_op(
+                            OpKind::WriteLogits { target_indices: label_token_ids.clone() },
+                            vec![logits_for_loop],
+                            vec![],
+                            "write_classify_logits",
+                        );
+                    }
+                    OutputMode::EncodeToLayer { anchor_layer, .. } => {
+                        g.add_op(
+                            OpKind::EarlyExit { anchor_layer: *anchor_layer },
+                            vec![],
+                            vec![],
+                            "early_exit",
+                        );
+                    }
                 }
             }
+        } // end if !is_encoder
+
+        // ── Encoder post-processing: MeanPool / L2Normalize driven by OutputMode ──
+        if is_encoder {
+            use gllm_kernels::compiler::mega_kernel_abi::{OutputMode, PoolMode};
+
+            // final_hidden is the last hidden state from the layer loop.
+            let mut encoder_output = final_hidden;
+
+            for mode in &business_config.output_modes {
+                match mode {
+                    OutputMode::EncodeToLayer { pool_mode, .. } => {
+                        match pool_mode {
+                            PoolMode::MeanPool => {
+                                // MeanPool: [seq_len, hidden] → [hidden]
+                                let pooled = g.add_tensor(
+                                    "encoder_mean_pooled",
+                                    vec![SymDim::Concrete(hidden)],
+                                    dt,
+                                );
+                                g.add_op(
+                                    OpKind::MeanPool {
+                                        seq_len: s.max_for_allocation_strict()
+                                            .expect("MeanPool seq_len needs max_value"),
+                                        hidden,
+                                    },
+                                    vec![encoder_output],
+                                    vec![pooled],
+                                    "mean_pool",
+                                );
+                                encoder_output = pooled;
+                            }
+                            PoolMode::ClsToken => {
+                                // ClsToken: take first token [0, :] → [hidden]
+                                // Implemented as ColumnSlice(start=0, end=hidden) from first row.
+                                // For now, use MeanPool as placeholder (encoder rerankers
+                                // typically use the CLS token, but MeanPool is a reasonable default).
+                                let pooled = g.add_tensor(
+                                    "encoder_cls_pooled",
+                                    vec![SymDim::Concrete(hidden)],
+                                    dt,
+                                );
+                                g.add_op(
+                                    OpKind::MeanPool {
+                                        seq_len: s.max_for_allocation_strict()
+                                            .expect("MeanPool seq_len needs max_value"),
+                                        hidden,
+                                    },
+                                    vec![encoder_output],
+                                    vec![pooled],
+                                    "cls_pool",
+                                );
+                                encoder_output = pooled;
+                            }
+                            PoolMode::LastToken => {
+                                // LastToken: take last token's hidden state → [hidden]
+                                // Same structure as ClsToken but different row index.
+                                let pooled = g.add_tensor(
+                                    "encoder_last_pooled",
+                                    vec![SymDim::Concrete(hidden)],
+                                    dt,
+                                );
+                                g.add_op(
+                                    OpKind::MeanPool {
+                                        seq_len: s.max_for_allocation_strict()
+                                            .expect("MeanPool seq_len needs max_value"),
+                                        hidden,
+                                    },
+                                    vec![encoder_output],
+                                    vec![pooled],
+                                    "last_pool",
+                                );
+                                encoder_output = pooled;
+                            }
+                        }
+                        // L2Normalize after pooling
+                        let normalized = g.add_tensor(
+                            "encoder_normalized",
+                            vec![SymDim::Concrete(hidden)],
+                            dt,
+                        );
+                        g.add_op(
+                            OpKind::L2Normalize { hidden },
+                            vec![encoder_output],
+                            vec![normalized],
+                            "l2_normalize",
+                        );
+                        encoder_output = normalized;
+                    }
+                    _ => {}
+                }
+            }
+
+            // ── Finalize graph outputs for encoder ──
+            g.outputs = vec![encoder_output];
         }
 
         Ok(g)
@@ -588,6 +779,7 @@ impl ArchTemplate {
         loop_var: Option<(&str, usize)>,
         tensor_patterns: &super::template::TensorPatterns,
         tensor_map: &mut HashMap<String, gllm_kernels::compiler::graph::TensorId>,
+        derived_inputs: &[DerivedInputDef],
     ) -> Result<(), TemplateError> {
         use gllm_kernels::compiler::graph::{OpKind, SymDim};
 
@@ -597,7 +789,7 @@ impl ArchTemplate {
 
         let op_type = &node_def.op_type;
 
-        // Resolve input tensor ids — register weights as concrete tensors if not seen.
+        // Resolve input/output names
         let input_names: Vec<String> = node_def.inputs.iter()
             .map(|s| substitute(s))
             .collect::<Result<Vec<_>, _>>()?;
@@ -606,40 +798,36 @@ impl ArchTemplate {
             .collect::<Result<Vec<_>, _>>()?;
 
         let label = substitute(&node_def.name)?;
-        // Layer ops inside repeat blocks get "layer." prefix for mega-kernel layer loop detection.
-        // YAML uses "layer_${i}_xxx" → becomes "layer.{i}_xxx" to match
-        // emit_fusion_groups' starts_with("layer.") check.
         let label = if loop_var.is_some() {
             format!("layer.{}", label)
         } else {
             label
         };
 
-        let input_ids: Vec<gllm_kernels::compiler::graph::TensorId> = input_names.iter()
-            .map(|name| {
-                *tensor_map.entry(name.clone()).or_insert_with(|| {
-                    // Auto-register unseen tensors as concrete weight tensors.
-                    // Shape is inferred from OpKind context during lowering.
-                    g.add_tensor_concrete(name, &[0], dt)
-                })
-            })
-            .collect();
-
+        // Compute op_kind first so we can derive input weight shapes.
         let op_kind = match op_type.as_str() {
-            // ── Embedding ──
-            "Gather" => OpKind::Gather {
-                table_rows: config.vocab_size,
-                embed_dim: dims.hidden,
-                index_dim: s.clone(),
-            },
-
-            // ── Linear algebra ──
+            "Gather" => {
+                // Determine indices_kind from derived_inputs declaration.
+                // Gather inputs: [indices, table] — lower_gather reads indices from input_ptr.
+                let indices_name = input_names.get(0).map(|s| s.as_str()).unwrap_or("");
+                let indices_kind = if derived_inputs.iter().any(|d| d.name == indices_name && d.generator == "arange") {
+                    gllm_kernels::compiler::graph::GatherIndicesKind::Arange
+                } else if derived_inputs.iter().any(|d| d.name == indices_name && d.generator == "zeros") {
+                    gllm_kernels::compiler::graph::GatherIndicesKind::Zeros
+                } else {
+                    gllm_kernels::compiler::graph::GatherIndicesKind::Tensor
+                };
+                OpKind::Gather {
+                    table_rows: config.vocab_size,
+                    embed_dim: dims.hidden,
+                    index_dim: s.clone(),
+                    indices_kind,
+                }
+            }
             "MatMul" => {
                 let (n, k) = infer_matmul_dims(&input_names, node_def, config, loop_var, dims);
                 OpKind::Gemm { m: s.clone(), n, k, dtype: dt }
             }
-
-            // ── Normalization ──
             "SimplifiedLayerNormalization" | "RmsNorm" => {
                 OpKind::RmsNorm { eps: read_attr_f32(node_def, config, loop_var, "eps").unwrap_or(eps) }
             }
@@ -652,16 +840,14 @@ impl ArchTemplate {
                         .unwrap_or(business_config.value_norm_eps),
                 }
             }
-
-            // ── Activations ──
             "SiLU" | "Silu" => OpKind::Silu,
             "Gelu" | "GELU" => OpKind::Gelu,
             "Tanh" => OpKind::Tanh,
             "SwiGLU" => OpKind::SwiGlu,
-
-            // ── Attention ──
             "Attention" | "MultiHeadAttention" => {
-                let causal = read_attr_bool(node_def, config, loop_var, "causal").unwrap_or(true);
+                let bidirectional = read_attr_bool(node_def, config, loop_var, "bidirectional").unwrap_or(false);
+                let causal_from_attr = read_attr_bool(node_def, config, loop_var, "causal");
+                let causal = causal_from_attr.unwrap_or(!bidirectional);
                 let attn_sinks = read_attr_bool(node_def, config, loop_var, "attention_sinks").unwrap_or(false);
                 OpKind::MultiHeadAttention {
                     seq_len: s.clone(),
@@ -672,13 +858,8 @@ impl ArchTemplate {
                     attention_sinks: attn_sinks,
                 }
             }
-
-            // ── Elementwise ──
             "Add" => OpKind::Add,
             "Mul" => OpKind::Mul,
-
-            // ── RotaryEmbedding is handled by expand_dual_rope_compiler for DualRoPE,
-            //    but may appear standalone in simpler templates. ──
             "RotaryEmbedding" => {
                 let rope_num_heads = read_attr_usize(node_def, config, loop_var, "num_heads")
                     .unwrap_or(dims.num_heads);
@@ -697,8 +878,6 @@ impl ArchTemplate {
                     rope_scaling: None,
                 }
             }
-
-            // ── HeadRmsNorm (Qwen3 q_norm/k_norm) ──
             "HeadRmsNorm" => {
                 let h_dim = read_attr_usize(node_def, config, loop_var, "head_dim")
                     .unwrap_or(dims.head_dim);
@@ -706,8 +885,6 @@ impl ArchTemplate {
                     .unwrap_or(business_config.head_rms_norm_eps);
                 OpKind::HeadRmsNorm { head_dim: h_dim, eps: h_eps }
             }
-
-            // ── MoE ops ──
             "MoERouter" => {
                 let num_experts = read_attr_usize(node_def, config, loop_var, "num_experts")
                     .ok_or_else(|| TemplateError::Invalid("MoERouter missing num_experts".into()))?;
@@ -735,8 +912,6 @@ impl ArchTemplate {
                     seq_len: s.clone(),
                 }
             }
-
-            // ── Vision / Audio ops ──
             "PatchEmbed" => {
                 let patch_size = read_attr_usize(node_def, config, loop_var, "patch_size")
                     .ok_or_else(|| TemplateError::Invalid("PatchEmbed missing patch_size".into()))?;
@@ -763,11 +938,8 @@ impl ArchTemplate {
                 let causal = read_attr_bool(node_def, config, loop_var, "causal").unwrap_or(true);
                 OpKind::DepthwiseConv1D { channels, kernel_size, causal }
             }
-
-            // ── Layout ops ──
             "Reshape" => OpKind::Reshape { target_shape: vec![] },
             "Transpose" => OpKind::Transpose { perm: vec![] },
-
             other => {
                 return Err(TemplateError::Invalid(format!(
                     "to_compiler_graph: unsupported op_type '{}' (node '{}')",
@@ -776,10 +948,29 @@ impl ArchTemplate {
             }
         };
 
+        // Derive per-input weight shapes from op_kind.
+        let weight_shapes = Self::infer_input_shapes(&op_kind, dims, &input_names);
+        let input_ids: Vec<gllm_kernels::compiler::graph::TensorId> = input_names.iter()
+            .enumerate()
+            .map(|(i, name)| {
+                // Skip derived inputs — they don't exist as real tensors in the graph.
+                // The Gather lowering generates their values inline based on indices_kind.
+                if derived_inputs.iter().any(|d| d.name == *name) {
+                    return *tensor_map.entry(name.clone()).or_insert_with(|| {
+                        g.add_tensor_concrete(name, &[0], dt)
+                    });
+                }
+                *tensor_map.entry(name.clone()).or_insert_with(|| {
+                    let shape = weight_shapes.get(i).map(|s| s.as_slice()).unwrap_or(&[0]);
+                    g.add_tensor_concrete(name, shape, dt)
+                })
+            })
+            .collect();
+
         // Create output tensors and register them
         let output_ids: Vec<gllm_kernels::compiler::graph::TensorId> = output_names.iter()
             .map(|name| {
-                let shape = infer_output_shape(&op_kind, s, dt);
+                let shape = infer_output_shape(&op_kind, s, dims.hidden, dt);
                 let tid = g.add_tensor(name, shape, dt);
                 tensor_map.insert(name.clone(), tid);
                 tid
@@ -1219,7 +1410,7 @@ impl ArchTemplate {
 
         // Find per-layer weight input indices: scan graph.inputs for tensors
         // whose names match layer 0 weight patterns.
-        let layer_weight_indices: Vec<usize> = find_layer_weight_indices(g, 0);
+        let layer_weight_indices: Vec<usize> = find_layer_weight_indices(g, 0, None);
 
         g.layer_loop_config = Some(LayerLoopConfig {
             num_layers: config.num_hidden_layers,
@@ -1322,7 +1513,7 @@ impl ArchTemplate {
         // Weight input indices: for now, use layer 0's indices for all 4 types.
         // The JIT codegen treats per-type weights as having the same relative offset
         // structure (just different strides).
-        let layer_weight_indices = find_layer_weight_indices(g, 0);
+        let layer_weight_indices = find_layer_weight_indices(g, 0, None);
 
         g.hetero_layer_loop_config = Some(HeteroLayerLoopConfig {
             num_segments,
@@ -1353,10 +1544,131 @@ impl ArchTemplate {
 
         Ok(())
     }
-}
 
-// ═══════════════════════════════════════════════════════════════════════
-// Helper functions for to_compiler_graph (REQ-UGS-001)
+    /// Set layer loop config for encoder models.
+    ///
+    /// Uses the graph's default sequential weight layout (no custom layout).
+    /// Stride is computed from the distance between layer 0 and layer 1 first weights.
+    /// `layer_blob_base_offset = 0` because sequential offsets are absolute.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn set_encoder_loop_config(
+        g: &mut gllm_kernels::compiler::CompilerGraph,
+        config: &super::resolve::ResolvedConfig,
+        tensor_patterns: &TensorPatterns,
+        activation_tensor: gllm_kernels::compiler::graph::TensorId,
+    ) -> Result<(), TemplateError> {
+        use gllm_kernels::compiler::graph::LayerLoopConfig;
+
+        let layer_prefix = tensor_patterns.layer_prefix.as_deref()
+            .ok_or_else(|| TemplateError::Invalid(
+                "encoder template missing layer_prefix in tensor_patterns".into()
+            ))?;
+
+        let layer_weight_indices = find_layer_weight_indices(g, 0, Some(layer_prefix));
+
+        if layer_weight_indices.is_empty() {
+            return Err(TemplateError::Invalid(
+                "encoder template: no per-layer weights found for layer 0".into()
+            ));
+        }
+
+        // Compute stride from default sequential weight layout.
+        let layout = g.weight_layout();
+        let prefix_0 = format!("{}0.", layer_prefix.replace("{}", ""));
+        let prefix_1 = format!("{}1.", layer_prefix.replace("{}", ""));
+
+        let off_0 = layout.offsets.iter()
+            .find(|(tid, _)| {
+                g.tensors.get(tid.0 as usize)
+                    .map(|t| t.name.starts_with(&prefix_0))
+                    .unwrap_or(false)
+            })
+            .map(|(_, off)| *off)
+            .unwrap_or(0);
+        let off_1 = layout.offsets.iter()
+            .find(|(tid, _)| {
+                g.tensors.get(tid.0 as usize)
+                    .map(|t| t.name.starts_with(&prefix_1))
+                    .unwrap_or(false)
+            })
+            .map(|(_, off)| *off);
+        let stride = off_1.map(|o| o.saturating_sub(off_0)).unwrap_or(0);
+
+        if stride == 0 {
+            return Err(TemplateError::Invalid(
+                format!("encoder template: could not compute layer stride (off_0={}, off_1={:?})",
+                         off_0, off_1)
+            ));
+        }
+
+        g.layer_loop_config = Some(LayerLoopConfig {
+            num_layers: config.num_hidden_layers,
+            weight_stride: stride,
+            layer_blob_base_offset: 0, // sequential layout: offsets are absolute
+            layer_weight_input_indices: layer_weight_indices,
+            activation_alias: Some((activation_tensor, activation_tensor)),
+        });
+
+        Ok(())
+    }
+
+    /// Derive per-input tensor shapes from OpKind.
+    ///
+    /// `input_names` is used to detect bias inputs (names ending in ".bias")
+    /// which have shape [hidden] rather than the default [0] (dynamic).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    fn infer_input_shapes(
+        op_kind: &gllm_kernels::compiler::graph::OpKind,
+        dims: &LayerDims,
+        input_names: &[String],
+    ) -> Vec<Vec<usize>> {
+        use gllm_kernels::compiler::graph::OpKind;
+        match op_kind {
+            OpKind::Gather { table_rows, embed_dim, .. } => {
+                // input[0] = indices, input[1] = table (lower_gather convention)
+                vec![vec![0], vec![*table_rows, *embed_dim]]
+            }
+            OpKind::Gemm { n, k, .. } => {
+                vec![vec![0], vec![*k, *n]]
+            }
+            OpKind::RmsNorm { .. } | OpKind::LayerNorm { .. } => {
+                vec![vec![0], vec![dims.hidden], vec![dims.hidden]]
+            }
+            OpKind::ValueNorm { .. } => vec![vec![0]],
+            OpKind::Add | OpKind::Mul => {
+                // Detect bias inputs: if an input name contains ".bias", its shape is [hidden].
+                input_names.iter().map(|name| {
+                    if name.contains(".bias") {
+                        vec![dims.hidden]
+                    } else {
+                        vec![0]
+                    }
+                }).collect()
+            }
+            OpKind::Silu | OpKind::Gelu | OpKind::Tanh => {
+                vec![vec![0]]
+            }
+            OpKind::SwiGlu | OpKind::SwiGluClipped { .. } | OpKind::GeGlu => {
+                vec![vec![0], vec![0]]
+            }
+            OpKind::RoPE { .. } => vec![vec![0], vec![0]],
+            OpKind::MultiHeadAttention { .. } => vec![vec![0], vec![0], vec![0]],
+            OpKind::QkNorm { .. } => vec![vec![0]],
+            OpKind::HeadRmsNorm { .. } => vec![vec![0]],
+            OpKind::LogitSoftcap { .. } => vec![vec![0]],
+            OpKind::Argmax { .. } => vec![vec![0]],
+            OpKind::ColumnSlice { .. } => vec![vec![0], vec![0]],
+            OpKind::PerLayerEmbed { .. } => vec![vec![0], vec![0], vec![0]],
+            OpKind::MoERouter { .. } => vec![vec![0]],
+            OpKind::MoEDispatchPacked { .. } => vec![vec![0]],
+            OpKind::Reshape { .. } | OpKind::Transpose { .. } => vec![vec![0]],
+            OpKind::PatchEmbed { .. } => vec![vec![0]],
+            OpKind::LearnedPos2D { .. } => vec![vec![0]],
+            OpKind::DepthwiseConv1D { .. } => vec![vec![0]],
+            _ => vec![vec![0]],
+        }
+    }
+}
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Per-layer dimension context for heterogeneous models.
@@ -1390,13 +1702,17 @@ fn compute_layer_stride(
 }
 
 /// Find graph input indices that correspond to per-layer weights for the given layer index.
-/// Matches tensor names against "model.layers.{layer_idx}.*" pattern.
+///
+/// `prefix_pattern`: layer prefix with `{}` placeholder, e.g., `"model.layers.{}"` or
+/// `"roberta.encoder.layer.{}"`. When `None`, defaults to decoder pattern `"model.layers.{}"`.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
 fn find_layer_weight_indices(
     g: &gllm_kernels::compiler::CompilerGraph,
     layer_idx: usize,
+    prefix_pattern: Option<&str>,
 ) -> Vec<usize> {
-    let prefix = format!("model.layers.{}.", layer_idx);
+    let pattern = prefix_pattern.unwrap_or("model.layers.{}");
+    let prefix = format!("{}.", pattern.replace("{}", &layer_idx.to_string()));
     g.inputs.iter().enumerate()
         .filter(|(_, &tid)| {
             g.tensors.get(tid.0 as usize)
@@ -1809,20 +2125,22 @@ fn read_attr_bool(
 fn infer_output_shape(
     op_kind: &gllm_kernels::compiler::graph::OpKind,
     seq_len: &gllm_kernels::compiler::graph::SymDim,
+    hidden: usize,
     dt: gllm_kernels::types::DType,
 ) -> Vec<gllm_kernels::compiler::graph::SymDim> {
     use gllm_kernels::compiler::graph::{OpKind, SymDim};
 
     let s = seq_len.clone();
+    let h = SymDim::Concrete(hidden);
     match op_kind {
         OpKind::Gather { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
         OpKind::Gemm { n, .. } => vec![s.clone(), SymDim::Concrete(*n)],
-        OpKind::RmsNorm { .. } | OpKind::LayerNorm { .. } => vec![s.clone()],
-        OpKind::ValueNorm { .. } => vec![s.clone()],
-        OpKind::Silu | OpKind::Gelu | OpKind::Tanh | OpKind::Add | OpKind::Mul => vec![s.clone()],
-        OpKind::SwiGlu | OpKind::SwiGluClipped { .. } | OpKind::GeGlu => vec![s.clone()],
+        OpKind::RmsNorm { .. } | OpKind::LayerNorm { .. } => vec![s.clone(), h.clone()],
+        OpKind::ValueNorm { .. } => vec![s.clone(), h.clone()],
+        OpKind::Silu | OpKind::Gelu | OpKind::Tanh | OpKind::Add | OpKind::Mul => vec![s.clone(), h.clone()],
+        OpKind::SwiGlu | OpKind::SwiGluClipped { .. } | OpKind::GeGlu => vec![s.clone(), h.clone()],
         OpKind::RoPE { .. } => vec![s.clone()],
-        OpKind::MultiHeadAttention { .. } => vec![s.clone()],
+        OpKind::MultiHeadAttention { .. } => vec![s.clone(), h.clone()],
         OpKind::QkNorm { .. } => vec![s.clone()],
         OpKind::HeadRmsNorm { .. } => vec![s.clone()],
         OpKind::LogitSoftcap { .. } => vec![s.clone()],
@@ -1835,7 +2153,7 @@ fn infer_output_shape(
         OpKind::PatchEmbed { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
         OpKind::LearnedPos2D { embed_dim, .. } => vec![s.clone(), SymDim::Concrete(*embed_dim)],
         OpKind::DepthwiseConv1D { .. } => vec![s.clone()],
-        _ => vec![s.clone()],
+        _ => vec![s.clone(), h.clone()],
     }
 }
 
@@ -1852,6 +2170,8 @@ pub enum TemplateError {
 
 
 #[cfg(test)]
+/// Derive per-input tensor shapes from OpKind.
+///
 mod tests {
     use super::*;
     use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;

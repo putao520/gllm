@@ -36,6 +36,12 @@ graph:
       dtype: int64
       shape: [batch, seq_len]
 
+  derived_inputs:
+    - name: position_ids
+      generator: arange
+    - name: token_type_ids
+      generator: zeros
+
   outputs:
     - name: hidden_0
       dtype: "${dtype}"
@@ -44,17 +50,17 @@ graph:
   nodes:
     - name: embed_tokens
       op_type: Gather
-      inputs: [roberta.embeddings.word_embeddings.weight, input_ids]
+      inputs: [input_ids, roberta.embeddings.word_embeddings.weight]
       outputs: [embed_tok]
 
     - name: embed_pos
       op_type: Gather
-      inputs: [roberta.embeddings.position_embeddings.weight, position_ids]
+      inputs: [position_ids, roberta.embeddings.position_embeddings.weight]
       outputs: [embed_pos_out]
 
     - name: embed_type
       op_type: Gather
-      inputs: [roberta.embeddings.token_type_embeddings.weight, token_type_ids]
+      inputs: [token_type_ids, roberta.embeddings.token_type_embeddings.weight]
       outputs: [embed_type_out]
 
     - name: embed_add_pos
