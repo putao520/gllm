@@ -644,18 +644,28 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
 2. ❌ **禁止手写 OpKind → VmInstr match arm**：`emit_standalone_op` 必须基于 `ComputePattern` 自动分发，不允许逐个 OpKind 手写 lowering
 3. ❌ **禁止 opaque 算子跳过 trace**：所有 OpKind 必须在 `ScalarOpRegistry` 注册 scalar 参考实现，SymExec 必须能提取 trace
 4. ❌ **禁止创建 per-OpKind 手写函数**：不允许创建 `emit_meanpool_auto` / `emit_rope_auto` / `lower_layernorm` / `lower_rope_full` / `lower_meanpool` 等按 OpKind 命名的 VmInstr 发射函数。每种 ComputePattern 只有**一个**通用处理器
-5. ✅ **Elementwise/BinaryElementwise**：`try_auto_dispatch_by_pattern()` → `auto_lower_trace()` 自动完成
-6. ✅ **Injective（多输入多输出逐元素）**：`emit_injective_inline` + `auto_lower_trace_multi`，覆盖 RoPE 等所有多输出逐元素变换
-7. ✅ **Reduction（归约+归一化）**：`emit_reduction_inline` + `auto_lower_trace`，覆盖 MeanPool/L2Normalize/Argmax 等所有归约算子
-8. ✅ **NormLike（三阶段归一化）**：`emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi`，覆盖 RmsNorm/LayerNorm/QkNorm/ValueNorm
-9. ✅ **Gemm**：`emit_gemm_inline_with_hook`，硬件分块策略
-10. ✅ **新增算子只需**：注册 scalar impl → SymExec 提取 ComputePattern → 自动路由到对应通用处理器，零额外代码
+5. ❌ **禁止以"结构型算子"为由绕过 auto_select**：Gather/Attention/MoE 等结构型算子必须通过扩展 TraceOp 语义纳入自动指令选择，不允许保留独立手写 lowering 函数
+6. ✅ **TraceOp 语义扩展是第一选择**：遇到任何算子无法被现有 TraceOp 表达时，必须先扩展 TraceOp 语义（增加新变体），而非绕过 auto_select 手写 VmInstr。新增 TraceOp 变体只需在 `auto_select.rs` 的 `dispatch_trace_op` 添加一个 match arm — 这是架构设计允许且鼓励的操作，不需要特殊审批
+7. ✅ **Elementwise/BinaryElementwise**：`try_auto_dispatch_by_pattern()` → `auto_lower_trace()` 自动完成
+8. ✅ **Injective（多输入多输出逐元素）**：`emit_injective_inline` + `auto_lower_trace_multi`，覆盖 RoPE 等所有多输出逐元素变换
+9. ✅ **Reduction（归约+归一化）**：`emit_reduction_inline` + `auto_lower_trace`，覆盖 MeanPool/L2Normalize/Argmax 等所有归约算子
+10. ✅ **NormLike（三阶段归一化）**：`emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi`，覆盖 RmsNorm/LayerNorm/QkNorm/ValueNorm
+11. ✅ **Gemm**：`emit_gemm_inline_with_hook`，硬件分块策略
+12. ✅ **Structural（Gather/ColumnSlice/Attention/MoE）**：必须通过 TraceOp 扩展纳入 auto_select，不允许独立手写 lower_* 函数。结构型算子的索引计算、行复制、循环嵌套全部用 TraceOp 语义表达
+13. ✅ **新增算子只需**：注册 scalar impl → SymExec 提取 ComputePattern → 自动路由到对应通用处理器，零额外代码
+
+**TraceOp 语义扩展原则**：
+- 测试发现语义不足 = TraceOp 需要扩展，这是正常的架构演进
+- 任何 VmInstr 都有对应的 TraceOp 语义表达（包括 ScalarLoad/VecLoad/IntMulStride/LoadPtr 等结构型指令）
+- 新增 TraceOp 变体的流程：(1) 在 `trace.rs` 添加枚举变体 (2) 在 `auto_select.rs` 添加 match arm (3) 在 `verify.rs` 确保 def-before-use 覆盖
+- **禁止以"后端约束"为由拒绝扩展 TraceOp**：后端（x86/ARM/GPU）差异由 ISA Lowering 层处理，TraceOp 是硬件无关的中间表示
 
 **实现状态**：
 - Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` / `auto_lower_trace_raw()` / `auto_lower_trace_multi()` — TraceOp → VmInstr 自动查表
-- Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Reduction/Injective/NormLike/Gemm 通用处理器 + dispatch_structural
+- Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Reduction/Injective/NormLike/Gemm 通用处理器
 - Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce/ConditionalBranch 全部已实现
-- Phase 4 (结构算子分类): ✅ Gather/ColumnSlice → dispatch_structural; MoEGate/MoERouter softmax → emit_softmax_inline (auto-driven); Top-K 提取为 lower_moe_topk_dispatch (MoEGate/MoERouter 共享); QuantGemm/MHA/MoEDispatchPacked → structural (算术嵌入 emit_loop 闭包)
+- Phase 4 (结构算子 TraceOp 化): 🟡 进行中 — Gather 需要扩展 TraceOp 语义（LoadIndexed/StoreIndexed），Attention/MoE 待覆盖
+- Phase 5 (手写 lowering 清除): ❌ `lower_gather`/`lower_mha_with_hook`/`lower_moe_*` 仍为手写，需迁移到 auto_select
 
 **核心验证标准**：整图融合后的 JIT 机器码中，堆栈、寄存器分配、内存布局错误必须为零。通过符号执行 + 自动指令选择从根本上保证正确性，而非逐个修具体 bug。
 

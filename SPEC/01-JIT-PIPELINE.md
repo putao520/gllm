@@ -702,20 +702,66 @@ Phase 3 的 TraceOp → VmInstr → ISA 映射必须是**完全自动的**，类
                                  人肉指令选择，bug 源头
 ```
 
-#### 5.1.2 自动分发规则
+#### 5.1.2 自动分发规则 — 三层分类体系
 
-`emit_standalone_op` 必须按 `ComputePattern`（或等价的 `OpSemantics`）分类分发，不允许逐个 `OpKind` 手写 match arm：
+`emit_standalone_op` 必须按 `ComputePattern`（或等价的 `OpSemantics`）分类分发，不允许逐个 `OpKind` 手写 match arm。
 
-| ComputePattern | 分发策略 | 自动化级别 |
-|----------------|---------|-----------|
-| Elementwise / BinaryElementwise | `auto_lower_trace(body)` → VmInstr | **全自动** — 零手写代码 |
-| Injective { body, num_inputs, num_outputs } | `emit_injective_inline` + `auto_lower_trace_multi` | **全自动** — trace 驱动，多输入多输出 |
-| Reduction { identity, combine, normalize } | `emit_reduction_inline` + `auto_lower_trace` | **全自动** — trace 驱动，归约+归一化 |
-| NormLike { reduce, finalize, transform } | `emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi` | **全自动** — trace 驱动，reduce→finalize→transform |
-| Gemm | `emit_gemm_inline_with_hook` | 半自动 — 硬件分块策略 |
-| Opaque (结构/控制) | `dispatch_structural` | 手写 — 控制流指令 |
+**三层分类**:
+
+| 层级 | ComputePattern | 分发策略 | 自动化级别 |
+|------|---------------|---------|-----------|
+| **Tier 1: 全自动** | Elementwise / BinaryElementwise | `auto_lower_trace(body)` → VmInstr | **100% 自动** — 零手写代码 |
+| **Tier 1: 全自动** | Injective { body, num_inputs, num_outputs } | `emit_injective_inline` + `auto_lower_trace_multi` | **100% 自动** — trace 驱动，多输入多输出 |
+| **Tier 1: 全自动** | Reduction { identity, combine, normalize } | `emit_reduction_inline` + `auto_lower_trace` | **100% 自动** — trace 驱动，归约+归一化 |
+| **Tier 1: 全自动** | NormLike { reduce, finalize, transform } | `emit_normlike_inline` + `auto_lower_trace` / `auto_lower_trace_multi` | **100% 自动** — trace 驱动 |
+| **Tier 2: 骨架手写 + 算术自动** | Gemm | `emit_gemm_inline_with_hook` | 分块策略手写，内层 FMA via TraceOp |
+| **Tier 2: 骨架手写 + 算术自动** | TiledAttention | `emit_tiled_attention_inline` | 循环骨架手写，softmax/V-accum via TraceOp |
+| **Tier 2: 骨架手写 + 算术自动** | MoEDispatch | `emit_moe_packed_inline` | 5-phase 骨架手写，router/softmax/topk/SwiGLU via TraceOp |
+| **Tier 2: 骨架手写 + 算术自动** | QuantGemm | `emit_quant_gemm_inline` | 分块策略手写，dequant/FMA via TraceOp |
+| **Tier 2: 骨架手写 + 算术自动** | Gather / ColumnSlice | `emit_*_inline` | 索引偏移手写，数据搬运 via TraceOp |
+| **Tier 3: 纯控制流** | Structural (StoreToken/WriteLogits/Guardrail/...) | `dispatch_structural` | **100% 手写**（无算术） |
+
+##### 5.1.2.1 "控制流骨架" 与 "算术计算体" 精确定义
+
+**控制流骨架（允许手写）**:
+- `emit_loop(BoundExpr, step, |prog, ctr, off|)` — 循环结构
+- `VmInstr::ConditionalSkip` — 条件跳过（如 causal mask）
+- `VmInstr::IndirectJump` — 间接跳转（如 hook 分发）
+- `VmInstr::ScopeBegin / ScopeEnd` — 作用域管理
+- `alloc_vreg(...)` — 虚拟寄存器分配
+- `VmInstr::VecLoad / VecStore` — 纯数据加载/存储（无计算）
+- `VmInstr::Broadcast { src: ScalarExpr::Param(...) }` — 参数广播
+
+**算术计算体（禁止手写，必须通过 `auto_lower_trace_raw`）**:
+- 所有 `VecBinOp { Add/Sub/Mul/Div/Max/Min }` — 算术运算
+- 所有 `VecUnaryOp { Neg/Abs/Sqrt/Rsqrt/Recip }` — 一元运算
+- 所有 `Transcendental { Exp/Log/Tanh/Sigmoid }` — 超越函数
+- 所有 `Fma { acc, a, b }` — 融合乘加
+- 所有 `VecCmp { pred }` — 比较
+- 所有 `ConditionalSelect` — 条件选择
+- 所有 `HReduce` — 水平归约
+- 所有 `BroadcastScalar` + 后续运算 — 标量广播+计算
+- 所有 `Mxfp4VecDequant` — 量化解量化
+
+**核心原则**: 控制流骨架 = "决定在哪里计算"，算术计算体 = "计算什么"。后者必须是算法生成的。
 
 **关键约束**：每个 ComputePattern 变体对应**一个**通用处理器函数，同类型的所有 OpKind 共享该处理器。禁止为特定 OpKind 创建 `emit_xxx_auto` 或 `lower_xxx` 等独立函数。
+
+##### 5.1.2.2 ARCH-AUTO-INSTR-FULL 需求
+
+```
+REQ-AIS-FULL-001: 所有 Tier 2 算子的算术计算体必须通过 auto_lower_trace_raw 生成，
+                  禁止在循环骨架内直接 emit(VmInstr::VecBinOp/VecUnaryOp/Transcendental/Fma/VecCmp/...)。
+                  验证方式: grep emit_*_inline 函数中的 prog.emit(VmInstr::VecBinOp) 等，
+                  结果必须为 0 或仅存在于 auto_select.rs 内部。
+
+REQ-AIS-FULL-002: emit_loop 支持 Result 返回值（emit_loop_try），
+                  使 auto_lower_trace_raw 可以在循环体内安全调用并传播错误。
+
+REQ-AIS-FULL-003: TraceOp 枚举必须包含 Sigmoid 变体，
+                  SwiGLU (x * sigmoid(gate)) 的 sigmoid 通过 auto_lower_trace_raw 生成，
+                  禁止直接 emit(VmInstr::Transcendental { Sigmoid })。
+```
 
 #### 5.1.3 自动分发实现要求
 
