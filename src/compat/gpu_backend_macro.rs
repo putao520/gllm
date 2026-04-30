@@ -287,6 +287,56 @@ macro_rules! impl_gpu_backend {
                     Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
                 }
             }
+
+            fn upload_weights_with_placement(
+                &self,
+                data: Vec<f32>,
+                placement: backend_trait::WeightPlacement,
+            ) -> Result<(Self::Tensor, backend_trait::WeightPlacement), BE> {
+                match placement {
+                    backend_trait::WeightPlacement::DeviceLocal => {
+                        #[cfg( $($cfg_pred)+ )]
+                        {
+                            use gllm_kernels::gpu::GpuDevice;
+                            let bytes: &[u8] = unsafe {
+                                std::slice::from_raw_parts(
+                                    data.as_ptr() as *const u8,
+                                    data.len() * std::mem::size_of::<f32>(),
+                                )
+                            };
+                            let mut buf = self.device.alloc(bytes.len()).map_err(|e| {
+                                BE::$upload_err_variant(format!("GPU alloc failed: {e}"))
+                            })?;
+                            let stream = self.device.default_stream();
+                            self.device.htod(bytes, &mut buf, stream).map_err(|e| {
+                                BE::$upload_err_variant(format!("GPU htod failed: {e}"))
+                            })?;
+                            // Keep host copy as Tensor (needed for weight_ptrs in mega-kernel packing)
+                            Ok((data, backend_trait::WeightPlacement::DeviceLocal))
+                        }
+                        #[cfg(not( $($cfg_pred)+ ))]
+                        {
+                            let _ = data;
+                            Err(BE::Unimplemented(concat!($feature_label, " feature not enabled")))
+                        }
+                    }
+                    backend_trait::WeightPlacement::HostLocal => {
+                        let tensor = self.upload_weights_f32_owned(data)?;
+                        Ok((tensor, backend_trait::WeightPlacement::HostLocal))
+                    }
+                }
+            }
+
+            fn device_memory_capacity(&self) -> usize {
+                #[cfg( $($cfg_pred)+ )]
+                {
+                    self.device.total_memory()
+                }
+                #[cfg(not( $($cfg_pred)+ ))]
+                {
+                    0
+                }
+            }
         }
     };
 }

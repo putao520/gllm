@@ -53,6 +53,17 @@ pub mod backend_trait {
     pub use crate::scheduler::types::{PageId, PageState, StorageKey};
     pub use gllm_kernels::quant::QuantType;
 
+    /// Weight data placement — determines where uploaded tensor data physically resides.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WeightPlacement {
+        /// Device-local memory (GPU VRAM / NPU SRAM).
+        /// Accessible by device compute units at highest bandwidth.
+        DeviceLocal,
+        /// Host memory (CPU RAM). Always accessible from CPU;
+        /// GPU access requires PCIe transfer (HtoD/DtoH).
+        HostLocal,
+    }
+
     /// Abstract compute backend.
     pub trait Backend<E: Element>: Send + Sync + 'static + std::fmt::Debug {
         type Tensor: std::fmt::Debug + Clone + Send + Sync + 'static + AsRef<[E]>;
@@ -229,6 +240,37 @@ pub mod backend_trait {
             _quant_type: QuantType,
         ) -> Result<(), BackendError> {
             Err(BackendError::Unimplemented("dequantize"))
+        }
+
+        /// Placement-aware weight upload.
+        ///
+        /// `data` is an f32 weight vector ready for inference.
+        /// `placement` determines where the tensor data should reside:
+        /// - `DeviceLocal`: upload to device memory (GPU VRAM / NPU SRAM)
+        /// - `HostLocal`: keep in host memory (CPU RAM)
+        ///
+        /// Returns `(Tensor, actual_placement)` where `actual_placement` may differ
+        /// from the requested placement (e.g., CPU backend ignores `DeviceLocal`).
+        fn upload_weights_with_placement(
+            &self,
+            data: Vec<f32>,
+            placement: WeightPlacement,
+        ) -> Result<(Self::Tensor, WeightPlacement), BackendError> {
+            let _ = placement;
+            let tensor = self.upload_weights_f32_owned(data)?;
+            Ok((tensor, WeightPlacement::HostLocal))
+        }
+
+        /// Total device memory capacity in bytes (GPU VRAM / NPU SRAM).
+        /// Returns 0 for CPU-only backends.
+        fn device_memory_capacity(&self) -> usize {
+            0
+        }
+
+        /// Currently used device memory in bytes.
+        /// Returns 0 for CPU-only backends.
+        fn device_memory_used(&self) -> usize {
+            0
         }
     }
 

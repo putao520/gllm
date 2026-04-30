@@ -72,6 +72,64 @@ pub fn gguf_layer_prefix(layer: usize) -> String {
     format!("blk.{layer}")
 }
 
+/// Given a canonical encoder weight name, generate all possible aliases
+/// across all known encoder prefixes.
+///
+/// Handles two patterns:
+/// 1. Embedding-level: `{prefix}.embeddings.{suffix}`
+/// 2. Layer-level: `{prefix}.encoder.layer.{N}.{suffix}`
+///
+/// Returns all variants including the original name and GGUF equivalents.
+pub fn all_encoder_weight_aliases(canonical: &str) -> Vec<String> {
+    let mut out = vec![canonical.to_string()];
+
+    // Pattern 1: embedding-level — `{prefix}.embeddings.{suffix}`
+    for &prefix in ENCODER_PREFIXES {
+        let pfx = if prefix.is_empty() {
+            "embeddings.".to_string()
+        } else {
+            format!("{prefix}.embeddings.")
+        };
+        if let Some(suffix) = canonical.strip_prefix(&pfx) {
+            for &p in ENCODER_PREFIXES {
+                if p.is_empty() {
+                    out.push(format!("embeddings.{suffix}"));
+                } else {
+                    out.push(format!("{p}.embeddings.{suffix}"));
+                }
+            }
+            return out;
+        }
+    }
+
+    // Pattern 2: layer-level — `{prefix}.encoder.layer.{N}.{suffix}`
+    for &prefix in ENCODER_PREFIXES {
+        let pfx = if prefix.is_empty() {
+            "encoder.layer.".to_string()
+        } else {
+            format!("{prefix}.encoder.layer.")
+        };
+        if let Some(rest) = canonical.strip_prefix(&pfx) {
+            let Some(dot_pos) = rest.find('.') else { break };
+            let layer_str = &rest[..dot_pos];
+            let suffix = &rest[dot_pos + 1..];
+            let Ok(layer) = layer_str.parse::<usize>() else { break };
+
+            for &p in ENCODER_PREFIXES {
+                if p.is_empty() {
+                    out.push(format!("encoder.layer.{layer}.{suffix}"));
+                } else {
+                    out.push(format!("{p}.encoder.layer.{layer}.{suffix}"));
+                }
+            }
+            out.push(format!("blk.{layer}.{suffix}"));
+            return out;
+        }
+    }
+
+    out
+}
+
 /// Check if weights contain any known embedding weight (for transpose detection).
 pub fn has_any_embedding_weight(checker: impl Fn(&str) -> bool) -> bool {
     embedding_aliases("word_embeddings.weight", Some("token_embd.weight"))

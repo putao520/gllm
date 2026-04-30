@@ -576,6 +576,15 @@ impl<E: Element> Backend<E> for CpuBackend<E> {
         Ok(tensor)
     }
 
+    fn upload_weights_with_placement(
+        &self,
+        data: Vec<f32>,
+        _placement: backend_trait::WeightPlacement,
+    ) -> Result<(Self::Tensor, backend_trait::WeightPlacement), BE> {
+        let tensor = self.upload_weights_f32_owned(data)?;
+        Ok((tensor, backend_trait::WeightPlacement::HostLocal))
+    }
+
     fn quantized_matmul(
         &self,
         weight_blocks: &[u8],

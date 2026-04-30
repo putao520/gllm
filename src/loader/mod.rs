@@ -26,6 +26,7 @@ pub mod onnx;
 pub mod parallel;
 pub mod pytorch;
 pub mod safetensors;
+pub mod weight_tier;
 
 pub use downloader::{ModelScopeDownloader, ProgressBar};
 pub use gguf::GgufReader as GgufLoader;
@@ -396,6 +397,63 @@ pub trait TensorProvider {
     }
 }
 
+/// ARCH-TENSOR-FILTER: check if a tensor should be skipped during upload.
+fn should_skip_tensor(name: &str) -> bool {
+    name.contains("vision_tower")
+        || name.contains("audio_tower")
+        || name.contains("embed_vision")
+        || name.contains("embed_audio")
+        || name.contains("embed_tokens_per_layer")
+        || name.contains("per_layer_embedding")
+        || name.contains("per_layer_projection")
+        || name.contains("post_mlp_projection")
+}
+
+/// Tensor loading priority for back-to-front ordering.
+///
+/// Higher value = loaded first = priority access to fastest tier (DeviceLocal).
+/// Global weights (embedding, lm_head) get highest priority.
+/// Layer weights: last layer (N-1) first, layer 0 last.
+fn tensor_load_priority(name: &str) -> u32 {
+    // Global weights: highest priority
+    if name.contains("embed_tokens") || name.contains("token_embd")
+        || name.contains("word_embeddings")
+    {
+        return 1000;
+    }
+    if name.contains("lm_head") || name.contains("output.weight") {
+        return 999;
+    }
+    if name.contains("model.norm") || name.contains("norm.weight") {
+        return 998;
+    }
+
+    // Layer weights: back-to-front (last layer gets higher priority)
+    if let Some(layer_idx) = extract_layer_index(name) {
+        return 900 - (layer_idx as u32);
+    }
+
+    500
+}
+
+/// Extract layer index from tensor name patterns.
+fn extract_layer_index(name: &str) -> Option<usize> {
+    let parts: Vec<&str> = name.split('.').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if let Ok(idx) = part.parse::<usize>() {
+            if i > 0
+                && matches!(
+                    parts[i - 1],
+                    "layers" | "layer" | "blk" | "h" | "blocks" | "block"
+                )
+            {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct Loader {
     manifest: ModelManifest,
@@ -409,6 +467,23 @@ pub struct Loader {
     safetensors: Option<safetensors::SafeTensorsLoader>,
     gguf: Option<gguf::GgufReader>,
     onnx: Option<onnx::OnnxLoader>,
+}
+
+/// Per-tensor processing result for concurrent upload pipeline.
+enum TensorProcessResult<B: Backend<E>, E: Element> {
+    Native {
+        name: String,
+        meta: TensorMeta,
+        tensor: B::Tensor,
+        placement: crate::compat::backend_trait::WeightPlacement,
+        sp_meta: Option<Vec<Vec<u16>>>,
+    },
+    Quantized {
+        name: String,
+        meta: TensorMeta,
+        data: QuantizedTensor,
+    },
+    Skipped,
 }
 
 impl Loader {
@@ -868,87 +943,142 @@ impl Loader {
         }
     }
 
-    fn upload_provider<P: TensorProvider, B: Backend<E>, E: Element>(
+    fn upload_provider<P: TensorProvider + Sync, B: Backend<E>, E: Element>(
         &self,
         provider: &P,
         backend: &B,
         format: WeightFormat,
     ) -> Result<WeightsHandle<B, E>> {
+        use crate::compat::backend_trait::WeightPlacement;
+
+        // Pass 1: collect + filter + sort (back-to-front priority)
+        let mut tensor_metas: Vec<TensorMeta> = provider
+            .iter_tensors()
+            .filter(|m| !should_skip_tensor(&m.name))
+            .collect();
+        tensor_metas.sort_by(|a, b| {
+            tensor_load_priority(&b.name).cmp(&tensor_load_priority(&a.name))
+        });
+
+        // Pass 2: concurrent processing (CPU-side parallelism)
+        let tier_manager = weight_tier::WeightTierManager::from_backend(backend);
+
+        let results: Vec<TensorProcessResult<B, E>> = tensor_metas
+            .par_iter()
+            .map(|meta| {
+                Self::process_single_tensor(provider, backend, meta, format, &tier_manager)
+                    .unwrap_or_else(|e| {
+                        log::error!("failed to process tensor '{}': {}", meta.name, e);
+                        TensorProcessResult::Skipped
+                    })
+            })
+            .collect();
+
+        // Pass 3: sequential fold into HashMaps
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
         let mut meta_map = HashMap::new();
         let mut quantized = HashMap::new();
         let mut sparse_24 = HashMap::new();
+        let mut placements = HashMap::new();
 
-        for meta in provider.iter_tensors() {
-            // ARCH-TENSOR-FILTER: 跳过当前推理管线不使用的 tensor，节省内存。
-            // (1) 多模态组件: vision_tower / audio_tower / embed_vision / embed_audio
-            // (2) PLE 组件: embed_tokens_per_layer / per_layer_embedding — YAML 模板中
-            //     PLE 节点被禁用 (JIT 未实现), 加载这个 9.4GB F32 tensor 纯属浪费。
-            //     同时跳过 per_layer_projection 和 post_mlp_projection (PLE 辅助权重)。
-            if meta.name.contains("vision_tower")
-                || meta.name.contains("audio_tower")
-                || meta.name.contains("embed_vision")
-                || meta.name.contains("embed_audio")
-                || meta.name.contains("embed_tokens_per_layer")
-                || meta.name.contains("per_layer_embedding")
-                || meta.name.contains("per_layer_projection")
-                || meta.name.contains("post_mlp_projection")
-            {
-                log::debug!("upload_provider: skipping unused tensor '{}'", meta.name);
-                continue;
-            }
-
-            // Check if this tensor has a quantized GGML dtype
-            if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {
-                if let Some(qt) = adapter::ggml_dtype_to_quant_type(ggml_dt) {
-                    // Quantized tensor — store raw bytes with QuantType metadata
-                    let data = provider.load_tensor_data(&meta.name)?;
-                    quantized.insert(
-                        meta.name.clone(),
-                        QuantizedTensor {
-                            data: data.into_owned(),
-                            quant_type: qt,
-                            shape: meta.shape.clone(),
-                            ggml_dtype: ggml_dt,
-                        },
-                    );
-                    shapes.insert(meta.name.clone(), meta.shape.clone());
-                    meta_map.insert(meta.name.clone(), meta);
-                    continue;
-                }
-            }
-
-            // Native float tensor — upload with dtype conversion if needed
-            match meta.dtype {
-                Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
-                    let data = provider.load_tensor_data(&meta.name)?;
-                    // ARCH-WEIGHT-CANONICAL-LAYOUT: loader-provided per-tensor
-                    // hint overrides format default. For ONNX this reads the
-                    // Gemm transB attribute; for SafeTensors/GGUF None falls
-                    // back to format default (SafeTensors/PyTorch always need
-                    // transpose on Linear weights).
-                    let explicit_hint = provider.weight_layout_hint(&meta.name);
-                    let (cloned_meta, tensor, sp_meta_opt) =
-                        upload_native_tensor_with_convert::<B, E>(backend, &meta, data.as_ref(), format, explicit_hint)?;
-
-                    tensors.insert(meta.name.clone(), tensor);
-                    shapes.insert(cloned_meta.name.clone(), cloned_meta.shape.clone());
-                    meta_map.insert(cloned_meta.name.clone(), cloned_meta);
-                    
-                    if let Some(sp_meta) = sp_meta_opt {
-                        sparse_24.insert(meta.name.clone(), sp_meta);
+        for result in results {
+            match result {
+                TensorProcessResult::Native { name, meta, tensor, placement, sp_meta } => {
+                    tensors.insert(name.clone(), tensor);
+                    shapes.insert(name.clone(), meta.shape.clone());
+                    meta_map.insert(name.clone(), meta);
+                    placements.insert(name.clone(), placement);
+                    if let Some(sp) = sp_meta {
+                        sparse_24.insert(name, sp);
                     }
                 }
-                _ => {
-                    // Skip unsupported types (e.g. integer indices, boolean masks)
+                TensorProcessResult::Quantized { name, meta, data } => {
+                    quantized.insert(name.clone(), data);
+                    shapes.insert(name.clone(), meta.shape.clone());
+                    meta_map.insert(name, meta);
                 }
+                TensorProcessResult::Skipped => {}
             }
         }
 
-        Ok(WeightsHandle::new_with_quantized_and_sparse(
-            tensors, shapes, meta_map, quantized, sparse_24,
+        // Log tier distribution
+        let (dev_used, dev_cap) = tier_manager.usage(weight_tier::WeightTier::DeviceLocal);
+        let (host_used, host_cap) = tier_manager.usage(weight_tier::WeightTier::HostLocal);
+        let device_count = placements.values().filter(|p| **p == WeightPlacement::DeviceLocal).count();
+        let host_count = placements.values().filter(|p| **p == WeightPlacement::HostLocal).count();
+        let mmap_count = tier_manager.tensor_count() - device_count - host_count;
+        log::info!(
+            "upload_provider: {} tensors loaded, device={}/{}B, host={}/{}B",
+            placements.len(), dev_used, dev_cap, host_used, host_cap,
+        );
+        if mmap_count > 0 {
+            log::info!("upload_provider: {} tensors degraded to mmap", mmap_count);
+        }
+
+        Ok(WeightsHandle::new_with_placements(
+            tensors, shapes, meta_map, quantized, sparse_24, placements,
         ))
+    }
+
+    /// Process a single tensor in the concurrent upload pipeline.
+    fn process_single_tensor<P, B, E>(
+        provider: &P,
+        backend: &B,
+        meta: &TensorMeta,
+        format: WeightFormat,
+        tier_manager: &weight_tier::WeightTierManager,
+    ) -> Result<TensorProcessResult<B, E>>
+    where
+        P: TensorProvider + Sync,
+        B: Backend<E>,
+        E: Element,
+    {
+        use crate::compat::backend_trait::WeightPlacement;
+
+        // Quantized tensor — store raw bytes, no tier decision needed
+        if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {
+            if let Some(qt) = adapter::ggml_dtype_to_quant_type(ggml_dt) {
+                let data = provider.load_tensor_data(&meta.name)?;
+                return Ok(TensorProcessResult::Quantized {
+                    name: meta.name.clone(),
+                    meta: meta.clone(),
+                    data: QuantizedTensor {
+                        data: data.into_owned(),
+                        quant_type: qt,
+                        shape: meta.shape.clone(),
+                        ggml_dtype: ggml_dt,
+                    },
+                });
+            }
+        }
+
+        // Float tensor — dtype convert + transpose + heuristics + tier-aware upload
+        match meta.dtype {
+            Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
+                let data = provider.load_tensor_data(&meta.name)?;
+                let explicit_hint = provider.weight_layout_hint(&meta.name);
+                let (cloned_meta, converted_f32, sp_meta_opt) =
+                    convert_tensor_to_f32(meta, data.as_ref(), format, explicit_hint)?;
+
+                // Tier decision: DeviceLocal → HostLocal → DiskMmap
+                let tensor_size = converted_f32.len() * std::mem::size_of::<f32>();
+                let decision = tier_manager.decide(&cloned_meta.name, tensor_size);
+
+                let (tensor, placement) = backend
+                    .upload_weights_with_placement(converted_f32, decision.placement)
+                    .map_err(|e| LoaderError::Backend(e.to_string()))?;
+
+                Ok(TensorProcessResult::Native {
+                    name: cloned_meta.name.clone(),
+                    meta: cloned_meta,
+                    tensor,
+                    placement,
+                    sp_meta: sp_meta_opt,
+                })
+            }
+            _ => Ok(TensorProcessResult::Skipped),
+        }
     }
 
     pub fn from_local_files_with_manifest(
@@ -991,22 +1121,17 @@ impl<'a> TensorSlice<'a> {
     }
 }
 
-// upload_native_tensor removed — superseded by upload_native_tensor_with_convert which
-// handles dtype conversion (ARCH-DTYPE-FULLCHAIN).
+// upload_native_tensor removed — superseded by convert_tensor_to_f32 (pure conversion)
+// + tier-aware upload in process_single_tensor.
 
-
-fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
-    backend: &B,
+/// Convert raw tensor bytes to f32, applying P4/P5 heuristics and layout normalization.
+/// Returns the modified meta, the f32 data, and optional sparsity metadata.
+fn convert_tensor_to_f32(
     meta: &TensorMeta,
     data: &[u8],
     format: WeightFormat,
     explicit_transpose_hint: Option<bool>,
-) -> Result<(TensorMeta, B::Tensor, Option<Vec<Vec<u16>>>)> {
-    let is_f32_backend = std::any::TypeId::of::<E>() == std::any::TypeId::of::<f32>();
-
-    // P4/P5 heuristics (sparsity, deduplication) operate on f32.
-    // We must extract a mutable f32 buffer regardless of whether conversion is needed.
-    //
+) -> Result<(TensorMeta, Vec<f32>, Option<Vec<Vec<u16>>>)> {
     // ARCH-LOADER-PARALLEL-CONVERT: Rayon-parallel dtype→f32 conversion.
     // For large models (e.g. Gemma 4 E2B 9.6 GB BF16), a single-threaded
     // `chunks_exact().map().collect()` takes 60-120s on 4.8B elements. The
@@ -1028,21 +1153,12 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
 
     let mut cloned_meta = meta.clone();
 
-    // Apply P4/P5 Tier II Structural Sparsity logic on the CPU prior to GPU upload
     apply_ffn_sparsity_heuristic(&cloned_meta, &mut converted_f32);
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
     deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
     // ARCH-WEIGHT-CANONICAL-LAYOUT: 统一把 HF `[out, in]` Linear 权重物理转置
     // 到 canonical `[K=in, N=out]` 布局, 内部 op 只需处理 canonical layout。
-    //
-    // 决定是否转置的优先级:
-    //   1. explicit_transpose_hint (loader 按 op attribute 给出): ONNX 的 Gemm
-    //      transB=1 → Some(true), MatMul/Gemm(transB=0) → Some(false)。
-    //   2. format 默认: SafeTensors / PyTorch → true (HF layout), 其他 → false。
-    //
-    // ONNX 可能混用 Gemm transB=1 (HF 原样) 和 MatMul (canonical), 所以按
-    // per-tensor hint 而非 format-level 判断。
     let should_transpose = match explicit_transpose_hint {
         Some(h) => h,
         None => matches!(format, WeightFormat::SafeTensors | WeightFormat::PyTorch),
@@ -1051,19 +1167,7 @@ fn upload_native_tensor_with_convert<B: Backend<E>, E: Element>(
         normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
     }
 
-    if is_f32_backend {
-        // ARCH-ZERO-COPY-F32: 直接 move converted_f32 给 backend，避免 to_vec() 再拷贝一次。
-        // CPU backend 覆写了 upload_weights_f32_owned，直接接收 Vec<f32> 转为 Vec<E>。
-        let tensor = backend
-            .upload_weights_f32_owned(converted_f32)
-            .map_err(|e| LoaderError::Backend(e.to_string()))?;
-        return Ok((cloned_meta, tensor, sp_meta_opt));
-    }
-
-    Err(LoaderError::Backend(format!(
-        "backend dtype {} not fully supported for zero-copy upload after heuristics",
-        std::any::type_name::<E>()
-    )))
+    Ok((cloned_meta, converted_f32, sp_meta_opt))
 }
 
 /// HF SafeTensors/PyTorch 的 Linear 权重 layout 归一化。
@@ -1561,6 +1665,7 @@ pub struct WeightsHandle<B: Backend<E>, E: Element = f32> {
     pub thinking_head: Option<ThinkingHead>,
     quantized: HashMap<String, QuantizedTensor>,
     pub sparse_24_meta: HashMap<String, Vec<Vec<u16>>>,
+    placements: HashMap<String, crate::compat::backend_trait::WeightPlacement>,
 }
 
 impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
@@ -1576,6 +1681,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             thinking_head: None,
             quantized: HashMap::new(),
             sparse_24_meta: HashMap::new(),
+            placements: HashMap::new(),
         }
     }
 
@@ -1593,6 +1699,26 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             thinking_head: None,
             quantized,
             sparse_24_meta,
+            placements: HashMap::new(),
+        }
+    }
+
+    pub fn new_with_placements(
+        tensors: HashMap<String, B::Tensor>,
+        shapes: HashMap<String, Vec<usize>>,
+        meta: HashMap<String, TensorMeta>,
+        quantized: HashMap<String, QuantizedTensor>,
+        sparse_24_meta: HashMap<String, Vec<Vec<u16>>>,
+        placements: HashMap<String, crate::compat::backend_trait::WeightPlacement>,
+    ) -> Self {
+        Self {
+            tensors,
+            shapes,
+            meta,
+            thinking_head: None,
+            quantized,
+            sparse_24_meta,
+            placements,
         }
     }
 
@@ -1615,6 +1741,11 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
     /// Return an iterator over all tensor names.
     pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
         self.tensors.keys()
+    }
+
+    /// Query the data placement of a tensor (DeviceLocal or HostLocal).
+    pub fn placement_of(&self, name: &str) -> Option<crate::compat::backend_trait::WeightPlacement> {
+        self.placements.get(name).copied()
     }
 
     /// ARCH-WEIGHT-BLOB-REMAPPING: 精确释放已编译到 weight_blob 中的权重张量。
