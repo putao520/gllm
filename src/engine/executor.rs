@@ -856,7 +856,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             let template = crate::arch::get_template(&arch_for_template);
 
             use gllm_kernels::compiler::MegaKernelBusinessConfig;
-            use gllm_kernels::compiler::mega_kernel_abi::FfnActivation;
+            use gllm_kernels::compiler::mega_kernel_abi::{FfnActivation, OutputMode, PoolMode};
             let business_config = MegaKernelBusinessConfig {
                 has_head_rms_norm: template.as_ref().map_or(false, |t| t.has_head_rms_norm),
                 head_rms_norm_eps: template.as_ref().map_or(1e-6, |t| t.head_rms_norm_eps),
@@ -873,18 +873,81 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     None
                 },
-                // SG config: QTapSTG always compiled in; callback activation is
-                // orthogonal (via register_semantic_gatekeeper).
-                semantic_gatekeeper: Some(SgConfig {
-                    detect_layer: geometry.num_layers / 2,
-                    detect_offset: 0,
-                    inject_offset: 0,
-                    q_tap: Some(qtap_cfg.clone()),
-                }),
+                // SG config: only for decoder family (encoder models don't use SG).
+                semantic_gatekeeper: if template.as_ref().map_or(false, |t| t.family == "decoder") {
+                    Some(SgConfig {
+                        detect_layer: geometry.num_layers / 2,
+                        detect_offset: 0,
+                        inject_offset: 0,
+                        q_tap: Some(qtap_cfg.clone()),
+                    })
+                } else {
+                    None
+                },
+                // Encoder models: output mode driven by manifest.kind.
+                // Decoder models: keep default (Generate).
+                output_modes: if template.as_ref().map_or(false, |t| t.family == "encoder") {
+                    match manifest.kind {
+                        crate::manifest::ModelKind::Embedding => vec![
+                            OutputMode::EncodeToLayer {
+                                anchor_layer: geometry.num_layers,
+                                pool_mode: PoolMode::MeanPool,
+                            },
+                        ],
+                        crate::manifest::ModelKind::Reranker => vec![
+                            OutputMode::EncodeToLayer {
+                                anchor_layer: geometry.num_layers,
+                                pool_mode: PoolMode::ClsToken,
+                            },
+                        ],
+                        crate::manifest::ModelKind::Classifier => vec![
+                            OutputMode::ClassifyMultiway {
+                                label_token_ids: vec![],
+                            },
+                        ],
+                        _ => vec![OutputMode::Generate {
+                            max_new_tokens: 512,
+                            eos_token_id: 2,
+                        }],
+                    }
+                } else {
+                    vec![OutputMode::Generate {
+                        max_new_tokens: 512,
+                        eos_token_id: 2,
+                    }]
+                },
                 ..MegaKernelBusinessConfig::default()
             };
 
-            let mega = if let Some(ref tmpl) = template {
+            // Route based on template family, not manifest.kind.
+            // Qwen3-Embed is family=decoder (decoder arch doing embedding task) → decoder mega-kernel.
+            // XLM-R is family=encoder (encoder arch doing embedding/rerank) → forward-only.
+            let template_family = template.as_ref().map(|t| t.family.as_str()).unwrap_or("decoder");
+            let is_encoder_family = template_family == "encoder";
+
+            let mega = if is_encoder_family {
+                // ── Encoder path: forward-only via InferenceCompiler::compile_graph ──
+                if let Some(ref tmpl) = template {
+                    let resolved = crate::arch::ResolvedConfig::from_geometry(
+                        &geometry, std::collections::HashMap::new(),
+                    );
+                    super::mega_kernel::MegaKernelExecutor::compile_forward(
+                        tmpl,
+                        &resolved,
+                        &geometry,
+                        &weight_ptrs,
+                        &weight_sizes,
+                        &business_config,
+                    ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                        format!("mega-kernel forward compilation failed: {}", e),
+                    )))?
+                } else {
+                    return Err(ExecutorError::Backend(BackendError::Other(
+                        "encoder models require a YAML template".into(),
+                    )));
+                }
+            } else if let Some(ref tmpl) = template {
+                // ── Decoder path with template ──
                 let resolved = crate::arch::ResolvedConfig::from_geometry(
                     &geometry, std::collections::HashMap::new(),
                 );
@@ -917,6 +980,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     }
                 }
             } else {
+                // ── Decoder path without template ──
                 super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
                     &geometry,
                     &weight_ptrs,
@@ -2730,15 +2794,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        let embedding = {
-            self.backend.embedding_forward_gpu_pure(
-                &tokens,
-                &self.topology,
-                &self.weights,
-                &self.forward_config,
-            )?
-        };
-        Ok(embedding)
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "mega-kernel not compiled".into()
+            )))?;
+        let output_elems = mega.output_elems_for_embed(tokens.len(), self.geometry.hidden_size);
+        if mega.has_mega_compiled() {
+            mega.execute_encode(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        } else {
+            mega.execute_forward(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        }
     }
 
     pub fn rerank(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {
@@ -2746,13 +2813,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        let scores = self.backend.rerank_forward_gpu_pure(
-            &tokens,
-            &self.topology,
-            &self.weights,
-            &self.forward_config,
-        )?;
-        Ok(scores)
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "mega-kernel not compiled".into()
+            )))?;
+        let output_elems = tokens.len();
+        if mega.has_mega_compiled() {
+            mega.execute_encode(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        } else {
+            mega.execute_forward(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        }
     }
 
     /// Rerank with proper pair encoding (query + document as separate segments).
@@ -2784,13 +2856,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 }
             }
         }
-        let scores = self.backend.rerank_forward_gpu_pure(
-            &tokens,
-            &self.topology,
-            &self.weights,
-            &self.forward_config,
-        )?;
-        Ok(scores)
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "mega-kernel not compiled".into()
+            )))?;
+        let output_elems = tokens.len();
+        if mega.has_mega_compiled() {
+            mega.execute_encode(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        } else {
+            mega.execute_forward(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        }
     }
 
     /// Classify text: run encoder/decoder + classifier head, return raw logits.
@@ -2799,13 +2876,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        let logits = self.backend.classify_forward_gpu_pure(
-            &tokens,
-            &self.topology,
-            &self.weights,
-            &self.forward_config,
-        )?;
-        Ok(logits)
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "mega-kernel not compiled".into()
+            )))?;
+        let output_elems = tokens.len() * 2;
+        if mega.has_mega_compiled() {
+            mega.execute_encode(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        } else {
+            mega.execute_forward(&tokens, output_elems)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        }
     }
 
     /// Head Routing SDK — 对 `prompt` 跑一次 generator forward,返回

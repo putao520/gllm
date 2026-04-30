@@ -3,6 +3,7 @@
 //! ARCH-RUST-IS-CODEGEN 铁律: 推理时 Rust 只做一次 CALL。
 //! 整个 decoder 模型（embedding → N 层 → lm_head → sampling → generate loop）
 //! 编译为单一 JIT 机器码，推理时通过 MegaKernelFn 单次 CALL 完成。
+//! Encoder 模型（embedding/rerank/classify）通过 CompiledLayerFn 单次 CALL 完成。
 //!
 //! 无 fallback。编译失败 = 致命错误。
 
@@ -47,14 +48,35 @@ struct MegaKernelCompiled {
     hetero_layout: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroWeightLayout>,
 }
 
+/// Forward-only 编译产物 (encoder 路径: embedding / rerank / classify)。
+///
+/// 通过 `InferenceCompiler::compile_graph` 编译任意 CompilerGraph，
+/// 推理时通过 `CompiledLayerFn` (10 参数通用 ABI) 单次 CALL 完成。
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+struct ForwardCompiled {
+    /// JIT 编译产物（通用 forward-pass 机器码）
+    exec_code: gllm_kernels::compiler::CompiledLayer,
+    /// CompiledLayerFn 函数指针（10 参数通用 ABI）
+    entry_fn: gllm_kernels::compiler::CompiledLayerFn,
+    /// 预打包的连续权重 blob（按 graph.weight_layout() 排列）
+    weight_blob: Vec<u8>,
+    /// graph.weight_layout() 记录的权重布局
+    weight_layout: gllm_kernels::compiler::graph::WeightLayout,
+    /// scratchpad 大小
+    total_scratchpad_bytes: usize,
+}
+
 /// Mega-Kernel 执行器 (§9.1)
 ///
 /// 唯一推理路径: 编译 → 单次 CALL。
 /// 编译在模型加载时完成，推理时零 Rust 开销。
 pub struct MegaKernelExecutor {
-    /// True mega-kernel 编译产物 — 单次 CALL 路径
+    /// Decoder mega-kernel 编译产物 (generate loop 路径)
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
-    mega_compiled: MegaKernelCompiled,
+    mega_compiled: Option<MegaKernelCompiled>,
+    /// Forward-only 编译产物 (encoder 路径: embedding / rerank / classify)
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    forward_compiled: Option<ForwardCompiled>,
     /// 模型配置
     num_layers: usize,
     hidden_size: usize,
@@ -152,7 +174,8 @@ impl MegaKernelExecutor {
         };
 
         Ok(Self {
-            mega_compiled,
+            mega_compiled: Some(mega_compiled),
+            forward_compiled: None,
             num_layers: geometry.num_layers,
             hidden_size: geometry.hidden_size,
             vocab_size: geometry.vocab_size,
@@ -160,8 +183,6 @@ impl MegaKernelExecutor {
             eos_token_id,
         })
     }
-
-    /// 从 YAML 模板编译 true mega-kernel (REQ-UGS-001/003)。
     ///
     /// 使用 `ArchTemplate::to_compiler_graph()` 直接构建 CompilerGraph，
     /// 绕过 `graph_builders.rs` 中的手写 `decoder_model()` / `decoder_model_hetero()`。
@@ -259,13 +280,120 @@ impl MegaKernelExecutor {
         };
 
         Ok(Self {
-            mega_compiled,
+            mega_compiled: Some(mega_compiled),
+            forward_compiled: None,
             num_layers: geometry.num_layers,
             hidden_size: geometry.hidden_size,
             vocab_size: geometry.vocab_size,
             dtype: geometry.dtype,
             eos_token_id,
         })
+    }
+
+    /// 从 YAML 模板编译 forward-only encoder mega-kernel。
+    ///
+    /// 使用 `InferenceCompiler::compile_graph`（通用编译器）编译任意 CompilerGraph。
+    /// Encoder 模型不需要 generate loop / argmax / sampling — 仅单次 forward pass。
+    ///
+    /// 编译失败直接返回错误，不 fallback。
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+    pub fn compile_forward(
+        template: &crate::arch::ArchTemplate,
+        resolved_config: &crate::arch::ResolvedConfig,
+        geometry: &crate::model_config::ModelGeometry,
+        weight_ptrs: &std::collections::HashMap<String, *const u8>,
+        weight_sizes: &std::collections::HashMap<String, usize>,
+        business_config: &gllm_kernels::compiler::MegaKernelBusinessConfig,
+    ) -> Result<Self, MegaKernelError> {
+        let graph = template.to_compiler_graph(resolved_config, business_config)
+            .map_err(|e| MegaKernelError::Compilation(format!("template→CompilerGraph: {e}")))?;
+
+        let weight_layout = graph.weight_layout();
+
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let exec_code = compiler.compile_graph(&graph)
+            .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
+
+        let entry_fn = unsafe { exec_code.entry_point() };
+        let total_scratchpad_bytes = exec_code.scratchpad_bytes;
+
+        let weight_blob = pack_weights_from_graph(
+            &graph,
+            &weight_layout,
+            weight_ptrs,
+            weight_sizes,
+        );
+
+        let forward_compiled = ForwardCompiled {
+            exec_code,
+            entry_fn,
+            weight_blob,
+            weight_layout,
+            total_scratchpad_bytes,
+        };
+
+        Ok(Self {
+            mega_compiled: None,
+            forward_compiled: Some(forward_compiled),
+            num_layers: geometry.num_layers,
+            hidden_size: geometry.hidden_size,
+            vocab_size: geometry.vocab_size,
+            dtype: geometry.dtype,
+            eos_token_id: 0,
+        })
+    }
+
+    /// 执行 forward-only 推理 (embedding / rerank / classify)。
+    ///
+    /// ARCH-RUST-IS-CODEGEN: 一次 CALL 完成。
+    /// CompiledLayerFn ABI (10 参数):
+    ///   input_ptr → token IDs, weight_ptr → weight blob,
+    ///   output → 输出缓冲, scratchpad → 临时空间。
+    #[cfg(target_arch = "x86_64")]
+    pub fn execute_forward(
+        &self,
+        input_ids: &[u32],
+        output_elems: usize,
+    ) -> Result<Vec<f32>, MegaKernelError> {
+        let fw = self.forward_compiled.as_ref()
+            .ok_or_else(|| MegaKernelError::Execution(
+                "not a forward-compiled model".into()
+            ))?;
+
+        let seq_len = input_ids.len();
+        let mut scratchpad = vec![0u8; fw.total_scratchpad_bytes];
+        let mut output = vec![0.0f32; output_elems];
+
+        unsafe {
+            (fw.entry_fn)(
+                input_ids.as_ptr() as *const u8,
+                fw.weight_blob.as_ptr(),
+                std::ptr::null_mut(),       // kv_cache: null
+                std::ptr::null(),           // positions: null
+                std::ptr::null(),           // seq_lens: null
+                0,                          // batch_size: unused
+                seq_len,                    // seq_len
+                output.as_mut_ptr() as *mut u8,
+                scratchpad.as_mut_ptr(),
+                std::ptr::null_mut(),       // telemetry: null
+            );
+        }
+
+        Ok(output)
+    }
+
+    /// Returns total scratchpad bytes needed for execution.
+    pub fn total_scratchpad_bytes(&self) -> usize {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            if let Some(ref mega) = self.mega_compiled {
+                return mega.total_scratchpad_bytes;
+            }
+            if let Some(ref fw) = self.forward_compiled {
+                return fw.total_scratchpad_bytes;
+            }
+        }
+        0
     }
 
     /// 单序列 mega-kernel 生成。
@@ -285,7 +413,10 @@ impl MegaKernelExecutor {
         hook_ctx_ptr: *const u8,
         callback_table_ptr: *const u8,
     ) -> Result<Vec<u32>, MegaKernelError> {
-        let mega = &self.mega_compiled;
+        let mega = self.mega_compiled.as_ref()
+            .ok_or_else(|| MegaKernelError::Execution(
+                "not a decoder mega-kernel model".into()
+            ))?;
         let prompt_len = prompt_tokens.len();
         let max_total = prompt_len + max_new_tokens;
 
@@ -410,6 +541,131 @@ impl MegaKernelExecutor {
         };
 
         Ok(output_tokens[..actual_count].to_vec())
+    }
+
+    /// Execute mega-kernel in EncodeToLayer mode (output_mode_selector = 3).
+    ///
+    /// Runs a single forward pass through all layers, then extracts the hidden
+    /// state from the activation buffer. The mega-kernel skips the generate loop
+    /// and argmax, jumping directly to the encode path.
+    ///
+    /// Returns the hidden state as a Vec<f32> of shape [seq_len * hidden_size].
+    #[cfg(target_arch = "x86_64")]
+    pub fn execute_encode(
+        &self,
+        prompt_tokens: &[u32],
+        output_elems: usize,
+    ) -> Result<Vec<f32>, MegaKernelError> {
+        let mega = self.mega_compiled.as_ref()
+            .ok_or_else(|| MegaKernelError::Execution(
+                "not a decoder mega-kernel model".into()
+            ))?;
+
+        let prompt_len = prompt_tokens.len();
+        let mut input_ids = vec![0u32; prompt_len];
+        input_ids.copy_from_slice(prompt_tokens);
+
+        let positions: Vec<u32> = (0..prompt_len as u32).collect();
+        let mut output_tokens = vec![0u32; 1];
+        let mut scratchpad = vec![0u8; mega.total_scratchpad_bytes];
+
+        // Pre-fill RoPE cache
+        if let Some(ref rc) = mega.rope_cache {
+            let rope_elems = prompt_len * rc.head_dim;
+            let rope_bytes = rope_elems * 4;
+            if rc.cache_offset + rope_bytes <= scratchpad.len() {
+                let rope_slice = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        scratchpad[rc.cache_offset..].as_mut_ptr() as *mut f32,
+                        rope_elems,
+                    )
+                };
+                gllm_kernels::compiler::fill_cos_sin_table(
+                    rope_slice,
+                    &positions,
+                    rc.head_dim,
+                    rc.theta,
+                    rc.rope_scaling.clone(),
+                );
+            }
+        }
+
+        let _generated_count = unsafe {
+            (mega.entry_fn)(
+                input_ids.as_ptr(),
+                mega.weight_blob.as_ptr(),
+                std::ptr::null_mut(),       // kv_cache: null
+                positions.as_ptr(),
+                std::ptr::null(),           // seq_lens: null
+                1,                          // batch_size
+                prompt_len,
+                scratchpad.as_mut_ptr(),
+                output_tokens.as_mut_ptr(),
+                0,                          // temperature (unused in encode mode)
+                0,                          // top_k (unused)
+                0,                          // top_p bits (unused)
+                1,                          // max_new_tokens = 1 (minimal)
+                self.eos_token_id as usize,
+                3,                          // output_mode_selector: EncodeToLayer
+                std::ptr::null(),           // hook_ctx_ptr: null
+                std::ptr::null_mut(),       // telemetry: null
+                0,                          // session_position: new
+                std::ptr::null(),           // fused_hidden_ptr: no MM
+                0,                          // num_mm_tokens: 0
+                std::ptr::null(),           // callback_table_ptr: null
+            )
+        };
+
+        // The activation buffer is at the beginning of the scratchpad.
+        // BufferAllocation places intermediate tensors sequentially from offset 0.
+        // For EncodeToLayer, the final hidden state is the last activation buffer content.
+        let mut output = vec![0.0f32; output_elems];
+        let copy_bytes = output_elems * 4;
+        if copy_bytes <= scratchpad.len() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    scratchpad.as_ptr() as *const f32,
+                    output.as_mut_ptr(),
+                    output_elems,
+                );
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Returns true if this executor has a decoder mega-kernel (compile_from_template/geometry path).
+    pub fn has_mega_compiled(&self) -> bool {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        { self.mega_compiled.is_some() }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda")))]
+        { false }
+    }
+
+    /// Returns the expected output element count for embedding inference.
+    ///
+    /// - Decoder path (mega_compiled): seq_len × hidden_size (raw hidden states)
+    /// - Encoder path (forward_compiled): hidden_size (after MeanPool in JIT graph)
+    pub fn output_elems_for_embed(&self, seq_len: usize, hidden_size: usize) -> usize {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        {
+            if self.mega_compiled.is_some() {
+                seq_len * hidden_size
+            } else {
+                // Encoder: graph includes MeanPool → output is [hidden_size]
+                hidden_size
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda")))]
+        { seq_len * hidden_size }
+    }
+
+    /// Returns true if this executor has a forward-only compiled layer (encoder path).
+    pub fn has_forward_compiled(&self) -> bool {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+        { self.forward_compiled.is_some() }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda")))]
+        { false }
     }
 }
 
@@ -716,6 +972,81 @@ fn pack_single_layer(
         }
     }
 }
+// ============================================================================
+// Generic Weight Packing (graph.weight_layout() driven)
+// ============================================================================
+
+/// 通用权重打包：按 CompilerGraph 的 weight_layout() 将权重排列到连续 blob。
+///
+/// 遍历 weight_layout 中的每个 (TensorId, offset) 对，
+/// 从 weight_ptrs 中查找对应的实际权重并 memcpy 到 blob 中。
+///
+/// 无硬编码权重名 — 完全由图结构驱动。
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
+fn pack_weights_from_graph(
+    graph: &gllm_kernels::compiler::CompilerGraph,
+    layout: &gllm_kernels::compiler::graph::WeightLayout,
+    weight_ptrs: &std::collections::HashMap<String, *const u8>,
+    weight_sizes: &std::collections::HashMap<String, usize>,
+) -> Vec<u8> {
+    let mut blob = vec![0u8; layout.total_bytes];
+    let mut packed_count = 0usize;
+    let mut missing_count = 0usize;
+
+    for &(tid, offset) in &layout.offsets {
+        let tensor = match graph.tensors.get(tid.0 as usize) {
+            Some(t) => t,
+            None => continue,
+        };
+        let name = &tensor.name;
+
+        // Resolve weight name via alias system (weight_names.rs).
+        // YAML templates define canonical names (e.g., "roberta.encoder.layer.0.attention.self.query.weight");
+        // safetensors files may store them under a different prefix (e.g., "encoder.layer.0.attention.self.query.weight").
+        // `all_encoder_weight_aliases` generates all known prefix variants for matching.
+        let resolved_name = match weight_ptrs.get(name) {
+            Some(_) => name.clone(),
+            None => {
+                let aliases = crate::weight_names::all_encoder_weight_aliases(name);
+                let found = aliases.iter().find(|a| weight_ptrs.contains_key(a.as_str()));
+                match found {
+                    Some(n) => n.clone(),
+                    None => {
+                        missing_count += 1;
+                        if missing_count <= 5 {
+                            eprintln!("[pack_weights] MISSING: {:?} name={:?}", tid, name);
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let ptr = match weight_ptrs.get(&resolved_name) {
+            Some(&p) if !p.is_null() => p,
+            _ => continue,
+        };
+        let size = *weight_sizes.get(&resolved_name).unwrap_or(&0);
+        if size == 0 {
+            continue;
+        }
+
+        let copy_size = size.min(blob.len().saturating_sub(offset));
+        if copy_size == 0 || offset >= blob.len() {
+            continue;
+        }
+        let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
+        blob[offset..offset + copy_size].copy_from_slice(src);
+        packed_count += 1;
+    }
+    if missing_count > 0 || std::env::var("GLLM_DEBUG_BUFFER_ALLOC").is_ok() {
+        eprintln!("[pack_weights] packed={} missing={}/{} total_bytes={}",
+            packed_count, missing_count, layout.offsets.len(), layout.total_bytes);
+    }
+
+    blob
+}
+
 // ============================================================================
 
 /// Structured observation extracted from Mega-Kernel epilogue telemetry buffer.
