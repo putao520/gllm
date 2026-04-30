@@ -142,6 +142,7 @@ impl EmbedLookupOnlyGraph {
                 table_rows: vocab_size,
                 embed_dim: hidden_size,
                 index_dim: sym_seq(),
+                indices_kind: Default::default(),
             },
             vec![indices, table],
             vec![output],

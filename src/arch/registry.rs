@@ -295,15 +295,14 @@ mod tests {
             .to_compiler_graph(&config, &MegaKernelBusinessConfig::default())
             .expect("to_compiler_graph 必须成功");
 
-        // 每个 Conformer block 展开为 26 ops; 2 层 → 52, 加顶层 1 + auto-added 6
-        // (embed_gather, final_norm, lm_head, argmax, store_token, check_stop) → 总计 59
+        // 每个 Conformer block 展开为 26 ops; 2 层 → 52, 加顶层 1 final_norm
+        // Encoder 模型不注入 decoder 专有节点 (embed_gather, lm_head, argmax 等)
         let expected_per_layer = 26;
-        let auto_added = 6;
-        let expected_total = expected_per_layer * config.num_hidden_layers + 1 + auto_added;
+        let expected_total = expected_per_layer * config.num_hidden_layers + 1;
         assert_eq!(
             graph.ops.len(),
             expected_total,
-            "USM Conformer 展开节点数应为 {expected_total} (每层 {expected_per_layer} + 1 final_norm)",
+            "USM Conformer 展开节点数应为 {expected_total} (每层 {expected_per_layer} + 1 final_norm, encoder 无 decoder 节点)",
         );
 
         // 每层必须包含 1 个 DepthwiseConv1D
@@ -379,17 +378,16 @@ mod tests {
             .to_compiler_graph(&config, &MegaKernelBusinessConfig::default())
             .expect("to_compiler_graph 必须成功");
 
-        // 每层 12 ops, 2 层 → 24, 顶层 3 + auto-added 6 (embed_gather, final_norm, lm_head,
-        // argmax, store_token, check_stop) → 总计 33
+        // 每层 12 ops, 2 层 → 24, 顶层 3 (PatchEmbed + LearnedPos2D + final LayerNorm)
+        // Encoder 模型不注入 decoder 专有节点 (embed_gather, lm_head, argmax 等)
         let expected_per_layer = 12;
         let expected_top = 3;
-        let auto_added = 6;
-        let expected_total = expected_per_layer * config.num_hidden_layers + expected_top + auto_added;
+        let expected_total = expected_per_layer * config.num_hidden_layers + expected_top;
         assert_eq!(
             graph.ops.len(),
             expected_total,
             "SigLIP 展开节点数应为 {expected_total} \
-             (每层 {expected_per_layer} + 顶层 {expected_top})",
+             (每层 {expected_per_layer} + 顶层 {expected_top}, encoder 无 decoder 节点)",
         );
 
         let patch_ops: Vec<_> = graph.ops.iter()
