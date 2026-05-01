@@ -66,7 +66,8 @@ CompiledNode { feature_dim, per_output_feature_dims, output_dtype, ... }
 
 | 消费点 | **唯一来源** | ❌ 禁止 |
 |--------|-------------|---------|
-| JIT 计算路径 elem_bytes | `computation_elem_bytes()` (TurboQuant: 统一 F32) | 裸 `4`, `4usize`, `* 4` |
+| JIT 计算路径 elem_bytes | `op_input_dtype(op, graph).elem_bytes()` — 从 tensor 元数据自动推断 | `computation_elem_bytes()` (硬编码 F32), 裸 `4`, `4usize`, `* 4` |
+| JIT 计算 elem_bytes (无 op 上下文) | `graph.tensor(graph.inputs[0]).dtype.to_quant_precision().elem_bytes()` | `size_of::<f32>()` |
 | Tile 步长 elem_bytes | `TileConfig.dtype.size_bytes()` | `* 4` |
 | executor 输出 elem_bytes | `cn.output_dtype.size_bytes()` | `4usize`, `size_of::<f32>()` |
 | KV cache elem_bytes | `DType::F32.size_bytes()` (TurboQuant: KV 统一 F32) | `size_of::<f32>()`, `4` |
@@ -75,9 +76,9 @@ CompiledNode { feature_dim, per_output_feature_dims, output_dtype, ... }
 
 | 消费点 | **唯一来源** | ❌ 禁止 |
 |--------|-------------|---------|
-| 张量行步长 | `row_stride_bytes(inner_dim)` — 从张量 shape 最内层 Concrete 维度推导 | 手动 `k * elem`, `n * 4` |
-| MHA Q stride | `row_stride_bytes(num_heads * head_dim)` — 参数来自 OpKind | `num_heads * head_dim * 4` |
-| MHA K stride | `row_stride_bytes(num_kv_heads * head_dim)` — 参数来自 OpKind | 手动计算 |
+| 张量行步长 | `inner_dim * op_input_dtype(op, graph).elem_bytes()` — dtype 从 tensor 元数据推断 | `row_stride_bytes(inner_dim)` (硬编码 F32), 手动 `k * elem`, `n * 4` |
+| MHA Q stride | `num_heads * head_dim * dtype.elem_bytes()` — dtype 从 OpKind 上下文推断 | `num_heads * head_dim * 4` |
+| MHA K stride | `num_kv_heads * head_dim * dtype.elem_bytes()` — dtype 从 OpKind 上下文推断 | 手动计算 |
 
 ### §2.4 循环边界
 
@@ -288,4 +289,13 @@ grep -rn "SymBound {" src/compiler/codegen/vm/ | grep -v "sym_map\|to_bound"
 
 # eprintln 在生产代码
 grep -rn "eprintln\!" src/ | grep -v test | grep -v "e2e_tests"
+
+# 硬编码 QuantPrecision::F32（dtype 必须从 tensor 元数据推断）
+grep -rn "QuantPrecision::F32" src/compiler/codegen/vm/plan_lower.rs | grep -v "op_input_dtype\|unwrap_or"
+
+# computation_elem_bytes 已废弃
+grep -rn "computation_elem_bytes" src/compiler/codegen/vm/
+
+# row_stride_bytes 已废弃
+grep -rn "row_stride_bytes" src/compiler/codegen/vm/
 ```

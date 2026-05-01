@@ -418,18 +418,36 @@ JIT 编译的全层融合图二进制缓存（L3 磁盘层）。7 天 TTL 自动
 
 **理由**：JIT 融合算子直接驻留缓存对齐内存页，调用外部预编译库的 ROI 过低。gllm 的 JIT 可以根据 (模型结构 × 硬件能力) 生成比预编译库更优的代码。
 
-## 🚨 严禁动态 DType 分发 (ARCH-DTYPE-ADAPTIVE 物理废弃)
+## 🚨 编译时 dtype 感知 — 原生混合精度 (ARCH-DTYPE-JIT-TYPED)
 
-**铁律：纯浮点动态调度 (`F32/F16/BF16`) 及动态计算 `dtype_size` 的架构已被全盘否决并物理销毁！系统唯一绑定物理位宽常量 `TurboQuantBits`。**
+**铁律：dtype 从模型 TensorMeta 自动推断，JIT 编译时根据 dtype 生成特化机器码，运行时零分支。**
 
-### 核心禁止规则 (Architect Veto)
+### 核心规则
 
-1. ❌ **禁止任何基于浮点或动态 DType 的分发流**：禁止在运行时或编译时根据张量原始特征使用 `match dtype { F16 => ... }` 进行逻辑分支硬编码。
-2. ❌ **禁止反量化回浮点**：不再提供 `Backend::dequantize`，严禁在运行时逆向量化至 F32 规约计算。数学运算纯基于极化微字节或定点硬派累加器实现。
-3. ❌ **禁止动态寻址映射表**：原本关于 `dtype.size_bytes()` 动态寻址的复杂映射表与实现方案被永久废除。禁止实现此模块中的多态汇编下发逻辑！
-4. ❌ **移除浮点混淆**：即使原始权重为 F16/BF16，所有算子统一并入静态编译位宽处理管线，精度差异化在 Load-time 被物理抹抹平。
+1. ✅ **dtype 在 JIT 编译时已知**：模型加载时每个 tensor 的 dtype 已知（TensorMeta.dtype），JIT 编译时读取并影响指令选择
+2. ✅ **编译时单态化**：对每种 dtype 组合生成特化机器码（BF16→VDPBF16PS, F32→VMULPS），运行时零 dtype 分支
+3. ✅ **双路径共存**：原生混合精度（模型原始 dtype）+ TurboQuant（额外量化格式），两种模式互不冲突
+4. ✅ **自动类型推断**：TraceOp body 通过 TypedSlot 携带 dtype，auto_select 根据 dtype 选择 VmInstr
 
-**正确架构导向**: 系统强依赖定轨和极致物理约束（如 TurboQuant 预研架构中的 `DualTrackPool` 方案和 `Static Bit-width Execution`），将一切特征张量推回不可降级的原色矩阵运算，实现零代价极速吞吐。
+### 禁止规则
+
+1. ❌ **禁止硬编码 `QuantPrecision::F32`**：dtype 必须从 `graph.tensor(op.inputs[0]).dtype` 推断，不得硬编码
+2. ❌ **禁止 `computation_elem_bytes()` 硬编码 F32**：必须用 `op_input_dtype(op, graph).elem_bytes()`
+3. ❌ **禁止硬件不支持时 fallback 到 F32**：必须返回 Error
+4. ❌ **禁止运行时 `match dtype` 分支**：dtype 在编译时 bake 进机器码，运行时零分支
+
+### 审计命令
+
+```bash
+# 硬编码 QuantPrecision::F32（仅 op_input_dtype 默认值例外）
+grep -rn "QuantPrecision::F32" ../gllm-kernels/src/compiler/codegen/vm/plan_lower.rs | grep -v "op_input_dtype\|unwrap_or"
+
+# computation_elem_bytes 已废弃
+grep -rn "computation_elem_bytes" ../gllm-kernels/src/compiler/codegen/vm/
+
+# row_stride_bytes 已废弃
+grep -rn "row_stride_bytes" ../gllm-kernels/src/compiler/codegen/vm/
+```
 
 ## Common Commands
 

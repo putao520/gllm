@@ -119,15 +119,51 @@ gllm 自身的所有模块必须静态编译并链接。禁止 dlopen/libloading
 
 禁止擅自添加环境变量。新增必须由用户明确要求且场景不可替代。
 
-## 4. DType 架构决定
+## 4. DType 架构决定 — 编译时 dtype 感知 + 原生混合精度
 
-纯浮点动态调度（F32/F16/BF16）及动态计算 dtype_size 的架构已全盘否决。
+**核心原则**：dtype 在模型加载时确定（TensorMeta.dtype），JIT 编译时根据 dtype 生成特化机器码，运行时零分支。
 
-- 禁止运行时根据张量特征使用 match dtype 分支
-- 禁止反量化回浮点（Backend::dequantize 已废除）
-- 系统强依赖 TurboQuant 定轨和极致物理约束
-- 所有算子统一并入静态编译位宽处理管线
-- 运行时精度分发通过 `<E: Element>` 编译时单态化实现，完整定义见 `SPEC/04-OPERATORS.md` §1.3 和 §2
+### 4.1 dtype 传播链
+
+```
+模型文件 (safetensors/GGUF)
+  → loader 读取 DType
+    → CompilerGraph.TensorMeta.dtype
+      → JIT 编译时: op_input_dtype(op, graph) 从 tensor 元数据推断
+        → TraceOp body 通过 TypedSlot 携带推断的 dtype
+          → VmInstr 携带 dtype 字段
+            → ISA Lowering 根据 dtype 选择原生硬件指令
+              → 单态化机器码（每种 dtype 组合一份）
+```
+
+### 4.2 编译时单态化
+
+- dtype 在 JIT 编译时已知（不是运行时变量）
+- 对每种 dtype 组合生成特化机器码
+- ISA Lowering 根据 dtype 分支选指令：BF16→VDPBF16PS, F32→VMULPS, F16→VFMULCPH
+- 这是**编译时分支**（类似 LLVM SelectionDAG），不是运行时分支
+
+### 4.3 双路径共存
+
+| 路径 | 触发条件 | 行为 |
+|------|---------|------|
+| **原生混合精度** | 模型权重以 BF16/F16/FP8 格式保留（不经 dequant） | JIT 直接生成对应 dtype 的原生指令（VDPBF16PS/mfma.bf16） |
+| **TurboQuant 量化** | 模型使用 TurboQuant 量化格式（INT4/FP4/FP6） | TurboQuant 解量化管线 + 定点/微浮点硬派算子 |
+
+两种路径互不冲突：原生混合精度路径处理模型原始 dtype，TurboQuant 处理额外量化。
+
+### 4.4 禁止项
+
+- 禁止硬编码 `QuantPrecision::F32` 作为计算 dtype（必须从 TensorMeta 推断）
+- 禁止 `computation_elem_bytes()` 硬编码返回 4（必须用推断的 dtype.elem_bytes()）
+- 禁止硬件不支持时静默 fallback 到 F32（必须报错）
+- 禁止运行时 `match dtype { ... }` 分支（编译时确定，运行时零分支）
+
+### 4.5 运行时行为
+
+- 运行时零 dtype 分支：dtype 在 JIT 编译时已 bake 进机器码
+- `<E: Element>` 编译时单态化保留（与 dtype 推断兼容）
+- executor 通过 `cn.output_dtype` 读取 dtype（来源：graph.tensor.dtype）
 
 ## 5. 禁止模式索引
 
