@@ -890,13 +890,13 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     match manifest.kind {
                         crate::manifest::ModelKind::Embedding => vec![
                             OutputMode::EncodeToLayer {
-                                anchor_layer: geometry.num_layers,
+                                anchor_layer: 0,
                                 pool_mode: PoolMode::MeanPool,
                             },
                         ],
                         crate::manifest::ModelKind::Reranker => vec![
                             OutputMode::EncodeToLayer {
-                                anchor_layer: geometry.num_layers,
+                                anchor_layer: 0,
                                 pool_mode: PoolMode::ClsToken,
                             },
                         ],

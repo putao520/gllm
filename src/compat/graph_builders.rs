@@ -92,7 +92,7 @@ pub(crate) fn build_fused_attention_layer_graph_symbolic(
         OpKind::EntropyGate {
             seq_len: sym_s.clone(),
             vocab_size: q_dim,
-            entropy_threshold: 0.5_f32,
+            entropy_threshold: 0.0,
         },
         vec![attn_out],
         vec![write_mask],

@@ -539,18 +539,31 @@ impl ArchTemplate {
         // ── Pre-populate g.inputs for decoder (before layer loop config) ──
         // Layer loop config needs g.inputs to find per-layer weight indices.
         // Final global weights (final_norm_w, lm_head_w) are added later after creation.
-        //
-        // ARCHITECTURE NOTE: The mega-kernel layer loop (LoopBegin/LoopEnd with weight stride)
-        // is designed for graphs where ONLY layer 0 ops exist and the loop repeats them.
-        // When the template has an expanded graph (all N layers already in the graph),
-        // the layer loop would repeat ALL ops N times — producing N² iterations.
-        // For now, only use the template mega-kernel path for encoder models (which skip
-        // LayerLoopConfig). Decoder templates fall back to geometry path.
         if !is_encoder && g.inputs.is_empty() {
-            return Err(TemplateError::Invalid(
-                "decoder template mega-kernel: expanded graph incompatible with layer loop; \
-                 use geometry path instead".into(),
-            ));
+            let derived_names: Vec<&str> = self.graph.derived_inputs.iter()
+                .map(|d| d.name.as_str())
+                .collect();
+
+            let mut external_inputs: Vec<gllm_kernels::compiler::graph::TensorId> = Vec::new();
+
+            // 1. Activation input: token_ids (ABI arg 0 for decoder)
+            for t in &g.tensors {
+                if t.name == "token_ids" {
+                    external_inputs.push(t.id);
+                    break;
+                }
+            }
+
+            // 2. Weight tensors: no-producer tensors excluding derived inputs and activation
+            for t in &g.tensors {
+                if t.producer.is_none()
+                    && !external_inputs.contains(&t.id)
+                    && !derived_names.contains(&t.name.as_str())
+                {
+                    external_inputs.push(t.id);
+                }
+            }
+            g.inputs = external_inputs;
         }
 
         // ── Layer loop config for mega-kernel compilation ──
@@ -652,9 +665,9 @@ impl ArchTemplate {
                             "write_classify_logits",
                         );
                     }
-                    OutputMode::EncodeToLayer { anchor_layer, .. } => {
+                    OutputMode::EncodeToLayer { .. } => {
                         g.add_op(
-                            OpKind::EarlyExit { anchor_layer: *anchor_layer },
+                            OpKind::EarlyExit { anchor_layer: 0 },
                             vec![],
                             vec![],
                             "early_exit",
