@@ -428,6 +428,29 @@ JIT 编译的全层融合图二进制缓存（L3 磁盘层）。7 天 TTL 自动
 2. ✅ **编译时单态化**：对每种 dtype 组合生成特化机器码（BF16→VDPBF16PS, F32→VMULPS），运行时零 dtype 分支
 3. ✅ **双路径共存**：原生混合精度（模型原始 dtype）+ TurboQuant（额外量化格式），两种模式互不冲突
 4. ✅ **自动类型推断**：TraceOp body 通过 TypedSlot 携带 dtype，auto_select 根据 dtype 选择 VmInstr
+5. ✅ **属性驱动指令选择**：ISA lowering 通过 `dtype.x86_elem_strategy()` / `dtype.aarch64_elem_strategy()` 属性方法选择策略（Native/WidenCompute/Unsupported），禁止 `match dtype { F32 => ..., BF16 => ..., _ => ... }` 身份匹配
+
+### dtype 传播链（唯一正确路径）
+
+```
+TensorMeta.dtype (DType)
+  → .to_quant_precision() (QuantPrecision)
+    → op_input_dtype(op, graph) [plan_lower.rs]
+      → auto_lower_trace(prog, body, inputs, width, dtype) [auto_select.rs]
+        → VmInstr { ..., dtype } [instr.rs]
+          → dtype.x86_elem_strategy() [x86_lower.rs]
+            → Native(elem_bytes) / WidenCompute / Unsupported
+```
+
+**传播方向严格单向：从 tensor metadata 向下传播到 VmInstr 构造，再向下到 ISA lowering。禁止反向推断或独立计算。**
+
+### 唯一合法的 `QuantPrecision::F32` 出现场景
+
+1. ✅ **无输入 tensor 的安全回退**：`op_input_dtype()` 和图级 `graph_dtype` 中 `.unwrap_or(QuantPrecision::F32)` — 当图/op 没有输入 tensor 时使用 F32 作为默认值
+2. ✅ **QTapSTG 验证后使用**：`lower_qtap_stg()` 已验证 `dtype != F32` 返回 Error，因此内部 VecLoad/VecStore 使用 F32 合法
+3. ✅ **测试代码中的 fixture**：`#[test]` 内的 VmInstr 构造使用 F32 作为测试数据
+4. ✅ **`infer_result_dtype()` 的零 slot 回退**：当 `TypedSlot` 列表为空时返回 F32（不可能发生的边界条件）
+5. ❌ **除此之外，任何 `QuantPrecision::F32` 的出现都是 bug**
 
 ### 禁止规则
 
@@ -435,18 +458,24 @@ JIT 编译的全层融合图二进制缓存（L3 磁盘层）。7 天 TTL 自动
 2. ❌ **禁止 `computation_elem_bytes()` 硬编码 F32**：必须用 `op_input_dtype(op, graph).elem_bytes()`
 3. ❌ **禁止硬件不支持时 fallback 到 F32**：必须返回 Error
 4. ❌ **禁止运行时 `match dtype` 分支**：dtype 在编译时 bake 进机器码，运行时零分支
+5. ❌ **禁止 dtype 身份匹配驱动指令选择**：使用 `dtype.x86_elem_strategy()` 属性方法，不使用 `match dtype { F32 => ..., BF16 => ... }`
+6. ❌ **禁止在 VmInstr 构造时省略 dtype 传播**：所有 emit 函数必须接受 dtype 参数并传递给 VmInstr
 
 ### 审计命令
 
 ```bash
-# 硬编码 QuantPrecision::F32（仅 op_input_dtype 默认值例外）
-grep -rn "QuantPrecision::F32" ../gllm-kernels/src/compiler/codegen/vm/plan_lower.rs | grep -v "op_input_dtype\|unwrap_or"
+# 硬编码 QuantPrecision::F32（排除唯一合法场景：op_input_dtype 回退、QTapSTG 验证后、测试代码）
+cd ../gllm-kernels
+grep -rn "QuantPrecision::F32" src/compiler/codegen/vm/ --include="*.rs" | grep -v "#\[test\]\|fn test_\|mod tests" | grep -v "unwrap_or" | grep -v "//.*F32\|///"
 
 # computation_elem_bytes 已废弃
 grep -rn "computation_elem_bytes" ../gllm-kernels/src/compiler/codegen/vm/
 
 # row_stride_bytes 已废弃
 grep -rn "row_stride_bytes" ../gllm-kernels/src/compiler/codegen/vm/
+
+# 验证 auto_select.rs 零硬编码
+grep -n "QuantPrecision::F32" src/compiler/codegen/vm/auto_select.rs | grep -v "//"
 ```
 
 ## Common Commands

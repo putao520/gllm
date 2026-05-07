@@ -153,6 +153,7 @@ impl EmbedLookupOnlyGraph {
         let compiled = compiler
             .compile_graph(&g)
             .map_err(|e| SemanticGatekeeperError::SmallGraph(format!("Gather compile failed: {e}")))?;
+        compiler.print_resource_report();
 
         Ok(Self {
             hidden_size,
@@ -411,6 +412,7 @@ impl KProjOnlyGraph {
                 "RmsNorm compile failed for layer {layer_idx}: {e}"
             ))
         })?;
+        compiler.print_resource_report();
 
         // ── Stage 2: Gemm(norm_out, k_w) → k_out ──
         let mut gg = CompilerGraph::new();

@@ -46,7 +46,7 @@ pub struct CompilerGraph {
 /// 张量描述 — 携带量化元数据供 StrategySelector 使用 (ARCH-COMPUTE-TIME-DEQUANT)
 pub struct TensorDesc {
     pub shape: Vec<SymDim>,
-    pub dtype: DType,                // 计算精度 (F32 累加)
+    pub dtype: DType,                // 计算精度 (从模型元数据推断, 00-PHILOSOPHY §4)
     pub source_quant: QuantType,     // 原始量化格式 (Q4_K / BF16 / F32 原生 / MXFP4)
     pub block_size: Option<usize>,   // 量化块大小 (MXFP4=32, Q4_K=256, F32=None)
 }

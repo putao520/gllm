@@ -3051,3 +3051,320 @@ output_mode_selector 传入:
   > 0 → generate: token 数量
   == 0 → classify/encode: output buffer 已填充
 ```
+
+## §10 编译管线三层并行化
+
+> **核心洞察**: mega-kernel 编译完全串行处理所有 fusion groups。
+> 异构模型（Gemma-4）有 4 种层类型（ss/fs/sl/fl），每种类型有独立的 fusion group 序列，
+> 它们之间编译完全独立。三层并行化将编译时间从 O(总 groups) 降低到 O(最慢层类型)。
+
+### §10.1 基础设施：LoweringContext
+
+**问题**: `emit_fusion_groups` 有 16 个参数，大量参数在调用链中重复传递。
+`emit_standalone_op`、`emit_gemm_inline_with_hook` 等函数同样参数膨胀。
+新增 `ResourceBudget` 等参数会进一步恶化。
+
+**方案**: `LoweringContext<'a>` 持有编译会话的所有不可变共享状态：
+
+```rust
+pub struct LoweringContext<'a> {
+    pub width: SimdWidth,
+    pub sym_map: &'a SymDimSlotMap,
+    pub registry: Option<&'a ScalarOpRegistry>,
+    pub hook: Option<&'a dyn IsaHook>,
+    pub budget: Option<ResourceBudget>,
+    pub rope_req: Option<&'a RopeCacheRequirement>,
+    pub ple_req: Option<&'a PleScratchRequirement>,
+    pub dwc_req: Option<&'a DwcScratchRequirement>,
+}
+```
+
+**约束**:
+- `LoweringContext` 一旦构造就不可变 — 编译会话期间 `width`/`sym_map`/`hook`/`budget` 不变
+- 通过 `&LoweringContext` 传递，不消耗所有权
+- 所有 emit 函数签名简化为 `ctx: &LoweringContext` + 必要的局部参数
+
+### §10.2 EmitState — emit_fusion_groups 可变状态抽取
+
+**问题**: `emit_fusion_groups` 内部有 5 个跨迭代可变状态变量：
+
+```
+current_abi: &mut AbiPtrs           — ABI 指针集 (层间 output→input 交换)
+hetero_phase: HeteroPhase           — 异构层模板阶段追踪
+in_layer_loop: bool                 — 是否已进入层循环
+hetero_seg_byte_offset: Option<VRegId> — 异构段偏移
+hetero_seg_weight_base: Option<VRegId> — 异构段权重基址
+```
+
+这些状态变量阻止了 emit_fusion_groups 被拆分为可并行的子函数。
+
+**方案**: 抽取为 `EmitState` 结构体：
+
+```rust
+pub struct EmitState {
+    /// ABI 指针集 — 层间 output→input 交换
+    pub abi: AbiPtrs,
+    /// 异构层模板阶段追踪
+    pub hetero_phase: HeteroPhase,
+    /// 是否已进入层循环
+    pub in_layer_loop: bool,
+    /// 异构段偏移 VReg
+    pub hetero_seg_byte_offset: Option<VRegId>,
+    /// 异构段权重基址 VReg
+    pub hetero_seg_weight_base: Option<VRegId>,
+}
+```
+
+**状态机模型**: `emit_fusion_groups` 的执行是一个有限状态机：
+
+```
+EmitState {
+    hetero_phase: HeteroPhase (5 状态)
+    ├── BeforeLayers      — embed 阶段，非 layer ops
+    ├── SlidingSmall(ss)  — 在 ss 层循环内
+    ├── FullSmall(fs)     — fs 层模板
+    ├── SlidingLarge(sl)  — sl 层循环内
+    └── FullLarge(fl)     — fl 层模板
+
+    in_layer_loop: bool
+    ├── false → 层循环外 (embed/lm_head)
+    └── true  → 层循环内 (op 已包在 LoopBegin/LoopEnd 中)
+}
+```
+
+**状态转移**:
+
+```
+BeforeLayers --(遇到 "layer_sliding_small.*" op)--> SlidingSmall(0)
+SlidingSmall(i) --(LoopEnd + 段内迭代完成)--> SlidingSmall(i+1) | FullSmall
+FullSmall --(遇到 "layer_sliding_large.*" op)--> SlidingLarge(0)
+SlidingLarge(i) --(LoopEnd + 段内迭代完成)--> SlidingLarge(i+1) | FullLarge
+FullLarge --(遇到非 layer op)--> BeforeLayers (post-lm_head 阶段)
+```
+
+**并行化关键**: 每种层类型（ss/fs/sl/fl）的编译拥有独立的 `EmitState` 快照。
+层模板编译函数 `compile_layer_type_body` 从快照初始化自己的 `EmitState`，
+编译完成后返回 `LayerTemplate`（包含 VmProgram + ABI 映射）。
+
+### §10.3 第一层：层模板并行编译（最大收益）
+
+**核心洞察**: 异构模型（Gemma-4）的 4 种层类型各自有一组 fusion groups。
+4 种类型之间编译完全独立，可以用 rayon 并行编译。
+
+**数据结构**:
+
+```rust
+/// 编译后的层模板 — 独立 VmProgram + ABI 指针映射
+pub struct LayerTemplate {
+    pub body: VmProgram,
+    pub abi_map: LayerAbiMap,
+}
+
+pub struct LayerAbiMap {
+    pub input_ptr: VRegId,
+    pub weight_ptr: VRegId,
+    pub output_ptr: VRegId,
+    pub scratch_base: VRegId,
+}
+```
+
+**编译函数**:
+
+```rust
+fn compile_layer_type_body(
+    ctx: &LoweringContext,
+    group_range: Range<usize>,
+    plan: &FusionPlan,
+    graph: &CompilerGraph,
+    alloc: &BufferAllocation,
+    state: &EmitState,
+    resolver: &TensorPtrResolver,
+) -> Result<LayerTemplate, CompilerError>
+```
+
+**当前状态**: 仅支持 `Standalone` / `LoopFusion`。
+
+**扩展计划**: 逐步支持所有 FusionMode：
+
+| FusionMode | 模板编译可行性 | 实现策略 |
+|------------|---------------|---------|
+| `Standalone` / `LoopFusion` | ✅ 已支持 | 直接 emit |
+| `EpilogueInjection` | 可行 | GEMM + epilogue trace 整体编译为模板 |
+| `NormIntoGemm` | 可行 | Norm→GEMM 融合整体编译 |
+| `QkvSharedInput` | 可行 | 3× GEMM + shared pack_a 整体编译 |
+| `TileLevelFusion` | 需评估 | 嵌入 GEMM MC 循环的前驱算子需要 scratch 布局 |
+| `ComputeRoot` | 需评估 | 前驱完整计算 → GEMM，scratch 生命周期跨组 |
+| `FFNBlock` | 可行 | Gate+Up+Act+Mul 整体编译 |
+| `CrossLayerResidual` | 不可行 | 跨层残差依赖外部层输出 |
+| `FusedQkvNormRope` | 可行 | 6 算子链整体编译 |
+
+**并行实例化**: 在 `emit_fusion_groups` 中：
+
+```
+1. 预分析 FusionPlan，识别每种层类型的 group 边界
+   ├── 分析 anchor op label 前缀 ("layer_sliding_small.*", "layer_full_small.*", ...)
+   ├── 对每种层类型收集 group_range
+   └── 构造每种层类型的 EmitState 快照
+
+2. 使用 rayon 并行编译 N 个模板
+   templates: Vec<LayerTemplate> = layer_types
+       .par_iter()
+       .map(|(group_range, state)| compile_layer_type_body(ctx, group_range, ...))
+       .collect()
+
+3. 在主 VmProgram 中按顺序实例化模板
+   ├── LoopBegin(outer_segment_loop)
+   │   ├── LoopBegin(inner_sliding_loop)
+   │   │   └── prog.append_with_mapping(ss_template, &ss_abi_subst)
+   │   └── LoopEnd
+   │   └── prog.append_with_mapping(fs_template, &fs_abi_subst)
+   └── LoopEnd
+```
+
+**VmProgram 模板合并**:
+
+```rust
+impl VmProgram {
+    /// 合并模板：VReg 重映射 + ABI 指针替换。
+    /// subst: [(template_vreg, main_prog_vreg)] 替换表
+    pub fn append_with_mapping(&mut self, other: VmProgram, subst: &[(VRegId, VRegId)]);
+}
+```
+
+**替换语义**:
+- 模板内 `DeclareVReg { id }` → 跳过声明，用 subst 映射的 VRegId 替代
+- 模板内 `VRegId` 引用 → 全部替换为主程序对应的 VRegId
+- 模板内 `LoopBegin`/`LoopEnd` → 保留循环结构，VReg 映射后嵌入
+- 新分配的 VReg（非 ABI 指针）→ 主程序分配新的 VRegId，保持独立性
+
+### §10.4 第二层：融合组级并行（中等收益）
+
+**核心洞察**: FusionPlan 的 groups 形成生产-消费 DAG。
+同一拓扑层级的 groups 之间无数据依赖，可以并行 lower。
+
+**依赖分析器**:
+
+```rust
+struct GroupDependencyAnalyzer;
+
+impl GroupDependencyAnalyzer {
+    /// 分析 FusionPlan 的 group 间数据依赖。
+    /// 返回拓扑层级列表：同一层级的 groups 可并行处理。
+    fn analyze(plan: &FusionPlan, graph: &CompilerGraph) -> Vec<Vec<usize>>;
+}
+```
+
+**依赖分析算法**:
+
+```
+1. 对每个 group gi，收集其所有 op 的 input TensorId 集合
+2. 对每个其他 group gj，检查是否有 op 的 output TensorId ∈ gi 的 input 集合
+   ├── 是 → gj blocks gi (gi 依赖 gj)
+   └── 否 → 无依赖
+3. 拓扑排序：按依赖关系分层，每层的 groups 无互相依赖
+   ├── level 0: 无依赖的 groups (如 embed 阶段)
+   ├── level 1: 仅依赖 level 0 的 groups
+   └── level N: 依赖 level 0..N-1 的 groups
+4. 循环依赖检测：无剩余 group 可分配时，将剩余 group 合入同一层
+```
+
+**并行 lower**:
+
+```rust
+fn lower_parallel_groups(
+    ctx: &LoweringContext,
+    groups: &[usize],
+    plan: &FusionPlan,
+    graph: &CompilerGraph,
+    alloc: &BufferAllocation,
+    resolver: &TensorPtrResolver,
+) -> Vec<(usize, VmProgram)>
+```
+
+**约束**:
+- 同一拓扑层级内无依赖的 groups 可并行编译到独立 VmProgram
+- 层内 groups 有顺序依赖（attn → ffn），不能并行
+- `emit_inter_group_casts` 需要 producer group 先完成才能更新 resolver
+- 组间 cast 在所有 groups 编译完成后统一处理
+- 跨层残差（`CrossLayerResidual`）的 group 不能与其他组并行
+
+### §10.5 第三层：自调优并行（精确优化）
+
+**核心洞察**: 每个 GEMM 算子的 FMA 策略选择可以并行评估多种候选方案。
+
+**成本模型**:
+
+```rust
+/// 硬件资源预算 — 从 IsaProfile 推导
+pub struct ResourceBudget {
+    pub l1_bytes: usize,
+    pub l2_bytes: usize,
+    pub avail_regs: usize,
+}
+
+/// FMA 候选策略 + 估算成本
+pub struct FmaCandidate {
+    pub strategy: FmaStrategy,
+    pub estimated_cost: f64,
+}
+```
+
+**成本评估维度**:
+
+```
+estimate_strategy_cost(strategy, m, n, k, budget):
+  ├── 计算吞吐: FMA 单元利用率 (utilization rate)
+  ├── 寄存器压力: 累加器占用 vs 可用寄存器预算 (spill penalty)
+  └── Cache 友好性: 分块是否 fit L1/L2
+```
+
+**并行评估**:
+
+```rust
+pub fn select_fma_best(
+    hook: &dyn IsaHook, m: usize, n: usize, k: usize,
+    dtype: DType, budget: &ResourceBudget,
+) -> FmaStrategy {
+    let candidates = select_fma_candidates(hook, m, n, k, dtype);
+    candidates.into_par_iter()
+        .map(|c| evaluate_cost(c, m, n, k, budget))
+        .min_by(|a, b| a.estimated_cmp(b))
+        .map(|c| c.strategy)
+        .unwrap_or_else(|| hook.select_fma(m, n, k, dtype))
+}
+```
+
+### §10.6 实施顺序
+
+```
+1. 基础设施 (已完成): LoweringContext + 函数签名重构
+2. 第三层 (已完成): select_fma_best + ResourceBudget + 成本模型
+3. EmitState 抽取: 从 emit_fusion_groups 提取可变状态 → EmitState 结构体
+4. compile_layer_type_body 扩展: 支持 EpilogueInjection / TileLevelFusion / ComputeRoot
+5. 第一层 (层模板并行): LayerTemplate + append_with_mapping + rayon 并行编译
+6. 第二层 (融合组并行): GroupDependencyAnalyzer + 拓扑序并行 lower
+```
+
+### §10.7 关键文件
+
+| 文件 | 改动 |
+|------|------|
+| `codegen/vm/plan_lower.rs` | `EmitState`, `LoweringContext`, `compile_layer_type_body` 扩展, rayon 并行路径 |
+| `codegen/vm/isa_hook.rs` | `FmaCandidate`, `ResourceBudget`, `estimate_strategy_cost`, `select_fma_best` (已完成) |
+| `codegen/vm/instr.rs` | `LayerTemplate`, `LayerAbiMap`, `append_with_mapping` (已完成) |
+
+### §10.8 验证
+
+```bash
+# 编译正确性
+cd gllm-kernels && cargo test --lib
+
+# gllm E2E 测试
+cd gllm && cargo test --lib -p gllm
+
+# 异构模型并行编译验证
+cd gllm && cargo test test_e2e_gemma -- --nocapture --test-threads=1
+
+# 编译时间对比
+GLLM_DEBUG_RESOURCE=1 cargo test test_e2e_llama_7b -- --nocapture 2>&1 | grep "compile\|time"
+```

@@ -298,4 +298,82 @@ grep -rn "computation_elem_bytes" src/compiler/codegen/vm/
 
 # row_stride_bytes 已废弃
 grep -rn "row_stride_bytes" src/compiler/codegen/vm/
+
+# emit 函数内部 F32 硬编码（ARCH-EMIT-DTYPE）
+grep -rn "QuantPrecision::F32" src/compiler/codegen/vm/plan_lower.rs | grep -v "op_input_dtype\|unwrap_or"
+
+# auto_lower_trace_raw 应迁移到 typed 版本
+grep -rn "auto_lower_trace_raw\b" src/compiler/codegen/vm/plan_lower.rs
 ```
+
+## §11 emit 函数 dtype 传播契约 (ARCH-EMIT-DTYPE)
+
+> **铁律**：plan_lower.rs 中所有 emit 函数必须接受 `dtype: QuantPrecision` 参数，
+> dtype 由调用方从 `op_input_dtype(op, graph)` 推断并传入。
+> emit 函数内部禁止硬编码 `QuantPrecision::F32`。
+
+### §11.1 dtype 推断入口
+
+```rust
+fn op_input_dtype(op: &CompilerOp, graph: &CompilerGraph) -> QuantPrecision {
+    op.inputs.first()
+        .and_then(|&tid| graph.tensor(tid))
+        .map(|t| t.dtype.to_quant_precision())
+        .unwrap_or(QuantPrecision::F32)  // 仅此处允许 F32 默认值（无输入张量的边缘情况）
+}
+```
+
+**合法调用点**：
+- `dispatch_compute_pattern`：推断 dtype 后传入各 emit 函数
+- `emit_standalone_op`：同上
+- `emit_fusion_groups`：从 fusion group 的第一个 op 推断
+
+**禁止**：emit 函数内部调用 `op_input_dtype()`（dtype 由调用方推断并传入）。
+
+### §11.2 emit 函数签名规范
+
+所有 emit 函数必须添加 `dtype: QuantPrecision` 参数：
+
+| 函数 | dtype 用途 |
+|------|-----------|
+| `emit_elementwise_inline` | `dtype.elem_bytes()` 替换 `computation_elem_bytes()`, VmInstr.dtype |
+| `emit_normlike_inline` | 同上 + `dim * dtype.elem_bytes()` 替换 `row_stride_bytes(dim)` |
+| `emit_normlike_one_group` | 同上 |
+| `emit_layernorm_auto` | 同上 |
+| `emit_softmax_inline` | VmInstr.dtype |
+| `emit_gemm_inline_with_hook` | VmInstr.dtype |
+| `emit_gemm_naive_inline` | VmInstr.dtype |
+| `emit_gemm_blis_inline` | VmInstr.dtype |
+| `emit_gemm_inline_with_epilogue` | VmInstr.dtype |
+| `emit_injective_inline` | 传入 `auto_lower_trace_typed` |
+| `emit_ple_fused_elementwise` | 传入 `auto_lower_trace_typed` |
+| `emit_ple_residual_add` | 传入 `auto_lower_trace_typed` |
+| `emit_gather_inline` | VmInstr.dtype |
+| `emit_column_slice_inline` | VmInstr.dtype |
+| `emit_rope_inline` | VmInstr.dtype |
+| `emit_tiled_attention_inline` | VmInstr.dtype |
+| `emit_moe_router_gemv_inline` | VmInstr.dtype |
+| `emit_moe_topk_dispatch_inline` | VmInstr.dtype |
+| `emit_moe_packed_inline` | VmInstr.dtype |
+| `emit_quant_gemm_inline` | VmInstr.dtype |
+| `emit_row_copy` | VmInstr.dtype |
+
+**豁免**：`emit_zero_fill_bytes` — 与 dtype 无关（纯字节清零）。
+
+### §11.3 auto_select.rs 公共 API
+
+`auto_lower_trace_raw` / `auto_lower_trace` / `auto_lower_trace_into` / `auto_lower_trace_multi`
+均接受 `dtype: QuantPrecision` 参数。
+
+`dispatch_trace_op` 接受 `dtype` 参数，所有 VmInstr 构造使用传入的 `dtype`。
+
+`copy_vreg` / `emit_binop` / `emit_binop_into` / `emit_fwht` 等辅助函数
+接受 `dtype: QuantPrecision` 参数，VmInstr 构造中使用 `dtype`。
+
+**禁止**：auto_select.rs 内部出现 `QuantPrecision::F32` — dtype 始终从调用方传入。
+
+### §11.4 删除目标
+
+所有调用点替换完成后，删除 `lower.rs` 中的：
+- `computation_elem_bytes()` — 硬编码 `size_of::<f32>()` = 4
+- `row_stride_bytes(dim)` — 硬编码 `dim * 4`
