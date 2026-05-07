@@ -1191,6 +1191,12 @@ impl AudioTensorLookup for InMemoryAudioWeights {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize tests that invoke JIT compilation + execution.
+    /// Conformer block JIT execution can corrupt heap metadata,
+    /// causing subsequent tests to produce NaN. This lock prevents pollution.
+    static AUDIO_JIT_LOCK: Mutex<()> = Mutex::new(());
 
     fn small_config() -> AudioConfig {
         // 小模型便于测试: hidden=64, 2 层, 8 heads → head_dim=8 (单 AVX2 vec)
@@ -1398,6 +1404,7 @@ mod tests {
     /// (要求 T45-forward: 形状正确,非全零,非 NaN)。
     #[test]
     fn audio_encode_non_stub_output() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let config = small_config();
         let weights = build_random_weights(&config);
         // 0.25 秒静音 PCM
@@ -1443,6 +1450,7 @@ mod tests {
     /// USM Conformer encoder 集成到 MultimodalEncoder trait。
     #[test]
     fn usm_conformer_encoder_integrates_with_multimodal_context() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use crate::compat::multimodal::{MultimodalContext, MultimodalTokenIds};
 
         let config = small_config();
@@ -1557,6 +1565,7 @@ mod tests {
     /// 最小 JIT 验证: LayerNorm + GEMM (FF1 第一半) 链式稳定。
     #[test]
     fn standalone_layernorm_gemm_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         let config = small_config();
         let seq = 8usize;
@@ -1620,6 +1629,7 @@ mod tests {
     /// 最小 JIT 验证: 单 DepthwiseConv1D 算子是否稳定。
     #[test]
     fn standalone_depthwise_conv_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
         let config = small_config();
         let seq = 8usize;
@@ -1681,6 +1691,7 @@ mod tests {
     #[test]
     #[ignore = "MHA codegen 输出未对齐 reference; is_finite() 检查偶发误判通过 (见函数 doc)"]
     fn standalone_mha_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         let config = small_config();
         let seq = 8usize;
@@ -1738,6 +1749,7 @@ mod tests {
     /// 最小 JIT 验证: 单 LayerNorm 算子是否稳定。
     #[test]
     fn standalone_layernorm_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
         let config = small_config();
         let seq = 8usize;
@@ -1800,6 +1812,7 @@ mod tests {
     /// `usm_conformer_encoder_integrates_with_multimodal_context` 将自然通过。
     #[test]
     fn standalone_ff1_only_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         // 用 seq=3 (< mr=4) 触发 naive 路径而非 BLIS
         let seq = 3usize;
@@ -1857,6 +1870,7 @@ mod tests {
     /// emit_silu_dead_neuron_telemetry 未 gate → 已根治 (见 fix commit)。
     #[test]
     fn standalone_conformer_block_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let config = small_config();
         let num_frames = 8usize;
         let graph = build_conformer_block_graph(num_frames, &config);
@@ -1896,6 +1910,7 @@ mod tests {
     /// (与 Conformer block 图的其他算子无关)。
     #[test]
     fn standalone_mel_projection_gemm_does_not_crash() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let config = small_config();
         // 构造与 audio_encode 内相同的 mel_projection graph
         let graph = build_mel_projection_graph(124, &config);
@@ -2133,6 +2148,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_seq3() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2153,6 +2169,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_gemm_seq3() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_gemm(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2161,6 +2178,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_only_seq3() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ff1(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2169,6 +2187,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_only_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ff1(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2177,6 +2196,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_plus_attn_seq3() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2185,6 +2205,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_plus_attn_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2276,6 +2297,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_attn_conv_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ff1_attn_conv(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2322,6 +2344,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_conv_only_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_conv_only(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2364,6 +2387,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_conv_no_dwc_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_conv_no_dwc(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2397,6 +2421,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_ln_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2432,6 +2457,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_ln_silu_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2457,6 +2483,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_silu_seq8() {
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
         let cfg = small_config();
         let g = build_subgraph_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
