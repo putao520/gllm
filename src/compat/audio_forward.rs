@@ -825,7 +825,7 @@ pub fn audio_encode(
     }
 
     let mut hidden_buf = vec![0.0f32; num_frames * hidden];
-    let mut scratch = vec![0u8; proj_compiled.scratchpad_bytes];
+    let mut scratch = vec![0u8; proj_compiled.scratchpad_bytes.max(65536)];
     unsafe {
         proj_compiled.execute(
             mel_flat.as_ptr() as *const u8,
@@ -839,19 +839,26 @@ pub fn audio_encode(
             scratch.as_mut_ptr(),
         );
     }
+    if let Some((i, &v)) = hidden_buf.iter().enumerate().find(|(_, &v)| !v.is_finite()) {
+        return Err(BackendError::Other(format!(
+            "audio_encode: NaN after mel projection at [{i}]: {v}"
+        )));
+    }
 
     // ── 3. Conformer blocks ──
     // 同一 seq_len 下所有 block 的 graph 结构等价,编译一次复用 num_layers 次
+
     let block_graph = build_conformer_block_graph(num_frames, config);
     let block_compiled = compiler
         .compile_graph(&block_graph)
         .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?;
 
-    let mut scratch_block = vec![0u8; block_compiled.scratchpad_bytes];
+    let mut scratch_block = vec![0u8; block_compiled.scratchpad_bytes.max(65536)];
     let mut out_buf = vec![0.0f32; num_frames * hidden];
 
     for layer_idx in 0..config.num_layers {
         let weights_packed = pack_layer_weights(layer_idx, weights)?;
+
         unsafe {
             block_compiled.execute(
                 hidden_buf.as_ptr() as *const u8,
@@ -865,7 +872,12 @@ pub fn audio_encode(
                 scratch_block.as_mut_ptr(),
             );
         }
-        // 下一层的 input 是本层 output
+
+        if let Some((i, &v)) = out_buf.iter().enumerate().find(|(_, &v)| !v.is_finite()) {
+            return Err(BackendError::Other(format!(
+                "audio_encode: NaN after conformer block layer {layer_idx} at [{i}]: {v}"
+            )));
+        }
         std::mem::swap(&mut hidden_buf, &mut out_buf);
     }
 
@@ -901,7 +913,7 @@ pub fn audio_encode(
     final_weights.extend_from_slice(final_w);
     final_weights.extend_from_slice(final_b);
 
-    let mut scratch_final = vec![0u8; final_compiled.scratchpad_bytes];
+    let mut scratch_final = vec![0u8; final_compiled.scratchpad_bytes.max(65536)];
     unsafe {
         final_compiled.execute(
             hidden_buf.as_ptr() as *const u8,
@@ -1404,7 +1416,7 @@ mod tests {
     /// (要求 T45-forward: 形状正确,非全零,非 NaN)。
     #[test]
     fn audio_encode_non_stub_output() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = small_config();
         let weights = build_random_weights(&config);
         // 0.25 秒静音 PCM
@@ -1450,7 +1462,7 @@ mod tests {
     /// USM Conformer encoder 集成到 MultimodalEncoder trait。
     #[test]
     fn usm_conformer_encoder_integrates_with_multimodal_context() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::compat::multimodal::{MultimodalContext, MultimodalTokenIds};
 
         let config = small_config();
@@ -1565,7 +1577,7 @@ mod tests {
     /// 最小 JIT 验证: LayerNorm + GEMM (FF1 第一半) 链式稳定。
     #[test]
     fn standalone_layernorm_gemm_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         let config = small_config();
         let seq = 8usize;
@@ -1629,7 +1641,7 @@ mod tests {
     /// 最小 JIT 验证: 单 DepthwiseConv1D 算子是否稳定。
     #[test]
     fn standalone_depthwise_conv_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
         let config = small_config();
         let seq = 8usize;
@@ -1691,7 +1703,7 @@ mod tests {
     #[test]
     #[ignore = "MHA codegen 输出未对齐 reference; is_finite() 检查偶发误判通过 (见函数 doc)"]
     fn standalone_mha_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         let config = small_config();
         let seq = 8usize;
@@ -1749,7 +1761,7 @@ mod tests {
     /// 最小 JIT 验证: 单 LayerNorm 算子是否稳定。
     #[test]
     fn standalone_layernorm_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use gllm_kernels::compiler::{CompilerGraph, OpKind};
         let config = small_config();
         let seq = 8usize;
@@ -1812,7 +1824,7 @@ mod tests {
     /// `usm_conformer_encoder_integrates_with_multimodal_context` 将自然通过。
     #[test]
     fn standalone_ff1_only_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use gllm_kernels::compiler::{CompilerGraph, OpKind, SymDim};
         // 用 seq=3 (< mr=4) 触发 naive 路径而非 BLIS
         let seq = 3usize;
@@ -1870,9 +1882,11 @@ mod tests {
     /// emit_silu_dead_neuron_telemetry 未 gate → 已根治 (见 fix commit)。
     #[test]
     fn standalone_conformer_block_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = small_config();
-        let num_frames = 8usize;
+        // Test with num_frames=61 (same as audio_encode produces for 4000-sample silence)
+        // to reproduce the flaky NaN issue
+        let num_frames = 61usize;
         let graph = build_conformer_block_graph(num_frames, &config);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let compiled = compiler
@@ -1885,7 +1899,7 @@ mod tests {
         // 构造非零 hidden_state 输入
         let input: Vec<f32> = (0..num_frames * hidden).map(|i| (i as f32 * 0.001).sin()).collect();
         let mut out = vec![0.0f32; num_frames * hidden];
-        let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1024)];
+        let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(4096)];
         unsafe {
             compiled.execute(
                 input.as_ptr() as *const u8,
@@ -1910,7 +1924,7 @@ mod tests {
     /// (与 Conformer block 图的其他算子无关)。
     #[test]
     fn standalone_mel_projection_gemm_does_not_crash() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = small_config();
         // 构造与 audio_encode 内相同的 mel_projection graph
         let graph = build_mel_projection_graph(124, &config);
@@ -2148,7 +2162,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_seq3() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2169,7 +2183,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_gemm_seq3() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_gemm(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2178,7 +2192,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_only_seq3() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ff1(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2187,7 +2201,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_only_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ff1(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2196,7 +2210,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_plus_attn_seq3() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(3, &cfg);
         let w = layer0_weights(&cfg);
@@ -2205,7 +2219,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_plus_attn_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2297,7 +2311,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ff1_attn_conv_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ff1_attn_conv(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2344,7 +2358,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_conv_only_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_conv_only(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2387,7 +2401,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_conv_no_dwc_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_conv_no_dwc(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2421,7 +2435,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_ln_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2457,7 +2471,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_gemm_silu_ln_silu_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
@@ -2483,7 +2497,7 @@ mod tests {
 
     #[test]
     fn bisect_subgraph_ln_silu_seq8() {
-        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap();
+        let _jit_guard = AUDIO_JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = small_config();
         let g = build_subgraph_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
