@@ -136,13 +136,18 @@ macro_rules! impl_gpu_backend {
                         let out_gpu = bf.alloc_scratchpad_gpu(out_bytes)
                             .map_err(|e| BE::$upload_err_variant(e))?;
                         let kv_ptr = kv_caches.get(seq_idx).map(|h| h.0).unwrap_or(0);
+                        let page_table_gpu = match &seq.page_table {
+                            Some(pt) => bf.upload_to_gpu(pt.as_slice())
+                                .map_err(|e| BE::$upload_err_variant(e))?,
+                            None => 0,
+                        };
 
                         let args = super::gpu_helpers::build_mega_kernel_args(
                             ids_gpu, weight_gpu, kv_ptr, pos_gpu,
                             0, 1, seq_len, sp_gpu, out_gpu,
                             0, 0, 0, 1, 0, 0,
                             0, 0, seq.position, 0, 0, 0,
-                            0,
+                            page_table_gpu,
                         );
                         bf.gpu_launch_mega_kernel(&ptx, "mega_kernel", &args)
                             .map_err(|e| BE::$upload_err_variant(e))?;

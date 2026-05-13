@@ -169,6 +169,29 @@ impl PagedScheduler {
         self.block_size
     }
 
+    /// Export the page table for a request as a flat u32 array.
+    ///
+    /// Each entry maps a logical block index to a physical page ID.
+    /// The mega-kernel uses this for PagedAttention indirect addressing.
+    /// Returns None if the request has no block table (not yet scheduled).
+    ///
+    /// Safety: validates all page IDs are within [0, total_pages).
+    pub fn get_page_table(&self, request_id: RequestId) -> Option<Vec<u32>> {
+        self.block_tables.get(&request_id).map(|bt| {
+            let total_pages = self.allocator.get_total_blocks();
+            bt.blocks.iter().map(|&page_id| {
+                debug_assert!(page_id < total_pages, "page_id {} >= total_pages {}", page_id, total_pages);
+                page_id as u32
+            }).collect()
+        })
+    }
+
+    /// Returns the total number of physical pages in the pool.
+    /// Used for bounds validation of page table entries.
+    pub fn total_pages(&self) -> usize {
+        self.allocator.get_total_blocks()
+    }
+
     pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {
         // Calculate needed blocks for the context
         let needed_blocks = group.context_len.div_ceil(self.block_size);

@@ -353,6 +353,12 @@ pub struct SequenceInput {
     pub tokens: Vec<u32>,
     pub position: usize,
     pub draft_steps: usize,
+    /// PagedAttention page table for this sequence (flat u32 array).
+    ///
+    /// Each entry maps a logical block index to a physical page ID.
+    /// Populated by the executor from PagedScheduler::get_page_table().
+    /// None = contiguous KV access (no paging).
+    pub page_table: Option<Vec<u32>>,
     /// Pre-computed fused embedding sequence for this step (multimodal only).
     ///
     /// ARCH-MULTIMODAL-FUSION (SPEC/02-ARCHITECTURE.md):
@@ -365,6 +371,24 @@ pub struct SequenceInput {
     /// Pure text requests leave this as `None` — they follow the standard
     /// Gather path with zero runtime overhead.
     pub fused_hidden: Option<Vec<f32>>,
+}
+
+impl SequenceInput {
+    /// Validate page table entries against pool bounds.
+    /// Returns Ok(()) if valid, Err with description if any page ID is out of bounds.
+    pub fn validate_page_table(&self, total_pages: usize) -> Result<(), String> {
+        if let Some(ref pt) = self.page_table {
+            for (i, &page_id) in pt.iter().enumerate() {
+                if page_id as usize >= total_pages {
+                    return Err(format!(
+                        "page_table[{}] = {} >= total_pages {} (bounds violation)",
+                        i, page_id, total_pages
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Batched input for the forward pass.
@@ -2082,6 +2106,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 tokens,
                 position,
                 draft_steps: current_draft_steps,
+                page_table: self.scheduler.get_page_table(req_id),
                 fused_hidden,
             });
             request_indices.push(req_id);
@@ -2089,6 +2114,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         if sequences.is_empty() {
             return Ok(());
+        }
+
+        // PA-007: Validate page table bounds before forwarding
+        let total_pages = self.scheduler.total_pages();
+        for seq in &sequences {
+            if let Err(e) = seq.validate_page_table(total_pages) {
+                log::error!("executor: page table validation failed: {e}");
+                return Err(ExecutorError::Backend(BackendError::Other(e)));
+            }
         }
 
         let batch_input = BatchInput { sequences };
@@ -2586,6 +2620,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                                 tokens: spine_tokens.clone(),
                                 position,
                                 draft_steps: spine_tokens.len(),
+                                page_table: self.scheduler.get_page_table(req_id),
                                 fused_hidden: None,
                             });
                             verify_req_indices.push(req_id);
@@ -2729,6 +2764,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             tokens: tokens.to_vec(),
             position: 0,
             draft_steps: 0,
+            page_table: None,
             fused_hidden: None,
         };
 
