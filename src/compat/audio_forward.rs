@@ -447,7 +447,7 @@ fn build_conformer_block_graph(
     );
     let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq_len, inter], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: inter, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, },
         vec![ff1_normed, ff1_in_w],
         vec![ff1_inter],
         "ff1_gemm_in",
@@ -456,7 +456,7 @@ fn build_conformer_block_graph(
     g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
     let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: inter, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, },
         vec![ff1_act, ff1_out_w],
         vec![ff1_proj],
         "ff1_gemm_out",
@@ -479,21 +479,21 @@ fn build_conformer_block_graph(
     );
     let q = g.add_tensor_concrete("q", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_q],
         vec![q],
         "attn_q",
     );
     let k = g.add_tensor_concrete("k", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_k],
         vec![k],
         "attn_k",
     );
     let v = g.add_tensor_concrete("v", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_normed, w_v],
         vec![v],
         "attn_v",
@@ -514,7 +514,7 @@ fn build_conformer_block_graph(
     );
     let attn_proj = g.add_tensor_concrete("attn_proj", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![attn_out, w_o],
         vec![attn_proj],
         "attn_o",
@@ -539,7 +539,7 @@ fn build_conformer_block_graph(
     );
     let conv_pw1_out = g.add_tensor_concrete("conv_pw1", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![conv_normed, conv_pw1_w],
         vec![conv_pw1_out],
         "conv_pw1_gemm",
@@ -568,7 +568,7 @@ fn build_conformer_block_graph(
     g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "conv_silu_post");
     let conv_pw2_out = g.add_tensor_concrete("conv_pw2", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: hidden, dtype: dt, trans_b: false, },
         vec![conv_act, conv_pw2_w],
         vec![conv_pw2_out],
         "conv_pw2_gemm",
@@ -591,7 +591,7 @@ fn build_conformer_block_graph(
     );
     let ff2_inter = g.add_tensor_concrete("ff2_inter", &[seq_len, inter], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: inter, k: hidden, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: inter, k: hidden, dtype: dt, trans_b: false, },
         vec![ff2_normed, ff2_in_w],
         vec![ff2_inter],
         "ff2_gemm_in",
@@ -600,7 +600,7 @@ fn build_conformer_block_graph(
     g.add_op(OpKind::Silu, vec![ff2_inter], vec![ff2_act], "ff2_silu");
     let ff2_proj = g.add_tensor_concrete("ff2_proj", &[seq_len, hidden], ft);
     g.add_op(
-        OpKind::Gemm { m: s_dim.clone(), n: hidden, k: inter, dtype: dt },
+        OpKind::Gemm{ m: s_dim.clone(), n: hidden, k: inter, dtype: dt, trans_b: false, },
         vec![ff2_act, ff2_out_w],
         vec![ff2_proj],
         "ff2_gemm_out",
@@ -709,12 +709,13 @@ fn build_mel_projection_graph(num_frames: usize, config: &AudioConfig) -> Compil
     g.inputs = vec![mel, proj_w];
     let out = g.add_tensor_concrete("hidden_0", &[num_frames, config.hidden_size], dt);
     g.add_op(
-        OpKind::Gemm {
+        OpKind::Gemm{
             m: s_dim,
             n: config.hidden_size,
             k: config.num_mel_bins,
             dtype: dt,
-        },
+                trans_b: false,
+            },
         vec![mel, proj_w],
         vec![out],
         "mel_projection",
@@ -1595,11 +1596,12 @@ mod tests {
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: 1e-5 }, vec![input, nw, nb], vec![normed], "ln");
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(seq),
                 n: inter,
                 k: h,
                 dtype: dt,
+                trans_b: false,
             },
             vec![normed, gw],
             vec![out],
@@ -1844,11 +1846,11 @@ mod tests {
         g.add_op(OpKind::LayerNorm { eps: 1e-5 }, vec![input, nw, nb], vec![normed], "ln");
         let inter_t = g.add_tensor_concrete("inter", &[seq, inter], dt);
         g.add_op(
-            OpKind::Gemm { m: SymDim::Concrete(seq), n: inter, k: h, dtype: dt },
+            OpKind::Gemm{ m: SymDim::Concrete(seq), n: inter, k: h, dtype: dt, trans_b: false, },
             vec![normed, gw], vec![inter_t], "gemm_in",
         );
         g.add_op(
-            OpKind::Gemm { m: SymDim::Concrete(seq), n: h, k: inter, dtype: dt },
+            OpKind::Gemm{ m: SymDim::Concrete(seq), n: h, k: inter, dtype: dt, trans_b: false, },
             vec![inter_t, ow], vec![out], "gemm_out",
         );
 
@@ -2027,7 +2029,7 @@ mod tests {
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln");
         let inter_t = g.add_tensor_concrete("inter_t", &[seq, inter], dt);
-        g.add_op(OpKind::Gemm { m: s, n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        g.add_op(OpKind::Gemm{ m: s, n: inter, k: h, dtype: dt, trans_b: false, }, vec![normed, gw], vec![inter_t], "gemm");
         let out = g.add_tensor_concrete("output", &[seq, inter], dt);
         g.add_op(OpKind::Silu, vec![inter_t], vec![out], "silu");
         g.outputs = vec![out];
@@ -2050,11 +2052,11 @@ mod tests {
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln");
         let inter_t = g.add_tensor_concrete("inter_t", &[seq, inter], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm_in");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: inter, k: h, dtype: dt, trans_b: false, }, vec![normed, gw], vec![inter_t], "gemm_in");
         let act = g.add_tensor_concrete("act", &[seq, inter], dt);
         g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu");
         let out = g.add_tensor_concrete("output", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![act, ow], vec![out], "gemm_out");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: inter, dtype: dt, trans_b: false, }, vec![act, ow], vec![out], "gemm_out");
         g.outputs = vec![out];
         g
     }
@@ -2075,11 +2077,11 @@ mod tests {
         let normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ff1_ln");
         let inter_t = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "ff1_gemm_in");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: inter, k: h, dtype: dt, trans_b: false, }, vec![normed, gw], vec![inter_t], "ff1_gemm_in");
         let act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
         g.add_op(OpKind::Silu, vec![inter_t], vec![act], "ff1_silu");
         let proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: inter, dtype: dt }, vec![act, ow], vec![proj], "ff1_gemm_out");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: inter, dtype: dt, trans_b: false, }, vec![act, ow], vec![proj], "ff1_gemm_out");
         let out = g.add_tensor_concrete("output", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![input, proj], vec![out], "ff1_residual");
         g.outputs = vec![out];
@@ -2111,28 +2113,28 @@ mod tests {
         let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![input, ff1_nw, ff1_nb], vec![ff1_normed], "ff1_ln");
         let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_gemm_in");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: inter, k: h, dtype: dt, trans_b: false, }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_gemm_in");
         let ff1_act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
         g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
         let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: inter, dtype: dt }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_gemm_out");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: inter, dtype: dt, trans_b: false, }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_gemm_out");
         let after_ff1 = g.add_tensor_concrete("after_ff1", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![input, ff1_proj], vec![after_ff1], "ff1_residual");
 
         let attn_normed = g.add_tensor_concrete("attn_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: config.layer_norm_eps }, vec![after_ff1, attn_nw, attn_nb], vec![attn_normed], "attn_ln");
         let q = g.add_tensor_concrete("q", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_q], vec![q], "attn_q");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_q], vec![q], "attn_q");
         let k = g.add_tensor_concrete("k", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_k], vec![k], "attn_k");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_k], vec![k], "attn_k");
         let v = g.add_tensor_concrete("v", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_v], vec![v], "attn_v");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_v], vec![v], "attn_v");
         let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
         g.add_op(OpKind::MultiHeadAttention {
             seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false, attention_sinks: false,
         }, vec![q, k, v], vec![attn_out], "attn_mha");
         let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![attn_out, w_o], vec![attn_proj], "attn_o");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_out, w_o], vec![attn_proj], "attn_o");
         let after_attn = g.add_tensor_concrete("output", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![after_ff1, attn_proj], vec![after_attn], "attn_residual");
         g.outputs = vec![after_attn];
@@ -2262,28 +2264,28 @@ mod tests {
         let ff1_normed = g.add_tensor_concrete("ff1_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, ff1_nw, ff1_nb], vec![ff1_normed], "ff1_ln");
         let ff1_inter = g.add_tensor_concrete("ff1_inter", &[seq, inter], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: inter, k: h, dtype: dt }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_in");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: inter, k: h, dtype: dt, trans_b: false, }, vec![ff1_normed, ff1_iw], vec![ff1_inter], "ff1_in");
         let ff1_act = g.add_tensor_concrete("ff1_act", &[seq, inter], dt);
         g.add_op(OpKind::Silu, vec![ff1_inter], vec![ff1_act], "ff1_silu");
         let ff1_proj = g.add_tensor_concrete("ff1_proj", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: inter, dtype: dt }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_out");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: inter, dtype: dt, trans_b: false, }, vec![ff1_act, ff1_ow], vec![ff1_proj], "ff1_out");
         let after_ff1 = g.add_tensor_concrete("after_ff1", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![input, ff1_proj], vec![after_ff1], "ff1_res");
 
         let attn_normed = g.add_tensor_concrete("attn_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![after_ff1, attn_nw, attn_nb], vec![attn_normed], "attn_ln");
         let q = g.add_tensor_concrete("q", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_q], vec![q], "q");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_q], vec![q], "q");
         let k = g.add_tensor_concrete("k", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_k], vec![k], "k");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_k], vec![k], "k");
         let v = g.add_tensor_concrete("v", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_normed, w_v], vec![v], "v");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_normed, w_v], vec![v], "v");
         let attn_out = g.add_tensor_concrete("attn_out", &[seq, h], dt);
         g.add_op(OpKind::MultiHeadAttention {
             seq_len: s.clone(), num_heads: nh, num_kv_heads: nh, head_dim: hd, causal: false, attention_sinks: false,
         }, vec![q, k, v], vec![attn_out], "mha");
         let attn_proj = g.add_tensor_concrete("attn_proj", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![attn_out, w_o], vec![attn_proj], "o");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![attn_out, w_o], vec![attn_proj], "o");
         let after_attn = g.add_tensor_concrete("after_attn", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![after_ff1, attn_proj], vec![after_attn], "attn_res");
 
@@ -2291,7 +2293,7 @@ mod tests {
         let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![after_attn, conv_nw, conv_nb], vec![conv_normed], "conv_ln");
         let conv_pw1_out = g.add_tensor_concrete("conv_pw1_out", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "conv_pw1");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "conv_pw1");
         let conv_glu = g.add_tensor_concrete("conv_glu", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "conv_glu");
         let conv_dw = g.add_tensor_concrete("conv_dw", &[seq, h], dt);
@@ -2302,7 +2304,7 @@ mod tests {
         let conv_act = g.add_tensor_concrete("conv_act", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "conv_silu");
         let conv_pw2_out = g.add_tensor_concrete("conv_pw2_out", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "conv_pw2");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "conv_pw2");
         let after_conv = g.add_tensor_concrete("output", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![after_attn, conv_pw2_out], vec![after_conv], "conv_res");
         g.outputs = vec![after_conv];
@@ -2338,7 +2340,7 @@ mod tests {
         let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, conv_nw, conv_nb], vec![conv_normed], "ln");
         let conv_pw1_out = g.add_tensor_concrete("pw1", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
         let conv_glu = g.add_tensor_concrete("glu", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "glu_silu");
         let conv_dw = g.add_tensor_concrete("dw", &[seq, h], dt);
@@ -2349,7 +2351,7 @@ mod tests {
         let conv_act = g.add_tensor_concrete("act", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "act_silu");
         let conv_pw2_out = g.add_tensor_concrete("pw2", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
         let out = g.add_tensor_concrete("output", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![input, conv_pw2_out], vec![out], "res");
         g.outputs = vec![out];
@@ -2383,7 +2385,7 @@ mod tests {
         let conv_normed = g.add_tensor_concrete("conv_normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, conv_nw, conv_nb], vec![conv_normed], "ln");
         let conv_pw1_out = g.add_tensor_concrete("pw1", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s.clone(), n: h, k: h, dtype: dt }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
+        g.add_op(OpKind::Gemm{ m: s.clone(), n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_normed, conv_pw1], vec![conv_pw1_out], "pw1");
         let conv_glu = g.add_tensor_concrete("glu", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_pw1_out], vec![conv_glu], "glu_silu");
         // skip DWC, treat conv_glu as conv_dw
@@ -2392,7 +2394,7 @@ mod tests {
         let conv_act = g.add_tensor_concrete("act", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![conv_bn_out], vec![conv_act], "act_silu");
         let conv_pw2_out = g.add_tensor_concrete("pw2", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![conv_act, conv_pw2], vec![conv_pw2_out], "pw2");
         let out = g.add_tensor_concrete("output", &[seq, h], dt);
         g.add_op(OpKind::Add, vec![input, conv_pw2_out], vec![out], "res");
         g.outputs = vec![out];
@@ -2424,7 +2426,7 @@ mod tests {
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln1");
         let inter_t = g.add_tensor_concrete("inter_t", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![normed, gw], vec![inter_t], "gemm");
         let act = g.add_tensor_concrete("act", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu");
         let out = g.add_tensor_concrete("output", &[seq, h], dt);
@@ -2458,7 +2460,7 @@ mod tests {
         let normed = g.add_tensor_concrete("normed", &[seq, h], dt);
         g.add_op(OpKind::LayerNorm { eps: cfg.layer_norm_eps }, vec![input, nw, nb], vec![normed], "ln1");
         let inter_t = g.add_tensor_concrete("inter_t", &[seq, h], dt);
-        g.add_op(OpKind::Gemm { m: s, n: h, k: h, dtype: dt }, vec![normed, gw], vec![inter_t], "gemm");
+        g.add_op(OpKind::Gemm{ m: s, n: h, k: h, dtype: dt, trans_b: false, }, vec![normed, gw], vec![inter_t], "gemm");
         let act = g.add_tensor_concrete("act", &[seq, h], dt);
         g.add_op(OpKind::Silu, vec![inter_t], vec![act], "silu1");
         let bn = g.add_tensor_concrete("bn", &[seq, h], dt);

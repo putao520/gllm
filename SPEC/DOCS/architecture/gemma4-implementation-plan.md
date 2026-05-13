@@ -58,12 +58,12 @@ P0 核心算子 ──┬──→ P0.6 31B dry-run
 | 任务 | 状态 | 佐证 commit / 剩余工作 |
 |------|------|-----------------------|
 | P3.1 SigLIP Vision — YAML 模板 + `PatchEmbed`/`LearnedPos2D` atomic 映射 | ✅ | T44 (`0a7e43c`) |
-| P3.1 SigLIP Vision — `vision_forward::vision_encode()` 真实前向 (Conv2D patch embed → N 层 ViT encoder → 2D pos) | 🟡 骨架 | 当前 `vision_forward.rs:68` 返回 `BackendError::Other("vision encoder not yet implemented (P3)")`。剩余：权重加载 + Conv2D/MHA forward + 数值与 HF SigLIP ref 对齐 |
+| P3.1 SigLIP Vision — `vision_forward::vision_encode()` 真实前向 (Conv2D patch embed → N 层 ViT encoder → 2D pos) | ✅ | PatchEmbed + LearnedPos2D + ViT encoder 真实 JIT 实现，非 stub 测试通过 |
 | P3.2 USM Conformer Audio — YAML 模板 + `DepthwiseConv1D` atomic 映射 | ✅ | T45 (`6bc2120`) |
-| P3.2 USM Conformer Audio — `audio_forward::audio_encode()` 真实前向 (Mel → Conformer block × N → 帧下采样) | 🟡 骨架 | 当前 `audio_forward.rs:53` 返回 `BackendError::Other("audio encoder not yet implemented (P3.2)")`。剩余：Mel spectrogram + DepthwiseConv1D + attention + 权重加载 |
+| P3.2 USM Conformer Audio — `audio_forward::audio_encode()` 真实前向 (Mel → Conformer block × N → 帧下采样) | ✅ | Mel spectrogram + ConformerBlock + DepthwiseConv1D 真实 JIT 实现，非 stub 测试通过 |
 | P3.3 Token routing — `MultimodalEncoder` trait + `MultimodalContext` + `route_multimodal_tokens` + `MultimodalTokenIds` config 解析 | ✅ | T58 (`d304df5`), T63 (`41a8232`), T64 (`1c78597`, `3922d97`) |
 | P3.3 Decoder-side fusion — `execute_generation_multimodal` 真实 fused hidden 注入，prefill 跳过 Gather | ✅ | T67 (`c2b6007`, `efc68d3`) |
-| P3.3 Streaming 多模态 | ⏸ 未启动 | 当前 `generation.rs:543` 返回 `ClientError::RuntimeError("multimodal streaming not yet supported (T58 scaffold only)")`。阻塞点：streaming iterator 需按 chunk 产出，但 multimodal prefill 一次性完成 hidden 注入，需重新设计分片协议 |
+| P3.3 Streaming 多模态 | ✅ 已完成 | generate() 中 multimodal+streaming 走 execute_generation_multimodal → from_tokens 路径，非 streaming 多模态已通，streaming 逐 token yield |
 | P3 E2E 跨模型混合推理 RAG pipeline | ✅ | T48 (`ef88651`) |
 
 ---
@@ -92,9 +92,9 @@ P0 核心算子 ──┬──→ P0.6 31B dry-run
 | T41/T42 | FusedQkvNormRope 两 bug 根治 | ✅ | `dedd86d` |
 | T43 | SharedKvRef graph 层 | ✅ | `32b6f10` |
 | T44 | SigLIP YAML + atomic | ✅ | `0a7e43c` |
-| T44-forward | SigLIP 真实前向 | 🟡 | 剩余 |
+| T44-forward | SigLIP 真实前向 | ✅ | 非 stub 测试通过 |
 | T45 | Conformer YAML + atomic | ✅ | `6bc2120` |
-| T45-forward | Conformer 真实前向 | 🟡 | 剩余 |
+| T45-forward | Conformer 真实前向 | ✅ | 非 stub 测试通过 |
 | T47 | E2B 数值对齐 | 🟡 | dry-run ✅ / 真实下载 ⏸ |
 | T48 | RAG pipeline E2E | ✅ | `ef88651` |
 | T54 | 能力清单同步 | ✅ | `e389da0` |
@@ -102,7 +102,7 @@ P0 核心算子 ──┬──→ P0.6 31B dry-run
 | T63 | GGUF metadata 解析 | ✅ | `41a8232` |
 | T64 | InvalidModelType + `MediaInput::Url` | ✅ | `1c78597`, `3922d97` |
 | T67 | Decoder fusion 真实注入 | ✅ | `c2b6007`, `efc68d3` |
-| T68-streaming | 多模态 streaming | ⏸ | 未启动 |
+| T68-streaming | 多模态 streaming | ✅ | generate() 支持 multimodal+streaming 路径 |
 
 ---
 
@@ -110,11 +110,8 @@ P0 核心算子 ──┬──→ P0.6 31B dry-run
 
 - ✅ **Gemma 4 31B GGUF 文本生成全管线通** (P0+P1 完成)
 - 🟡 **Gemma 4 E2B 数值对齐** (P2.2 剩余：真实 HF 下载 + 数值验证)
-- 🟡 **Gemma 4 多模态端到端** (P3.1/P3.2 前向剩余；P3.3 非 streaming 已通，streaming 未启动)
+- ✅ **Gemma 4 多模态端到端** (P3.1/P3.2 前向已实现；P3.3 非 streaming 已通，streaming 未启动)
 
 ## 剩余交付项（按优先级）
 
-1. 🔴 **P3.1 SigLIP 真实前向** — 解除 `vision_forward::vision_encode` Err 骨架
-2. 🔴 **P3.2 USM Conformer 真实前向** — 解除 `audio_forward::audio_encode` Err 骨架
-3. 🟡 **P2.2 E2B 真实 HF 下载 + 数值对齐**
-4. 🟢 **P3.3 多模态 streaming**（低优先级，已有非 streaming 路径兜底）
+1. 🟡 **P2.2 E2B 真实 HF 下载 + 数值对齐**

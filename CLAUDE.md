@@ -69,7 +69,11 @@
 | `DOCS/scheduling/ai-development-guideline.md` | 极简化内核执行底线开发思想原则 | ✅ |
 | `DOCS/scheduling/hgal-scheduler-algorithm.md` | HGAL 调度算法规划基准 | ✅ |
 | `../gllm-kernels/SPEC/ARCH-DATA-FLOW-CONTRACT.md` | **数据流唯一来源契约** — lower/executor 每个值的唯一数据源映射表，禁止独立计算/反推/硬编码 | ✅ |
-| `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md` | **全虚拟化编译管线 (SSOT)** — 元抽象: 编译时映射函数替代运行时物理操作; 十维全虚拟化图谱; VTC 虚拟 tensor; PDT 拓扑融合; 7 轮虚拟化求解; Phase 3 唯一物化点; §1.5.3 Session KV Cache 复用 + Multimodal Fused Hidden 注入 + SgDetect/SgInject 共享内存; §6.5/§6.6 Session/Multimodal 数据流契约; 后端无关 ABI 参数布局 (x86_64/AArch64/GPU) | 🟡 设计完成，实施中 |
+| `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md` | **全虚拟化编译管线 (SSOT)** — 元抽象: 编译时映射函数替代运行时物理操作; 十维全虚拟化图谱; VTC 虚拟 tensor; PDT 拓扑融合; 7 轮虚拟化求解; Phase 3 唯一物化点; §1.5.3 Session KV Cache 复用 + Multimodal Fused Hidden 注入 + SgDetect/SgInject 共享内存; §6.5/§6.6 Session/Multimodal 数据流契约; 后端无关 ABI 参数布局 (x86_64/AArch64/GPU); **§0.8 dtype 感知编译与去数据搬移** (REQ-DTYPE-001~008: LoweringContext.dtype 穿透, emit_* 函数参数化, 融合组 dtype 连续性, 布局协商 dtype 感知, GEMM 累加策略, Epilogue 窄化写回, dtype 代数重关联, 交换律判定矩阵) | ✅ 全部实现完成 |
+| `15-GPU-HOST-GLUE.md` | **GPU Mega-Kernel Host 执行胶水** — 6 `*_gpu_pure` + prepare_gpu_mega_kernel + GPU PTX 编译接入 + Forward-only GPU 编译 + CUDA/HIP/Metal 三后端统一 launch (REQ-GPU-001~012) | ✅ 全部完成 |
+| `16-DEVICE-FUSION.md` | **设备特化融合 PASS** — 12 HardwareProfile 特化融合规则 (SM100 FP4/SM90 TMA/SM80 Tensor Core/SME2 outer product/AVX-512+AMX tile/AVX10.2 深链 epilogue/量化感知融合), 融合代价模型 (REQ-FUS-001~009) | ✅ 全部实现完成 |
+| `17-DEVICE-CODEGEN.md` | **设备特化 JIT codegen** — AArch64 (24→42/45) + GPU (25→42/45) VmInstr 覆盖补齐, auto_select device-aware (REQ-CG-001~015), x86_64 100% 覆盖 | ✅ REQ-CG-001~014 全部完成 (AArch64 6 stubs + GPU 7 组 VmInstr lowering) |
+| `19-KV-CACHE-OPTIMIZATION.md` | **KV Cache 智能优化** — Epilogue 驱动动态稀疏 + 混合精度 + 页级表达 (KIVI/KVTuner/MUSTAFAR/ChunkKV/KVzip/Lexico/CacheSlide 融合, 四维交叉决策, Variant 矩阵编译, REQ-KV-OPT-001~010) | 🟡 SPEC 完成, 待实现 |
 
 ## Technology Stack
 
@@ -95,7 +99,7 @@
 
 ### 0.1 SymDim 动态维度铁律 (ARCH-SYMDIM-CODEGEN)
 > **关联**: SPEC-archive/02-ARCHITECTURE.md §5.3, jit-cache-protocol.md
-> **状态**: 🔴 IN PROGRESS (重构中)
+> **状态**: ✅ 已完成 (CompilerGraph.max_seq_len + BoundExpr::Symbolic + emit_loop)
 
 **问题**: 当前 JIT codegen 假设所有维度在编译时已知（`m: usize`），导致动态 seq_len 需要 hack（硬编码 compile_seq_len=512 + 运行时 `[rbp+16]` 读取）。
 
@@ -230,10 +234,10 @@ gllm 的推理引擎以 JIT 编译为技术基础，根据当前设备最佳 ISA
 | GLM-4 / GLM-5 | ✅ | ✅ | MoE (glm-4.7-flash) |
 | Mistral3 / Ministral | ✅ | ✅ | Sliding Window |
 | Phi4 / Phi4-mini | ✅ | ✅ | Partial RoPE |
-| GptOss (gpt-oss-20b) | 🟡 模板待编写 | 🟡 | MoE + sliding/full attention 交替 + yarn RoPE + RMSNorm + SiLU + attention bias |
+| GptOss (gpt-oss-20b) | ✅ | ✅ | MoE + sliding/full attention 交替 + yarn RoPE + RMSNorm + SiLU + attention bias |
 | DeepSeek V3/R1 / Kimi-K2 | ✅ | ✅ | MoE Router+SharedExperts |
 | XLM-R / XLM-R-Next (Encoder) | ✅ | ✅ | Embedding / Rerank |
-| **Gemma 4 (E2B/E4B/26B-A4B/31B)** | ✅ | ✅ | QkNorm + ValueNorm + DualRoPE + PLE(E2B/E4B) + SharedKvRef page 层 ✅; graph 层 🟡 T43; Vision/Audio 🟡 T44/T45; E2E 数值验证 🟡 T47 |
+| **Gemma 4 (E2B/E4B/26B-A4B/31B)** | ✅ | ✅ | QkNorm + ValueNorm + DualRoPE + PLE(E2B/E4B) + SharedKvRef page 层 ✅ + graph 层 ✅ T43; Vision ✅ T44 + Audio ✅ T45; E2E 数值验证 🟡 T47 |
 
 **Gemma 4 关键差异点** (T21-T42 接入完成):
 - **DualRoPE**: sliding 层 θ=10K + partial=1.0;global 层 θ=1M + partial=0.25 (p-RoPE)
@@ -255,7 +259,6 @@ src/
 ├── tokenizer.rs           # Tokenizer integration
 ├── model_config.rs        # Tensor-driven model config (Ω1)
 ├── weight_loader.rs       # Weight loading utilities
-├── weight_names.rs        # Canonical weight name mappings
 ├── kv_cache.rs            # KV Cache structures
 ├── quantization.rs        # Quantization support
 ├── static_compression.rs  # Static compression utilities
@@ -421,6 +424,8 @@ JIT 编译的全层融合图二进制缓存（L3 磁盘层）。7 天 TTL 自动
 ## 🚨 编译时 dtype 感知 — 原生混合精度 (ARCH-DTYPE-JIT-TYPED)
 
 **铁律：dtype 从模型 TensorMeta 自动推断，JIT 编译时根据 dtype 生成特化机器码，运行时零分支。**
+
+> **SSOT**: `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §0.8` — dtype 感知编译与去数据搬移完整设计（REQ-DTYPE-001~008）
 
 ### 核心规则
 
@@ -711,8 +716,8 @@ Scalar → SymExec → TraceOp → [自动指令选择] → VmInstr → ISA Lowe
 - Phase 1 (`auto_select.rs`): ✅ `auto_lower_trace()` / `auto_lower_trace_raw()` / `auto_lower_trace_multi()` — TraceOp → VmInstr 自动查表
 - Phase 2 (ComputePattern dispatch): ✅ elementwise 自动分发 + Reduction/Injective/NormLike/Gemm 通用处理器
 - Phase 3 (TraceOp 扩展): ✅ Compare/Cast/HReduce/ConditionalBranch 全部已实现
-- Phase 4 (结构算子 TraceOp 化): 🟡 进行中 — Gather 需要扩展 TraceOp 语义（LoadIndexed/StoreIndexed），Attention/MoE 待覆盖
-- Phase 5 (手写 lowering 清除): ❌ `lower_gather`/`lower_mha_with_hook`/`lower_moe_*` 仍为手写，需迁移到 auto_select
+- Phase 4 (结构算子 TraceOp 化): ✅ Gather/Attention/MoE 已迁移到 TraceOp + auto_select
+- Phase 5 (手写 lowering 清除): ✅ `lower_gather`/`lower_mha_with_hook`/`lower_moe_*` 已全部重写为 TraceOp 驱动
 
 **核心验证标准**：整图融合后的 JIT 机器码中，堆栈、寄存器分配、内存布局错误必须为零。通过符号执行 + 自动指令选择从根本上保证正确性，而非逐个修具体 bug。
 

@@ -19,6 +19,7 @@ pub mod proto {
 
 mod attributes;
 mod external;
+pub mod graph_convert;
 mod model;
 mod pack;
 mod tensor;

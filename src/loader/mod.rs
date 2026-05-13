@@ -22,6 +22,7 @@ pub mod format_detector;
 pub mod gguf;
 pub mod hf_hub;
 pub mod modelscope;
+pub mod name_map;
 pub mod onnx;
 pub mod parallel;
 pub mod pytorch;
@@ -52,6 +53,16 @@ pub struct QuantizedTensor {
     pub quant_type: QuantType,
     pub shape: Vec<usize>,
     pub ggml_dtype: GgmlDType,
+}
+
+/// A native float tensor stored as raw bytes in its original dtype (BF16/F16).
+/// Not converted to F32 — preserves original precision, saves 2× memory vs F32 expansion.
+/// Bypasses Backend upload path; the raw bytes are consumed directly by weight packing.
+#[derive(Debug, Clone)]
+pub struct RawFloatTensor {
+    pub data: Vec<u8>,
+    pub dtype: Dtype,
+    pub shape: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,104 +154,177 @@ pub fn fallback_source(source: ModelSource) -> ModelSource {
 
 // --- Tensor Role & Provider Logic ---
 
-/// Matches a tensor name to a role and optional layer index
+/// Suffix pattern table for 100% precise tensor role matching.
+///
+/// Each entry: `(suffix_segments, role, is_global)`
+/// - `suffix_segments`: exact path segments after stripping layer prefix and terminal
+/// - `is_global`: true if this tensor has no layer index
+///
+/// Order matters: longer suffixes MUST come before shorter ones to ensure
+/// longest-match-first priority (e.g., "attn_q_norm" before "attn_q").
+///
+/// Derived from weight_names.rs mapping tables — single source of truth.
+const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
+    // ── Global tensors (is_global = true) ──
+    (&["embed_tokens"],                     TensorRole::Embedding,         true),
+    (&["word_embeddings"],                  TensorRole::Embedding,         true),
+    (&["token_embd"],                       TensorRole::Embedding,         true),
+    (&["lm_head"],                          TensorRole::OutputHead,        true),
+    (&["output"],                           TensorRole::OutputHead,        true),
+    (&["output_layer"],                     TensorRole::OutputHead,        true),
+    (&["output_norm"],                      TensorRole::FinalNorm,         true),
+    (&["norm"],                             TensorRole::FinalNorm,         true),
+    (&["final_layernorm"],                  TensorRole::FinalNorm,         true),
+    (&["post_layernorm"],                   TensorRole::FinalNorm,         true),
+    (&["classifier", "dense"],              TensorRole::ClassifierDense,   true),
+    (&["classifier", "out_proj"],           TensorRole::ClassifierOutProj, true),
+    (&["classifier"],                       TensorRole::ClassifierOutProj, true),
+    (&["score"],                            TensorRole::ClassifierOutProj, true),
+    (&["vision_tower", "patch_embed", "proj"], TensorRole::PatchEmbed,    true),
+    (&["patch_embed", "proj"],              TensorRole::PatchEmbed,        true),
+    (&["position_embedding"],               TensorRole::PositionEmbedding, true),
+    (&["embeddings", "position_embedding"], TensorRole::PositionEmbedding, true),
+    (&["rope"],                             TensorRole::Rope,              true),
+
+    // ── Per-layer tensors (is_global = false) ──
+    // Sorted longest-first for unambiguous matching.
+
+    // Attention norms (must come before q_proj/k_proj to win longest match)
+    (&["self_attn", "q_norm"],              TensorRole::AttentionQNorm,    false),
+    (&["self_attn", "k_norm"],              TensorRole::AttentionKNorm,    false),
+    (&["attn_q_norm"],                      TensorRole::AttentionQNorm,    false),
+    (&["attn_k_norm"],                      TensorRole::AttentionKNorm,    false),
+    (&["self_attn", "sinks"],               TensorRole::AttentionSinks,    false),
+    (&["attn_sinks"],                       TensorRole::AttentionSinks,    false),
+
+    // Attention projections
+    (&["self_attn", "q_proj"],              TensorRole::AttentionQuery,    false),
+    (&["self_attn", "k_proj"],              TensorRole::AttentionKey,      false),
+    (&["self_attn", "v_proj"],              TensorRole::AttentionValue,    false),
+    (&["self_attn", "o_proj"],              TensorRole::AttentionOutput,   false),
+    (&["self_attn", "out_proj"],            TensorRole::AttentionOutput,   false),
+    (&["attn_q"],                           TensorRole::AttentionQuery,    false),
+    (&["attn_k"],                           TensorRole::AttentionKey,      false),
+    (&["attn_v"],                           TensorRole::AttentionValue,    false),
+    (&["attn_output"],                      TensorRole::AttentionOutput,   false),
+    (&["wq"],                               TensorRole::AttentionQuery,    false),
+    (&["wk"],                               TensorRole::AttentionKey,      false),
+    (&["wv"],                               TensorRole::AttentionValue,    false),
+    (&["wo"],                               TensorRole::AttentionOutput,   false),
+
+    // BERT attention (3-segment paths)
+    (&["attention", "self", "query"],       TensorRole::AttentionQuery,    false),
+    (&["attention", "self", "key"],         TensorRole::AttentionKey,      false),
+    (&["attention", "self", "value"],       TensorRole::AttentionValue,    false),
+    (&["attention", "output", "dense"],     TensorRole::AttentionOutput,   false),
+    (&["self_attention", "query_key_value"], TensorRole::AttentionQuery,   false),
+    (&["self_attn", "qkv_proj"],             TensorRole::AttentionFusedQkv, false),
+
+    // Layer norms (longest first)
+    (&["attention", "output", "layernorm"], TensorRole::InputNorm,         false),
+    (&["output", "layernorm"],              TensorRole::PostAttnNorm,      false),
+    (&["input_layernorm"],                  TensorRole::InputNorm,         false),
+    (&["post_attention_layernorm"],         TensorRole::PostAttnNorm,      false),
+    (&["pre_feedforward_layernorm"],        TensorRole::InputNorm,         false),
+    (&["post_feedforward_layernorm"],       TensorRole::PostAttnNorm,      false),
+    (&["attn_norm"],                        TensorRole::InputNorm,         false),
+    (&["ffn_norm"],                         TensorRole::PostAttnNorm,      false),
+    (&["layer_norm1"],                      TensorRole::InputNorm,         false),
+    (&["layer_norm2"],                      TensorRole::PostAttnNorm,      false),
+    (&["ln_1"],                             TensorRole::InputNorm,         false),
+    (&["ln_2"],                             TensorRole::PostAttnNorm,      false),
+
+    // FFN
+    (&["mlp", "gate_up_proj"],              TensorRole::FfnGate,           false),
+    (&["mlp", "gate_proj"],                 TensorRole::FfnGate,           false),
+    (&["mlp", "up_proj"],                   TensorRole::FfnUp,             false),
+    (&["mlp", "down_proj"],                 TensorRole::FfnDown,           false),
+    (&["mlp", "fc1"],                       TensorRole::FfnUp,             false),
+    (&["mlp", "fc2"],                       TensorRole::FfnDown,           false),
+    (&["ffn_gate"],                         TensorRole::FfnGate,           false),
+    (&["ffn_up"],                           TensorRole::FfnUp,             false),
+    (&["ffn_down"],                         TensorRole::FfnDown,           false),
+    (&["intermediate", "dense"],            TensorRole::FfnUp,             false),
+    (&["output", "dense"],                  TensorRole::FfnDown,           false),
+    (&["w1"],                               TensorRole::FfnGate,           false),
+    (&["w2"],                               TensorRole::FfnDown,           false),
+    (&["w3"],                               TensorRole::FfnUp,             false),
+
+    // MoE
+    (&["mlp", "gate"],                      TensorRole::MoEGate,           false),
+    (&["mlp", "router"],                    TensorRole::MoEGate,           false),
+    (&["ffn_gate_inp"],                     TensorRole::MoEGate,           false),
+    (&["mlp", "shared_experts", "gate_proj"], TensorRole::MoESharedExpert, false),
+    (&["mlp", "shared_experts", "up_proj"], TensorRole::MoESharedExpert,   false),
+    (&["mlp", "shared_experts", "down_proj"], TensorRole::MoESharedExpert, false),
+
+    // Audio/Vision special
+    (&["conv_module", "depthwise_conv"],    TensorRole::DepthwiseConv,     false),
+];
+
+/// Matches a tensor name to a role and optional layer index.
+///
+/// 100% precise: uses segment-sequence exact matching (not `contains()` heuristics).
+/// Longest suffix matches first to disambiguate (e.g. `attn_q_norm` before `attn_q`).
+/// Unrecognized names return `None` — no guessing.
 pub fn match_tensor_role(name: &str) -> Option<(TensorRole, Option<usize>)> {
     let lower = name.to_ascii_lowercase();
 
-    // Skip bias tensors — they are 1D and should not be matched as projection weights
+    // Skip bias tensors
     if lower.ends_with(".bias") || lower.ends_with("_bias") {
         return None;
     }
 
-    // 1. Extract layer index if present
-    // Common patterns: layers.N, blk.N, blocks.N, .h.N
-    let mut layer_idx = None;
+    let segments: Vec<&str> = lower.split('.').collect();
 
-    // Simple heuristic: look for numeric segments preceded by layer keywords
-    let parts: Vec<&str> = lower.split('.').collect();
-    for (i, part) in parts.iter().enumerate() {
-        if let Ok(idx) = part.parse::<usize>() {
+    // Extract layer index: scan for numeric segment preceded by a layer keyword.
+    let mut layer_idx = None;
+    let mut layer_end = 0;
+    for (i, seg) in segments.iter().enumerate() {
+        if let Ok(idx) = seg.parse::<usize>() {
             if i > 0 {
-                let prefix = parts[i - 1];
-                if matches!(
-                    prefix,
-                    "layers" | "blk" | "blocks" | "h" | "layer" | "block"
+                let prev = segments[i - 1];
+                if matches!(prev,
+                    "layers" | "blk" | "blocks" | "h" | "layer" | "block" | "encoder"
                 ) {
                     layer_idx = Some(idx);
+                    layer_end = i + 1;
                     break;
                 }
             }
         }
     }
 
-    // 2. Match Role
-    // Layer-specific roles — check FIRST to avoid false matches
-    // (e.g. "embeddings.LayerNorm.bias" contains "embed" but is a norm tensor)
-    if lower.contains("norm") || lower.contains("ln_") {
-        return Some((TensorRole::LayerNorm, layer_idx));
-    }
+    // Content segments: after layer prefix, before terminal
+    let content_segs = if layer_end > 0 {
+        &segments[layer_end..]
+    } else {
+        &segments[..]
+    };
 
-    // Embedding
-    if (lower.contains("embed") || lower.contains("embd") || lower.contains("wte")) && layer_idx.is_none() {
-        // Exclude position embeddings and type embeddings
-        if !lower.contains("pos") && !lower.contains("type") {
-            return Some((TensorRole::Embedding, None));
+    // Strip terminal segment ("weight" / "bias" / "scales" / "blocks")
+    let content_segs = if content_segs.last().is_some_and(|s|
+        matches!(*s, "weight" | "bias" | "scales" | "blocks")
+    ) {
+        &content_segs[..content_segs.len() - 1]
+    } else {
+        content_segs
+    };
+
+    // Match against suffix patterns (longest first, already sorted in table)
+    for &(suffix_segs, role, is_global) in SUFFIX_PATTERNS {
+        if is_global != layer_idx.is_none() && !is_global {
+            continue;
         }
-    }
-    // BERT style embedding
-    if lower.contains("word_embeddings") {
-        return Some((TensorRole::Embedding, None));
-    }
 
-    // Output Head
-    if (lower.contains("lm_head") || lower.contains("output"))
-        && !lower.contains("layer")
-        && !lower.contains("attention")
-        && !lower.contains("attn")
-    {
-        return Some((TensorRole::OutputHead, None));
-    }
+        if suffix_segs.len() > content_segs.len() {
+            continue;
+        }
 
-    // Attention
-    if lower.contains("q_proj") || lower.contains("query") || lower.contains("wq") || lower.contains("attn_q") {
-        return Some((TensorRole::AttentionQuery, layer_idx));
-    }
-    if lower.contains("k_proj") || lower.contains("key") || lower.contains("wk") || lower.contains("attn_k") {
-        return Some((TensorRole::AttentionKey, layer_idx));
-    }
-    if lower.contains("v_proj") || lower.contains("value") || lower.contains("wv") || lower.contains("attn_v.") {
-        return Some((TensorRole::AttentionValue, layer_idx));
-    }
-    if lower.contains("o_proj") || lower.contains("wo") || lower.contains("attn_output") {
-        return Some((TensorRole::AttentionOutput, layer_idx));
-    }
-    // BERT Attention Output: "attention.output.dense"
-    if lower.contains("attention") && lower.contains("output") {
-        return Some((TensorRole::AttentionOutput, layer_idx));
-    }
-
-    // MLP
-    if lower.contains("gate_proj") || lower.contains("w1") || lower.contains("ffn_gate") {
-        return Some((TensorRole::FfnGate, layer_idx));
-    }
-    if lower.contains("up_proj") || lower.contains("w3") || lower.contains("ffn_up") {
-        return Some((TensorRole::FfnUp, layer_idx));
-    }
-    if lower.contains("down_proj") || lower.contains("w2") || lower.contains("ffn_down") {
-        return Some((TensorRole::FfnDown, layer_idx));
-    }
-    // BERT Intermediate (FFN Up)
-    if lower.contains("intermediate") {
-        return Some((TensorRole::FfnUp, layer_idx));
-    }
-    // BERT Output (FFN Down) - must check this AFTER attention output
-    if lower.contains("output") && lower.contains("dense") {
-        return Some((TensorRole::FfnDown, layer_idx));
-    }
-
-    // RoPE (if explicit)
-    if lower.contains("rope") {
-        return Some((TensorRole::Rope, layer_idx));
+        let start = content_segs.len() - suffix_segs.len();
+        if content_segs[start..] == *suffix_segs {
+            return Some((role, layer_idx));
+        }
     }
 
     None
@@ -477,6 +561,11 @@ enum TensorProcessResult<B: Backend<E>, E: Element> {
         tensor: B::Tensor,
         placement: crate::compat::backend_trait::WeightPlacement,
         sp_meta: Option<Vec<Vec<u16>>>,
+    },
+    RawFloat {
+        name: String,
+        meta: TensorMeta,
+        data: RawFloatTensor,
     },
     Quantized {
         name: String,
@@ -729,7 +818,7 @@ impl Loader {
     /// 无论原始格式是 ONNX、SafeTensors 还是 GGUF，都转换为统一的 OnnxGraph。
     /// 检测模型架构（统一入口）
     ///
-    /// 优先级：GGUF metadata > 张量名称模式匹配 > manifest fallback
+    /// 优先级：GGUF metadata > config.json model_type > 张量名称模式匹配 > manifest fallback
     pub fn detect_architecture(&self) -> String {
         use crate::manifest::map_architecture_token;
 
@@ -742,12 +831,36 @@ impl Loader {
             }
         }
 
-        // 2. 张量名称模式匹配
+        // 2. config.json model_type / architectures (SafeTensors/ONNX)
+        if let Some(config_path) = self.config_path() {
+            if config_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(config_path) {
+                    if let Ok(json) = serde_json::from_str::<Value>(&content) {
+                        if let Some(arr) = json.get("architectures").and_then(|v| v.as_array()) {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    if let Some(arch) = map_architecture_token(s) {
+                                        return arch;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(s) = json.get("model_type").and_then(|v| v.as_str()) {
+                            if let Some(arch) = map_architecture_token(s) {
+                                return arch;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. 张量名称模式匹配
         if let Some(arch) = self.detect_architecture_from_tensors() {
             return arch;
         }
 
-        // 3. manifest fallback
+        // 4. manifest fallback
         self.manifest.arch.clone()
     }
 
@@ -979,6 +1092,7 @@ impl Loader {
         let mut shapes = HashMap::new();
         let mut meta_map = HashMap::new();
         let mut quantized = HashMap::new();
+        let mut raw_floats = HashMap::new();
         let mut sparse_24 = HashMap::new();
         let mut placements = HashMap::new();
 
@@ -992,6 +1106,11 @@ impl Loader {
                     if let Some(sp) = sp_meta {
                         sparse_24.insert(name, sp);
                     }
+                }
+                TensorProcessResult::RawFloat { name, meta, data } => {
+                    shapes.insert(name.clone(), meta.shape.clone());
+                    meta_map.insert(name.clone(), meta);
+                    raw_floats.insert(name, data);
                 }
                 TensorProcessResult::Quantized { name, meta, data } => {
                     quantized.insert(name.clone(), data);
@@ -1017,7 +1136,7 @@ impl Loader {
         }
 
         Ok(WeightsHandle::new_with_placements(
-            tensors, shapes, meta_map, quantized, sparse_24, placements,
+            tensors, shapes, meta_map, quantized, raw_floats, sparse_24, placements,
         ))
     }
 
@@ -1034,8 +1153,6 @@ impl Loader {
         B: Backend<E>,
         E: Element,
     {
-        use crate::compat::backend_trait::WeightPlacement;
-
         // Quantized tensor — store raw bytes, no tier decision needed
         if let Some(ggml_dt) = provider.ggml_dtype(&meta.name) {
             if let Some(qt) = adapter::ggml_dtype_to_quant_type(ggml_dt) {
@@ -1053,9 +1170,27 @@ impl Loader {
             }
         }
 
-        // Float tensor — dtype convert + transpose + heuristics + tier-aware upload
+        // Float tensor — preserve original dtype for BF16/F16, convert F32/F64 normally
         match meta.dtype {
-            Dtype::F32 | Dtype::F16 | Dtype::BF16 | Dtype::F64 => {
+            Dtype::BF16 | Dtype::F16 => {
+                let data = provider.load_tensor_data(&meta.name)?;
+                let mut cloned_meta = meta.clone();
+                let mut raw = data.into_owned();
+
+                // ARCH-WEIGHT-NO-TRANSPOSE: Linear weights kept in original [out, in] layout.
+                // GEMM lowering handles trans_b=true for HF [N,K] row-major weights.
+
+                Ok(TensorProcessResult::RawFloat {
+                    name: cloned_meta.name.clone(),
+                    meta: cloned_meta.clone(),
+                    data: RawFloatTensor {
+                        data: raw,
+                        dtype: meta.dtype,
+                        shape: cloned_meta.shape.clone(),
+                    },
+                })
+            }
+            Dtype::F32 | Dtype::F64 => {
                 let data = provider.load_tensor_data(&meta.name)?;
                 let explicit_hint = provider.weight_layout_hint(&meta.name);
                 let (cloned_meta, converted_f32, sp_meta_opt) =
@@ -1157,15 +1292,8 @@ fn convert_tensor_to_f32(
     let sp_meta_opt = compress_24_sparsity_heuristic(&mut cloned_meta, &mut converted_f32);
     deduplicate_q_heads_heuristic(&cloned_meta, &mut converted_f32);
 
-    // ARCH-WEIGHT-CANONICAL-LAYOUT: 统一把 HF `[out, in]` Linear 权重物理转置
-    // 到 canonical `[K=in, N=out]` 布局, 内部 op 只需处理 canonical layout。
-    let should_transpose = match explicit_transpose_hint {
-        Some(h) => h,
-        None => matches!(format, WeightFormat::SafeTensors | WeightFormat::PyTorch),
-    };
-    if should_transpose {
-        normalize_linear_weight_layout(&mut cloned_meta, &mut converted_f32);
-    }
+    // ARCH-WEIGHT-NO-TRANSPOSE: Linear weights kept in original [out, in] layout.
+    // GEMM lowering handles trans_b=true for HF [N,K] row-major weights.
 
     Ok((cloned_meta, converted_f32, sp_meta_opt))
 }
@@ -1199,6 +1327,28 @@ fn normalize_linear_weight_layout(meta: &mut TensorMeta, data: &mut Vec<f32>) {
     cache_blocked_transpose_f32(data, &mut out, rows, cols);
     *data = out;
     meta.shape = vec![cols, rows]; // canonical [in, out] = [K, N]
+}
+
+/// Byte-level layout normalization for non-F32 float tensors (BF16/F16).
+/// Same logic as `normalize_linear_weight_layout` but operates on raw bytes.
+fn normalize_linear_weight_layout_bytes(meta: &mut TensorMeta, data: &mut Vec<u8>, elem_size: usize) {
+    if !is_linear_weight(&meta.name, &meta.shape) {
+        return;
+    }
+    let rows = meta.shape[0]; // out_features (HF)
+    let cols = meta.shape[1]; // in_features (HF)
+    let total_elems = data.len() / elem_size;
+    if rows * cols != total_elems {
+        log::warn!(
+            "normalize_linear_weight_layout_bytes: '{}' shape {:?} does not match data len {} (elem_size={}), skip",
+            meta.name, meta.shape, data.len(), elem_size
+        );
+        return;
+    }
+    let mut out = vec![0u8; data.len()];
+    cache_blocked_transpose_bytes(data, &mut out, rows, cols, elem_size);
+    *data = out;
+    meta.shape = vec![cols, rows];
 }
 
 /// Cache-blocked (tiled) f32 transpose.
@@ -1249,6 +1399,44 @@ fn cache_blocked_transpose_f32(src: &[f32], dst: &mut [f32], rows: usize, cols: 
                     unsafe {
                         let v = *src.get_unchecked(src_row + jj);
                         *dst_base.add(jj * rows + ii) = v;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Cache-blocked byte-level transpose for arbitrary element sizes (BF16=2, F16=2, etc.).
+/// Generalization of `cache_blocked_transpose_f32` where each element is `elem_size` bytes.
+fn cache_blocked_transpose_bytes(src: &[u8], dst: &mut [u8], rows: usize, cols: usize, elem_size: usize) {
+    const TILE: usize = 64;
+    let row_stride = cols * elem_size;
+    let col_stride = rows * elem_size;
+    let total = rows * cols * elem_size;
+    debug_assert_eq!(src.len(), total);
+    debug_assert_eq!(dst.len(), total);
+
+    let dst_addr = dst.as_mut_ptr() as usize;
+    let src_addr = src.as_ptr() as usize;
+
+    let num_j_tiles = cols.div_ceil(TILE);
+    (0..num_j_tiles).into_par_iter().for_each(|j_tile| {
+        let j_start = j_tile * TILE;
+        let j_end = (j_start + TILE).min(cols);
+        let dst_base = dst_addr as *mut u8;
+        let src_base = src_addr as *const u8;
+        for i_start in (0..rows).step_by(TILE) {
+            let i_end = (i_start + TILE).min(rows);
+            for ii in i_start..i_end {
+                let src_row_off = ii * row_stride;
+                for jj in j_start..j_end {
+                    let dst_off = jj * col_stride + ii * elem_size;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src_base.add(src_row_off + jj * elem_size),
+                            dst_base.add(dst_off),
+                            elem_size,
+                        );
                     }
                 }
             }
@@ -1664,6 +1852,7 @@ pub struct WeightsHandle<B: Backend<E>, E: Element = f32> {
     pub meta: HashMap<String, TensorMeta>,
     pub thinking_head: Option<ThinkingHead>,
     quantized: HashMap<String, QuantizedTensor>,
+    raw_floats: HashMap<String, RawFloatTensor>,
     pub sparse_24_meta: HashMap<String, Vec<Vec<u16>>>,
     placements: HashMap<String, crate::compat::backend_trait::WeightPlacement>,
 }
@@ -1680,6 +1869,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             meta,
             thinking_head: None,
             quantized: HashMap::new(),
+            raw_floats: HashMap::new(),
             sparse_24_meta: HashMap::new(),
             placements: HashMap::new(),
         }
@@ -1698,6 +1888,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             meta,
             thinking_head: None,
             quantized,
+            raw_floats: HashMap::new(),
             sparse_24_meta,
             placements: HashMap::new(),
         }
@@ -1708,6 +1899,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
         shapes: HashMap<String, Vec<usize>>,
         meta: HashMap<String, TensorMeta>,
         quantized: HashMap<String, QuantizedTensor>,
+        raw_floats: HashMap<String, RawFloatTensor>,
         sparse_24_meta: HashMap<String, Vec<Vec<u16>>>,
         placements: HashMap<String, crate::compat::backend_trait::WeightPlacement>,
     ) -> Self {
@@ -1717,6 +1909,7 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
             meta,
             thinking_head: None,
             quantized,
+            raw_floats,
             sparse_24_meta,
             placements,
         }
@@ -1724,6 +1917,14 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
 
     pub fn quantized_tensor(&self, name: &str) -> Option<&QuantizedTensor> {
         self.quantized.get(name)
+    }
+
+    pub fn raw_float_tensor(&self, name: &str) -> Option<&RawFloatTensor> {
+        self.raw_floats.get(name)
+    }
+
+    pub fn raw_floats(&self) -> &HashMap<String, RawFloatTensor> {
+        &self.raw_floats
     }
 
     pub fn is_quantized(&self, name: &str) -> bool {
@@ -1741,6 +1942,27 @@ impl<B: Backend<E>, E: Element> WeightsHandle<B, E> {
     /// Return an iterator over all tensor names.
     pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
         self.tensors.keys()
+    }
+
+    /// All external tensor names (F32 + quantized + BF16/F16 raw_floats).
+    pub fn all_tensor_names(&self) -> Vec<&String> {
+        let mut names: Vec<&String> = self.tensors.keys().collect();
+        names.extend(self.quantized.keys());
+        names.extend(self.raw_floats.keys());
+        names
+    }
+
+    /// Build canonical name mapping from all tensor names.
+    pub fn name_map(&self) -> name_map::TensorNameMap {
+        self.name_map_with_tied(false)
+    }
+
+    /// Build canonical name mapping with tied embeddings support.
+    /// When `tie_word_embeddings` is true and no separate lm_head tensor exists,
+    /// maps lm_head canonical to embed's physical tensor.
+    pub fn name_map_with_tied(&self, tie_word_embeddings: bool) -> name_map::TensorNameMap {
+        let all: Vec<String> = self.all_tensor_names().into_iter().cloned().collect();
+        name_map::TensorNameMap::build_from_names(&all, tie_word_embeddings)
     }
 
     /// Query the data placement of a tensor (DeviceLocal or HostLocal).
@@ -1794,6 +2016,7 @@ impl<B: Backend<E>, E: Element> crate::compat::backend_trait::TensorLookup<E, B>
     fn available_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tensors.keys().cloned().collect();
         names.extend(self.quantized.keys().cloned());
+        names.extend(self.raw_floats.keys().cloned());
         names.sort();
         names
     }

@@ -377,3 +377,41 @@ fn op_input_dtype(op: &CompilerOp, graph: &CompilerGraph) -> QuantPrecision {
 所有调用点替换完成后，删除 `lower.rs` 中的：
 - `computation_elem_bytes()` — 硬编码 `size_of::<f32>()` = 4
 - `row_stride_bytes(dim)` — 硬编码 `dim * 4`
+
+## §12 Loader → Graph dtype 契约 (REQ-DTYPE-CHAIN)
+
+> **SSOT**: `../gllm-kernels/SPEC/GRAPH-SHAPE-DRIVEN-MEGA-KERNEL.md §0.9` 定义全链路 dtype 契约。
+> 本节描述 gllm 侧（Loader → Graph）的 dtype 传播责任。
+
+### §12.1 dtype 传播链
+
+```
+TensorMeta { name, shape, dtype }    ← Loader 层产出（SSOT）
+  ↓
+weight_ptrs: HashMap<String, *const u8>  ← 指向原始 dtype raw bytes（无转换）
+weight_sizes: HashMap<String, usize>     ← 原始 dtype 的 byte 大小
+  ↓
+auto_graph::build_compiler_graph()
+  每个 add_tensor_*() 使用 TensorMeta.dtype（per-tensor，非全局 config.dtype）
+  ↓
+CompilerGraph { tensors: Vec<TensorMeta { dtype: DType }> }
+  ↓
+GraphDerivedGeometry::from_graph() → compute_dtype: DType（用于 buffer/scratchpad）
+graph.weight_layout() → per-tensor 偏移（按 per-tensor dtype.size_bytes()）
+```
+
+### §12.2 Loader 责任
+
+| 格式 | 当前行为 | 目标行为 |
+|------|---------|---------|
+| SafeTensors | `convert_tensor_to_f32()` 全转 F32 | 保留原始 dtype raw bytes |
+| GGUF float | F16/BF16 转 F32 | 保留原始 bytes + GgmlDType |
+| GGUF 量化 | 已保留 raw bytes + dtype | 不变 |
+| ONNX | 继承 provider 行为 | 跟随 provider 改进 |
+
+### §12.3 禁止事项
+
+- ❌ Loader 层 `convert_tensor_to_f32()` 对 BF16/F16 tensor 调用
+- ❌ `auto_graph` 中 `let dt = match config.dtype` 全局覆盖 per-tensor dtype
+- ❌ `GraphDerivedGeometry.dtype` 用于权重偏移计算（应用 `graph.weight_layout()`）
+- ❌ executor 层对权重做 dtype 转换再传入 mega-kernel

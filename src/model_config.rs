@@ -381,6 +381,11 @@ pub struct ModelConfig {
     /// Whether FFN uses double-wide MLP (intermediate = hidden * 8/3 rounded).
     /// From config.json `use_double_wide_mlp`.
     pub use_double_wide_mlp: Option<bool>,
+
+    /// Whether to add special tokens (BOS/EOS) during tokenization.
+    /// From config.json `add_bos_token` or `add_special_tokens`.
+    /// Defaults to `true` when not specified.
+    pub add_special_tokens: Option<bool>,
 }
 
 impl ModelConfig {
@@ -830,6 +835,7 @@ impl ModelConfig {
             multimodal_token_ids: None,
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
+            add_special_tokens: None, // GGUF has no add_special_tokens concept, default true downstream
         };
         apply_tensor_derived(base, derived)
     }
@@ -1219,6 +1225,7 @@ impl ModelConfig {
             multimodal_token_ids,
             final_logit_softcapping: find_f32(value, &["final_logit_softcapping"]),
             use_double_wide_mlp: find_bool(value, &["use_double_wide_mlp"]),
+            add_special_tokens: find_bool(value, &["add_bos_token", "add_special_tokens"]),
         })
     }
 
@@ -2276,6 +2283,7 @@ mod tests {
             multimodal_token_ids: None,
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
+            add_special_tokens: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -2504,6 +2512,7 @@ mod tests {
             multimodal_token_ids: None,
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
+            add_special_tokens: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }

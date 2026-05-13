@@ -1,5 +1,16 @@
 use std::path::Path;
 
+/// Convert safetensors Dtype to gllm_kernels DType.
+/// Returns None for non-float types that don't have a gllm_kernels equivalent.
+pub fn safetensors_dtype_to_gllm(dtype: ::safetensors::Dtype) -> Option<gllm_kernels::types::DType> {
+    match dtype {
+        ::safetensors::Dtype::F32 => Some(gllm_kernels::types::DType::F32),
+        ::safetensors::Dtype::F16 => Some(gllm_kernels::types::DType::F16),
+        ::safetensors::Dtype::BF16 => Some(gllm_kernels::types::DType::BF16),
+        _ => None,
+    }
+}
+
 /// Placeholder for packed quantized bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PackedBits {

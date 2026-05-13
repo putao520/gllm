@@ -441,11 +441,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: q_dim,
                 k: hidden,
                 dtype: dt,
+                trans_b: false,
             },
             vec![normed1, layer.w_q],
             vec![q],
@@ -457,11 +458,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: q_dim,
                 k: hidden,
                 dtype: dt,
+                trans_b: false,
             },
             vec![normed1, layer.w_k],
             vec![k],
@@ -473,11 +475,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: q_dim,
                 k: hidden,
                 dtype: dt,
+                trans_b: false,
             },
             vec![normed1, layer.w_v],
             vec![v],
@@ -511,11 +514,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: hidden,
                 k: q_dim,
                 dtype: dt,
+                trans_b: false,
             },
             vec![attn, layer.w_o],
             vec![o_proj],
@@ -557,11 +561,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: inter,
                 k: hidden,
                 dtype: dt,
+                trans_b: false,
             },
             vec![normed2, layer.w_fc1],
             vec![fc1],
@@ -588,11 +593,12 @@ fn build_vision_encoder_graph(
             dt,
         );
         g.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: SymDim::Concrete(num_patches),
                 n: hidden,
                 k: inter,
                 dtype: dt,
+                trans_b: false,
             },
             vec![gelu_out, layer.w_fc2],
             vec![fc2],
@@ -1332,7 +1338,7 @@ mod tests {
 
         let out = g.add_tensor_concrete("out", &[m, n], dt);
         g.add_op(
-            OpKind::Gemm { m: SymDim::Concrete(m), n, k, dtype: dt },
+            OpKind::Gemm{ m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, },
             vec![normed, w], vec![out], "gemm",
         );
         g.outputs = vec![out];
@@ -1382,7 +1388,7 @@ mod tests {
         g.inputs = vec![input, w];
         let out = g.add_tensor_concrete("out", &[m, n], dt);
         g.add_op(
-            OpKind::Gemm { m: SymDim::Concrete(m), n, k, dtype: dt },
+            OpKind::Gemm{ m: SymDim::Concrete(m), n, k, dtype: dt, trans_b: false, },
             vec![input, w],
             vec![out],
             "gemm",
@@ -1440,7 +1446,7 @@ mod tests {
         );
         let q = g.add_tensor_concrete("q", &[seq, h], dt);
         g.add_op(
-            OpKind::Gemm { m: SymDim::Concrete(seq), n: h, k: h, dtype: dt },
+            OpKind::Gemm{ m: SymDim::Concrete(seq), n: h, k: h, dtype: dt, trans_b: false, },
             vec![normed, w_q],
             vec![q],
             "gemm_q",

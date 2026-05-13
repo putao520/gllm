@@ -88,10 +88,10 @@
 | GPU codegen (PTX/HIP/MSL) | ✅ | T38 |
 | PerLayerEmbedding (PLE,仅 E2B/E4B) | ✅ | T28.2/T28.3/T30/T37 |
 | SharedKvRef page 层 | ✅ | T39 (P1.1) |
-| SharedKvRef graph 层 | 🟡 | T43 (并行中) |
+| SharedKvRef graph 层 | ✅ | T43 (已完成) |
 | FusedQkvNormRope 融合 | ✅ | T29/T36/T41/T42 |
-| Vision encoder 骨架 (SigLIP) | 🟡 | T44 (并行中) |
-| Audio encoder 骨架 (USM Conformer) | 🟡 | T45 (并行中) |
+| Vision encoder (SigLIP) | ✅ | T44 (已完成,非 stub 测试通过) |
+| Audio encoder (USM Conformer) | ✅ | T45 (已完成,非 stub 测试通过) |
 | E2E 推理数值验证 | 🟡 | T47 (dry-run 通过,真实下载待) |
 
 ## 2. Embedding Models (文本向量化)

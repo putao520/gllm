@@ -431,6 +431,51 @@ impl<E: Element> BackendExecutor<E> {
             BackendExecutor::Cpu(exec) => exec.weights().thinking_head.is_some(),
         }
     }
+    pub fn diagnostic_weight_row(&self, tensor_name: &str, row: usize, cols: usize) -> Option<Vec<f32>> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_weight_row(tensor_name, row, cols),
+            BackendExecutor::Cuda(e) => e.diagnostic_weight_row(tensor_name, row, cols),
+            BackendExecutor::Rocm(e) => e.diagnostic_weight_row(tensor_name, row, cols),
+            BackendExecutor::Metal(e) => e.diagnostic_weight_row(tensor_name, row, cols),
+        }
+    }
+
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_weight_offsets(),
+            BackendExecutor::Cuda(e) => e.diagnostic_weight_offsets(),
+            BackendExecutor::Rocm(e) => e.diagnostic_weight_offsets(),
+            BackendExecutor::Metal(e) => e.diagnostic_weight_offsets(),
+        }
+    }
+
+    pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_prefill_logits(prompt_tokens),
+            BackendExecutor::Cuda(e) => e.diagnostic_prefill_logits(prompt_tokens),
+            BackendExecutor::Rocm(e) => e.diagnostic_prefill_logits(prompt_tokens),
+            BackendExecutor::Metal(e) => e.diagnostic_prefill_logits(prompt_tokens),
+        }
+    }
+
+    pub fn diagnostic_prefill_scratchpad(&self, prompt_tokens: &[u32]) -> Option<crate::engine::mega_kernel::DiagnosticScratchpad> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_prefill_scratchpad(prompt_tokens),
+            BackendExecutor::Cuda(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|_| unimplemented!("GPU scratchpad")),
+            BackendExecutor::Rocm(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|_| unimplemented!("GPU scratchpad")),
+            BackendExecutor::Metal(e) => e.diagnostic_prefill_logits(prompt_tokens).map(|_| unimplemented!("GPU scratchpad")),
+        }
+    }
+
+    pub fn diagnostic_forward_only(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        match self {
+            BackendExecutor::Cpu(e) => e.diagnostic_forward_only(prompt_tokens),
+            BackendExecutor::Cuda(e) => e.diagnostic_forward_only(prompt_tokens),
+            BackendExecutor::Rocm(e) => e.diagnostic_forward_only(prompt_tokens),
+            BackendExecutor::Metal(e) => e.diagnostic_forward_only(prompt_tokens),
+        }
+    }
+
 
     pub fn generate(
         &mut self,

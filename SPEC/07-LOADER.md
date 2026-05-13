@@ -1,6 +1,6 @@
 # 模型加载与解析层 (Loader)
 
-> **SSOT 声明**: 本文档是 gllm 模型加载、格式解析、配置推导、架构模板、下载管理的唯一真源。
+> **SSOT 声明**: 本文档是 gllm 模型加载、格式解析、配置推导、架构推导、下载管理的唯一真源。
 
 ## 1. 统一加载入口
 
@@ -64,26 +64,25 @@ SafeTensors 支持通过 `gllm.quantization` 扩展字段存储量化参数（AR
 
 缺失量化元数据时返回明确错误，禁止使用默认值推测。
 
-### 2.4 Load-time Dtype Normalisation & Canonical Layout (ARCH-LOADER-NORMALIZE)
+### 2.4 Canonical Layout Normalisation (ARCH-LOADER-NORMALIZE)
 
-SafeTensors / PyTorch 权重通常以 BF16 / F16 存储，且 `nn.Linear.weight` 的物理布局为 HF 风格 `[out_features, in_features]` row-major。Loader 在上传张量前必须一次性完成两项归一化：
+SafeTensors / PyTorch 权重通常以 BF16 / F16 存储，且 `nn.Linear.weight` 的物理布局为 HF 风格 `[out_features, in_features]` row-major。Loader 在上传张量前必须完成布局归一化，同时保持原始 dtype 不做精度降级或升级：
 
 | 归一化 | 输入 | 输出 | 并行化约束 |
 |--------|------|------|------------|
-| Dtype→F32 | `BF16` / `F16` / `F32` / `F64` 原始字节 | `Vec<f32>` | 必须 rayon 并行；单线程 `chunks_exact().map().collect()` 在大模型（Gemma 4 E2B 9.6 GB BF16，约 4.8 B 元素）上需要 60-120 秒，无法接受 |
-| Linear 布局 | `[out, in]` row-major `Vec<f32>` | `[in, out]` row-major `Vec<f32>` + `meta.shape = [in, out]` | 必须使用 cache-blocked (tiled) 转置；naive `out[c * rows + r] = in[r * cols + c]` 写步进为 `rows * 4` 字节（典型 1536 × 12288 ≈ 6 KB），每次 L1 miss，吞吐 50-200 MB/s；tiled 版本每个 `64×64` tile 占 16 KB，读写双命中 L1，rayon 按列-tile 拆分 20 核并行 |
+| Dtype 保持 | `BF16` / `F16` / `F32` / `F64` 原始字节 | 原始 dtype 字节保持（BF16→BF16, F32→F32） | dtype passthrough，零转换开销；JIT codegen 根据 TensorMeta.dtype 生成特化机器码（见 ARCH-DTYPE-JIT-TYPED） |
+| Linear 布局 | `[out, in]` row-major | `[in, out]` row-major + `meta.shape = [in, out]` | 必须使用 cache-blocked (tiled) 转置；naive `out[c * rows + r] = in[r * cols + c]` 写步进为 `rows * elem_size` 字节（典型 1536 × 12288 ≈ 6 KB），每次 L1 miss，吞吐 50-200 MB/s；tiled 版本每个 `64×64` tile 占 16 KB，读写双命中 L1，rayon 按列-tile 拆分 20 核并行 |
 
 **关键常量**:
-- dtype 并行 chunk size: `1024` f32（F32 passthrough）/ `4096` f32（F16/BF16/F64 转换） — 平衡并行 overhead 与 per-worker 局部性
-- 转置 tile size: `TILE = 64` f32 — 与 L1 cache line (64 B = 16 f32) 对齐、双维度 tile 在 L1 内可重用
+- 转置 tile size: `TILE = 64` elements — 与 L1 cache line (64 B = 16 f32) 对齐、双维度 tile 在 L1 内可重用
 
 **正确性要求**:
-- 并行路径必须与串行 `chunks_exact().map()` 产生 bit-identical 输出（即 `to_bits()` 完全相同）
-- Cache-blocked 转置必须与 naive 实现产生 bit-identical 输出（所有 finite f32 值）
+- Dtype 必须保持 bit-identical（BF16 权重不得升级为 F32，F16 权重不得升级为 F32）
+- Cache-blocked 转置必须与 naive 实现产生 bit-identical 输出（所有 finite 值）
 - 两者均需附带单元测试证明 bit-exactness（见 `src/loader/mod.rs` test 模块）
 
 **禁止**:
-- 单线程 `collect()` dtype 转换（违反 ARCH-LOADER-PARALLEL-CONVERT）
+- Load-time dtype 升级（如 BF16→F32），违反 ARCH-DTYPE-JIT-TYPED 原生混合精度设计
 - Naive 双层 `for r × for c` 转置（违反 ARCH-LOADER-CACHE-BLOCKED-TRANSPOSE）
 - 改变输出数值（不得以"SIMD fast-path"为借口破坏 bit-exactness）
 
@@ -393,62 +392,108 @@ let head_dim = q_tensor.shape.max() / num_heads;
 let head_dim = config.head_dim.unwrap_or(128);
 ```
 
-## 7. 架构模板
+## 7. 架构推导 — Tensor-Name-Driven Graph Builder (REQ-ARCH-AUTO-001)
 
-### 7.1 YAML → OnnxGraph → JIT 端到端
+**核心原则**: 模型文件本身包含推理所需的全部信息。gllm 不维护任何模型架构硬编码——所有架构特征从 tensor names + shapes 自动推导。
 
-YAML 模板定义模型架构，展开为 OnnxGraph，经图优化后 JIT 编译执行。
+### 7.1 设计哲学
+
+每个模型文件（GGUF / SafeTensors / ONNX / PyTorch）都能被 HuggingFace transformers、vllm、llama.cpp 等引擎推理，说明模型文件内必然包含：
+- 网络拓扑（哪些层、什么顺序）
+- 维度信息（hidden_size、num_heads、vocab_size）
+- 算子类型（RmsNorm vs LayerNorm、SwiGLU vs Standard FFN）
+- 特殊特征（RoPE、MoE、HeadRmsNorm 等）
+
+gllm 的 auto_graph 系统从模型文件提取这些信息，生成 CompilerGraph，不需要任何外部模板或硬编码。
+
+### 7.2 数据流
 
 ```
-YAML 模板 (src/arch/templates/qwen3.yaml)
-  ↓ template.rs 解析
-OnnxGraph (统一 DAG 表示)
-  ↓ graph/optimizer/ 优化
-  │   ├── PatternFusion (FlashAttn, SwiGLU, MoERouting, ...)
-  │   ├── HardwareFusionPass (硬件感知降级)
-  │   ├── ConstantFolding (常量预计算)
-  │   └── DeadCodeElimination (移除未使用节点)
+模型文件 (GGUF / SafeTensors / ONNX)
+  ↓ loader 解析
+weight_names: ["model.layers.0.self_attn.q_proj.weight", ...]
+weight_shapes: {"model.layers.0.self_attn.q_proj.weight": [4096, 4096], ...}
+  ↓ match_tensor_role() — 段序列精确匹配
+role_index: {(AttentionQuery, 0) → "model.layers.0.self_attn.q_proj.weight", ...}
+  ↓ analyze_architecture() — 特征推导
+ArchitectureFeatures { family, num_layers, norm_type, ffn_type, has_rope, ... }
+  ↓ build_compiler_graph() — 图生成
+CompilerGraph (全层融合图)
   ↓ JIT 编译 (四阶段管线)
 硬件原生机器码
 ```
 
-核心优势：新模型只需提供 YAML 文件，不需要修改任何 Rust 代码。
+### 7.3 Tensor Role 匹配 (REQ-ARCH-AUTO-002)
 
-### 7.2 架构注册表 (SSOT: YAML 驱动)
+`match_tensor_role(name)` 将任意 tensor name 精确映射到 `(TensorRole, Option<layer_idx>)`。
 
-`src/arch/registry.rs` 的全局注册表在启动时由 `build.rs` 自动扫描
-`src/arch/templates/*.yaml`,把每个 YAML 的 `name` + `extra_aliases`
-字段加载为别名映射。**没有任何硬编码的模板名列表 / 架构 token → 模板名
-的 match 语句 / 测试断言**。新增架构 = 扔一个 YAML 文件进 `templates/`
-目录,无需改 Rust 代码、无需改 SPEC、无需更新注册表测试。
+**算法**: 段序列精确匹配，非 `contains()` 启发式。
 
-**当前模板清单以目录内容为真源**,SPEC 不再复制一份(那会变成双 SSOT
-会陷入不同步)。查看支持模型见 `./SUPPORTED_MODELS.md`。
+1. 按 `.` 分割 tensor name 为 segments
+2. 提取 `layer_idx`（如 `model.layers.3.xxx` → `Some(3)`）
+3. 去除终端 `.weight` / `.bias`
+4. 剩余 segments 与 `SUFFIX_PATTERNS` 常量表做最长匹配
 
-注册 / 反查契约(由 `registry.rs` 单元测试验证):
-- 每个 YAML 的 `name` 自反查 → 自己
-- 每个 YAML 的 `{name}ForCausalLM` 自动派生 → 自己
-- 每个 YAML 的 `extra_aliases` 列出的别名 → 自己
-- 每个 YAML 的 `family` 字段能解析为 `ArchFamily`
-- 未在任何 YAML 里出现的 token → `None`
+`SUFFIX_PATTERNS` 覆盖所有已知命名约定（HF decoder、GGUF、BERT encoder、GLM-4、vision、audio），约 80 条规则。未识别的 name 返回 `None`，不猜测。
 
-### 7.3 架构解析流程
+### 7.4 ArchitectureFeatures 推导 (REQ-ARCH-AUTO-003)
 
-```rust
-// 1. 从元数据读取架构标识
-let arch = reader.architecture()?;  // GGUF: "qwen3", config.json: model_type
+`analyze_architecture(role_index, weight_shapes)` 从 role_index 精确判断每个架构特征：
 
-// 2. 匹配 YAML 模板
-let template = registry.resolve(&arch)?;
+| 特征 | 推导方式 | 示例 |
+|------|---------|------|
+| `family` | OutputHead ∨ FinalNorm → Decoder; 否则 → Encoder | LLaMA: 有 lm_head → Decoder; BERT: 无 → Encoder |
+| `num_layers` | `role_index.keys().filter_map(layer_idx).max() + 1` | 32 层模型 → 32 |
+| `has_rope` | Decoder → true; Encoder → false | Qwen3: true; XLM-R: false |
+| `norm_type` | InputNorm 对应 `.bias` 存在 → LayerNorm; 否则 → RmsNorm | BERT: 有 bias → LayerNorm; LLaMA: 无 → RmsNorm |
+| `ffn_type` | FfnGate ∧ FfnUp ∧ FfnDown → SwiGLU; 仅 FfnUp + FfnDown → Standard; MoEGate → MoE | Qwen3: SwiGLU; BERT: Standard |
+| `has_head_rms_norm` | `(AttentionQNorm, Some(0))` 存在 | Qwen3: true; LLaMA: false |
+| `is_moe` | `(MoEGate, Some(0))` 存在 | DeepSeek-V3: true; Qwen3: false |
+| `has_attention_bias` | 遍历 weight_shapes 找 `*.q_proj.bias` | Mistral: false; GPT-2: true |
+| `is_vision` | `(PatchEmbed, None)` 存在 | SigLIP: true; Qwen3: false |
+| `is_audio` | `(DepthwiseConv, _)` 存在 | USM Conformer: true; Qwen3: false |
+| `has_qk_norm` | arch=="gemma4" ∧ ¬has_head_rms_norm (Gemma-4 无 weight 的 Q/K L2-norm) | Gemma-4: true; Qwen3: false |
+| `has_value_norm` | arch=="gemma4" (Gemma-4 V 无参数 RMSNorm) | Gemma-4: true; Qwen3: false |
+| `has_embedding_scale` | arch=="gemma4" (embedding × √hidden_size) | Gemma-4: true; Qwen3: false |
+| `has_classifier` | ClassifierDense ∨ ClassifierOutProj 存在 | XLM-R-reranker: true; Qwen3: false |
 
-// 3. 展开为 OnnxGraph（Symbolic Shape）
-let graph = template.expand(&model_config)?;
+### 7.5 CompilerGraph 生成 (REQ-ARCH-AUTO-004)
 
-// 4. 图优化 → JIT 编译
-let compiled = jit_compile(graph, &device_profile)?;
-```
+`build_compiler_graph(features, config, role_index, weight_shapes, business_config)` 生成完整的 CompilerGraph。
 
-### 7.4 融合权重处理
+**所有维度从 weight_shapes 推导**:
+
+| 维度 | 来源 |
+|------|------|
+| `vocab_size` | `embed_shape[0]` |
+| `hidden_size` | `embed_shape[1]` |
+| `num_heads` | `q_proj_shape[0] / head_dim` |
+| `num_kv_heads` | `k_proj_shape[0] / head_dim` |
+| `intermediate_size` | `gate_proj_shape[0]` |
+
+**图结构按 family 分支**:
+
+Decoder: `Gather(embed) → [LayerLoop: Norm → Q/K/V → HeadRmsNorm? → RoPE? → MHA → O_proj → Residual → PostNorm → FFN → Residual] → FinalNorm → lm_head → OutputMode`
+
+Encoder: `[LayerLoop: Norm → Q/K/V → MHA → O_proj → Residual → PostNorm → FFN → Residual] → FinalNorm`
+
+**待补图生成** (REQ-ARCH-AUTO-009 ~ 011):
+- MoE: `MoEGate → TopK → ExpertDispatch → ExpertFFN → ExpertCombine`
+- Audio (USM Conformer): `DepthwiseConv1D + Conformer attention`
+- Vision (SigLIP): `PatchEmbed + LearnedPos2D + ViT layers`
+
+### 7.6 架构别名注册表 (REQ-ARCH-AUTO-005)
+
+`src/arch/registry.rs` 提供 GGUF arch token / HF `architectures` 值 → canonical name 的纯 const 查找表 (`ARCH_TABLE`)。
+
+- 不依赖 YAML 文件、不依赖 build.rs 扫描、不依赖 OnceLock 运行时注册
+- `resolve_template_name(token)` — token 归一化后查表
+- `resolve_family(token)` — token → ArchFamily
+- `resolve_moe_router(name)` — canonical name → RouterType
+
+新增架构只需在 `ARCH_TABLE` const 数组添加一行。
+
+### 7.7 融合权重处理
 
 融合权重（如 QKV 拼接）的分割完全基于 `ModelConfig` 参数驱动：
 
@@ -456,135 +501,16 @@ let compiled = jit_compile(graph, &device_profile)?;
 - KV 维度 = `config.num_key_value_heads * config.head_dim`
 - 禁止硬编码任何维度值（如 `3072`, `1024`）
 
-### 7.5 YAML 模板 Schema
+### 7.8 新增架构流程
 
-每个 YAML 模板必须包含以下顶级字段。模板由 `src/arch/template.rs` 解析为 `ArchTemplate` struct，再由 `expand()` 方法展开为 `OnnxGraph`。
+1. 在 `SUFFIX_PATTERNS` 中添加新架构的 tensor name 模式（如果命名约定不同于现有模式）
+2. 在 `ARCH_TABLE` 中添加 arch token 别名
+3. 如果架构有特殊算子（非标准 OpKind），先在 `gllm-kernels` 的 `ScalarOpRegistry` 注册 scalar impl
+4. 如果有新的架构特征（如 QkNorm），在 `TensorRole` 枚举和 `ArchitectureFeatures` 中添加
+5. 在 `build_compiler_graph()` 中添加对应图生成分支
+6. 运行 `cargo test` 验证
 
-#### 7.5.1 顶级字段
-
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `name` | string | ✅ | 架构唯一标识（如 `qwen3`, `gemma4`） |
-| `family` | string | ✅ | 架构族（`ArchFamily` 枚举值: `Decoder`, `Encoder`, `EncoderDecoder`） |
-| `extra_aliases` | string[] | ❌ | 额外匹配别名（如 `["Qwen2ForCausalLM"]`） |
-| `description` | string | ❌ | 人类可读描述 |
-| `config_bindings` | map | ✅ | 模型配置参数到图模板变量的绑定 |
-| `layers` | object | ✅ | 层定义（attention/ffn 结构） |
-| `special_ops` | object | ❌ | 非标准算子（MoE, PLE, Vision, Audio 等） |
-| `post_layer_ops` | object | ❌ | 层后处理（logit softcap, head routing 等） |
-
-#### 7.5.2 `config_bindings` 规范
-
-将 `ModelConfig` 字段映射为模板内可引用的变量名：
-
-```yaml
-config_bindings:
-  hidden_size: hidden_size           # ModelConfig.hidden_size → {{hidden_size}}
-  num_layers: num_hidden_layers       # → {{num_hidden_layers}}
-  num_heads: num_attention_heads      # → {{num_attention_heads}}
-  num_kv_heads: num_key_value_heads   # → {{num_key_value_heads}}
-  head_dim: head_dim                  # → {{head_dim}}
-  intermediate_size: intermediate_size # → {{intermediate_size}}
-  vocab_size: vocab_size              # → {{vocab_size}}
-  max_seq_len: max_position_embeddings # → {{max_position_embeddings}}
-  rope_theta: rope_theta              # → {{rope_theta}}
-  rope_partial: rope_partial          # → {{rope_partial}} (默认 1.0)
-  eps: rms_norm_eps                   # → {{eps}}
-```
-
-**铁律**: 所有模型参数必须通过 `config_bindings` 读取，禁止在模板中出现硬编码数字。`template.rs` 解析时遇到数字字面量必须报错。
-
-#### 7.5.3 `layers` 结构
-
-```yaml
-layers:
-  # Attention 子图定义
-  attention:
-    ops:
-      - op: FusedQkvRope
-        inputs: [hidden_state]
-        outputs: [q, k, v]
-        params:
-          num_heads: "{{num_heads}}"
-          num_kv_heads: "{{num_kv_heads}}"
-          head_dim: "{{head_dim}}"
-          rope_theta: "{{rope_theta}}"
-      - op: GQA
-        inputs: [q, k, v]
-        outputs: [attn_out]
-        params:
-          num_heads: "{{num_heads}}"
-          num_kv_heads: "{{num_kv_heads}}"
-      - op: Residual
-        inputs: [attn_out, hidden_state]
-        outputs: [residual]
-
-  # FFN 子图定义
-  ffn:
-    ops:
-      - op: SwiGLU
-        inputs: [residual]
-        outputs: [ffn_out]
-        params:
-          hidden_size: "{{hidden_size}}"
-          intermediate_size: "{{intermediate_size}}"
-      - op: Residual
-        inputs: [ffn_out, residual]
-        outputs: [hidden_state]
-```
-
-#### 7.5.4 `special_ops` 结构（可选）
-
-用于 MoE、PLE、Vision 等非标准模块：
-
-```yaml
-special_ops:
-  moe:
-    enabled: "{{has_moe}}"           # 条件启用
-    ops:
-      - op: MoEGate
-        inputs: [hidden_state]
-        outputs: [router_logits]
-        params:
-          num_experts: "{{num_experts}}"
-      - op: MoEDispatchPacked
-        inputs: [hidden_state, router_logits]
-        outputs: [expert_output]
-        params:
-          num_experts: "{{num_experts}}"
-          top_k: "{{num_experts_per_tok}}"
-  ple:
-    enabled: "{{has_per_layer_embed}}"
-    ops:
-      - op: PerLayerEmbed
-        params:
-          layer_idx: "{{layer_idx}}"
-          dim_per_layer: "{{per_layer_dim}}"
-```
-
-#### 7.5.5 模板变量引用规则
-
-| 语法 | 说明 | 示例 |
-|------|------|------|
-| `"{{var}}"` | 从 `config_bindings` 绑定读取 | `"{{hidden_size}}"` → `3584` |
-| `"{{layer_idx}}"` | 运行时注入（层循环索引） | `"{{layer_idx}}"` → `0, 1, 2, ...` |
-| `"{{has_moe}}"` | 布尔条件 | `"{{has_moe}}"` → `true`/`false` |
-
-**禁止的引用**:
-- ❌ 硬编码维度值（`"3072"`, `"1024"`）
-- ❌ 引用不存在的 `config_bindings` 变量（编译时报错）
-- ❌ 模板内数学表达式（`"{{hidden_size}} * 4"`），所有计算在 Rust 侧完成
-
-#### 7.5.6 新增架构流程
-
-新增模型架构只需：
-
-1. 创建 `src/arch/templates/<name>.yaml`，填写 §7.5.1-7.5.5 规定的字段
-2. 如果架构有特殊算子（非标准 OpKind），先在 `gllm-kernels` 的 `ScalarOpRegistry` 注册 scalar impl
-3. 运行 `cargo test`，`build.rs` 自动扫描新模板并注册
-4. 无需修改任何 Rust 代码（除非需要新 OpKind）
-
-**验证**: `registry.rs` 单元测试自动验证新模板的 `name` 自反查、`ForCausalLM` 派生、`extra_aliases` 映射。
+**验证**: 每个新增架构必须有 `auto_graph::tests` 下的测试覆盖。
 
 ## 8. 下载源管理
 

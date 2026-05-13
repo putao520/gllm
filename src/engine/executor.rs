@@ -7,35 +7,21 @@ use log;
 use crate::compat::backend_trait::{Backend, Element};
 use crate::compat::CpuBackend;
 use crate::scheduler::types::{PageId, RequestId, StorageKey};
-use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
 use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 use gllm_kernels::types::DType;
 use thiserror::Error;
 
 use super::mega_kernel_callback::{slot, MegaKernelCallbackTable, SgCallbackCtx, sg_knowledge_retrieve_callback, null_retrieve_bridge};
 
-/// Cap the geometry-declared `max_position_embeddings` by the JIT compile-time
-/// ceiling (`SYMDIM_MAX_SEQ_LEN`) whenever it is used to size / index the
-/// runtime KV cache.
+/// Maximum sequence length for KV cache sizing.
 ///
-/// Rationale: modern LLMs (Gemma 4 E2B = 131 072, DeepSeek = 163 840, Kimi =
-/// 200 000+) ship with enormous theoretical context windows that would
-/// allocate hundreds of gigabytes of CPU KV cache at load time (e.g. Gemma 4
-/// E2B: 15 effective layers × 1 KV head × 131 072 × 256 head_dim × 4 B × 2 =
-/// 3.84 GB just for the zero-memset, on top of the weight loader!).
-///
-/// The JIT-emitted attention kernel already bakes `SYMDIM_MAX_SEQ_LEN` as its
-/// compile-time upper bound (`emit_multi_head_attention` computes the `V_ptr`
-/// offset as `compile_seq_len * kv_dim * 4` where `compile_seq_len ==
-/// SYMDIM_MAX_SEQ_LEN`), so the cache stride MUST match this constant. Any
-/// larger allocation is wasted memory and any smaller stride produces
-/// out-of-bounds reads inside the JIT kernel. Exposing a single SSOT
-/// (`effective_kv_max_seq_len`) keeps the cache size, the cache-offset math
-/// in `merge_kv_cache_for_decode` / `perform_kv_cache_write`, and the JIT
-/// `compile_seq_len` in lock-step.
+/// Now sourced directly from `geometry.max_seq_len` (model config
+/// `max_position_embeddings`) — no longer capped by a hardcoded constant.
+/// Buffer allocation uses `CompilerGraph.max_seq_len` which is set from
+/// the same source during graph construction.
 #[inline]
 pub fn effective_kv_max_seq_len(geometry_max_seq_len: usize) -> usize {
-    geometry_max_seq_len.min(SYMDIM_MAX_SEQ_LEN)
+    geometry_max_seq_len
 }
 
 // ---- Engine types (moved from compat) ----
@@ -134,11 +120,9 @@ impl GeneratorForwardConfig {
     pub fn intermediate_size(&self) -> usize { self.geometry.intermediate_size }
     /// Backward-compatible accessor: LayerNorm epsilon.
     pub fn norm_eps(&self) -> f32 { self.geometry.norm_eps }
-    /// Backward-compatible accessor: model weight dtype.
+    /// Backward-compatible accessor: model compute dtype.
     pub fn dtype(&self) -> DType { self.geometry.dtype }
-    /// Backward-compatible accessor: maximum sequence length, capped by the
-    /// JIT compile-time ceiling (`SYMDIM_MAX_SEQ_LEN`). See
-    /// `effective_kv_max_seq_len` for why the cap is mandatory.
+    /// Backward-compatible accessor: maximum sequence length from model config.
     pub fn max_seq_len(&self) -> usize {
         effective_kv_max_seq_len(self.geometry.max_seq_len)
     }
@@ -205,7 +189,7 @@ pub struct SwapConfig {
 pub struct KvCacheConfig {
     /// Model geometry (provides num_layers, num_kv_heads, head_dim, max_seq_len).
     pub geometry: Arc<crate::model_config::ModelGeometry>,
-    /// KV cache element dtype (may differ from geometry.dtype, e.g. CPU forces F32).
+    /// KV cache element dtype (may differ from geometry.compute_dtype, e.g. CPU forces F32).
     pub kv_dtype: DType,
     pub page_size: usize,
     pub swap_config: Option<SwapConfig>,
@@ -220,13 +204,9 @@ impl KvCacheConfig {
     pub fn num_heads(&self) -> usize { self.geometry.num_kv_heads }
     /// Dimension of each attention head.
     pub fn head_dim(&self) -> usize { self.geometry.head_dim }
-    /// Maximum sequence length, capped by the JIT compile-time ceiling
-    /// (`SYMDIM_MAX_SEQ_LEN`). This is the stride used by the KV cache buffer
-    /// allocation and by `merge_kv_cache_for_decode` / `perform_kv_cache_write`
-    /// offset math — it MUST equal the `compile_seq_len` baked into the JIT
-    /// attention kernel. Models with `max_position_embeddings` larger than
-    /// `SYMDIM_MAX_SEQ_LEN` (e.g. Gemma 4 E2B's 131 072) would otherwise
-    /// allocate multi-GB of zeroed cache that the JIT kernel can't index into.
+    /// Maximum sequence length for KV cache sizing, from model config.
+    /// Buffer allocation uses `CompilerGraph.max_seq_len` set during graph
+    /// construction from the same `geometry.max_seq_len` source.
     pub fn max_seq_len(&self) -> usize {
         effective_kv_max_seq_len(self.geometry.max_seq_len)
     }
@@ -682,105 +662,181 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let mega_kernel = {
             use crate::compat::backend_trait::TensorLookup;
 
-            // Resolve EOS token ID: prefer tokenizer vocab (authoritative) over config.json
+            // Resolve EOS token ID: tokenizer vocab > config.json > bos_token_id fallback.
+            // bos_token_id is used as last resort because some tokenizers (e.g. Llama)
+            // define EOS = BOS = 1. If none available, log a warning.
             let eos_id = tokenizer.eos_token_id()
                 .or(model_config.eos_token_id)
-                .unwrap_or(2);
+                .or(model_config.bos_token_id)
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "mega-kernel: no eos_token_id found in tokenizer/config/bos — \
+                         using 0 (generation will rely on max_new_tokens limit only)"
+                    );
+                    0
+                });
             log::info!(
                 "mega-kernel eos_id={} (config={:?}, tokenizer={:?})",
                 eos_id, model_config.eos_token_id, tokenizer.eos_token_id(),
             );
 
-            // Build weight_ptrs/weight_sizes directly from executor's weights HashMap
-            let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
-            let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            // Build weight_ptrs/weight_sizes/weight_shapes from executor's weights HashMap
+            // using canonical names as keys (one-time mapping via TensorNameMap).
+            let mut ext_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
+            let mut ext_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut ext_shapes: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
             for name in weights.tensor_names() {
                 if let Some(t) = TensorLookup::get_tensor(&weights, &name) {
                     let data: &[E] = t.as_ref();
                     let size = data.len() * std::mem::size_of::<E>();
-                    weight_ptrs.insert(name.clone(), data.as_ptr() as *const u8);
-                    weight_sizes.insert(name.clone(), size);
+                    ext_ptrs.insert(name.clone(), data.as_ptr() as *const u8);
+                    ext_sizes.insert(name.clone(), size);
+                }
+                if let Some(shape) = TensorLookup::tensor_shape(&weights, &name) {
+                    ext_shapes.insert(name.clone(), shape.to_vec());
+                }
+            }
+            // Add raw float tensors (BF16/F16 preserved in original dtype)
+            for name in weights.available_names() {
+                if let Some(raw) = weights.raw_float_tensor(&name) {
+                    ext_ptrs.insert(name.clone(), raw.data.as_ptr());
+                    ext_sizes.insert(name.clone(), raw.data.len());
+                    ext_shapes.entry(name.clone()).or_insert_with(|| raw.shape.clone());
                 }
             }
 
-            // Supplement with prefix aliases (multi-modal nesting, GGUF aliases)
-            const MID_PREFIX_REPLACEMENTS: &[(&str, &str)] = &[
-                ("model.layers.", "model.language_model.layers."),
-            ];
-            let mut _supplement_owned: Vec<Vec<u8>> = Vec::new();
-            let supplement_weight = |name: &str, owned: &mut Vec<Vec<u8>>| -> Option<(*const u8, usize)> {
-                let mut candidates = vec![name.to_string()];
-                for (from, to) in MID_PREFIX_REPLACEMENTS {
-                    if let Some(idx) = name.find(from) {
-                        let mut replaced = name.to_string();
-                        replaced.replace_range(idx..idx + from.len(), to);
-                        candidates.push(replaced);
+            // Dequantize GGUF quantized tensors (Q4_0/Q4_K/Q8_0/etc.) to F32
+            // before inserting into ext_ptrs. JIT codegen expects F32 data.
+            // Two-phase: collect all dequantized data first, then insert pointers.
+            // This avoids Vec realloc invalidating previously stored pointers.
+            let cpu_backend = crate::compat::CpuBackend::<E>::new();
+            let dequant_results: Vec<(String, Vec<f32>)> = weights.available_names()
+                .into_iter()
+                .filter_map(|name| {
+                    weights.quantized_tensor(&name).map(|qt| (name, qt))
+                })
+                .filter_map(|(name, qt)| {
+                    // MXFP4 (SafeTensors separated format) uses non-interleaved layout
+                    // (blocks + scales as separate tensors). Skip here — raw bytes are
+                    // inserted by the fallback below for JIT direct consumption.
+                    if matches!(qt.quant_type, gllm_kernels::quant::QuantType::Mxfp4 { .. }) {
+                        return None;
                     }
+                    match crate::compat::weight_helpers::dequantize_weight_to_f32(qt, &cpu_backend) {
+                        Ok(f32_data) => {
+                            Some((name, f32_data))
+                        },
+                        Err(e) => {
+                            None
+                        }
+                    }
+                })
+                .collect();
+            // Now insert stable pointers (Vec won't realloc anymore).
+            for (name, f32_data) in &dequant_results {
+                {
+                    let sample: Vec<f32> = f32_data.iter().take(5).copied().collect();
+                    let nonzero = f32_data.iter().filter(|&&x| x != 0.0).count();
+                    let nan_count = f32_data.iter().filter(|&&x| x.is_nan()).count();
                 }
-                for lookup in &candidates {
-                    if let Some(t) = TensorLookup::get_tensor(&weights, lookup) {
-                        let data: &[E] = t.as_ref();
-                        let size = data.len() * std::mem::size_of::<E>();
-                        let bytes: Vec<u8> = unsafe {
-                            std::slice::from_raw_parts(data.as_ptr() as *const u8, size).to_vec()
-                        };
-                        let ptr = bytes.as_ptr();
-                        owned.push(bytes);
-                        return Some((ptr, size));
-                    }
-                }
-                None
-            };
-            for layer_idx in 0..geometry.num_layers {
-                let qkv_name = format!("model.layers.{}.self_attn.qkv_proj.weight", layer_idx);
-                if !weight_ptrs.contains_key(&qkv_name) {
-                    if let Some((ptr, size)) = supplement_weight(&qkv_name, &mut _supplement_owned) {
-                        weight_ptrs.insert(qkv_name.clone(), ptr);
-                        weight_sizes.insert(qkv_name, size);
-                    }
-                }
-                let gu_name = format!("model.layers.{}.mlp.gate_up_proj.weight", layer_idx);
-                if !weight_ptrs.contains_key(&gu_name) {
-                    if let Some((ptr, size)) = supplement_weight(&gu_name, &mut _supplement_owned) {
-                        weight_ptrs.insert(gu_name.clone(), ptr);
-                        weight_sizes.insert(gu_name, size);
-                    }
-                }
-                let gate_name = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
-                if !weight_ptrs.contains_key(&gate_name) {
-                    if let Some((ptr, size)) = supplement_weight(&gate_name, &mut _supplement_owned) {
-                        weight_ptrs.insert(gate_name.clone(), ptr);
-                        weight_sizes.insert(gate_name, size);
-                    }
+                let f32_bytes = f32_data.len() * std::mem::size_of::<f32>();
+                ext_ptrs.insert(name.clone(), f32_data.as_ptr() as *const u8);
+                ext_sizes.insert(name.clone(), f32_bytes);
+                ext_shapes.entry(name.clone()).or_insert_with(|| {
+                    // Keep original shape from quantized tensor
+                    weights.quantized_tensor(name).unwrap().shape.clone()
+                });
+            }
+            // Fallback: any quantized tensors that failed dequantization
+            for name in weights.available_names() {
+                if ext_ptrs.contains_key(&name) { continue; }
+                if let Some(qt) = weights.quantized_tensor(&name) {
+                    ext_ptrs.insert(name.clone(), qt.data.as_ptr());
+                    ext_sizes.insert(name.clone(), qt.data.len());
+                    ext_shapes.entry(name.clone()).or_insert_with(|| qt.shape.clone());
                 }
             }
-            // Detect heterogeneous layers (e.g., Gemma-4 E2B with sliding + full attention).
-            let ref_size_q = weight_sizes.get("model.layers.0.self_attn.q_proj.weight").copied();
-            let ref_size_gate = weight_sizes.get("model.layers.0.mlp.gate_proj.weight").copied();
+            // Prevent dequant_storage from being dropped until weight packing completes.
+            // dequant_results lives until end of this block, but weight packing
+            // happens later — we must ensure data lives long enough.
+            // Solution: store dequant_results alongside ext_ptrs lifetime.
+            // Since from_loader returns Self, we attach it to the Executor.
+            let _dequant_data = dequant_results;
+
+            // ── Build canonical name mapping ──
+            let all_names: Vec<String> = ext_shapes.keys().cloned().collect();
+            let tie_embed = model_config.tie_word_embeddings.unwrap_or(false);
+            let name_map = crate::loader::name_map::TensorNameMap::build_from_names(&all_names, tie_embed);
+            // Check if output.weight exists in ext_shapes
+            let has_output = all_names.iter().any(|n| n.contains("output.weight") || n == "output.weight");
+            // List all non-blk names (global tensors)
+            for n in &all_names {
+            }
+
+            // ── Build role index from external tensor names (for analyze_architecture only) ──
+            let (auto_role_index, _) = crate::loader::build_tensor_role_index(
+                ext_shapes.keys().map(|s| s.as_str()),
+            );
+            let auto_features = crate::arch::auto_graph::analyze_architecture(
+                &auto_role_index, &ext_shapes, Some(&manifest.arch),
+            );
+
+            // ── Convert ext_ptrs/sizes/shapes to canonical keys ──
+            let mut weight_ptrs: std::collections::HashMap<String, *const u8> = std::collections::HashMap::new();
+            let mut weight_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut weight_shapes: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+            for (ext_name, &ptr) in &ext_ptrs {
+                // An external name may map to multiple canonical names (e.g. tied embeddings:
+                // "token_embd.weight" → both "embed" and "lm_head"). Use all canonical mappings.
+                let canonicals = name_map.all_canonical_for(ext_name);
+                for cn in canonicals {
+                    weight_ptrs.entry(cn.to_string()).or_insert(ptr);
+                }
+            }
+            for (ext_name, &size) in &ext_sizes {
+                let canonicals = name_map.all_canonical_for(ext_name);
+                for cn in canonicals {
+                    weight_sizes.entry(cn.to_string()).or_insert(size);
+                }
+            }
+            for (ext_name, shape) in &ext_shapes {
+                let canonicals = name_map.all_canonical_for(ext_name);
+                for cn in canonicals {
+                    weight_shapes.entry(cn.to_string()).or_insert(shape.clone());
+                }
+            }
+
+            // ── Detect heterogeneous layers using canonical names ──
+            let find_weight_size = |canonical: &str| -> Option<usize> {
+                weight_sizes.get(canonical).copied()
+            };
+            let ref_size_q = find_weight_size("L0.q_proj");
+            let ref_size_gate = find_weight_size("L0.gate_proj");
+
             let mut full_attention_indices: Vec<usize> = Vec::new();
             let mut hetero_q_dim_full: usize = 0;
             let mut hetero_kv_dim_full: usize = 0;
             let mut hetero_intermediate_differs = false;
             if let Some(ref_q) = ref_size_q {
                 for layer_idx in 1..geometry.num_layers {
-                    let q_key = format!("model.layers.{}.self_attn.q_proj.weight", layer_idx);
-                    if let Some(&sz) = weight_sizes.get(&q_key) {
+                    let q_canonical = format!("L{}.q_proj", layer_idx);
+                    if let Some(sz) = find_weight_size(&q_canonical) {
                         if sz != ref_q {
                             full_attention_indices.push(layer_idx);
                             if hetero_q_dim_full == 0 {
                                 let ref_q_dim = ref_q / (geometry.hidden_size * 4);
                                 let full_q_dim = sz / (geometry.hidden_size * 4);
                                 hetero_q_dim_full = full_q_dim;
-                                let k_key = format!("model.layers.{}.self_attn.k_proj.weight", layer_idx);
-                                if let Some(&k_sz) = weight_sizes.get(&k_key) {
+                                let k_canonical = format!("L{}.k_proj", layer_idx);
+                                if let Some(k_sz) = find_weight_size(&k_canonical) {
                                     hetero_kv_dim_full = k_sz / (geometry.hidden_size * 4);
                                 }
                             }
                         }
                     }
                     if let Some(ref_gate) = ref_size_gate {
-                        let gate_key = format!("model.layers.{}.mlp.gate_proj.weight", layer_idx);
-                        if let Some(&sz) = weight_sizes.get(&gate_key) {
+                        let gate_canonical = format!("L{}.gate_proj", layer_idx);
+                        if let Some(sz) = find_weight_size(&gate_canonical) {
                             if sz != ref_gate {
                                 hetero_intermediate_differs = true;
                             }
@@ -809,11 +865,12 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                         let mut large_ffn_start_segment = num_segments;
                         if hetero_intermediate_differs && ref_gate > 0 {
                             let first_large_layer = (1..geometry.num_layers).find(|&l| {
-                                let gk = format!("model.layers.{}.mlp.gate_proj.weight", l);
-                                weight_sizes.get(&gk).map_or(false, |&s| s != ref_gate)
+                                let gk = format!("L{}.gate_proj", l);
+                                find_weight_size(&gk).map_or(false, |s| s != ref_gate)
                             });
                             if let Some(fl) = first_large_layer {
-                                let large_gate = weight_sizes.get(&format!("model.layers.{}.mlp.gate_proj.weight", fl)).copied().unwrap_or(ref_gate);
+                                let gk = format!("L{}.gate_proj", fl);
+                                let large_gate = find_weight_size(&gk).unwrap_or(ref_gate);
                                 large_intermediate = large_gate / (geometry.hidden_size * 4);
                                 large_ffn_start_segment = fl / (sliding_per_segment + 1);
                             }
@@ -851,30 +908,30 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 None
             };
 
-            let arch_for_template = crate::manifest::map_kind_template(&manifest.arch, manifest.kind)
-                .unwrap_or_else(|| manifest.arch.clone());
-            let template = crate::arch::get_template(&arch_for_template);
-
             use gllm_kernels::compiler::MegaKernelBusinessConfig;
             use gllm_kernels::compiler::mega_kernel_abi::{FfnActivation, OutputMode, PoolMode};
+
+            // max_new_tokens from model's max_position_embeddings.
+            let max_new_tokens_default = model_config.max_position_embeddings;
+            let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder;
+
             let business_config = MegaKernelBusinessConfig {
-                has_head_rms_norm: template.as_ref().map_or(false, |t| t.has_head_rms_norm),
-                head_rms_norm_eps: template.as_ref().map_or(1e-6, |t| t.head_rms_norm_eps),
+                has_head_rms_norm: auto_features.has_head_rms_norm,
+                head_rms_norm_eps: geometry.norm_eps,
                 ffn_activation: match geometry.hidden_act.as_ref().map(|a| a.as_str()).unwrap_or("") {
                     "gelu_new" | "gelu_pytorch_tanh" | "gelu" => FfnActivation::GeGLU,
                     _ => FfnActivation::SwiGLU,
                 },
-                has_qk_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
-                has_value_norm: template.as_ref().map_or(false, |t| t.name == "gemma4"),
+                has_qk_norm: auto_features.has_qk_norm,
+                has_value_norm: auto_features.has_value_norm,
                 value_norm_eps: geometry.norm_eps,
                 logit_softcapping: geometry.final_logit_softcapping,
-                embedding_scale: if template.as_ref().map_or(false, |t| t.name == "gemma4") {
+                embedding_scale: if auto_features.has_embedding_scale {
                     Some((geometry.hidden_size as f32).sqrt())
                 } else {
                     None
                 },
-                // SG config: only for decoder family (encoder models don't use SG).
-                semantic_gatekeeper: if template.as_ref().map_or(false, |t| t.family == "decoder") {
+                semantic_gatekeeper: if !is_encoder {
                     Some(SgConfig {
                         detect_layer: geometry.num_layers / 2,
                         detect_offset: 0,
@@ -884,9 +941,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 } else {
                     None
                 },
-                // Encoder models: output mode driven by manifest.kind.
-                // Decoder models: keep default (Generate).
-                output_modes: if template.as_ref().map_or(false, |t| t.family == "encoder") {
+                output_modes: if is_encoder {
                     match manifest.kind {
                         crate::manifest::ModelKind::Embedding => vec![
                             OutputMode::EncodeToLayer {
@@ -906,94 +961,111 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                             },
                         ],
                         _ => vec![OutputMode::Generate {
-                            max_new_tokens: 512,
-                            eos_token_id: 2,
+                            max_new_tokens: max_new_tokens_default,
+                            eos_token_id: eos_id,
                         }],
                     }
                 } else {
-                    vec![OutputMode::Generate {
-                        max_new_tokens: 512,
-                        eos_token_id: 2,
-                    }]
+                    // Decoder used as embedding/reranker: forward-only path
+                    match manifest.kind {
+                        crate::manifest::ModelKind::Embedding => vec![
+                            OutputMode::EncodeToLayer {
+                                anchor_layer: 0,
+                                pool_mode: PoolMode::MeanPool,
+                            },
+                        ],
+                        crate::manifest::ModelKind::Reranker => vec![
+                            OutputMode::ClassifyBinary {
+                                positive_token_id: 0,
+                                negative_token_id: 0,
+                            },
+                        ],
+                        _ => vec![OutputMode::Generate {
+                            max_new_tokens: max_new_tokens_default,
+                            eos_token_id: eos_id,
+                        }],
+                    }
                 },
                 ..MegaKernelBusinessConfig::default()
             };
 
-            // Route based on template family, not manifest.kind.
-            // Qwen3-Embed is family=decoder (decoder arch doing embedding task) → decoder mega-kernel.
-            // XLM-R is family=encoder (encoder arch doing embedding/rerank) → forward-only.
-            let template_family = template.as_ref().map(|t| t.family.as_str()).unwrap_or("decoder");
-            let is_encoder_family = template_family == "encoder";
+            // Build CompilerGraph from tensor names + shapes.
+            // No templates, no geometry fallback — auto_graph is the only path.
+            let resolved = crate::arch::ResolvedConfig::from_geometry(
+                &geometry, std::collections::HashMap::new(),
+            );
+            // REQ-DTYPE-CHAIN-002: per-tensor dtype from loader TensorMeta.
+            let weight_dtypes: std::collections::HashMap<String, gllm_kernels::types::DType> =
+                weights.meta.iter()
+                    .filter_map(|(name, meta)| {
+                        crate::loader::adapter::safetensors_dtype_to_gllm(meta.dtype)
+                            .map(|dt| (name.clone(), dt))
+                    })
+                    .collect();
+            let graph = crate::arch::auto_graph::build_compiler_graph(
+                &auto_features, &resolved, &weight_shapes, &weight_dtypes, &business_config,
+                model_config.max_position_embeddings,
+            ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                format!("auto_graph build failed: {}", e),
+            )))?;
 
-            let mega = if is_encoder_family {
-                // ── Encoder path: forward-only via InferenceCompiler::compile_graph ──
-                if let Some(ref tmpl) = template {
-                    let resolved = crate::arch::ResolvedConfig::from_geometry(
-                        &geometry, std::collections::HashMap::new(),
-                    );
-                    super::mega_kernel::MegaKernelExecutor::compile_forward(
-                        tmpl,
-                        &resolved,
-                        &geometry,
-                        &weight_ptrs,
-                        &weight_sizes,
-                        &business_config,
-                    ).map_err(|e| ExecutorError::Backend(BackendError::Other(
-                        format!("mega-kernel forward compilation failed: {}", e),
-                    )))?
-                } else {
-                    return Err(ExecutorError::Backend(BackendError::Other(
-                        "encoder models require a YAML template".into(),
-                    )));
-                }
-            } else if let Some(ref tmpl) = template {
-                // ── Decoder path with template ──
-                let resolved = crate::arch::ResolvedConfig::from_geometry(
-                    &geometry, std::collections::HashMap::new(),
-                );
-                match super::mega_kernel::MegaKernelExecutor::compile_from_template(
-                    tmpl,
-                    &resolved,
+            let sm = backend.gpu_sm_version();
+            let gpu_sm_version = if sm > 0 { Some(sm) } else { None };
+
+            let needs_forward_only = is_encoder;
+            let mega = if needs_forward_only {
+                super::mega_kernel::MegaKernelExecutor::compile_forward_from_graph(
+                    graph,
                     &geometry,
                     &weight_ptrs,
                     &weight_sizes,
-                    eos_id,
-                    business_config.clone(),
-                    hetero_config.clone(),
-                ) {
-                    Ok(m) => {
-                        log::info!("executor: mega-kernel compiled from YAML template '{}'", tmpl.name);
-                        m
-                    }
-                    Err(e) => {
-                        log::warn!("[executor] template compilation failed ({}), falling back to geometry path", e);
-                        super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
-                            &geometry,
-                            &weight_ptrs,
-                            &weight_sizes,
-                            eos_id,
-                            business_config,
-                            hetero_config,
-                        ).map_err(|e2| ExecutorError::Backend(BackendError::Other(
-                            format!("mega-kernel compilation failed (template: {}, geometry: {})", e, e2),
-                        )))?
-                    }
-                }
+                    weights.raw_floats(),
+                    &name_map,
+                    gpu_sm_version,
+                ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+                    format!("mega-kernel compilation failed: {}", e),
+                )))?
             } else {
-                // ── Decoder path without template ──
-                super::mega_kernel::MegaKernelExecutor::compile_from_geometry(
-                    &geometry,
+                super::mega_kernel::MegaKernelExecutor::compile_from_auto_graph(
+                    graph,
                     &weight_ptrs,
                     &weight_sizes,
+                    weights.raw_floats(),
+                    &name_map,
+                    geometry.max_seq_len,
                     eos_id,
                     business_config,
                     hetero_config,
+                    gpu_sm_version,
                 ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                     format!("mega-kernel compilation failed: {}", e),
                 )))?
             };
 
-            log::info!("executor: true mega-kernel compiled");
+
+            // Upload GPU mega-kernel artifacts to backend (weight blob + PTX cache).
+            // GPU backends store PTX in compiled_ptx cache and upload weight blob once.
+            {
+                let wb = mega.weight_blob();
+                let sb = mega.scratchpad_bytes();
+                // gpu_code() returns decoder PTX for decoder models, forward PTX for encoder models.
+                // For encoder models, forward GPU code goes into forward_gpu_code param.
+                // For decoder models, decoder GPU code goes into decoder_gpu_code param.
+                let (decoder_gc, forward_gc) = if is_encoder {
+                    (None, mega.gpu_code())
+                } else {
+                    (mega.gpu_code(), None)
+                };
+                if let Err(e) = backend.prepare_gpu_mega_kernel(
+                    wb.unwrap_or(&[]),
+                    decoder_gc,
+                    forward_gc,
+                    sb,
+                ) {
+                    log::warn!("executor: GPU mega-kernel artifact upload failed: {e}");
+                }
+            }
+
             Some(mega)
         };
 
@@ -1056,12 +1128,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                     "executor: §12.4 LatencyProfiler probe failed ({e}), deriving from topology"
                 );
                 // Derive probe result from topology constraints when micro-benchmark fails
-                let (_, l2, _) = pre_topology.profile.cache_sizes();
-                let elem_bytes = 4usize;
+                let (l1d, l2, _) = pre_topology.profile.cache_sizes();
+                let elem_bytes = model_config.dtype.size_bytes();
+                let row_bytes = geometry.hidden_size * elem_bytes;
                 let l2_thrash = if l2 > 0 {
-                    l2 / (geometry.hidden_size * 2 * elem_bytes).max(1)
+                    l2 / (row_bytes * 2).max(1)
+                } else if l1d > 0 {
+                    // No L2 info: estimate from L1d — a single row should fit in L1,
+                    // L2 thrash ≈ L1 size / row_bytes as a lower bound estimate
+                    l1d / row_bytes.max(1)
                 } else {
-                    2048
+                    // Last resort: derive from model's max_position_embeddings
+                    model_config.max_position_embeddings
                 };
                 crate::jit::profiler::ProbeResult {
                     spill_points: vec![l2_thrash / 4, l2_thrash / 2, l2_thrash],
@@ -1087,7 +1165,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             scheduler,
             manifest,
             weights,
-            add_special_tokens: true,
+            add_special_tokens: model_config.add_special_tokens.unwrap_or(true),
             geometry: geometry.clone(),
             model_config,
             forward_config,
@@ -2703,7 +2781,6 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             return Err(ExecutorError::EmptyPrompt);
         }
 
-        #[cfg(target_arch = "x86_64")]
         if let Some(ref mega) = self.mega_kernel {
             let prompt_tokens = self.encode_prompt(&prompt.to_string())?;
             log::debug!("[executor] mega-kernel path: prompt_tokens={:?}, max_tokens={}", prompt_tokens, max_tokens);
@@ -2725,6 +2802,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 top_p,
                 sg_hook_ptr,
                 if self.callback_table.has_any_callback() { self.callback_table.as_ptr() } else { std::ptr::null() },
+                None,  // page_table: no PagedAttention integration yet
+                0,  // session_position: new session
+                None,  // fused_hidden: no multimodal
+                0,  // num_mm_tokens: 0
             ).map_err(|e| ExecutorError::Backend(BackendError::Other(
                 format!("mega-kernel generate failed: {}", e),
             )))?;
@@ -2742,51 +2823,132 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     ///
     /// Takes the pre-expanded token sequence and pre-computed fused hidden
     /// state (text positions: gathered from `embed_tokens`; media positions:
-    /// encoder output).
-    ///
-    /// ARCH-RUST-IS-CODEGEN: 需要支持 fused hidden state 注入的 mega-kernel 路径。
-    /// 当前 mega-kernel 仅支持纯文本 generate_single_sequence。
-    /// TODO: mega-kernel multimodal 支持 (fused hidden state → JIT 注入)
+    /// encoder output). Passes fused_hidden to mega-kernel via ABI arg 18/19.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_with_multimodal(
         &mut self,
-        _token_ids: Vec<u32>,
-        _fused_hidden: Vec<f32>,
-        _max_tokens: usize,
-        _temperature: f32,
-        _top_k: usize,
-        _top_p: f32,
+        token_ids: Vec<u32>,
+        fused_hidden: Vec<f32>,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
         _thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        // ARCH-RUST-IS-CODEGEN: mega-kernel 尚未支持 multimodal (fused hidden 注入)
-        Err(ExecutorError::Backend(BackendError::Other(
-            "generate_with_multimodal: mega-kernel 尚未支持 multimodal 输入。\
-             需要扩展 generate_single_sequence 以接受 fused hidden state (ARCH-MULTIMODAL-FUSION)。\
-             当前仅支持纯文本路径 generate_with_sampling (ARCH-RUST-IS-CODEGEN)。".into(),
-        )))
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "generate_with_multimodal: no mega-kernel available".into(),
+            )))?;
+
+        let num_mm_tokens = fused_hidden.len() / self.geometry.hidden_size;
+        if fused_hidden.len() != num_mm_tokens * self.geometry.hidden_size {
+            return Err(ExecutorError::Backend(BackendError::Other(
+                format!("fused_hidden length {} != num_mm_tokens({}) * hidden_size({})",
+                    fused_hidden.len(), num_mm_tokens, self.geometry.hidden_size),
+            )));
+        }
+
+        let sg_hook_ptr = match self.sg_shared_memory {
+            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            None => std::ptr::null(),
+        };
+        let output_tokens = mega.generate_single_sequence(
+            &token_ids,
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            sg_hook_ptr,
+            if self.callback_table.has_any_callback() { self.callback_table.as_ptr() } else { std::ptr::null() },
+            None,           // page_table: no PagedAttention
+            0,              // session_position: new session
+            Some(&fused_hidden), // fused_hidden: multimodal encoder output
+            num_mm_tokens,  // number of multimodal tokens
+        ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+            format!("mega-kernel multimodal generate failed: {}", e),
+        )))?;
+
+        let text = self.decode_tokens(&output_tokens)?;
+        Ok(text)
     }
 
     /// Generate with session affinity for multi-turn conversation KV cache reuse.
     ///
-    /// ARCH-RUST-IS-CODEGEN: 需要支持 session KV cache 复用的 mega-kernel 路径。
-    /// 当前 mega-kernel 仅支持单次 generate_single_sequence。
-    /// TODO: mega-kernel session 支持 (KV cache 跨轮次复用)
+    /// Passes session_position to mega-kernel (ABI arg 17). The JIT embed phase
+    /// checks session_position > 0 and skips already-processed prompt tokens,
+    /// resuming from the cached KV state.
     pub fn generate_with_session(
         &mut self,
-        _prompt: &str,
-        _max_tokens: usize,
-        _temperature: f32,
-        _top_k: usize,
-        _top_p: f32,
-        _session_id: SessionId,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        session_id: SessionId,
         _thinking_budget: Option<usize>,
     ) -> ExecutorResult<String> {
-        // ARCH-RUST-IS-CODEGEN: mega-kernel 尚未支持 session KV cache 复用
-        Err(ExecutorError::Backend(BackendError::Other(
-            "generate_with_session: mega-kernel 尚未支持 multi-turn session。\
-             需要扩展 generate_single_sequence 以支持 KV cache 跨轮次复用 (ARCH-SESSION)。\
-             当前仅支持单轮 generate_with_sampling (ARCH-RUST-IS-CODEGEN)。".into(),
-        )))
+        let mega = self.mega_kernel.as_ref()
+            .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
+                "generate_with_session: no mega-kernel available".into(),
+            )))?;
+
+        let prompt_tokens = self.encode_prompt(prompt)?;
+        if prompt_tokens.is_empty() {
+            return Err(ExecutorError::EmptyPrompt);
+        }
+
+        let session_position = self.memory_manager
+            .session_finalized_position(session_id)
+            .unwrap_or(0);
+
+        let sg_hook_ptr = match self.sg_shared_memory {
+            Some(ref mx) => mx.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+            None => std::ptr::null(),
+        };
+        let output_tokens = mega.generate_single_sequence(
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            sg_hook_ptr,
+            if self.callback_table.has_any_callback() { self.callback_table.as_ptr() } else { std::ptr::null() },
+            None,               // page_table: no PagedAttention
+            session_position,   // session_position: resume from cached KV
+            None,               // fused_hidden: no multimodal
+            0,                  // num_mm_tokens: 0
+        ).map_err(|e| ExecutorError::Backend(BackendError::Other(
+            format!("mega-kernel session generate failed: {}", e),
+        )))?;
+
+        self.memory_manager.register_session(session_id);
+
+        let text = self.decode_tokens(&output_tokens)?;
+        Ok(text)
+    }
+
+    // ── Diagnostic methods ──
+
+    /// Read a row of F32 data from the weight blob at the given tensor name and row index.
+    pub fn diagnostic_weight_row(&self, tensor_name: &str, row: usize, cols: usize) -> Option<Vec<f32>> {
+        self.mega_kernel.as_ref()?.read_weight_row(tensor_name, row, cols)
+    }
+
+    /// Return all named weight offsets (canonical_name, byte_offset).
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+        self.mega_kernel.as_ref().map(|m| m.weight_offsets().unwrap_or(&[]).to_vec())
+    }
+
+    pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        self.mega_kernel.as_ref()?.diagnostic_prefill_logits(prompt_tokens).ok()
+    }
+
+
+    pub fn diagnostic_forward_only(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        self.mega_kernel.as_ref()?.diagnostic_forward_only(prompt_tokens).ok()
+    }
+    pub fn diagnostic_prefill_scratchpad(&self, prompt_tokens: &[u32]) -> Option<crate::engine::mega_kernel::DiagnosticScratchpad> {
+        self.mega_kernel.as_ref()?.diagnostic_prefill_scratchpad(prompt_tokens).ok()
     }
 
     pub fn embed(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {
@@ -2817,7 +2979,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
                 "mega-kernel not compiled".into()
             )))?;
-        let output_elems = tokens.len();
+        let output_elems = mega.output_elems_for_embed(tokens.len(), self.geometry.hidden_size);
         if mega.has_mega_compiled() {
             mega.execute_encode(&tokens, output_elems)
                 .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
@@ -2841,7 +3003,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if tokens.is_empty() {
             return Err(ExecutorError::EmptyPrompt);
         }
-        // For decoder-based rerankers without a score head, resolve yes/no token IDs
+            // For decoder-based rerankers without a score head, resolve yes/no token IDs
         if is_decoder && self.forward_config.rerank_yes_token_id.is_none() {
             if let Ok(yes_ids) = self.tokenizer.encode("yes", false) {
                 if let Some(&id) = yes_ids.first() {
@@ -2860,11 +3022,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             .ok_or_else(|| ExecutorError::Backend(BackendError::Other(
                 "mega-kernel not compiled".into()
             )))?;
-        let output_elems = tokens.len();
-        if mega.has_mega_compiled() {
+        if is_decoder && mega.has_mega_compiled() {
+            // Decoder-based reranker: use ClassifyBinary mode to get yes/no logits
+            let yes_id = self.forward_config.rerank_yes_token_id
+                .ok_or_else(|| ExecutorError::Plan("decoder reranker: yes_token_id not resolved".into()))?;
+            let no_id = self.forward_config.rerank_no_token_id
+                .ok_or_else(|| ExecutorError::Plan("decoder reranker: no_token_id not resolved".into()))?;
+            mega.execute_rerank(&tokens, yes_id, no_id)
+                .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+        } else if mega.has_mega_compiled() {
+            // Encoder-based reranker via mega-kernel: use EncodeToLayer
+            let output_elems = mega.output_elems_for_embed(tokens.len(), self.geometry.hidden_size);
             mega.execute_encode(&tokens, output_elems)
                 .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
         } else {
+            // Forward-only path (encoder models)
+            let output_elems = mega.output_elems_for_embed(tokens.len(), self.geometry.hidden_size);
             mega.execute_forward(&tokens, output_elems)
                 .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
         }

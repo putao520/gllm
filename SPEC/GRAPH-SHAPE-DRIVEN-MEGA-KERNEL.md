@@ -387,6 +387,328 @@ Phase 3: 唯一物化点
 
 **不变量验证**: 任何 Phase 0-2 的输出如果包含物理机器码字节，则违反管线不变量。
 
+### §0.8 dtype 感知编译与去数据搬移
+
+> **实现状态**: ✅ REQ-DTYPE-001~008 全部完成 — LoweringContext.dtype 穿透 + emit_* 参数化 + 融合组 dtype 连续性 + 布局协商 dtype 感知 + GEMM 累加策略 + Epilogue 窄化写回 + 代数重关联 + 交换律判定
+
+> **核心原则**: dtype 从模型 TensorMeta 自动推断，编译时穿透所有 emit 函数，
+> 运行时零 dtype 分支。融合组内通过代数重关联消除不必要的 dtype 变换，
+> 最小化数据搬移。
+
+#### §0.8.1 问题诊断
+
+当前实现存在两类架构缺陷：
+
+**缺陷 A — dtype 穿透断裂**: `LoweringContext` 无 dtype 字段，所有 32 个 `emit_*` 函数
+内部硬编码 `QuantPrecision::F32`（plan_lower.rs 568 处）。dtype 传播链在 GEMM 入口处
+断裂，导致 BF16/F16 模型权重被无条件 widen 到 F32 计算。
+
+```
+正确传播链 (auto_select.rs 已实现):
+  TensorMeta.dtype → TypedSlot.dtype → infer_result_dtype() → VmInstr.dtype → ISA Lowering
+
+断裂点 (plan_lower.rs):
+  emit_gemm_inline_with_hook(prog, m, n, k, ctx, ...)
+    ├── ctx 无 dtype 字段
+    ├── 函数签名无 dtype 参数
+    └── 内部 568 处 QuantPrecision::F32 硬编码
+```
+
+**缺陷 B — 重复 pack/transform**: 每个 codegen 路径独立决定数据格式，缺少全局布局协商。
+融合组内存在冗余的 widen→narrow→widen 链，本可通过算子重排消除。
+
+#### §0.8.2 dtype 穿透设计 — REQ-DTYPE-001 ~ REQ-DTYPE-002
+
+**REQ-DTYPE-001: LoweringContext.dtype 穿透**
+
+`LoweringContext` 新增 dtype 字段，从 `op_input_dtype(op, graph)` 自动推断：
+
+```
+传播路径:
+  CompilerGraph.tensor(op.inputs[0]).dtype
+    → op_input_dtype(op, graph)       [已实现]
+      → LoweringContext.dtype          [新增字段]
+        → emit_gemm_*(ctx)            [从 ctx.dtype 读取]
+          → VmInstr { ..., dtype: ctx.dtype }
+            → ISA Lowering 用 dtype.x86_elem_strategy() 选择指令
+```
+
+**约束**:
+- dtype 推断方向严格单向: TensorMeta → emit 函数 → VmInstr → ISA Lowering
+- 禁止反向推断或独立计算
+- 每个 emit 函数的 dtype 从调用者传入，禁止在函数内部硬编码
+- `op_input_dtype()` 的 `unwrap_or(QuantPrecision::F32)` 仅用于无输入 tensor 的安全回退
+
+**REQ-DTYPE-002: 所有 emit_* 函数签名参数化**
+
+所有 `emit_*` 函数从 `LoweringContext` 读取 dtype，替代内部硬编码：
+
+```
+变更前:
+  emit_gemm_naive_inline(prog, m_dim, n, k, width, a, b, c, sym_map, seq_bound)
+  内部: 567 处 QuantPrecision::F32
+
+变更后:
+  emit_gemm_naive_inline(prog, m_dim, n, k, ctx, a, b, c, seq_bound)
+  内部: 用 ctx.dtype 替代所有 QuantPrecision::F32
+```
+
+**影响范围**: plan_lower.rs 全部 32 个 emit_* 函数。
+
+#### §0.8.3 融合组内 dtype 连续性 — REQ-DTYPE-003
+
+**REQ-DTYPE-003: 融合组内 dtype 连续性约束**
+
+融合规则增加约束: 相邻算子 dtype 相同时，零变换直传。dtype 不同时按以下策略处理:
+
+```
+dtype 边界处理策略:
+
+widening (存储 dtype → 累加 dtype):
+  BF16 weights → F32 累加器
+  ├── 在 GEMM 内部 load 时完成 (VDPBF16PS / BF16→F32 widen)
+  └── 无额外 pack/transform
+
+narrowing (累加 dtype → 存储 dtype):
+  F32 累加器 → BF16 写回
+  ├── 在 Epilogue 最后一步完成 (§0.8.6)
+  └── 无中间变换
+
+量化边界 (F32/BF16 → INT8/INT4):
+  ├── 仅在量化算子入口发生
+  └── 算子间的中间值保持原生 dtype
+```
+
+**约束**:
+- 禁止融合组内部出现 widen→compute→narrow→widen 链（应通过重排消除，见 §0.8.7）
+- 中间 tensor 的 dtype 等于前驱算子的输出 dtype（零拷贝直传）
+- pack/transform 仅在 dtype 真正需要改变时发生
+
+#### §0.8.4 布局协商器 dtype 感知 — REQ-DTYPE-004
+
+**REQ-DTYPE-004: R1.5 布局协商器消费 dtype 信息**
+
+`LayoutNegotiator` (§3.10) 收集每个加速指令的 `(dtype, layout_preference)` 对:
+
+```
+协商输入:
+  ├── GEMM(BF16 weights):     layout = PanelPack(mr, nr, kc), dtype = BF16
+  ├── AMX tile:               layout = AmxTile(16×32),        dtype = BF16
+  ├── VNNI:                   layout = VnniPack,              dtype = U8/I8
+  ├── GPU WMMA:               layout = SharedMemTile,         dtype = BF16/F16
+  ├── FlashAttention:         layout = HeadSplit,             dtype = F32
+  ├── RmsNorm:                layout = RowMajor,              dtype = F32(累加)
+  └── SwiGLU:                 layout = Interleaved,           dtype = BF16
+
+协商结果:
+  ├── 相同 dtype + 相同布局 → 零变换
+  ├── 相同 dtype + 不同布局 → PackMap 虚拟索引 (无物理 pack)
+  └── 不同 dtype → 在自然搬运点零成本切换 (GEMM 累加器写回时顺便窄化)
+```
+
+**约束**: 协商器不得引入仅因 dtype 不同的额外 pack 操作。dtype 变换在计算内部完成，
+不作为独立数据搬移步骤。
+
+#### §0.8.5 GEMM 累加器 dtype 策略 — REQ-DTYPE-005
+
+**REQ-DTYPE-005: GEMM 累加器 dtype 选择**
+
+GEMM 累加器 dtype 由 `(输入 dtype × 硬件能力)` 联合决定:
+
+```
+累加策略决策:
+  ├── 输入 BF16 + AVX-512 VDPBF16PS → BF16 load + F32 累加 (硬件原生)
+  ├── 输入 BF16 + AVX2              → F32 widen + F32 累加 (软件 widen)
+  ├── 输入 BF16 + GPU tensor core   → BF16 load + F32 累加 (wgmma/mma.sync)
+  ├── 输入 F16 + GPU tensor core    → F16 load + F32 累加 (同上)
+  ├── 输入 F32 + 任意硬件            → F32 load + F32 累加 (直通)
+  └── 输入 INT8/INT4 (量化)         → Dequant → F32 累加 (量化算子路径)
+
+累加器 dtype 传播到 Epilogue:
+  Epilogue 链在累加 dtype 下执行全部后继算子 (§3.2.1 P0: EpilogueInjection)
+  最后一步窄化到存储 dtype (§0.8.6)
+```
+
+**约束**: 累加 dtype 由 `dtype.x86_elem_strategy()` / `dtype.gpu_elem_strategy()` 属性方法
+决定，禁止 `match dtype { BF16 => ..., F32 => ... }` 身份匹配。
+
+#### §0.8.6 Epilogue 窄化写回 — REQ-DTYPE-006
+
+**REQ-DTYPE-006: Epilogue 最后一步窄化**
+
+EpilogueInjection (§3.2.1 P0) 的写回阶段将累加器 dtype 窄化为存储 dtype:
+
+```
+GEMM + Epilogue 全链路:
+
+  累加阶段:   load(input_dtype) → FMA(accumulate_dtype) → 累加器 [累加 dtype]
+  Epilogue:   累加器 → Op1(累加 dtype) → Op2(累加 dtype) → ... → 最后一步 [全在累加 dtype]
+  写回阶段:   narrow(累加 dtype → 存储 dtype) → VecStore [存储 dtype]
+```
+
+**约束**:
+- 窄化仅发生在 Epilogue 链的最末端
+- Epilogue 内部所有算子在累加 dtype 下执行（零中间变换）
+- 窄化操作通过 `dtype.narrow_strategy()` 属性方法选择，禁止手写 match
+
+#### §0.8.7 dtype 感知的代数重关联 — REQ-DTYPE-007, REQ-DTYPE-008
+
+**REQ-DTYPE-007: dtype 感知的代数重关联**
+
+融合组构建时（R1 PDT 融合），当融合组内存在 dtype 边界，若相邻算子满足
+交换律，重排顺序将同 dtype 算子聚集，消除中间 widen/narrow 变换:
+
+```
+原始算子链 (按图拓扑序):
+  Op_A(BF16) → Cast(BF16→F32) → Op_B(F32) → Cast(F32→BF16) → Op_C(BF16)
+      ╰── dtype 边界 ──╯                    ╰── dtype 边界 ──╯
+  = 2 次 dtype 变换, 2 个融合断点
+
+重排后 (交换律成立时):
+  Op_A(BF16) → Op_C(BF16) → Cast(BF16→F32) → Op_B(F32)
+      ╰── 同 dtype 融合 ──╯    ╰── 单次变换 ──╯
+  = 1 次 dtype 变换, 1 个融合断点
+```
+
+**重排条件**:
+1. 算子对满足交换律: f(g(x)) = g(f(x))
+2. 重排后数值等价: 输出在目标精度范围内一致
+3. 重排不破坏数据依赖: 无跨算子的值依赖
+
+**REQ-DTYPE-008: 交换律与 dtype 无损判定矩阵**
+
+| 算子对 | 交换律 | dtype 无损 | 可重排 |
+|--------|--------|-----------|--------|
+| ElemWise × ElemWise (Mul, Add, Sub) | 成立 | BF16/MXFP 精度足够 | 可重排聚集 |
+| ElemWise × ElemWise (SiLU, GELU) | 成立 | BF16 精度足够 | 可重排聚集 |
+| Norm → ElemWise | Norm 先执行 | Norm 输出窄化回原生 dtype 后 ElemWise 可执行 | 可保持序 |
+| ElemWise → Norm | 可交换 | ElemWise 在原生 dtype 下执行后 Norm 内部 widen | 可重排 |
+| GEMM 累加 → ElemWise | 累加器内执行 | 全在累加 dtype (EpilogueInjection) | 已融合 |
+| Softmax → ElemWise | 不交换 | Softmax 内部需要 F32 exp/sum | 不可重排 |
+| Attention → RoPE | 不交换 | RoPE 修改 Q/K 位置编码 | 不可重排 |
+
+**判定规则**:
+- 默认不可重排（保守策略）
+- 仅当判定矩阵明确标注"可重排"时才允许重排
+- 新增算子必须显式声明其交换律属性
+
+#### §0.8.9 全链路数据流不变量
+
+dtype 贯穿后的完整数据流约束:
+
+```
+模型加载:   TensorMeta.dtype (BF16/F16/F32/MXFP4/INT8/INT4)
+              ↓
+图构建:     OpKind × TensorMeta.dtype → 计算图节点
+              ↓
+SymExec:    OpTrace × TypedSlot.dtype → ComputePattern (dtype 感知)
+              ↓
+融合 (R1):  PDT 融合 + dtype 代数重关联 → FusionPlan (dtype 连续性约束)
+              ↓
+布局 (R1.5): (dtype, layout_preference) 协商 → LayoutAssignment
+              ↓
+数据流 (R2): VirtualTensor IndexMap 尊重 dtype + layout
+              ↓
+Plan Lower:  LoweringContext.dtype → emit_* 函数 → VmInstr { dtype }
+              ↓
+ISA Lower:   dtype.x86_elem_strategy() / dtype.gpu_elem_strategy()
+              ↓
+机器码:      VDPBF16PS / VMULPS / wmma.mma.sync.bf16 / v_mfma_bf16
+```
+
+**不变量验证**:
+- 任何 emit 函数内部出现 `QuantPrecision::F32` 硬编码 = 违反 REQ-DTYPE-002
+- 任何 dtype 变换出现在融合组内部（非 Epilogue 末端）= 违反 REQ-DTYPE-003
+- 任何 pack/transform 仅因 dtype 不同而引入 = 违反 REQ-DTYPE-004
+
+### §0.9 全链路 dtype 传播契约
+
+> **核心原则**: dtype 传播是单向管线，每个阶段只读前一阶段的输出。
+> 任何阶段不得将原始 dtype 转换为"更方便"的中间表示、独立计算/反推/硬编码 dtype、
+> 或跳过 dtype 传播链中的任何环节。
+
+```
+dtype 单向管线:
+
+  Loader (raw bytes + per-tensor DType)
+    → Graph (per-tensor DType in TensorMeta)
+      → JIT (per-op QuantPrecision via op_input_dtype)
+        → ISA (per-instruction 策略 via dtype.x86_elem_strategy())
+```
+
+#### 三种 dtype 概念
+
+| 概念 | 来源 | 用途 | 存储位置 |
+|------|------|------|---------|
+| **存储 dtype** | Loader per-tensor | 权重 blob 偏移计算 | `graph.tensor(id).dtype` |
+| **计算 dtype** | DeviceProfile × 存储 dtype | GEMM 累加器 / 激活 buffer | `GraphDerivedGeometry.compute_dtype` |
+| **指令 dtype** | 计算dtype × ISA 能力 | 每条 VM 指令的寄存器/指令选择 | `VmInstr.dtype` |
+
+#### REQ-DTYPE-CHAIN-001: Loader 保留原始 dtype
+
+SafeTensors / GGUF / ONNX loader 必须保留每个 tensor 的原始 dtype 和 raw bytes。
+**禁止加载时无条件转换到 F32。**
+
+- 量化 tensor（Q4_K / MXFP4 等）：保留 raw bytes + `GgmlDType` 元数据
+- 浮点 tensor（BF16 / F16 / F32）：保留 raw bytes，不转换
+- 仅以下场景允许 dtype 转换：
+  1. GGUF 量化 → JIT 时 dequant（在 GEMM load 微内核内完成）
+  2. BF16 权重 → F32 累加（在 GEMM `VDPBF16PS` 指令内完成）
+  3. 累加结果 → 存储写回（在 Epilogue 最后一步完成）
+
+#### REQ-DTYPE-CHAIN-002: Graph per-tensor dtype 源自 Loader
+
+CompilerGraph 中每个 tensor 的 dtype 必须来自 Loader 的 `TensorMeta.dtype`。
+`auto_graph::build_compiler_graph()` 不得用全局 `config.dtype` 覆盖 per-tensor dtype。
+
+**约束**:
+- 每个 `add_tensor_*()` 调用使用该 tensor 在 Loader 中的实际 dtype
+- 图构建时不做 dtype 转换（转换在 JIT 指令层完成）
+
+#### REQ-DTYPE-CHAIN-003: 权重布局 per-tensor dtype 感知
+
+`MegaKernelWeightLayout` 通过 `graph.weight_layout()` 获取每个 tensor 的精确偏移。
+`graph.weight_layout()` 内部按 per-tensor `dtype.size_bytes()` 计算偏移。
+`GraphDerivedGeometry` 不承担权重 dtype 责任——权重布局从 graph 直接派生。
+
+**约束**:
+- 权重 blob 中不同 dtype 的 tensor 按各自 `size_bytes()` 排列
+- Norm 权重（通常 F32）与 GEMM 权重（可能 BF16）的偏移各自正确
+
+#### REQ-DTYPE-CHAIN-004: Buffer 布局用计算 dtype
+
+`MegaKernelBufferLayout` 使用**计算 dtype**（通常 F32）计算 activation / logits / sampling 大小。
+激活 buffer 始终在计算 dtype 下分配（JIT 累加器在 F32 中运行）。
+
+**计算 dtype 推导规则**:
+- BF16 模型 + AVX-512 → `compute_dtype = F32`（累加在 F32）
+- BF16 模型 + GPU tensor core → `compute_dtype = F32`
+- F32 模型 + 任意硬件 → `compute_dtype = F32`
+- 量化模型 → `compute_dtype = F32`（dequant 后在 F32 累加）
+
+#### REQ-DTYPE-CHAIN-005: GraphDerivedGeometry 演进
+
+`GraphDerivedGeometry.dtype` 语义演化为 `compute_dtype`：
+- 来自 graph 输入 tensor 的 dtype，但经过 DeviceProfile 提升
+- 仅用于 buffer sizing 和 scratchpad 计算
+- 权重偏移计算不依赖此字段（使用 `graph.weight_layout()`）
+
+#### §0.9 审计命令
+
+```bash
+# Loader 层: 检查是否有 convert_to_f32 调用在非测试路径
+grep -rn "convert.*to_f32\|convert_tensor_to_f32" src/loader/ --include="*.rs" | grep -v test
+
+# Graph 层: 检查 auto_graph 是否使用全局 dt 而非 per-tensor
+grep -n "config\.dtype\|let dt = " src/arch/auto_graph.rs
+
+# Geometry 层: 检查 compute_dtype 是否只用于 buffer/scratchpad
+grep -rn "compute_dtype\|geometry\.dtype" src/compiler/ --include="*.rs" | grep -v "weight_layout"
+
+# 权重布局: 检查是否使用单一 elem_bytes
+grep -rn "elem_bytes.*geo\|geo.*elem_bytes" src/compiler/mega_kernel_abi.rs
+```
+
 ## §1 核心原则
 
 ```

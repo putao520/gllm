@@ -8,8 +8,6 @@ use crate::loader::gguf::GgufReader;
 use crate::loader::TensorProvider;
 use crate::manifest::TensorRole;
 
-use super::template::{ArchTemplate, ConfigValue};
-
 /// 解析后的配置
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedConfig {
@@ -176,46 +174,23 @@ pub enum ResolveError {
     Inconsistent(String),
 }
 
-/// 从模板和数据源解析配置
-pub fn resolve_config<P: TensorProvider>(
-    template: &ArchTemplate,
+/// 从数据源解析配置 (GGUF metadata + tensor shapes)
+pub fn resolve_from_provider<P: TensorProvider>(
     provider: &P,
     gguf: Option<&GgufReader>,
 ) -> Result<ResolvedConfig, ResolveError> {
     let mut config = ResolvedConfig::default();
 
-    // 优先从 GGUF metadata 获取
     if let Some(reader) = gguf {
         resolve_from_gguf(&mut config, reader)?;
     }
 
-    // 从张量形状补充/验证
     resolve_from_tensors(&mut config, provider)?;
 
-    // 处理模板中的配置覆盖
-    for (key, value) in &template.config {
-        if !value.is_placeholder() {
-            // 直接值覆盖
-            match value {
-                ConfigValue::Direct(v) => {
-                    config.extra.insert(key.clone(), *v);
-                }
-                ConfigValue::Float(v) => {
-                    if key == "rope_theta" {
-                        config.rope_theta = *v;
-                    }
-                }
-                ConfigValue::String(_) => {}
-            }
-        }
-    }
-
-    // 计算派生值
     if config.head_dim == 0 && config.hidden_size > 0 && config.num_attention_heads > 0 {
         config.head_dim = config.hidden_size / config.num_attention_heads;
     }
 
-    // 验证必需字段
     validate_config(&config)?;
 
     Ok(config)

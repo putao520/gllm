@@ -272,6 +272,34 @@ pub mod backend_trait {
         fn device_memory_used(&self) -> usize {
             0
         }
+
+        /// GPU compute capability version (e.g. 80 for sm_80, 90 for sm_90).
+        /// Returns 0 for non-GPU backends.
+        /// Used by mega-kernel compilation to generate correct PTX/HIP code.
+        fn gpu_sm_version(&self) -> u32 {
+            0
+        }
+
+        /// Store GPU mega-kernel artifacts (PTX/HIP/MSL code + weight blob)
+        /// in the backend for subsequent GPU launches.
+        ///
+        /// Called once during model loading after `MegaKernelExecutor` compilation.
+        /// CPU backend: no-op. GPU backend: uploads weight blob to device,
+        /// stores PTX in cache.
+        ///
+        /// `decoder_gpu_code`: mega-kernel GPU code for decoder path (21-param ABI).
+        /// `forward_gpu_code`: forward-only GPU code for encoder path (10-param ABI).
+        /// `scratchpad_bytes`: scratchpad size needed by the mega-kernel.
+        fn prepare_gpu_mega_kernel(
+            &self,
+            weight_blob: &[u8],
+            decoder_gpu_code: Option<&[u8]>,
+            forward_gpu_code: Option<&[u8]>,
+            scratchpad_bytes: usize,
+        ) -> Result<(), BackendError> {
+            let _ = (weight_blob, decoder_gpu_code, forward_gpu_code, scratchpad_bytes);
+            Ok(())
+        }
     }
 
     /// Trait for looking up named tensors in a weight store.

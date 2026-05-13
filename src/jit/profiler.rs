@@ -336,11 +336,12 @@ impl LatencyProfiler {
 
         // 添加 GEMM 算子 - OpKind::Gemm 需要提供字段
         graph.add_op(
-            OpKind::Gemm {
+            OpKind::Gemm{
                 m: gllm_kernels::compiler::SymDim::Concrete(seq_len),
                 n: hidden,
                 k: hidden,
                 dtype: DType::F32,
+                trans_b: false,
             },
             vec![a_id, b_id],
             vec![c_id],

@@ -3,20 +3,89 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-/// Role of a tensor in the model architecture
+/// Role of a tensor in the model architecture.
+///
+/// Used by `match_tensor_role()` for 100% precise segment-sequence matching:
+/// every variant maps to an exact suffix pattern (no `contains()` heuristics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TensorRole {
+    // ── Global (layer_idx == None) ──
     Embedding,
+    OutputHead,
+    FinalNorm,
+    ClassifierDense,
+    ClassifierOutProj,
+    PatchEmbed,
+    PositionEmbedding,
+
+    // ── Per-layer attention ──
     AttentionQuery,
     AttentionKey,
     AttentionValue,
+    AttentionFusedQkv,
     AttentionOutput,
+    AttentionQNorm,
+    AttentionKNorm,
+    AttentionSinks,
+
+    // ── Per-layer norm ──
+    InputNorm,
+    PostAttnNorm,
+    LayerNorm, // legacy — kept for backward compat
+
+    // ── Per-layer FFN ──
     FfnGate,
     FfnUp,
     FfnDown,
-    OutputHead,
-    LayerNorm,
+
+    // ── MoE ──
+    MoEGate,         // router: mlp.gate / ffn_gate_inp
+    MoESharedExpert, // shared_experts.*
+    MoEExpert,       // experts.*.*
+
+    // ── Audio/Vision special ──
+    DepthwiseConv,
+
+    // ── Misc ──
     Rope,
+}
+
+impl TensorRole {
+    /// Map this role to its canonical name, optionally prefixed with layer index.
+    pub fn to_canonical_name(&self, layer: Option<usize>) -> String {
+        let base = match self {
+            Self::Embedding => "embed",
+            Self::OutputHead => "lm_head",
+            Self::FinalNorm => "final_norm",
+            Self::ClassifierDense => "classifier.dense",
+            Self::ClassifierOutProj => "classifier",
+            Self::PatchEmbed => "patch_embed",
+            Self::PositionEmbedding => "position_embed",
+            Self::AttentionFusedQkv => "qkv_proj",
+            Self::AttentionQuery => "q_proj",
+            Self::AttentionKey => "k_proj",
+            Self::AttentionValue => "v_proj",
+            Self::AttentionOutput => "o_proj",
+            Self::AttentionQNorm => "q_norm",
+            Self::AttentionKNorm => "k_norm",
+            Self::AttentionSinks => "attn_sinks",
+            Self::InputNorm => "input_norm",
+            Self::PostAttnNorm => "post_attn_norm",
+            Self::LayerNorm => "input_norm",
+            Self::FfnGate => "gate_proj",
+            Self::FfnUp => "up_proj",
+            Self::FfnDown => "down_proj",
+            Self::MoEGate => "moe_gate",
+            Self::MoESharedExpert => "shared_expert",
+            Self::MoEExpert => "expert",
+            Self::DepthwiseConv => "depthwise_conv",
+            Self::Rope => "rope",
+        };
+        match layer {
+            Some(l) => format!("L{}.{base}", l),
+            None => base.to_string(),
+        }
+    }
 }
 
 /// HuggingFace file rename map.
@@ -105,9 +174,8 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
-    /// 获取架构族 (从注册表查询)
+    /// 获取架构族 (从别名表查询)
     pub fn family(&self) -> ArchFamily {
-        crate::arch::register_builtin_templates();
         crate::arch::resolve_family(&self.arch).unwrap_or(ArchFamily::Decoder)
     }
 
@@ -131,70 +199,21 @@ impl Default for ModelManifest {
     }
 }
 
-/// Map architecture token string to template name.
-///
-/// 委托给 `arch::registry` 的别名查找，返回模板名字符串。
+/// Map architecture token string to canonical name.
 pub fn map_architecture_token(token: &str) -> Option<String> {
-    crate::arch::register_builtin_templates();
     crate::arch::resolve_template_name(token).map(|s| s.to_string())
 }
 
-/// Model-kind-specific template override table.
-///
-/// When a GGUF architecture token resolves to a generative template but the
-/// `ModelKind` requires a different specialised template, we reroute to the
-/// matching template here. This is necessary because GGUF stores the same
-/// `general.architecture` value for generative, embedding, and reranker
-/// variants (e.g. all Qwen3 variants report `general.architecture = qwen3`).
-///
-/// Entry format: (base_template, model_kind, override_template)
-static KIND_TEMPLATE_OVERRIDE: &[(&str, ModelKind, &str)] = &[
-    ("qwen3", ModelKind::Embedding, "qwen3-embed"),
-    ("qwen3", ModelKind::Reranker, "qwen3-reranker"),
-    // XLM-R / BERT / RoBERTa 架构的 reranker (如 bge-reranker-v2-m3) 在
-    // encoder 之后附加 RobertaClassificationHead (dense + tanh + out_proj)，
-    // 使用独立模板 xlmr-reranker 表达完整图，不能用 encoder-only 的 xlmr。
-    ("xlmr", ModelKind::Reranker, "xlmr-reranker"),
-];
-
-/// Map architecture token string to template name, respecting model kind.
-///
-/// For specialised `ModelKind` variants (Embedding, Reranker), applies
-/// kind-specific template overrides so that (for example) `qwen3` with
-/// `ModelKind::Embedding` → `qwen3-embed` instead of the generative `qwen3`
-/// template, and `qwen3` with `ModelKind::Reranker` → `qwen3-reranker`.
-pub fn map_architecture_token_for_kind(token: &str, kind: ModelKind) -> Option<String> {
-    crate::arch::register_builtin_templates();
-    let base = crate::arch::resolve_template_name(token)?.to_string();
-    if let Some(&(_, _, override_template)) = KIND_TEMPLATE_OVERRIDE
-        .iter()
-        .find(|&&(t, k, _)| t == base && k == kind)
-    {
-        // Only override if the specialised template is registered.
-        if crate::arch::is_valid_template(override_template) {
-            return Some(override_template.to_string());
-        }
-    }
-    Some(base)
+/// Map architecture token string to canonical name, respecting model kind.
+pub fn map_architecture_token_for_kind(token: &str, _kind: ModelKind) -> Option<String> {
+    // auto_graph derives everything from tensor names at runtime.
+    // The canonical name is still useful for model identification.
+    crate::arch::resolve_template_name(token).map(|s| s.to_string())
 }
 
-/// 按 ModelKind 对已解析的 template name 做 override (SafeTensors/ONNX 路径)。
-///
-/// `map_architecture_token_for_kind` 从 HF token 解析，适用于 GGUF;
-/// 本函数从**已确定的模板名**做 kind override，适用于 SafeTensors/ONNX/PyTorch
-/// 路径 (loader.detect_architecture 返回 template name 时)。
-///
-/// 返回 None 表示无需 override，调用方应保持原模板名。
-pub fn map_kind_template(template_name: &str, kind: ModelKind) -> Option<String> {
-    crate::arch::register_builtin_templates();
-    let (_, _, override_template) = KIND_TEMPLATE_OVERRIDE
-        .iter()
-        .find(|&&(t, k, _)| t == template_name && k == kind)?;
-    if crate::arch::is_valid_template(override_template) {
-        Some(override_template.to_string())
-    } else {
-        None
-    }
+/// Map template name respecting model kind (no-op for auto_graph).
+pub fn map_kind_template(template_name: &str, _kind: ModelKind) -> Option<String> {
+    Some(template_name.to_string())
 }
 
 #[cfg(test)]
@@ -203,29 +222,14 @@ mod tests {
 
     #[test]
     fn map_architecture_token_delegates_to_registry() {
-        // SSOT 测试:不硬编码 token 映射。从 YAML 注册表读取每个模板的
-        // `name` / extra_aliases,验证 map_architecture_token 能正确反查。
-        crate::arch::register_builtin_templates();
-        let registry = crate::arch::ARCH_REGISTRY.get().unwrap();
-        for (name, template) in &registry.templates {
-            assert_eq!(map_architecture_token(name).as_deref(), Some(name.as_str()),
-                "template name '{name}' 必须自反查");
-            assert_eq!(
-                map_architecture_token(&format!("{name}ForCausalLM")).as_deref(),
-                Some(name.as_str()),
-                "自动派生 token '{name}ForCausalLM' 必须反查到 '{name}'"
-            );
-            for alias in &template.extra_aliases {
-                assert_eq!(map_architecture_token(alias).as_deref(), Some(name.as_str()),
-                    "extra_alias '{alias}' (YAML {}) 必须反查到 '{name}'", name);
-            }
-        }
+        assert_eq!(map_architecture_token("qwen3"), Some("qwen3".to_string()));
+        assert_eq!(map_architecture_token("LlamaForCausalLM"), Some("llama".to_string()));
+        assert_eq!(map_architecture_token("xlmr"), Some("xlmr".to_string()));
         assert_eq!(map_architecture_token("custom-token-that-never-exists"), None);
     }
 
     #[test]
     fn manifest_family_from_registry() {
-        crate::arch::register_builtin_templates();
         let mut m = ModelManifest::default();
         assert_eq!(m.family(), ArchFamily::Decoder);
         m.arch = "xlmr".to_string();

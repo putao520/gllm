@@ -167,6 +167,11 @@ enum StreamPhase {
         session_id: Option<u64>,
         thinking_budget: Option<usize>,
     },
+    /// Pre-computed tokens to yield (multimodal path).
+    Precomputed {
+        tokens: Vec<u32>,
+        index: usize,
+    },
     /// Generation completed; yielding tokens one by one.
     Yielding {
         tokens: Vec<u32>,
@@ -198,6 +203,14 @@ impl GenerationStream {
                 session_id,
                 thinking_budget,
             },
+        }
+    }
+
+    /// Create stream from pre-computed tokens (multimodal path).
+    pub(crate) fn from_tokens(tokens: Vec<u32>) -> Self {
+        Self {
+            state: Arc::new(ArcSwapOption::empty()),
+            phase: StreamPhase::Precomputed { tokens, index: 0 },
         }
     }
 }
@@ -272,6 +285,27 @@ impl Iterator for GenerationStream {
                             return Some(Err(e));
                         }
                     }
+                }
+                StreamPhase::Precomputed { tokens, index } => {
+                    if *index >= tokens.len() {
+                        self.phase = StreamPhase::Done;
+                        return None;
+                    }
+                    let token = tokens[*index];
+                    let end = *index + 1;
+                    let is_last = end >= tokens.len();
+                    let text_up_to = tokens[..end].iter()
+                        .map(|t| char::from_u32(*t).unwrap_or('?'))
+                        .collect::<String>();
+                    *index += 1;
+                    if is_last {
+                        self.phase = StreamPhase::Done;
+                    }
+                    return Some(Ok(GenerationChunk {
+                        tokens: vec![token],
+                        text: text_up_to,
+                        finished: is_last,
+                    }));
                 }
                 StreamPhase::Yielding { tokens, index } => {
                     if *index >= tokens.len() {
@@ -573,28 +607,51 @@ impl<'a> GenerationBuilder<'a> {
     /// # }
     /// ```
     pub fn generate(self) -> GenerationOutput {
-        // 多模态输入需要显式的 encoder 调用 + token routing，当前仅在
-        // 非 streaming 路径实现；streaming 路径沿用原走法。
         let has_multimodal = self.image_input.is_some() || self.audio_input.is_some();
 
         if self.stream {
             if has_multimodal {
-                // T58 铁律 NO_SILENT_FALLBACK：streaming 多模态尚未接入，
-                // 立即 Err 而非静默丢弃媒体输入。
-                return GenerationOutput::Response(Err(GllmError::RuntimeError(
-                    "multimodal streaming not yet supported (T58 scaffold only)".into(),
-                )));
+                // T68: multimodal streaming — run generation synchronously,
+                // then yield tokens via Precomputed stream phase.
+                match self.client.execute_generation_multimodal(
+                    self.prompt,
+                    self.max_tokens,
+                    self.temperature,
+                    self.top_k,
+                    self.top_p,
+                    self.session_id,
+                    self.thinking_budget,
+                    self.image_input,
+                    self.audio_input,
+                ) {
+                    Ok(resp) => {
+                        let tokens = match (|| -> Result<Vec<u32>, GllmError> {
+                            let loaded = self.client.state_handle()
+                                .load_full()
+                                .ok_or(GllmError::NoModelLoaded)?;
+                            let executor = loaded.backend.executor();
+                            executor.encode_prompt(&resp.text)
+                                .map_err(|e| GllmError::RuntimeError(format!("{e}")))
+                        })() {
+                            Ok(t) => t,
+                            Err(e) => return GenerationOutput::Response(Err(e)),
+                        };
+                        GenerationOutput::Stream(GenerationStream::from_tokens(tokens))
+                    }
+                    Err(e) => GenerationOutput::Response(Err(e.into())),
+                }
+            } else {
+                GenerationOutput::Stream(GenerationStream::new(
+                    self.client,
+                    self.prompt,
+                    self.max_tokens,
+                    self.temperature,
+                    self.top_k,
+                    self.top_p,
+                    self.session_id,
+                    self.thinking_budget,
+                ))
             }
-            GenerationOutput::Stream(GenerationStream::new(
-                self.client,
-                self.prompt,
-                self.max_tokens,
-                self.temperature,
-                self.top_k,
-                self.top_p,
-                self.session_id,
-                self.thinking_budget,
-            ))
         } else {
             let result = if has_multimodal {
                 self.client.execute_generation_multimodal(
@@ -923,7 +980,9 @@ mod tests {
     }
 
     #[test]
-    fn generation_builder_stream_plus_multimodal_is_rejected() {
+    fn generation_builder_stream_plus_multimodal_needs_encoder() {
+        // T68: streaming+multimodal is now supported. Without an encoder
+        // registered, it returns InvalidModelType (same as non-streaming).
         let client = Client::new_empty();
         let out = client
             .generate("hello")
@@ -932,13 +991,12 @@ mod tests {
             .generate();
         match out {
             GenerationOutput::Response(Err(e)) => {
-                let msg = format!("{e}");
                 assert!(
-                    msg.contains("multimodal streaming"),
-                    "expected streaming-not-supported error, got: {msg}"
+                    matches!(e, GllmError::InvalidModelType),
+                    "expected InvalidModelType (no encoder), got: {e}"
                 );
             }
-            _ => panic!("expected streaming+multimodal to error"),
+            _ => panic!("expected error (no encoder registered)"),
         }
     }
 

@@ -1,0 +1,166 @@
+# TraceOp Extensions Analysis: Auto-Select for All Structural Ops
+
+## Current TraceOp Variants
+
+Based on /home/putao/code/rust/gllm-kernels/src/compiler/trace.rs, the existing TraceOp variants are:
+
+### Basic Operations
+- Input(u32) - Load i-th input element
+- Const(f64) - Floating-point constant
+
+### Arithmetic Operations
+- Add(u32, u32), Sub(u32, u32), Mul(u32, u32), Div(u32, u32)
+- Fma(u32, u32, u32) - Fused multiply-add: a * b + c
+
+### Unary Operations
+- Neg(u32), Abs(u32), Exp(u32), Sqrt(u32), Rsqrt(u32)
+- Tanh(u32), Recip(u32), Log(u32)
+- Sigmoid(u32) - 1 / (1 + exp(-a))
+
+### Comparison & Selection
+- Compare { a: u32, b: u32, op: CmpOp } - Elementwise comparison
+- ConditionalBranch(u32, u32, u32) - Conditional select per lane
+
+### Quantization Operations
+- QuantFma { acc, act, weight, act_dtype, weight_dtype }
+- BlockScale { data, scale, block_size }
+- Cast { src, from, to }
+
+### Memory Operations
+- ScalarLoad { base, offset } - Load one value from memory
+- StrideMul { value, stride } - Integer stride multiplication
+- PtrAdd { base, offset } - Pointer addition
+- VecLoadIndexed { base, offset } - Vector load with offset
+- VecStoreIndexed { base, offset, value } - Vector store
+- GatherLoad { base, indices, stride } - Gather load
+- ScatterStore { base, indices, value, stride } - Scatter store
+- TableLookup { base, row_index, row_bytes } - Table lookup
+
+### Reduction Operations
+- HReduce { src, op } - Horizontal reduction
+
+### Other Operations
+- Prefetch { level } - Prefetch hint
+- NonTemporalStore - Non-temporal store
+- BitExtract { src, offset, width } - Bit extraction
+- Permute { src, indices } - Vector permutation
+- MaskedOp { op, mask } - Masked operation
+- AtomicAdd { addr, val } - Atomic addition
+- FWHT { src, dim } - Fast Walsh-Hadamard transform
+- Mxfp4Dequant { data, scales, off_a, stride_a, off_b, stride_b, off_c, const_off, block_size }
+- BitAnd(u32, u32) - Bitwise AND
+- BroadcastScalar { src } - Scalar broadcast
+
+## Current VmInstr Mappings in auto_select.rs
+
+The dispatch_trace_op function in auto_select.rs maps the following TraceOp variants to VmInstr:
+
+### ✅ Already Mapped
+1. Basic: Input, Const → handled directly
+2. Binary ops: Add, Sub, Mul, Div, Max, Min → VecBinOp
+3. FMA: Fma → VmInstr::Fma
+4. Unary ops: Neg, Abs, Sqrt, Rsqrt, Recip → VecUnaryOp
+5. Transcendentals: Exp, Tanh, Log, Sigmoid → Transcendental
+6. Compare: Compare → VecCmp
+7. Cast: Cast → VecCast
+8. ConditionalSelect: ConditionalBranch → ConditionalSelect
+9. ScalarLoad: ScalarLoad → ScalarLoad
+10. Address calc: StrideMul → IntMulStride, PtrAdd → LoadPtr
+11. Memory ops: VecLoadIndexed, VecStoreIndexed → VecLoad, VecStore
+12. QuantFma: QuantFma → Fma (with type info at lowering)
+13. BlockScale: BlockScale → VecBinOp::Mul
+14. MaskedOp: MaskedOp → dispatch inner op + ConditionalSelect
+15. AtomicAdd: AtomicAdd → AtomicAddU32 (limited to value=1)
+16. BroadcastScalar: BroadcastScalar → Broadcast with ExtractLane0
+17. Gather/Scatter: GatherLoad, ScatterStore → GatherLoad, ScatterStore
+18. TableLookup: TableLookup → TableLookup
+19. Mxfp4Dequant: Mxfp4Dequant → Mxfp4VecDequant
+20. BitAnd: BitAnd → VecBinOp::And
+21. FWHT: FWHT → expanded butterfly network
+
+### ❌ NOT Mapped (Need New TraceOp Variants)
+
+## Required New TraceOp Variants for Structural Ops
+
+### 1. Conditional Branch (mode-based)
+Missing for mode-based conditional logic (mode==0 skip, mode==1 layer-compare, else data-driven)
+
+**auto_lower_trace**: Map to sequence of ConditionalSelect + Branch
+**x86_lower**: Mode 0: NOP, Mode 1: vblendvps, Mode 2: test + jcc
+
+### 2. Memory Comparison (Immediate)
+Missing for CMP dword [ptr], immediate pattern
+
+**auto_lower_trace**: ScalarLoad + Compare (imm to scalar) → VecCmp
+**x86_lower**: Load dword, cmp reg imm, setcc + vmovd
+
+### 3. GPR Comparison (Memory Load)
+Missing for CMP gpr, [ptr] pattern
+
+**auto_lower_trace**: LoadPtr + VecCmp (with gpr broadcast)
+**x86_lower**: Broadcast gpr, load dword, vcmpps
+
+### 4. SIMD Accumulate (VFMADD231PS Loop)
+Missing for vector accumulation loop
+
+**auto_lower_trace**: VecLoad + Accumulate (need new Accumulate VmInstr)
+**x86_lower**: Loop with vfmadd231ps
+
+### 5. Horizontal Sum + Sqrt
+Missing for reduction patterns
+
+**auto_lower_trace**: HReduce(Sum) + Unary(Sqrt)
+**x86_lower**: vhaddps chain vsqrtps
+
+### 6. Jump to Epilogue
+Missing for conditional exit from layer loop
+
+**auto_lower_trace**: ConditionalExit with epilogue output
+**x86_lower**: test mask, jnz epilogue_label
+
+### 7. Callback Table Load + Native Call
+Missing for callback mechanism
+
+**auto_lower_trace**: sequence of loads + NativeCall VmInstr
+**x86_lower**: Load table, compute slot address, load fn/ctx, call
+
+### 8. Token Store with Counter Increment
+Missing for token storage
+
+**auto_lower_trace**: ScalarStore + AtomicAddU32
+**x86_lower**: Store token, atomic increment position
+
+### 9. Argmax (Vector Find-Max-Index)
+Already exists in VmInstr but missing TraceOp wrapper
+
+**auto_lower_trace**: Map to existing Argmax VmInstr
+**x86_lower**: Already implemented
+
+### 10. Guardrail/Security Check
+Missing for conditional skip patterns
+
+**auto_lower_trace**: ScalarLoad + ConditionalSkip
+**x86_lower**: Load probe, test, generate ConditionalSkip
+
+### 11. Shared Memory Read at Fixed Offset
+Missing for shared memory access
+
+**auto_lower_trace**: ScalarLoad with Const offset
+**x86_lower**: Load from [shared_base + fixed_offset]
+
+## Summary
+
+Currently, about 60% of common structural op patterns can be expressed with existing TraceOp variants. The remaining 40% require new TraceOp variants, primarily for:
+
+1. Complex control flow (conditional branching, epilogue jumps)
+2. Memory-based comparisons (not just vector ops)
+3. Native callback mechanisms
+4. Specialized accumulation patterns
+5. Security/guardrail operations
+
+Key gaps:
+- Mode-based conditional branching (critical)
+- Memory comparison with immediates
+- Control flow exits (epilogue jumps)
+- Native callback integration
+- Security/guardrail patterns

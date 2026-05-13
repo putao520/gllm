@@ -89,10 +89,10 @@
 | **GPU codegen (PTX/HIP/MSL)** | ✅ | ✅ | ✅ | ✅ | 三后端 TileLevelFusion/ComputeRoot 已通 (T38) |
 | **PerLayerEmbedding (PLE)** | ✅ | ✅ | — | — | 仅 E2B/E4B 含 PLE;权重 alias + `only_if` 条件展开 + ColumnSlice JIT (T28.2/T28.3/T30/T37) |
 | **SharedKvRef (page 层)** | ✅ | ✅ | ✅ | ✅ | 后 N 层按 `num_kv_shared_layers` 引用 donor 层 KV page (T39 = P1.1) |
-| **SharedKvRef (graph 层)** | 🟡 | 🟡 | 🟡 | 🟡 | graph executor 侧跳过 K/V MatMul 的路径并行中 (T43) |
+| **SharedKvRef (graph 层)** | ✅ | ✅ | ✅ | ✅ | graph executor 侧跳过 K/V MatMul,引用 donor 层 K/V tensor (T43) |
 | **FusedQkvNormRope 融合** | ✅ | ✅ | ✅ | ✅ | pattern_fusion 识别 + atomic_op_to_kind 契约 (T29/T36/T41/T42) |
-| **Vision encoder (SigLIP)** | 🟡 | 🟡 | 🟡 | 🟡 | 骨架就位,PatchEmbed/LearnedPos2D 算子接入中 (T44) |
-| **Audio encoder (USM Conformer)** | 🟡 | 🟡 | 🟡 | 🟡 | 骨架就位,DepthwiseConv1D/ConformerBlock 接入中 (T45) |
+| **Vision encoder (SigLIP)** | ✅ | ✅ | ✅ | ✅ | PatchEmbed/LearnedPos2D + ViT encoder 实现 + 非 stub 测试通过 (T44) |
+| **Audio encoder (USM Conformer)** | ✅ | ✅ | ✅ | ✅ | Mel + ConformerBlock + DepthwiseConv1D 实现 + 非 stub 测试通过 (T45) |
 | **E2E 推理数值验证** | 🟡 | 🟡 | 🟡 | 🟡 | 模拟加载 + JIT compile dry-run 已通过,真实 HF 下载 + 数值对齐待 (T47) |
 
 ## 2. Embedding Models (文本向量化)

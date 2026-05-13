@@ -467,7 +467,7 @@ pub(crate) fn build_lm_head_graph(
 
     let logits = g.add_tensor_concrete("logits", &[seq_len, vocab_size], ft);
     g.add_op(
-        OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(seq_len), n: vocab_size, k: hidden, dtype: dt },
+        OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(seq_len), n: vocab_size, k: hidden, dtype: dt, trans_b: false },
         vec![normed, lm_w], vec![logits], "lm_head",
     );
 
@@ -597,11 +597,11 @@ pub(crate) fn build_moe_pre_attention_graph(
     g.add_op(OpKind::RmsNorm { eps }, vec![input, rn1_w], vec![normed], "rms_norm_1");
 
     let q_out = g.add_tensor_concrete("q", &[s, q_dim], ft);
-    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: q_dim, k: h, dtype: dt }, vec![normed, w_q], vec![q_out], "gemm_q");
+    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: q_dim, k: h, dtype: dt, trans_b: false }, vec![normed, w_q], vec![q_out], "gemm_q");
     let k_out = g.add_tensor_concrete("k", &[s, kv_dim], ft);
-    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_k], vec![k_out], "gemm_k");
+    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt, trans_b: false }, vec![normed, w_k], vec![k_out], "gemm_k");
     let v_out = g.add_tensor_concrete("v", &[s, kv_dim], ft);
-    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt }, vec![normed, w_v], vec![v_out], "gemm_v");
+    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: kv_dim, k: h, dtype: dt, trans_b: false }, vec![normed, w_v], vec![v_out], "gemm_v");
 
     let q_rope = g.add_tensor_concrete("q_rope", &[s, q_dim], ft);
     g.add_op(OpKind::RoPE { num_heads, head_dim, theta: rope_theta, partial: rope_partial, rope_scaling: None }, vec![q_out], vec![q_rope], "rope_q");
@@ -691,7 +691,7 @@ pub(crate) fn build_post_attention_graph(
     g.inputs = vec![attn_out, w_o, residual_in, rn2_w];
 
     let o_out = g.add_tensor_concrete("o_proj", &[s, h], ft);
-    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: h, k: q_dim, dtype: dt }, vec![attn_out, w_o], vec![o_out], "gemm_o");
+    g.add_op(OpKind::Gemm { m: gllm_kernels::compiler::SymDim::Concrete(s), n: h, k: q_dim, dtype: dt, trans_b: false }, vec![attn_out, w_o], vec![o_out], "gemm_o");
 
     let resid1 = g.add_tensor_concrete("residual1", &[s, h], ft);
     g.add_op(OpKind::Residual, vec![residual_in, o_out], vec![resid1], "residual_1");

@@ -7,6 +7,47 @@
 
 use gllm::Client;
 
+fn install_segv_handler() {
+    #[repr(C)]
+    struct SigAction {
+        sa_handler: usize,
+        sa_flags: i32,
+        sa_restorer: Option<unsafe extern "C" fn()>,
+        sa_mask: [u8; 128],
+    }
+    extern "C" {
+        fn sigaction(sig: i32, act: *const SigAction, oact: *mut SigAction) -> i32;
+    }
+    unsafe {
+        let mut sa: SigAction = std::mem::zeroed();
+        sa.sa_handler = segv_handler as *const () as usize;
+        sa.sa_flags = 4; // SA_SIGINFO
+        sigaction(11, &sa, std::ptr::null_mut());
+    }
+}
+
+extern "C" fn segv_handler(
+    _sig: i32,
+    info: *mut std::ffi::c_void,
+    uctx: *mut std::ffi::c_void,
+) {
+    let fault_addr = unsafe { *(info as *const u8).add(16) as *const std::ffi::c_void };
+    eprintln!("[SIGSEGV] fault_addr={:p}", fault_addr);
+    unsafe {
+        let mc = (uctx as *const u8).add(40) as *const u64;
+        let r = |i: usize| *mc.add(i);
+        eprintln!("[SIGSEGV] RIP=0x{:x} RAX=0x{:x} RCX=0x{:x} RDX=0x{:x}",
+            r(16), r(13), r(14), r(12));
+        eprintln!("[SIGSEGV] RSI=0x{:x} RDI=0x{:x} R8=0x{:x} R9=0x{:x}",
+            r(9), r(8), r(0), r(1));
+        eprintln!("[SIGSEGV] R10=0x{:x} R11=0x{:x} R12=0x{:x} R13=0x{:x}",
+            r(2), r(3), r(4), r(5));
+        eprintln!("[SIGSEGV] R14=0x{:x} R15=0x{:x} RBP=0x{:x} RSP=0x{:x}",
+            r(6), r(7), r(10), r(15));
+    }
+    std::process::exit(139);
+}
+
 // ============================================================================
 // Anti-cheating helpers
 // ============================================================================
@@ -75,6 +116,7 @@ fn assert_rerank_sane(results: &[gllm::RerankResult], label: &str) {
 /// **期望结果**: 成功加载 SafeTensors 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_safetensors() {
+    install_segv_handler();
     const MODEL: &str = "BAAI/bge-reranker-v2-m3";
 
     let client =
@@ -114,6 +156,7 @@ fn e2e_reranker_safetensors() {
 /// **期望结果**: 成功加载 GGUF 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_gguf() {
+    install_segv_handler();
     const MODEL: &str = "DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF";
 
     let client = Client::new(MODEL, gllm::ModelKind::Reranker).expect("Failed to load GGUF model");
@@ -148,6 +191,7 @@ fn e2e_reranker_gguf() {
 /// **期望结果**: 成功加载 ONNX 模型并返回有效相关性分数
 #[test]
 fn e2e_reranker_onnx() {
+    install_segv_handler();
     const MODEL: &str = "onnx-community/bge-reranker-v2-m3-ONNX";
 
     let client = Client::new(MODEL, gllm::ModelKind::Reranker).expect("Failed to load ONNX model");
