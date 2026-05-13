@@ -690,7 +690,7 @@ pub fn dequantize_v_per_token(
 /// Check if a token should be preserved in FP16 (Attention Sink protection).
 ///
 /// Per SPEC §11.2: First N tokens (default N=4) preserved in FP16 if detected as sinks.
-/// Sink detection comes from telemetry (softmax_sharpness from epilogue).
+/// Sink detection comes from telemetry (centroid_pos from epilogue).
 #[inline]
 pub fn should_preserve_fp16(token_idx: usize, sink_count: usize, is_sink: bool) -> bool {
     token_idx < sink_count && is_sink

@@ -24,7 +24,7 @@
 //! 保护位置列表，当检测到 Sink 模式时标记哪些位置需要保护.
 
 use super::epilogue::{SinkDetectionConfig, AttentionPattern, SinkDetector, TelemetryAggregator};
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{KvPageHeader, f16_bits_to_f32};
 
 /// 逐层注意力模式记录
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ impl SinkTracker {
         layer_idx: usize,
         header: &KvPageHeader,
     ) -> AttentionPattern {
-        self.detect_for_layer(layer_idx, header.softmax_max, header.softmax_sharpness)
+        self.detect_for_layer(layer_idx, f16_bits_to_f32(header.softmax_max_avg), f16_bits_to_f32(header.centroid_pos))
     }
 
     /// 记录注意力模式到历史
@@ -362,21 +362,18 @@ mod tests {
 
     #[test]
     fn test_sink_tracker_from_page_header() {
+        use crate::kv_cache::f32_to_f16_bits;
+
         let config = SinkDetectionConfig::default();
         let mut tracker = SinkTracker::new(config, 32);
 
-        let header = KvPageHeader {
-            page_id: 0,
-            ref_count: 1,
-            fragmentation_metric: 0.1,
-            logits_entropy: 2.5,
-            guard_veto_flag: 0,
-            softmax_max: 0.91,
-            softmax_sharpness: 0.85,
-            residual_delta_rho: 0.998,
-            dead_neuron_ratio: 0.1,
-            per_channel_scale: 1.5,
-        };
+        let mut header = KvPageHeader::new(0);
+        header.ref_count = 1;
+        header.entropy_avg = f32_to_f16_bits(2.5);
+        header.centroid_pos = f32_to_f16_bits(0.85);
+        header.softmax_max_avg = f32_to_f16_bits(0.91);
+        header.delta_rho_avg = f32_to_f16_bits(0.998);
+        header.dead_ratio = 25;
 
         let pattern = tracker.detect_from_page_header(10, &header);
         assert_eq!(pattern, AttentionPattern::Sink);

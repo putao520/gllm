@@ -24,7 +24,7 @@
 //! - 跳过决策写入 KvPageHeader，供后续层参考
 
 use super::epilogue::{ResidualBypassConfig, ResidualBypassDecision, ResidualBypassDetector, TelemetryAggregator};
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{KvPageHeader, f16_bits_to_f32};
 
 /// 逐层 Residual Bypass 决策记录
 #[derive(Debug, Clone)]
@@ -114,14 +114,15 @@ impl ResidualBypassLayer {
     ) -> ResidualBypassDecision {
         // KvPageHeader 没有 residual_cosine 字段，使用保守的默认值
         let cosine = 0.99;  // 假设方向一致
+        let delta_rho = f16_bits_to_f32(header.delta_rho_avg);
         let decision = self.detector.decide(
             layer_idx,
-            header.residual_delta_rho,
+            delta_rho,
             cosine,
         );
         self.record_decision(
             layer_idx,
-            header.residual_delta_rho,
+            delta_rho,
             cosine,
             decision,
         );

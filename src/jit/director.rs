@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{f16_bits_to_f32, dead_ratio_to_f32, KvPageHeader};
 // ============================================================================
 // Decaying Reservoir — 半衰期积分池 (§9.2)
 // ============================================================================
@@ -63,15 +63,15 @@ impl DecayingReservoir {
         let w = 1.0 - d;
 
         if self.sample_count == 0 {
-            self.avg_entropy = header.logits_entropy as f64;
-            self.avg_residual_delta = header.residual_delta_rho as f64;
-            self.avg_dead_neuron_ratio = header.dead_neuron_ratio as f64;
-            self.avg_softmax_sharpness = header.softmax_sharpness as f64;
+            self.avg_entropy = f16_bits_to_f32(header.entropy_avg) as f64;
+            self.avg_residual_delta = f16_bits_to_f32(header.delta_rho_avg) as f64;
+            self.avg_dead_neuron_ratio = dead_ratio_to_f32(header.dead_ratio) as f64;
+            self.avg_softmax_sharpness = f16_bits_to_f32(header.centroid_pos) as f64;
         } else {
-            self.avg_entropy = d * self.avg_entropy + w * header.logits_entropy as f64;
-            self.avg_residual_delta = d * self.avg_residual_delta + w * header.residual_delta_rho as f64;
-            self.avg_dead_neuron_ratio = d * self.avg_dead_neuron_ratio + w * header.dead_neuron_ratio as f64;
-            self.avg_softmax_sharpness = d * self.avg_softmax_sharpness + w * header.softmax_sharpness as f64;
+            self.avg_entropy = d * self.avg_entropy + w * f16_bits_to_f32(header.entropy_avg) as f64;
+            self.avg_residual_delta = d * self.avg_residual_delta + w * f16_bits_to_f32(header.delta_rho_avg) as f64;
+            self.avg_dead_neuron_ratio = d * self.avg_dead_neuron_ratio + w * dead_ratio_to_f32(header.dead_ratio) as f64;
+            self.avg_softmax_sharpness = d * self.avg_softmax_sharpness + w * f16_bits_to_f32(header.centroid_pos) as f64;
         }
         self.sample_count += 1;
     }
@@ -416,34 +416,28 @@ impl Drop for JitDirector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_cache::f32_to_f16_bits;
 
     #[test]
     fn test_decaying_reservoir() {
         let mut reservoir = DecayingReservoir::new(100);
         assert_eq!(reservoir.sample_count(), 0);
 
-        let header = KvPageHeader {
-            page_id: 1,
-            ref_count: 1,
-            fragmentation_metric: 0.0,
-            logits_entropy: 2.5,
-            guard_veto_flag: 0,
-            softmax_max: 0.9,
-            softmax_sharpness: 0.8,
-            residual_delta_rho: 0.5,
-            dead_neuron_ratio: 0.1,
-            per_channel_scale: 1.0,
-        };
+        let mut header = KvPageHeader::new(1);
+        header.ref_count = 1;
+        header.entropy_avg = f32_to_f16_bits(2.5);
+        header.centroid_pos = f32_to_f16_bits(0.8);
+        header.softmax_max_avg = f32_to_f16_bits(0.9);
+        header.delta_rho_avg = f32_to_f16_bits(0.5);
+        header.dead_ratio = 26; // ~0.1 in [0,255] range
 
         reservoir.ingest(&header);
         assert_eq!(reservoir.sample_count(), 1);
         assert!((reservoir.avg_entropy() - 2.5).abs() < 1e-6);
 
         // Second ingest should decay
-        let header2 = KvPageHeader {
-            logits_entropy: 3.0,
-            ..header
-        };
+        let mut header2 = header;
+        header2.entropy_avg = f32_to_f16_bits(3.0);
         reservoir.ingest(&header2);
         assert_eq!(reservoir.sample_count(), 2);
         // Should be between 2.5 and 3.0
@@ -525,12 +519,10 @@ mod tests {
         let shared = Arc::clone(director.shared());
 
         // Push some page headers
-        shared.update_page_headers(vec![KvPageHeader {
-            page_id: 1,
-            ref_count: 1,
-            logits_entropy: 1.5,
-            ..KvPageHeader::default()
-        }]);
+        let mut header = KvPageHeader::new(1);
+        header.ref_count = 1;
+        header.entropy_avg = f32_to_f16_bits(1.5);
+        shared.update_page_headers(vec![header]);
 
         shared.record_expert_hit(0);
         shared.advance_step();

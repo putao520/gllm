@@ -20,6 +20,7 @@ pub mod telemetry;
 pub mod chunked_prefill;
 pub mod compact;
 pub mod request_state;
+pub mod kv_optimizer;
 
 pub use allocator::BlockAllocator;
 pub use batcher::{BatchAction, BatchResult, ContinuousBatcher, ScheduledBatch};

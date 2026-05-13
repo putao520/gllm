@@ -2304,18 +2304,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             }
             // Feed batch-level telemetry to Director via synthetic KvPageHeaders
             for tel in &batch_telemetry {
-                let header = crate::kv_cache::KvPageHeader {
-                    page_id: 0,
-                    ref_count: 1,
-                    fragmentation_metric: 0.0,
-                    logits_entropy: tel.output_entropy,
-                    guard_veto_flag: 0,
-                    softmax_max: 0.0,
-                    softmax_sharpness: 0.0,
-                    residual_delta_rho: tel.transform_ratio,
-                    dead_neuron_ratio: 0.0,
-                    per_channel_scale: 0.0,
-                };
+                let mut header = crate::kv_cache::KvPageHeader::new(0);
+                header.ref_count = 1;
+                header.entropy_avg = crate::kv_cache::f32_to_f16_bits(tel.output_entropy);
+                header.delta_rho_avg = crate::kv_cache::f32_to_f16_bits(tel.transform_ratio);
                 self.telemetry_aggregator.ingest_from_page_header(&header);
             }
             // Drain consensus events from Director → drive MoE thermal + Hot JMP Patching

@@ -25,7 +25,7 @@
 //!   §17.9 Spec Scheduling: Entropy 低 → 启用推测解码
 //! ```
 
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{KvPageHeader, f16_bits_to_f32, dead_ratio_to_f32};
 
 // ============================================================================
 // §13 白嫖信号枚举 — 所有机制信号的统一表示
@@ -185,12 +185,11 @@ impl TelemetryAggregator {
 
     /// 从 KvPageHeader 批量加载遥测数据
     pub fn ingest_from_page_header(&mut self, header: &KvPageHeader) {
-        self.dead_neuron_ratio = header.dead_neuron_ratio;
-        self.softmax_max = header.softmax_max;
-        self.softmax_sharpness = header.softmax_sharpness;
-        self.residual_delta_rho = header.residual_delta_rho;
-        self.per_channel_scale = header.per_channel_scale;
-        self.output_entropy = header.logits_entropy;
+        self.dead_neuron_ratio = dead_ratio_to_f32(header.dead_ratio);
+        self.softmax_max = f16_bits_to_f32(header.softmax_max_avg);
+        self.softmax_sharpness = f16_bits_to_f32(header.centroid_pos);
+        self.residual_delta_rho = f16_bits_to_f32(header.delta_rho_avg);
+        self.output_entropy = f16_bits_to_f32(header.entropy_avg);
     }
 
     // === 信号读取接口（供消费模块使用）===
@@ -717,23 +716,16 @@ mod tests {
     #[test]
     fn test_telemetry_ingest_from_page_header() {
         let mut agg = TelemetryAggregator::new();
-        let header = KvPageHeader {
-            page_id: 0,
-            ref_count: 1,
-            fragmentation_metric: 0.1,
-            logits_entropy: 2.5,
-            guard_veto_flag: 0,
-            softmax_max: 0.8,
-            softmax_sharpness: 0.6,
-            residual_delta_rho: 0.998,
-            dead_neuron_ratio: 0.3,
-            per_channel_scale: 1.5,
-        };
+        let mut header = KvPageHeader::new(0);
+        header.ref_count = 1;
+        header.entropy_avg = crate::kv_cache::f32_to_f16_bits(2.5);
+        header.softmax_max_avg = crate::kv_cache::f32_to_f16_bits(0.8);
+        header.dead_ratio = crate::kv_cache::f32_to_dead_ratio(0.3);
 
         agg.ingest_from_page_header(&header);
-        assert!((agg.dead_neuron_ratio() - 0.3).abs() < 0.001);
-        assert!((agg.softmax_max() - 0.8).abs() < 0.001);
-        assert!((agg.output_entropy() - 2.5).abs() < 0.001);
+        assert!((agg.dead_neuron_ratio() - 0.3).abs() < 0.02);
+        assert!((agg.softmax_max() - 0.8).abs() < 0.02);
+        assert!((agg.output_entropy() - 2.5).abs() < 0.1);
     }
 
     #[test]

@@ -25,7 +25,7 @@
 //! ```
 
 use super::epilogue::{GateFirstSkipConfig, GateSkipDecision, GateFirstSkipDetector, TelemetryAggregator};
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{KvPageHeader, dead_ratio_to_f32};
 
 /// 逐层 Gate-First Skip 决策记录
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ impl GateFirstSkipLayer {
         layer_idx: usize,
         header: &KvPageHeader,
     ) -> GateSkipDecision {
-        let dead_ratio = header.dead_neuron_ratio;
+        let dead_ratio = dead_ratio_to_f32(header.dead_ratio);
         self.decide_for_layer(layer_idx, dead_ratio)
     }
 
@@ -357,18 +357,9 @@ mod tests {
         let config = GateFirstSkipConfig::default();
         let mut layer = GateFirstSkipLayer::new(config, 32);
 
-        let header = KvPageHeader {
-            page_id: 0,
-            ref_count: 1,
-            fragmentation_metric: 0.1,
-            logits_entropy: 2.5,
-            guard_veto_flag: 0,
-            softmax_max: 0.8,
-            softmax_sharpness: 0.6,
-            residual_delta_rho: 0.998,
-            dead_neuron_ratio: 0.35,
-            per_channel_scale: 1.5,
-        };
+        let mut header = KvPageHeader::new(0);
+        header.ref_count = 1;
+        header.dead_ratio = crate::kv_cache::f32_to_dead_ratio(0.35);
 
         let decision = layer.decide_from_page_header(15, &header);
         assert_eq!(decision, GateSkipDecision::MaskedCompute);

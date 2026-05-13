@@ -44,7 +44,7 @@ use super::gate_skip::{BatchSkipAdvice, BatchSkipSummary, GateFirstSkipLayer};
 use super::residual_bypass::{BypassStats, ResidualBypassLayer};
 use super::sink_tracker::{BatchAttentionSummary, SinkTracker};
 use super::prefetch::{CentroidPrefetch, PrefetchConfig, PrefetchAdvice};
-use crate::kv_cache::KvPageHeader;
+use crate::kv_cache::{KvPageHeader, f32_to_f16_bits, f32_to_dead_ratio};
 use crate::scheduler::telemetry::SequenceTelemetry;
 
 // ============================================================================
@@ -300,25 +300,26 @@ impl EpilogueSubsystem {
         telemetry: &SequenceTelemetry,
     ) {
         // §13.9: Softmax 信号 — 近似映射
-        header.softmax_max = if telemetry.per_head_entropy > 0.0 {
+        let softmax_max_val = if telemetry.per_head_entropy > 0.0 {
             // 高熵 → 低 max (分散); 低熵 → 高 max (集中)
             1.0 / (1.0 + telemetry.per_head_entropy)
         } else {
             0.0
         };
-        header.softmax_sharpness = telemetry.per_head_entropy;
+        header.softmax_max_avg = f32_to_f16_bits(softmax_max_val);
+        header.centroid_pos = f32_to_f16_bits(telemetry.per_head_entropy);
 
         // §13.3: 残差能量差
-        header.residual_delta_rho = 1.0 + telemetry.transform_ratio;
+        header.delta_rho_avg = f32_to_f16_bits(1.0 + telemetry.transform_ratio);
 
         // §13.5: 死神经元比例
-        header.dead_neuron_ratio = telemetry.dead_density;
+        header.dead_ratio = f32_to_dead_ratio(telemetry.dead_density);
 
-        // §13.8: per-channel scale
-        header.per_channel_scale = 1.0; // 近似 — 完整实现需 RmsNorm epilogue
+        // §13.8: per-channel scale (placeholder)
+        header.v_scale_factor = 0;
 
         // §7: logits 熵
-        header.logits_entropy = telemetry.output_entropy;
+        header.entropy_avg = f32_to_f16_bits(telemetry.output_entropy);
     }
 
     /// 将 SequenceTelemetry 的 6 个字段转换为 EpilogueSignal 并喂入聚合器
@@ -398,6 +399,7 @@ impl EpilogueSubsystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_cache::{f16_bits_to_f32, dead_ratio_to_f32};
 
     fn make_telemetry(
         dead_density: f32,
@@ -543,10 +545,10 @@ mod tests {
 
         sub.write_page_header(&mut header, &decision, &t);
 
-        assert!((header.dead_neuron_ratio - 0.35).abs() < 0.001);
-        assert!((header.residual_delta_rho - 1.002).abs() < 0.001);
-        assert!((header.logits_entropy - 2.5).abs() < 0.001);
-        assert!(header.softmax_max > 0.0);
+        assert!((dead_ratio_to_f32(header.dead_ratio) - 0.35).abs() < 0.01);
+        assert!((f16_bits_to_f32(header.delta_rho_avg) - 1.002).abs() < 0.01);
+        assert!((f16_bits_to_f32(header.entropy_avg) - 2.5).abs() < 0.1);
+        assert!(f16_bits_to_f32(header.softmax_max_avg) > 0.0);
     }
 
     #[test]
