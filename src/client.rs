@@ -813,6 +813,29 @@ impl Client {
     // Inference APIs (per SPEC 04-API-DESIGN §3)
     // -----------------------------------------------------------------
 
+    /// Diagnostic: read a row from a weight tensor in the weight blob.
+    pub fn diagnostic_weight_row(&self, tensor_name: &str, row: usize, cols: usize) -> Option<Vec<f32>> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_weight_row(tensor_name, row, cols)
+    }
+
+    /// Diagnostic: return all named weight offsets.
+    pub fn diagnostic_weight_offsets(&self) -> Option<Vec<(String, usize)>> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_weight_offsets()
+    }
+
+    /// Diagnostic: run prefill on prompt tokens and return logits for the last token.
+    pub fn diagnostic_prefill_logits(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_prefill_logits(prompt_tokens)
+    }
+
+    pub fn diagnostic_prefill_scratchpad(&self, prompt_tokens: &[u32]) -> Option<crate::engine::mega_kernel::DiagnosticScratchpad> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_prefill_scratchpad(prompt_tokens)
+    }
+
+    pub fn diagnostic_forward_only(&self, prompt_tokens: &[u32]) -> Option<Vec<f32>> {
+        self.state.load().as_ref()?.backend.executor().diagnostic_forward_only(prompt_tokens)
+    }
+
     /// Create a text generation builder.
     pub fn generate(&self, prompt: impl Into<String>) -> crate::generation::GenerationBuilder<'_> {
         crate::generation::GenerationBuilder::from_prompt(self, prompt)
@@ -1944,6 +1967,14 @@ impl Client {
         }
 
         // ── 4. 提取 token embedding 字节 → EmbedLookupOnlyGraph ──
+        let name_map = {
+            let weights = executor.weights().map_err(|e| {
+                ClientError::RuntimeError(format!(
+                    "semantic gatekeeper: weights accessor failed: {e}"
+                ))
+            })?;
+            weights.name_map()
+        };
         let (embed_bytes, embed_dtype) = {
             let weights = executor.weights().map_err(|e| {
                 ClientError::RuntimeError(format!(
@@ -1955,8 +1986,8 @@ impl Client {
                     "semantic gatekeeper: cpu_backend accessor failed: {e}"
                 ))
             })?;
-            let aliases = crate::weight_names::decoder_embed_aliases();
-            crate::compat::weight_helpers::get_typed_data::<f32>(weights, backend, &aliases)
+            let embed_ext = name_map.resolve_external_to_string("embed");
+            crate::compat::weight_helpers::get_typed_data::<f32>(weights, backend, &[embed_ext])
                 .map_err(|e| {
                     ClientError::RuntimeError(format!(
                         "semantic gatekeeper: embed_tokens weight lookup failed: {e}"
@@ -1978,21 +2009,14 @@ impl Client {
             vocab_size,
             DType::F32,
             &embed_bytes,
+            executor.forward_config().map_err(|e| ClientError::RuntimeError(format!("forward_config: {e}")))?.max_seq_len(),
         )
         .map_err(sg_err_to_client)?;
         // ── 5. 每个检测层构造 KProjOnlyGraph ──
         let mut kproj_graphs: Vec<KProjOnlyGraph> = Vec::with_capacity(detection_layers.len());
         for &layer_idx in &detection_layers {
-            let ln_aliases = crate::weight_names::decoder_layer_aliases(
-                layer_idx,
-                "input_layernorm.weight",
-                Some("attn_norm.weight"),
-            );
-            let k_aliases = crate::weight_names::decoder_layer_aliases(
-                layer_idx,
-                "self_attn.k_proj.weight",
-                Some("attn_k.weight"),
-            );
+            let ln_ext = name_map.resolve_external_to_string(&format!("L{}.input_norm", layer_idx));
+            let k_ext = name_map.resolve_external_to_string(&format!("L{}.k_proj", layer_idx));
 
             let (ln_bytes_f32, _) = {
                 let weights = executor.weights().map_err(|e| {
@@ -2006,7 +2030,7 @@ impl Client {
                     ))
                 })?;
                 crate::compat::weight_helpers::get_typed_data::<f32>(
-                    weights, backend, &ln_aliases,
+                    weights, backend, &[ln_ext],
                 )
                 .map_err(|e| {
                     ClientError::RuntimeError(format!(
@@ -2026,7 +2050,7 @@ impl Client {
                     ))
                 })?;
                 crate::compat::weight_helpers::get_typed_data::<f32>(
-                    weights, backend, &k_aliases,
+                    weights, backend, &[k_ext],
                 )
                 .map_err(|e| {
                     ClientError::RuntimeError(format!(
@@ -2045,6 +2069,7 @@ impl Client {
                 DType::F32,
                 &ln_bytes_f32,
                 &k_bytes_f32,
+                executor.forward_config().map_err(|e| ClientError::RuntimeError(format!("forward_config: {e}")))?.max_seq_len(),
             )
             .map_err(sg_err_to_client)?;
             kproj_graphs.push(kpg);

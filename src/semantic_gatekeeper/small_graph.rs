@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use gllm_kernels::compiler::graph::SYMDIM_MAX_SEQ_LEN;
 use gllm_kernels::compiler::{CompiledLayer, CompilerGraph, InferenceCompiler, OpKind, SymDim};
 use gllm_kernels::types::DType;
 
@@ -25,10 +24,10 @@ use super::SemanticGatekeeperError;
 // 内部工具: SymDim 构造与 f32 bytes 编码
 // ============================================================================
 
-fn sym_seq() -> SymDim {
+fn sym_seq(max_seq_len: usize) -> SymDim {
     SymDim::Symbolic {
         name: "seq_len".to_string(),
-        max_value: Some(SYMDIM_MAX_SEQ_LEN),
+        max_value: Some(max_seq_len),
     }
 }
 
@@ -71,6 +70,7 @@ fn alloc_scratchpad(required: usize) -> Vec<u8> {
 pub struct EmbedLookupOnlyGraph {
     pub(super) hidden_size: usize,
     pub(super) vocab_size: usize,
+    pub(super) max_seq_len: usize,
     pub(super) dtype: DType,
     /// JIT 编译产物 (mmap executable + scratchpad 元数据).
     compiled: CompiledLayer,
@@ -102,6 +102,7 @@ impl EmbedLookupOnlyGraph {
         vocab_size: usize,
         dtype: DType,
         embed_weight: &[u8],
+        max_seq_len: usize,
     ) -> Result<Self, SemanticGatekeeperError> {
         if hidden_size == 0 || vocab_size == 0 {
             return Err(SemanticGatekeeperError::SmallGraph(format!(
@@ -126,11 +127,11 @@ impl EmbedLookupOnlyGraph {
 
         let mut g = CompilerGraph::new();
 
-        let indices = g.add_tensor("sg_indices", vec![sym_seq()], DType::F32);
+        let indices = g.add_tensor("sg_indices", vec![sym_seq(max_seq_len)], DType::F32);
         let table = g.add_tensor_concrete("sg_embed_table", &[vocab_size, hidden_size], dtype);
         let output = g.add_tensor(
             "sg_embed_out",
-            vec![sym_seq(), SymDim::Concrete(hidden_size)],
+            vec![sym_seq(max_seq_len), SymDim::Concrete(hidden_size)],
             dtype,
         );
 
@@ -141,7 +142,7 @@ impl EmbedLookupOnlyGraph {
             OpKind::Gather {
                 table_rows: vocab_size,
                 embed_dim: hidden_size,
-                index_dim: sym_seq(),
+                index_dim: sym_seq(max_seq_len),
                 indices_kind: Default::default(),
             },
             vec![indices, table],
@@ -158,6 +159,7 @@ impl EmbedLookupOnlyGraph {
         Ok(Self {
             hidden_size,
             vocab_size,
+            max_seq_len,
             dtype,
             compiled,
             embed_weight_blob: Arc::<[u8]>::from(embed_weight.to_vec().into_boxed_slice()),
@@ -195,11 +197,11 @@ impl EmbedLookupOnlyGraph {
                 )));
             }
         }
-        if tokens.len() > SYMDIM_MAX_SEQ_LEN {
+        if tokens.len() > self.max_seq_len {
             return Err(SemanticGatekeeperError::SmallGraph(format!(
                 "tokens.len()={} exceeds compile-time max {}",
                 tokens.len(),
-                SYMDIM_MAX_SEQ_LEN
+                self.max_seq_len
             )));
         }
 
@@ -316,6 +318,7 @@ pub struct KProjOnlyGraph {
     pub(super) layer_idx: usize,
     pub(super) hidden_size: usize,
     pub(super) kv_dim: usize,
+    pub(super) max_seq_len: usize,
     pub(super) rms_eps: f32,
     pub(super) dtype: DType,
     norm_compiled: CompiledLayer,
@@ -348,6 +351,7 @@ impl KProjOnlyGraph {
         dtype: DType,
         input_layernorm_weight: &[u8],
         k_proj_weight: &[u8],
+        max_seq_len: usize,
     ) -> Result<Self, SemanticGatekeeperError> {
         if hidden_size == 0 || kv_dim == 0 {
             return Err(SemanticGatekeeperError::SmallGraph(format!(
@@ -388,13 +392,13 @@ impl KProjOnlyGraph {
         let mut gn = CompilerGraph::new();
         let norm_in = gn.add_tensor(
             "sg_norm_input",
-            vec![sym_seq(), SymDim::Concrete(hidden_size)],
+            vec![sym_seq(max_seq_len), SymDim::Concrete(hidden_size)],
             dtype,
         );
         let norm_w = gn.add_tensor_concrete("sg_norm_w", &[hidden_size], dtype);
         let norm_out = gn.add_tensor(
             "sg_norm_out",
-            vec![sym_seq(), SymDim::Concrete(hidden_size)],
+            vec![sym_seq(max_seq_len), SymDim::Concrete(hidden_size)],
             dtype,
         );
         gn.inputs = vec![norm_in, norm_w];
@@ -418,23 +422,24 @@ impl KProjOnlyGraph {
         let mut gg = CompilerGraph::new();
         let gemm_in = gg.add_tensor(
             "sg_gemm_input",
-            vec![sym_seq(), SymDim::Concrete(hidden_size)],
+            vec![sym_seq(max_seq_len), SymDim::Concrete(hidden_size)],
             dtype,
         );
         let k_w = gg.add_tensor_concrete("sg_gemm_k_w", &[hidden_size, kv_dim], dtype);
         let k_out = gg.add_tensor(
             "sg_gemm_out",
-            vec![sym_seq(), SymDim::Concrete(kv_dim)],
+            vec![sym_seq(max_seq_len), SymDim::Concrete(kv_dim)],
             dtype,
         );
         gg.inputs = vec![gemm_in, k_w];
         gg.outputs = vec![k_out];
         gg.add_op(
-            OpKind::Gemm {
-                m: sym_seq(),
+            OpKind::Gemm{
+                m: sym_seq(max_seq_len),
                 n: kv_dim,
                 k: hidden_size,
                 dtype,
+                trans_b: false,
             },
             vec![gemm_in, k_w],
             vec![k_out],
@@ -451,6 +456,7 @@ impl KProjOnlyGraph {
             layer_idx,
             hidden_size,
             kv_dim,
+            max_seq_len,
             rms_eps,
             dtype,
             norm_compiled,
@@ -501,10 +507,10 @@ impl KProjOnlyGraph {
                 "run_on_embed: seq_len=0".to_string(),
             ));
         }
-        if seq_len > SYMDIM_MAX_SEQ_LEN {
+        if seq_len > self.max_seq_len {
             return Err(SemanticGatekeeperError::SmallGraph(format!(
                 "seq_len={} exceeds compile-time max {}",
-                seq_len, SYMDIM_MAX_SEQ_LEN
+                seq_len, self.max_seq_len
             )));
         }
 

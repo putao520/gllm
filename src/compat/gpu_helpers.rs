@@ -4,11 +4,10 @@
 //! serves all three GPU backends. The logic is byte-for-byte identical to the
 //! original per-backend versions — only the type parameter differs.
 
-use super::backend_trait::{self, Backend};
-
-use super::Element;
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+use super::backend_trait;
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::engine::executor::BackendError as BE;
-use gllm_kernels::types::DType;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 use crate::engine::executor::KvCacheConfig;
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
@@ -116,543 +115,11 @@ impl GpuBackendOps for super::metal_backend::MetalBackend<f32> {
     fn kv_meta(&self) -> &super::gpu_compile::GpuKvMetaStore { &self.kv_meta }
 }
 
-/// Get tensor data as f32, trying quantized dequant first, then f32 fallback.
-///
-/// Replaces `get_f32_data_cuda` / `get_f32_data_hip` / `get_f32_data_metal`.
-pub(super) fn get_f32_data_gpu<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    _backend: &B,
-    aliases: &[impl AsRef<str>],
-) -> Result<Vec<f32>, BE> {
-    // Try quantized path first
-    for name in aliases {
-        if let Some(qt) = weights.get_quantized(name.as_ref()) {
-            let n_elements = qt.shape.iter().product::<usize>();
-            let mut out = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
-            use gllm_kernels::Kernels;
-            let blk_elems = qt.quant_type.block_size();
-            let blk_bytes = qt.quant_type.block_bytes();
-            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes)
-                .zip(out.chunks_exact_mut(blk_elems))
-            {
-                match qt.quant_type {
-                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
-                    _ => {
-                        return Err(BE::Other(format!(
-                            "Unsupported quantization type {:?} for weight {:?}",
-                            qt.quant_type, name.as_ref()
-                        )));
-                    }
-                }
-            }
-            return Ok(out);
-        }
-    }
-
-    // Fall back to f32 tensor
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let e_slice: &[E] = tensor.as_ref();
-            let slice = unsafe {
-                std::slice::from_raw_parts(
-                    e_slice.as_ptr() as *const f32,
-                    std::mem::size_of_val(e_slice) / 4,
-                )
-            };
-            return Ok(slice.to_vec());
-        }
-    }
-
-    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
-}
-
-/// Get tensor data as raw bytes in the target dtype.
-///
-/// Quantized weights: dequant to f32 then convert to target dtype.
-/// Non-quantized weights: reinterpret raw bytes (assumes storage matches dtype_size).
-/// ARCH-DTYPE-ADAPTIVE: returns bytes in model's native dtype, not always f32.
-pub(super) fn get_typed_data_gpu<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    _backend: &B,
-    aliases: &[impl AsRef<str>],
-    target_dtype: DType,
-) -> Result<Vec<u8>, BE> {
-    // Try quantized path first — dequant to f32, then convert to target dtype
-    for name in aliases {
-        if let Some(qt) = weights.get_quantized(name.as_ref()) {
-            let n_elements = qt.shape.iter().product::<usize>();
-            let mut f32_buf = vec![0.0f32; n_elements];
-            let kern = gllm_kernels::cpu_kernels::CpuKernels::<E>::new();
-            use gllm_kernels::Kernels;
-            let blk_elems = qt.quant_type.block_size();
-            let blk_bytes = qt.quant_type.block_bytes();
-            for (blk_in, blk_out) in qt.data.chunks_exact(blk_bytes)
-                .zip(f32_buf.chunks_exact_mut(blk_elems))
-            {
-                match qt.quant_type {
-                    gllm_kernels::quant::QuantType::Q4_0 => kern.dequant_q4_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4_1 => kern.dequant_q4_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_0 => kern.dequant_q8_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8_1 => kern.dequant_q8_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_0 => kern.dequant_q5_0(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5_1 => kern.dequant_q5_1(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q2K => kern.dequant_q2_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q3K => kern.dequant_q3_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q4K => kern.dequant_q4_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q5K => kern.dequant_q5_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q6K => kern.dequant_q6_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::Q8K => kern.dequant_q8_k(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4NL => kern.dequant_iq4_nl(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ4XS => kern.dequant_iq4_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1S => kern.dequant_iq1_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ1M => kern.dequant_iq1_m(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XXS => kern.dequant_iq2_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2XS => kern.dequant_iq2_xs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ2S => kern.dequant_iq2_s(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3XXS => kern.dequant_iq3_xxs(blk_in, blk_out),
-                    gllm_kernels::quant::QuantType::IQ3S => kern.dequant_iq3_s(blk_in, blk_out),
-                    _ => {
-                        return Err(BE::Other(format!(
-                            "Unsupported quantization type {:?} for weight {:?}",
-                            qt.quant_type, name.as_ref()
-                        )));
-                    }
-                }
-            }
-            return Ok(super::jit_helpers::pack_weights_typed(&[&f32_buf], target_dtype));
-        }
-    }
-
-    // Non-quantized: return raw bytes in storage dtype
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let e_slice: &[E] = tensor.as_ref();
-            let raw_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    e_slice.as_ptr() as *const u8,
-                    std::mem::size_of_val(e_slice),
-                )
-            };
-            let storage_elem_bytes = std::mem::size_of_val(e_slice) / e_slice.len().max(1);
-            if storage_elem_bytes == target_dtype.size_bytes() {
-                return Ok(raw_bytes.to_vec());
-            }
-            // Storage dtype differs from target — convert via f32
-            let f32_slice = unsafe {
-                std::slice::from_raw_parts(
-                    e_slice.as_ptr() as *const f32,
-                    std::mem::size_of_val(e_slice) / 4,
-                )
-            };
-            return Ok(super::jit_helpers::pack_weights_typed(&[f32_slice], target_dtype));
-        }
-    }
-
-    let name_strs: Vec<&str> = aliases.iter().map(|s| s.as_ref()).collect();
-    Err(BE::Other(format!("Weight not found: {:?}", name_strs)))
-}
-
-// ── Phase 27: RmsNorm GEMM Pre-folding ───────────────────────────────────────
-
-/// Fold RmsNorm scale (gamma) directly into the downstream GEMM weights.
-///
-/// This eliminates redundant GMEM roundtrips for RmsNorm computation on the device,
-/// shifting the math to the host-side load phase.
-/// W'_{r,c} = W_{r,c} * \gamma_c
-fn fold_rms_norm_into_weights(
-    w_bytes: &mut [u8],
-    gamma_bytes: &[u8],
-    rows: usize, // e.g. out_dim
-    cols: usize, // e.g. in_dim (hidden)
-    dtype: DType,
-) {
-    let w_f32 = super::jit_helpers::typed_bytes_to_f32(w_bytes, dtype);
-    let g_f32 = super::jit_helpers::typed_bytes_to_f32(gamma_bytes, dtype);
-    let mut folded = vec![0.0_f32; w_f32.len()];
-
-    for r in 0..rows {
-        for c in 0..cols {
-            folded[r * cols + c] = w_f32[r * cols + c] * g_f32[c];
-        }
-    }
-
-    let packed = super::jit_helpers::pack_weights_typed(&[&folded], dtype);
-    w_bytes.copy_from_slice(&packed);
-}
-
-/// Transpose raw bytes in-place for a given dtype.
-///
-/// Operates on raw byte buffer where each element is `elem_bytes` wide.
-fn transpose_typed_bytes(data: &[u8], rows: usize, cols: usize, elem_bytes: usize) -> Vec<u8> {
-    assert_eq!(data.len(), rows * cols * elem_bytes);
-    let mut out = vec![0u8; data.len()];
-    for r in 0..rows {
-        for c in 0..cols {
-            let src = (r * cols + c) * elem_bytes;
-            let dst = (c * rows + r) * elem_bytes;
-            out[dst..dst + elem_bytes].copy_from_slice(&data[src..src + elem_bytes]);
-        }
-    }
-    out
-}
-
-/// Load decoder layer weights as raw bytes in the target dtype.
-///
-/// ARCH-DTYPE-ADAPTIVE: weights are loaded in model's native dtype, not always f32.
-pub(super) fn load_decoder_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    backend: &B,
-    layer: usize,
-    hidden: usize,
-    q_dim: usize,
-    kv_hidden: usize,
-    inter: usize,
-    dtype: DType,
-    num_experts: Option<usize>,
-) -> Result<std::collections::HashMap<String, Vec<u8>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_typed_data_gpu(weights, backend, $aliases, dtype)?);
-        };
-    }
-
-    load!("attn_norm_w", &crate::weight_names::layer_aliases(layer, "input_layernorm.weight", Some("attn_norm.weight")));
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "self_attn.q_proj.weight", Some("attn_q.weight")));
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "self_attn.k_proj.weight", Some("attn_k.weight")));
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "self_attn.v_proj.weight", Some("attn_v.weight")));
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "self_attn.o_proj.weight", Some("attn_output.weight")));
-    load!("ffn_norm_w", &crate::weight_names::layer_aliases(layer, "post_attention_layernorm.weight", Some("ffn_norm.weight")));
-    if let Some(n_exp) = num_experts {
-        load!("w_router", &crate::weight_names::layer_aliases(layer, "mlp.gate.weight", Some("ffn_gate_inp.weight")));
-        
-        // Qwen/DeepSeek MoE Shared Expert weights
-        load!("w_gate_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.gate_proj.weight", Some("mlp.gate_proj.weight")));
-        load!("w_up_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.up_proj.weight", Some("mlp.up_proj.weight")));
-        load!("w_down_shared", &crate::weight_names::layer_aliases(layer, "mlp.shared_expert.down_proj.weight", Some("mlp.down_proj.weight")));
-        
-        for i in 0..n_exp {
-            load!(&format!("w_gate_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "gate_proj.weight"));
-            load!(&format!("w_up_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "up_proj.weight"));
-            load!(&format!("w_down_exp{i}"), &crate::weight_names::moe_expert_aliases(layer, i, "down_proj.weight"));
-        }
-    } else {
-        load!("w_gate", &crate::weight_names::layer_aliases(layer, "mlp.gate_proj.weight", Some("ffn_gate.weight")));
-        load!("w_up", &crate::weight_names::layer_aliases(layer, "mlp.up_proj.weight", Some("ffn_up.weight")));
-        load!("w_down", &crate::weight_names::layer_aliases(layer, "mlp.down_proj.weight", Some("ffn_down.weight")));
-    }
-
-    // Phase 27: RmsNorm GEMM Pre-folding
-    if let Some(attn_norm) = m.get("attn_norm_w").cloned() {
-        let mut fold = |name: &str, rows: usize, cols: usize| {
-            if let Some(w) = m.get_mut(name) {
-                fold_rms_norm_into_weights(w, &attn_norm, rows, cols, dtype);
-            }
-        };
-        fold("w_q", q_dim, hidden);
-        fold("w_k", kv_hidden, hidden);
-        fold("w_v", kv_hidden, hidden);
-    }
-
-    if let Some(ffn_norm) = m.get("ffn_norm_w").cloned() {
-        let mut fold = |name: &str, rows: usize, cols: usize| {
-            if let Some(w) = m.get_mut(name) {
-                fold_rms_norm_into_weights(w, &ffn_norm, rows, cols, dtype);
-            }
-        };
-        if let Some(n_exp) = num_experts {
-            fold("w_router", n_exp, hidden);
-            fold("w_gate_shared", inter, hidden);
-            fold("w_up_shared", inter, hidden);
-            for i in 0..n_exp {
-                fold(&format!("w_gate_exp{i}"), inter, hidden);
-                fold(&format!("w_up_exp{i}"), inter, hidden);
-            }
-        } else {
-            fold("w_gate", inter, hidden);
-            fold("w_up", inter, hidden);
-        }
-    }
-
-    if needs_weight_transpose_gpu(weights) {
-        let eb = dtype.size_bytes();
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_typed_bytes(data, rows, cols, eb);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", q_dim, hidden);
-        t("w_k", kv_hidden, hidden);
-        t("w_v", kv_hidden, hidden);
-        t("w_o", hidden, q_dim);
-        if let Some(n_exp) = num_experts {
-            t("w_router", n_exp, hidden);
-            t("w_gate_shared", inter, hidden);
-            t("w_up_shared", inter, hidden);
-            t("w_down_shared", hidden, inter);
-            for i in 0..n_exp {
-                t(&format!("w_gate_exp{i}"), inter, hidden);
-                t(&format!("w_up_exp{i}"), inter, hidden);
-                t(&format!("w_down_exp{i}"), hidden, inter);
-            }
-        } else {
-            t("w_gate", inter, hidden);
-            t("w_up", inter, hidden);
-            t("w_down", hidden, inter);
-        }
-    }
-
-    Ok(m)
-}
-
-/// Load BERT encoder layer weights as raw bytes in the target dtype.
-///
-/// ARCH-DTYPE-ADAPTIVE: weights are loaded in model's native dtype, not always f32.
-pub(super) fn load_bert_layer_weights_gpu_typed<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    backend: &B,
-    layer: usize,
-    _seq_len: usize,
-    hidden: usize,
-    inter: usize,
-    transpose: bool,
-    dtype: DType,
-) -> Result<std::collections::HashMap<String, Vec<u8>>, BE> {
-    let mut m = std::collections::HashMap::new();
-
-    macro_rules! load {
-        ($graph_name:expr, $aliases:expr) => {
-            m.insert($graph_name.to_string(), get_typed_data_gpu(weights, backend, $aliases, dtype)?);
-        };
-    }
-    macro_rules! load_bias {
-        ($graph_name:expr, $aliases:expr, $size:expr) => {
-            m.insert($graph_name.to_string(), get_bias_data_gpu_typed(weights, $aliases, $size, dtype));
-        };
-    }
-
-    load!("w_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.weight", Some("attn_q.weight")));
-    load_bias!("b_q", &crate::weight_names::layer_aliases(layer, "attention.self.query.bias", Some("attn_q.bias")), hidden);
-    load!("w_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.weight", Some("attn_k.weight")));
-    load_bias!("b_k", &crate::weight_names::layer_aliases(layer, "attention.self.key.bias", Some("attn_k.bias")), hidden);
-    load!("w_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.weight", Some("attn_v.weight")));
-    load_bias!("b_v", &crate::weight_names::layer_aliases(layer, "attention.self.value.bias", Some("attn_v.bias")), hidden);
-    load!("w_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.weight", Some("attn_output.weight")));
-    load_bias!("b_o", &crate::weight_names::layer_aliases(layer, "attention.output.dense.bias", Some("attn_output.bias")), hidden);
-    load!("ln1_w", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.weight", Some("attn_output_norm.weight")));
-    load_bias!("ln1_b", &crate::weight_names::layer_aliases(layer, "attention.output.LayerNorm.bias", Some("attn_output_norm.bias")), hidden);
-    load!("w_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.weight", Some("ffn_up.weight")));
-    load_bias!("b_up", &crate::weight_names::layer_aliases(layer, "intermediate.dense.bias", Some("ffn_up.bias")), inter);
-    load!("w_down", &crate::weight_names::layer_aliases(layer, "output.dense.weight", Some("ffn_down.weight")));
-    load_bias!("b_down", &crate::weight_names::layer_aliases(layer, "output.dense.bias", Some("ffn_down.bias")), hidden);
-    load!("ln2_w", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.weight", Some("layer_output_norm.weight")));
-    load_bias!("ln2_b", &crate::weight_names::layer_aliases(layer, "output.LayerNorm.bias", Some("layer_output_norm.bias")), hidden);
-
-    if transpose {
-        let eb = dtype.size_bytes();
-        let mut t = |name: &str, rows: usize, cols: usize| {
-            if let Some(data) = m.get(name) {
-                let transposed = transpose_typed_bytes(data, rows, cols, eb);
-                m.insert(name.to_string(), transposed);
-            }
-        };
-        t("w_q", hidden, hidden);
-        t("w_k", hidden, hidden);
-        t("w_v", hidden, hidden);
-        t("w_o", hidden, hidden);
-        t("w_up", inter, hidden);
-        t("w_down", hidden, inter);
-    }
-
-    Ok(m)
-}
-
-/// Get bias data (zeros if not found).
-///
-/// Replaces `get_bias_data_cuda` / `get_bias_data_hip` / `get_bias_data_metal`.
-/// Get bias data as raw bytes in the target dtype.
-/// Falls back to zeros if not found.
-pub(super) fn get_bias_data_gpu_typed<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    aliases: &[impl AsRef<str>],
-    size: usize,
-    dtype: DType,
-) -> Vec<u8> {
-    for name in aliases {
-        if let Some(tensor) = weights.get_tensor(name.as_ref()) {
-            let e_slice: &[E] = tensor.as_ref();
-            let storage_bytes = std::mem::size_of_val(e_slice);
-            let storage_elem_bytes = storage_bytes / e_slice.len().max(1);
-            if storage_elem_bytes == dtype.size_bytes() {
-                // Storage matches target dtype — return raw bytes
-                let raw = unsafe {
-                    std::slice::from_raw_parts(e_slice.as_ptr() as *const u8, storage_bytes)
-                };
-                return raw.to_vec();
-            }
-            // Storage differs — convert via f32
-            let f32_slice = unsafe {
-                std::slice::from_raw_parts(e_slice.as_ptr() as *const f32, storage_bytes / 4)
-            };
-            return super::jit_helpers::pack_weights_typed(&[f32_slice], dtype);
-        }
-    }
-    vec![0u8; size * dtype.size_bytes()]
-}
-
-/// Check if weights need transposition (SafeTensors stores [out, in]).
-///
-/// Replaces `needs_weight_transpose_cuda` / `_hip` / `_metal`.
-pub(super) fn needs_weight_transpose_gpu<E: Element, B: Backend<E>>(
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-) -> bool {
-    crate::weight_names::has_any_embedding_weight(|n| weights.get_tensor(n).is_some())
-}
-
-/// CPU-side token embedding lookup for GPU backends.
-/// ARCH-DTYPE-ADAPTIVE: returns raw bytes in comp_dtype, not always f32.
-pub(super) fn embed_tokens_gpu<E: Element, B: Backend<E>>(
-    tokens: &[u32],
-    weights: &dyn backend_trait::TensorLookup<E, B>,
-    backend: &B,
-    config: &crate::engine::executor::GeneratorForwardConfig,
-) -> Result<Vec<u8>, BE> {
-    let hidden = config.hidden_size();
-    let comp_dtype = super::jit_helpers::computation_dtype_from_config(config);
-    let elem_bytes = comp_dtype.size_bytes();
-
-    let _seq_len = tokens.len();
-    
-
-
-    // Word embeddings (typed)
-    let word_emb = get_typed_data_gpu(
-        weights, backend,
-        &crate::weight_names::embedding_aliases("word_embeddings.weight", Some("token_embd.weight")),
-        comp_dtype,
-    )?;
-
-    let seq_len = tokens.len();
-    let hidden_bytes = hidden * elem_bytes;
-    let mut hidden_state = vec![0u8; seq_len * hidden_bytes];
-    let vocab = word_emb.len() / hidden_bytes;
-    for (s, &tok) in tokens.iter().enumerate() {
-        let v = tok as usize;
-        if v >= vocab {
-            return Err(BE::Other(format!(
-                "token id {} out of range for word_embeddings (vocab {})", tok, vocab
-            )));
-        }
-        hidden_state[s * hidden_bytes..(s + 1) * hidden_bytes]
-            .copy_from_slice(&word_emb[v * hidden_bytes..(v + 1) * hidden_bytes]);
-    }
-
-    // Position embeddings (typed)
-    let pos_emb = get_typed_data_gpu(
-        weights, backend,
-        &crate::weight_names::embedding_aliases("position_embeddings.weight", Some("position_embd.weight")),
-        comp_dtype,
-    )?;
-    let max_pos = pos_emb.len() / hidden_bytes;
-    for s in 0..seq_len {
-        if s >= max_pos {
-            return Err(BE::Other(format!(
-                "position {} out of range for position_embeddings (max {})", s, max_pos
-            )));
-        }
-    }
-    let mut hidden_f32 = super::jit_helpers::typed_bytes_to_f32(&hidden_state, comp_dtype);
-    let _kern = gllm_kernels::cpu_kernels::CpuKernels::<f32>::new();
-    use gllm_kernels::Kernels;
-
-    {
-        let pos_f32 = super::jit_helpers::typed_bytes_to_f32(&pos_emb[..seq_len * hidden_bytes], comp_dtype);
-        let mut added = vec![0.0f32; seq_len * hidden];
-        _kern.vec_add(&hidden_f32, &pos_f32, &mut added);
-        hidden_f32.copy_from_slice(&added);
-    }
-
-    // Token type embeddings (type 0, typed)
-    let tt_emb = get_typed_data_gpu(
-        weights, backend,
-        &crate::weight_names::embedding_aliases("token_type_embeddings.weight", Some("token_types.weight")),
-        comp_dtype,
-    )?;
-    if tt_emb.len() >= hidden_bytes {
-        // Broadcast tt_emb[hidden_bytes] across all seq positions
-        let tt_broadcast: Vec<u8> = tt_emb[..hidden_bytes].iter().cloned().cycle().take(seq_len * hidden_bytes).collect();
-        let tt_f32 = super::jit_helpers::typed_bytes_to_f32(&tt_broadcast, comp_dtype);
-        let mut added = vec![0.0f32; seq_len * hidden];
-        _kern.vec_add(&hidden_f32, &tt_f32, &mut added);
-        hidden_f32.copy_from_slice(&added);
-    }
-
-    // Embedding LayerNorm (typed)
-    let emb_ln_w = get_typed_data_gpu(
-        weights, backend,
-        &crate::weight_names::embedding_aliases("LayerNorm.weight", Some("token_embd_norm.weight")),
-        comp_dtype,
-    )?;
-    let emb_ln_b = get_bias_data_gpu_typed(
-        weights,
-        &crate::weight_names::embedding_aliases("LayerNorm.bias", Some("token_embd_norm.bias")),
-        hidden,
-        comp_dtype,
-    );
-    {
-        let ln_w = super::jit_helpers::typed_bytes_to_f32(&emb_ln_w, comp_dtype);
-        let ln_b = super::jit_helpers::typed_bytes_to_f32(&emb_ln_b, comp_dtype);
-        let mut ln_out = vec![0.0f32; seq_len * hidden];
-        for s in 0..seq_len {
-            _kern.layer_norm(
-                &hidden_f32[s * hidden..(s + 1) * hidden],
-                &ln_w,
-                &ln_b,
-                &mut ln_out[s * hidden..(s + 1) * hidden],
-                1e-5,
-            );
-        }
-        hidden_f32.copy_from_slice(&ln_out);
-    }
-    
-    hidden_state = super::jit_helpers::pack_weights_typed(&[&hidden_f32], comp_dtype);
-
-
-
-    Ok(hidden_state)
-}
-
 // ---------------------------------------------------------------------------
 // Generic GPU ops using GpuBackendOps trait
 // ---------------------------------------------------------------------------
 
 /// GPU alloc_kv_cache: allocate GPU buffer for KV cache and register metadata.
-///
-/// Replaces `cuda_alloc_kv_cache` / `hip_alloc_kv_cache` / `metal_alloc_kv_cache`.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_alloc_kv_cache(
     backend: &dyn GpuBackendOps,
@@ -675,8 +142,6 @@ pub(super) fn gpu_alloc_kv_cache(
 }
 
 /// GPU sample_from_tensor: download logits to CPU and sample.
-///
-/// Replaces `cuda_sample_from_tensor` / `hip_sample_from_tensor` / `metal_sample_from_tensor`.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_sample_from_tensor(
     logits: &crate::engine::executor::LogitsHandle,
@@ -688,8 +153,6 @@ pub(super) fn gpu_sample_from_tensor(
 }
 
 /// GPU swap_out_pages: download page data from GPU to host swap store.
-///
-/// Replaces `cuda_swap_out_pages` / `hip_swap_out_pages` / `metal_swap_out_pages`.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_swap_out_pages(
     backend: &dyn GpuBackendOps,
@@ -748,8 +211,6 @@ pub(super) fn gpu_swap_out_pages(
 }
 
 /// GPU swap_in_pages: upload page data from host swap store to GPU.
-///
-/// Replaces `cuda_swap_in_pages` / `hip_swap_in_pages` / `metal_swap_in_pages`.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_swap_in_pages(
     backend: &dyn GpuBackendOps,
@@ -807,8 +268,6 @@ pub(super) fn gpu_swap_in_pages(
 }
 
 /// GPU get_page_states: return page states based on metadata.
-///
-/// Replaces `cuda_get_page_states` / `hip_get_page_states` / `metal_get_page_states`.
 #[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
 pub(super) fn gpu_get_page_states(
     backend: &dyn GpuBackendOps,
@@ -827,4 +286,74 @@ pub(super) fn gpu_get_page_states(
         states.push((page_id, state));
     }
     Ok(states)
+}
+
+// ---------------------------------------------------------------------------
+// GPU Mega-Kernel Launch Helpers
+// ---------------------------------------------------------------------------
+
+/// Build the 22-parameter ABI array for mega-kernel launch.
+///
+/// All pointer arguments must already be device pointers.
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn build_mega_kernel_args(
+    input_ids_gpu: u64,
+    weight_blob_gpu: u64,
+    kv_cache_gpu: u64,
+    positions_gpu: u64,
+    seq_lens_ptr: u64,
+    batch_size: usize,
+    seq_len: usize,
+    scratchpad_gpu: u64,
+    output_buf_gpu: u64,
+    temperature_bits: usize,
+    top_k: usize,
+    top_p_bits: usize,
+    max_new_tokens: usize,
+    eos_token_id: usize,
+    output_mode_selector: usize,
+    hook_ctx_ptr: u64,
+    telemetry_ptr: u64,
+    session_position: usize,
+    fused_hidden_ptr: u64,
+    num_mm_tokens: usize,
+    callback_table_ptr: u64,
+    page_table_ptr_gpu: u64,
+) -> [usize; 22] {
+    [
+        input_ids_gpu as usize,
+        weight_blob_gpu as usize,
+        kv_cache_gpu as usize,
+        positions_gpu as usize,
+        seq_lens_ptr as usize,
+        batch_size,
+        seq_len,
+        scratchpad_gpu as usize,
+        output_buf_gpu as usize,
+        temperature_bits,
+        top_k,
+        top_p_bits,
+        max_new_tokens,
+        eos_token_id,
+        output_mode_selector,
+        hook_ctx_ptr as usize,
+        telemetry_ptr as usize,
+        session_position,
+        fused_hidden_ptr as usize,
+        num_mm_tokens,
+        callback_table_ptr as usize,
+        page_table_ptr_gpu as usize,
+    ]
+}
+
+/// Extract f32 array from raw bytes (for DtoH results).
+#[cfg(any(feature = "cuda", feature = "hip", all(target_os = "macos", feature = "metal")))]
+pub(super) fn bytes_to_f32_vec(data: &[u8]) -> Vec<f32> {
+    let count = data.len() / 4;
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let bytes = [data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]];
+        result.push(f32::from_le_bytes(bytes));
+    }
+    result
 }
