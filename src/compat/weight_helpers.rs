@@ -42,14 +42,16 @@ fn _dequantize_to_f32<E: Element>(
     // GGUF pads each row (innermost dim) to the block boundary.
     // When ne0 % block_size != 0, we must dequantize row-by-row,
     // skipping the padding blocks at the end of each row.
-    // GGUF shape is [ne0, ne1, ...] where ne0 is the innermost dim (first element).
-    let ne0 = if qt.shape.is_empty() { n } else { qt.shape[0] };
+    // After GGUF→HF shape reversal, innermost dim is shape[last] (not shape[0]).
+    // tensor_nbytes uses original GGUF order where shape[0] = innermost,
+    // but qt.shape has been reversed to HF order where shape[last] = innermost.
+    let ne0 = if qt.shape.is_empty() { n } else { qt.shape[qt.shape.len() - 1] };
     let blocks_per_row = ne0.div_ceil(blk_elems);
     let row_data_bytes = blocks_per_row * blk_bytes;
     let needs_row_dequant = ne0 % blk_elems != 0 && qt.shape.len() >= 2;
 
     if needs_row_dequant {
-        let n_rows: usize = qt.shape[1..].iter().product();
+        let n_rows: usize = qt.shape[..qt.shape.len() - 1].iter().product();
         let mut out_off = 0;
         let mut data_off = 0;
         // Temp buffer for one full row (including padding elements)
@@ -68,6 +70,14 @@ fn _dequantize_to_f32<E: Element>(
     }
 
     Ok(out)
+}
+
+/// Dequantize a QuantizedTensor to Vec<f32>. Public wrapper for executor use.
+pub(crate) fn dequantize_weight_to_f32<E: Element>(
+    qt: &crate::loader::QuantizedTensor,
+    backend: &crate::compat::CpuBackend<E>,
+) -> Result<Vec<f32>, crate::compat::BackendError> {
+    _dequantize_to_f32(qt, backend)
 }
 
 /// Try to get bias data as Vec<f32>. Returns zeros if not found.
@@ -127,6 +137,10 @@ pub(crate) fn get_bias_data_typed<E: Element>(
 pub(crate) fn needs_weight_transpose<E: Element>(
     weights: &dyn backend_trait::TensorLookup<E, CpuBackend<E>>,
 ) -> bool {
+    // Build name_map from available tensor names for format-agnostic probing.
+    let all_names = weights.available_names();
+    let name_map = crate::loader::name_map::TensorNameMap::build_from_names(&all_names, false);
+
     // GGUF models use blk.* names — they always need transpose because
     // GGUF shape [ne0, ne1] stores ne1 rows of ne0 elements, giving
     // [out_dim, in_dim] in memory (same as SafeTensors).
@@ -135,29 +149,25 @@ pub(crate) fn needs_weight_transpose<E: Element>(
         return true;
     }
 
-    // Probe decoder (Llama/Qwen/Mistral) style weights: self_attn.q_proj.weight
-    // SafeTensors shape: [out_dim, in_dim] → [num_heads*head_dim, hidden] → first < second for GQA
-    // but for q_proj with hidden=576, heads=9, head_dim=64: out=576, in=576 (square, skip)
-    // Use mlp.gate_proj.weight: [inter_dim, hidden] → inter > hidden → true for SafeTensors
-    let decoder_probes: &[&str] = &[
-        "model.layers.0.mlp.gate_proj.weight",
-        "model.layers.0.mlp.up_proj.weight",
-        "transformer.h.0.mlp.c_fc.weight",
-    ];
-    for name in decoder_probes {
-        if let Some(shape) = weights.tensor_shape(name) {
+    // Probe decoder gate_proj via canonical name → external name lookup.
+    if let Some(ext) = name_map.to_external("L0.gate_proj") {
+        if let Some(shape) = weights.tensor_shape(ext) {
             if shape.len() == 2 && shape[0] != shape[1] {
-                // SafeTensors: [out_dim, in_dim] → gate_proj [inter, hidden], inter > hidden → true
-                // If shape[0] > shape[1]: out_dim > in_dim → SafeTensors row-major → needs transpose
+                return shape[0] > shape[1];
+            }
+        }
+    }
+    if let Some(ext) = name_map.to_external("L0.up_proj") {
+        if let Some(shape) = weights.tensor_shape(ext) {
+            if shape.len() == 2 && shape[0] != shape[1] {
                 return shape[0] > shape[1];
             }
         }
     }
 
-    // Probe a non-square SafeTensors / ONNX weight (BERT style).
-    let probe_names = crate::weight_names::layer_aliases(0, "intermediate.dense.weight", None);
-    for name in &probe_names {
-        if let Some(shape) = weights.tensor_shape(name) {
+    // Probe encoder FFN up_proj via canonical name.
+    if let Some(ext) = name_map.to_external("L0.up_proj") {
+        if let Some(shape) = weights.tensor_shape(ext) {
             if shape.len() == 2 && shape[0] != shape[1] {
                 // SafeTensors: [out_dim(1536), in_dim(384)] → first > second → true
                 // ONNX:        [in_dim(384), out_dim(1536)] → first < second → false
@@ -165,11 +175,13 @@ pub(crate) fn needs_weight_transpose<E: Element>(
             }
         }
     }
-    // Fallback: name-existence heuristic (original behaviour).
-    // SafeTensors models use "embeddings.word_embeddings.weight" style names.
-    crate::weight_names::has_any_embedding_weight(|n| {
-        weights.get_tensor(n).is_some() || weights.get_quantized(n).is_some()
-    })
+
+    // Fallback: check if any embedding weight exists (SafeTensors naming).
+    if let Some(ext) = name_map.to_external("embed") {
+        weights.get_tensor(ext).is_some() || weights.get_quantized(ext).is_some()
+    } else {
+        false
+    }
 }
 
 /// Try to get tensor data as (Vec<u8>, DType). Returns None if not found.
@@ -237,10 +249,10 @@ pub(crate) fn get_weight_data<E: Element>(
         }
         if let Some(qt) = weights.get_quantized(name) {
             if qt.shape.len() >= 2 {
-                // GGUF shape: [ne0=in_dim, ne1=out_dim]
-                // Memory layout: out_dim rows of in_dim elements (quantized blocks)
-                let in_dim = qt.shape[0];
-                let out_dim = qt.shape[1];
+                // Shape is HF order [out_dim, in_dim] (reversed from GGUF at TensorProvider boundary).
+                // Memory layout: out_dim rows of in_dim elements (quantized blocks).
+                let out_dim = qt.shape[0];
+                let in_dim = qt.shape[qt.shape.len() - 1];
                 return Ok(WeightData::Quantized {
                     data: qt.data.clone(),
                     quant_type: qt.quant_type,
