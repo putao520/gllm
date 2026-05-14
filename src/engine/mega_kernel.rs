@@ -113,6 +113,8 @@ pub struct MegaKernelExecutor {
     dtype: DType,
     /// EOS token ID — 从 ModelConfig 读取，传给 JIT 停止条件
     eos_token_id: u32,
+    /// §19 KV-OPT-009: Mega-Kernel Variant 矩阵 (按 PrecisionTier 编译独立 Variant)
+    variant_registry: crate::jit::variant_registry::VariantRegistry,
 }
 
 impl MegaKernelExecutor {
@@ -236,6 +238,22 @@ impl MegaKernelExecutor {
             vocab_size: geometry.vocab_size,
             dtype: geometry.compute_dtype,
             eos_token_id,
+            variant_registry: {
+                let mut registry = crate::jit::variant_registry::VariantRegistry::new();
+                // Register default FP16 variant (the compiled mega-kernel itself)
+                let default_key = crate::jit::variant_registry::VariantRegistry::derive_key(
+                    "default", false, false, None, false, 64, None, None,
+                );
+                let default_variant = crate::jit::variant_registry::CompiledVariant {
+                    code: Vec::new(), // The actual code lives in mega_compiled
+                    instruction_footprint_bytes: 8192, // estimated
+                    mechanisms: vec![crate::jit::variant_registry::MechanismId::Dense],
+                    section: crate::jit::variant_registry::CodeSection::Hot,
+                    key: default_key.clone(),
+                };
+                let _ = registry.register(default_variant);
+                registry
+            },
         })
     }
 
@@ -337,6 +355,7 @@ impl MegaKernelExecutor {
             vocab_size: geometry.vocab_size,
             dtype: geometry.dtype,
             eos_token_id: 0,
+            variant_registry: crate::jit::variant_registry::VariantRegistry::new(),
         })
     }
 

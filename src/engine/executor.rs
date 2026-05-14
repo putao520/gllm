@@ -522,6 +522,8 @@ pub struct Executor<B: Backend<E> + 'static, E: Element = f32> {
     moe_dispatcher: Option<crate::moe::dispatch::MoeHardwareDispatcher>,
     /// §15.2 MoE 专家权重预取调度器
     moe_prefetcher: Option<crate::moe::prefetch::ExpertWeightPrefetcher>,
+    /// §19 KV Cache 智能优化器 (importance_score + PrecisionTier + Sparse Bitmap)
+    kv_optimizer: crate::scheduler::kv_optimizer::KvOptimizer,
     /// §17 推测解码引擎（EESD / SAGUARO / Standard）
     spec_decoding: crate::speculative::engine::SpecDecodingState,
     /// §16.1 RAG system (set via set_rag_system)
@@ -1267,6 +1269,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             moe_thermal,
             moe_dispatcher,
             moe_prefetcher,
+            kv_optimizer: crate::scheduler::kv_optimizer::KvOptimizer::new(geometry.num_layers),
             spec_decoding: crate::speculative::engine::SpecDecodingState::new_standard(),
             rag_system: None,
             hot_patch_manager,
@@ -2359,6 +2362,39 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let epilogue_summary = self.epilogue_subsystem.ingest_and_decide(&batch_telemetry);
         if epilogue_summary.compact_required {
             log::debug!("executor: Epilogue compact required (waste={:.2}%)", epilogue_summary.waste_ratio * 100.0);
+        }
+
+        // §19: KV Cache 智能优化 — 从遥测驱动 importance_score + PrecisionTier 决策
+        {
+            use crate::scheduler::kv_optimizer;
+            use crate::kv_cache::KvPageHeader;
+            let num_kv_heads = self.geometry.num_kv_heads;
+            // 将 batch_telemetry 映射为临时 KvPageHeader 供 kv_optimizer 消费
+            let mut temp_headers: Vec<KvPageHeader> = batch_telemetry.iter().map(|tel| {
+                let mut h = KvPageHeader::new(0);
+                h.ref_count = 1;
+                h.entropy_avg = crate::kv_cache::f32_to_f16_bits(tel.output_entropy);
+                h.softmax_max_avg = crate::kv_cache::f32_to_f16_bits(if tel.output_entropy < 1.0 { 0.85 } else { 0.3 });
+                h.delta_rho_avg = crate::kv_cache::f32_to_f16_bits(tel.transform_ratio);
+                h.dead_ratio = crate::kv_cache::f32_to_dead_ratio(tel.dead_density);
+                h.head_entropy_max = (tel.per_head_entropy * 25.5).min(255.0) as u8;
+                h.head_entropy_min = (tel.per_head_entropy * 10.0).min(255.0) as u8;
+                h
+            }).collect();
+            kv_optimizer::optimize_pages(&self.kv_optimizer, &mut temp_headers, 0, num_kv_heads);
+            let tier_changes: usize = temp_headers.iter()
+                .filter(|h| h.needs_requantize())
+                .count();
+            if tier_changes > 0 {
+                log::debug!(
+                    "executor: §19 KV optimizer: {}/{} requests need tier adjustment",
+                    tier_changes, temp_headers.len(),
+                );
+            }
+            // §19: 记录优化结果到 telemetry_aggregator 供后续消费
+            for h in &temp_headers {
+                self.telemetry_aggregator.ingest_from_page_header(h);
+            }
         }
 
         // §13.1: 将 Epilogue gate_skip 决策写入 forward_config，
