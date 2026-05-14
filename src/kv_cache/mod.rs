@@ -259,6 +259,24 @@ impl KvPageHeader {
     pub fn is_high_dead_ratio(&self) -> bool {
         self.dead_ratio > 127
     }
+
+    /// REQ-KV-OPT-010: 标记为 position-agnostic (CacheSlide)
+    /// System prompt 页跳过 RoPE 注入，实现跨请求 KV 复用。
+    /// 使用 _reserved[0] bit 0 作为标志。
+    #[inline]
+    pub fn set_position_agnostic(&mut self, value: bool) {
+        if value {
+            self._reserved[0] |= 0x01;
+        } else {
+            self._reserved[0] &= !0x01;
+        }
+    }
+
+    /// 检查是否为 position-agnostic 页 (CacheSlide)
+    #[inline]
+    pub fn is_position_agnostic(&self) -> bool {
+        self._reserved[0] & 0x01 != 0
+    }
 }
 
 // ============================================================================

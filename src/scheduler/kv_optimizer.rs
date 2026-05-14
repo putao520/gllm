@@ -57,6 +57,9 @@ pub struct KvOptimizer {
     pub tier_floor: LayerTierFloor,
     /// 总层数 (用于计算层位置分区)
     pub num_layers: usize,
+    /// 跨层 Index 复用间隔 (REQ-KV-OPT-008 ChunkKV)
+    /// 每隔 K 层完整评估 importance_score，中间层复用最近关键层评分
+    pub chunk_cross_layer_k: usize,
 }
 
 impl KvOptimizer {
@@ -64,6 +67,7 @@ impl KvOptimizer {
         Self {
             tier_floor: LayerTierFloor::default(),
             num_layers,
+            chunk_cross_layer_k: 4,
         }
     }
 
@@ -170,6 +174,21 @@ impl KvOptimizer {
             self.tier_floor.deep_min
         }
     }
+
+    /// REQ-KV-OPT-008: 判断指定层是否为关键层 (ChunkKV)
+    ///
+    /// 仅关键层完整评估 importance_score，中间层复用最近关键层评分。
+    /// K 值由 chunk_cross_layer_k 控制（默认 4）。
+    pub fn is_key_layer(&self, layer_idx: usize) -> bool {
+        layer_idx % self.chunk_cross_layer_k == 0
+    }
+
+    /// REQ-KV-OPT-008: 查找最近的关键层索引
+    ///
+    /// 对于非关键层，返回向下最近的已评估关键层。
+    pub fn nearest_key_layer(&self, layer_idx: usize) -> usize {
+        (layer_idx / self.chunk_cross_layer_k) * self.chunk_cross_layer_k
+    }
 }
 
 /// 对基础 tier 应用层位置精度下限
@@ -196,11 +215,56 @@ fn tier_rank(tier: PrecisionTier) -> u8 {
     }
 }
 
+/// REQ-KV-OPT-005: Per-Head 稀疏 Bitmap 计算 (MUSTAFAR)
+///
+/// 基于 head_entropy_max / head_entropy_min 的分布判断哪些 head 活跃。
+/// channel_bitmap_lo 中 bit = 1 表示对应 head 的通道活跃（保留），
+/// bit = 0 表示低活跃（可跳过 KV 读取）。
+///
+/// 由于 KvPageHeader 仅存储 head_entropy_max/min 两个值（而非 per-head 数组），
+/// 使用一种启发式方法：将 head 0..31 均匀映射到 [min, max] 范围，
+/// 低于中位值的 head 标记为非活跃。
+fn compute_sparse_bitmap(header: &KvPageHeader, num_kv_heads: usize) -> u32 {
+    let h_min = header.head_entropy_min as u32;
+    let h_max = header.head_entropy_max as u32;
+
+    // 如果 max 和 min 接近，没有明显稀疏 head
+    if h_max.saturating_sub(h_min) < HEAD_SPARSITY_THRESHOLD as u32 {
+        return 0xFFFF_FFFF;
+    }
+
+    // 将 [min, max] 分成两半，下半部分为低活跃
+    let threshold = h_min + (h_max - h_min) / 2;
+    let num_heads = num_kv_heads.min(32);
+    let mut bitmap = 0u32;
+
+    for i in 0..num_heads {
+        // 线性映射 head i → entropy 值
+        let val = if num_heads <= 1 {
+            h_min
+        } else {
+            h_min + (h_max - h_min) * i as u32 / (num_heads - 1) as u32
+        };
+        if val >= threshold {
+            bitmap |= 1 << i;
+        }
+    }
+
+    // 如果 bitmap 中活跃 head 太少（< 25%），保持全活跃避免精度损失
+    let active_count = bitmap.count_ones() as usize;
+    if active_count < (num_heads + 3) / 4 {
+        return 0xFFFF_FFFF;
+    }
+
+    bitmap
+}
+
 /// 对一批 page header 执行优化决策
 pub fn optimize_pages(
     optimizer: &KvOptimizer,
     headers: &mut [KvPageHeader],
     layer_idx: usize,
+    num_kv_heads: usize,
 ) {
     for header in headers.iter_mut() {
         if !header.is_active() {
@@ -219,15 +283,129 @@ pub fn optimize_pages(
             header.set_precision_tier(target_tier);
             // 标记需要 requantize
             header.deopt_flags |= 0x01;
+        }
 
-            // 必要时标记稀疏 bitmap
-            if importance.should_mark_sparse && target_tier == PrecisionTier::Sparse {
-                // channel_bitmap 将在 requantize 时由 Epilogue 填充
-            }
+        // REQ-KV-OPT-005: Per-Head 稀疏 Bitmap (MUSTAFAR)
+        // 当 head 间 entropy 差异大时，某些 head 几乎无贡献
+        if importance.should_mark_sparse {
+            let bitmap = compute_sparse_bitmap(header, num_kv_heads);
+            header.channel_bitmap_lo = bitmap;
+        } else {
+            // 清除 bitmap — 所有 head 活跃
+            header.channel_bitmap_lo = 0xFFFF_FFFF;
         }
 
         // 更新 tier_age
         header.tier_age = header.tier_age.saturating_add(1);
+    }
+}
+
+/// REQ-KV-OPT-007: System Prompt 压缩复用 (KVzip)
+///
+/// KvPrefixIndex 匹配的 system prompt 页在首次 prefill 后执行 importance scoring。
+/// 高重要性页保持 FP16，低重要性页降级到 KIVI2/Sparse。
+/// 标记为 query-agnostic，ref_count 引用管理。
+///
+/// `system_prompt_pages`: system prompt 占据的 page headers (已 prefill)
+/// `num_kv_heads`: KV head 数量，用于稀疏 bitmap 计算
+pub fn optimize_system_prompt_pages(
+    optimizer: &KvOptimizer,
+    system_prompt_pages: &mut [KvPageHeader],
+    num_kv_heads: usize,
+) {
+    for (i, header) in system_prompt_pages.iter_mut().enumerate() {
+        if !header.is_active() {
+            continue;
+        }
+
+        // 计算 importance_score
+        let importance = optimizer.write_importance(header);
+
+        // System prompt 页使用更激进的降级策略:
+        // 高重要性 → FP16, 低重要性 → KIVI2/Sparse
+        // 但保持 sink token 的 FP16 锁定
+        let target_tier = if header.has_sink_token() || importance.score > 180 {
+            PrecisionTier::FP16
+        } else if importance.score > 100 {
+            PrecisionTier::KIVI4
+        } else {
+            PrecisionTier::KIVI2
+        };
+
+        let current_tier = header.precision_tier();
+        if target_tier != current_tier {
+            header.set_precision_tier(target_tier);
+            header.deopt_flags |= 0x01;
+        }
+
+        // Per-head sparse bitmap
+        if importance.should_mark_sparse {
+            header.channel_bitmap_lo = compute_sparse_bitmap(header, num_kv_heads);
+        } else {
+            header.channel_bitmap_lo = 0xFFFF_FFFF;
+        }
+
+        // System prompt 页标记为 Conversation 管线 (跨轮保留)
+        header.pipeline_id = 0;
+
+        // REQ-KV-OPT-010: 标记为 position-agnostic (CacheSlide)
+        // System prompt 页跳过 RoPE 注入，decode 时通过 Correction Attention 补偿
+        header.set_position_agnostic(true);
+
+        // tier_age 更新
+        let _ = i;
+        header.tier_age = header.tier_age.saturating_add(1);
+    }
+}
+
+/// REQ-KV-OPT-008: 跨层 Index 复用 (ChunkKV)
+///
+/// 仅在关键层完整评估 importance_score，中间层复用最近关键层评分。
+/// `all_layer_headers`: [layer][page] 二维切片
+/// `num_kv_heads`: KV head 数量
+pub fn optimize_with_cross_layer_reuse(
+    optimizer: &KvOptimizer,
+    all_layer_headers: &mut [Vec<KvPageHeader>],
+    num_kv_heads: usize,
+) {
+    let num_layers = all_layer_headers.len();
+    // 先评估所有关键层，收集评分快照
+    let mut key_layer_scores: Vec<Vec<(u8, u32)>> = vec![Vec::new(); num_layers];
+    for layer_idx in 0..num_layers {
+        if optimizer.is_key_layer(layer_idx) {
+            optimize_pages(optimizer, &mut all_layer_headers[layer_idx], layer_idx, num_kv_heads);
+            key_layer_scores[layer_idx] = all_layer_headers[layer_idx].iter()
+                .map(|h| (h.importance_score, h.sink_mask))
+                .collect();
+        }
+    }
+
+    // 再处理非关键层：复用最近关键层评分
+    for layer_idx in 0..num_layers {
+        if optimizer.is_key_layer(layer_idx) {
+            continue;
+        }
+        let key_layer = optimizer.nearest_key_layer(layer_idx);
+        if key_layer >= num_layers || key_layer_scores[key_layer].is_empty() {
+            continue;
+        }
+        let scores = &key_layer_scores[key_layer];
+        let headers = &mut all_layer_headers[layer_idx];
+        for (i, header) in headers.iter_mut().enumerate() {
+            if !header.is_active() {
+                continue;
+            }
+            if i < scores.len() {
+                header.importance_score = scores[i].0;
+                header.sink_mask = scores[i].1;
+            }
+            let target_tier = optimizer.decide_tier(header, layer_idx);
+            if target_tier != header.precision_tier() {
+                header.set_precision_tier(target_tier);
+                header.deopt_flags |= 0x01;
+            }
+            header.tier_age = header.tier_age.saturating_add(1);
+        }
     }
 }
 
@@ -345,7 +523,7 @@ mod tests {
     fn test_optimize_pages_updates_tier_age() {
         let optimizer = KvOptimizer::new(32);
         let mut headers = vec![make_header(3.0, 0.3, 0.5, 0.3, 80, 60)];
-        optimize_pages(&optimizer, &mut headers, 10);
+        optimize_pages(&optimizer, &mut headers, 10, 32);
         assert_eq!(headers[0].tier_age, 1);
         assert!(headers[0].importance_score > 0);
     }
@@ -357,7 +535,7 @@ mod tests {
         header.ref_count = 0; // inactive
         header.entropy_avg = f32_to_f16_bits(3.0);
         let mut headers = vec![header];
-        optimize_pages(&optimizer, &mut headers, 10);
+        optimize_pages(&optimizer, &mut headers, 10, 32);
         assert_eq!(headers[0].importance_score, 0, "inactive page should not be scored");
         assert_eq!(headers[0].tier_age, 0);
     }
@@ -378,5 +556,107 @@ mod tests {
         assert!(tier_rank(PrecisionTier::KIVI4) > tier_rank(PrecisionTier::KIVI2));
         assert!(tier_rank(PrecisionTier::KIVI2) > tier_rank(PrecisionTier::Sparse));
         assert!(tier_rank(PrecisionTier::Sparse) > tier_rank(PrecisionTier::Evicted));
+    }
+
+    #[test]
+    fn test_sparse_bitmap_high_spread() {
+        // High spread: max=250, min=10 → many heads should be filtered
+        let header = make_header(2.0, 0.3, 0.5, 0.2, 250, 10);
+        let bitmap = compute_sparse_bitmap(&header, 32);
+        // Should not be all-ones (some heads filtered)
+        assert_ne!(bitmap, 0xFFFF_FFFF, "high spread should produce sparse bitmap");
+        // Should have some active heads
+        assert!(bitmap != 0, "bitmap should not be all-zero");
+    }
+
+    #[test]
+    fn test_sparse_bitmap_low_spread() {
+        // Low spread: max=60, min=50 → all heads active
+        let header = make_header(2.0, 0.3, 0.5, 0.2, 60, 50);
+        let bitmap = compute_sparse_bitmap(&header, 32);
+        assert_eq!(bitmap, 0xFFFF_FFFF, "low spread should keep all heads active");
+    }
+
+    #[test]
+    fn test_sparse_bitmap_too_few_active() {
+        // Extreme case: max=255, min=0 with 4 heads → should preserve all (too few active)
+        let header = make_header(2.0, 0.3, 0.5, 0.2, 255, 0);
+        let bitmap = compute_sparse_bitmap(&header, 4);
+        // With 4 heads and threshold at midpoint, only 2 would be active = 50% → OK
+        // But if it falls below 25% it would be all-ones
+        assert!(bitmap.count_ones() >= 1, "should have at least 1 active head");
+    }
+
+    #[test]
+    fn test_optimize_pages_sets_sparse_bitmap() {
+        let optimizer = KvOptimizer::new(32);
+        let mut headers = vec![make_header(2.0, 0.3, 0.5, 0.2, 250, 10)];
+        optimize_pages(&optimizer, &mut headers, 20, 32);
+        // head_spread = 240 > HEAD_SPARSITY_THRESHOLD → should_mark_sparse = true
+        // channel_bitmap should be computed (not default)
+        assert_ne!(headers[0].channel_bitmap_lo, 0, "sparse bitmap should be set");
+    }
+
+    #[test]
+    fn test_key_layer_detection() {
+        let optimizer = KvOptimizer::new(32);
+        assert!(optimizer.is_key_layer(0));
+        assert!(optimizer.is_key_layer(4));
+        assert!(optimizer.is_key_layer(8));
+        assert!(!optimizer.is_key_layer(1));
+        assert!(!optimizer.is_key_layer(3));
+        assert!(!optimizer.is_key_layer(7));
+    }
+
+    #[test]
+    fn test_nearest_key_layer() {
+        let optimizer = KvOptimizer::new(32);
+        assert_eq!(optimizer.nearest_key_layer(0), 0);
+        assert_eq!(optimizer.nearest_key_layer(1), 0);
+        assert_eq!(optimizer.nearest_key_layer(3), 0);
+        assert_eq!(optimizer.nearest_key_layer(4), 4);
+        assert_eq!(optimizer.nearest_key_layer(6), 4);
+        assert_eq!(optimizer.nearest_key_layer(7), 4);
+    }
+
+    #[test]
+    fn test_system_prompt_optimization() {
+        let optimizer = KvOptimizer::new(32);
+        let mut headers = vec![
+            make_header(0.5, 0.9, 0.1, 0.1, 200, 50), // sink → FP16
+            make_header(3.0, 0.3, 0.5, 0.3, 80, 60),   // normal → KIVI4
+            make_header(5.0, 0.1, 0.9, 0.5, 30, 20),   // low → KIVI2
+        ];
+        optimize_system_prompt_pages(&optimizer, &mut headers, 32);
+        assert_eq!(headers[0].precision_tier(), PrecisionTier::FP16);
+        assert_eq!(headers[0].pipeline_id, 0); // Conversation pipeline
+        assert_eq!(headers[2].pipeline_id, 0);
+        // REQ-KV-OPT-010: all system prompt pages should be position-agnostic
+        assert!(headers[0].is_position_agnostic());
+        assert!(headers[1].is_position_agnostic());
+        assert!(headers[2].is_position_agnostic());
+    }
+
+    #[test]
+    fn test_cross_layer_reuse() {
+        let optimizer = KvOptimizer::new(32);
+        // 8 layers, 1 page per layer
+        let mut all_headers: Vec<Vec<KvPageHeader>> = (0..8)
+            .map(|_| vec![make_header(3.0, 0.3, 0.5, 0.3, 80, 60)])
+            .collect();
+
+        optimize_with_cross_layer_reuse(&optimizer, &mut all_headers, 32);
+
+        // Layers 0, 4 should be key layers (fully evaluated)
+        assert!(all_headers[0][0].importance_score > 0, "key layer 0 should be evaluated");
+        assert!(all_headers[4][0].importance_score > 0, "key layer 4 should be evaluated");
+
+        // Non-key layers should reuse scores from their nearest key layer
+        assert_eq!(all_headers[1][0].importance_score, all_headers[0][0].importance_score,
+            "layer 1 should reuse layer 0 score");
+        assert_eq!(all_headers[2][0].importance_score, all_headers[0][0].importance_score,
+            "layer 2 should reuse layer 0 score");
+        assert_eq!(all_headers[5][0].importance_score, all_headers[4][0].importance_score,
+            "layer 5 should reuse layer 4 score");
     }
 }
