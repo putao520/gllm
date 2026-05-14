@@ -53,6 +53,8 @@ pub enum MechanismId {
     EarlyExit,
     /// Compact→Execute→Scatter 三段式 (§9.1)
     RaggedCompaction,
+    /// KIVI 4/2 量化 KV 写回 Epilogue (§19 KV-OPT-004)
+    KiviQuant,
 }
 
 /// 推测解码阶段
@@ -85,6 +87,8 @@ pub struct VariantKey {
     pub golden_size: usize,
     /// 量化精度标识 (决定 TurboQuant FWHT 代码), 存储 QuantType variant name
     pub quant_type: Option<String>,
+    /// KV cache 精度等级 (决定 Attention KV load 微内核, None=FP16 基准)
+    pub kv_tier: Option<String>,
 }
 
 impl std::fmt::Display for VariantKey {
@@ -105,6 +109,9 @@ impl std::fmt::Display for VariantKey {
         )?;
         if let Some(ref q) = self.quant_type {
             write!(f, "_{}", q)?;
+        }
+        if let Some(ref t) = self.kv_tier {
+            write!(f, "_kv{}", t)?;
         }
         Ok(())
     }
@@ -220,32 +227,32 @@ impl VariantRegistry {
     pub fn find_closest(&self, key: &VariantKey) -> Option<&CompiledVariant> {
         // 原始约束
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
-            key.spec_phase, key.rag_enabled, &key.quant_type, key.golden_size) {
+            key.spec_phase, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         // 放松 spec_phase=None
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
-            None, key.rag_enabled, &key.quant_type, key.golden_size) {
+            None, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=original
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
-            key.spec_phase, key.rag_enabled, &key.quant_type, key.golden_size) {
+            key.spec_phase, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         // 放松 guardrail=false, spec_phase=None
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
-            None, key.rag_enabled, &key.quant_type, key.golden_size) {
+            None, key.rag_enabled, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         // 放松 rag=false, guardrail=original, spec=original
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, key.guardrail_enabled,
-            key.spec_phase, false, &key.quant_type, key.golden_size) {
+            key.spec_phase, false, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         // 全部放松
         if let Some(v) = self.try_relaxed(&key.arch, key.moe_enabled, false,
-            None, false, &key.quant_type, key.golden_size) {
+            None, false, &key.quant_type, &key.kv_tier, key.golden_size) {
             return Some(v);
         }
         None
@@ -254,11 +261,11 @@ impl VariantRegistry {
     /// 尝试精确匹配 + golden_size 放松
     fn try_relaxed(&self, arch: &str, moe: bool, guard: bool,
                    spec: Option<SpecPhase>, rag: bool, qt: &Option<String>,
-                   max_gs: usize) -> Option<&CompiledVariant> {
+                   kv_tier: &Option<String>, max_gs: usize) -> Option<&CompiledVariant> {
         let exact = VariantKey {
             arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
             spec_phase: spec, rag_enabled: rag, golden_size: max_gs,
-            quant_type: qt.clone(),
+            quant_type: qt.clone(), kv_tier: kv_tier.clone(),
         };
         if let Some(v) = self.entries.get(&exact) {
             return Some(v);
@@ -269,6 +276,7 @@ impl VariantRegistry {
                 k.arch == arch && k.moe_enabled == moe
                     && k.guardrail_enabled == guard && k.spec_phase == spec
                     && k.rag_enabled == rag && k.quant_type == *qt
+                    && k.kv_tier == *kv_tier
                     && k.golden_size <= max_gs
             })
             .map(|k| k.golden_size)
@@ -277,7 +285,7 @@ impl VariantRegistry {
             let relaxed = VariantKey {
                 arch: arch.to_string(), moe_enabled: moe, guardrail_enabled: guard,
                 spec_phase: spec, rag_enabled: rag, golden_size: best_gs,
-                quant_type: qt.clone(),
+                quant_type: qt.clone(), kv_tier: kv_tier.clone(),
             };
             self.entries.get(&relaxed)
         } else {
@@ -321,6 +329,7 @@ impl VariantRegistry {
         rag_active: bool,
         golden_size: usize,
         quant_type: Option<String>,
+        kv_tier: Option<String>,
     ) -> VariantKey {
         VariantKey {
             arch: arch.into(),
@@ -330,7 +339,22 @@ impl VariantRegistry {
             rag_enabled: rag_active,
             golden_size,
             quant_type,
+            kv_tier,
         }
+    }
+
+    /// 根据 KV tier 名称列表推导主 Variant (多数投票)
+    ///
+    /// 选择数量最多的 tier 作为主 Variant，少数 tier 的 page 预 dequant。
+    pub fn majority_kv_tier(tiers: &[String]) -> Option<String> {
+        if tiers.is_empty() {
+            return None;
+        }
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for t in tiers {
+            *counts.entry(t.as_str()).or_insert(0) += 1;
+        }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k.to_string())
     }
 }
 
@@ -353,6 +377,7 @@ mod tests {
             rag_enabled: false,
             golden_size,
             quant_type: None,
+            kv_tier: None,
         }
     }
 
@@ -434,6 +459,7 @@ mod tests {
             false,
             64,
             None,
+            None,
         );
         assert_eq!(key.arch, "qwen3");
         assert!(key.moe_enabled);
@@ -451,6 +477,7 @@ mod tests {
             rag_enabled: true,
             golden_size: 128,
             quant_type: None,
+            kv_tier: None,
         };
         let s = format!("{}", key);
         assert!(s.contains("qwen3moe"));
