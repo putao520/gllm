@@ -46,6 +46,9 @@ pub struct ResolvedConfig {
 
     /// 额外的自定义配置
     pub extra: HashMap<String, i64>,
+
+    /// LayerNorm / RMSNorm epsilon (from model config, typically 1e-12 for BERT, 1e-5 for GPT)
+    pub norm_eps: f32,
 }
 
 impl ResolvedConfig {
@@ -70,6 +73,7 @@ impl ResolvedConfig {
             global_head_dim: g.global_head_dim,
             hidden_size_per_layer_input: g.hidden_size_per_layer_input,
             has_per_layer_embedding: g.hidden_size_per_layer_input > 0,
+            norm_eps: g.norm_eps,
             extra,
         }
     }
@@ -444,6 +448,7 @@ mod tests {
             has_per_layer_embedding: false,
             rope_scaling: None,
             extra: HashMap::new(),
+            norm_eps: 1e-5,
         };
 
         let template = "layers: ${num_hidden_layers}, hidden: ${hidden_size}, dtype: ${dtype}";
@@ -1812,6 +1817,7 @@ mod tests {
             has_per_layer_embedding: false,
             rope_scaling: None,
             extra,
+            norm_eps: 1e-5,
         };
         let cloned = original.clone();
         assert_eq!(cloned.num_hidden_layers, original.num_hidden_layers);
@@ -2310,6 +2316,7 @@ mod tests {
             hidden_size_per_layer_input: 14,
             has_per_layer_embedding: true,
             extra: HashMap::new(),
+            norm_eps: 1e-5,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("num_hidden_layers"));
@@ -3021,6 +3028,7 @@ mod tests {
                 m.insert("custom".to_string(), 1);
                 m
             },
+            norm_eps: 1e-5,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -3938,6 +3946,7 @@ mod tests {
             has_per_layer_embedding: true,
             rope_scaling: Some(RopeScaling::Linear { factor: 8.0 }),
             extra,
+            norm_eps: 1e-5,
         };
         // Verify every field
         assert_eq!(config.num_hidden_layers, 64);
@@ -7847,6 +7856,7 @@ mod tests {
             has_per_layer_embedding: true,
             rope_scaling: Some(RopeScaling::Linear { factor: 2.0 }),
             extra,
+            norm_eps: 1e-5,
         };
         // Act
         let cloned = config.clone();
@@ -8198,6 +8208,7 @@ mod tests {
             has_per_layer_embedding: true,
             rope_scaling: Some(RopeScaling::Linear { factor: 4.0 }),
             extra,
+            norm_eps: 1e-5,
         };
         // Act
         let cloned = config.clone();
@@ -9212,6 +9223,7 @@ mod tests {
             has_per_layer_embedding: false,
             rope_scaling: None,
             extra: HashMap::new(),
+            norm_eps: 1e-5,
         };
         // Act & Assert: validation passes with only required fields.
         assert!(validate_config(&config).is_ok());
@@ -9426,6 +9438,7 @@ mod tests {
             has_per_layer_embedding: true,
             rope_scaling: Some(RopeScaling::Linear { factor: 4.0 }),
             extra,
+            norm_eps: 1e-5,
         };
         // Act & Assert: exercise every getter path
         // get_int covers: num_hidden_layers, hidden_size, num_attention_heads,
