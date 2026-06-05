@@ -490,6 +490,51 @@ impl GgufReader {
         Ok(out)
     }
 
+    /// Tokenizer model type: `llama`/`gpt2` = BPE, `t5`/`whisper`/`albert` = Unigram
+    pub fn tokenizer_model(&self) -> Option<&str> {
+        self.get_metadata_str("tokenizer.ggml.model")
+    }
+
+    /// Pre-tokenizer type hint (e.g. "default", "gemma", "llama3", "qwen2", "gpt-2")
+    pub fn tokenizer_pre(&self) -> Option<&str> {
+        self.get_metadata_str("tokenizer.ggml.pre")
+    }
+
+    /// BPE merge rules (only present for BPE models)
+    pub fn tokenizer_merges(&self) -> Result<Vec<&str>, GgufError> {
+        let merges = self
+            .get_metadata_array("tokenizer.ggml.merges")
+            .ok_or_else(|| GgufError::MissingMetadata("tokenizer.ggml.merges".to_string()))?;
+        if merges.item_type != GgufValueType::String {
+            return Err(GgufError::InvalidMetadata(
+                "tokenizer.ggml.merges must be ARRAY[STRING]".to_string(),
+            ));
+        }
+        let mut out = Vec::with_capacity(merges.items.len());
+        for item in &merges.items {
+            out.push(item.as_str().ok_or_else(|| {
+                GgufError::InvalidMetadata(
+                    "tokenizer.ggml.merges contains non-string item".to_string(),
+                )
+            })?);
+        }
+        Ok(out)
+    }
+
+    pub fn tokenizer_unknown_token_id(&self) -> Option<u32> {
+        self.get_metadata_u64("tokenizer.ggml.unknown_token_id")
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    pub fn tokenizer_padding_token_id(&self) -> Option<u32> {
+        self.get_metadata_u64("tokenizer.ggml.padding_token_id")
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    pub fn chat_template(&self) -> Option<&str> {
+        self.get_metadata_str("tokenizer.chat_template")
+    }
+
     pub fn tensor_info(&self, name: &str) -> Result<&TensorInfo, GgufError> {
         let idx = self
             .tensor_index

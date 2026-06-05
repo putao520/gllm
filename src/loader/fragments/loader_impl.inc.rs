@@ -69,8 +69,10 @@ impl Loader {
     }
 
     pub fn from_source_with_config(model_id: String, config: LoaderConfig) -> Result<Self> {
-        // 本地目录检测：如果 model_id 是一个存在的目录，直接扫描文件
         let local_path = Path::new(&model_id);
+        if local_path.is_file() {
+            return Self::from_local_file(local_path);
+        }
         if local_path.is_dir() {
             return Self::from_local_dir(local_path);
         }
@@ -142,6 +144,30 @@ impl Loader {
                     loader.config_path = Some(path.clone());
                 } else if name == "tokenizer.json" {
                     loader.tokenizer_path = Some(path.clone());
+                }
+            }
+        }
+
+        Ok(loader)
+    }
+
+    /// 从本地单文件加载模型（支持 GGUF / ONNX / .gllm 等自包含格式）
+    fn from_local_file(file: &Path) -> Result<Self> {
+        let mut loader = Self::new(ModelManifest::default());
+        loader.weight_paths = vec![file.to_path_buf()];
+        loader.detect_format();
+
+        // GGUF 文件内嵌 tokenizer，不需要外部 tokenizer.json
+        // 对于 ONNX/safetensors 单文件场景，可能需要同目录的 config.json
+        if let Some(parent) = file.parent() {
+            for entry in std::fs::read_dir(parent).map_err(LoaderError::Io)? {
+                let entry = entry.map_err(LoaderError::Io)?;
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == "config.json" {
+                        loader.config_path = Some(entry.path());
+                    } else if name == "tokenizer.json" {
+                        loader.tokenizer_path = Some(entry.path());
+                    }
                 }
             }
         }

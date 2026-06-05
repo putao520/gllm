@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokenizers::Tokenizer;
 
 use crate::loader::Loader;
+use crate::loader::gguf::GgufReader;
 use crate::manifest::ModelKind;
 
 #[derive(Debug, PartialEq, Error)]
@@ -26,15 +27,164 @@ pub struct TokenizerHandle {
 
 impl TokenizerHandle {
     pub fn from_loader(loader: &Loader, model_kind: ModelKind) -> TokenizerResult<Self> {
-        let path = loader
-            .tokenizer_path()
-            .ok_or(TokenizerError::MissingTokenizer)?;
-        Self::from_path(path, model_kind)
+        if let Some(path) = loader.tokenizer_path() {
+            return Self::from_path(path, model_kind);
+        }
+        if let Some(reader) = loader.gguf_ref() {
+            if reader.tokenizer_model().is_some() {
+                return Self::from_gguf_reader(reader, model_kind);
+            }
+        }
+        Err(TokenizerError::MissingTokenizer)
     }
 
     pub fn from_path(path: &Path, model_kind: ModelKind) -> TokenizerResult<Self> {
         let mut tokenizer = Tokenizer::from_file(path)
             .map_err(|err| TokenizerError::Tokenizers(format!("{err}")))?;
+        tokenizer.with_padding(None);
+        Ok(Self { tokenizer, model_kind })
+    }
+
+    /// 从 GGUF 内嵌 tokenizer.ggml.* 元数据构建 Tokenizer (REQ-TOK-GGUF-003)
+    pub fn from_gguf_reader(reader: &GgufReader, model_kind: ModelKind) -> TokenizerResult<Self> {
+        use tokenizers::models::bpe::BPE;
+        use tokenizers::models::bpe::Vocab;
+        use tokenizers::models::unigram::Unigram;
+        use tokenizers::AddedToken;
+        use tokenizers::normalizers::unicode::NFKC;
+        use tokenizers::decoders::fuse::Fuse;
+        use tokenizers::decoders::sequence::Sequence as DecoderSequence;
+        use tokenizers::pre_tokenizers::metaspace::Metaspace;
+        use tokenizers::pre_tokenizers::metaspace::PrependScheme;
+
+        let model_type = reader.tokenizer_model().unwrap_or("llama");
+        let tokens = reader.tokenizer_tokens().map_err(|e| {
+            TokenizerError::Tokenizers(format!("GGUF tokenizer.ggml.tokens: {e}"))
+        })?;
+        let scores = reader.tokenizer_scores().map_err(|e| {
+            TokenizerError::Tokenizers(format!("GGUF tokenizer.ggml.scores: {e}"))
+        })?;
+
+        let mut tokenizer = match model_type {
+            "llama" | "gpt2" | "gemma" | "gemma2" | "gemma4" => {
+                let vocab: Vocab = tokens
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (t.to_string(), i as u32))
+                    .collect();
+
+                let merges = reader.tokenizer_merges()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|m| {
+                        let parts: Vec<&str> = m.splitn(2, ' ').collect();
+                        if parts.len() == 2 {
+                            Some((parts[0].to_string(), parts[1].to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let unk_id = reader.tokenizer_unknown_token_id();
+                let unk_token = unk_id
+                    .and_then(|id| tokens.get(id as usize))
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "<unk>".to_string());
+
+                let mut builder = BPE::builder();
+                builder = builder.vocab_and_merges(vocab, merges);
+                builder = builder.unk_token(unk_token);
+                builder = builder.fuse_unk(true);
+                builder = builder.byte_fallback(true);
+                let bpe = builder.build().map_err(|e| {
+                    TokenizerError::Tokenizers(format!("BPE build: {e}"))
+                })?;
+                Tokenizer::new(bpe)
+            }
+            _ => {
+                // Unigram (t5, whisper, albert, japanese, etc.)
+                let vocab_scores: Vec<(String, f64)> = tokens
+                    .iter()
+                    .zip(scores.iter())
+                    .map(|(t, s)| (t.to_string(), *s as f64))
+                    .collect();
+
+                let unk_id = reader.tokenizer_unknown_token_id()
+                    .map(|id| id as usize);
+
+                let unigram = Unigram::from(vocab_scores, unk_id, true).map_err(|e| {
+                    TokenizerError::Tokenizers(format!("Unigram build: {e}"))
+                })?;
+                Tokenizer::new(unigram)
+            }
+        };
+
+        // Configure pipeline based on tokenizer.ggml.pre (authoritative) or model type (fallback)
+        let pre_type = reader.tokenizer_pre().unwrap_or(model_type);
+        match pre_type {
+            "gemma" | "gemma2" | "gemma4" => {
+                // Gemma SentencePiece BPE:
+                //   Pre-tokenizer: Metaspace (space→▁ split + add_prefix_space)
+                //   Decoder: ByteFallback (<0xXX>→byte) + Metaspace (▁→space) + Fuse
+                use tokenizers::decoders::byte_fallback::ByteFallback;
+
+                let replacement = '\u{2581}';
+                let metaspace = Metaspace::new(replacement, PrependScheme::First, true);
+                tokenizer.with_pre_tokenizer(Some(tokenizers::PreTokenizerWrapper::Metaspace(metaspace.clone())));
+                tokenizer.with_normalizer(Some(tokenizers::NormalizerWrapper::NFKC(NFKC::default())));
+                let decoder_seq = DecoderSequence::new(vec![
+                    tokenizers::DecoderWrapper::ByteFallback(ByteFallback::new()),
+                    tokenizers::DecoderWrapper::Metaspace(metaspace),
+                    tokenizers::DecoderWrapper::Fuse(Fuse::default()),
+                ]);
+                tokenizer.with_decoder(Some(decoder_seq));
+            }
+            "gpt-2" => {
+                use tokenizers::pre_tokenizers::byte_level::ByteLevel as ByteLevelPre;
+                use tokenizers::decoders::byte_level::ByteLevel as ByteLevelDec;
+                tokenizer.with_pre_tokenizer(Some(tokenizers::PreTokenizerWrapper::ByteLevel(
+                    ByteLevelPre::new(false, true, true),
+                )));
+                tokenizer.with_decoder(Some(tokenizers::DecoderWrapper::ByteLevel(
+                    ByteLevelDec::default(),
+                )));
+            }
+            _ => {
+                // Default SentencePiece-style (llama, qwen2, smollm, etc.)
+                let replacement = '\u{2581}';
+                let metaspace = Metaspace::new(replacement, PrependScheme::First, true);
+                tokenizer.with_pre_tokenizer(Some(tokenizers::PreTokenizerWrapper::Metaspace(metaspace.clone())));
+                tokenizer.with_normalizer(Some(tokenizers::NormalizerWrapper::NFKC(NFKC::default())));
+                let decoder_seq = DecoderSequence::new(vec![
+                    tokenizers::DecoderWrapper::Metaspace(metaspace),
+                    tokenizers::DecoderWrapper::Fuse(Fuse::default()),
+                ]);
+                tokenizer.with_decoder(Some(decoder_seq));
+            }
+        }
+
+        // Add special tokens
+        let mut special_tokens = Vec::new();
+        if let Some(bos_id) = reader.bos_token_id() {
+            if let Some(token) = tokens.get(bos_id as usize) {
+                special_tokens.push(AddedToken::from(token.to_string(), true));
+            }
+        }
+        if let Some(eos_id) = reader.eos_token_id() {
+            if let Some(token) = tokens.get(eos_id as usize) {
+                special_tokens.push(AddedToken::from(token.to_string(), true));
+            }
+        }
+        if let Some(unk_id) = reader.tokenizer_unknown_token_id() {
+            if let Some(token) = tokens.get(unk_id as usize) {
+                special_tokens.push(AddedToken::from(token.to_string(), true));
+            }
+        }
+        if !special_tokens.is_empty() {
+            tokenizer.add_special_tokens(&special_tokens);
+        }
+
         tokenizer.with_padding(None);
         Ok(Self { tokenizer, model_kind })
     }

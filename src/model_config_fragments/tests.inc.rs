@@ -73,8 +73,11 @@ mod tests {
         assert_eq!(derived.dtype, DType::F16);
     }
 
+    /// TENSOR-DERIVE-AMBIGUOUS: multiple valid head_dims → prefer largest
+    /// Q=4096, K=1024 → candidates: (16,4,256), (32,8,128), (64,16,64), (128,32,32)
+    /// Largest head_dim=256 selected → 16 attention heads, 4 KV heads
     #[test]
-    fn derive_config_from_tensors_rejects_ambiguous_head_dim() {
+    fn derive_config_from_tensors_prefers_largest_head_dim() {
         let provider = MockTensorProvider {
             tensors: vec![
                 tensor("model.embed_tokens.weight", &[32000, 4096]),
@@ -87,30 +90,41 @@ mod tests {
             ],
         };
 
-        let err = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default()).expect_err("must reject ambiguity");
-        assert!(
-            err.to_string().contains("ambiguous"),
-            "unexpected error: {err}"
-        );
+        let derived = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default())
+            .expect("must resolve ambiguity by picking largest head_dim");
+        assert_eq!(derived.head_dim, 256);
+        assert_eq!(derived.num_attention_heads, 16);
+        assert_eq!(derived.num_key_value_heads, 4);
     }
 
+    /// TENSOR-DERIVE-CROSS-LAYER: alternating dimensions sharing a common head_dim
+    /// L0 Q=2048/K=256 (sliding, majority 3 layers), L1 Q=4096/K=512 (global, 1 layer)
+    /// Both share head_dim=256: 2048/256=8, 256/256=1, 4096/256=16, 512/256=2
+    /// Frequency-based: (2048,256) appears 3 times vs (4096,512) once → majority wins
     #[test]
-    fn derive_config_from_tensors_rejects_cross_layer_mismatch() {
+    fn derive_config_from_tensors_allows_cross_layer_shared_head_dim() {
         let provider = MockTensorProvider {
             tensors: vec![
-                tensor("model.embed_tokens.weight", &[50000, 2816]),
-                tensor("model.layers.0.self_attn.q_proj.weight", &[2816, 2816]),
-                tensor("model.layers.0.self_attn.k_proj.weight", &[352, 2816]),
-                tensor("model.layers.1.self_attn.q_proj.weight", &[3072, 2816]),
-                tensor("model.layers.1.self_attn.k_proj.weight", &[352, 2816]),
+                tensor("model.embed_tokens.weight", &[256000, 2048]),
+                // 3 sliding layers (majority)
+                tensor("model.layers.0.self_attn.q_proj.weight", &[2048, 2048]),
+                tensor("model.layers.0.self_attn.k_proj.weight", &[256, 2048]),
+                tensor("model.layers.1.self_attn.q_proj.weight", &[2048, 2048]),
+                tensor("model.layers.1.self_attn.k_proj.weight", &[256, 2048]),
+                tensor("model.layers.2.self_attn.q_proj.weight", &[2048, 2048]),
+                tensor("model.layers.2.self_attn.k_proj.weight", &[256, 2048]),
+                // 1 global layer (minority)
+                tensor("model.layers.3.self_attn.q_proj.weight", &[4096, 2048]),
+                tensor("model.layers.3.self_attn.k_proj.weight", &[512, 2048]),
             ],
         };
 
-        let err = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default()).expect_err("must reject mismatch");
-        assert!(
-            err.to_string().contains("cross-layer") || err.to_string().contains("ambiguous"),
-            "unexpected error: {err}"
-        );
+        let derived = derive_config_from_tensors_with_hints(&provider, TensorDeriveHints::default())
+            .expect("must succeed when cross-layer dims share a valid head_dim");
+        // Majority (Q=2048, K=256) → head_dim=256 → 8 heads, 1 KV head
+        assert_eq!(derived.num_attention_heads, 8);
+        assert_eq!(derived.num_key_value_heads, 1);
+        assert_eq!(derived.head_dim, 256);
     }
 
     #[test]

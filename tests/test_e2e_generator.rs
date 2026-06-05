@@ -711,14 +711,20 @@ fn e2e_generator_phi4_partial_rope() {
 /// G-A 路径 (SwiGLU+RMSNorm+单 RoPE) 和 G-E 路径 (LayerNorm+AbsolutePos)。
 /// Gemma 4 采用 Per-Layer Embeddings (PLE) + Standard GELU (非 gated),
 /// global 层 K/V 统一。本测试覆盖文本单模态路径 (gemma-4-E2B)。
-/// **期望结果**: 成功加载 Gemma 4 E2B SafeTensors 模型并生成语义正确的 token 序列
+/// **期望结果**: 成功加载 Gemma 4 E2B 模型并生成语义正确的 token 序列
 #[test]
 fn e2e_generator_gemma4_qknorm() {
     install_segv_handler();
     let _ = env_logger::builder().is_test(true).try_init();
-    const MODEL: &str = "google/gemma-4-E2B";
+    const GGUF_PATH: &str = "/tmp/gemma4_e2b/gemma-4-E2B-it-Q3_K_S.gguf";
+    const HF_MODEL: &str = "google/gemma-4-E2B";
+    let model = if std::path::Path::new(GGUF_PATH).exists() {
+        GGUF_PATH
+    } else {
+        HF_MODEL
+    };
 
-    let client = Client::new_chat(MODEL).expect("Failed to load Gemma 4 model");
+    let client = Client::new_chat(model).expect("Failed to load Gemma 4 model");
     let response = client
         .generate("The capital of France is")
         .max_tokens(10)
