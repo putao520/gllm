@@ -1,0 +1,315 @@
+// ---------------------------------------------------------------------------
+// Architecture Features — derived from role index
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Family {
+    Decoder,
+    Encoder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NormType {
+    RmsNorm,
+    LayerNorm,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FfnType {
+    SwiGLU,
+    GeGLU,
+    Standard,
+    MoE,
+}
+
+/// Architecture features derived purely from tensor name presence/absence.
+///
+/// Every field is determined by exact role-index lookups — no heuristics.
+#[derive(Debug)]
+pub struct ArchitectureFeatures {
+    pub family: Family,
+    pub num_layers: usize,
+
+    // Attention
+    pub has_rope: bool,
+    pub has_head_rms_norm: bool,
+    pub has_attention_bias: bool,
+    pub attention_sinks: bool,
+    pub has_qk_norm: bool,
+    pub has_value_norm: bool,
+    pub has_per_layer_embedding: bool,
+    pub hidden_size_per_layer_input: usize,
+    /// AltUp (Alternating Updates) number of parallel prediction paths (P).
+    /// Gemma 4 E2B/E4B: P=2. Non-AltUp models: P=0.
+    pub altup_num_inputs: usize,
+    pub has_embedding_scale: bool,
+
+    // Norm
+    pub norm_type: NormType,
+
+    // FFN
+    pub ffn_type: FfnType,
+
+    // MoE
+    pub is_moe: bool,
+    pub has_shared_experts: bool,
+    pub num_experts: usize,
+    pub moe_top_k: usize,
+
+    // MLA (Multi-head Latent Attention)
+    pub is_mla: bool,
+    pub mla_latent_dim: usize,
+    pub mla_rope_dim: usize,
+    /// Build un-absorbed path (K/V restore → standard MHA) instead of absorbed.
+    /// Used for short prefill where compute is saturated (REQ-MLA-004).
+    pub mla_use_unabsorbed: bool,
+
+    // Vision/Audio
+    pub is_vision: bool,
+    pub is_audio: bool,
+
+    // Special
+    pub has_classifier: bool,
+    pub tie_lm_head: bool,
+}
+
+/// Analyze architecture features from a tensor role index.
+///
+/// `role_index`: maps `(TensorRole, layer_idx)` → tensor name
+/// `weight_shapes`: maps tensor name → shape
+/// `arch_name`: optional canonical architecture name (e.g., "gemma4", "qwen3") — used for
+///              features not derivable from tensor names alone.
+pub fn analyze_architecture(
+    role_index: &HashMap<(TensorRole, Option<usize>), String>,
+    weight_shapes: &HashMap<String, Vec<usize>>,
+    arch_name: Option<&str>,
+) -> ArchitectureFeatures {
+    // ── Family ──
+    let has_output_head = role_index.contains_key(&(TensorRole::OutputHead, None));
+    let has_classifier = role_index.contains_key(&(TensorRole::ClassifierDense, None))
+        || role_index.contains_key(&(TensorRole::ClassifierOutProj, None));
+    let has_final_norm = role_index.contains_key(&(TensorRole::FinalNorm, None));
+
+    // Decoder: has OutputHead or FinalNorm
+    // Encoder: has Classifier or no OutputHead
+    let family = if has_output_head || has_final_norm {
+        Family::Decoder
+    } else {
+        Family::Encoder
+    };
+
+    // ── Num layers ──
+    let num_layers = role_index.keys()
+        .filter_map(|(_, layer_idx)| *layer_idx)
+        .max()
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+
+    // ── Attention features ──
+    let has_head_rms_norm = role_index.contains_key(&(TensorRole::AttentionQNorm, Some(0)));
+    let has_attention_bias = weight_shapes.keys().any(|n| {
+        let lower = n.to_ascii_lowercase();
+        lower.ends_with(".bias") && (lower.contains("q_proj") || lower.contains("k_proj") || lower.contains("v_proj"))
+    });
+    let attention_sinks = role_index.contains_key(&(TensorRole::AttentionSinks, Some(0)));
+
+    // Gemma-4 QkNorm: Q/K normalization WITHOUT learnable weight (pure L2 + sqrt(d) scale).
+    // Distinct from Qwen3 HeadRmsNorm which HAS a weight tensor (AttentionQNorm/KNorm roles).
+    // Detection: arch is "gemma4" AND no q_norm/k_norm weight tensors present.
+    let is_gemma4 = arch_name == Some("gemma4");
+    let has_qk_norm = is_gemma4 && !has_head_rms_norm;
+
+    // Gemma-4 ValueNorm: V normalization WITHOUT learnable weight (pure RMS, no gamma).
+    // Detection: arch is "gemma4".
+    let has_value_norm = is_gemma4;
+
+    // Embedding scale: Gemma-4 multiplies embeddings by sqrt(hidden_size).
+    // Detection: arch is "gemma4" (config.json `embedding_scale_factor`).
+    let has_embedding_scale = is_gemma4;
+
+    // ── PerLayerEmbedding (Gemma 4 E2B/E4B) ──
+    // Detection: presence of PLE weight tensors in weight_shapes.
+    // Gemma 4 E2B/E4B have `embed_tokens_per_layer` / `per_layer_embedding` tensors;
+    // Gemma 4 31B Dense / 26B MoE do not.
+    let has_per_layer_embedding = weight_shapes.keys().any(|n| {
+        n.contains("embed_tokens_per_layer") || n.contains("per_layer_embedding")
+    });
+    // hidden_size_per_layer_input: dimension of per-layer input signal.
+    // Derived from PLE projection weight shape [hidden_size, hidden_size_per_layer_input].
+    let hidden_size_per_layer_input = if has_per_layer_embedding {
+        weight_shapes.keys()
+            .filter(|n| n.contains("per_layer_projection") || n.contains("per_layer_model_projection"))
+            .filter_map(|n| weight_shapes.get(n))
+            .filter_map(|shape| shape.last().copied())
+            .next()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // ── AltUp (Alternating Updates) — Gemma 4 E2B/E4B ──
+    // Detection: presence of `altup.` prefixed weight tensors.
+    // altup_num_inputs (P): derived from correction_coefs weight shape [P, P].
+    // Non-AltUp models: P=0.
+    let has_altup = weight_shapes.keys().any(|n| n.contains("altup."));
+    let altup_num_inputs = if has_altup {
+        // Derive P from correction_coefs.weight shape [P, P] or modality_router.weight [P, H].
+        weight_shapes.keys()
+            .filter(|n| n.contains("correction_coefs") || n.contains("altup.correction"))
+            .filter_map(|n| weight_shapes.get(n))
+            .filter_map(|shape| shape.first().copied())
+            .next()
+            .unwrap_or(2)
+    } else if has_per_layer_embedding {
+        // PLE present without AltUp weights: assume P=2 (Gemma 4 E2B/E4B default).
+        2
+    } else {
+        0
+    };
+
+    // ── RoPE: decoders have RoPE by default unless encoder ──
+    let has_rope = family == Family::Decoder;
+
+    // ── Norm type ──
+    // Check if layer 0 InputNorm has a corresponding bias tensor
+    let norm_type = if let Some(norm_name) = role_index.get(&(TensorRole::InputNorm, Some(0))) {
+        let bias_name = norm_name.replace(".weight", ".bias");
+        if weight_shapes.contains_key(&bias_name) {
+            NormType::LayerNorm
+        } else {
+            NormType::RmsNorm
+        }
+    } else {
+        // Default for decoders: RmsNorm; for encoders (BERT): LayerNorm
+        if family == Family::Encoder {
+            NormType::LayerNorm
+        } else {
+            NormType::RmsNorm
+        }
+    };
+
+    // ── FFN type ──
+    let has_gate = role_index.contains_key(&(TensorRole::FfnGate, Some(0)));
+    let has_up = role_index.contains_key(&(TensorRole::FfnUp, Some(0)));
+    let has_down = role_index.contains_key(&(TensorRole::FfnDown, Some(0)));
+    let is_moe = role_index.contains_key(&(TensorRole::MoEGate, Some(0)));
+
+    let ffn_type = if is_moe {
+        FfnType::MoE
+    } else if has_gate && has_up && has_down {
+        // Both gate+up+down → SwiGLU or GeGLU (determined by activation config)
+        FfnType::SwiGLU
+    } else if has_gate && has_down {
+        // gate_up_proj fused (Phi4 style) + down
+        FfnType::SwiGLU
+    } else {
+        FfnType::Standard
+    };
+
+    // ── MoE ──
+    let has_shared_experts = role_index.keys().any(|(role, _)| *role == TensorRole::MoESharedExpert);
+
+    // num_experts from MoEGate router weight shape [hidden, num_experts]
+    let num_experts = role_index.get(&(TensorRole::MoEGate, Some(0)))
+        .and_then(|name| weight_shapes.get(name))
+        .map(|shape| if shape.len() >= 2 { shape[1] } else { shape[0] })
+        .unwrap_or(0);
+
+    // moe_top_k: not derivable from tensor shapes alone.
+    // Default to 2 (Mixtral/DeepSeek common); executor overrides from config.
+    let moe_top_k = if num_experts > 0 { 2 } else { 0 };
+
+    // ── Vision/Audio ──
+    let is_vision = role_index.contains_key(&(TensorRole::PatchEmbed, None));
+    let is_audio = role_index.keys().any(|(role, _)| *role == TensorRole::DepthwiseConv);
+
+    // ── MLA (Multi-head Latent Attention) ──
+    let is_mla = role_index.keys().any(|(role, _)| {
+        matches!(role, TensorRole::MlaKvCompress | TensorRole::MlaKeyAbsorb)
+    });
+    let mla_latent_dim = if is_mla {
+        role_index.get(&(TensorRole::MlaKvCompress, Some(0)))
+            .and_then(|name| weight_shapes.get(name))
+            .map(|shape| if shape.len() >= 2 { shape[1] } else { shape[0] })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mla_rope_dim = if is_mla {
+        role_index.get(&(TensorRole::MlaRopeKey, Some(0)))
+            .and_then(|name| weight_shapes.get(name))
+            .map(|shape| if shape.len() >= 2 { shape[1] } else { shape[0] })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // ── Tie lm_head ──
+    let tie_lm_head = if has_output_head {
+        if let (Some(embed_name), Some(lm_name)) = (
+            role_index.get(&(TensorRole::Embedding, None)),
+            role_index.get(&(TensorRole::OutputHead, None)),
+        ) {
+            embed_name == lm_name
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    ArchitectureFeatures {
+        family,
+        num_layers,
+        has_rope,
+        has_head_rms_norm,
+        has_attention_bias,
+        attention_sinks,
+        has_qk_norm,
+        has_value_norm,
+        has_per_layer_embedding,
+        hidden_size_per_layer_input,
+        altup_num_inputs,
+        has_embedding_scale,
+        norm_type,
+        ffn_type,
+        is_moe,
+        has_shared_experts,
+        num_experts,
+        moe_top_k,
+        is_mla,
+        mla_latent_dim,
+        mla_rope_dim,
+        mla_use_unabsorbed: false,
+        is_vision,
+        is_audio,
+        has_classifier,
+        tie_lm_head,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AutoGraphBuilder — CompilerGraph from features + weight_shapes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum GraphBuildError {
+    MissingTensor(String),
+    InvalidDimension(String),
+    UnsupportedArchitecture(String),
+}
+
+impl std::fmt::Display for GraphBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTensor(s) => write!(f, "missing tensor: {s}"),
+            Self::InvalidDimension(s) => write!(f, "invalid dimension: {s}"),
+            Self::UnsupportedArchitecture(s) => write!(f, "unsupported architecture: {s}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical name helpers
+// ---------------------------------------------------------------------------
+

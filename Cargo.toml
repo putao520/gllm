@@ -1,0 +1,94 @@
+[package]
+name = "gllm"
+version = "0.11.0"
+edition = "2021"
+authors = ["gllm contributors"]
+license = "Apache-2.0"
+description = "Pure Rust library for local embeddings, reranking, and text generation with MoE-optimized inference and aggressive performance tuning"
+repository = "https://github.com/putao520/gllm"
+homepage = "https://github.com/putao520/gllm"
+keywords = ["embeddings", "reranking", "nlp", "ml", "rust"]
+categories = ["algorithms", "science", "text-processing"]
+
+[lib]
+name = "gllm"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "download"
+path = "src/bin/download.rs"
+
+[features]
+# Default: Auto-detect backend at runtime
+default = []
+
+# GPU features (forward to gllm-kernels)
+cuda = ["gllm-kernels/jit-cuda"]
+hip = ["gllm-kernels/jit-hip"]
+metal = ["gllm-kernels/jit-metal"]
+
+# 开发/调试 features
+nccl = ["gllm-kernels/nccl"]
+sg-debug = []
+
+# nvCOMP GPU ANS 压缩 (NVIDIA only)
+nvcomp = []
+
+[dependencies]
+gllm-kernels = { path = "../gllm-kernels", default-features = false }
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq", "rustls-tls"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+tokenizers = { version = "0.22.1", default-features = false, features = ["fancy-regex"] }
+arc-swap = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+prost = "0.12"
+thiserror = "2"
+log = "0.4"
+dirs = "5"
+safetensors = "0.4"
+rand = "0.8"
+urlencoding = "2"
+half = "2.4"
+memmap2 = "0.9"
+zstd = "0.13"
+lz4_flex = "0.11"
+libc = "0.2"
+rayon = "1.10"
+sha2 = "0.10"
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+serde_yaml = "0.9.34"
+bincode = "1.3.3"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+gllm-kernels = { path = "../gllm-kernels", default-features = false, features = ["jit-x86"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+gllm-kernels = { path = "../gllm-kernels", default-features = false, features = ["jit-aarch64"] }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11.8"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+ahash = "0.8"
+
+[build-dependencies]
+prost-build = "0.12"
+
+# NOTE: benches temporarily disabled - files not yet created
+# [[bench]]
+# name = "moe_layer"
+# harness = false
+#
+# [[bench]]
+# name = "quantized_matmul"
+# harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+opt-level = 3

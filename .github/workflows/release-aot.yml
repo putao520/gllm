@@ -1,0 +1,77 @@
+name: Release AOT
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    name: Build for ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Build gllm
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgllm-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/libgllm.rlib
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## gllm Release (AOT / Driver API)
+
+            Pure Rust implementation with zero-copy GPU inference.
+
+            ### Installation
+
+            ```toml
+            [dependencies]
+            gllm = "${{ github.ref_name }}"
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

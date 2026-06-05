@@ -1,0 +1,67 @@
+/target
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model files
+~/.gllm/
+test_models/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# AI Agent
+CLAUDE.md
+.claude/
+
+# Internal design docs
+SPEC/
+SPEC-archive/
+
+# Internal status docs
+IMPLEMENTATION-STATUS.md
+PHASE7-COMPLETION.md
+REQ_FULL_LIST.md
+TASKLIST.md
+PLAN.md
+audit_report.md
+docs/
+
+# Development artifacts (root level only)
+/debug_*.rs
+/*.py
+/*.txt
+*.o
+*.rlib
+run_gdb.sh
+scripts/
+tools/
+test_compress
+test_scope_issue
+\{
+auto_select_ops.txt
+trace_ops.txt
+trace_op_analysis.txt
+
+# AI tools
+.serena/
+.gsc/
+
+# IDE / tooling
+*.log
+*.tmp
+.DS_Store
+
+# Alignment test golden data
+tests/e2e_alignment/data/
+
+# Sub-repo copies (these are separate repos)
+gllm-nccl/
+gllm-kernels/
