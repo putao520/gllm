@@ -654,6 +654,46 @@ impl MegaKernelExecutor {
         Ok(output)
     }
 
+    /// Diagnostic: execute forward and return the scratchpad + output for encoder models.
+    /// Useful for comparing intermediate activations with golden per-layer data.
+    pub fn diagnostic_forward_scratchpad(
+        &self,
+        input_ids: &[u32],
+    ) -> Result<(Vec<f32>, Vec<u8>), MegaKernelError> {
+        let fw = self
+            .forward_compiled
+            .as_ref()
+            .ok_or_else(|| MegaKernelError::Execution("not a forward-compiled model".into()))?;
+
+        let seq_len = input_ids.len();
+        let mut scratchpad = vec![0u8; fw.total_scratchpad_bytes];
+        let jit_output_elems = fw.output_bytes / 4;
+        let mut output = vec![0.0f32; jit_output_elems];
+
+        unsafe {
+            (fw.entry_fn)(
+                input_ids.as_ptr() as *const u8,
+                fw.weight_blob.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                seq_len,
+                output.as_mut_ptr() as *mut u8,
+                scratchpad.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+        }
+        // Apply MeanPool scaling (same as execute_forward)
+        if jit_output_elems > 0 && seq_len > 0 {
+            let inv_n = 1.0f32 / seq_len as f32;
+            for v in output.iter_mut().take(jit_output_elems) {
+                *v *= inv_n;
+            }
+        }
+        Ok((output, scratchpad))
+    }
+
     /// Returns total scratchpad bytes needed for execution.
     pub fn total_scratchpad_bytes(&self) -> usize {
         {
