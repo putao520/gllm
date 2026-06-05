@@ -346,7 +346,6 @@ impl MegaKernelCompiled {
         } else {
             0
         };
-        
 
         (self.scratchpad_base_bytes + logits_bytes
             + mtp_logits_bytes + mtp_sampling_bytes)

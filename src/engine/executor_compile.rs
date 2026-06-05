@@ -431,7 +431,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         use gllm_kernels::compiler::MegaKernelBusinessConfig;
 
         let max_new_tokens_default = model_config.max_position_embeddings;
-        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder;
+        // Manifest kind overrides tensor-name-based detection: embedding/reranker models
+        // always use the forward-only (encoder) path, even if they have output_norm tensors
+        // (e.g. Qwen3-Embedding GGUF has output_norm but is an encoder model).
+        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder
+            || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
         let ffn_act = match geometry.hidden_act.as_ref().map(|a| a.as_str()).unwrap_or("") {
             "gelu_new" | "gelu_pytorch_tanh" | "gelu" => FfnActivation::GeGLU,
@@ -653,7 +657,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             Self::build_canonical_weight_maps(&ext_ptrs, &ext_sizes, &ext_shapes, model_config, manifest);
 
         let hetero_config = Self::detect_hetero_layers(&weight_sizes, geometry);
-        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder;
+        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder
+            || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
         let business_config = Self::build_business_config(
             geometry, model_config, manifest, &auto_features, eos_id, qtap_cfg,
