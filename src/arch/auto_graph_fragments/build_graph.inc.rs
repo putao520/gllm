@@ -295,6 +295,8 @@ pub fn build_compiler_graph(
     let mut _lc_layer_output: Option<TensorId> = None;
 
     // AltUp fat buffer output (set inside layer template closure, read in post-layer)
+    // Set inside layer template closure, read in post-layer block below.
+    #[allow(unused_assignments)]
     let mut altup_fat_output_tid: Option<TensorId> = None;
 
     // Helper: compute physical bytes for a weight tensor, accounting for quantization.
@@ -477,7 +479,7 @@ pub fn build_compiler_graph(
         // ── AltUp per-layer PLE gate weights (registered in layer stride) ──
         // These weights are strided per-layer (like q_proj, k_proj, etc.).
         if has_altup {
-            let hpl = features.hidden_size_per_layer_input;
+            let _hpl = features.hidden_size_per_layer_input;
 
             // per_layer_input_gate: [hpl, H] — GELU gate projection H→hpl
             let gate_cn = cn_layer(0, "per_layer_input_gate");
