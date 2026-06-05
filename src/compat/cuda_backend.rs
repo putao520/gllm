@@ -384,12 +384,14 @@ impl<E: Element> CudaBackend<E> {
     /// Returns the device pointer to the uploaded page table.
     #[cfg(feature = "cuda")]
     pub fn upload_page_table(&self, page_table: &[u32]) -> Result<u64, String> {
-        use gllm_kernels::gpu::GpuDevice;
+        use gllm_kernels::gpu::{GpuBuffer, GpuDevice};
         let bytes = page_table.len() * 4;
-        let ptr = self.device.raw_alloc(bytes)
+        let buf = self.device.alloc(bytes)
             .map_err(|e| format!("page_table alloc failed ({bytes} bytes): {e}"))?;
+        let ptr = buf.as_device_ptr();
+        std::mem::forget(buf); // prevent Drop from freeing device memory
         let src = page_table.as_ptr() as *const u8;
-        self.device.memcpy_h_to_d(ptr, unsafe { std::slice::from_raw_parts(src, bytes) })
+        self.device.driver().memcpy_htod(ptr, src, bytes)
             .map_err(|e| format!("page_table memcpy failed: {e}"))?;
         Ok(ptr)
     }

@@ -75,7 +75,7 @@ pub fn build_compiler_graph(
     };
 
     let is_encoder = features.family == Family::Encoder;
-    let eps = 1e-5f32;
+    let eps = config.norm_eps;
 
     // ── Derive dimensions from weight shapes (canonical names) ──
     let embed_shape = get_shape(weight_shapes, "embed")?;
@@ -225,8 +225,8 @@ pub fn build_compiler_graph(
             let eln_shape = get_shape(weight_shapes, "embed_norm")?;
             let eln_w = g.add_tensor_concrete("embed_norm", &eln_shape, tdt("embed_norm"));
             let eln_bias_cn = "embed_norm.bias";
-            // BERT uses eps=1e-12 for embedding LayerNorm
-            let embed_ln_eps = 1e-12f32;
+            // Embedding LayerNorm uses the same model-specific eps
+            let embed_ln_eps = config.norm_eps;
             let has_eln_bias = weight_shapes.contains_key(eln_bias_cn);
             if has_eln_bias {
                 let eln_bias_shape = weight_shapes.get(eln_bias_cn).cloned().unwrap_or_else(|| eln_shape.clone());
@@ -1569,8 +1569,11 @@ pub fn build_compiler_graph(
 
         // layer_blob_base_offset = sum of all global weight bytes before layer template
         // (embed + final_norm + lm_head + any other non-layer weights)
+        // IMPORTANT: Skip inputs[0] (activation input, e.g. token_ids) to match
+        // weight_layout() which also skips inputs[0] via .skip(1).
         let mut global_weight_bytes = 0usize;
         for (idx, &tid) in g.inputs.iter().enumerate() {
+            if idx == 0 { continue; } // Skip activation input — not a weight
             if layer_weight_input_indices.contains(&idx) {
                 break; // layer weights start here
             }
@@ -1649,6 +1652,13 @@ pub fn build_compiler_graph(
     } else {
         None
     };
+    eprintln!("[DIAG] build_graph DONE: norm_eps={eps}, is_encoder={is_encoder}, total_ops={}, total_tensors={}", g.ops.len(), g.tensors.len());
+    for op in &g.ops {
+        let k = format!("{:?}", op.kind);
+        if k.contains("Norm") || k.contains("Gather") || k.contains("MeanPool") {
+            eprintln!("[DIAG-OP] {} {:?}", op.label, k);
+        }
+    }
     Ok(g)
 }
 
