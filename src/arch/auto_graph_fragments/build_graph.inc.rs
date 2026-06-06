@@ -690,7 +690,6 @@ pub fn build_compiler_graph(
                 (q_slice, Some((fused_out, fused_n)), q_dim)
             } else {
                 let q_s = weight_shapes.get(&cn_layer(0, "q_proj"));
-                eprintln!("[AUTO-GRAPH-DIAG] q_proj key='{}' shape={:?} q_dim={} hidden={}", cn_layer(0, "q_proj"), q_s, q_dim, hidden);
                 let q_n = q_s.map(|s| s[0]).unwrap_or(q_dim);
                 let q_k = q_s.map(|s| s[1]).unwrap_or(hidden);
                 let q_cn = cn_layer(0, "q_proj");
@@ -1462,14 +1461,22 @@ pub fn build_compiler_graph(
             g.add_op(OpKind::MeanPool { seq_len: 0, hidden, cls_mode: false }, vec![final_normed], vec![pooled], "meanpool");
             g.outputs = vec![pooled];
         } else {
-            // Generator: lm_head → Argmax → generate loop
+            // Generator: lm_head → [LogitSoftcap] → Argmax → generate loop
             let lm_head_w = g.add_tensor_concrete("lm_head", &[vocab_size, hidden], tdt("lm_head"));
-            let logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+            let mut logits = g.add_tensor("logits", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
             add_gemm_or_quant(&mut g, "lm_head", s.clone(), vocab_size, hidden,
                 vec![final_normed, lm_head_w],
                 vec![logits],
                 "lm_head",
             );
+
+            // ── Logit softcapping (Gemma 4: cap=30.0, Grok: cap=24.0) ──
+            // cap * tanh(logits / cap) before argmax — prevents extreme logit values.
+            if let Some(cap) = config.final_logit_softcapping {
+                let softcapped = g.add_tensor("logits_softcapped", vec![s.clone(), SymDim::Concrete(vocab_size)], dt);
+                g.add_op(OpKind::LogitSoftcap { cap }, vec![logits], vec![softcapped], "logit_softcap");
+                logits = softcapped;
+            }
 
             // ── MTP (Multi-Token Prediction) projection nodes (REQ-MTP-003) ──
             // Each MTP depth projects the final hidden state through a per-depth
@@ -1654,13 +1661,6 @@ pub fn build_compiler_graph(
     } else {
         None
     };
-    eprintln!("[DIAG] build_graph DONE: norm_eps={eps}, is_encoder={is_encoder}, total_ops={}, total_tensors={}", g.ops.len(), g.tensors.len());
-    for op in &g.ops {
-        let k = format!("{:?}", op.kind);
-        if k.contains("Norm") || k.contains("Gather") || k.contains("MeanPool") {
-            eprintln!("[DIAG-OP] {} {:?}", op.label, k);
-        }
-    }
     Ok(g)
 }
 

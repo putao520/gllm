@@ -191,6 +191,7 @@ impl ModelConfig {
             num_kv_shared_layers,
             global_head_dim,
             hidden_size_per_layer_input,
+            final_logit_softcapping,
             mla_config,
             mtp_depth,
         ) = {
@@ -357,6 +358,8 @@ impl ModelConfig {
             let hidden_size_per_layer_input =
                 gguf_arch_usize(reader, arch, "embedding.per_layer_input")
                     .or_else(|| gguf_arch_usize(reader, arch, "hidden_size_per_layer_input"));
+            let final_logit_softcapping = gguf_arch_f32(reader, arch, "final_logit_softcapping")
+                .filter(|v| v.is_finite() && *v > 0.0);
 
             (
                 derived,
@@ -384,6 +387,7 @@ impl ModelConfig {
                 num_kv_shared_layers,
                 global_head_dim,
                 hidden_size_per_layer_input,
+                final_logit_softcapping,
                 reader.kv_lora_rank().map(|d_c| {
                     let d_rope = reader.qk_rope_head_dim().unwrap_or(64) as usize;
                     MlaConfig { d_c: d_c as usize, d_rope, unabsorbed_threshold: 4096 }
@@ -462,7 +466,7 @@ impl ModelConfig {
             vision_config: None,
             audio_config: None,
             multimodal_token_ids: None,
-            final_logit_softcapping: None,
+            final_logit_softcapping,
             use_double_wide_mlp: None,
             add_special_tokens: None, // GGUF has no add_special_tokens concept, default true downstream
         };
