@@ -602,29 +602,22 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
         gpu_sm_version: Option<u32>,
     ) -> ExecutorResult<super::mega_kernel::MegaKernelExecutor> {
-        let mega = if is_encoder {
-            super::mega_kernel::MegaKernelExecutor::compile_forward_from_graph(
-                graph, geometry, weight_ptrs, weight_sizes,
-                weights.raw_floats(), name_map, gpu_sm_version,
-            )
-        } else {
-            super::mega_kernel::MegaKernelExecutor::compile_from_auto_graph(
-                graph, weight_ptrs, weight_sizes,
-                weights.raw_floats(), name_map,
-                geometry.max_seq_len, eos_id,
-                business_config, hetero_config, gpu_sm_version,
-            )
-        }
+        // SPEC/39: unified mega-kernel path — all models use compile_from_auto_graph.
+        // Encoder models pass eos_id=0; the graph topology naturally excludes
+        // sampling/KV/generation ops so the JIT output is encoder-specific.
+        let _ = is_encoder; // no longer branches on this
+        let mega = super::mega_kernel::MegaKernelExecutor::compile_from_auto_graph(
+            graph, weight_ptrs, weight_sizes,
+            weights.raw_floats(), name_map,
+            geometry.max_seq_len, eos_id,
+            business_config, hetero_config, gpu_sm_version,
+        )
         .map_err(|e| ExecutorError::Backend(BackendError::Other(format!("mega-kernel compilation failed: {}", e))))?;
 
         // Upload GPU artifacts
         let wb = mega.weight_blob();
         let sb = mega.scratchpad_bytes();
-        let (decoder_gc, forward_gc) = if is_encoder {
-            (None, mega.gpu_code())
-        } else {
-            (mega.gpu_code(), None)
-        };
+        let (decoder_gc, forward_gc) = (mega.gpu_code(), None::<&[u8]>);
         if let Err(e) = backend.prepare_gpu_mega_kernel(wb.unwrap_or(&[]), decoder_gc, forward_gc, sb) {
             log::warn!("executor: GPU mega-kernel artifact upload failed: {e}");
         }
@@ -653,10 +646,20 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         let WeightMaps { ext_ptrs, ext_sizes, ext_shapes } =
             Self::build_ext_weight_maps(weights, geometry);
 
-        let CanonicalWeightMaps { weight_ptrs, weight_sizes, weight_shapes, name_map, auto_features } =
+        let CanonicalWeightMaps { weight_ptrs, weight_sizes, weight_shapes, name_map, mut auto_features } =
             Self::build_canonical_weight_maps(&ext_ptrs, &ext_sizes, &ext_shapes, model_config, manifest);
 
         let hetero_config = Self::detect_hetero_layers(&weight_sizes, geometry);
+        if let Some(ref hc) = hetero_config {
+            auto_features.is_hetero_layer = true;
+            auto_features.sliding_head_dim = hc.sliding_head_dim;
+            auto_features.full_head_dim = hc.full_head_dim;
+            auto_features.small_intermediate = hc.small_intermediate;
+            auto_features.large_intermediate = hc.large_intermediate;
+            auto_features.large_ffn_start_segment = hc.large_ffn_start_segment;
+            auto_features.num_segments = hc.num_segments;
+            auto_features.sliding_per_segment = hc.sliding_per_segment;
+        }
         let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder
             || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
@@ -721,6 +724,7 @@ mod tests {
             expert_intermediate_size: 0,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -764,6 +768,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         }
     }
 
@@ -5335,6 +5347,7 @@ mod tests {
         // Arrange — custom (Gemma 4 global layers use partial=0.25)
         let geo_custom = ModelGeometry {
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             ..make_geometry()
         };
 

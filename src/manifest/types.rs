@@ -59,6 +59,20 @@ pub enum TensorRole {
     // ── MTP (Multi-Token Prediction) ──
     MtpProjection,   // mtp_proj / mtp_head / model.mtp.* projection weights
 
+    // ── Sandwich Norms (Gemma 4) ──
+    PostAttentionSandwichNorm, // post_attention_norm — norm after attention, before residual
+    PostFfwSandwichNorm,       // post_ffw_norm — norm after FFN, before residual
+    PostLayerNorm,             // post_norm — norm after AltUp/PLE correction
+
+    // ── PLE / AltUp (Gemma 4 E2B/E4B) ──
+    PerLayerEmbedding,         // per_layer_token_embd
+    PerLayerGate,              // inp_gate
+    PerLayerProj,              // proj
+    PerLayerModelProj,         // per_layer_model_proj
+    PerLayerProjNorm,          // per_layer_proj_norm
+    LayerOutputScale,          // layer_output_scale
+    OutputScale,               // output_scale (global)
+
     // ── Misc ──
     Rope,
 }
@@ -101,6 +115,16 @@ impl TensorRole {
             Self::MlaValueAbsorb => "v_b_proj",
             Self::MlaRopeKey => "k_pe_proj",
             Self::MtpProjection => "mtp_proj",
+            Self::PostAttentionSandwichNorm => "post_attention_norm",
+            Self::PostFfwSandwichNorm => "post_ffw_norm",
+            Self::PostLayerNorm => "post_norm",
+            Self::PerLayerEmbedding => "per_layer_token_embd",
+            Self::PerLayerGate => "inp_gate",
+            Self::PerLayerProj => "proj",
+            Self::PerLayerModelProj => "per_layer_model_proj",
+            Self::PerLayerProjNorm => "per_layer_proj_norm",
+            Self::LayerOutputScale => "layer_output_scale",
+            Self::OutputScale => "output_scale",
             Self::Rope => "rope",
         };
         match layer {

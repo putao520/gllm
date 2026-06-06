@@ -71,6 +71,25 @@ pub struct ArchitectureFeatures {
     // Special
     pub has_classifier: bool,
     pub tie_lm_head: bool,
+
+    // ── Heterogeneous layers (Gemma 4 E2B/E4B) ──
+    /// True when model has both sliding + global attention AND different FFN sizes across segments.
+    /// Detected by: global_head_dim > 0 && global_head_dim != head_dim
+    pub is_hetero_layer: bool,
+    /// Head dim for sliding attention layers (Gemma 4: 256).
+    pub sliding_head_dim: usize,
+    /// Head dim for global attention layers (Gemma 4: 512).
+    pub full_head_dim: usize,
+    /// FFN intermediate size for small-FFN segment group (Gemma 4 E2B: 6144).
+    pub small_intermediate: usize,
+    /// FFN intermediate size for large-FFN segment group (Gemma 4 E2B: 12288).
+    pub large_intermediate: usize,
+    /// First segment index (0-based) using large FFN. Segments < this use small FFN.
+    pub large_ffn_start_segment: usize,
+    /// Number of attention segments. Gemma 4 E2B: 7.
+    pub num_segments: usize,
+    /// Number of sliding layers per segment (before the global layer). Gemma 4: 4.
+    pub sliding_per_segment: usize,
 }
 
 /// Analyze architecture features from a tensor role index.
@@ -133,12 +152,14 @@ pub fn analyze_architecture(
     // Gemma 4 31B Dense / 26B MoE do not.
     let has_per_layer_embedding = weight_shapes.keys().any(|n| {
         n.contains("embed_tokens_per_layer") || n.contains("per_layer_embedding")
+            || n.contains("per_layer_token_embd")
     });
     // hidden_size_per_layer_input: dimension of per-layer input signal.
     // Derived from PLE projection weight shape [hidden_size, hidden_size_per_layer_input].
     let hidden_size_per_layer_input = if has_per_layer_embedding {
         weight_shapes.keys()
-            .filter(|n| n.contains("per_layer_projection") || n.contains("per_layer_model_projection"))
+            .filter(|n| n.contains("per_layer_projection") || n.contains("per_layer_model_projection")
+                || n.contains("per_layer_model_proj"))
             .filter_map(|n| weight_shapes.get(n))
             .filter_map(|shape| shape.last().copied())
             .next()
@@ -148,10 +169,12 @@ pub fn analyze_architecture(
     };
 
     // ── AltUp (Alternating Updates) — Gemma 4 E2B/E4B ──
-    // Detection: presence of `altup.` prefixed weight tensors.
-    // altup_num_inputs (P): derived from correction_coefs weight shape [P, P].
-    // Non-AltUp models: P=0.
-    let has_altup = weight_shapes.keys().any(|n| n.contains("altup."));
+    // Detection: presence of `altup.` prefixed weight tensors OR
+    // GGUF-style AltUp correction weights (`correction_coefs` / `altup_corrections`).
+    // GGUF Gemma 4 E2B has PLE weights but NO AltUp weights — has_altup must be false.
+    let has_altup = weight_shapes.keys().any(|n| {
+        n.contains("altup.") || n.contains("correction_coefs") || n.contains("altup_corrections")
+    });
     let altup_num_inputs = if has_altup {
         // Derive P from correction_coefs.weight shape [P, P] or modality_router.weight [P, H].
         weight_shapes.keys()
@@ -160,9 +183,6 @@ pub fn analyze_architecture(
             .filter_map(|shape| shape.first().copied())
             .next()
             .unwrap_or(2)
-    } else if has_per_layer_embedding {
-        // PLE present without AltUp weights: assume P=2 (Gemma 4 E2B/E4B default).
-        2
     } else {
         0
     };
@@ -197,8 +217,9 @@ pub fn analyze_architecture(
     let ffn_type = if is_moe {
         FfnType::MoE
     } else if has_gate && has_up && has_down {
-        // Both gate+up+down → SwiGLU or GeGLU (determined by activation config)
-        FfnType::SwiGLU
+        // Both gate+up+down → SwiGLU or GeGLU.
+        // Gemma 4 uses GELU activation (LLM_FFN_GELU, LLM_FFN_PAR), not SiLU.
+        if is_gemma4 { FfnType::GeGLU } else { FfnType::SwiGLU }
     } else if has_gate && has_down {
         // gate_up_proj fused (Phi4 style) + down
         FfnType::SwiGLU
@@ -285,6 +306,15 @@ pub fn analyze_architecture(
         is_audio,
         has_classifier,
         tie_lm_head,
+        // Hetero fields — populated after analyze_architecture by caller
+        is_hetero_layer: false,
+        sliding_head_dim: 0,
+        full_head_dim: 0,
+        small_intermediate: 0,
+        large_intermediate: 0,
+        large_ffn_start_segment: 0,
+        num_segments: 0,
+        sliding_per_segment: 0,
     }
 }
 

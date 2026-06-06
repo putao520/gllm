@@ -15,12 +15,86 @@ fn pack_weights_from_graph(
     raw_floats: &std::collections::HashMap<String, crate::loader::RawFloatTensor>,
     name_map: &crate::loader::name_map::TensorNameMap,
     layer_config: Option<&gllm_kernels::compiler::graph::LayerLoopConfig>,
+    hetero_config: Option<&gllm_kernels::compiler::graph::HeteroLayerLoopConfig>,
     num_layers: usize,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; total_bytes];
     let mut packed_count = 0usize;
     let mut missing_count = 0usize;
-    if !raw_floats.is_empty() {
+
+    // ── Heterogeneous layer offset computation ──
+    // For Gemma 4 E2B: 4 layer types with different strides.
+    // Each layer's absolute offset depends on its segment and position.
+    // named_offsets uses reference layer canonical names (L0., L4., L15., L19.)
+    // because weight tensors are registered with cn_layer(ref_layer, suffix).
+    let _ = hetero_config; // used in packing loop below
+    let hetero_ref_layers: [usize; 4] = [0, 4, 15, 19]; // reference layers for each type
+    let hetero_ref_prefixes: [String; 4] = [
+        format!("L{}.", hetero_ref_layers[0]),
+        format!("L{}.", hetero_ref_layers[1]),
+        format!("L{}.", hetero_ref_layers[2]),
+        format!("L{}.", hetero_ref_layers[3]),
+    ];
+
+    /// Compute absolute byte offset for a layer in hetero mode.
+    /// Returns (abs_offset, stride_for_this_type).
+    fn hetero_layer_offset(
+        layer_idx: usize, hcfg: &gllm_kernels::compiler::graph::HeteroLayerLoopConfig,
+    ) -> usize {
+        let layers_per_seg = hcfg.sliding_per_segment + 1;
+        let seg = layer_idx / layers_per_seg;
+        let pos = layer_idx % layers_per_seg;
+        let is_sliding = pos < hcfg.sliding_per_segment;
+        let is_small = seg < hcfg.large_ffn_start_segment;
+
+        let seg_base = if is_small {
+            seg * hcfg.small_segment_stride
+        } else {
+            let small_segs = hcfg.large_ffn_start_segment;
+            small_segs * hcfg.small_segment_stride
+                + (seg - small_segs) * hcfg.large_segment_stride
+        };
+
+        let pos_off = if is_sliding {
+            let s = if is_small { hcfg.sliding_small_stride } else { hcfg.sliding_large_stride };
+            pos * s
+        } else {
+            let s = if is_small { hcfg.sliding_small_stride } else { hcfg.sliding_large_stride };
+            hcfg.sliding_per_segment * s
+            // plus the full-type stride is added below
+        };
+
+        // For full layers, add the full-type offset after all sliding layers
+        let full_off = if !is_sliding {
+            let _f = if is_small { hcfg.full_small_stride } else { hcfg.full_large_stride };
+            // The position within the segment for a full layer is always 0
+            // (there's exactly one full layer per segment, after all sliding layers)
+            0 // already accounted for in seg_base + pos_off
+        } else {
+            0
+        };
+
+        hcfg.layer_blob_base_offset + seg_base + pos_off + full_off
+    }
+
+    /// Determine which hetero type a layer belongs to.
+    /// Returns index: 0=sliding_small, 1=full_small, 2=sliding_large, 3=full_large.
+    fn hetero_type_index(
+        layer_idx: usize, hcfg: &gllm_kernels::compiler::graph::HeteroLayerLoopConfig,
+    ) -> usize {
+        let layers_per_seg = hcfg.sliding_per_segment + 1;
+        let seg = layer_idx / layers_per_seg;
+        let pos = layer_idx % layers_per_seg;
+        let is_sliding = pos < hcfg.sliding_per_segment;
+        let is_small = seg < hcfg.large_ffn_start_segment;
+        match (is_sliding, is_small) {
+            (true, true) => 0,   // sliding_small
+            (false, true) => 1,  // full_small
+            (true, false) => 2,  // sliding_large
+            (false, false) => 3, // full_large
+        }
+    }
+    if false && !raw_floats.is_empty() {
         for (cn, offset) in named_offsets {
             if cn.contains("qkv_proj") || cn.contains("gate_proj") {
                 let ext = name_map.resolve_external_to_string(cn);
@@ -39,25 +113,13 @@ fn pack_weights_from_graph(
                         numel * 4,
                         offset
                     );
-                } else {
-                    eprintln!("[pack] {} -> {} NOT IN raw_floats", cn, ext);
                 }
             }
         }
     }
 
     for (canonical_name, offset) in named_offsets {
-        eprintln!("[PACK-DEBUG] cn='{}' offset={} is_layer={}", canonical_name, offset,
-            canonical_name.starts_with("L0.") && layer_config.is_some());
-        // Resolve canonical → external name for raw_floats lookup.
         let ext_name = name_map.resolve_external_to_string(canonical_name);
-        {
-            let rf = raw_floats.get(&ext_name);
-            let wp = weight_ptrs.get(canonical_name);
-            let ws = weight_sizes.get(canonical_name);
-            eprintln!("[PACK-ALL] cn='{}' ext='{}' rf={} wp={} ws={:?}",
-                canonical_name, ext_name, rf.is_some(), wp.is_some(), ws);
-        }
         if let Some(raw) = raw_floats.get(&ext_name) {
             let elem_size = match raw.dtype {
                 ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
@@ -68,131 +130,164 @@ fn pack_weights_from_graph(
             let f32_bytes = numel * 4;
 
             // Per-layer weights: compute absolute offsets and replicate for all layers.
-            let is_per_layer_rf = layer_config.is_some()
+            // Hetero mode: detect by template prefixes (graph tensor names); Homogeneous: detect by "L0." prefix.
+            let is_hetero_layer_rf = hetero_config.is_some()
+                && hetero_ref_prefixes.iter().any(|p| canonical_name.starts_with(p));
+            let is_per_layer_rf = (layer_config.is_some()
                 && canonical_name.starts_with("L0.")
                 && !canonical_name.contains("embed")
                 && !canonical_name.contains("lm_head")
-                && !canonical_name.contains("final_norm");
+                && !canonical_name.contains("final_norm"))
+                || is_hetero_layer_rf;
 
             if is_per_layer_rf {
-                let cfg = layer_config.unwrap();
-                // Count how many layers we successfully find in raw_floats
-                let mut layer_hits = 0usize;
-                for layer_idx in 0..num_layers {
-                    if layer_idx == 0 {
-                        layer_hits += 1;
+                // Determine offset computation mode
+                let (abs_off_fn, ref_layer_ext, hetero_suffix): (Box<dyn Fn(usize) -> usize>, String, Option<String>) =
+                    if let Some(hcfg) = hetero_config {
+                        // Match by template prefix (graph tensor name), then map to ref layer for weight lookup
+                        let (type_idx, suffix) = hetero_ref_prefixes.iter().enumerate()
+                            .filter_map(|(i, p)| {
+                                if canonical_name.starts_with(p) {
+                                    Some((i, &canonical_name[p.len()..]))
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                            .unwrap();
+                        let ref_layer = hetero_ref_layers[type_idx];
+                        let ref_cn = format!("L{}.{}", ref_layer, suffix);
+                        let ref_ext = name_map.resolve_external_to_string(&ref_cn);
+                        (Box::new(move |li| hetero_layer_offset(li, hcfg)), ref_ext, Some(suffix.to_string()))
                     } else {
-                        let lcn = canonical_name.replacen("L0.", &format!("L{}.", layer_idx), 1);
-                        let lext = name_map.resolve_external_to_string(&lcn);
-                        if raw_floats.get(&lext).is_some() { layer_hits += 1; }
-                    }
-                }
-                if canonical_name.contains("q_proj") {
-                    eprintln!("[PACK-LAYER-RF] cn='{}' found {}/{} layers in raw_floats stride={}",
-                        canonical_name, layer_hits, num_layers, cfg.weight_stride);
-                }
-                let stride = cfg.weight_stride;
-                let rel_off = *offset;
+                        let cfg = layer_config.unwrap();
+                        let stride = cfg.weight_stride;
+                        let rel_off = *offset;
+                        let ref_ext = name_map.resolve_external_to_string(canonical_name);
+                        (Box::new(move |li| li * stride + rel_off), ref_ext, None)
+                    };
 
-                for layer_idx in 0..num_layers {
-                    let abs_off = layer_idx * stride + rel_off;
-                    let copy_size = f32_bytes.min(blob.len().saturating_sub(abs_off));
-                    if copy_size == 0 || abs_off >= blob.len() {
-                        continue;
-                    }
-                    // For layers > 0, look up per-layer raw_floats if available
-                    if layer_idx == 0 {
-                        let dst = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                blob[abs_off..].as_mut_ptr() as *mut f32,
-                                copy_size / 4,
-                            )
-                        };
-                        match raw.dtype {
-                            ::safetensors::Dtype::BF16 => {
-                                let src = unsafe {
-                                    std::slice::from_raw_parts(raw.data.as_ptr() as *const half::bf16, numel)
-                                };
-                                for (i, &v) in src.iter().enumerate() {
-                                    if i >= dst.len() { break; }
-                                    dst[i] = v.to_f32();
-                                }
-                            }
-                            ::safetensors::Dtype::F16 => {
-                                let src = unsafe {
-                                    std::slice::from_raw_parts(raw.data.as_ptr() as *const half::f16, numel)
-                                };
-                                for (i, &v) in src.iter().enumerate() {
-                                    if i >= dst.len() { break; }
-                                    dst[i] = v.to_f32();
-                                }
-                            }
-                            _ => {
-                                let cs = raw.data.len().min(blob.len().saturating_sub(abs_off));
-                                blob[abs_off..abs_off + cs].copy_from_slice(&raw.data[..cs]);
-                            }
+                // Use the reference layer's external name for raw_floats lookup
+                let raw_ref = raw_floats.get(&ref_layer_ext)
+                    .or_else(|| raw_floats.get(&ext_name));
+                if let Some(layer_raw) = raw_ref {
+                    let lelem_size = match layer_raw.dtype {
+                        ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
+                        _ => 4,
+                    };
+                    let lnumel = layer_raw.data.len() / lelem_size;
+                    let lf32_bytes = lnumel * 4;
+
+                    for layer_idx in 0..num_layers {
+                        // In hetero mode, skip layers of different type
+                        if let Some(hcfg) = hetero_config {
+                            let type_idx = hetero_ref_prefixes.iter().enumerate()
+                                .filter_map(|(i, p)| {
+                                    if canonical_name.starts_with(p) { Some(i) } else { None }
+                                })
+                                .next().unwrap();
+                            let layer_type = hetero_type_index(layer_idx, hcfg);
+                            if layer_type != type_idx { continue; }
                         }
-                    } else {
-                        let layer_cn = canonical_name.replacen("L0.", &format!("L{}.", layer_idx), 1);
-                        let layer_ext = name_map.resolve_external_to_string(&layer_cn);
-                        if let Some(layer_raw) = raw_floats.get(&layer_ext) {
-                            let ln = layer_raw.data.len() / elem_size;
-                            let lb = ln * 4;
-                            let lcs = lb.min(blob.len().saturating_sub(abs_off));
-                            if lcs > 0 {
-                                let dst = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        blob[abs_off..].as_mut_ptr() as *mut f32,
-                                        lcs / 4,
-                                    )
-                                };
-                                match layer_raw.dtype {
-                                    ::safetensors::Dtype::BF16 => {
-                                        let src = unsafe {
-                                            std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::bf16, ln)
-                                        };
-                                        for (i, &v) in src.iter().enumerate() {
-                                            if i >= dst.len() { break; }
-                                            dst[i] = v.to_f32();
-                                        }
+
+                        let abs_off = abs_off_fn(layer_idx);
+                        let copy_size = lf32_bytes.min(blob.len().saturating_sub(abs_off));
+                        if copy_size == 0 || abs_off >= blob.len() { continue; }
+
+                        // For non-reference layers, try per-layer lookup first
+                        let layer_ext = if let Some(ref suffix) = hetero_suffix {
+                            let layer_cn = format!("L{}.{}", layer_idx, suffix);
+                            name_map.resolve_external_to_string(&layer_cn)
+                        } else if layer_idx == 0 {
+                            ref_layer_ext.clone()
+                        } else {
+                            let lcn = canonical_name.replacen("L0.", &format!("L{}.", layer_idx), 1);
+                            name_map.resolve_external_to_string(&lcn)
+                        };
+
+                        if let Some(lr) = raw_floats.get(&layer_ext) {
+                            let dst = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    blob[abs_off..].as_mut_ptr() as *mut f32,
+                                    copy_size / 4,
+                                )
+                            };
+                            match lr.dtype {
+                                ::safetensors::Dtype::BF16 => {
+                                    let src = unsafe {
+                                        std::slice::from_raw_parts(lr.data.as_ptr() as *const half::bf16, lr.data.len() / 2)
+                                    };
+                                    for (i, &v) in src.iter().enumerate() {
+                                        if i >= dst.len() { break; }
+                                        dst[i] = v.to_f32();
                                     }
-                                    ::safetensors::Dtype::F16 => {
-                                        let src = unsafe {
-                                            std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::f16, ln)
-                                        };
-                                        for (i, &v) in src.iter().enumerate() {
-                                            if i >= dst.len() { break; }
-                                            dst[i] = v.to_f32();
-                                        }
+                                }
+                                ::safetensors::Dtype::F16 => {
+                                    let src = unsafe {
+                                        std::slice::from_raw_parts(lr.data.as_ptr() as *const half::f16, lr.data.len() / 2)
+                                    };
+                                    for (i, &v) in src.iter().enumerate() {
+                                        if i >= dst.len() { break; }
+                                        dst[i] = v.to_f32();
                                     }
-                                    _ => {
-                                        let cs2 = layer_raw.data.len().min(blob.len().saturating_sub(abs_off));
-                                        blob[abs_off..abs_off + cs2].copy_from_slice(&layer_raw.data[..cs2]);
-                                    }
+                                }
+                                _ => {
+                                    let cs = lr.data.len().min(blob.len().saturating_sub(abs_off));
+                                    blob[abs_off..abs_off + cs].copy_from_slice(&lr.data[..cs]);
                                 }
                             }
                         } else {
-                            // Reuse layer 0 data from correct position (rel_off = graph offset)
-                            if layer_idx < 2 && canonical_name.contains("q_proj") {
-                                eprintln!("[PACK-FALLBACK] L{}.{} layer_ext='{}' not in raw_floats, reusing L0 data from blob[{}]",
-                                    layer_idx, canonical_name, layer_ext, rel_off);
-                            }
-                            let src_off = rel_off;
-                            let src_f32 = unsafe {
-                                std::slice::from_raw_parts(blob[src_off..].as_ptr() as *const f32, f32_bytes.min(blob.len().saturating_sub(src_off)) / 4)
-                            };
+                            // Fallback: reuse reference layer data
                             let dst = unsafe {
-                                std::slice::from_raw_parts_mut(blob[abs_off..].as_mut_ptr() as *mut f32, f32_bytes.min(blob.len().saturating_sub(abs_off)) / 4)
+                                std::slice::from_raw_parts_mut(
+                                    blob[abs_off..].as_mut_ptr() as *mut f32,
+                                    copy_size / 4,
+                                )
                             };
-                            let copy_len = src_f32.len().min(dst.len());
-                            dst[..copy_len].copy_from_slice(&src_f32[..copy_len]);
+                            match layer_raw.dtype {
+                                ::safetensors::Dtype::BF16 => {
+                                    let src = unsafe {
+                                        std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::bf16, lnumel)
+                                    };
+                                    for (i, &v) in src.iter().enumerate() {
+                                        if i >= dst.len() { break; }
+                                        dst[i] = v.to_f32();
+                                    }
+                                }
+                                ::safetensors::Dtype::F16 => {
+                                    let src = unsafe {
+                                        std::slice::from_raw_parts(layer_raw.data.as_ptr() as *const half::f16, lnumel)
+                                    };
+                                    for (i, &v) in src.iter().enumerate() {
+                                        if i >= dst.len() { break; }
+                                        dst[i] = v.to_f32();
+                                    }
+                                }
+                                _ => {
+                                    let cs = layer_raw.data.len().min(blob.len().saturating_sub(abs_off));
+                                    blob[abs_off..abs_off + cs].copy_from_slice(&layer_raw.data[..cs]);
+                                }
+                            }
                         }
                     }
                 }
             } else {
                 // Global weight: post-layer globals need offset adjustment for layer replication.
                 // Pre-layer globals (embed, offset < base) stay at their graph offsets.
-                let blob_off = if let Some(cfg) = layer_config {
+                let blob_off = if let Some(hcfg) = hetero_config {
+                    let templates_blob = hcfg.sliding_small_stride + hcfg.full_small_stride
+                        + hcfg.sliding_large_stride + hcfg.full_large_stride;
+                    let small_segs = hcfg.large_ffn_start_segment;
+                    let large_segs = hcfg.num_segments - small_segs;
+                    let total_layers_blob = small_segs * hcfg.small_segment_stride
+                        + large_segs * hcfg.large_segment_stride;
+                    let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
+                    if *offset >= graph_globals_start {
+                        *offset + total_layers_blob.saturating_sub(templates_blob)
+                    } else {
+                        *offset
+                    }
+                } else if let Some(cfg) = layer_config {
                     let globals_start = cfg.layer_blob_base_offset + cfg.weight_stride;
                     if *offset >= globals_start {
                         (num_layers - 1) * cfg.weight_stride + *offset
@@ -245,6 +340,62 @@ fn pack_weights_from_graph(
             continue;
         }
 
+        // Hetero template weights: named_offsets uses template prefixes (layer_sliding_small.)
+        // but weight_ptrs uses reference layer canonical names (L0.).
+        // Match by template prefix, then map to ref layer for weight lookup.
+        if let Some(hcfg) = hetero_config {
+            if let Some((type_idx, suffix)) = hetero_ref_prefixes.iter().enumerate()
+                .filter_map(|(i, p)| {
+                    if canonical_name.starts_with(p) { Some((i, &canonical_name[p.len()..])) } else { None }
+                })
+                .next()
+            {
+                let ref_layer = hetero_ref_layers[type_idx];
+                let ref_cn = format!("L{}.{}", ref_layer, suffix);
+                let ref_ptr = match weight_ptrs.get(&ref_cn) {
+                    Some(&p) if !p.is_null() => p,
+                    _ => { missing_count += 1; continue; }
+                };
+                let ref_size = *weight_sizes.get(&ref_cn).unwrap_or(&0);
+                if ref_size == 0 { continue; }
+
+                let type_base_offsets: [usize; 4] = [
+                    hcfg.layer_blob_base_offset,
+                    hcfg.layer_blob_base_offset + hcfg.sliding_small_stride,
+                    hcfg.layer_blob_base_offset + hcfg.sliding_small_stride + hcfg.full_small_stride,
+                    hcfg.layer_blob_base_offset + hcfg.sliding_small_stride + hcfg.full_small_stride + hcfg.sliding_large_stride,
+                ];
+                let rel_off = offset.saturating_sub(type_base_offsets[type_idx]);
+
+                for layer_idx in 0..num_layers {
+                    if hetero_type_index(layer_idx, hcfg) != type_idx { continue; }
+                    let abs_off = hetero_layer_offset(layer_idx, hcfg) + rel_off;
+                    let copy_size = ref_size.min(blob.len().saturating_sub(abs_off));
+                    if copy_size == 0 || abs_off >= blob.len() { continue; }
+
+                    if layer_idx == ref_layer {
+                        let src = unsafe { std::slice::from_raw_parts(ref_ptr, copy_size) };
+                        blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+                    } else {
+                        let layer_cn = format!("L{}.{}", layer_idx, suffix);
+                        if let Some(&lp) = weight_ptrs.get(&layer_cn) {
+                            if !lp.is_null() {
+                                let ls = *weight_sizes.get(&layer_cn).unwrap_or(&copy_size);
+                                let lc = ls.min(copy_size);
+                                let src = unsafe { std::slice::from_raw_parts(lp, lc) };
+                                blob[abs_off..abs_off + lc].copy_from_slice(src);
+                            }
+                        } else {
+                            let src = unsafe { std::slice::from_raw_parts(ref_ptr, copy_size) };
+                            blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+                        }
+                    }
+                }
+                packed_count += 1;
+                continue;
+            }
+        }
+
         // Standard weight: direct lookup by canonical name.
         let ptr = match weight_ptrs.get(canonical_name) {
             Some(&p) if !p.is_null() => p,
@@ -259,25 +410,17 @@ fn pack_weights_from_graph(
         }
 
         // For per-layer weights with layer_loop_config, replicate across all layers.
-        // The offset in named_offsets is RELATIVE to layer start. We compute absolute
-        // offset as: layer_blob_base_offset + layer_idx * weight_stride + relative_offset.
         let is_per_layer = layer_config.is_some()
             && canonical_name.starts_with("L0.")
             && !canonical_name.contains("embed")
             && !canonical_name.contains("lm_head")
             && !canonical_name.contains("final_norm");
 
-        if is_per_layer && packed_count < 3 {
-            eprintln!("[PACK-LAYER] cn='{}' rel_offset={} -> will replicate to {} layers, stride={}",
-                canonical_name, offset, num_layers, layer_config.unwrap().weight_stride);
-        }
-
         if is_per_layer {
             let cfg = layer_config.unwrap();
             let stride = cfg.weight_stride;
-            let rel_off = *offset; // graph offset (includes base)
+            let rel_off = *offset;
 
-            // Pack layer 0 data (L0.xxx) for all N layers
             for layer_idx in 0..num_layers {
                 let abs_off = layer_idx * stride + rel_off;
                 let copy_size = size.min(blob.len().saturating_sub(abs_off));
@@ -285,7 +428,6 @@ fn pack_weights_from_graph(
                     continue;
                 }
 
-                // For layers > 0, look up their specific weight data (L1.xxx, L2.xxx, etc.)
                 if layer_idx == 0 {
                     let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                     blob[abs_off..abs_off + copy_size].copy_from_slice(src);
@@ -299,7 +441,6 @@ fn pack_weights_from_graph(
                             blob[abs_off..abs_off + layer_copy].copy_from_slice(src);
                         }
                     } else {
-                        // Layer weight not found: reuse layer 0 data
                         let src = unsafe { std::slice::from_raw_parts(ptr, copy_size) };
                         blob[abs_off..abs_off + copy_size].copy_from_slice(src);
                     }
@@ -308,8 +449,20 @@ fn pack_weights_from_graph(
             packed_count += 1;
         } else {
             // Global weight: post-layer globals need offset adjustment for layer replication.
-            // Pre-layer globals (embed, offset < base) stay at their graph offsets.
-            let blob_off = if let Some(cfg) = layer_config {
+            let blob_off = if let Some(hcfg) = hetero_config {
+                let templates_blob = hcfg.sliding_small_stride + hcfg.full_small_stride
+                    + hcfg.sliding_large_stride + hcfg.full_large_stride;
+                let small_segs = hcfg.large_ffn_start_segment;
+                let large_segs = hcfg.num_segments - small_segs;
+                let total_layers_blob = small_segs * hcfg.small_segment_stride
+                    + large_segs * hcfg.large_segment_stride;
+                let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
+                if *offset >= graph_globals_start {
+                    *offset + total_layers_blob.saturating_sub(templates_blob)
+                } else {
+                    *offset
+                }
+            } else if let Some(cfg) = layer_config {
                 let globals_start = cfg.layer_blob_base_offset + cfg.weight_stride;
                 if *offset >= globals_start {
                     (num_layers - 1) * cfg.weight_stride + *offset
@@ -328,7 +481,6 @@ fn pack_weights_from_graph(
             packed_count += 1;
         }
     }
-    eprintln!("[PACK] blob size={} packed={}/{} named_offsets={}", blob.len(), packed_count, packed_count + missing_count, named_offsets.len());
     blob
 }
 

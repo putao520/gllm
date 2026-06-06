@@ -173,6 +173,7 @@ mod tests {
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
             add_special_tokens: None,
+            feed_forward_lengths: None,
         };
         let moe = cfg.build_moe_config("deepseek").unwrap();
         assert_eq!(moe.num_experts, 64);
@@ -404,6 +405,7 @@ mod tests {
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
             add_special_tokens: None,
+            feed_forward_lengths: None,
         };
         assert!(cfg.build_moe_config("llama").is_none());
     }
@@ -514,6 +516,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,

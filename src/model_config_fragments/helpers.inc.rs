@@ -654,6 +654,33 @@ fn gguf_arch_array_u8(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<V
     Some(out)
 }
 
+/// Read a GGUF bool array (`{arch}.{suffix}`).
+/// Used for Gemma 4 `attention.sliding_window_pattern` (true=sliding, false=global).
+fn gguf_arch_array_bool(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<Vec<bool>> {
+    let key = gguf_arch_key(arch, suffix);
+    let array = reader.get_metadata_array(&key)?;
+    let mut out = Vec::with_capacity(array.items.len());
+    for item in &array.items {
+        let value = item.as_bool()?;
+        out.push(value);
+    }
+    Some(out)
+}
+
+/// Read a `{arch}.{suffix}` ARRAY metadata as `Vec<usize>`.
+/// Used for Gemma 4 `feed_forward_length` (per-layer FFN intermediate sizes).
+fn gguf_arch_array_usize(reader: &GgufLoader, arch: &str, suffix: &str) -> Option<Vec<usize>> {
+    let key = gguf_arch_key(arch, suffix);
+    let array = reader.get_metadata_array(&key)?;
+    let mut out = Vec::with_capacity(array.items.len());
+    for item in &array.items {
+        let value = item.as_u64()?;
+        let sz = usize::try_from(value).ok()?;
+        out.push(sz);
+    }
+    Some(out)
+}
+
 /// Gemma 4 fallback: derive per-layer attention pattern when GGUF metadata is
 /// absent. SPEC §Gemma4: every 6th layer (1-indexed) is global, others are
 /// sliding-window. I.e. `(i + 1) % 6 == 0 → 1 (global)`, else `0 (sliding)`.

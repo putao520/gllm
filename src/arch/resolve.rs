@@ -27,6 +27,9 @@ pub struct ResolvedConfig {
     // ── Gemma 4: Dual RoPE ──
     pub global_rope_theta: f64,
     pub rope_partial_ratio: f32,
+    /// Global attention 层的 RoPE partial 旋转比例 (Gemma 4: 0.25)。
+    /// 仅当 global_rope_theta > 0 时有效。
+    pub rope_partial_ratio_global: f32,
 
     // ── Gemma 4: Per-layer attention ──
     pub attention_pattern: Vec<u8>,
@@ -47,6 +50,11 @@ pub struct ResolvedConfig {
     /// Logit softcapping: `cap * tanh(logits / cap)` before argmax.
     /// None = no softcapping. Gemma 4: 30.0, Grok: 24.0.
     pub final_logit_softcapping: Option<f32>,
+
+    /// Per-layer FFN intermediate sizes. When present, indicates heterogeneous
+    /// layer structure (e.g., Gemma 4 E2B: first 15 layers = 6144, last 20 = 12288).
+    /// None = all layers use the same intermediate_size.
+    pub feed_forward_lengths: Option<Vec<usize>>,
 
     /// 额外的自定义配置
     pub extra: HashMap<String, i64>,
@@ -70,6 +78,7 @@ impl ResolvedConfig {
             dtype: format!("{:?}", g.dtype).to_lowercase(),
             global_rope_theta: g.global_rope_theta,
             rope_partial_ratio: g.rope_partial_ratio,
+            rope_partial_ratio_global: g.rope_partial_ratio_global,
             attention_pattern: g.attention_pattern.clone(),
             sliding_window: g.sliding_window,
             rope_scaling: convert_rope_scaling(g.rope_scaling.as_ref()),
@@ -78,6 +87,7 @@ impl ResolvedConfig {
             hidden_size_per_layer_input: g.hidden_size_per_layer_input,
             has_per_layer_embedding: g.hidden_size_per_layer_input > 0,
             final_logit_softcapping: g.final_logit_softcapping,
+            feed_forward_lengths: None, // populated in GGUF path from per-layer metadata
             norm_eps: g.norm_eps,
             extra,
         }
@@ -444,6 +454,7 @@ mod tests {
             rope_theta: 10000.0,
             dtype: "f16".to_string(),
             global_rope_theta: 0.0,
+            rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
@@ -455,6 +466,7 @@ mod tests {
             extra: HashMap::new(),
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
 
         let template = "layers: ${num_hidden_layers}, hidden: ${hidden_size}, dtype: ${dtype}";
@@ -1165,6 +1177,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0, 1, 0, 1, 0, 1],
             sliding_window: 4096,
             num_kv_shared_layers: 4,
@@ -1223,6 +1236,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -1276,6 +1290,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -1558,6 +1573,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -1601,6 +1617,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -1814,6 +1831,7 @@ mod tests {
             rope_theta: 50000.0,
             dtype: "f32".to_string(),
             global_rope_theta: 0.0,
+            rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 1.0,
             attention_pattern: vec![0, 1],
             sliding_window: 256,
@@ -1825,6 +1843,7 @@ mod tests {
             extra,
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         let cloned = original.clone();
         assert_eq!(cloned.num_hidden_layers, original.num_hidden_layers);
@@ -2315,6 +2334,7 @@ mod tests {
             dtype: "f32".to_string(),
             global_rope_theta: 9.0,
             rope_partial_ratio: 10.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0],
             sliding_window: 11,
             rope_scaling: None,
@@ -2325,6 +2345,7 @@ mod tests {
             extra: HashMap::new(),
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("num_hidden_layers"));
@@ -2472,6 +2493,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -2515,6 +2537,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0, 1],
             sliding_window: 4096,
             num_kv_shared_layers: 0,
@@ -2868,6 +2891,7 @@ mod tests {
     fn get_float_global_rope_theta_zero() {
         let config = ResolvedConfig {
             global_rope_theta: 0.0,
+            rope_partial_ratio_global: 1.0,
             ..Default::default()
         };
         assert_eq!(config.get_float("global_rope_theta"), Some(0.0));
@@ -3024,6 +3048,7 @@ mod tests {
             dtype: "bf16".to_string(),
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0, 1],
             sliding_window: 4096,
             num_kv_shared_layers: 4,
@@ -3038,6 +3063,7 @@ mod tests {
             },
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -3146,6 +3172,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -3200,6 +3227,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -3243,6 +3271,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -3286,6 +3315,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -3847,6 +3877,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.5,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
             sliding_window: 1024,
             num_kv_shared_layers: 2,
@@ -3947,6 +3978,7 @@ mod tests {
             dtype: "bf16".to_string(),
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0; 64],
             sliding_window: 4096,
             num_kv_shared_layers: 4,
@@ -3957,6 +3989,7 @@ mod tests {
             extra,
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         // Verify every field
         assert_eq!(config.num_hidden_layers, 64);
@@ -4503,6 +4536,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: pattern.clone(),
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -4546,6 +4580,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -4591,6 +4626,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -4634,6 +4670,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 8192,
             num_kv_shared_layers: 0,
@@ -5185,6 +5222,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -5956,6 +5994,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -6288,6 +6327,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -6596,6 +6636,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -6876,6 +6917,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -7213,6 +7255,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -7262,6 +7305,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -7575,6 +7619,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -7858,6 +7903,7 @@ mod tests {
             dtype: "bf16".to_string(),
             global_rope_theta: 250000.0,
             rope_partial_ratio: 0.5,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0],
             sliding_window: 512,
             num_kv_shared_layers: 1,
@@ -7868,6 +7914,7 @@ mod tests {
             extra,
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         // Act
         let cloned = config.clone();
@@ -7912,6 +7959,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -8115,6 +8163,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -8211,6 +8260,7 @@ mod tests {
             dtype: "bf16".to_string(),
             global_rope_theta: 500000.0,
             rope_partial_ratio: 0.25,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1, 0, 1, 0, 1],
             sliding_window: 2048,
             num_kv_shared_layers: 2,
@@ -8221,6 +8271,7 @@ mod tests {
             extra,
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         // Act
         let cloned = config.clone();
@@ -8883,6 +8934,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -8931,6 +8983,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -9226,6 +9279,7 @@ mod tests {
             rope_theta: 0.0,
             dtype: String::new(),
             global_rope_theta: 0.0,
+            rope_partial_ratio_global: 1.0,
             rope_partial_ratio: 0.0,
             attention_pattern: vec![],
             sliding_window: 0,
@@ -9237,6 +9291,7 @@ mod tests {
             extra: HashMap::new(),
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         // Act & Assert: validation passes with only required fields.
         assert!(validate_config(&config).is_ok());
@@ -9443,6 +9498,7 @@ mod tests {
             dtype: "bf16".to_string(),
             global_rope_theta: 1000000.0,
             rope_partial_ratio: 0.5,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![0, 1],
             sliding_window: 2048,
             num_kv_shared_layers: 2,
@@ -9453,6 +9509,7 @@ mod tests {
             extra,
             norm_eps: 1e-5,
             final_logit_softcapping: None,
+            feed_forward_lengths: None,
         };
         // Act & Assert: exercise every getter path
         // get_int covers: num_hidden_layers, hidden_size, num_attention_heads,
@@ -9618,6 +9675,7 @@ mod tests {
             rope_interleaved: true, // not mapped to ResolvedConfig
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -9670,6 +9728,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -9718,6 +9777,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -9886,6 +9946,7 @@ mod tests {
             rope_interleaved: false,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,
@@ -9917,3 +9978,4 @@ mod tests {
         assert_ne!(config.num_attention_heads, 131072);
     }
 }
+

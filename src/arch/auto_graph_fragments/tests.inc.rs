@@ -497,6 +497,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -592,6 +600,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -665,6 +681,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -744,6 +768,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -826,6 +858,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -898,6 +938,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -959,6 +1007,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -1151,6 +1207,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let mut business_config = MegaKernelBusinessConfig::default();
@@ -1279,6 +1343,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -1346,6 +1418,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let mut business_config = MegaKernelBusinessConfig::default();
@@ -1555,6 +1635,14 @@ mod tests {
             is_audio: false,
             has_classifier: true,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         assert_eq!(features.family, Family::Encoder);
         assert_eq!(features.num_layers, 2);
@@ -1595,6 +1683,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         assert!(features.is_mla);
         assert_eq!(features.mla_latent_dim, 512);
@@ -2011,6 +2107,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         let ws = make_weight_shapes(vec![]);
         let result = build_compiler_graph(
@@ -2060,6 +2164,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         let ws = make_weight_shapes(vec![
             ("embed", vec![100, 64]),
@@ -2113,6 +2225,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         let ws = make_weight_shapes(vec![
             ("embed", vec![100, 64]),
@@ -2163,6 +2283,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         let ws = make_weight_shapes(vec![
             ("embed", vec![50, 32]),
@@ -2226,6 +2354,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -2294,6 +2430,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -2433,6 +2577,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -2482,6 +2634,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let mut ws = make_weight_shapes(vec![
@@ -2571,6 +2731,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -2620,6 +2788,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         // gate_proj has 2×intermediate rows, no up_proj → fused gate_up
@@ -2698,6 +2874,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         // Verify every boolean is false
         assert!(!features.has_rope);
@@ -2758,6 +2942,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         let debug = format!("{:?}", features);
         assert!(debug.contains("Decoder"), "Debug should contain family");
@@ -2924,6 +3116,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         // q_dim=64, k_dim=32 → expected fused=64+2*32=128, but providing 100
@@ -3010,6 +3210,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3085,6 +3293,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3361,6 +3577,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
         // Provide embed and norm but no q_proj
         let ws = make_weight_shapes(vec![
@@ -3467,6 +3691,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3545,6 +3777,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3662,6 +3902,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3779,6 +4027,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3891,6 +4147,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -3971,6 +4235,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let ws = make_weight_shapes(vec![
@@ -4061,6 +4333,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -4153,6 +4433,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -4224,6 +4512,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(
@@ -4290,6 +4586,14 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            is_hetero_layer: false,
+            sliding_head_dim: 0,
+            full_head_dim: 0,
+            small_intermediate: 0,
+            large_intermediate: 0,
+            large_ffn_start_segment: 0,
+            num_segments: 0,
+            sliding_per_segment: 0,
         };
 
         let graph = build_compiler_graph(

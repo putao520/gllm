@@ -192,6 +192,7 @@ impl ModelConfig {
             global_head_dim,
             hidden_size_per_layer_input,
             final_logit_softcapping,
+            feed_forward_lengths,
             mla_config,
             mtp_depth,
         ) = {
@@ -210,6 +211,7 @@ impl ModelConfig {
             let metadata_num_kv_heads =
                 optional_gguf_usize(reader.head_count_kv(), "attention.head_count_kv")?;
             let metadata_head_dim = gguf_arch_usize(reader, arch, "attention.head_dim")
+                .or_else(|| gguf_arch_usize(reader, arch, "attention.key_length_swa"))
                 .or_else(|| {
                     reader
                         .rope_dimension_count()
@@ -263,6 +265,10 @@ impl ModelConfig {
 
             let intermediate_size =
                 optional_gguf_usize(reader.feed_forward_length(), "feed_forward_length")?;
+            // Per-layer FFN intermediate sizes (Gemma 4 E2B: [6144×15, 12288×20]).
+            // When present, indicates heterogeneous layer structure.
+            let feed_forward_lengths = gguf_arch_array_usize(reader, arch, "feed_forward_length")
+                .filter(|arr| arr.len() > 1 && arr.iter().any(|&v| v != arr[0]));
             let num_experts = optional_gguf_usize(reader.num_experts(), "num_experts")?;
             if matches!(num_experts, Some(0)) {
                 return Err(ModelConfigError::InvalidConfig(
@@ -347,17 +353,29 @@ impl ModelConfig {
                 .or_else(|| gguf_arch_f32(reader, arch, "rope.global.partial_ratio"))
                 .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0);
             let attention_pattern_metadata = gguf_arch_array_u8(reader, arch, "attention.pattern")
-                .or_else(|| gguf_arch_array_u8(reader, arch, "attention_pattern"));
+                .or_else(|| gguf_arch_array_u8(reader, arch, "attention_pattern"))
+                .or_else(|| {
+                    // Gemma 4 GGUF (unsloth): bool array → convert to u8
+                    gguf_arch_array_bool(reader, arch, "attention.sliding_window_pattern")
+                        .map(|bools| bools.into_iter().map(|b| if b { 0 } else { 1 }).collect())
+                });
             let sliding_window = gguf_arch_usize(reader, arch, "attention.sliding_window")
                 .or_else(|| gguf_arch_usize(reader, arch, "sliding_window"));
-            let num_kv_shared_layers =
-                gguf_arch_usize(reader, arch, "attention.num_kv_shared_layers")
-                    .or_else(|| gguf_arch_usize(reader, arch, "num_kv_shared_layers"));
+            let num_kv_shared_layers = {
+                // TEMP: disable shared_kv for now — JIT SharedKvRef lowering
+                // needs the graph-layer GprCondAction to match the reduced KV
+                // cache allocation.  Re-enable after DualRoPE is validated.
+                let _ = gguf_arch_usize(reader, arch, "attention.shared_kv_layers");
+                None
+            };
             let global_head_dim = gguf_arch_usize(reader, arch, "attention.global_head_dim")
-                .or_else(|| gguf_arch_usize(reader, arch, "global_head_dim"));
+                .or_else(|| gguf_arch_usize(reader, arch, "global_head_dim"))
+                .or_else(|| gguf_arch_usize(reader, arch, "attention.key_length"))
+                .filter(|&v| v > 0);
             let hidden_size_per_layer_input =
                 gguf_arch_usize(reader, arch, "embedding.per_layer_input")
-                    .or_else(|| gguf_arch_usize(reader, arch, "hidden_size_per_layer_input"));
+                    .or_else(|| gguf_arch_usize(reader, arch, "hidden_size_per_layer_input"))
+                    .or_else(|| gguf_arch_usize(reader, arch, "embedding_length_per_layer_input"));
             let final_logit_softcapping = gguf_arch_f32(reader, arch, "final_logit_softcapping")
                 .filter(|v| v.is_finite() && *v > 0.0);
 
@@ -388,6 +406,7 @@ impl ModelConfig {
                 global_head_dim,
                 hidden_size_per_layer_input,
                 final_logit_softcapping,
+                feed_forward_lengths,
                 reader.kv_lora_rank().map(|d_c| {
                     let d_rope = reader.qk_rope_head_dim().unwrap_or(64) as usize;
                     MlaConfig { d_c: d_c as usize, d_rope, unabsorbed_threshold: 4096 }
@@ -405,6 +424,39 @@ impl ModelConfig {
             ));
         }
         let rope_theta = manifest.rope_base_override.unwrap_or(rope_theta); // LEGAL: manifest 可选字段，缺失时使用推导值
+
+        // ── Gemma 4 dual-RoPE correction ──────────────────────────────────
+        // Unsloth/llama.cpp GGUF only stores rope_freq_base=1000000 (the *global*
+        // theta). For Gemma 4 the *sliding* theta is 10000. When the GGUF lacks
+        // explicit `rope.global.freq_base` but we detect the model as dual-RoPE
+        // (attention_pattern exists + rope_freq_base >= 100000), reinterpret:
+        //   rope_theta ← 10000  (sliding, used by 29/35 layers)
+        //   global_rope_theta ← original rope_freq_base (1M)
+        //   rope_partial_ratio ← 0.25 (p-RoPE for global layers)
+        let (rope_theta, global_rope_theta, rope_partial_ratio): (f32, Option<f32>, Option<f32>) = {
+            // Detect dual-RoPE models (Gemma 4): GGUF stores only the global theta
+            // (1M) as rope_freq_base without per-layer metadata. We infer dual-RoPE
+            // when: (a) no explicit global_rope_theta, (b) freq_base >= 100K,
+            // (c) Gemma 4 family signals present (sliding_window or PLE).
+            let has_gemma4_signal = hidden_size_per_layer_input
+                .map(|v| v > 0)
+                .unwrap_or(false)
+                || sliding_window.map(|v| v > 0).unwrap_or(false);
+            let is_dual_rope_candidate = global_rope_theta.is_none()
+                && rope_theta >= 100_000.0
+                && has_gemma4_signal;
+            if is_dual_rope_candidate {
+                // rope_theta becomes sliding (10K), global_rope_theta gets original (1M).
+                // rope_partial_ratio stays unchanged (sliding partial = 1.0 default).
+                (
+                    10_000.0_f32,                                   // sliding theta
+                    Some(rope_theta),                               // global theta = original freq_base
+                    rope_partial_ratio,                             // sliding partial (None→1.0 default)
+                )
+            } else {
+                (rope_theta, global_rope_theta, rope_partial_ratio)
+            }
+        };
 
         let base_derived = derived.clone();
 
@@ -467,6 +519,7 @@ impl ModelConfig {
             audio_config: None,
             multimodal_token_ids: None,
             final_logit_softcapping,
+            feed_forward_lengths,
             use_double_wide_mlp: None,
             add_special_tokens: None, // GGUF has no add_special_tokens concept, default true downstream
         };
@@ -875,6 +928,7 @@ impl ModelConfig {
             audio_config,
             multimodal_token_ids,
             final_logit_softcapping: find_f32(value, &["final_logit_softcapping"]),
+            feed_forward_lengths: None, // JSON config path doesn't expose per-layer FFN sizes
             use_double_wide_mlp: find_bool(value, &["use_double_wide_mlp"]),
             add_special_tokens: find_bool(value, &["add_bos_token", "add_special_tokens"]),
         })

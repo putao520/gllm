@@ -871,6 +871,7 @@ mod tests {
             expert_intermediate_size: 0,
             global_rope_theta: 0.0,
             rope_partial_ratio: 1.0,
+            rope_partial_ratio_global: 1.0,
             attention_pattern: vec![],
             sliding_window: 0,
             num_kv_shared_layers: 0,

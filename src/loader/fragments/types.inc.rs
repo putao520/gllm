@@ -246,6 +246,12 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["embeddings", "layer_norm"],         TensorRole::EmbedNorm,         true),
     (&["rope"],                             TensorRole::Rope,              true),
 
+    // PLE / AltUp global tensors (Gemma 4 E2B/E4B GGUF names)
+    (&["per_layer_token_embd"],             TensorRole::PerLayerEmbedding, true),
+    (&["per_layer_model_proj"],             TensorRole::PerLayerModelProj, true),
+    (&["per_layer_proj_norm"],              TensorRole::PerLayerProjNorm,  true),
+    (&["output_scale"],                     TensorRole::OutputScale,       true),
+
     // ── Per-layer tensors (is_global = false) ──
     // Sorted longest-first for unambiguous matching.
 
@@ -297,6 +303,10 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
     (&["post_feedforward_layernorm"],       TensorRole::PostAttnNorm,      false),
     (&["attn_norm"],                        TensorRole::InputNorm,         false),
     (&["ffn_norm"],                         TensorRole::PostAttnNorm,      false),
+    // Gemma 4 sandwich norms (GGUF names)
+    (&["post_attention_norm"],              TensorRole::PostAttentionSandwichNorm, false),
+    (&["post_ffw_norm"],                    TensorRole::PostFfwSandwichNorm,       false),
+    (&["post_norm"],                        TensorRole::PostLayerNorm,             false),
     (&["layer_norm1"],                      TensorRole::InputNorm,         false),
     (&["layer_norm2"],                      TensorRole::PostAttnNorm,      false),
     (&["ln_1"],                             TensorRole::InputNorm,         false),
@@ -328,6 +338,11 @@ const SUFFIX_PATTERNS: &[(&[&str], TensorRole, bool)] = &[
 
     // Audio/Vision special
     (&["conv_module", "depthwise_conv"],    TensorRole::DepthwiseConv,     false),
+
+    // PLE / AltUp (Gemma 4 E2B/E4B GGUF names)
+    (&["inp_gate"],                         TensorRole::PerLayerGate,      false),
+    (&["proj"],                             TensorRole::PerLayerProj,      false),
+    (&["layer_output_scale"],               TensorRole::LayerOutputScale,  false),
 ];
 
 /// Matches a tensor name to a role and optional layer index.

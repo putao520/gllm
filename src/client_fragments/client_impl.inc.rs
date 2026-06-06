@@ -1095,7 +1095,6 @@ impl Client {
             })?;
             scores.push(val);
         }
-
         let mut results = scores
             .into_iter()
             .enumerate()
@@ -1229,7 +1228,7 @@ impl Client {
         gllm_kernels::compiler::planner::with_execution_plan(plan, || {
             let mut executor = reranker.backend.executor_mut();
             let mut scores = Vec::with_capacity(documents.len());
-            for doc in documents {
+            for doc in documents.iter() {
                 let score_vec = executor.rerank_pair(query, doc).map_err(|e| {
                     ClientError::RuntimeError(format!("pipeline rerank_pair error: {}", e))
                 })?;
@@ -1240,6 +1239,7 @@ impl Client {
                 })?;
                 scores.push(val);
             }
+            eprintln!("[RERANK-DEBUG] all_scores={:?}", scores);
             Ok(scores)
         })
     }

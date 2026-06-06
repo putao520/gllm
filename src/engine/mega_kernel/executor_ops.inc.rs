@@ -256,21 +256,20 @@ impl MegaKernelExecutor {
             )
         };
 
-        // The activation buffer is at the beginning of the scratchpad.
-        // BufferAllocation places intermediate tensors sequentially from offset 0.
-        // For EncodeToLayer, the final hidden state is the last activation buffer content.
+        // The graph output tensor (MeanPool/classifier result) is redirected to the Output region
+        // at scratchpad + logits_scratch_offset (same mechanism as lm_head logits for decoder).
         let mut output = vec![0.0f32; output_elems];
+        let offset = mega.logits_scratch_offset;
         let copy_bytes = output_elems * 4;
-        if copy_bytes <= scratchpad.len() {
+        if offset + copy_bytes <= scratchpad.len() {
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    scratchpad.as_ptr() as *const f32,
+                    scratchpad[offset..].as_ptr() as *const f32,
                     output.as_mut_ptr(),
                     output_elems,
                 );
             }
         }
-
         Ok(output)
     }
 
@@ -618,22 +617,12 @@ impl MegaKernelExecutor {
 
     /// Returns the expected output element count for embedding inference.
     ///
-    /// - Decoder path (mega_compiled): seq_len × hidden_size (raw hidden states)
-    /// - Encoder path (forward_compiled): hidden_size (after MeanPool in JIT graph)
-    pub fn output_elems_for_embed(&self, seq_len: usize, hidden_size: usize) -> usize {
-        if self.mega_compiled.is_some() {
-            seq_len * hidden_size
-        } else if let Some(ref fw) = self.forward_compiled {
-            // Use actual JIT-compiled output size
-            fw.output_bytes / 4
-        } else {
-            hidden_size
-        }
-    }
-
-    /// Returns true if this executor has a forward-only compiled layer (encoder path).
-    pub fn has_forward_compiled(&self) -> bool {
-        self.forward_compiled.is_some()
+    /// SPEC/39: unified path — all models use mega_compiled.
+    pub fn output_elems_for_embed(&self, _seq_len: usize, hidden_size: usize) -> usize {
+        // Always return hidden_size: the MeanPool output is a single pooled vector
+        // of shape [hidden], regardless of seq_len. The buffer allocator reuses
+        // the activation slot for the MeanPool result.
+        hidden_size
     }
 
     /// Returns the MTP depth (0 = MTP disabled, >0 = candidate tokens per decode step).
@@ -677,35 +666,20 @@ impl MegaKernelExecutor {
 
     /// Returns the weight blob for GPU upload.
     pub fn weight_blob(&self) -> Option<&[u8]> {
-        if let Some(ref mega) = self.mega_compiled {
-            Some(&mega.weight_blob)
-        } else if let Some(ref fw) = self.forward_compiled {
-            Some(&fw.weight_blob)
-        } else {
-            None
-        }
+        self.mega_compiled.as_ref().map(|m| m.weight_blob.as_slice())
     }
 
     /// Returns the GPU PTX/HIP code if available.
     pub fn gpu_code(&self) -> Option<&[u8]> {
-        if let Some(ref mega) = self.mega_compiled {
-            mega.gpu_code.as_deref()
-        } else if let Some(ref fw) = self.forward_compiled {
-            fw.gpu_code.as_deref()
-        } else {
-            None
-        }
+        self.mega_compiled.as_ref().and_then(|m| m.gpu_code.as_deref())
     }
 
     /// Returns total scratchpad bytes needed.
     pub fn scratchpad_bytes(&self) -> usize {
-        if let Some(ref mega) = self.mega_compiled {
-            mega.scratchpad_base_bytes
-        } else if let Some(ref fw) = self.forward_compiled {
-            fw.total_scratchpad_bytes
-        } else {
-            0
-        }
+        self.mega_compiled
+            .as_ref()
+            .map(|m| m.scratchpad_base_bytes)
+            .unwrap_or(0)
     }
 
     /// Layer 6: 将 JIT source map 写入文本文件（供 DAP 调试器使用）。
@@ -840,13 +814,6 @@ impl MegaKernelExecutor {
     pub fn set_decoder_gpu_code(&mut self, code: Vec<u8>) {
         if let Some(ref mut mega) = self.mega_compiled {
             mega.gpu_code = Some(code);
-        }
-    }
-
-    /// Store GPU forward-only PTX/HIP code for encoder path.
-    pub fn set_forward_gpu_code(&mut self, code: Vec<u8>) {
-        if let Some(ref mut fw) = self.forward_compiled {
-            fw.gpu_code = Some(code);
         }
     }
 

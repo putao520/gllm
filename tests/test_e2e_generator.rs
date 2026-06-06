@@ -716,7 +716,7 @@ fn e2e_generator_phi4_partial_rope() {
 fn e2e_generator_gemma4_qknorm() {
     install_segv_handler();
     let _ = env_logger::builder().is_test(true).try_init();
-    const GGUF_PATH: &str = "/tmp/gemma4_e2b/gemma-4-E2B-it-Q3_K_S.gguf";
+    const GGUF_PATH: &str = "/tmp/gemma4_e2b/gemma-4-E2B-it-Q8_0.gguf";
     const HF_MODEL: &str = "google/gemma-4-E2B";
     let model = if std::path::Path::new(GGUF_PATH).exists() {
         GGUF_PATH
@@ -734,6 +734,7 @@ fn e2e_generator_gemma4_qknorm() {
         .expect("Generation failed");
 
     let text = response.text.trim();
+    eprintln!("[GEMMA4-OUTPUT] text={:?}", text);
 
     // 反退化检查
     assert_generation_sane(text, "gemma4_qknorm");

@@ -40,6 +40,9 @@ pub struct ModelGeometry {
     /// Global attention 层的 RoPE partial 旋转比例 (Gemma 4: 0.25 = p-RoPE)。
     /// 1.0 表示全维度旋转 (标准 RoPE)。
     pub rope_partial_ratio: f32,
+    /// Global attention 层的 RoPE partial 旋转比例 (Gemma 4: 0.25)。
+    /// 仅当 global_rope_theta > 0 时有效。sliding 层使用 rope_partial_ratio。
+    pub rope_partial_ratio_global: f32,
 
     // ── Gemma 4: Per-layer attention pattern ──
     /// 每层注意力类型: 0=sliding-window, 1=global。
@@ -129,6 +132,8 @@ impl ModelGeometry {
             rope_interleaved: config.rope_interleaved,
             global_rope_theta: config.global_rope_theta.unwrap_or(0.0) as f64,
             rope_partial_ratio: config.rope_partial_ratio.unwrap_or(1.0),
+            // Global partial: 0.25 when dual-RoPE is active (Gemma 4 p-RoPE), else 1.0
+            rope_partial_ratio_global: if config.global_rope_theta.unwrap_or(0.0) > 0.0 { 0.25 } else { 1.0 },
             attention_pattern: config.attention_pattern.clone().unwrap_or_default(),
             sliding_window: config.sliding_window.unwrap_or(0),
             num_kv_shared_layers: config.num_kv_shared_layers.unwrap_or(0),
@@ -431,4 +436,9 @@ pub struct ModelConfig {
     /// From config.json `add_bos_token` or `add_special_tokens`.
     /// Defaults to `true` when not specified.
     pub add_special_tokens: Option<bool>,
+
+    /// Per-layer FFN intermediate sizes from GGUF `gemma4.feed_forward_length`.
+    /// When Some with >1 distinct values, indicates heterogeneous layer structure
+    /// (e.g., Gemma 4 E2B: layers 0-14 = 6144, layers 15-34 = 12288).
+    pub feed_forward_lengths: Option<Vec<usize>>,
 }

@@ -4,10 +4,8 @@
 /// 编译在模型加载时完成，推理时零 Rust 开销。
 #[allow(dead_code)]
 pub struct MegaKernelExecutor {
-    /// Decoder mega-kernel 编译产物 (generate loop 路径)
+    /// Mega-kernel 编译产物 (唯一路径 — SPEC/39 统一架构)
     mega_compiled: Option<MegaKernelCompiled>,
-    /// Forward-only 编译产物 (encoder 路径: embedding / rerank / classify)
-    forward_compiled: Option<ForwardCompiled>,
     /// 模型配置
     num_layers: usize,
     hidden_size: usize,
@@ -74,6 +72,7 @@ impl MegaKernelExecutor {
         // Clone graph for GPU compilation (CPU compiler takes ownership).
         // Also save layer_loop_config for weight packing (needed even without GPU).
         let layer_loop_cfg = graph.layer_loop_config.clone();
+        let hetero_loop_cfg = graph.hetero_layer_loop_config.clone();
         let graph_for_gpu = if gpu_sm_version.is_some() {
             Some(graph.clone())
         } else {
@@ -92,7 +91,21 @@ impl MegaKernelExecutor {
             .collect();
         // Expand total_weight_bytes for layer loop: the layout only contains 1 copy of
         // per-layer weights (L0.*), but packing replicates to num_layers copies.
-        let total_weight_bytes = if let Some(ref llcfg) = layer_loop_cfg {
+        let total_weight_bytes = if let Some(ref hcfg) = hetero_loop_cfg {
+            // Hetero mode: total = base + sum of all segment strides + post-layer globals
+            let templates_blob = hcfg.sliding_small_stride + hcfg.full_small_stride
+                + hcfg.sliding_large_stride + hcfg.full_large_stride;
+            let small_segs = hcfg.large_ffn_start_segment;
+            let large_segs = hcfg.num_segments - small_segs;
+            let total_layers_blob = small_segs * hcfg.small_segment_stride
+                + large_segs * hcfg.large_segment_stride;
+            let graph_globals_start = hcfg.layer_blob_base_offset + templates_blob;
+            let globals_size = weight_layout.total_bytes.saturating_sub(graph_globals_start);
+            let total = hcfg.layer_blob_base_offset + total_layers_blob + globals_size;
+            eprintln!("[BLOB-LAYOUT] HETERO: num_segments={} small_segs={} large_segs={} total_layers_blob={}(0x{:x}) total={}(0x{:x})",
+                hcfg.num_segments, small_segs, large_segs, total_layers_blob, total_layers_blob, total, total);
+            total
+        } else if let Some(ref llcfg) = layer_loop_cfg {
             let num_layers = llcfg.num_layers;
             let stride = llcfg.weight_stride;
             let base = llcfg.layer_blob_base_offset;
@@ -156,6 +169,7 @@ impl MegaKernelExecutor {
             raw_floats,
             name_map,
             layer_loop_cfg.as_ref(),
+            hetero_loop_cfg.as_ref(),
             geometry.num_layers,
         );
 
@@ -338,7 +352,6 @@ impl MegaKernelExecutor {
 
         Ok(Self {
             mega_compiled: Some(mega_compiled),
-            forward_compiled: None,
             num_layers: geometry.num_layers,
             hidden_size: geometry.hidden,
             vocab_size: geometry.vocab_size,
@@ -385,254 +398,12 @@ impl MegaKernelExecutor {
         })
     }
 
-    /// 从 auto-derived CompilerGraph 编译 forward-only encoder mega-kernel。
-    ///
-    /// Graph 由 `auto_graph::build_compiler_graph()` 从 tensor names + shapes 生成。
-    pub fn compile_forward_from_graph(
-        graph: gllm_kernels::compiler::graph::CompilerGraph,
-        geometry: &crate::model_config::ModelGeometry,
-        weight_ptrs: &std::collections::HashMap<String, *const u8>,
-        weight_sizes: &std::collections::HashMap<String, usize>,
-        raw_floats: &std::collections::HashMap<String, crate::loader::RawFloatTensor>,
-        name_map: &crate::loader::name_map::TensorNameMap,
-        gpu_sm_version: Option<u32>,
-    ) -> Result<Self, MegaKernelError> {
-        let weight_layout = graph.weight_layout();
-
-        // Pre-resolve named offsets for packing.
-        let named_offsets: Vec<(String, usize)> = weight_layout
-            .offsets
-            .iter()
-            .filter_map(|&(tid, offset)| {
-                graph
-                    .tensors
-                    .get(tid.0 as usize)
-                    .map(|t| (t.name.clone(), offset))
-            })
-            .collect();
-        // Expand total_weight_bytes for layer loop (same as mega-kernel path).
-        let layer_loop_cfg = graph.layer_loop_config.clone();
-        let (total_weight_bytes, layer_cfg_ref, num_layers) = if let Some(ref llcfg) = layer_loop_cfg {
-            let num_layers = llcfg.num_layers;
-            let stride = llcfg.weight_stride;
-            let base = llcfg.layer_blob_base_offset;
-            let globals_start = base + stride;
-            let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
-            eprintln!("[FWD-BLOB] num_layers={} stride={} base={} total={}",
-                num_layers, stride, base, base + num_layers * stride + globals_size);
-            (base + num_layers * stride + globals_size, layer_loop_cfg.as_ref(), num_layers)
-        } else {
-            (weight_layout.total_bytes, None, 0)
-        };
-
-        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let exec_code = compiler
-            .compile_graph(&graph)
-            .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
-
-        let entry_fn = unsafe { exec_code.entry_point() };
-        let total_scratchpad_bytes = exec_code.scratchpad_bytes;
-
-        let max_seq = graph.max_seq_len;
-        let output_bytes: usize = graph
-            .outputs
-            .iter()
-            .map(|&tid| {
-                let t = graph
-                    .tensor(tid)
-                    .expect("output_bytes: graph output tensor must exist");
-                let numel = graph.tensor_numel_for_alloc(tid, max_seq).unwrap_or(0);
-                numel * t.dtype.size_bytes()
-            })
-            .sum();
-
-        if std::env::var("GLLM_DUMP_JIT_CODE").is_ok() {
-            let dump_path = "/tmp/jit_code_forward_auto.bin";
-            let _ = std::fs::write(dump_path, exec_code.code_bytes());
-        }
-
-        let weight_blob = pack_weights_from_graph(
-            &named_offsets,
-            total_weight_bytes,
-            weight_ptrs,
-            weight_sizes,
-            raw_floats,
-            name_map,
-            layer_cfg_ref,
-            num_layers,
-        );
-        #[cfg(any(feature = "cuda", feature = "hip"))]
-        let gpu_code = match gpu_sm_version {
-            Some(sm) => match compiler.compile_graph_to_gpu(&graph, sm) {
-                Ok(gpu_output) => {
-                    log::info!(
-                        "[mega] GPU forward PTX compiled: {} bytes, {} scratchpad",
-                        gpu_output.gpu_code.len(),
-                        gpu_output.total_scratchpad_bytes,
-                    );
-                    Some(gpu_output.gpu_code)
-                }
-                Err(e) => {
-                    log::warn!("[mega] GPU forward compilation failed: {e}");
-                    None
-                }
-            },
-            None => None,
-        };
-        #[cfg(not(any(feature = "cuda", feature = "hip")))]
-        let gpu_code = {
-            let _ = gpu_sm_version;
-            None
-        };
-
-        let forward_compiled = ForwardCompiled {
-            exec_code,
-            entry_fn,
-            weight_blob,
-            weight_layout,
-            total_scratchpad_bytes,
-            output_bytes,
-            gpu_code,
-        };
-
-        Ok(Self {
-            mega_compiled: None,
-            forward_compiled: Some(forward_compiled),
-            num_layers: geometry.num_layers,
-            hidden_size: geometry.hidden_size,
-            vocab_size: geometry.vocab_size,
-            dtype: geometry.compute_dtype,
-            eos_token_id: 0,
-            variant_registry: crate::jit::variant_registry::VariantRegistry::new(),
-            weight_page_inject: WeightPageJitConfig::default(),
-            decompress_inject: KvPageDecompressConfig::default(),
-            weight_page_table: std::sync::Mutex::new(None),
-            fault_handler: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// 执行 forward-only 推理 (embedding / rerank / classify)。
-    ///
-    /// ARCH-RUST-IS-CODEGEN: 一次 CALL 完成。
-    /// CompiledLayerFn ABI (10 参数):
-    ///   input_ptr → token IDs, weight_ptr → weight blob,
-    ///   output → 输出缓冲, scratchpad → 临时空间。
-    pub fn execute_forward(
-        &self,
-        input_ids: &[u32],
-        output_elems: usize,
-    ) -> Result<Vec<f32>, MegaKernelError> {
-        let fw = self
-            .forward_compiled
-            .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a forward-compiled model".into()))?;
-
-        let seq_len = input_ids.len();
-        let mut scratchpad = vec![0u8; fw.total_scratchpad_bytes];
-        let jit_output_elems = fw.output_bytes / 4;
-        let actual_output_elems = output_elems.max(jit_output_elems);
-        let mut output = vec![0.0f32; actual_output_elems];
-
-        eprintln!("[MK-RUN] About to call JIT: seq_len={} output_elems={} scratch_bytes={}",
-            seq_len, actual_output_elems, scratchpad.len());
-        unsafe {
-            (fw.entry_fn)(
-                input_ids.as_ptr() as *const u8,
-                fw.weight_blob.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                seq_len,
-                output.as_mut_ptr() as *mut u8,
-                scratchpad.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-        }
-        eprintln!("[MK-RUN] JIT returned successfully");
-        // MeanPool post-processing: JIT emits scale=1.0 (sum), divide by seq_len here.
-        if output_elems > 0 && seq_len > 0 {
-            let inv_n = 1.0f32 / seq_len as f32;
-            eprintln!("[POST-MEANPOOL] dividing by seq_len={} inv_n={:.6} output_elems={}", seq_len, inv_n, output_elems);
-            for v in output.iter_mut().take(output_elems) {
-                *v *= inv_n;
-            }
-        } else {
-            eprintln!("[POST-MEANPOOL] SKIPPED: output_elems={} seq_len={}", output_elems, seq_len);
-        }
-
-        let nan_count = output.iter().filter(|&&x| x.is_nan()).count();
-        // Debug: output logits statistics
-        {
-            let non_zero: Vec<f32> = output.iter().filter(|&&x| x != 0.0).cloned().collect();
-            let max_val = output.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let min_val = output.iter().cloned().fold(f32::INFINITY, f32::min);
-            let sum: f32 = output.iter().map(|&x| if x.is_nan() { 0.0 } else { x }).sum();
-            eprintln!("[MK-RUN] output: len={} nan={} non_zero={} min={:.4} max={:.4} sum={:.4}",
-                output.len(), nan_count, non_zero.len(), min_val, max_val, sum);
-            // Show top-5 argmax
-            let mut indexed: Vec<(usize, f32)> = output.iter().cloned().enumerate().filter(|(_, v)| !v.is_nan()).collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            for (idx, val) in indexed.iter().take(5) {
-                eprintln!("  token[{}] = {:.4}", idx, val);
-            }
-        }
-        output.truncate(output_elems);
-
-        Ok(output)
-    }
-
-    /// Diagnostic: execute forward and return the scratchpad + output for encoder models.
-    /// Useful for comparing intermediate activations with golden per-layer data.
-    pub fn diagnostic_forward_scratchpad(
-        &self,
-        input_ids: &[u32],
-    ) -> Result<(Vec<f32>, Vec<u8>), MegaKernelError> {
-        let fw = self
-            .forward_compiled
-            .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a forward-compiled model".into()))?;
-
-        let seq_len = input_ids.len();
-        let mut scratchpad = vec![0u8; fw.total_scratchpad_bytes];
-        let jit_output_elems = fw.output_bytes / 4;
-        let mut output = vec![0.0f32; jit_output_elems];
-
-        unsafe {
-            (fw.entry_fn)(
-                input_ids.as_ptr() as *const u8,
-                fw.weight_blob.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                seq_len,
-                output.as_mut_ptr() as *mut u8,
-                scratchpad.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-        }
-        // Apply MeanPool scaling (same as execute_forward)
-        if jit_output_elems > 0 && seq_len > 0 {
-            let inv_n = 1.0f32 / seq_len as f32;
-            for v in output.iter_mut().take(jit_output_elems) {
-                *v *= inv_n;
-            }
-        }
-        Ok((output, scratchpad))
-    }
-
     /// Returns total scratchpad bytes needed for execution.
     pub fn total_scratchpad_bytes(&self) -> usize {
-        {
-            if let Some(ref mega) = self.mega_compiled {
-                return mega.scratchpad_base_bytes;
-            }
-            if let Some(ref fw) = self.forward_compiled {
-                return fw.total_scratchpad_bytes;
-            }
-        }
-        0
+        self.mega_compiled
+            .as_ref()
+            .map(|m| m.scratchpad_base_bytes)
+            .unwrap_or(0)
     }
 
     /// Set weight page table and fault handler for explicit fault recovery (REQ-WP-009).

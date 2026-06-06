@@ -597,11 +597,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ExecutorError::Backend(BackendError::Other("mega-kernel not compiled".into()))
         })?;
         let output_elems = mega.output_elems_for_embed(tokens.len(), self.model_ctx.geometry.hidden_size);
-        if mega.has_mega_compiled() {
-            mega.execute_encode(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        } else {
-            mega.execute_forward(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        }
+        mega.execute_encode(&tokens, output_elems)
+            .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
     }
 
     pub fn rerank(&mut self, input: &str) -> ExecutorResult<Vec<f32>> {
@@ -611,11 +608,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ExecutorError::Backend(BackendError::Other("mega-kernel not compiled".into()))
         })?;
         let output_elems = mega.output_elems_for_embed(tokens.len(), self.model_ctx.geometry.hidden_size);
-        if mega.has_mega_compiled() {
-            mega.execute_encode(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        } else {
-            mega.execute_forward(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        }
+        mega.execute_encode(&tokens, output_elems)
+            .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
     }
 
     pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
@@ -638,12 +632,9 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
                 ExecutorError::Compilation("decoder reranker: no_token_id not resolved".into())
             })?;
             mega.execute_rerank(&tokens, yes_id, no_id).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        } else if mega.has_mega_compiled() {
-            let output_elems = mega.output_elems_for_embed(tokens.len(), self.model_ctx.geometry.hidden_size);
-            mega.execute_encode(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
         } else {
             let output_elems = mega.output_elems_for_embed(tokens.len(), self.model_ctx.geometry.hidden_size);
-            mega.execute_forward(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
+            mega.execute_encode(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
         }
     }
 
@@ -671,11 +662,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             ExecutorError::Backend(BackendError::Other("mega-kernel not compiled".into()))
         })?;
         let output_elems = tokens.len() * 2;
-        if mega.has_mega_compiled() {
-            mega.execute_encode(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        } else {
-            mega.execute_forward(&tokens, output_elems).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
-        }
+        mega.execute_encode(&tokens, output_elems)
+            .map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
     }
 
     pub fn score_tokens_for_prompt(

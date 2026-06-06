@@ -369,25 +369,3 @@ impl MegaKernelCompiled {
         num_layers * self.kv_layer_stride()
     }
 }
-
-/// Forward-only 编译产物 (encoder 路径: embedding / rerank / classify)。
-///
-/// 通过 `InferenceCompiler::compile_graph` 编译任意 CompilerGraph，
-/// 推理时通过 `CompiledLayerFn` (10 参数通用 ABI) 单次 CALL 完成。
-#[allow(dead_code)]
-struct ForwardCompiled {
-    /// JIT 编译产物（通用 forward-pass 机器码）
-    exec_code: gllm_kernels::compiler::CompiledLayer,
-    /// CompiledLayerFn 函数指针（10 参数通用 ABI）
-    entry_fn: gllm_kernels::compiler::CompiledLayerFn,
-    /// 预打包的连续权重 blob（按 graph.weight_layout() 排列）
-    weight_blob: Vec<u8>,
-    /// graph.weight_layout() 记录的权重布局
-    weight_layout: gllm_kernels::compiler::graph::WeightLayout,
-    /// scratchpad 大小
-    total_scratchpad_bytes: usize,
-    /// Output buffer 所需字节数 (基于 graph outputs shape + graph.max_seq_len)
-    output_bytes: usize,
-    /// GPU forward-only PTX/HIP 代码（可选）
-    gpu_code: Option<Vec<u8>>,
-}

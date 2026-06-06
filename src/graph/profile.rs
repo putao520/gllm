@@ -424,6 +424,7 @@ mod tests {
             final_logit_softcapping: None,
             use_double_wide_mlp: None,
             add_special_tokens: None,
+            feed_forward_lengths: None,
         }
     }
 
