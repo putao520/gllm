@@ -12,7 +12,7 @@
 //! **零妥协铁律**:
 //! - Mel preprocessing 是输入信号转换 (音频 → 特征),不走 JIT。
 //! - 所有 Conformer block 计算 (LayerNorm / GEMM / SiLU / DepthwiseConv1D /
-//!   MHA / Residual) **必须** 经过 `InferenceCompiler::compile_graph`。
+//!   MHA / Residual) **必须** 经过 `InferenceCompiler::compile_mega_kernel_from_graph`。
 //! - 绝无 `scalar_*` fallback, 绝无 `emit_nop`,绝无硬编码 workaround。
 //!
 //! 权重来源由 `AudioTensorLookup` 注入 (仿 `VisionTensorLookup`)。
@@ -27,7 +27,10 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
-use gllm_kernels::compiler::{CompilerGraph, InferenceCompiler, OpKind, SymDim};
+use gllm_kernels::compiler::{
+    CompilerGraph, InferenceCompiler, BusinessConfig, OpKind, OutputMode, SymDim,
+};
+use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
 use gllm_kernels::types::DType;
 
 use crate::compat::multimodal::{MediaKind, MultimodalEncoded, MultimodalEncoder, EncoderMedia};

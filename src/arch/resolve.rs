@@ -2420,7 +2420,7 @@ mod tests {
             ],
         };
         let result = resolve_from_provider(&provider, None);
-        // lm_head does not match Embedding role → vocab_size stays 0
+        // OutputHead does not match Embedding role → vocab_size stays 0
         assert!(result.is_err());
     }
 
@@ -9425,7 +9425,7 @@ mod tests {
         };
         // Act
         let result = resolve_from_provider(&provider, None);
-        // Assert: vocab_size stays 0 because lm_head is not Embedding role.
+        // Assert: vocab_size stays 0 because OutputHead is not Embedding role.
         match result.unwrap_err() {
             ResolveError::MissingConfig(key) => {
                 assert_eq!(key, "num_hidden_layers",

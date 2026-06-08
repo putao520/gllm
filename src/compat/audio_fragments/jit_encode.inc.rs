@@ -455,9 +455,21 @@ pub fn audio_encode(
 
     // ── 2. Mel projection GEMM ──
     let proj_graph = build_mel_projection_graph(num_frames, config);
+    let proj_config = CompileConfig {
+        max_seq_len: num_frames,
+        business_config: BusinessConfig {
+            output_modes: vec![OutputMode::EncodeToLayer {
+                anchor_layer: 0,
+                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+            }],
+            ..BusinessConfig::default()
+        },
+        hetero: None,
+    };
     let proj_compiled = compiler
-        .compile_graph(&proj_graph)
-        .map_err(|e| BackendError::Other(format!("audio_encode: mel projection compile: {e}")))?;
+        .compile_mega_kernel_from_graph(proj_graph, &proj_config, None)
+        .map_err(|e| BackendError::Other(format!("audio_encode: mel projection compile: {e}")))?
+        .layer_code;
 
     let proj_w = weights
         .get_audio_tensor("audio_tower.feature_projection.weight")
@@ -478,12 +490,9 @@ pub fn audio_encode(
     let mut hidden_buf = vec![0.0f32; num_frames * hidden];
     let mut scratch = vec![0u8; proj_compiled.scratchpad_bytes.max(65536)];
     unsafe {
-        proj_compiled.execute(
+        proj_compiled.execute_as_mega_kernel(
             mel_flat.as_ptr() as *const u8,
             proj_w.as_ptr() as *const u8,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
             1,
             num_frames,
             hidden_buf.as_mut_ptr() as *mut u8,
@@ -500,9 +509,21 @@ pub fn audio_encode(
     // 同一 seq_len 下所有 block 的 graph 结构等价,编译一次复用 num_layers 次
 
     let block_graph = build_conformer_block_graph(num_frames, config);
+    let block_config = CompileConfig {
+        max_seq_len: num_frames,
+        business_config: BusinessConfig {
+            output_modes: vec![OutputMode::EncodeToLayer {
+                anchor_layer: 0,
+                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+            }],
+            ..BusinessConfig::default()
+        },
+        hetero: None,
+    };
     let block_compiled = compiler
-        .compile_graph(&block_graph)
-        .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?;
+        .compile_mega_kernel_from_graph(block_graph, &block_config, None)
+        .map_err(|e| BackendError::Other(format!("audio_encode: conformer block compile: {e}")))?
+        .layer_code;
 
     let mut scratch_block = vec![0u8; block_compiled.scratchpad_bytes.max(65536)];
     let mut out_buf = vec![0.0f32; num_frames * hidden];
@@ -511,12 +532,9 @@ pub fn audio_encode(
         let weights_packed = pack_layer_weights(layer_idx, weights)?;
 
         unsafe {
-            block_compiled.execute(
+            block_compiled.execute_as_mega_kernel(
                 hidden_buf.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 num_frames,
                 out_buf.as_mut_ptr() as *mut u8,
@@ -534,9 +552,21 @@ pub fn audio_encode(
 
     // ── 4. Encoder final LayerNorm ──
     let final_graph = build_final_norm_graph(num_frames, config);
+    let final_config = CompileConfig {
+        max_seq_len: num_frames,
+        business_config: BusinessConfig {
+            output_modes: vec![OutputMode::EncodeToLayer {
+                anchor_layer: 0,
+                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+            }],
+            ..BusinessConfig::default()
+        },
+        hetero: None,
+    };
     let final_compiled = compiler
-        .compile_graph(&final_graph)
-        .map_err(|e| BackendError::Other(format!("audio_encode: final norm compile: {e}")))?;
+        .compile_mega_kernel_from_graph(final_graph, &final_config, None)
+        .map_err(|e| BackendError::Other(format!("audio_encode: final norm compile: {e}")))?
+        .layer_code;
 
     let final_w = weights
         .get_audio_tensor("audio_tower.encoder.final_norm.weight")
@@ -566,12 +596,9 @@ pub fn audio_encode(
 
     let mut scratch_final = vec![0u8; final_compiled.scratchpad_bytes.max(65536)];
     unsafe {
-        final_compiled.execute(
+        final_compiled.execute_as_mega_kernel(
             hidden_buf.as_ptr() as *const u8,
             final_weights.as_ptr() as *const u8,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
             1,
             num_frames,
             out_buf.as_mut_ptr() as *mut u8,

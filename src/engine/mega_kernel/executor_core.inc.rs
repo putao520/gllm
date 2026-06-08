@@ -32,7 +32,7 @@ unsafe impl Send for MegaKernelExecutor {}
 unsafe impl Sync for MegaKernelExecutor {}
 
 impl MegaKernelExecutor {
-    /// 从 auto-derived CompilerGraph 编译 decoder mega-kernel。
+    /// 从 auto-derived CompilerGraph 编译 mega-kernel（含 Argmax 或无 Argmax 的图均适用）。
     ///
     /// Graph 由 `auto_graph::build_compiler_graph()` 从 tensor names + shapes 生成。
     /// 所有模型 geometry 从 graph 自动派生，外部只需传不可派生的字段。
@@ -44,7 +44,7 @@ impl MegaKernelExecutor {
         name_map: &crate::loader::name_map::TensorNameMap,
         max_seq_len: usize,
         eos_token_id: u32,
-        business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
+        business_config: gllm_kernels::compiler::BusinessConfig,
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
         gpu_sm_version: Option<u32>,
     ) -> Result<Self, MegaKernelError> {
@@ -54,16 +54,19 @@ impl MegaKernelExecutor {
                 .map_err(|e| MegaKernelError::Compilation(e.to_string()))?;
 
         // Build slim config with only non-derivable fields.
-        let mtp_depth = business_config.mtp_config.as_ref().map(|c| c.depth).unwrap_or(0);
-        let config = gllm_kernels::compiler::mega_kernel_abi::MegaKernelConfig {
+        // SPEC/39: mtp_config 已迁移到图拓扑（OpKind::MtpDraft），不再从 BusinessConfig 读取。
+        let mtp_depth = graph.ops.iter().find_map(|op| match &op.kind {
+            gllm_kernels::compiler::graph::OpKind::MtpDraft { depth, .. } => Some(*depth),
+            _ => None,
+        }).unwrap_or(0);
+        let config = gllm_kernels::compiler::mega_kernel_abi::CompileConfig {
             max_seq_len,
-            num_eos_tokens: 1,
             business_config,
             hetero: hetero_config.clone(),
         };
 
         let hetero_layout = hetero_config.as_ref().map(|hc| {
-            gllm_kernels::compiler::mega_kernel_abi::HeteroWeightLayout::from_geometry_and_config(
+            gllm_kernels::compiler::mega_kernel_abi::HeteroKernelWeightLayout::from_geometry_and_config(
                 &geometry, hc,
             )
         });
@@ -109,7 +112,7 @@ impl MegaKernelExecutor {
             let num_layers = llcfg.num_layers;
             let stride = llcfg.weight_stride;
             let base = llcfg.layer_blob_base_offset;
-            // Globals after layer area: final_norm, lm_head, etc.
+            // Globals after layer area: final_norm, logits-producer, etc.
             let globals_start = base + stride;
             let globals_size = weight_layout.total_bytes.saturating_sub(globals_start);
             eprintln!("[BLOB-LAYOUT] num_layers={} stride={}(0x{:x}) base_offset={}(0x{:x}) globals_start={}(0x{:x}) wl_total={}(0x{:x}) globals_size={}(0x{:x}) total_blob={}(0x{:x})",
@@ -135,6 +138,12 @@ impl MegaKernelExecutor {
         };
 
         let hetero_layout_for_kivi4 = hetero_layout.clone();
+        // SPEC/39: 从图拓扑推导 norm residual 约定，替代硬编码。
+        // Gemma 1/2/3: has_embedding_scale=true, has_qk_norm=false → (1+weight) residual
+        // Gemma 4+: has_qk_norm=true → standard RMSNorm, no residual
+        // All other models: no embedding_scale → no residual
+        let has_gemma_norm_residual = graph.embedding_scale.is_some()
+            && !graph.ops.iter().any(|op| matches!(op.kind, gllm_kernels::compiler::graph::OpKind::QkNorm { .. }));
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
         let output = compiler
             .compile_mega_kernel_from_graph(graph, &config, hetero_layout)
@@ -160,7 +169,7 @@ impl MegaKernelExecutor {
             None
         };
 
-        // Pack weights using pre-resolved named offsets — unified with encoder path.
+        // Pack weights using pre-resolved named offsets — unified with 无 Argmax 的图路径。
         let weight_blob = pack_weights_from_graph(
             &named_offsets,
             total_weight_bytes,
@@ -171,6 +180,7 @@ impl MegaKernelExecutor {
             layer_loop_cfg.as_ref(),
             hetero_loop_cfg.as_ref(),
             geometry.num_layers,
+            has_gemma_norm_residual,
         );
 
         // Verify Q4_0 embed data in packed blob at offset 0
@@ -208,12 +218,14 @@ impl MegaKernelExecutor {
 
         // Verify embed data in packed blob (first hidden F32 values = embed row 0)
         {
-            // Tied weight verify: lm_head is a global, packed at adjusted offset
-            let lm_head_graph_off = named_offsets.iter()
-                .find(|(n, _)| n == "lm_head")
+            // Tied weight verify: find the global (non-layer) output projection weight.
+            // SPEC/39: no string-based "lm_head" search — identify by being the only
+            // non-"L0." weight that is large enough to be an output projection.
+            let lm_goff = named_offsets.iter()
+                .find(|(n, off)| !n.starts_with("L0.") && !n.contains("embed") && !n.contains("final_norm") && *off > 0)
                 .map(|(_, off)| *off);
-            if let Some(lm_goff) = lm_head_graph_off {
-                // lm_head is a global weight packed at its graph offset — no layer
+            if let Some(lm_goff) = lm_goff {
+                // logits-producer is a global weight packed at its graph offset — no layer
                 // loop stride adjustment needed (that applies to per-layer weights only).
                 let lm_blob_off = lm_goff;
                 if lm_blob_off + 32 <= weight_blob.len() {
@@ -302,6 +314,41 @@ impl MegaKernelExecutor {
                 eprintln!("[PACK-VERIFY] L1.q_proj at offset {}: [{}]", l1_q_off, first_8.join(","));
             }
         }
+        // Verify norm weight values at actual hetero-computed offsets
+        {
+            if let Some(hcfg) = hetero_loop_cfg.as_ref() {
+                eprintln!("[NORM-WEIGHT-DIAG] blob_size={} layer_blob_base_offset={}", weight_blob.len(), hcfg.layer_blob_base_offset);
+            }
+            for &norm_name in &["L0.input_norm", "L0.q_norm", "L0.k_norm", "L0.post_attn_norm"] {
+                let norm_off = named_offsets.iter()
+                    .find(|(n, _)| n == &norm_name)
+                    .map(|(_, off)| *off);
+                if let Some(off) = norm_off {
+                    // Read from raw named_offsets offset first (template region)
+                    if off + 32 <= weight_blob.len() {
+                        let f32_vals = unsafe {
+                            std::slice::from_raw_parts(weight_blob[off..].as_ptr() as *const f32, 8)
+                        };
+                        let first_8: Vec<String> = f32_vals.iter().take(8).map(|v| format!("{:.6}", v)).collect();
+                        let mean: f32 = f32_vals.iter().sum::<f32>() / f32_vals.len() as f32;
+                        eprintln!("[NORM-WEIGHT-TEMPLATE] {} at template_off={}: [{}] mean={:.4}", norm_name, off, first_8.join(","), mean);
+                    }
+                    // Also try reading at hetero layer 0 absolute offset
+                    if let Some(hcfg) = hetero_loop_cfg.as_ref() {
+                        let type_base = hcfg.layer_blob_base_offset;
+                        let abs_off = type_base + off;
+                        if abs_off + 32 <= weight_blob.len() {
+                            let f32_vals = unsafe {
+                                std::slice::from_raw_parts(weight_blob[abs_off..].as_ptr() as *const f32, 8)
+                            };
+                            let first_8: Vec<String> = f32_vals.iter().take(8).map(|v| format!("{:.6}", v)).collect();
+                            let mean: f32 = f32_vals.iter().sum::<f32>() / f32_vals.len() as f32;
+                            eprintln!("[NORM-WEIGHT-HETERO] {} at base+off={}: [{}] mean={:.4}", norm_name, abs_off, first_8.join(","), mean);
+                        }
+                    }
+                }
+            }
+        }
 
         // Compile GPU PTX/HIP code if sm_version provided and GPU JIT backend available.
         #[cfg(any(feature = "cuda", feature = "hip"))]
@@ -341,7 +388,13 @@ impl MegaKernelExecutor {
             scratchpad_base_bytes: output.logits_scratch_offset,
             vocab_size: output.vocab_size,
             hidden: output.hidden,
-            elem_bytes: geometry.compute_dtype.size_bytes(),
+            elem_bytes: { let eb = geometry.compute_dtype.size_bytes();
+                eprintln!("[DIAG-EXEC-DTYPE] compute_dtype={:?} elem_bytes={} num_kv_heads={} head_dim={} kv_row_stride={}",
+                    geometry.compute_dtype, eb, geometry.num_kv_heads, geometry.head_dim,
+                    geometry.num_kv_heads * geometry.head_dim * eb);
+                eb
+            },
+
             gpu_code,
             source_map: output.source_map,
             num_kv_heads: geometry.num_kv_heads,
@@ -472,7 +525,7 @@ impl MegaKernelExecutor {
     ///
     /// ARCH-RUST-IS-CODEGEN: 一次 CALL 完成。
     /// JIT mega-kernel 内部执行完整的 generate loop:
-    ///   LoopBegin → embed → N 层 → lm_head → Argmax → StoreToken → CheckStopCondition → LoopEnd
+    ///   LoopBegin → embed → N 层 → logits-producer → Argmax → StoreToken → CheckStopCondition → LoopEnd
     /// Rust 只做：(1) 准备输入 (2) 预填 RoPE 表 (3) 一次 CALL (4) 读 output_tokens
     pub fn generate_single_sequence(
         &self,
@@ -532,7 +585,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let prompt_len = prompt_tokens.len();
         let max_total = prompt_len + max_new_tokens;
@@ -547,6 +600,15 @@ impl MegaKernelExecutor {
         let output_size = max_new_tokens * (1 + mtp_depth);
         let mut output_tokens = vec![0u32; output_size];
         let mut scratchpad = vec![0u8; mega.runtime_scratchpad_bytes(max_total)];
+        eprintln!("[SCRATCHPAD-DBG] max_total={} scratchpad_bytes={} buffer_layout.total={}",
+            max_total, scratchpad.len(), mega.buffer_layout.total_scratchpad_bytes);
+        eprintln!("[SCRATCHPAD-DBG] logits_off={} vocab={} hidden={} max_seq_len={}",
+            mega.logits_scratch_offset, mega.vocab_size, mega.hidden, mega.max_seq_len);
+        eprintln!("[SCRATCHPAD-DBG] activation_a_off={} activation_b_off={} activation_bytes={}",
+            mega.buffer_layout.activation_a_offset, mega.buffer_layout.activation_b_offset,
+            mega.buffer_layout.activation_bytes);
+        eprintln!("[SCRATCHPAD-DBG] scratchpad_ptr={:p} scratchpad_end={:p}",
+            scratchpad.as_ptr(), unsafe { scratchpad.as_ptr().add(scratchpad.len()) });
 
         // Pre-fill RoPE cos/sin table for all positions [0..max_total).
         if let Some(ref rc) = mega.rope_cache {
@@ -740,7 +802,75 @@ impl MegaKernelExecutor {
             self.eos_token_id,
             output_tokens.first().copied().unwrap_or(0),
         );
-
+        // DIAG: dump output tokens, logits at pos 0, activation buffers
+        {
+            let n_dump = 20.min(output_tokens.len());
+            eprintln!("[DIAG-OUTPUT] output_tokens[0..{}]: {:?}", n_dump, &output_tokens[..n_dump]);
+            eprintln!("[DIAG-INPUT] prompt_len={} input_ids={:?}", prompt_len, &input_ids[..prompt_len.min(20)]);
+            // Logits at pos 0 (after decode, this is the last decode step's logits)
+            let logits_off = mega.logits_scratch_offset;
+            let vocab = mega.vocab_size;
+            for &check_pos in &[0usize, prompt_len.saturating_sub(1)] {
+                let byte_off = logits_off + check_pos * vocab * 4;
+                if byte_off + vocab * 4 <= scratchpad.len() {
+                    let full = unsafe { std::slice::from_raw_parts(scratchpad[byte_off..].as_ptr() as *const f32, vocab) };
+                    let max_val = full.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let min_val = full.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let nan_n = full.iter().filter(|x| x.is_nan()).count();
+                    eprintln!("[DIAG-LOGITS] pos={} nan={} min={:.4} max={:.4} first8={:?}",
+                        check_pos, nan_n, min_val, max_val, &full[..8.min(vocab)]);
+                    if max_val > f32::NEG_INFINITY {
+                        let mut idx: Vec<(usize, f32)> = full.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+                        idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        eprintln!("[DIAG-TOP5] pos={} {:?}", check_pos, &idx[..5]);
+                    }
+                }
+            }
+            // Activation buffers at pos 0
+            let hidden = mega.hidden;
+            let row_bytes = hidden * 4;
+            for (label, off) in [("act_a", mega.buffer_layout.activation_a_offset), ("act_b", mega.buffer_layout.activation_b_offset)] {
+                if off + row_bytes <= scratchpad.len() {
+                    let v = unsafe { std::slice::from_raw_parts(scratchpad[off..].as_ptr() as *const f32, 8.min(hidden)) };
+                    eprintln!("[DIAG-ACT-POS0] {} {:?}", label, v);
+                }
+            }
+            // KV cache dump for layer 0 (K and V at positions 0 and prompt_len-1)
+            if !kv_cache.is_empty() {
+                let kv_ptr = kv_cache.as_ptr();
+                let kv_len = kv_cache.len();
+                let max_seq = mega.max_seq_len;
+                let kv_row_stride = mega.num_kv_heads * mega.head_dim * 4;
+                let kv_layer_stride = 2 * max_seq * kv_row_stride;
+                let v_offset_in_layer = max_seq * kv_row_stride;
+                for &pos in &[0usize, prompt_len.saturating_sub(1)] {
+                    let k_off = pos * kv_row_stride;
+                    let v_off = v_offset_in_layer + pos * kv_row_stride;
+                    let n = 8.min(kv_row_stride / 4);
+                    if k_off + n * 4 <= kv_len {
+                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off) as *const f32, n) };
+                        eprintln!("[DIAG-KV] layer=0 pos={} k={:?} all_zero={}", pos, &k_vals[..n], k_vals.iter().all(|&x| x == 0.0));
+                    }
+                    if v_off + n * 4 <= kv_len {
+                        let v_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(v_off) as *const f32, n) };
+                        eprintln!("[DIAG-KV] layer=0 pos={} v={:?} all_zero={}", pos, &v_vals[..n], v_vals.iter().all(|&x| x == 0.0));
+                    }
+                }
+                for &layer_idx in &[1usize, 4] {
+                    let n = 4.min(kv_row_stride / 4);
+                    let k_off_0 = layer_idx * kv_layer_stride;
+                    let k_off_last = layer_idx * kv_layer_stride + (prompt_len - 1) * kv_row_stride;
+                    if k_off_0 + n * 4 <= kv_len {
+                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off_0) as *const f32, n) };
+                        eprintln!("[DIAG-KV] layer={} pos=0 k={:?}", layer_idx, k_vals);
+                    }
+                    if k_off_last + n * 4 <= kv_len {
+                        let k_vals = unsafe { std::slice::from_raw_parts(kv_ptr.add(k_off_last) as *const f32, n) };
+                        eprintln!("[DIAG-KV] layer={} pos={} k={:?}", layer_idx, prompt_len - 1, k_vals);
+                    }
+                }
+            }
+        }
         let actual_count = if generated_count == 0 && max_new_tokens > 0 && output_tokens[0] != 0 {
             1
         } else {
@@ -821,7 +951,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         // Scratchpad must hold both prefill + decode (max_decode_steps × num_seqs tokens)
         let num_seqs = batch_ctx.num_seqs;

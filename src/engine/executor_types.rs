@@ -394,8 +394,8 @@ pub struct AttentionTopology {
 }
 
 impl AttentionTopology {
-    /// Construct a bidirectional (encoder) topology for BERT-style models
-    /// (embedding / reranker).
+    /// Construct a bidirectional topology for embedding/reranker models
+    /// (无 causal mask, 全 token 互可见).
     pub fn bidirectional(geometry: Arc<crate::model_config::ModelGeometry>) -> Self {
         Self {
             geometry,
@@ -403,7 +403,8 @@ impl AttentionTopology {
         }
     }
 
-    /// Construct a causal (decoder) topology for GPT-style generator models.
+    /// Construct a causal topology for generator models
+    /// (causal mask, 每个 token 只能看到前驱).
     pub fn causal(geometry: Arc<crate::model_config::ModelGeometry>) -> Self {
         Self {
             geometry,

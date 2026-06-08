@@ -143,6 +143,7 @@ pub fn build_intent_tracker_graph(
             embed_dim: h,
             index_dim: s.clone(),
             indices_kind: GatherIndicesKind::Tensor,
+            scale: None,
         },
         vec![role_emb, roles],
         vec![role_emb_out],

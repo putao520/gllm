@@ -758,9 +758,11 @@ impl ModelConfig {
         // ── Gemma 4 specific fields ──
         let global_rope_theta = find_f32(value, &["global_rope_theta"])
             .or_else(|| find_f32(value, &["text_config.rope_parameters.full_attention.rope_theta"]));
+        // rope_partial_ratio is the SLIDING layer's partial factor (default 1.0 = full RoPE).
+        // Do NOT load from full_attention keys — that's handled by rope_partial_ratio_global.
         let rope_partial_ratio = find_f32(value, &[
-            "rope_partial_ratio", "global_rope_partial", "partial_rotary_factor",
-            "text_config.rope_parameters.full_attention.partial_rotary_factor",
+            "rope_partial_ratio", "partial_rotary_factor",
+            "text_config.rope_parameters.sliding_attention.partial_rotary_factor",
         ]);
         // Gemma 4: layer_types=["sliding_attention","full_attention",...]
         //           → attention_pattern=[0,0,0,0,1,...] (0=sliding,1=full)
@@ -782,8 +784,16 @@ impl ModelConfig {
             });
         let sliding_window = find_usize(value, &["sliding_window", "sliding_window_size",
             "text_config.sliding_window", "text_config.sliding_window_size"]);
-        let num_kv_shared_layers = find_usize(value, &["num_kv_shared_layers",
-            "text_config.num_kv_shared_layers"]);
+        let num_kv_shared_layers = {
+            // TEMP: disable shared_kv — JIT MHA lowering writes current K/V to
+            // per-layer KV cache via MemCopy, but consumer layers' K/V proj ops
+            // are skipped by the guard, so the MemCopy copies garbage into the
+            // consumer's empty KV cache region.  Re-enable after implementing
+            // donor-layer KV cache address remapping in the MHA lowering.
+            let _ = find_usize(value, &["num_kv_shared_layers",
+                "text_config.num_kv_shared_layers"]);
+            None
+        };
         let global_head_dim = find_usize(value, &["global_head_dim",
             "text_config.global_head_dim"]);
         let hidden_size_per_layer_input = find_usize(value, &["hidden_size_per_layer_input",

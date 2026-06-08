@@ -11,6 +11,22 @@ mod tests {
     /// causing subsequent tests to produce NaN. This lock prevents pollution.
     static AUDIO_JIT_LOCK: Mutex<()> = Mutex::new(());
 
+    fn compile_test_graph(
+        compiler: &mut InferenceCompiler,
+        graph: CompilerGraph,
+        max_seq_len: usize,
+    ) -> gllm_kernels::compiler::CompiledLayer {
+        let config = CompileConfig {
+            max_seq_len,
+            business_config: BusinessConfig::default(),
+            hetero: None,
+        };
+        compiler
+            .compile_mega_kernel_from_graph(graph, &config, None)
+            .expect("compile_test_graph")
+            .layer_code
+    }
+
     fn small_config() -> AudioConfig {
         // 小模型便于测试: hidden=64, 2 层, 8 heads → head_dim=8 (单 AVX2 vec)
         // 选用 num_mel_bins=32、hidden=64 确保 mel_projection GEMM 的 N/K 维都是
@@ -409,7 +425,7 @@ mod tests {
         );
 
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("ln+gemm compile");
+        let compiled = compile_test_graph(&mut compiler, g, seq);
 
         let input_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.01).sin()).collect();
         let nw_data: Vec<f32> = vec![1.0; h];
@@ -423,12 +439,9 @@ mod tests {
         let mut out_data = vec![0.0f32; seq * inter];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(8192)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq,
                 out_data.as_mut_ptr() as *mut u8,
@@ -468,18 +481,15 @@ mod tests {
         );
 
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("dwc compile");
+        let compiled = compile_test_graph(&mut compiler, g, seq);
         let input_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.01).sin()).collect();
         let w_data: Vec<f32> = (0..h * kernel).map(|i| (i as f32 * 0.1).cos()).collect();
         let mut out_data = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(8192)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 w_data.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq,
                 out_data.as_mut_ptr() as *mut u8,
@@ -574,7 +584,7 @@ mod tests {
         );
 
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("mha compile");
+        let compiled = compile_test_graph(&mut compiler, g, seq);
         let q_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.01).sin()).collect();
         let k_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.02).cos()).collect();
         let v_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.03).sin()).collect();
@@ -584,12 +594,9 @@ mod tests {
         let mut out_data = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(16384)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 q_data.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq,
                 out_data.as_mut_ptr() as *mut u8,
@@ -641,7 +648,7 @@ mod tests {
         );
 
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("layernorm compile");
+        let compiled = compile_test_graph(&mut compiler, g, seq);
         let input_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.01).sin()).collect();
         let w_data: Vec<f32> = (0..h).map(|_| 1.0).collect();
         let b_data: Vec<f32> = (0..h).map(|_| 0.0).collect();
@@ -651,12 +658,9 @@ mod tests {
         let mut out_data = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1024)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq,
                 out_data.as_mut_ptr() as *mut u8,
@@ -712,7 +716,7 @@ mod tests {
         );
 
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("ff1 compile");
+        let compiled = compile_test_graph(&mut compiler, g, seq);
         let input_data: Vec<f32> = (0..seq * h).map(|i| (i as f32 * 0.01).sin()).collect();
         let mut weights_packed: Vec<f32> = Vec::new();
         weights_packed.extend(vec![1.0f32; h]);
@@ -722,10 +726,9 @@ mod tests {
         let mut out_data = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
                 1, seq,
                 out_data.as_mut_ptr() as *mut u8,
                 scratch.as_mut_ptr(),
@@ -748,9 +751,7 @@ mod tests {
         let num_frames = 61usize;
         let graph = build_conformer_block_graph(num_frames, &config);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler
-            .compile_graph(&graph)
-            .expect("conformer block compile");
+        let compiled = compile_test_graph(&mut compiler, graph, num_frames);
         let weights = build_random_weights(&config);
         let weights_packed = pack_layer_weights(0, &weights).expect("pack layer 0");
         let hidden = config.hidden_size;
@@ -760,12 +761,9 @@ mod tests {
         let mut out = vec![0.0f32; num_frames * hidden];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(4096)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input.as_ptr() as *const u8,
                 weights_packed.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 num_frames,
                 out.as_mut_ptr() as *mut u8,
@@ -788,7 +786,7 @@ mod tests {
         // 构造与 audio_encode 内相同的 mel_projection graph
         let graph = build_mel_projection_graph(124, &config);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&graph).expect("mel projection compile");
+        let compiled = compile_test_graph(&mut compiler, graph, 124);
 
         let mel: Vec<f32> = (0..124 * config.num_mel_bins).map(|i| (i as f32 * 0.001).sin()).collect();
         let w: Vec<f32> = (0..config.num_mel_bins * config.hidden_size)
@@ -797,12 +795,9 @@ mod tests {
         let mut out = vec![0.0f32; 124 * config.hidden_size];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1024)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 mel.as_ptr() as *const u8,
                 w.as_ptr() as *const u8,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 124,
                 out.as_mut_ptr() as *mut u8,
@@ -998,18 +993,17 @@ mod tests {
         g
     }
 
-    fn run_subgraph(g: &CompilerGraph, weights: &InMemoryAudioWeights, seq: usize, hidden: usize) {
+    fn run_subgraph(g: CompilerGraph, weights: &InMemoryAudioWeights, seq: usize, hidden: usize) {
+        let packed = pack_for_graph(&g, weights);
         let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(g).expect("compile ok");
-        let packed = pack_for_graph(g, weights);
+        let compiled = compile_test_graph(&mut compiler, g, seq);
         let input: Vec<f32> = (0..seq * hidden).map(|i| (i as f32 * 0.001).sin()).collect();
         let mut out = vec![0.0f32; seq * hidden];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input.as_ptr() as *const u8,
                 packed.as_ptr() as *const u8,
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
                 1, seq,
                 out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr(),
             );
@@ -1026,15 +1020,14 @@ mod tests {
         let g = build_subgraph_ln_gemm_silu(3, &cfg);
         let w = layer0_weights(&cfg);
         // 输出形状 [seq, inter],非 [seq, hidden]
-        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
         let packed = pack_for_graph(&g, &w);
+        let mut compiler = gllm_kernels::compiler::InferenceCompiler::new();
+        let compiled = compile_test_graph(&mut compiler, g, 3);
         let input: Vec<f32> = (0..3 * cfg.hidden_size).map(|i| (i as f32 * 0.001).sin()).collect();
         let mut out = vec![0.0f32; 3 * cfg.intermediate_size];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(65536)];
         unsafe {
-            compiled.execute(input.as_ptr() as *const u8, packed.as_ptr() as *const u8,
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
+            compiled.execute_as_mega_kernel(input.as_ptr() as *const u8, packed.as_ptr() as *const u8,
                 1, 3, out.as_mut_ptr() as *mut u8, scratch.as_mut_ptr());
         }
         for (i, &v) in out.iter().enumerate() { assert!(v.is_finite(), "NaN at {i}"); }
@@ -1046,7 +1039,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_gemm(3, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 3, cfg.hidden_size);
+        run_subgraph(g, &w, 3, cfg.hidden_size);
     }
 
     #[test]
@@ -1055,7 +1048,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ff1(3, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 3, cfg.hidden_size);
+        run_subgraph(g, &w, 3, cfg.hidden_size);
     }
 
     #[test]
@@ -1064,7 +1057,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ff1(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     #[test]
@@ -1073,7 +1066,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(3, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 3, cfg.hidden_size);
+        run_subgraph(g, &w, 3, cfg.hidden_size);
     }
 
     #[test]
@@ -1082,7 +1075,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ff1_attn(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 子图: FF1 + Attn + Conv module (停在 conv_residual)。
@@ -1174,7 +1167,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ff1_attn_conv(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 子图: 单 conv module (LN+GEMM+Silu+DWC+LN+Silu+GEMM+Add)。
@@ -1221,7 +1214,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_conv_only(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 子图: conv module 但跳过 DepthwiseConv1D (LN+GEMM+Silu+LN+Silu+GEMM+Add)。
@@ -1264,7 +1257,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_conv_no_dwc(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 子图: LN + GEMM + Silu + LN (停在第 2 个 LN)。
@@ -1298,7 +1291,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 子图: LN + GEMM + Silu + LN + Silu。
@@ -1334,7 +1327,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ln_gemm_silu_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     /// 极小子图: 单 LN + 单 Silu。
@@ -1360,7 +1353,7 @@ mod tests {
         let cfg = small_config();
         let g = build_subgraph_ln_silu(8, &cfg);
         let w = layer0_weights(&cfg);
-        run_subgraph(&g, &w, 8, cfg.hidden_size);
+        run_subgraph(g, &w, 8, cfg.hidden_size);
     }
 
     // ========================================================================

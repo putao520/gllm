@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use gllm_kernels::compiler::graph::{CompilerGraph, OpKind, SymDim};
-use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
+use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
 use gllm_kernels::types::DType;
 
 use super::attributes::OnnxAttributeValue;
@@ -38,7 +38,7 @@ pub enum ConvertError {
 /// and value_info shape annotations. No YAML template is needed.
 pub fn onnx_to_compiler_graph(
     onnx: &OnnxGraph,
-    business: &MegaKernelBusinessConfig,
+    business: &BusinessConfig,
     max_seq_len: usize,
 ) -> Result<CompilerGraph, ConvertError> {
     let mut ctx = ConvertContext::new(onnx, business, max_seq_len);
@@ -48,7 +48,7 @@ pub fn onnx_to_compiler_graph(
 #[allow(dead_code)]
 struct ConvertContext<'a> {
     onnx: &'a OnnxGraph,
-    business: &'a MegaKernelBusinessConfig,
+    business: &'a BusinessConfig,
     graph: CompilerGraph,
     tensor_map: HashMap<String, gllm_kernels::compiler::graph::TensorId>,
     producer_map: HashMap<String, usize>,
@@ -58,7 +58,7 @@ struct ConvertContext<'a> {
 }
 
 impl<'a> ConvertContext<'a> {
-    fn new(onnx: &'a OnnxGraph, business: &'a MegaKernelBusinessConfig, max_seq_len: usize) -> Self {
+    fn new(onnx: &'a OnnxGraph, business: &'a BusinessConfig, max_seq_len: usize) -> Self {
         let dtype = detect_dtype(onnx);
         let seq_dim = SymDim::Symbolic {
             name: "seq_len".to_string(),
@@ -484,6 +484,7 @@ impl<'a> ConvertContext<'a> {
                 embed_dim,
                 index_dim: self.seq_dim.clone(),
                 indices_kind: Default::default(),
+                scale: None,
             },
             vec![index_tid, table_tid],
             vec![out_tid],
@@ -707,7 +708,7 @@ mod tests {
     #[test]
     fn converts_matmul_gather_add() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
 
         assert_eq!(graph.ops.len(), 4, "Expected 4 ops (Gather + 2 MatMul + Add)");
@@ -752,7 +753,7 @@ mod tests {
             outputs: vec!["out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -788,7 +789,7 @@ mod tests {
             },
         });
 
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
 
         let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -1075,7 +1076,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1120,7 +1121,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1165,7 +1166,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
@@ -1215,7 +1216,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have a Gemm op");
@@ -1267,7 +1268,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op (no bias)");
@@ -1321,7 +1322,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_bias_op = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
@@ -1380,7 +1381,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -1416,7 +1417,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
@@ -1460,7 +1461,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
@@ -1482,7 +1483,7 @@ mod tests {
             outputs: vec!["silu_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu))
             .expect("Should have Silu op");
@@ -1501,7 +1502,7 @@ mod tests {
             outputs: vec!["gelu_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
             graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gelu)),
@@ -1520,7 +1521,7 @@ mod tests {
             outputs: vec!["tanh_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
             graph.ops.iter().any(|op| matches!(op.kind, OpKind::Tanh)),
@@ -1539,7 +1540,7 @@ mod tests {
             outputs: vec!["sm_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
             graph.ops.iter().any(|op| matches!(op.kind, OpKind::Softmax)),
@@ -1560,7 +1561,7 @@ mod tests {
             outputs: vec!["mul_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Mul))
             .expect("Should have Mul op");
@@ -1580,7 +1581,7 @@ mod tests {
             outputs: vec!["relu_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Passthrough does not add a new op; it maps output name to input tensor
         assert_eq!(graph.ops.len(), 4, "Relu passthrough should not add a new op");
@@ -1597,7 +1598,7 @@ mod tests {
             outputs: vec!["sig_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 4, "Sigmoid passthrough should not add a new op");
     }
@@ -1613,7 +1614,7 @@ mod tests {
             outputs: vec!["clip_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 4, "Clip passthrough should not add a new op");
     }
@@ -1629,7 +1630,7 @@ mod tests {
             outputs: vec!["where_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 4, "Where passthrough should not add a new op");
     }
@@ -1647,7 +1648,7 @@ mod tests {
             outputs: vec!["reshaped".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
             .expect("Should have Reshape op");
@@ -1681,7 +1682,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
             .expect("Should have Transpose op");
@@ -1701,7 +1702,7 @@ mod tests {
             outputs: vec!["transposed_np".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
             .expect("Should have Transpose op");
@@ -1748,7 +1749,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -1784,7 +1785,7 @@ mod tests {
             outputs: vec!["ln_def_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -1814,7 +1815,7 @@ mod tests {
             outputs: vec!["rn_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
@@ -1837,7 +1838,7 @@ mod tests {
             outputs: vec!["reduced".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reduce = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool op from ReduceMean");
@@ -1884,7 +1885,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -1910,7 +1911,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 0, "Empty graph should have 0 ops");
         assert_eq!(graph.max_seq_len, 1024, "max_seq_len should be propagated");
@@ -1921,7 +1922,7 @@ mod tests {
     #[test]
     fn max_seq_len_propagated_to_graph() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         assert_eq!(graph.max_seq_len, 4096, "max_seq_len should be 4096");
     }
@@ -1929,7 +1930,7 @@ mod tests {
     #[test]
     fn max_seq_len_propagated_with_different_value() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         assert_eq!(graph.max_seq_len, 8192, "max_seq_len should be 8192");
     }
@@ -1964,7 +1965,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // The graph input should have been registered as a tensor with Concrete dims
         assert!(!graph.inputs.is_empty() || graph.tensors.iter().any(|t| t.name == "x"),
@@ -1999,7 +2000,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
             .expect("Tensor 'y' should be registered");
@@ -2036,7 +2037,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let z_tensor = graph.tensors.iter().find(|t| t.name == "z")
             .expect("Tensor 'z' should be registered");
@@ -2066,7 +2067,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let w_tensor = graph.tensors.iter().find(|t| t.name == "w")
             .expect("Tensor 'w' should be registered");
@@ -2083,7 +2084,7 @@ mod tests {
     #[test]
     fn graph_outputs_populated_correctly() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(!graph.outputs.is_empty(), "Graph should have outputs");
     }
@@ -2101,7 +2102,7 @@ mod tests {
             outputs: vec!["sub_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Sub maps to OpKind::Add (2 Add ops: original add_qk + this one)
         let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
@@ -2119,7 +2120,7 @@ mod tests {
             outputs: vec!["div_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
         assert_eq!(mul_count, 1, "Div should produce Mul op");
@@ -2138,7 +2139,7 @@ mod tests {
             outputs: vec!["pow_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
         assert_eq!(mul_count, 1, "Pow should produce Mul op");
@@ -2155,7 +2156,7 @@ mod tests {
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
         assert_eq!(mul_count, 1, "Sqrt should produce Mul op");
@@ -2184,7 +2185,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Conv"), "Error message must mention 'Conv': {msg}");
@@ -2243,7 +2244,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -2283,7 +2284,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // shared_input should appear exactly once (as initializer, not as separate activation)
         let count = graph.tensors.iter().filter(|t| t.name == "shared_input").count();
@@ -2530,7 +2531,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "seq_input")
             .expect("seq_input should be registered");
@@ -2569,7 +2570,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "scalar_input")
             .expect("scalar_input should be registered");
@@ -2654,7 +2655,7 @@ mod tests {
     #[test]
     fn graph_ops_preserve_node_order() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // make_test_graph nodes: Gather, MatMul(q_proj), MatMul(k_proj), Add
         // Verify order is preserved
@@ -2668,7 +2669,7 @@ mod tests {
     #[test]
     fn node_output_feeds_into_next_node() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // q_proj outputs "q", k_proj outputs "k", add_qk takes "q" and "k"
         let add_op = graph.ops.iter().find(|op| op.label == "add_qk")
@@ -2866,7 +2867,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "map_input")
             .expect("map_input should be registered");
@@ -2906,7 +2907,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "opt_input")
             .expect("opt_input should be registered");
@@ -2960,7 +2961,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Empty third input should not trigger GemmBias path
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -3005,7 +3006,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -3136,7 +3137,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gathers: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -3179,7 +3180,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 0, "No nodes should produce no ops");
         assert_eq!(graph.max_seq_len, 256);
@@ -3220,7 +3221,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
@@ -3271,7 +3272,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -3332,7 +3333,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "my_weight")
             .expect("my_weight should be registered");
@@ -3368,7 +3369,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 768).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "sparse_in")
             .expect("sparse_in should be registered");
@@ -3533,7 +3534,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "mixed_input")
             .expect("mixed_input should be registered");
@@ -3653,7 +3654,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -3700,7 +3701,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -3731,7 +3732,7 @@ mod tests {
             outputs: vec!["combined".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
@@ -3760,7 +3761,7 @@ mod tests {
             outputs: vec!["gelu_hidden".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu = graph.tensors.iter().find(|t| t.name == "silu_hidden")
             .expect("silu_hidden should exist");
@@ -3786,7 +3787,7 @@ mod tests {
             doc_string: String::new(),
             metadata_props: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(graph.outputs.len() >= 2, "Graph should have at least 2 outputs");
         let q_out = graph.tensors.iter().find(|t| t.name == "q");
@@ -3816,7 +3817,7 @@ mod tests {
     #[test]
     fn max_seq_len_zero_succeeds() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 0).unwrap();
         assert_eq!(graph.max_seq_len, 0, "max_seq_len=0 should propagate");
     }
@@ -3824,7 +3825,7 @@ mod tests {
     #[test]
     fn max_seq_len_usize_max_succeeds() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, usize::MAX).unwrap();
         assert_eq!(graph.max_seq_len, usize::MAX, "max_seq_len=usize::MAX should propagate");
     }
@@ -3876,7 +3877,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -3924,7 +3925,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -3971,7 +3972,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op even with 0-row weight");
@@ -4019,7 +4020,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Bias not in initializers → should produce plain Gemm, not GemmBias
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -4039,7 +4040,7 @@ mod tests {
             doc_string: String::new(),
             metadata_props: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Should only have the original valid output, not the nonexistent one
         assert!(graph.outputs.len() == 1, "Nonexistent output should be skipped");
@@ -4068,7 +4069,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transpose = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::Transpose { .. }) && op.label == "transpose_3d")
@@ -4125,7 +4126,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool op");
@@ -4172,7 +4173,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -4219,7 +4220,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op even with [0,0] table");
@@ -4254,7 +4255,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "scalar_val")
             .expect("scalar_val should be registered");
@@ -4330,7 +4331,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 3, "Should have 3 ops: Gather + RmsNorm + Gemm");
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
@@ -4799,7 +4800,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Clip is passthrough (no op added), so only MatMul produces an op
         assert_eq!(graph.ops.len(), 1, "Clip passthrough + MatMul should produce 1 op");
@@ -4883,7 +4884,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 3, "Should have 3 ops");
         assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output");
@@ -4924,7 +4925,7 @@ mod tests {
             ],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "No nodes = no ops regardless of annotations");
     }
@@ -4955,7 +4956,7 @@ mod tests {
             outputs: vec!["normed2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let rms_norms: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -5012,7 +5013,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add))
             .expect("Should have Add op");
@@ -5053,7 +5054,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshape = graph.ops.iter().find(|op| op.label == "reshape")
             .expect("Should have reshape op");
@@ -5091,7 +5092,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "vec_input")
             .expect("vec_input should be registered");
@@ -5130,7 +5131,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "multi_param")
             .expect("multi_param should be registered");
@@ -5173,7 +5174,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "First node being unsupported should fail immediately");
         let err = result.unwrap_err();
@@ -5202,7 +5203,7 @@ mod tests {
             outputs: vec!["rand_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "Unsupported op after valid nodes should still fail");
         let err = result.unwrap_err();
@@ -5231,7 +5232,7 @@ mod tests {
             outputs: vec!["final_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Silu after Where passthrough should use the same tensor ID as qk_sum
         let silu = graph.ops.iter().find(|op| op.label == "silu_after_where")
@@ -5297,7 +5298,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // value_info is not processed as inputs, so "intermediate" should NOT be registered
         let found = graph.tensors.iter().any(|t| t.name == "intermediate");
@@ -5395,7 +5396,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -5430,7 +5431,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
@@ -5462,7 +5463,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -5516,7 +5517,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -5539,7 +5540,7 @@ mod tests {
             outputs: vec!["qk_sum2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
         assert_eq!(add_ops.len(), 2, "Should have 2 Add ops");
@@ -5610,7 +5611,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Both "act" and "input_free_w" have no producer, so both are inputs
         let act_tensor = graph.tensors.iter().find(|t| t.name == "act")
@@ -5649,7 +5650,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "cube_weight")
             .expect("cube_weight should be registered");
@@ -5858,7 +5859,7 @@ mod tests {
             outputs: vec!["qk_sum".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Should have 5 ops total (4 original + 1 overwrite)
         assert_eq!(graph.ops.len(), 5);
@@ -5893,7 +5894,7 @@ mod tests {
             });
             last_output = output.to_string();
         }
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 8, "Should have 4 original + 4 unary ops");
     }
@@ -5903,7 +5904,7 @@ mod tests {
     #[test]
     fn gemm_m_dimension_is_symbolic_seq_len() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -5918,7 +5919,7 @@ mod tests {
     #[test]
     fn gemm_n_k_dimensions_are_concrete() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gemm = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::Gemm { .. }) && op.label == "q_proj")
@@ -5966,7 +5967,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
             .expect("y tensor should exist");
@@ -6022,7 +6023,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 10, "Should have 10 Gemm ops");
         // Verify chain: each op's output feeds into the next
@@ -6080,7 +6081,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).count();
         let gemm_bias_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::GemmBias { .. })).count();
@@ -6101,7 +6102,7 @@ mod tests {
             outputs: vec!["activated".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu = graph.ops.iter().find(|op| op.label == "silu_after_add")
             .expect("Should find silu_after_add op");
@@ -6148,7 +6149,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -6204,7 +6205,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "Passthrough-only graph should produce no ops");
         // x is the only real tensor; passthrough ops map output names to its tensor ID
@@ -6228,7 +6229,7 @@ mod tests {
             outputs: vec!["rs_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let qk_shape = graph.tensors.iter().find(|t| t.name == "qk_sum")
             .map(|t| t.shape.clone()).unwrap_or_default();
@@ -6261,7 +6262,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transpose = graph.ops.iter().find(|op| op.label == "trans_bad_attr")
             .expect("Should find Transpose op");
@@ -6304,7 +6305,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
             .expect("Should have GemmBias");
@@ -6335,7 +6336,7 @@ mod tests {
             outputs: vec!["pooled2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pools: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::MeanPool { .. }))
@@ -6366,7 +6367,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "Empty op_type should be unsupported");
     }
@@ -6403,7 +6404,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -6441,7 +6442,7 @@ mod tests {
             outputs: vec!["proj_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Should have original 4 ops + LayerNorm + Gemm = 6 ops
         assert_eq!(graph.ops.len(), 6);
@@ -6464,7 +6465,7 @@ mod tests {
             outputs: vec!["mul_result".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let new_a = graph.tensors.iter().find(|t| t.name == "new_a")
             .expect("new_a should be auto-created");
@@ -6498,7 +6499,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // direct_out is both an initializer and a graph output, so it should NOT be in inputs
         let direct_out = graph.tensors.iter().find(|t| t.name == "direct_out")
@@ -6591,7 +6592,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "tiny")
             .expect("tiny should be registered");
@@ -6606,7 +6607,7 @@ mod tests {
     #[test]
     fn onnx_to_compiler_graph_default_business() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_ok(), "Default business config should succeed");
     }
@@ -6652,7 +6653,7 @@ mod tests {
                 a
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transposes: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Transpose { .. }))
@@ -6715,7 +6716,7 @@ mod tests {
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce Mul");
@@ -6741,7 +6742,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "w_all_concrete")
             .expect("Should exist");
@@ -6793,7 +6794,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -6832,7 +6833,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 0);
         let a = graph.tensors.iter().find(|t| t.name == "a");
@@ -6846,7 +6847,7 @@ mod tests {
     #[test]
     fn gather_index_dim_is_symbolic() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather");
@@ -6871,7 +6872,7 @@ mod tests {
             outputs: vec!["pooled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pooled = graph.tensors.iter().find(|t| t.name == "pooled")
             .expect("pooled should exist");
@@ -6910,7 +6911,7 @@ mod tests {
             outputs: vec!["ln_eout".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert!(
             graph.ops.iter().any(|op| matches!(op.kind, OpKind::LayerNorm { .. })),
@@ -7023,7 +7024,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 1);
         assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output");
@@ -7559,7 +7560,7 @@ mod tests {
     #[test]
     fn gather_indices_kind_is_default() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather");
@@ -7630,7 +7631,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         // Assert: 5-D weight should produce InvalidMatMulShape with dims=5
@@ -7680,7 +7681,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -7737,7 +7738,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "Triple passthrough should produce zero ops");
         // All three output names should alias to the same input tensor
@@ -7801,7 +7802,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
             .expect("Should have GemmBias op");
@@ -7835,7 +7836,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -7882,7 +7883,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -7918,7 +7919,7 @@ mod tests {
             outputs: vec!["ln2_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
@@ -7983,7 +7984,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "Should have Gather + MeanPool");
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
@@ -8051,7 +8052,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let biased = graph.tensors.iter().find(|t| t.name == "biased")
             .expect("biased tensor should exist");
@@ -8096,7 +8097,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -8157,7 +8158,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Reshape output should have same shape as input (placeholder)
         let h_tensor = graph.tensors.iter().find(|t| t.name == "h")
@@ -8205,7 +8206,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -8269,7 +8270,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
             .expect("hidden should exist");
@@ -8301,7 +8302,7 @@ mod tests {
             outputs: vec!["gated".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu = graph.ops.iter().find(|op| op.label == "gate")
             .expect("Should find gate Silu");
@@ -8356,7 +8357,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1);
         assert_eq!(graph.ops[0].label, "layer/0/self_attn/Q肯V-proj",
@@ -8675,7 +8676,7 @@ mod tests {
             outputs: vec!["rm_sl_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
@@ -8728,7 +8729,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
             .expect("Should have GemmBias");
@@ -8751,7 +8752,7 @@ mod tests {
             outputs: vec!["rs_e_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let rs = graph.ops.iter().find(|op| op.label == "rs_empty")
             .expect("Should have Reshape");
@@ -8792,7 +8793,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
@@ -8833,7 +8834,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm even with 0x0 weight");
@@ -8880,7 +8881,7 @@ mod tests {
         };
         assert_eq!(onnx.value_info.len(), 3);
         // value_info entries should not be registered as tensors
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.tensors.len(), 0, "value_info should not produce tensors");
     }
@@ -9218,7 +9219,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
@@ -9255,7 +9256,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
@@ -9290,7 +9291,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
@@ -9446,7 +9447,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "zero_dim")
             .expect("zero_dim should be registered");
@@ -9486,7 +9487,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "five_d")
             .expect("five_d should be registered");
@@ -9516,7 +9517,7 @@ mod tests {
             outputs: vec!["silu2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu_labels: Vec<&str> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Silu))
@@ -9567,7 +9568,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -9617,7 +9618,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 0);
         let x = graph.tensors.iter().find(|t| t.name == "x");
@@ -9640,7 +9641,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let g1 = onnx_to_compiler_graph(&make_empty(), &business, 1024).unwrap();
         let g2 = onnx_to_compiler_graph(&make_empty(), &business, 1024).unwrap();
         assert_eq!(g1.ops.len(), g2.ops.len());
@@ -9955,7 +9956,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -10021,7 +10022,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 3, "Should have Gather + LayerNorm + Gemm");
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
@@ -10049,7 +10050,7 @@ mod tests {
             outputs: vec!["gelu_after_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let gelu = graph.ops.iter().find(|op| op.label == "gelu_after")
             .expect("Should find gelu_after");
@@ -10092,7 +10093,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         assert!(err.to_string().contains("Conv"), "First unsupported op should be in error");
         assert!(!err.to_string().contains("Pool"), "Second unsupported op should not be reached");
@@ -10204,7 +10205,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -10227,7 +10228,7 @@ mod tests {
             outputs: vec!["doubled_q".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add = graph.ops.iter().find(|op| op.label == "self_add")
             .expect("Should find self_add op");
@@ -10311,7 +10312,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
@@ -10347,7 +10348,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm");
@@ -10413,7 +10414,7 @@ mod tests {
         let onnx = make_test_graph();
         let original_nodes = onnx.nodes.len();
         let original_init = onnx.initializers.len();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let _graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Verify original graph is unchanged (it's borrowed, not consumed)
         assert_eq!(onnx.nodes.len(), original_nodes);
@@ -10454,7 +10455,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let y = graph.tensors.iter().find(|t| t.name == "y")
             .expect("y should exist");
@@ -10476,7 +10477,7 @@ mod tests {
             outputs: vec!["t_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let q_shape = graph.tensors.iter().find(|t| t.name == "q")
             .map(|t| t.shape.clone()).unwrap_or_default();
@@ -11029,7 +11030,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1).unwrap();
         assert_eq!(graph.max_seq_len, 1);
     }
@@ -11086,7 +11087,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gathers: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -11139,7 +11140,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x should exist");
         assert_eq!(x_tensor.shape.len(), 2);
@@ -11333,7 +11334,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 0);
         assert_eq!(graph.tensors.len(), 1, "Should have the initializer tensor");
@@ -11371,7 +11372,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -11408,7 +11409,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.tensors.len(), 30);
     }
@@ -11434,7 +11435,7 @@ mod tests {
             outputs: vec!["pooled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
             .expect("Should have Reshape");
@@ -11531,7 +11532,7 @@ mod tests {
             outputs: vec!["ln_out2".to_string()],
             attributes: attrs,
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
@@ -11617,7 +11618,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -11705,7 +11706,7 @@ mod tests {
             outputs: vec!["t2_out".to_string()],
             attributes: attrs,
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let t = graph.ops.iter().find(|op| op.label == "t2_perm")
             .expect("Should have transpose");
@@ -11791,7 +11792,7 @@ mod tests {
     #[test]
     fn conversion_preserves_initializer_tensor_names() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let names: Vec<&str> = graph.tensors.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"embed.weight"), "embed.weight should be preserved");
@@ -11857,7 +11858,7 @@ mod tests {
             outputs: vec!["ln2_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let lns: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
@@ -11920,7 +11921,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -12042,7 +12043,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: n=128, k=64
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
@@ -12097,7 +12098,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: should produce GemmBias with transB-swapped n/k
         let gemm_bias = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
@@ -12143,7 +12144,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
 
         // Assert: 3 ops total
         assert_eq!(graph.ops.len(), 3);
@@ -12191,7 +12192,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: 3 ops: Gemm, Add, Mul
         assert_eq!(graph.ops.len(), 3);
@@ -12231,7 +12232,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
 
         // Assert: Sub → OpKind::Add, Div → OpKind::Mul
         let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
@@ -12261,7 +12262,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
         let silu_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Silu)).collect();
@@ -12291,7 +12292,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert
         let tanh_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Tanh)).collect();
@@ -12351,7 +12352,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
         let rms_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::RmsNorm { .. })).collect();
@@ -12388,7 +12389,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: MeanPool op with hidden = 64 (MatMul output shape is [seq_len, n=64])
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
@@ -12428,7 +12429,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert
         assert_eq!(graph.ops.len(), 2);
@@ -12493,7 +12494,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: 3 ops: Gemm, RmsNorm, Transpose
         assert_eq!(graph.ops.len(), 3);
@@ -12539,7 +12540,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: 3 ops
         assert_eq!(graph.ops.len(), 3);
@@ -12596,7 +12597,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: outputs should have both y1 and y2
         assert_eq!(graph.outputs.len(), 2, "Should have 2 graph outputs");
@@ -12619,7 +12620,7 @@ mod tests {
         );
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert: 1x1 is valid 2D
         assert!(result.is_ok());
@@ -12655,7 +12656,7 @@ mod tests {
         };
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert: both inputs are activations → NoWeightInput error
         assert!(result.is_err());
@@ -12692,7 +12693,7 @@ mod tests {
         };
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert
         assert!(result.is_err());
@@ -12728,7 +12729,7 @@ mod tests {
         };
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert: empty name not in initializers → MissingInitializer
         assert!(result.is_err());
@@ -12768,7 +12769,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: non-initializer bias should fall back to Gemm (not GemmBias)
         assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gemm { .. })));
@@ -12800,7 +12801,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Pow maps to Mul
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
@@ -12832,7 +12833,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Sqrt maps to Mul
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
@@ -12866,7 +12867,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: table_rows=0, embed_dim=0 (from 1D shape, .get(1) is None → 0)
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).unwrap();
@@ -12906,7 +12907,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: table_rows=0, embed_dim=0 (no initializer found)
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).unwrap();
@@ -12943,7 +12944,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: passthrough ops don't add ops to the graph
         assert_eq!(graph.ops.len(), 0, "Passthrough ops should not produce graph ops");
@@ -12979,7 +12980,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: only MatMul op (Relu is passthrough)
         assert_eq!(graph.ops.len(), 1);
@@ -13058,7 +13059,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
@@ -13113,7 +13114,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).unwrap();
@@ -13165,7 +13166,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).unwrap();
@@ -13204,7 +13205,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
 
         // Assert: the activation tensor should have concrete dims
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
@@ -13243,7 +13244,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
 
         // Assert
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
@@ -13289,7 +13290,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Unknown dims become Symbolic with name "unknown"
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
@@ -13330,7 +13331,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
 
         // Assert: non-Tensor type falls back to default [Symbolic("seq_len")]
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor should exist");
@@ -13375,7 +13376,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: inputs should only have the activation "x", not "y" (has producer) or "w" (initializer)
         // Note: "y" is in outputs, so it's excluded from inputs too
@@ -13417,7 +13418,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: graph.outputs should reference the "result" tensor
         assert_eq!(graph.outputs.len(), 1);
@@ -13453,7 +13454,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: nonexistent output is silently skipped
         assert_eq!(graph.outputs.len(), 0);
@@ -13476,7 +13477,7 @@ mod tests {
         );
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 4096).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 4096).unwrap();
 
         // Assert
         assert_eq!(graph.max_seq_len, 4096);
@@ -13509,7 +13510,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: initializer tensors have Concrete dimensions
         let w_tensor = graph.tensors.iter().find(|t| t.name == "w").expect("w tensor");
@@ -13550,7 +13551,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Add output should use the higher-rank shape (h's shape)
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).unwrap();
@@ -13584,7 +13585,7 @@ mod tests {
         };
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert: first unsupported op causes error
         assert!(result.is_err());
@@ -13635,7 +13636,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: Float transB is ignored → no swap (n=32, k=16)
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).unwrap();
@@ -13667,7 +13668,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: hidden=0 when no shape info
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).unwrap();
@@ -13710,7 +13711,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: LayerNorm still created with 3 inputs (bias auto-created)
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).unwrap();
@@ -13806,7 +13807,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: all 5 initializer tensors registered
         let init_tensors: Vec<_> = graph.tensors.iter()
@@ -13845,7 +13846,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: default perm is empty
         let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).unwrap();
@@ -13883,7 +13884,7 @@ mod tests {
         };
 
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
 
         // Assert: lowercase should be unsupported
         assert!(result.is_err());
@@ -13920,7 +13921,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
 
         // Assert: target_shape is always vec![]
         let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).unwrap();
@@ -13956,7 +13957,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
 
         // Assert: output shape = [Symbolic("seq_len"), Concrete(256)]
         let out_tensor = graph.tensors.iter().find(|t| t.name == "out").expect("out tensor");
@@ -14030,7 +14031,7 @@ mod tests {
         };
 
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
 
         // Assert: 5 ops in order
         assert_eq!(graph.ops.len(), 5, "Should have 5 ops: Gather, LayerNorm, Gemm, Silu, Add");
@@ -14122,7 +14123,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 3333).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -14171,7 +14172,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
             .expect("hidden tensor should exist");
@@ -14220,7 +14221,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
             .expect("y tensor should exist");
@@ -14252,7 +14253,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let w_tensor = graph.tensors.iter().find(|t| t.name == "init_w")
             .expect("init_w should exist");
@@ -14280,7 +14281,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let act = graph.tensors.iter().find(|t| t.name == "input_act")
             .expect("input_act should exist");
@@ -14324,7 +14325,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -14361,7 +14362,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
@@ -14407,7 +14408,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -14463,7 +14464,7 @@ mod tests {
                 a
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norms: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -14500,7 +14501,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.tensors.len(), 20, "All 20 initializers should be registered as tensors");
     }
@@ -14547,7 +14548,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "k")
             .expect("k should be registered");
@@ -14575,7 +14576,7 @@ mod tests {
             outputs: vec!["scaled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
@@ -14607,7 +14608,7 @@ mod tests {
             outputs: vec!["normed".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm after Relu passthrough");
@@ -14645,7 +14646,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "fixed_input")
             .expect("fixed_input should be registered");
@@ -14677,7 +14678,7 @@ mod tests {
                 a
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let transpose = graph.ops.iter().find(|op| op.label == "t4d")
             .expect("Should find t4d Transpose");
@@ -14733,7 +14734,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -14761,7 +14762,7 @@ mod tests {
             outputs: vec!["ln_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
             .expect("hidden should exist");
@@ -14787,7 +14788,7 @@ mod tests {
             outputs: vec!["rn_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden")
             .expect("hidden should exist");
@@ -14809,7 +14810,7 @@ mod tests {
             outputs: vec!["sm_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let qk = graph.tensors.iter().find(|t| t.name == "qk_sum").expect("qk_sum");
         let sm = graph.tensors.iter().find(|t| t.name == "sm_out").expect("sm_out");
@@ -14829,7 +14830,7 @@ mod tests {
             outputs: vec!["silu_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
         let silu_out = graph.tensors.iter().find(|t| t.name == "silu_out").expect("silu_out");
@@ -14852,7 +14853,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert!(graph.tensors.is_empty(), "Empty graph should have no tensors");
         assert!(graph.ops.is_empty(), "Empty graph should have no ops");
@@ -14876,7 +14877,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 0).unwrap();
         assert_eq!(graph.max_seq_len, 0);
     }
@@ -14918,7 +14919,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -14970,7 +14971,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops[0].label, "my_matmul");
         assert_eq!(graph.ops[1].label, "my_silu");
@@ -14989,7 +14990,7 @@ mod tests {
             outputs: vec!["pooled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
@@ -15014,7 +15015,7 @@ mod tests {
             outputs: vec!["biased".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add = graph.ops.iter().find(|op| op.label == "add_bias")
             .expect("Should have add_bias op");
@@ -15067,7 +15068,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "All passthrough chain should produce no ops");
         // Only "x" should be registered as a tensor (passthroughs create no new tensors)
@@ -15118,7 +15119,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
             .expect("Should have GemmBias");
@@ -15151,7 +15152,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "MatMul with no inputs should error");
     }
@@ -15213,7 +15214,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "all_unknown")
             .expect("all_unknown should be registered");
@@ -15256,7 +15257,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Initializer shape should win (10, 10), not the input shape (5, 5)
         let t = graph.tensors.iter().find(|t| t.name == "shared")
@@ -15303,7 +15304,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
             .expect("y should exist");
@@ -15326,7 +15327,7 @@ mod tests {
             outputs: vec!["reshaped".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
             .expect("Should have Reshape");
@@ -15377,7 +15378,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let out = graph.tensors.iter().find(|t| t.name == "out")
             .expect("out should exist");
@@ -15419,7 +15420,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         assert!(err.to_string().contains("InvalidOp"), "Should report first bad op");
         assert!(!err.to_string().contains("AnotherBadOp"), "Should not reach second bad op");
@@ -15469,7 +15470,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gb = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
             .expect("Should have GemmBias");
@@ -15499,7 +15500,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 0);
         assert_eq!(graph.tensors.len(), 1);
@@ -15519,7 +15520,7 @@ mod tests {
             outputs: vec!["pow_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
         assert_eq!(mul_count, 1, "Pow should map to Mul");
@@ -15538,7 +15539,7 @@ mod tests {
             outputs: vec!["pooled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
@@ -15589,7 +15590,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // x has no producer and is not in outputs → should be in inputs
         // y has no producer (passthrough maps to x) → excluded from inputs since y is in outputs
@@ -15664,7 +15665,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 4, "Should have 4 ops: Gather + Add + Silu + Gemm");
         assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }));
@@ -15712,7 +15713,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "Where + Clip both passthrough → no ops");
     }
@@ -15745,7 +15746,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(
@@ -15770,7 +15771,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let g1 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let g2 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(g1.ops.len(), g2.ops.len());
@@ -15810,7 +15811,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -15851,7 +15852,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm");
@@ -15889,7 +15890,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
@@ -15934,7 +15935,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather");
@@ -15949,7 +15950,7 @@ mod tests {
     #[test]
     fn graph_tensor_ids_are_unique() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ids: Vec<_> = graph.tensors.iter().map(|t| t.id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
@@ -15998,7 +15999,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1, "Sigmoid passthrough + MatMul = 1 op");
         assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }));
@@ -16017,7 +16018,7 @@ mod tests {
             outputs: vec!["tanh_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
         let tanh_out = graph.tensors.iter().find(|t| t.name == "tanh_out").expect("tanh_out");
@@ -16037,7 +16038,7 @@ mod tests {
             outputs: vec!["gelu_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let hidden = graph.tensors.iter().find(|t| t.name == "hidden").expect("hidden");
         let gelu_out = graph.tensors.iter().find(|t| t.name == "gelu_out").expect("gelu_out");
@@ -16071,7 +16072,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 7777).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "dyn")
             .expect("dyn should be registered");
@@ -16101,7 +16102,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "bf16_w")
             .expect("bf16_w should be registered");
@@ -16165,7 +16166,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 1, "Single Gather should produce exactly 1 op");
         assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }));
@@ -16194,7 +16195,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         assert!(matches!(err, ConvertError::UnsupportedOp { .. }));
     }
@@ -16334,7 +16335,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "zero_dim").expect("tensor should exist");
         assert!(matches!(&t.shape[0], SymDim::Concrete(0)));
@@ -16373,7 +16374,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
         if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
@@ -16455,7 +16456,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
             assert_eq!(*n, 32);
@@ -16486,7 +16487,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "Empty inputs MatMul should return error");
     }
@@ -16518,7 +16519,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Gemm always expects weight as second input
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err(), "Gemm with weight in first position should fail");
@@ -16545,7 +16546,7 @@ mod tests {
             outputs: vec!["rs2_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshapes: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Reshape { .. })).collect();
         assert_eq!(reshapes.len(), 2);
@@ -16576,7 +16577,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let trans = graph.ops.iter().find(|op| op.label == "trans_1d").expect("should exist");
         if let OpKind::Transpose { perm } = &trans.kind {
@@ -16604,7 +16605,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.outputs.len(), 1, "Initializer used as output should appear in graph.outputs");
     }
@@ -16767,7 +16768,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 128).unwrap();
         assert!(graph.tensors.is_empty(), "Empty graph should have no tensors");
         assert!(graph.ops.is_empty());
@@ -16831,7 +16832,7 @@ mod tests {
             outputs: vec!["tanh_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let silu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Silu)).expect("should exist");
         let tanh = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("should exist");
@@ -16851,7 +16852,7 @@ mod tests {
             outputs: vec!["sm_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("should exist");
         let sm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("should exist");
@@ -16899,7 +16900,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 2);
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
@@ -16931,7 +16932,7 @@ mod tests {
             outputs: vec!["res".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("should exist");
         let add_op = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).find(|op| op.label == "residual").expect("should exist");
@@ -17046,7 +17047,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
             assert_eq!(*n, 64);
@@ -17084,7 +17085,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_bias = graph.ops.iter().find(|op| matches!(op.kind, OpKind::GemmBias { .. })).expect("should exist");
         assert_eq!(gemm_bias.inputs.len(), 3);
@@ -17112,7 +17113,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         for t in &graph.tensors {
             assert!(t.producer.is_none(), "Initializer tensor {} should have no producer", t.name);
@@ -17140,7 +17141,7 @@ mod tests {
             outputs: vec!["final".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // The MatMul should find sig_mapped in tensor_map (mapped to qk_sum's tensor ID)
         let gemm = graph.ops.iter().find(|op| op.label == "mm_after_sig").expect("should exist");
@@ -17196,7 +17197,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "def1").expect("should exist");
         assert!(matches!(&t.shape[0], SymDim::Symbolic { max_value: Some(1), .. }));
@@ -17261,7 +17262,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
             assert_eq!(*n, 4);
@@ -17283,7 +17284,7 @@ mod tests {
             outputs: vec!["fresh_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_op = graph.ops.iter().find(|op| op.label == "mul_fresh").expect("should exist");
         assert_eq!(mul_op.inputs.len(), 2);
@@ -17316,7 +17317,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         assert!(err.to_string().contains(&long_name));
     }
@@ -17365,7 +17366,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         if let Some(norm) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })) {
             if let OpKind::RmsNorm { eps } = norm.kind {
@@ -17402,7 +17403,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         if let Some(ln) = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })) {
             if let OpKind::LayerNorm { eps } = ln.kind {
@@ -17434,7 +17435,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let trans = graph.ops.iter().find(|op| op.label == "trans_rev4").expect("should exist");
         if let OpKind::Transpose { perm } = &trans.kind {
@@ -17463,7 +17464,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert!(graph.tensors.iter().any(|t| t.name == "a"), "input 'a' should be registered");
         assert!(graph.tensors.iter().any(|t| t.name == "b"), "input 'b' should be registered");
@@ -17539,7 +17540,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let err = onnx_to_compiler_graph(&onnx, &business, 512).unwrap_err();
         assert!(matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Foo"),
             "First unsupported op should be reported");
@@ -17572,7 +17573,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         if let OpKind::Gemm { n, k, .. } = &graph.ops[0].kind {
             assert_eq!(*n, 10000);
@@ -17593,7 +17594,7 @@ mod tests {
             outputs: vec!["rm_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let rm_out = graph.tensors.iter().find(|t| t.name == "rm_out").expect("should exist");
         assert_eq!(rm_out.shape.len(), 1, "ReduceMean output should be 1-D");
@@ -17628,7 +17629,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "sym_in").expect("should exist");
         if let SymDim::Symbolic { name, max_value } = &t.shape[0] {
@@ -17679,7 +17680,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(graph.ops.len(), 1);
         assert_eq!(graph.outputs.len(), 1);
@@ -17771,7 +17772,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "six_d").expect("should exist");
         assert_eq!(t.shape.len(), 6);
@@ -17805,7 +17806,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("should exist");
         if let OpKind::Gather { indices_kind, .. } = &gather.kind {
@@ -17827,7 +17828,7 @@ mod tests {
             outputs: vec!["rs_e_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let reshape = graph.ops.iter().find(|op| op.label == "rs_empty").expect("should exist");
         if let OpKind::Reshape { target_shape } = &reshape.kind {
@@ -17862,7 +17863,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y").expect("should exist");
         assert!(y_tensor.producer.is_some(), "Gemm output should have a producer");
@@ -17895,7 +17896,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConvertError::InvalidMatMulShape { dims: 4, .. }));
@@ -17907,7 +17908,7 @@ mod tests {
     fn graph_inputs_exclude_output_tensors() {
         let mut onnx = make_test_graph();
         // The output "qk_sum" is produced by add_qk node, so it should not be in inputs
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let output_ids: std::collections::HashSet<_> = graph.outputs.iter().collect();
         for input_id in &graph.inputs {
@@ -17950,7 +17951,7 @@ mod tests {
             outputs: vec!["sm2_out".into()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let softmax_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Softmax)).collect();
         assert_eq!(softmax_ops.len(), 2);
@@ -17973,7 +17974,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let g1 = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let g2 = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(g1.ops.len(), g2.ops.len());
@@ -18513,7 +18514,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "tensor_6d")
             .expect("tensor_6d should be registered");
@@ -18550,7 +18551,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.tensors.iter().find(|t| t.name == "all_unknown")
             .expect("all_unknown should be registered");
@@ -18587,7 +18588,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         for i in 0..5 {
             let name = format!("w_{i}");
@@ -18619,7 +18620,7 @@ mod tests {
             outputs: vec!["final".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).count();
         let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
@@ -18648,7 +18649,7 @@ mod tests {
             outputs: vec!["pow_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert_eq!(mul_ops.len(), 1, "Pow should produce 1 Mul op");
@@ -18675,7 +18676,7 @@ mod tests {
             outputs: vec!["final".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Sigmoid is passthrough (no op), Silu adds 1 op
         assert_eq!(graph.ops.len(), 5, "Should have 4 original + 1 Silu");
@@ -18718,7 +18719,7 @@ mod tests {
             outputs: vec!["s1".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         assert_eq!(graph.ops.len(), 0, "All passthrough ops should produce 0 ops");
     }
@@ -19117,7 +19118,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let gemm_bias = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
@@ -19188,7 +19189,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let y = graph.tensors.iter().find(|t| t.name == "y")
             .expect("y tensor should exist");
@@ -19232,7 +19233,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 8192).unwrap();
         let emb = graph.tensors.iter().find(|t| t.name == "emb")
             .expect("emb tensor should exist");
@@ -19257,7 +19258,7 @@ mod tests {
             outputs: vec!["pooled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let pooled = graph.tensors.iter().find(|t| t.name == "pooled")
             .expect("pooled tensor should exist");
@@ -19287,7 +19288,7 @@ mod tests {
             outputs: vec!["sm_b_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let sm_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Softmax))
@@ -19347,7 +19348,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Both Where and Clip are passthrough, only MatMul produces an op
         assert_eq!(graph.ops.len(), 1, "Where+Clip passthrough + MatMul should produce 1 op");
@@ -19388,7 +19389,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let found1 = graph.tensors.iter().any(|t| t.name == "inter1");
         let found2 = graph.tensors.iter().any(|t| t.name == "inter2");
@@ -19514,7 +19515,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 5, "MatMul + Silu + Gelu + Tanh + Softmax = 5 ops");
     }
@@ -19560,7 +19561,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 128).unwrap();
         assert_eq!(graph.ops.len(), 1);
         let op = &graph.ops[0];
@@ -19625,7 +19626,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 3, "1 MatMul + 2 Add = 3 ops");
         let matmul = &graph.ops[0];
@@ -19689,7 +19690,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "2 Gather ops");
         let g1 = &graph.ops[0];
@@ -19728,7 +19729,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let input_tensor = graph.tensors.iter().find(|t| t.name == "input_tensor")
             .expect("input_tensor should be registered");
@@ -19779,7 +19780,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
         assert!(matches!(graph.ops[0].kind, OpKind::Gemm { .. }), "should be Gemm not GemmBias");
@@ -19837,7 +19838,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("should have LayerNorm op");
@@ -19894,7 +19895,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let rn_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("should have RmsNorm op");
@@ -19917,7 +19918,7 @@ mod tests {
             outputs: vec!["out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -19943,7 +19944,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         assert_eq!(graph.max_seq_len, 4096, "max_seq_len should be 4096");
     }
@@ -19983,7 +19984,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let mm = &graph.ops[0];
         match &mm.kind {
@@ -20018,7 +20019,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let tensor = graph.tensors.iter().find(|t| t.name == "my_weight")
             .expect("my_weight should be registered");
@@ -20079,7 +20080,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.ops.len(), 1);
         match &graph.ops[0].kind {
@@ -20150,7 +20151,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Only MatMul produces an op; Relu/Sigmoid are passthrough
         assert_eq!(graph.ops.len(), 1, "passthrough + MatMul = 1 op");
@@ -20225,7 +20226,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         assert_eq!(graph.outputs.len(), 2, "should have 2 graph outputs");
         // First output = tensor "a" from mm1
@@ -20275,7 +20276,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Where is passthrough: "c_out" maps to the same tensor as "x"
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x").expect("x tensor");
@@ -20306,7 +20307,7 @@ mod tests {
             outputs: vec!["scaled".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let mul_op = graph.ops.iter().find(|op| op.label == "mul_scale")
             .expect("Should have mul_scale op");
@@ -20348,7 +20349,7 @@ mod tests {
             outputs: vec!["final_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&extended, &business, 2048).unwrap();
         // 4 original ops + 3 new = 7
         assert_eq!(graph.ops.len(), 7, "Should have 7 ops total");
@@ -20390,7 +20391,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
         if let OpKind::MeanPool { hidden, .. } = &pool.kind {
@@ -20436,7 +20437,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
             .expect("Should have Gemm op");
@@ -20490,7 +20491,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm");
@@ -20543,7 +20544,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 0, "Passthrough-only graph should have 0 ops");
         assert_eq!(graph.outputs.len(), 1, "Should have 1 graph output");
@@ -20555,7 +20556,7 @@ mod tests {
     #[test]
     fn conversion_repeated_produces_same_structure() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let g1 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let g2 = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         assert_eq!(g1.ops.len(), g2.ops.len(), "Op count should be identical");
@@ -20611,7 +20612,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // bias_act is not an initializer, so Gemm (not GemmBias)
         assert!(graph.ops.iter().any(|op| matches!(op.kind, OpKind::Gemm { .. })),
@@ -20640,7 +20641,7 @@ mod tests {
             outputs: vec!["div_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let sub_op = graph.ops.iter().find(|op| op.label == "sub1").expect("sub1 op");
         assert!(matches!(sub_op.kind, OpKind::Add), "Sub should produce Add");
@@ -20668,7 +20669,7 @@ mod tests {
             }],
             vec![],
         );
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         let h_tensor = graph.tensors.iter().find(|t| t.name == "h").expect("h tensor");
         let out_tensor = graph.tensors.iter().find(|t| t.name == "out").expect("out tensor");
         assert_eq!(h_tensor.shape.len(), out_tensor.shape.len(),
@@ -20706,7 +20707,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather");
         if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
@@ -20757,7 +20758,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let gemms: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -20789,7 +20790,7 @@ mod tests {
             }],
             vec![],
         );
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
         assert_eq!(graph.max_seq_len, 1024, "max_seq_len should be set to 1024");
     }
 
@@ -20831,7 +20832,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let t = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
             .expect("Should have Transpose");
@@ -20885,7 +20886,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 2, "Should have 2 norm ops");
         assert!(matches!(graph.ops[0].kind, OpKind::RmsNorm { .. }), "First op should be RmsNorm");
@@ -20919,7 +20920,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 512);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -20966,7 +20967,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 256);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConvertError::NoWeightInput { .. }),
@@ -21005,7 +21006,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 256);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -21090,7 +21091,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let t = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
             .expect("Should have Transpose");
@@ -21129,7 +21130,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather");
         if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
@@ -21151,7 +21152,7 @@ mod tests {
             outputs: vec![String::new()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // The Add op with empty output should still be created
         let add_op = graph.ops.iter().find(|op| op.label == "empty_out")
@@ -21173,7 +21174,7 @@ mod tests {
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let sqrt_op = graph.ops.iter().find(|op| op.label == "sqrt1")
             .expect("Should have sqrt1 op");
@@ -21206,7 +21207,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         let x_count = graph.tensors.iter().filter(|t| t.name == "x").count();
         assert_eq!(x_count, 1, "Initializer/input overlap should produce exactly 1 tensor");
@@ -21244,7 +21245,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 256);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -21279,7 +21280,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let silu = graph.ops.iter().find(|op| op.label == "silu_empty")
             .expect("Should have silu_empty op");
@@ -21324,7 +21325,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         let pool = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. }))
             .expect("Should have MeanPool");
         if let OpKind::MeanPool { hidden, .. } = &pool.kind {
@@ -21378,7 +21379,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Pow should produce a Mul op (not an error)
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
@@ -21406,7 +21407,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: 4 base ops (Gather + 2 MatMul + Add), no additional ops from Clip+Relu
         assert_eq!(graph.ops.len(), 4, "Clip and Relu passthrough should not add ops");
@@ -21440,7 +21441,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128);
         // Assert
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -21465,7 +21466,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Tanh is a unary op, which creates 1 output tensor from first() output name
         let tanh = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh));
@@ -21515,7 +21516,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }));
@@ -21563,7 +21564,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -21616,7 +21617,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -21654,7 +21655,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
@@ -21683,7 +21684,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let gelu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu));
@@ -21740,7 +21741,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: "x" is an activation with no producer, should be in graph.inputs
         assert!(!graph.inputs.is_empty(), "Graph should have at least one external input");
     }
@@ -21767,7 +21768,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Where is passthrough, no additional op
         assert_eq!(graph.ops.len(), 4, "Where passthrough should not add a new op");
@@ -21803,7 +21804,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -21836,7 +21837,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
@@ -21886,7 +21887,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512);
         // Assert
         let err = result.expect_err("0-D weight should fail");
         assert!(
@@ -21932,7 +21933,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256);
         // Assert
         let err = result.expect_err("0-D Gemm weight should fail");
         assert!(
@@ -21954,7 +21955,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048);
         // Assert
         let err = result.expect_err("empty op_type should be unsupported");
         match &err {
@@ -22008,7 +22009,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: output tensor shape should be [Symbolic(seq_len), Concrete(128)]
         let output_tid = graph.tensors.iter().find(|t| t.name == "output")
             .expect("output tensor should exist");
@@ -22053,7 +22054,7 @@ mod tests {
             },
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: epsilon value should be exactly what was provided
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -22092,7 +22093,7 @@ mod tests {
             },
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
@@ -22107,7 +22108,7 @@ mod tests {
         let onnx = make_test_graph();
         // The base test graph already has a Gather node using embed.weight [100, 64]
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
             .expect("Should have Gather op");
@@ -22130,7 +22131,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: output tensor "reduced" should have 1-D shape
         let reduced = graph.tensors.iter().find(|t| t.name == "reduced")
             .expect("reduced tensor should exist");
@@ -22160,7 +22161,7 @@ mod tests {
             },
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
         let transpose = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
             .expect("Should have Transpose op");
@@ -22198,7 +22199,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: total ops = 4 (base graph) + 3 unary = 7
         let unary_ops: Vec<_> = graph.ops.iter().filter(|op| {
             matches!(op.kind, OpKind::Silu | OpKind::Tanh | OpKind::Softmax)
@@ -22219,7 +22220,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert
         let reshape = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. }))
             .expect("Should have Reshape op");
@@ -22234,7 +22235,7 @@ mod tests {
         let mut onnx = make_test_graph();
         onnx.outputs.clear();
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: should succeed with empty outputs
         assert!(graph.outputs.is_empty(), "graph outputs should be empty");
     }
@@ -22254,7 +22255,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: the output shape should match the higher-rank input
         let broadcast_out = graph.tensors.iter().find(|t| t.name == "broadcast_out")
             .expect("broadcast_out tensor should exist");
@@ -22316,7 +22317,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: The detected dtype should be derived from the first initializer
         // (HashMap iteration order is not guaranteed, but at least one tensor should be non-F32)
         let has_bf16 = graph.tensors.iter().any(|t| t.dtype == DType::BF16);
@@ -22337,7 +22338,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 2048).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 2048).unwrap();
         // Assert: Clip is passthrough, so op count should remain the same as base
         assert_eq!(graph.ops.len(), base_op_count, "Clip passthrough should not add a new op, got {} ops", graph.ops.len());
     }
@@ -22389,7 +22390,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Should produce Gemm (not GemmBias) since bias is not an initializer
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -22444,7 +22445,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: ReduceMean output should be 1-D (no seq dim)
         let reduced = graph.tensors.iter().find(|t| t.name == "reduced_rm")
@@ -22476,7 +22477,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Labels should be in exact node order
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
@@ -22500,7 +22501,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let _graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: conversion succeeds without error (graph name is not on CompilerGraph)
         // This validates that empty named graphs convert without panic
@@ -22531,7 +22532,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert
         let t = graph.tensors.iter().find(|t| t.name == "my_bias")
@@ -22563,7 +22564,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let transpose = graph.ops.iter().rev().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
@@ -22604,7 +22605,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
         let t = graph.tensors.iter().find(|t| t.name == "all_known")
@@ -22652,7 +22653,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 16384).unwrap();
         // Assert
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -22709,7 +22710,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Gather extracts first two dims (table_rows=50, embed_dim=30)
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -22733,7 +22734,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: get_or_create should have created a default tensor for the missing name
         let missing_t = graph.tensors.iter().find(|t| t.name == "nonexistent_tensor");
@@ -22773,7 +22774,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let ln_ops: Vec<_> = graph.ops.iter()
@@ -22804,7 +22805,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Both output tensors should have the same shape as the input
         let silu_out = graph.tensors.iter().find(|t| t.name == "silu_s_out")
@@ -22846,7 +22847,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -22905,7 +22906,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert
         let gemm_bias = graph.ops.iter()
@@ -22922,7 +22923,7 @@ mod tests {
     fn graph_inputs_populated_from_non_producer_tensors() {
         // Arrange: Graph with an input that no node produces (external input)
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: "input_ids" is a graph input with no producer, should be in graph.inputs
@@ -22964,7 +22965,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Gelu output tensor should have same shape rank as q (which is [seq, 64])
         let gelu_out = graph.tensors.iter().find(|t| t.name == "gelu_out")
@@ -22989,7 +22990,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         // Assert
         assert!(result.is_err(), "Upper-case MATMUL should be unsupported");
@@ -23032,7 +23033,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: passthrough maps output to input tensor id, no new op added
         assert_eq!(graph.ops.len(), 0, "Single Relu passthrough should produce zero ops");
@@ -23060,7 +23061,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: Sub maps to OpKind::Add, Div maps to OpKind::Mul
         let sub_op = graph.ops.iter().find(|op| op.label == "sub1")
@@ -23111,7 +23112,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: output tensor first dim should be Symbolic (seq_len)
         let y_tensor = graph.tensors.iter().find(|t| t.name == "y")
@@ -23175,7 +23176,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: both Gemm ops exist with different n/k values
         let gemm_ops: Vec<_> = graph.ops.iter()
@@ -23226,7 +23227,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let transpose = graph.ops.iter()
@@ -23260,7 +23261,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let ln = graph.ops.iter()
@@ -23277,7 +23278,7 @@ mod tests {
     fn gather_with_known_initializer_has_correct_table_rows() {
         // Arrange: Gather from embed.weight (100x64) should have table_rows=100
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
@@ -23309,7 +23310,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: bias_w should be registered as a tensor from initializers
         let bias_t = graph.tensors.iter().find(|t| t.name == "bias_w");
@@ -23336,7 +23337,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert
         assert_eq!(graph.max_seq_len, 4096,
@@ -23376,7 +23377,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: ops should be in order — base ops, then Silu, Add, Gemm
         let labels: Vec<&str> = graph.ops.iter().map(|op| op.label.as_str()).collect();
@@ -23406,7 +23407,7 @@ mod tests {
             attributes: HashMap::new(),
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: ReduceMean on q (shape [seq, 64]) should produce hidden=64
         let rm = graph.ops.iter()
@@ -23460,7 +23461,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: transB=0 means no transpose, n=48, k=32
         let gemm = graph.ops.iter()
@@ -23477,7 +23478,7 @@ mod tests {
     fn gather_output_shape_preserves_initializer_embed_dim() {
         // Arrange: Gather from embed.weight [100, 64] should produce output shape [seq, 64]
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: output tensor "hidden" from Gather should have [Symbolic, Concrete(64)]
@@ -23524,7 +23525,7 @@ mod tests {
             outputs: vec!["qk".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_err(), "MatMul with both activation inputs should fail");
         let msg = result.unwrap_err().to_string();
@@ -23567,7 +23568,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Should have Gemm");
         if let OpKind::Gemm { n, k, .. } = gemm.kind {
@@ -23580,7 +23581,7 @@ mod tests {
     #[test]
     fn max_seq_len_propagated_to_symbolic_dim() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Should have Gather");
         if let OpKind::Gather { .. } = &gather_op.kind {
@@ -23603,7 +23604,7 @@ mod tests {
             outputs: vec!["qk2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let add_count = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).count();
         assert_eq!(add_count, 2, "Should have 2 Add ops");
@@ -23613,7 +23614,7 @@ mod tests {
     #[test]
     fn graph_output_tensor_has_correct_shape() {
         let onnx = make_test_graph();
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let output = graph.tensors.iter().find(|t| t.name == "qk_sum");
         assert!(output.is_some(), "Output tensor qk_sum should exist");
@@ -23635,7 +23636,7 @@ mod tests {
             outputs: vec!["normed2".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
             .expect("Should have RmsNorm op");
@@ -23670,7 +23671,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 1024);
         assert!(result.is_ok(), "1D initializer Gather should succeed");
         let graph = result.unwrap();
@@ -23707,7 +23708,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         assert_eq!(graph.ops.len(), 1, "Single Gather should produce exactly 1 op");
     }
@@ -23732,7 +23733,7 @@ mod tests {
             outputs: vec!["mul_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         assert!(result.is_ok(), "Mul with two initializers should succeed");
     }
@@ -23767,7 +23768,7 @@ mod tests {
                 a
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
             .expect("Should have LayerNorm op");
@@ -23808,7 +23809,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -23833,7 +23834,7 @@ mod tests {
             outputs: vec!["sqrt_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Sqrt should produce a Mul op
@@ -23854,7 +23855,7 @@ mod tests {
             outputs: vec!["div_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Div should produce Mul op kind
@@ -23893,7 +23894,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -23936,7 +23937,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         let norm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. }))
@@ -23971,7 +23972,7 @@ mod tests {
                 attrs
             },
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         let tr_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. }))
@@ -24015,7 +24016,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let result = onnx_to_compiler_graph(&onnx, &business, 2048);
         // Assert: should succeed despite long name
@@ -24062,7 +24063,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should have 1 op (MatMul) — Sigmoid is passthrough and adds no op
@@ -24093,7 +24094,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: output should reference the initializer tensor (it's in tensor_map)
@@ -24139,7 +24140,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should have 2 Gather ops
@@ -24173,7 +24174,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: no ops, no outputs, tensors are registered
@@ -24195,7 +24196,7 @@ mod tests {
             outputs: vec!["pow_out".to_string()],
             attributes: HashMap::new(),
         });
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Pow should produce Mul op kind
@@ -24242,7 +24243,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Both MatMul ops should exist, second overwrites "hidden" tensor
@@ -24273,7 +24274,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: passthrough ops produce no ops in the graph
@@ -24304,7 +24305,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert: output tensor should have shape [seq_dim]
@@ -24360,7 +24361,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: graph output should reference a tensor that has a producer (mm2)
@@ -24398,7 +24399,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: should produce a Gemm op with n=32, k=16
@@ -24433,7 +24434,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
@@ -24467,7 +24468,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "clipped" and "x" should resolve to the same tensor ID
@@ -24503,7 +24504,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 4096).unwrap();
         // Assert: input tensor should have shape [Concrete(128), Concrete(256)]
@@ -24542,7 +24543,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
@@ -24588,7 +24589,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "fresh" has 1D [seq], "bias" has 2D [32,16] → output should be 2D
@@ -24622,7 +24623,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: no ops added (passthrough)
@@ -24656,7 +24657,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert
@@ -24707,7 +24708,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: both outputs should exist and reference valid tensors with producers
@@ -24742,7 +24743,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: output tensor should be 1D (reduced over seq)
@@ -24786,7 +24787,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Transpose op should have perm = [1, 0]
@@ -24821,7 +24822,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: all 3 initializer tensors should be in the graph
@@ -24856,7 +24857,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "x" is no-producer, not an output → should be in graph.inputs
@@ -24908,7 +24909,7 @@ mod tests {
             quantization_annotation: vec![],
             metadata_props: HashMap::new(),
         };
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         // Act
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: "hidden" tensor (Gather output) should have producer
@@ -24996,7 +24997,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 应产生 GemmBias 且 transB 交换了 n/k
         let gemm_bias = graph.ops.iter()
@@ -25068,7 +25069,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Transpose 应消费 Gather 的输出 tensor
         let gather = graph.ops.iter().find(|op| op.label == "embed")
@@ -25129,7 +25130,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Add 输出形状应为 2-D（选 a 的 2-D 而非 b 的 1-D）
         let add_op = graph.ops.iter().find(|op| op.label == "add_rank")
@@ -25205,7 +25206,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 只有 MatMul 产生 op；三层 passthrough 全部跳过
         assert_eq!(graph.ops.len(), 1, "Triple passthrough should not produce any ops");
@@ -25242,7 +25243,7 @@ mod tests {
             },
         });
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert
         let transpose = graph.ops.iter()
@@ -25292,7 +25293,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gemm 的 dtype 应为 BF16
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -25351,7 +25352,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gather 的 index 输入应为 Reshape 的输出 tensor
         let reshape = graph.ops.iter().find(|op| op.label == "reshape_first")
@@ -25380,7 +25381,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: 空 graph 应正常生成，max_seq_len 传播正确
         assert_eq!(graph.ops.len(), 0);
@@ -25434,7 +25435,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: 两个 Gemm 都消费同一个 x tensor
         let gemm_ops: Vec<_> = graph.ops.iter()
@@ -25498,7 +25499,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: RmsNorm 应消费 LayerNorm 的输出
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. }))
@@ -25548,7 +25549,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 16384).unwrap();
         // Assert
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. }))
@@ -25623,7 +25624,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Gather 应成功，table_rows=100, embed_dim=64
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -25666,7 +25667,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: result_w 应该在 graph.outputs 中
         let result_w = graph.tensors.iter().find(|t| t.name == "result_w")
@@ -25714,7 +25715,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 空名称不应导致 panic，op 应成功添加
         assert_eq!(graph.ops.len(), 1, "Should have 1 Gemm op");
@@ -25772,7 +25773,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Where 输出 "where_out" 和 "x" 应映射到同一 tensor_id
         let x_tensor = graph.tensors.iter().find(|t| t.name == "x")
@@ -25834,7 +25835,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Sigmoid 输出 "sig_out" 应与 "act" 共享同一 tensor_id
         let act_tensor = graph.tensors.iter().find(|t| t.name == "act")
@@ -25894,7 +25895,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Relu passthrough 后 MatMul 消费原始输入 tensor
         let input_tensor = graph.tensors.iter().find(|t| t.name == "input_act")
@@ -25954,7 +25955,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Div 的 OpKind 应为 Mul（Div 映射到 Mul）
         let div_op = graph.ops.iter().find(|op| op.label == "div_op")
@@ -26017,7 +26018,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Sub 映射到 Add OpKind
         let sub_op = graph.ops.iter().find(|op| op.label == "sub_op")
@@ -26079,7 +26080,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: MatMul 应消费 Transpose 的输出 tensor
         let trans_op = graph.ops.iter().find(|op| op.label == "trans_first")
@@ -26146,7 +26147,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: RmsNorm 应消费 Gather 的输出 tensor
         let gather_op = graph.ops.iter()
@@ -26222,7 +26223,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 2048).unwrap();
         // Assert: LayerNorm 应消费 Gather 的输出
         let gather_op = graph.ops.iter()
@@ -26281,7 +26282,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: GemmBias 的 n=48（权重行数）, 输出 tensor 的第二维 = 48
         let gb_op = graph.ops.iter()
@@ -26356,7 +26357,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Reshape 应消费 ReduceMean 的输出
         let mean_op = graph.ops.iter()
@@ -26426,7 +26427,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: Transpose 应消费 ReduceMean 的输出
         let rm_op = graph.ops.iter()
@@ -26470,7 +26471,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: 输入 tensor 形状应包含 Symbolic("batch_size") + Concrete(128)
         let batch_tensor = graph.tensors.iter().find(|t| t.name == "batch_input")
@@ -26517,7 +26518,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 1024).unwrap();
         // Assert: Unknown 维度应变为 Symbolic("unknown", max_value=1024)
         let unk_tensor = graph.tensors.iter().find(|t| t.name == "unk_input")
@@ -26567,7 +26568,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 256).unwrap();
         // Assert: 应产生一个 Add op，消费两个不同的激活 tensor
         assert_eq!(graph.ops.len(), 1, "Should have exactly 1 Add op");
@@ -26629,7 +26630,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let business = MegaKernelBusinessConfig::default();
+        let business = BusinessConfig::default();
         let graph = onnx_to_compiler_graph(&onnx, &business, 512).unwrap();
         // Assert: Silu 应消费 Gather 的输出 tensor
         let gather_op = graph.ops.iter()
@@ -26688,7 +26689,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
         // Assert
         let tanh_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("Tanh op");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
@@ -26731,7 +26732,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
         let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
@@ -26776,7 +26777,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Sub maps to Add OpKind
         let add_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Add)).collect();
         assert!(add_ops.len() >= 1, "Sub should be mapped to Add OpKind");
@@ -26819,7 +26820,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
         let reduce_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("ReduceMean");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
@@ -26863,7 +26864,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: chain connectivity
         assert_eq!(graph.ops.len(), 4, "Should have 4 ops in chain");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
@@ -26907,7 +26908,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Pow maps to Mul, then Add
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert!(mul_ops.len() >= 1, "Pow should be mapped to Mul OpKind");
@@ -26951,7 +26952,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Div maps to Mul OpKind
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert!(mul_ops.len() >= 1, "Div should be mapped to Mul OpKind");
@@ -26996,7 +26997,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
         let reduce_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("ReduceMean");
@@ -27037,7 +27038,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert
         let gemm_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Gemm { .. })).collect();
         let reshape_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
@@ -27078,7 +27079,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Sqrt maps to Mul OpKind
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert!(mul_ops.len() >= 1, "Sqrt should be mapped to Mul OpKind");
@@ -27126,7 +27127,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: full chain connectivity
         let ln_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
         let gelu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu");
@@ -27169,7 +27170,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
         let gelu_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu");
@@ -27212,7 +27213,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert
         let softmax_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Softmax)).expect("Softmax");
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
@@ -27255,7 +27256,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert
         let gemm_bias_op = graph.ops.iter()
             .find(|op| matches!(op.kind, OpKind::GemmBias { .. }))
@@ -27296,7 +27297,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Pow and Sqrt both map to Mul OpKind
         let mul_ops: Vec<_> = graph.ops.iter().filter(|op| matches!(op.kind, OpKind::Mul)).collect();
         assert_eq!(mul_ops.len(), 2, "Pow and Sqrt should each produce one Mul op");
@@ -27332,7 +27333,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Conv"),
@@ -27363,7 +27364,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "MaxPool"),
@@ -27394,7 +27395,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "QuantizeLinear"),
@@ -27425,7 +27426,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "DequantizeLinear"),
@@ -27456,7 +27457,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Resize"),
@@ -27495,7 +27496,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Concat"),
@@ -27526,7 +27527,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Flatten"),
@@ -27557,7 +27558,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "BatchNormalization"),
@@ -27588,7 +27589,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Pad"),
@@ -27630,7 +27631,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Relu is passthrough (no separate op), so only Gather + Gemm ops
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather op");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op (MatMul)");
@@ -27673,7 +27674,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Sigmoid passthrough, Gemm should consume Gather output directly
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
@@ -27715,7 +27716,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 32).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 32).unwrap();
         // Assert: Clip is passthrough, MatMul should consume Gather output
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
         let gemm_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("MatMul Gemm");
@@ -27755,7 +27756,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::NoWeightInput { ref node_name } if node_name == "mm1"),
@@ -27790,7 +27791,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::InvalidMatMulShape { ref name, dims: 1 } if name == "flat_w"),
@@ -27821,7 +27822,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "AveragePool"),
@@ -27868,7 +27869,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Where is passthrough, Add should consume Gather output
         let gather_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
         let add_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Add)).expect("Add");
@@ -27910,7 +27911,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Expand"),
@@ -27949,7 +27950,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Tile"),
@@ -27980,7 +27981,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Shape"),
@@ -28019,7 +28020,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "GatherND"),
@@ -28064,7 +28065,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "ScatterND"),
@@ -28103,7 +28104,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "NonMaxSuppression"),
@@ -28142,7 +28143,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "TopK"),
@@ -28187,7 +28188,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, .. } if op_type == "Range"),
@@ -28240,7 +28241,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: two outputs should be populated
         assert_eq!(graph.outputs.len(), 2, "Should have 2 graph outputs");
         let out_names: Vec<&str> = graph.outputs.iter()
@@ -28290,7 +28291,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: all three inputs should appear in graph.inputs (no producer)
         let input_names: Vec<&str> = graph.inputs.iter()
             .filter_map(|&tid| graph.tensor(tid).map(|t| t.name.as_str()))
@@ -28347,7 +28348,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert: Expand error should identify the failing node
         assert!(
             matches!(err, ConvertError::UnsupportedOp { ref op_type, ref node_name }
@@ -28398,7 +28399,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: transB attribute with large int64 should be truthy (non-zero),
         // which causes n/k swap in convert_gemm (n=shape[1], k=shape[0]).
         // The OpKind::Gemm trans_b field itself is always false in current code,
@@ -28454,7 +28455,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: epsilon should be the value from the attribute
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
         if let OpKind::LayerNorm { eps } = ln.kind {
@@ -28485,7 +28486,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         assert_eq!(graph.ops.len(), 0, "Empty graph should have zero ops");
         assert_eq!(graph.inputs.len(), 1, "Should have 1 graph input");
@@ -28522,7 +28523,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: all 3 ops present, data flows correctly
         assert_eq!(graph.ops.len(), 3, "Should have 3 ops (Gather + Reshape + Softmax)");
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather");
@@ -28559,7 +28560,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Dropout should fail conversion");
         let err = result.unwrap_err();
@@ -28600,7 +28601,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Squeeze should fail conversion");
         let err = result.unwrap_err();
@@ -28642,7 +28643,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Unsqueeze should fail conversion");
         let err = result.unwrap_err();
@@ -28685,7 +28686,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Constant should fail conversion");
         let err = result.unwrap_err();
@@ -28718,7 +28719,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Split should fail conversion");
         let err = result.unwrap_err();
@@ -28751,7 +28752,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Erf should fail conversion");
         let err = result.unwrap_err();
@@ -28799,7 +28800,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert
         assert!(result.is_err(), "Cast should fail conversion");
         let err = result.unwrap_err();
@@ -28847,7 +28848,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose op");
         if let OpKind::Transpose { perm } = &tr.kind {
@@ -28893,7 +28894,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose");
         if let OpKind::Transpose { perm } = &tr.kind {
@@ -28927,7 +28928,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: two distinct ops
         assert_eq!(graph.ops.len(), 2, "Should have 2 ops");
         let gelu = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gelu)).expect("Gelu op");
@@ -28963,7 +28964,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: should succeed without panicking on missing attributes
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: MatMul maps to Gemm with n=shape[0], k=shape[1]
         let mm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm from MatMul");
         if let OpKind::Gemm { n, k, .. } = &mm.kind {
@@ -28995,7 +28996,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: no axes attribute, should still succeed
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let rm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::MeanPool { .. })).expect("MeanPool from ReduceMean");
         assert_eq!(rm.label, "rm1", "label should match node name");
@@ -29039,7 +29040,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: identity perm stored as-is, not optimized away
         let tr = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose");
         if let OpKind::Transpose { perm } = &tr.kind {
@@ -29089,7 +29090,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: missing transB should default to false, no panic
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: n/k should reflect no transpose (n=shape[0], k=shape[1])
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm");
         if let OpKind::Gemm { n, k, .. } = &gemm.kind {
@@ -29121,7 +29122,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: should not panic on missing shape attribute
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
         if let OpKind::Reshape { target_shape } = &rs.kind {
@@ -29165,7 +29166,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: missing epsilon should not panic
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: default epsilon is 1e-5
         let ln = graph.ops.iter().find(|op| matches!(op.kind, OpKind::LayerNorm { .. })).expect("LayerNorm");
         if let OpKind::LayerNorm { eps } = ln.kind {
@@ -29200,7 +29201,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: BOOL initializer tensor should have F32 dtype (map_onnx_dtype maps BOOL to F32)
         let t = graph.tensors.iter().find(|t| t.name == "bool_weight")
             .expect("bool_weight should be registered");
@@ -29242,7 +29243,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap_err();
         // Assert: error message must contain both the op_type and node_name verbatim
         let msg = err.to_string();
         assert!(msg.contains("BitShift"), "Error must contain op_type 'BitShift': {msg}");
@@ -29289,7 +29290,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: ops must appear in the exact order: Gather, Softmax, MatMul(=Gemm), Add
         assert_eq!(graph.ops.len(), 4, "Should have exactly 4 ops");
         assert!(matches!(graph.ops[0].kind, OpKind::Gather { .. }), "First op should be Gather");
@@ -29335,7 +29336,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: tensor name preserved verbatim
         let tensor = graph.tensors.iter()
             .find(|t| t.name == "model.layers.0.self_attn.q_proj.weight")
@@ -29361,7 +29362,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert
         assert_eq!(graph.ops.len(), 0, "No ops in empty graph");
         assert_eq!(graph.tensors.len(), 0, "No tensors in empty graph");
@@ -29396,7 +29397,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
         // Assert
         assert_eq!(graph.ops.len(), 1, "Exactly one op");
         let op = &graph.ops[0];
@@ -29451,7 +29452,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: epsilon should be exactly f32::MIN_POSITIVE
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
         if let OpKind::RmsNorm { eps } = rms.kind {
@@ -29502,7 +29503,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: negative infinity should be preserved as-is
         let rms = graph.ops.iter().find(|op| matches!(op.kind, OpKind::RmsNorm { .. })).expect("RmsNorm");
         if let OpKind::RmsNorm { eps } = rms.kind {
@@ -29540,7 +29541,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: INT64 type input should still have its declared concrete shape
         let t = graph.tensors.iter().find(|t| t.name == "int64_input")
             .expect("int64_input should be registered");
@@ -29579,7 +29580,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: MAP type is not Tensor, so falls back to default [Symbolic("seq_len")]
         let t = graph.tensors.iter().find(|t| t.name == "map_input")
             .expect("map_input should be registered");
@@ -29615,7 +29616,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act: should not panic; Gather with empty inputs uses zero defaults
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         assert_eq!(graph.ops.len(), 1, "Should have 1 Gather op");
         let op = &graph.ops[0];
@@ -29650,7 +29651,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert: should fail with NoWeightInput (empty string is not an initializer)
         let msg = err.to_string();
         assert!(msg.contains("mm_bad") || msg.contains("MatMul"),
@@ -29682,7 +29683,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let result = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64);
+        let result = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64);
         // Assert: should fail — Gemm needs at least a weight input
         assert!(result.is_err(), "Gemm with no inputs should fail");
     }
@@ -29757,7 +29758,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: three distinct tensors with unique IDs
         let ids: Vec<_> = graph.tensors.iter().map(|t| t.id).collect();
         let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
@@ -29792,7 +29793,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Reshape should convert with empty target_shape (shape from initializer is not parsed)
         let rs = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Reshape { .. })).expect("Reshape");
         if let OpKind::Reshape { target_shape } = &rs.kind {
@@ -29829,7 +29830,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Optional is not Tensor, so falls back to default [Symbolic("seq_len")]
         let t = graph.tensors.iter().find(|t| t.name == "opt_seq_in")
             .expect("opt_seq_in should be registered");
@@ -29870,7 +29871,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert: Unicode node name must appear verbatim in error message
         let msg = err.to_string();
         assert!(msg.contains("节点_卷积_01"), "Error must preserve unicode node name: {msg}");
@@ -29900,7 +29901,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Exp"), "Error must mention Exp op_type: {msg}");
@@ -29929,7 +29930,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: second op should be Mul (Pow maps to Mul)
         let mul_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Mul))
@@ -29959,7 +29960,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sqrt maps to Mul, should have 2 inputs (even if same tensor)
         let mul_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Mul))
@@ -30008,7 +30009,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: output shape should be [4, 8] from broadcast (a and b same rank)
         let out_t = graph.tensors.iter().find(|t| t.name == "sum").expect("sum tensor");
         assert_eq!(out_t.shape.len(), 2, "Same-rank broadcast output should have 2 dims");
@@ -30043,7 +30044,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: all 50 initializers registered as tensors
         assert_eq!(graph.tensors.len(), 50, "All 50 initializers must become tensors");
         let unique_names: std::collections::HashSet<_> = graph.tensors.iter().map(|t| t.name.clone()).collect();
@@ -30083,7 +30084,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: graph should convert successfully and have 1 Gemm op
         // The node output "shared_name" overwrites the initializer entry in tensor_map
         assert_eq!(graph.ops.len(), 1, "Should have 1 Gemm op");
@@ -30113,7 +30114,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Unique"), "Error must mention Unique op_type: {msg}");
@@ -30144,7 +30145,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: U8 dtype falls through map_onnx_dtype catchall → F32
         let t = graph.tensors.iter().find(|t| t.name == "labels").expect("labels tensor");
         assert_eq!(t.dtype, DType::F32, "U8 placeholder for STRING maps to F32 via catchall");
@@ -30184,7 +30185,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: the weight tensor and Gemm output should carry F16 dtype
         let weight_t = graph.tensors.iter().find(|t| t.name == "fp16_weight").expect("fp16_weight tensor");
         assert_eq!(weight_t.dtype, DType::F16, "FP16 initializer should produce F16 tensor");
@@ -30226,7 +30227,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: weight tensor and Gemm op should carry BF16 dtype
         let weight_t = graph.tensors.iter().find(|t| t.name == "bf16_weight").expect("bf16_weight tensor");
         assert_eq!(weight_t.dtype, DType::BF16, "BF16 initializer should produce BF16 tensor");
@@ -30268,7 +30269,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: F64 initializer should be downgraded to F32
         let weight_t = graph.tensors.iter().find(|t| t.name == "f64_w").expect("f64_w tensor");
         assert_eq!(weight_t.dtype, DType::F32, "F64 initializer should be mapped to F32");
@@ -30306,7 +30307,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: I8 falls through to F32 catchall
         let weight_t = graph.tensors.iter().find(|t| t.name == "quant_w").expect("quant_w tensor");
         assert_eq!(weight_t.dtype, DType::F32, "I8 initializer should fall through to F32");
@@ -30347,7 +30348,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: the graph should have 2 tensors with their own dtypes
         assert_eq!(graph.tensors.len(), 2, "Should have 2 weight tensors");
         // Each initializer keeps its mapped dtype
@@ -30389,7 +30390,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Gather should have table_rows=200, embed_dim=48
         let gather = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gather { .. })).expect("Gather op");
         if let OpKind::Gather { table_rows, embed_dim, .. } = &gather.kind {
@@ -30421,7 +30422,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Log"), "Error must mention Log op_type: {msg}");
@@ -30451,7 +30452,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("phantom_weight"), "Error must mention weight name: {msg}");
@@ -30485,7 +30486,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("flat_w"), "Error must mention weight name: {msg}");
@@ -30551,7 +30552,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("cube_w"), "Error must mention weight name: {msg}");
@@ -30587,7 +30588,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: Unknown dims should produce Symbolic with max_value = 512
         let t = graph.tensors.iter().find(|t| t.name == "mystery_input").expect("mystery_input tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2 dimensions");
@@ -30623,7 +30624,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sub should produce OpKind::Add
         let add_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Add))
@@ -30652,7 +30653,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Div should produce OpKind::Mul
         let mul_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Mul))
@@ -30683,7 +30684,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("HardSwish"), "Error must mention HardSwish op_type: {msg}");
@@ -30713,7 +30714,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Celu"), "Error must mention Celu op_type: {msg}");
@@ -30743,7 +30744,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("Selu"), "Error must mention Selu op_type: {msg}");
@@ -30783,7 +30784,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Unicode name should be preserved verbatim
         let t = graph.tensors.iter().find(|t| t.name == "模型_层_权重_alpha").expect("unicode tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2-D shape");
@@ -30829,7 +30830,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: output shape should be [2, 4, 8] from the higher-rank input
         let out_t = graph.tensors.iter().find(|t| t.name == "result").expect("result tensor");
         assert_eq!(out_t.shape.len(), 3, "Broadcast output should have 3 dims (higher rank)");
@@ -30865,7 +30866,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: I32 falls through to F32
         let t = graph.tensors.iter().find(|t| t.name == "int32_bias").expect("int32_bias tensor");
         assert_eq!(t.dtype, DType::F32, "I32 initializer should fall through to F32");
@@ -30895,7 +30896,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Should have 3 tensors registered and 0 ops
         assert_eq!(graph.tensors.len(), 3, "Should have 3 weight tensors");
         assert_eq!(graph.ops.len(), 0, "Should have 0 ops");
@@ -30930,7 +30931,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: Should successfully produce a Gemm op
         let gemm = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Gemm { .. })).expect("Gemm op");
         if let OpKind::Gemm { n, k, .. } = &gemm.kind {
@@ -30970,7 +30971,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let err = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap_err();
+        let err = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap_err();
         // Assert
         let msg = err.to_string();
         assert!(msg.contains("mm1"), "Error must mention node name: {msg}");
@@ -31007,7 +31008,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: F64 initializer should map to F32
         let w_tensor = graph.tensors.iter().find(|t| t.name == "f64_w").expect("f64_w tensor");
         assert_eq!(w_tensor.dtype, DType::F32, "F64 should map to F32 in detect_dtype");
@@ -31031,7 +31032,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 1024).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 1024).unwrap();
         // Assert
         assert_eq!(graph.ops.len(), 0, "Empty graph should have 0 ops");
         assert_eq!(graph.tensors.len(), 0, "Empty graph should have 0 tensors");
@@ -31067,7 +31068,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 512).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 512).unwrap();
         // Assert: output shape = [Symbolic(seq_len), Concrete(48)]
         let out_t = graph.tensors.iter().find(|t| t.name == "embedded").expect("embedded tensor");
         assert_eq!(out_t.shape.len(), 2, "Gather output should be 2-D");
@@ -31119,7 +31120,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let t_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Transpose { .. })).expect("Transpose op");
         if let OpKind::Transpose { perm } = &t_op.kind {
@@ -31148,7 +31149,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Pow should produce OpKind::Mul
         let mul_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Mul))
@@ -31177,7 +31178,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: Sqrt should produce OpKind::Mul
         let mul_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Mul))
@@ -31208,7 +31209,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert: "out" should map to same tensor id as "cond" (passthrough)
         let cond_tid = graph.tensors.iter().find(|t| t.name == "cond").expect("cond tensor");
         let out_tid = graph.tensors.iter().find(|t| t.name == "out");
@@ -31238,7 +31239,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 128).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 128).unwrap();
         // Assert: "clipped" should not appear as a separate tensor (passthrough)
         let clipped_tid = graph.tensors.iter().find(|t| t.name == "clipped");
         assert!(clipped_tid.is_none(), "Passthrough should not create a new tensor for 'clipped'");
@@ -31265,7 +31266,7 @@ mod tests {
             vec![],
         );
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 64).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 64).unwrap();
         // Assert
         let tanh_op = graph.ops.iter().find(|op| matches!(op.kind, OpKind::Tanh)).expect("Tanh op");
         assert_eq!(tanh_op.inputs.len(), 1, "Tanh should have 1 input");
@@ -31310,7 +31311,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 256).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 256).unwrap();
         // Assert: Should have 2 Gather ops, both referencing the same table
         let gather_ops: Vec<_> = graph.ops.iter()
             .filter(|op| matches!(op.kind, OpKind::Gather { .. }))
@@ -31378,7 +31379,7 @@ mod tests {
             metadata_props: HashMap::new(),
         };
         // Act
-        let graph = onnx_to_compiler_graph(&onnx, &MegaKernelBusinessConfig::default(), 4096).unwrap();
+        let graph = onnx_to_compiler_graph(&onnx, &BusinessConfig::default(), 4096).unwrap();
         // Assert: Param("batch_size") should become Symbolic { name: "batch_size", max_value: Some(4096) }
         let t = graph.tensors.iter().find(|t| t.name == "batch_input").expect("batch_input tensor");
         assert_eq!(t.shape.len(), 2, "Should have 2 dimensions");

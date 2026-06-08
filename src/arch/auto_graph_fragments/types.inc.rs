@@ -71,6 +71,19 @@ pub struct ArchitectureFeatures {
     // Special
     pub has_classifier: bool,
     pub tie_lm_head: bool,
+    /// Whether norm weights use (1 + weight) residual convention (Gemma 1/2/3).
+    /// Gemma 4 dropped this pattern — uses standard RMSNorm without +1.
+    /// SPEC/39: topology-driven, replaces hardcoded `has_gemma_norm_residual = false`.
+    pub has_norm_residual: bool,
+    /// Post-norm architecture (BERT/XLM-R): norm applied after residual, not before.
+    /// Detected by: presence of `TensorRole::EmbedNorm` (embeddings.LayerNorm weight).
+    pub is_post_norm: bool,
+    /// Causal attention: mask future positions. Post-norm models use bidirectional
+    /// (causal=false); pre-norm models use causal (causal=true).
+    pub causal: bool,
+    /// Absolute position embeddings (BERT): learned `position_embed` tensor.
+    /// Decoders use RoPE instead (has_absolute_position_embed=false).
+    pub has_absolute_position_embed: bool,
 
     // ── Heterogeneous layers (Gemma 4 E2B/E4B) ──
     /// True when model has both sliding + global attention AND different FFN sizes across segments.
@@ -78,8 +91,12 @@ pub struct ArchitectureFeatures {
     pub is_hetero_layer: bool,
     /// Head dim for sliding attention layers (Gemma 4: 256).
     pub sliding_head_dim: usize,
+    /// Number of Q heads for sliding layers (Gemma 4 E2B: 4).
+    pub sliding_num_q_heads: usize,
     /// Head dim for global attention layers (Gemma 4: 512).
     pub full_head_dim: usize,
+    /// Number of Q heads for full layers (Gemma 4 E2B: 8).
+    pub full_num_q_heads: usize,
     /// FFN intermediate size for small-FFN segment group (Gemma 4 E2B: 6144).
     pub small_intermediate: usize,
     /// FFN intermediate size for large-FFN segment group (Gemma 4 E2B: 12288).
@@ -187,8 +204,21 @@ pub fn analyze_architecture(
         0
     };
 
-    // ── RoPE: decoders have RoPE by default unless encoder ──
-    let has_rope = family == Family::Decoder;
+    // ── Topology-derived: absolute position embeddings (BERT) vs RoPE (decoders) ──
+    let has_absolute_position_embed = role_index.contains_key(&(TensorRole::PositionEmbedding, None));
+
+    // ── Topology-derived: post-norm (BERT/XLM-R) vs pre-norm (decoders) ──
+    // Detected by presence of EmbedNorm (embeddings.LayerNorm weight).
+    // Post-norm: InputNorm applied after attn residual; Pre-norm: InputNorm applied before attention.
+    let is_post_norm = role_index.contains_key(&(TensorRole::EmbedNorm, None));
+
+    // ── Topology-derived: causal attention ──
+    // Post-norm models (BERT/XLM-R) use bidirectional attention (causal=false).
+    // Pre-norm models (decoders) use causal masking (causal=true).
+    let causal = !is_post_norm;
+
+    // ── RoPE: pre-norm models with attention keys have RoPE; post-norm models do not ──
+    let has_rope = !is_post_norm && role_index.contains_key(&(TensorRole::AttentionKey, Some(0)));
 
     // ── Norm type ──
     // Check if layer 0 InputNorm has a corresponding bias tensor
@@ -200,8 +230,8 @@ pub fn analyze_architecture(
             NormType::RmsNorm
         }
     } else {
-        // Default for decoders: RmsNorm; for encoders (BERT): LayerNorm
-        if family == Family::Encoder {
+        // Default for post-norm: LayerNorm; for pre-norm: RmsNorm
+        if is_post_norm {
             NormType::LayerNorm
         } else {
             NormType::RmsNorm
@@ -279,6 +309,7 @@ pub fn analyze_architecture(
         false
     };
 
+    eprintln!("[DIAG-ARCH] arch_name={:?} is_gemma4={} has_head_rms_norm={} has_qk_norm={} has_value_norm={}", arch_name, arch_name == Some("gemma4"), has_head_rms_norm, has_qk_norm, has_value_norm);
     ArchitectureFeatures {
         family,
         num_layers,
@@ -306,10 +337,19 @@ pub fn analyze_architecture(
         is_audio,
         has_classifier,
         tie_lm_head,
+        // Gemma 1/2/3 use (1+weight) residual norm convention.
+        // Gemma 4 dropped this pattern (identified by has_qk_norm=true).
+        // All non-Gemma models also don't use residual norm.
+        has_norm_residual: has_embedding_scale && !has_qk_norm,
+        is_post_norm,
+        causal,
+        has_absolute_position_embed,
         // Hetero fields — populated after analyze_architecture by caller
         is_hetero_layer: false,
         sliding_head_dim: 0,
+        sliding_num_q_heads: 0,
         full_head_dim: 0,
+        full_num_q_heads: 0,
         small_intermediate: 0,
         large_intermediate: 0,
         large_ffn_start_segment: 0,

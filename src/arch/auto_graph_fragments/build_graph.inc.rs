@@ -42,7 +42,7 @@ pub fn build_compiler_graph(
     weight_shapes: &HashMap<String, Vec<usize>>,
     weight_dtypes: &HashMap<String, DType>,
     weight_quant_types: &HashMap<String, gllm_kernels::quant::QuantType>,
-    business_config: &MegaKernelBusinessConfig,
+    business_config: &BusinessConfig,
     max_seq_len: usize,
 ) -> Result<CompilerGraph, GraphBuildError> {
     let mut g = CompilerGraph::new();
@@ -74,7 +74,6 @@ pub fn build_compiler_graph(
         }
     };
 
-    let is_encoder = features.family == Family::Encoder;
     let eps = config.norm_eps;
 
     // ── Derive dimensions from weight shapes (canonical names) ──
@@ -158,6 +157,7 @@ pub fn build_compiler_graph(
                 vocab_size,
                 hidden_dim: hidden,
                 index_dim: s.clone(),
+                scale: g.embedding_scale,
             },
             vec![token_ids, embed_w],
             vec![embedding],
@@ -168,6 +168,7 @@ pub fn build_compiler_graph(
             OpKind::Gather {
                 table_rows: vocab_size, embed_dim: hidden,
                 index_dim: s.clone(), indices_kind: Default::default(),
+                scale: g.embedding_scale,
             },
             vec![token_ids, embed_w],
             vec![embedding],
@@ -183,7 +184,7 @@ pub fn build_compiler_graph(
     let has_token_type_embed = weight_shapes.contains_key("token_type_embed");
     let has_embed_norm = weight_shapes.contains_key("embed_norm");
     let mut hidden_0 = embedding;
-    if is_encoder && (has_position_embed || has_token_type_embed || has_embed_norm) {
+    if features.has_absolute_position_embed || has_token_type_embed || has_embed_norm {
         use gllm_kernels::compiler::graph::GatherIndicesKind;
 
         // Position embedding: Gather(position_emb_w, Arange{0..S})
@@ -195,6 +196,7 @@ pub fn build_compiler_graph(
                 OpKind::Gather {
                     table_rows: pos_shape[0], embed_dim: hidden,
                     index_dim: s.clone(), indices_kind: GatherIndicesKind::Arange,
+                    scale: None,
                 },
                 vec![token_ids, pos_w], vec![pos_emb], "position_embed",
             );
@@ -212,6 +214,7 @@ pub fn build_compiler_graph(
                 OpKind::Gather {
                     table_rows: tte_shape[0], embed_dim: hidden,
                     index_dim: s.clone(), indices_kind: GatherIndicesKind::Zeros,
+                    scale: None,
                 },
                 vec![token_ids, tte_w], vec![tte_emb], "token_type_embed",
             );
@@ -363,6 +366,7 @@ pub fn build_compiler_graph(
         let ref_layers = [0usize, 4, 15, 19]; // [ss, fs, sl, fl]
         let prefixes = ["layer_sliding_small", "layer_full_small", "layer_sliding_large", "layer_full_large"];
         let head_dims = [features.sliding_head_dim, features.full_head_dim, features.sliding_head_dim, features.full_head_dim];
+        let num_q_heads_per_type = [features.sliding_num_q_heads, features.full_num_q_heads, features.sliding_num_q_heads, features.full_num_q_heads];
         let intermediates = [features.small_intermediate, features.small_intermediate, features.large_intermediate, features.large_intermediate];
         // RoPE: sliding layers use base theta, full layers use global theta
         let rope_thetas = [config.rope_theta, config.global_rope_theta, config.rope_theta, config.global_rope_theta];
@@ -393,9 +397,10 @@ pub fn build_compiler_graph(
             let this_intermediate = intermediates[type_idx];
             let this_rope_theta = rope_thetas[type_idx];
             let this_rope_partial = rope_partials[type_idx];
+            let this_num_q_heads = num_q_heads_per_type[type_idx];
 
-            // Derive attention dimensions from head_dim
-            let this_q_dim = num_heads * this_head_dim;
+            // Derive attention dimensions from head_dim and per-type num_q_heads
+            let this_q_dim = this_num_q_heads * this_head_dim;
 
             let mut wtids: Vec<(TensorId, usize)> = Vec::new();
             let mut byte_cursor: usize = 0;
@@ -490,7 +495,7 @@ pub fn build_compiler_graph(
             byte_cursor += weight_physical_bytes(&in_norm_cn, &norm_shape);
 
             let normed: TensorId;
-            if is_encoder {
+            if features.is_post_norm {
                 normed = hidden_tid;
             } else {
                 let n = g.add_tensor(&ptname("normed"), vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -606,6 +611,32 @@ pub fn build_compiler_graph(
             let mut q_for_attn = q_out;
             let mut k_for_attn = k_out;
 
+            // HeadRmsNorm (with learned weight, e.g. Gemma 4 GGUF has q_norm.weight/k_norm.weight)
+            if features.has_head_rms_norm {
+                let head_rms_eps = 1e-6f32;
+                // Q norm weight
+                let q_norm_cn = cn_layer(ref_layer, "q_norm");
+                if let Some(qn_shape) = weight_shapes.get(&q_norm_cn) {
+                    let q_norm_w = g.add_tensor_concrete(&q_norm_cn, qn_shape, tdt(&q_norm_cn));
+                    wtids.push((q_norm_w, byte_cursor));
+                    byte_cursor += weight_physical_bytes(&q_norm_cn, qn_shape);
+                    let q_normed = g.add_tensor(&ptname("q_normed"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
+                    g.add_op(OpKind::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps },
+                        vec![q_for_attn, q_norm_w], vec![q_normed], &ptname("q_norm"));
+                    q_for_attn = q_normed;
+                }
+                // K norm weight (guarded for SharedKvRef)
+                let k_norm_cn = cn_layer(ref_layer, "k_norm");
+                if let Some(kn_shape) = weight_shapes.get(&k_norm_cn) {
+                    let k_norm_w = g.add_tensor_concrete(&k_norm_cn, kn_shape, tdt(&k_norm_cn));
+                    wtids.push((k_norm_w, byte_cursor));
+                    byte_cursor += weight_physical_bytes(&k_norm_cn, kn_shape);
+                    let k_normed = g.add_tensor(&ptname("k_normed"), vec![s.clone(), SymDim::Concrete(k_n)], dt);
+                    g.add_op_guarded(OpKind::HeadRmsNorm { head_dim: this_head_dim, eps: head_rms_eps },
+                        vec![k_for_attn, k_norm_w], vec![k_normed], &ptname("k_norm"), kv_guard);
+                    k_for_attn = k_normed;
+                }
+            }
             // QkNorm (no learned weight, operates per-head)
             if features.has_qk_norm && !features.has_head_rms_norm {
                 let qk_norm_eps = 1e-6f32;
@@ -625,7 +656,7 @@ pub fn build_compiler_graph(
                 let rope_q = g.add_tensor(&ptname("q_rope"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
                 g.add_op(
                     OpKind::RoPE {
-                        num_heads, head_dim: this_head_dim,
+                        num_heads: this_num_q_heads, head_dim: this_head_dim,
                         theta: this_rope_theta,
                         partial: this_rope_partial,
                         rope_scaling: config.rope_scaling,
@@ -646,11 +677,11 @@ pub fn build_compiler_graph(
             }
 
             // Attention
-            let causal = !is_encoder;
+            let causal = features.causal;
             let attn = g.add_tensor(&ptname("attn"), vec![s.clone(), SymDim::Concrete(q_n)], dt);
             g.add_op(
                 OpKind::MultiHeadAttention {
-                    seq_len: s.clone(), num_heads, num_kv_heads, head_dim: this_head_dim, causal,
+                    seq_len: s.clone(), num_heads: this_num_q_heads, num_kv_heads, head_dim: this_head_dim, causal,
                     attention_sinks: features.attention_sinks,
                 },
                 vec![q_for_attn, k_for_attn, v_out],
@@ -1097,7 +1128,7 @@ pub fn build_compiler_graph(
         };
 
         let normed: TensorId;
-        if is_encoder {
+        if features.is_post_norm {
             // Post-norm: attention uses raw hidden; InputNorm applied after attn residual
             normed = hidden_tid;
         } else {
@@ -1247,7 +1278,7 @@ pub fn build_compiler_graph(
             layer_weight_byte_cursor += weight_physical_bytes(&uv_cn, &[uv_n, uv_k]);
 
             // 6. MLA Attention: Absorbed (default) or Un-absorbed (short prefill)
-            let causal = !is_encoder;
+            let causal = features.causal;
             if features.mla_use_unabsorbed {
                 // ── MLA Un-absorbed Path (REQ-MLA-004) ──
                 // Restore K/V from compressed c_KV, then standard FlashAttention.
@@ -1536,7 +1567,7 @@ pub fn build_compiler_graph(
             }
 
             // ── Attention ──
-            let causal = !is_encoder;
+            let causal = features.causal;
             let attn = g.add_tensor("layer.attn", vec![s.clone(), SymDim::Concrete(q_n)], dt);
             g.add_op(
                 OpKind::MultiHeadAttention {
@@ -1646,7 +1677,7 @@ pub fn build_compiler_graph(
         };
 
         let post_normed: TensorId;
-        if is_encoder {
+        if features.is_post_norm {
             // Post-norm: apply InputNorm (attention.output.LayerNorm) after attn residual → FFN input
             let n = g.add_tensor("layer.normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
             if let Some(bias) = input_norm_bias_tid {
@@ -1668,7 +1699,7 @@ pub fn build_compiler_graph(
 
         // ── FFN ──
         // Pre-norm residual: resid + ffn_out. Post-norm residual: post_normed + ffn_out.
-        let ffn_resid_src = if is_encoder { post_normed } else { resid };
+        let ffn_resid_src = if features.is_post_norm { post_normed } else { resid };
         let ffn_resid_tid: Option<TensorId>;
         match &features.ffn_type {
             FfnType::SwiGLU | FfnType::GeGLU => {
@@ -2036,7 +2067,7 @@ pub fn build_compiler_graph(
             fat_output_tid = None;
             tensor_map.insert("hidden_0".to_string(), ple_resid);
         } else {
-            if is_encoder {
+            if features.is_post_norm {
                 // Post-norm: apply PostAttnNorm (output.LayerNorm) after FFN residual
                 let post_ffn_normed = g.add_tensor("layer.post_ffn_normed",
                     vec![s.clone(), SymDim::Concrete(hidden)], dt);
@@ -2138,8 +2169,8 @@ pub fn build_compiler_graph(
         final_hidden = final_hidden_raw;
     }
 
-    // ── Encoder post-layer: MeanPool → Classifier head ──
-    if is_encoder {
+    // ── Post-norm post-layer: MeanPool → Classifier head ──
+    if features.is_post_norm {
         // MeanPool: average over seq dimension → [hidden]
         let pooled = g.add_tensor("pooled", vec![SymDim::Concrete(hidden)], dt);
         g.add_op(OpKind::MeanPool { seq_len: 0, hidden, cls_mode: false }, vec![final_hidden], vec![pooled], "meanpool");
@@ -2200,8 +2231,8 @@ pub fn build_compiler_graph(
         }
     }
 
-    // ── Decoder post-layer ──
-    if !is_encoder {
+    // ── Pre-norm post-layer: final_norm + output modes ──
+    if !features.is_post_norm {
         let final_norm_w = g.add_tensor_concrete("final_norm", &[hidden], tdt("final_norm"));
         let final_normed = g.add_tensor("final_normed", vec![s.clone(), SymDim::Concrete(hidden)], dt);
         if use_rms {

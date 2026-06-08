@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
+    use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
     use gllm_kernels::compiler::RopeScaling;
     
     fn make_role_index(entries: Vec<(TensorRole, Option<usize>, &str)>) -> HashMap<(TensorRole, Option<usize>), String> {
@@ -92,7 +92,7 @@ mod tests {
             ("lm_head", vec![100, 64]),
         ]);
 
-        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &MegaKernelBusinessConfig::default(), 2048)
+        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("graph build should succeed");
 
         // Single-template: 1 × 15 layer ops + 6 global ops = 21
@@ -138,6 +138,7 @@ mod tests {
 
         let ri = make_role_index(vec![
             (TensorRole::Embedding, None, "roberta.embeddings.word_embeddings.weight"),
+            (TensorRole::EmbedNorm, None, "roberta.embeddings.LayerNorm.weight"),
             // Layer 0
             (TensorRole::InputNorm, Some(0), "roberta.encoder.layer.0.attention.output.LayerNorm.weight"),
             (TensorRole::AttentionQuery, Some(0), "roberta.encoder.layer.0.attention.self.query.weight"),
@@ -191,7 +192,7 @@ mod tests {
             ("L0.down_proj", vec![32, 64]),
         ]);
 
-        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &MegaKernelBusinessConfig::default(), 2048)
+        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("graph build should succeed");
 
         // Single-template: embed_gather(1) + 1 × 12 layer ops + meanpool(1) = 14
@@ -273,7 +274,7 @@ mod tests {
             ("lm_head", vec![100, 64]),
         ]);
 
-        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &MegaKernelBusinessConfig::default(), 2048)
+        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("graph build should succeed");
 
         // Single-template: 1 × 17 layer ops + 6 global ops = 23
@@ -350,7 +351,7 @@ mod tests {
         ws.insert("final_norm".to_string(), vec![64]);
         ws.insert("lm_head".to_string(), vec![100, 64]);
 
-        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &MegaKernelBusinessConfig::default(), 2048)
+        let graph = build_compiler_graph(&features, &config, &ws, &std::collections::HashMap::new(), &std::collections::HashMap::new(), &BusinessConfig::default(), 2048)
             .expect("MoE graph build should succeed");
 
         // Per-layer ops:
@@ -497,9 +498,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -511,7 +518,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with SharedKvRef");
 
@@ -600,9 +607,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -614,7 +627,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed without SharedKvRef");
 
@@ -681,9 +694,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -695,7 +714,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with SharedKvRef + HeadRmsNorm");
 
@@ -768,9 +787,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -782,7 +807,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with ValueNorm");
 
@@ -858,9 +883,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -872,7 +903,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with ValueNorm (no SharedKvRef)");
 
@@ -938,9 +969,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -952,7 +989,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with has_per_layer_embedding=true");
     }
@@ -1007,9 +1044,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1021,7 +1064,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed without PLE");
 
@@ -1094,7 +1137,7 @@ mod tests {
 
         let graph_q4_0 = build_compiler_graph(
             &features, &config, &ws, &HashMap::new(),
-            &quant_types_q4_0, &MegaKernelBusinessConfig::default(), 512,
+            &quant_types_q4_0, &BusinessConfig::default(), 512,
         ).unwrap();
 
         // Verify QuantGemm ops are generated with correct quant_type
@@ -1128,7 +1171,7 @@ mod tests {
 
         let graph_q8_0 = build_compiler_graph(
             &features, &config, &ws, &HashMap::new(),
-            &quant_types_q8_0, &MegaKernelBusinessConfig::default(), 512,
+            &quant_types_q8_0, &BusinessConfig::default(), 512,
         ).unwrap();
 
         let q8_gemms: Vec<_> = graph_q8_0.ops.iter()
@@ -1147,7 +1190,7 @@ mod tests {
 
         let graph_q4k = build_compiler_graph(
             &features, &config, &ws, &HashMap::new(),
-            &quant_types_q4k, &MegaKernelBusinessConfig::default(), 512,
+            &quant_types_q4k, &BusinessConfig::default(), 512,
         ).unwrap();
 
         let q4k_gemms: Vec<_> = graph_q4k.ops.iter()
@@ -1207,9 +1250,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1217,7 +1266,7 @@ mod tests {
             sliding_per_segment: 0,
         };
 
-        let mut business_config = MegaKernelBusinessConfig::default();
+        let mut business_config = BusinessConfig::default();
         business_config.mtp_config = Some(gllm_kernels::compiler::MtpKernelConfig {
             depth: mtp_depth,
             hidden_size: 64,
@@ -1343,9 +1392,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1357,7 +1412,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("graph build should succeed");
 
         let mtp_ops: Vec<_> = graph.ops.iter()
@@ -1418,9 +1473,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1428,7 +1489,7 @@ mod tests {
             sliding_per_segment: 0,
         };
 
-        let mut business_config = MegaKernelBusinessConfig::default();
+        let mut business_config = BusinessConfig::default();
         business_config.mtp_config = Some(gllm_kernels::compiler::MtpKernelConfig {
             depth: mtp_depth,
             hidden_size: 64,
@@ -1532,7 +1593,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 8192,
+            &BusinessConfig::default(), 8192,
         ).expect("GPT-OSS graph build should succeed");
 
         // Verify YaRN scaling propagated to all RoPE ops
@@ -1635,9 +1696,15 @@ mod tests {
             is_audio: false,
             has_classifier: true,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: true,
+            causal: false,
+            has_absolute_position_embed: true,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1683,9 +1750,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1824,11 +1897,12 @@ mod tests {
         let ri = make_role_index(vec![
             (TensorRole::Embedding, None, "embed.weight"),
             (TensorRole::FinalNorm, None, "norm.weight"),
+            (TensorRole::AttentionKey, Some(0), "L0.k_proj"),
         ]);
         let ws = make_weight_shapes(vec![]);
         let features = analyze_architecture(&ri, &ws, None);
         assert_eq!(features.family, Family::Decoder, "FinalNorm alone → Decoder");
-        assert!(features.has_rope, "Decoder should have RoPE");
+        assert!(features.has_rope, "Decoder with AttentionKey should have RoPE");
     }
 
     // ── analyze_architecture: audio detection via DepthwiseConv ──
@@ -2040,12 +2114,14 @@ mod tests {
     fn analyze_encoder_default_layer_norm() {
         let ri = make_role_index(vec![
             (TensorRole::Embedding, None, "embed.weight"),
+            (TensorRole::EmbedNorm, None, "embeddings.LayerNorm.weight"),
             (TensorRole::ClassifierDense, None, "classifier.dense.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
         let features = analyze_architecture(&ri, &ws, None);
         assert_eq!(features.family, Family::Encoder);
-        assert_eq!(features.norm_type, NormType::LayerNorm, "encoder default → LayerNorm");
+        assert!(features.is_post_norm, "EmbedNorm → is_post_norm");
+        assert_eq!(features.norm_type, NormType::LayerNorm, "post-norm default → LayerNorm");
     }
 
     // ── analyze_architecture: tie_lm_head false when no OutputHead ──
@@ -2107,9 +2183,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2120,7 +2202,7 @@ mod tests {
         let result = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         );
         assert!(result.is_err(), "missing embed → should error");
         let err = result.unwrap_err();
@@ -2164,9 +2246,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2188,7 +2276,7 @@ mod tests {
         let result = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         );
         assert!(result.is_err(), "missing post_attn_norm → should error");
     }
@@ -2225,9 +2313,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2246,7 +2340,7 @@ mod tests {
         let result = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         );
         assert!(result.is_err(), "MoE with 0 experts → should error");
     }
@@ -2283,9 +2377,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: true,
+            causal: false,
+            has_absolute_position_embed: true,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2308,7 +2408,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("encoder without classifier should build");
 
         // Output should be pooled tensor, not classifier result
@@ -2354,9 +2454,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2386,7 +2492,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &quant_types,
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("quantized embed graph should build");
 
         let embed_op = graph.ops.iter().find(|op| op.label == "embed_gather")
@@ -2430,9 +2536,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2457,7 +2569,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("standard FFN graph should build");
 
         assert!(
@@ -2523,7 +2635,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), max_seq,
+            &BusinessConfig::default(), max_seq,
         ).expect("graph build should succeed");
 
         assert_eq!(graph.max_seq_len, max_seq);
@@ -2577,9 +2689,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2590,7 +2708,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("multi-layer graph should build");
 
         let llc = graph.layer_loop_config.as_ref().expect("layer_loop_config should be set");
@@ -2634,9 +2752,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2669,7 +2793,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("MoE shared expert graph should build");
 
         let shared_ops: Vec<_> = graph.ops.iter()
@@ -2731,9 +2855,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2744,7 +2874,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("graph build should succeed");
 
         // First input should be token_ids (activation)
@@ -2788,9 +2918,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2817,7 +2953,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("fused gate_up graph should build");
 
         // Should have ColumnSlice ops for gate and up slices
@@ -2874,9 +3010,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: true,
+            causal: false,
+            has_absolute_position_embed: true,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -2942,9 +3084,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3116,9 +3264,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3143,7 +3297,7 @@ mod tests {
         let result = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         );
         assert!(result.is_err(), "fused QKV dimension mismatch should error");
         match result.unwrap_err() {
@@ -3210,9 +3364,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3238,7 +3398,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("graph build should succeed");
 
         assert!(!graph.ops.is_empty(), "graph should have ops");
@@ -3293,9 +3453,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3321,7 +3487,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("graph build should succeed");
 
         let final_norm_op = graph.ops.iter().find(|op| op.label == "final_norm");
@@ -3577,9 +3743,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3594,7 +3766,7 @@ mod tests {
         let result = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         );
         assert!(result.is_err(), "missing q_proj → should error");
         match result.unwrap_err() {
@@ -3619,6 +3791,7 @@ mod tests {
             (TensorRole::Embedding, None, "shared.weight"),
             (TensorRole::OutputHead, None, "shared.weight"),
             (TensorRole::FinalNorm, None, "norm.weight"),
+            (TensorRole::AttentionKey, Some(0), "L0.k_proj"),
         ]);
         let ws = make_weight_shapes(vec![]);
 
@@ -3628,7 +3801,7 @@ mod tests {
         // Assert: tied + OutputHead → Decoder + tie_lm_head
         assert_eq!(features.family, Family::Decoder, "OutputHead present → Decoder");
         assert!(features.tie_lm_head, "same name for Embedding+OutputHead → tied");
-        assert!(features.has_rope, "Decoder has RoPE");
+        assert!(features.has_rope, "pre-norm decoder with AttentionKey has RoPE");
     }
 
     // ── 2. Arch detection edge case: gemma4 arch_name is case-sensitive ──
@@ -3691,9 +3864,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3726,7 +3905,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &quant_types,
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("partial quantization graph should build");
 
         // Assert: 2 QuantGemm + rest are regular Gemm
@@ -3777,9 +3956,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3806,7 +3991,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("zero rope_theta graph should build");
 
         // Assert: RoPE ops should still be generated with theta=0.0
@@ -3825,9 +4010,10 @@ mod tests {
 
     #[test]
     fn analyze_single_layer_encoder_minimal_tensors() {
-        // Arrange: absolute minimum for encoder (only Embedding + ClassifierDense)
+        // Arrange: absolute minimum for encoder (Embedding + EmbedNorm + ClassifierDense)
         let ri = make_role_index(vec![
             (TensorRole::Embedding, None, "word_embeddings.weight"),
+            (TensorRole::EmbedNorm, None, "embeddings.LayerNorm.weight"),
             (TensorRole::ClassifierDense, None, "classifier.dense.weight"),
         ]);
         let ws = make_weight_shapes(vec![]);
@@ -3838,9 +4024,10 @@ mod tests {
         // Assert
         assert_eq!(features.family, Family::Encoder);
         assert_eq!(features.num_layers, 0, "no per-layer tensors → 0 layers");
-        assert!(!features.has_rope, "encoder should not have RoPE");
+        assert!(!features.has_rope, "post-norm should not have RoPE");
+        assert!(features.is_post_norm, "EmbedNorm → is_post_norm");
         assert!(features.has_classifier);
-        assert_eq!(features.norm_type, NormType::LayerNorm, "encoder default → LayerNorm");
+        assert_eq!(features.norm_type, NormType::LayerNorm, "post-norm default → LayerNorm");
         assert_eq!(features.ffn_type, FfnType::Standard, "no FFN roles → Standard");
     }
 
@@ -3902,9 +4089,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -3930,7 +4123,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("standard FFN with up+down should build");
 
         // Assert: Gelu present, no SwiGLU
@@ -4027,9 +4220,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4063,7 +4262,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &quant_types,
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("quant embed + quant projections graph should build");
 
         // Assert: embed_gather should be QuantGather
@@ -4147,9 +4346,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4172,7 +4377,7 @@ mod tests {
             ("lm_head", vec![100, 64]),
         ]);
 
-        let mut business_config = MegaKernelBusinessConfig::default();
+        let mut business_config = BusinessConfig::default();
         business_config.output_modes = vec![
             gllm_kernels::compiler::mega_kernel_abi::OutputMode::Generate {
                 max_new_tokens: 16,
@@ -4235,9 +4440,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4264,7 +4475,7 @@ mod tests {
         let graph = build_compiler_graph(
             &features, &config, &ws,
             &HashMap::new(), &HashMap::new(),
-            &MegaKernelBusinessConfig::default(), 2048,
+            &BusinessConfig::default(), 2048,
         ).expect("large rope_theta graph should build");
 
         // Assert: both RoPE ops should carry the large theta
@@ -4333,9 +4544,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4347,7 +4564,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with QkNorm");
 
@@ -4433,9 +4650,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4447,7 +4670,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed without QkNorm");
 
@@ -4512,9 +4735,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4526,7 +4755,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed with embedding_scale");
 
@@ -4586,9 +4815,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -4600,7 +4835,7 @@ mod tests {
             &features, &config, &ws,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-            &MegaKernelBusinessConfig::default(),
+            &BusinessConfig::default(),
             2048,
         ).expect("graph build should succeed without embedding_scale");
 

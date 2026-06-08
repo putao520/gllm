@@ -2,7 +2,7 @@
 //!
 //! Builds a `CompilerGraph` for the full SigLIP ViT encoder (PatchEmbed →
 //! LearnedPos2D → N × ViT blocks → final LayerNorm), JIT-compiles it through
-//! the standard `InferenceCompiler::compile_graph` pipeline (scalar → SymExec →
+//! the standard `InferenceCompiler::compile_mega_kernel_from_graph` pipeline (scalar → SymExec →
 //! IR → ISA lowering → native machine code) and executes it once per image.
 //!
 //! Every computation path goes through the JIT: no scalar fallback, no
@@ -15,8 +15,10 @@
 use std::sync::Arc;
 
 use gllm_kernels::compiler::{
-    CompilerGraph, InferenceCompiler, OpKind, ShapeBinding, SymDim, TensorId,
+    CompilerGraph, InferenceCompiler, BusinessConfig, OpKind, OutputMode,
+    ShapeBinding, SymDim, TensorId,
 };
+use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
 use gllm_kernels::types::DType;
 
 use crate::compat::multimodal::{
@@ -742,30 +744,39 @@ pub fn vision_encode(
 
     let weight_blob = pack_weight_blob(&specs, weights)?;
 
-    // JIT compile + execute. InferenceCompiler::compile_graph returns a
-    // `CompiledLayer` whose `execute` ABI matches `CompiledLayerFn` (see
-    // gllm-kernels/src/compiler/executable.rs).
-    let mut compiler = InferenceCompiler::new();
-    let compiled = compiler.compile_graph(&graph).map_err(|e| {
-        BackendError::Other(format!(
-            "vision_encode: InferenceCompiler::compile_graph failed: {e}"
-        ))
-    })?;
-
+    // JIT compile + execute via compile_mega_kernel_from_graph.
     let num_patches = config.num_patches();
     let hidden = config.hidden_size;
+    let mk_config = CompileConfig {
+        max_seq_len: num_patches,
+        business_config: BusinessConfig {
+            output_modes: vec![OutputMode::EncodeToLayer {
+                anchor_layer: 0,
+                pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+            }],
+            ..BusinessConfig::default()
+        },
+        hetero: None,
+    };
+    let mut compiler = InferenceCompiler::new();
+    let compiled = compiler
+        .compile_mega_kernel_from_graph(graph, &mk_config, None)
+        .map_err(|e| {
+            BackendError::Other(format!(
+                "vision_encode: compile_mega_kernel_from_graph failed: {e}"
+            ))
+        })?
+        .layer_code;
+
     let mut output = vec![0.0f32; num_patches * hidden];
     let mut scratchpad = vec![0u8; compiled.scratchpad_bytes.max(1)];
 
     // seq_len parameter is the `num_patches` for this graph (Concrete).
     // batch_size is 1 (single image).
     unsafe {
-        compiled.execute(
+        compiled.execute_as_mega_kernel(
             pixels.as_ptr() as *const u8,
             weight_blob.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
             1,
             num_patches,
             output.as_mut_ptr() as *mut u8,
@@ -1044,6 +1055,29 @@ mod tests {
         }
     }
 
+    /// Compile a simple (no layer loop) graph through `compile_mega_kernel_from_graph`.
+    fn compile_simple_graph(
+        compiler: &mut InferenceCompiler,
+        graph: CompilerGraph,
+        max_seq_len: usize,
+    ) -> gllm_kernels::compiler::CompiledLayer {
+        let config = CompileConfig {
+            max_seq_len,
+            business_config: BusinessConfig {
+                output_modes: vec![OutputMode::EncodeToLayer {
+                    anchor_layer: 0,
+                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+                }],
+                ..BusinessConfig::default()
+            },
+            hetero: None,
+        };
+        compiler
+            .compile_mega_kernel_from_graph(graph, &config, None)
+            .expect("compile_simple_graph")
+            .layer_code
+    }
+
     fn populate_weights(config: &VisionConfig) -> OwnedVisionWeights {
         // Deterministic pseudo-random weights.
         let (_, specs) = build_vision_encoder_graph(config).expect("graph");
@@ -1148,8 +1182,13 @@ mod tests {
         let config = tiny_config();
         let (graph, _) = build_vision_encoder_graph(&config).unwrap();
         let mut compiler = InferenceCompiler::new();
+        let mk_config = CompileConfig {
+            max_seq_len: config.num_patches(),
+            business_config: BusinessConfig::default(),
+            hetero: None,
+        };
         let _compiled = compiler
-            .compile_graph(&graph)
+            .compile_mega_kernel_from_graph(graph, &mk_config, None)
             .expect("SigLIP encoder graph must compile through JIT pipeline");
     }
 
@@ -1190,7 +1229,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, num_patches);
 
         let image_data: Vec<f32> = (0..in_channels * image_size * image_size)
             .map(|i| i as f32 * 0.1).collect();
@@ -1209,12 +1248,9 @@ mod tests {
         let mut output = vec![0.0f32; num_patches * embed_dim];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(64)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 image_data.as_ptr() as *const u8,
                 weights.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 num_patches,
                 output.as_mut_ptr() as *mut u8,
@@ -1253,7 +1289,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, seq);
 
         let input_data: Vec<f32> = (0..seq*h).map(|i| i as f32 * 0.1).collect();
         let ln_w_data = vec![1.0f32; h];
@@ -1265,12 +1301,9 @@ mod tests {
         let mut output = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1, seq,
                 output.as_mut_ptr() as *mut u8,
                 scratch.as_mut_ptr(),
@@ -1298,7 +1331,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, m);
 
         let a_data: Vec<f32> = (0..m*h).map(|i| i as f32 * 0.1).collect();
         let b_data: Vec<f32> = (0..m*h).map(|i| (i as f32 + 100.0) * 0.1).collect();
@@ -1307,9 +1340,9 @@ mod tests {
         let mut output = vec![0.0f32; m*h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1)];
         unsafe {
-            compiled.execute(
-                a_data.as_ptr() as *const u8, weights.as_ptr(), std::ptr::null_mut(),
-                std::ptr::null(), std::ptr::null(), 1, m,
+            compiled.execute_as_mega_kernel(
+                a_data.as_ptr() as *const u8, weights.as_ptr(),
+                1, m,
                 output.as_mut_ptr() as *mut u8, scratch.as_mut_ptr());
         }
         eprintln!("residual output: {:?}", output);
@@ -1343,7 +1376,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, m);
 
         let input_data: Vec<f32> = (0..m * k).map(|i| i as f32 * 0.1).collect();
         let ln_w_data = vec![1.0f32; k];
@@ -1356,12 +1389,9 @@ mod tests {
         let mut output = vec![0.0f32; m * n];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1, m,
                 output.as_mut_ptr() as *mut u8,
                 scratch.as_mut_ptr(),
@@ -1395,7 +1425,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, m);
 
         let input_data: Vec<f32> = (0..m * k).map(|i| i as f32 * 0.01).collect();
         let w_data: Vec<f32> = (0..k * n).map(|i| i as f32 * 0.005).collect();
@@ -1404,12 +1434,9 @@ mod tests {
         let mut output = vec![0.0f32; m * n];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1, m,
                 output.as_mut_ptr() as *mut u8,
                 scratch.as_mut_ptr(),
@@ -1455,7 +1482,7 @@ mod tests {
         g.outputs = vec![out];
 
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&g).expect("compile");
+        let compiled = compile_simple_graph(&mut compiler, g, seq);
 
         let input_data = vec![0.1f32; seq * h];
         let ln_w_data = vec![1.0f32; h];
@@ -1472,12 +1499,9 @@ mod tests {
         let mut output = vec![0.0f32; seq * h];
         let mut scratch = vec![0u8; compiled.scratchpad_bytes.max(1)];
         unsafe {
-            compiled.execute(
+            compiled.execute_as_mega_kernel(
                 input_data.as_ptr() as *const u8,
                 weights.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1, seq,
                 output.as_mut_ptr() as *mut u8,
                 scratch.as_mut_ptr(),
@@ -1492,13 +1516,19 @@ mod tests {
     fn vision_encoder_compile_reports_metadata() {
         let config = tiny_config();
         let (graph, specs) = build_vision_encoder_graph(&config).unwrap();
+        let num_weight_inputs = graph.inputs.len() - 1;
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&graph).expect("compile");
+        let mk_config = CompileConfig {
+            max_seq_len: config.num_patches(),
+            business_config: BusinessConfig::default(),
+            hetero: None,
+        };
+        let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("compile").layer_code;
         eprintln!(
             "SigLIP compile: code_size={}B scratchpad={}B, weights={} (specs={})",
             compiled.code_size(),
             compiled.scratchpad_bytes,
-            graph.inputs.len() - 1,
+            num_weight_inputs,
             specs.len(),
         );
         assert!(compiled.code_size() > 0);
@@ -5296,7 +5326,12 @@ mod tests {
         };
         let (graph, _) = build_vision_encoder_graph(&config).unwrap();
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler.compile_graph(&graph).expect("multi-head graph must compile");
+        let mk_config = CompileConfig {
+            max_seq_len: config.num_patches(),
+            business_config: BusinessConfig::default(),
+            hetero: None,
+        };
+        let compiled = compiler.compile_mega_kernel_from_graph(graph, &mk_config, None).expect("multi-head graph must compile").layer_code;
         assert!(compiled.code_size() > 0);
     }
 

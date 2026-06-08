@@ -1,9 +1,9 @@
 //! Mega-Kernel 执行器 (SPEC §9.1)
 //!
 //! ARCH-RUST-IS-CODEGEN 铁律: 推理时 Rust 只做一次 CALL。
-//! 整个 decoder 模型（embedding → N 层 → lm_head → sampling → generate loop）
+//! 含 Argmax 的图（embedding → N 个同构子结构 → logits-producer → sampling → generate loop）
 //! 编译为单一 JIT 机器码，推理时通过 MegaKernelFn 单次 CALL 完成。
-//! Encoder 模型（embedding/rerank/classify）通过 CompiledLayerFn 单次 CALL 完成。
+//! 无 Argmax 的图（embedding/rerank/classify）同样通过 MegaKernelFn 单次 CALL 完成。
 //!
 //! 无 fallback。编译失败 = 致命错误。
 //!

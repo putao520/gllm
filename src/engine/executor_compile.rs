@@ -342,8 +342,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
 
         let ref_q_dim = ref_q / (geometry.hidden_size * 4);
-        let sliding_head_dim = ref_q_dim / geometry.num_heads;
-        let full_head_dim = q_dim_full / geometry.num_heads;
+        let q_dim_full_val = q_dim_full;
+
+        // Use head_dim from model config (SSOT). Weight-size derivation is unreliable
+        // because K/V projections may use different dtypes (F16 vs F32).
+        let head_dim = geometry.head_dim;
+        let sliding_head_dim = head_dim;
+        let full_head_dim = head_dim;
+        let sliding_num_q_heads = if head_dim > 0 { ref_q_dim / head_dim } else { geometry.num_heads };
+        let full_num_q_heads = if head_dim > 0 { q_dim_full_val / head_dim } else { geometry.num_heads };
         let full_num_kv_heads = if full_head_dim > 0 {
             kv_dim_full / full_head_dim
         } else {
@@ -366,17 +373,24 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         log::info!(
             "executor: heterogeneous layers: {} segments of [{} sliding + 1 full], \
-             sliding_head_dim={}, full_head_dim={}, small_ffn={}, large_ffn={}, large_start_seg={}",
-            num_segments, sliding_per_segment, sliding_head_dim, full_head_dim,
+             head_dim={}, sliding_q_heads={}, full_q_heads={}, sliding_kv={}, full_kv={}, \
+             small_ffn={}, large_ffn={}, large_start_seg={}",
+            num_segments, sliding_per_segment, head_dim,
+            sliding_num_q_heads, full_num_q_heads,
+            geometry.num_kv_heads, full_num_kv_heads,
             small_intermediate, large_intermediate, large_ffn_start_segment,
         );
+        eprintln!("[DIAG-HETERO-CFG] head_dim={} sliding_q={} full_q={} sliding_kv={} full_kv={}",
+            head_dim, sliding_num_q_heads, full_num_q_heads, geometry.num_kv_heads, full_num_kv_heads);
 
         Some(gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig {
             num_segments,
             sliding_per_segment,
             sliding_head_dim,
+            sliding_num_q_heads,
             sliding_num_kv_heads: geometry.num_kv_heads,
             full_head_dim,
+            full_num_q_heads,
             full_num_kv_heads,
             full_layer_indices: full_indices,
             small_intermediate,
@@ -417,7 +431,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             })
     }
 
-    /// Build MegaKernelBusinessConfig from model geometry, features, and manifest.
+    /// Build BusinessConfig from model geometry, features, and manifest.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_business_config(
         geometry: &crate::model_config::ModelGeometry,
@@ -426,22 +440,21 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         auto_features: &crate::arch::auto_graph::ArchitectureFeatures,
         eos_id: u32,
         qtap_cfg: &gllm_kernels::compiler::graph::QTapGraphConfig,
-    ) -> gllm_kernels::compiler::MegaKernelBusinessConfig {
+    ) -> gllm_kernels::compiler::BusinessConfig {
         use gllm_kernels::compiler::mega_kernel_abi::FfnActivation;
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
+        use gllm_kernels::compiler::BusinessConfig;
 
         let max_new_tokens_default = model_config.max_position_embeddings;
-        // Manifest kind overrides tensor-name-based detection: embedding/reranker models
-        // always use the forward-only (encoder) path, even if they have output_norm tensors
-        // (e.g. Qwen3-Embedding GGUF has output_norm but is an encoder model).
-        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder
+        // is_single_pass: derived from topology (post-norm = no Argmax = single-pass)
+        // and user config (manifest.kind = service mode choice, not compiler assumption).
+        let is_single_pass = auto_features.is_post_norm
             || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
         let ffn_act = match geometry.hidden_act.as_ref().map(|a| a.as_str()).unwrap_or("") {
             "gelu_new" | "gelu_pytorch_tanh" | "gelu" => FfnActivation::GeGLU,
             _ => FfnActivation::SwiGLU,
         };
-        let sg = if !is_encoder {
+        let sg = if !is_single_pass {
             Some(gllm_kernels::compiler::mega_kernel_abi::SgConfig {
                 detect_layer: geometry.num_layers / 2,
                 detect_offset: 0,
@@ -452,10 +465,10 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             None
         };
         let output_modes = Self::build_output_modes(
-            manifest, is_encoder, max_new_tokens_default, eos_id,
+            manifest, is_single_pass, max_new_tokens_default, eos_id,
         );
 
-        let mut cfg = MegaKernelBusinessConfig {
+        let mut cfg = BusinessConfig {
             has_head_rms_norm: auto_features.has_head_rms_norm,
             head_rms_norm_eps: geometry.norm_eps,
             ffn_activation: ffn_act,
@@ -466,7 +479,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
             embedding_scale: auto_features.has_embedding_scale.then_some((geometry.hidden_size as f32).sqrt()),
             semantic_gatekeeper: sg,
             output_modes,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
 
         // Layer 6: debug_jit flag
@@ -487,18 +500,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         cfg
     }
 
-    /// Build output_modes vector based on model kind and encoder/decoder family.
+    /// Build output_modes vector based on model kind (service mode) and single-pass topology.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn build_output_modes(
         manifest: &crate::manifest::ModelManifest,
-        is_encoder: bool,
+        is_single_pass: bool,
         max_new_tokens: usize,
         eos_id: u32,
     ) -> Vec<gllm_kernels::compiler::mega_kernel_abi::OutputMode> {
         use gllm_kernels::compiler::mega_kernel_abi::{OutputMode, PoolMode};
         use crate::manifest::ModelKind;
 
-        if is_encoder {
+        if is_single_pass {
             match manifest.kind {
                 ModelKind::Embedding => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::MeanPool }],
                 ModelKind::Reranker => vec![OutputMode::EncodeToLayer { anchor_layer: 0, pool_mode: PoolMode::ClsToken }],
@@ -567,7 +580,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         weight_shapes: &std::collections::HashMap<String, Vec<usize>>,
         weight_dtypes: &std::collections::HashMap<String, gllm_kernels::types::DType>,
         weight_quant_types: &std::collections::HashMap<String, gllm_kernels::quant::QuantType>,
-        business_config: &gllm_kernels::compiler::MegaKernelBusinessConfig,
+        business_config: &gllm_kernels::compiler::BusinessConfig,
         max_position_embeddings: usize,
     ) -> ExecutorResult<gllm_kernels::compiler::CompilerGraph> {
         let resolved = crate::arch::ResolvedConfig::from_geometry(
@@ -587,6 +600,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     /// Compile graph into MegaKernelExecutor and upload to GPU backend.
+    ///
+    /// SPEC/39: unified mega-kernel path — all model families (decoder, encoder,
+    /// embedding, rerank, classify) use the same compilation path.  The graph
+    /// topology encodes model geometry; the compiler emits exactly what the graph
+    /// contains (no runtime branching on model kind).
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", feature = "cuda"))]
     fn compile_and_upload_mega(
         backend: &B,
@@ -596,16 +614,11 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         weight_sizes: &std::collections::HashMap<String, usize>,
         weights: &mut WeightsHandle<B, E>,
         name_map: &crate::loader::name_map::TensorNameMap,
-        is_encoder: bool,
         eos_id: u32,
-        business_config: gllm_kernels::compiler::MegaKernelBusinessConfig,
+        business_config: gllm_kernels::compiler::BusinessConfig,
         hetero_config: Option<gllm_kernels::compiler::mega_kernel_abi::HeteroLayerConfig>,
         gpu_sm_version: Option<u32>,
     ) -> ExecutorResult<super::mega_kernel::MegaKernelExecutor> {
-        // SPEC/39: unified mega-kernel path — all models use compile_from_auto_graph.
-        // Encoder models pass eos_id=0; the graph topology naturally excludes
-        // sampling/KV/generation ops so the JIT output is encoder-specific.
-        let _ = is_encoder; // no longer branches on this
         let mega = super::mega_kernel::MegaKernelExecutor::compile_from_auto_graph(
             graph, weight_ptrs, weight_sizes,
             weights.raw_floats(), name_map,
@@ -617,8 +630,8 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         // Upload GPU artifacts
         let wb = mega.weight_blob();
         let sb = mega.scratchpad_bytes();
-        let (decoder_gc, forward_gc) = (mega.gpu_code(), None::<&[u8]>);
-        if let Err(e) = backend.prepare_gpu_mega_kernel(wb.unwrap_or(&[]), decoder_gc, forward_gc, sb) {
+        let decoder_gc = mega.gpu_code();
+        if let Err(e) = backend.prepare_gpu_mega_kernel(wb.unwrap_or(&[]), decoder_gc, sb) {
             log::warn!("executor: GPU mega-kernel artifact upload failed: {e}");
         }
 
@@ -653,14 +666,18 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         if let Some(ref hc) = hetero_config {
             auto_features.is_hetero_layer = true;
             auto_features.sliding_head_dim = hc.sliding_head_dim;
+            auto_features.sliding_num_q_heads = hc.sliding_num_q_heads;
             auto_features.full_head_dim = hc.full_head_dim;
+            auto_features.full_num_q_heads = hc.full_num_q_heads;
             auto_features.small_intermediate = hc.small_intermediate;
             auto_features.large_intermediate = hc.large_intermediate;
             auto_features.large_ffn_start_segment = hc.large_ffn_start_segment;
             auto_features.num_segments = hc.num_segments;
             auto_features.sliding_per_segment = hc.sliding_per_segment;
         }
-        let is_encoder = auto_features.family == crate::arch::auto_graph::Family::Encoder
+        // SPEC/39: is_single_pass drives business config (output modes, SG gating)
+        // but NOT compilation branching. Derived from topology (is_post_norm) not Family enum.
+        let is_single_pass = auto_features.is_post_norm
             || matches!(manifest.kind, crate::manifest::ModelKind::Embedding | crate::manifest::ModelKind::Reranker);
 
         let business_config = Self::build_business_config(
@@ -681,7 +698,7 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
 
         let mega = Self::compile_and_upload_mega(
             backend, graph, geometry, &weight_ptrs, &weight_sizes,
-            weights, &name_map, is_encoder, eos_id,
+            weights, &name_map, eos_id,
             business_config, hetero_config, gpu_sm_version,
         )?;
         Ok(Some(mega))
@@ -768,9 +785,15 @@ mod tests {
             is_audio: false,
             has_classifier: false,
             tie_lm_head: false,
+            has_norm_residual: false,
+            is_post_norm: false,
+            causal: true,
+            has_absolute_position_embed: false,
             is_hetero_layer: false,
             sliding_head_dim: 0,
+            sliding_num_q_heads: 0,
             full_head_dim: 0,
+            full_num_q_heads: 0,
             small_intermediate: 0,
             large_intermediate: 0,
             large_ffn_start_segment: 0,
@@ -1063,7 +1086,7 @@ mod tests {
     #[test]
     fn detect_hetero_layers_valid_2_segment_pattern() {
         // [2 sliding + 1 full] x 2 = 6 layers
-        let geo = make_geometry(); // num_layers=6, hidden_size=256, num_heads=8
+        let geo = make_geometry(); // num_layers=6, hidden_size=256, num_heads=8, head_dim=32
         let mut sizes: HashMap<String, usize> = HashMap::new();
         sizes.insert("L0.q_proj".to_string(), 1024); // sliding ref
         // L1=sliding, L2=full, L3=sliding, L4=sliding, L5=full
@@ -1078,17 +1101,16 @@ mod tests {
         let result = TestExec::detect_hetero_layers(&sizes, &geo);
         assert!(result.is_some());
         let cfg = result.unwrap();
-        // full_indices = [2, 5], num_segments=2, sliding_per_segment=2
-        // total = 2 * (2+1) = 6 = num_layers ✓
         assert_eq!(cfg.num_segments, 2);
         assert_eq!(cfg.sliding_per_segment, 2);
         assert_eq!(cfg.full_layer_indices, vec![2, 5]);
-        // sliding_head_dim = (1024 / (256*4)) / 8 = 1 / 8 = 0 (integer division)
-        // hidden_size=256, elem_bytes=4 for F32: ref_q/(hidden_size*4)=1024/1024=1
-        // sliding_head_dim = 1 / 8 = 0
-        assert_eq!(cfg.sliding_head_dim, 0);
-        // full_head_dim = (4096/(256*4)) / 8 = 4/8 = 0
-        assert_eq!(cfg.full_head_dim, 0);
+        // head_dim from geometry (SSOT): geo.head_dim=32
+        assert_eq!(cfg.sliding_head_dim, 32);
+        assert_eq!(cfg.full_head_dim, 32);
+        // ref_q_dim = 1024/(256*4) = 1, sliding_num_q_heads = 1/32 = 0
+        assert_eq!(cfg.sliding_num_q_heads, 0);
+        // q_dim_full = 4096/(256*4) = 4, full_num_q_heads = 4/32 = 0
+        assert_eq!(cfg.full_num_q_heads, 0);
         assert_eq!(cfg.sliding_num_kv_heads, 4);
     }
 
@@ -1111,7 +1133,7 @@ mod tests {
     #[test]
     fn build_hetero_config_valid_6_layer_3_segment() {
         // [1 sliding + 1 full] x 3 = 6
-        let geo = make_geometry(); // num_layers=6, hidden_size=256, num_heads=8, num_kv_heads=4
+        let geo = make_geometry(); // num_layers=6, hidden_size=256, num_heads=8, num_kv_heads=4, head_dim=32
         let mut sizes: HashMap<String, usize> = HashMap::new();
         sizes.insert("L1.gate_proj".to_string(), 2048);
         sizes.insert("L3.gate_proj".to_string(), 2048);
@@ -1134,13 +1156,15 @@ mod tests {
         let cfg = result.unwrap();
         assert_eq!(cfg.num_segments, 3);
         assert_eq!(cfg.sliding_per_segment, 1);
-        // ref_q_dim = 1024/(256*4) = 1
-        // sliding_head_dim = 1 / 8 = 0
-        assert_eq!(cfg.sliding_head_dim, 0);
-        // full_head_dim = 4 / 8 = 0
-        assert_eq!(cfg.full_head_dim, 0);
-        // full_num_kv_heads: full_head_dim=0, so uses geo.num_kv_heads=4
-        assert_eq!(cfg.full_num_kv_heads, 4);
+        // head_dim from geometry (SSOT): geo.head_dim=32
+        assert_eq!(cfg.sliding_head_dim, 32);
+        assert_eq!(cfg.full_head_dim, 32);
+        // ref_q_dim = 1024/(256*4) = 1, sliding_num_q_heads = 1/32 = 0
+        assert_eq!(cfg.sliding_num_q_heads, 0);
+        // full_num_q_heads = 4/32 = 0
+        assert_eq!(cfg.full_num_q_heads, 0);
+        // full_num_kv_heads: full_head_dim=32, kv_dim_full/32 = 2/32 = 0
+        assert_eq!(cfg.full_num_kv_heads, 0);
         assert_eq!(cfg.full_layer_indices, vec![1, 3, 5]);
         assert_eq!(cfg.small_intermediate, 512);
         assert_eq!(cfg.large_intermediate, 512);
@@ -1486,34 +1510,30 @@ mod tests {
     #[test]
     fn build_hetero_config_head_dim_calculation() {
         // Use larger dimensions for meaningful head_dim calculations
+        // head_dim = hidden_size / num_heads = 1024 / 16 = 64
         let geo = ModelGeometry {
             hidden_size: 1024,
             num_layers: 6,
             num_heads: 16,
             num_kv_heads: 4,
             intermediate_size: 2048,
+            head_dim: 64, // SSOT: derived from hidden_size/num_heads
             ..make_geometry()
         };
-        let sizes: HashMap<String, usize> = HashMap::new();
+        let mut sizes: HashMap<String, usize> = HashMap::new();
+        // L0.k_proj: num_kv_heads=4, head_dim=64 → k_dim=256, bytes=1024*256*4=1048576
+        sizes.insert("L0.k_proj".to_string(), 1048576);
         let find_size = |c: &str| -> Option<usize> { sizes.get(c).copied() };
 
-        // ref_q = 1024*16*4 = 65536 (all heads * head_dim * 4 bytes)
-        // q_dim_full = 1024*32*4 = 131072 (different head_dim)
-        // ref_q_dim = 65536/(1024*4) = 16 -> sliding_head_dim = 16/16 = 1
-        // Wait, this doesn't make sense. Let me reconsider.
-        //
-        // Actually ref_q represents the byte size of q_proj weight tensor.
-        // For hidden_size=1024, num_heads=16, head_dim=64:
-        // ref_q = num_heads * head_dim * hidden_size * 4 = 16*64*1024*4 = 4194304
-        //
-        // Let me just use simple values:
         // ref_q = hidden_size * q_dim * elem_bytes = 1024 * 1024 * 4 = 4194304
-        // ref_q_dim = ref_q / (hidden_size * 4) = 4194304 / 4096 = 1024
-        // sliding_head_dim = 1024 / 16 = 64
+        // ref_q_dim = ref_q / (hidden_size * 4) = 1024
+        // sliding_num_q_heads = ref_q_dim / head_dim = 1024 / 64 = 16
+        // full_num_q_heads = q_dim_full / head_dim = 512 / 64 = 8
+        // full_num_kv_heads = kv_dim_full / head_dim = 128 / 64 = 2
 
-        let ref_q = 4194304usize; // 1024 * 1024 * 4
-        let q_dim_full_val = 2097152usize; // 1024 * 512 * 4, representing head_dim=128 for full
-        let kv_dim_full_val = 524288usize; // 1024 * 128 * 4, representing kv_heads=2 for head_dim=128
+        let ref_q = 4194304usize;
+        let q_dim_full_val = 2097152usize; // 1024 * 512 * 4
+        let kv_dim_full_val = 524288usize; // 1024 * 128 * 4
 
         // full_indices=[1,3,5], num_segments=3, sliding=1, total=3*2=6
         let result = TestExec::build_hetero_config(
@@ -1530,12 +1550,14 @@ mod tests {
         let cfg = result.unwrap();
         assert_eq!(cfg.num_segments, 3);
         assert_eq!(cfg.sliding_per_segment, 1);
-        // sliding_head_dim = (ref_q/(hidden_size*4)) / num_heads = (4194304/4096)/16 = 1024/16 = 64
+        // head_dim from geometry (SSOT): geo.head_dim=64
         assert_eq!(cfg.sliding_head_dim, 64);
-        // full_head_dim = q_dim_full / num_heads = 512 / 16 = 32
-        assert_eq!(cfg.full_head_dim, 32);
-        // full_num_kv_heads = kv_dim_full / full_head_dim = 128 / 32 = 4
-        assert_eq!(cfg.full_num_kv_heads, 4);
+        assert_eq!(cfg.full_head_dim, 64);
+        // Per-type Q heads: sliding=1024/64=16, full=512/64=8
+        assert_eq!(cfg.sliding_num_q_heads, 16);
+        assert_eq!(cfg.full_num_q_heads, 8);
+        // full_num_kv_heads = kv_dim_full / head_dim = 128 / 64 = 2
+        assert_eq!(cfg.full_num_kv_heads, 2);
     }
 
     // ======================================================================
@@ -1675,7 +1697,11 @@ mod tests {
 
     #[test]
     fn build_hetero_config_full_head_dim_zero_uses_geo_kv_heads() {
-        let geo = make_geometry(); // num_kv_heads=4
+        // When head_dim=0 in geometry, the function falls back to geo.num_kv_heads
+        let geo = ModelGeometry {
+            head_dim: 0,
+            ..make_geometry()
+        }; // num_kv_heads=4
         let sizes: HashMap<String, usize> = HashMap::new();
         let find_size = |c: &str| -> Option<usize> { sizes.get(c).copied() };
 
@@ -1685,6 +1711,7 @@ mod tests {
         );
         assert!(result.is_some());
         let cfg = result.unwrap();
+        // head_dim=0 from geometry (SSOT) -> fallback to geo.num_kv_heads
         assert_eq!(cfg.full_num_kv_heads, 4); // fallback to geometry
         assert_eq!(cfg.full_head_dim, 0);
     }
@@ -2115,13 +2142,13 @@ mod tests {
     }
 
     // ======================================================================
-    // MegaKernelBusinessConfig default values
+    // BusinessConfig default values
     // ======================================================================
 
     #[test]
     fn business_config_default_output_mode_is_generate() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig::default();
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig::default();
         assert_eq!(cfg.output_modes.len(), 1);
         match &cfg.output_modes[0] {
             OutputMode::Generate { max_new_tokens, eos_token_id } => {
@@ -2134,8 +2161,8 @@ mod tests {
 
     #[test]
     fn business_config_default_flags_off() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig::default();
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig::default();
         assert!(!cfg.guardrail_enabled);
         assert!(!cfg.has_head_rms_norm);
         assert!(!cfg.has_qk_norm);
@@ -2147,8 +2174,8 @@ mod tests {
 
     #[test]
     fn business_config_default_none_fields() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig::default();
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig::default();
         assert!(cfg.semantic_gatekeeper.is_none());
         assert!(cfg.intent_anchor_layer.is_none());
         assert!(cfg.cot_step_hook.is_none());
@@ -2159,15 +2186,15 @@ mod tests {
 
     #[test]
     fn business_config_default_ffn_activation_swiglu() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig::default();
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig::default();
         assert_eq!(cfg.ffn_activation, FfnActivation::SwiGLU);
     }
 
     #[test]
     fn business_config_default_eps_values() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig::default();
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig::default();
         assert!((cfg.head_rms_norm_eps - 1e-6).abs() < 1e-10);
         assert!((cfg.value_norm_eps - 1e-6).abs() < 1e-10);
     }
@@ -2278,8 +2305,10 @@ mod tests {
             num_segments: 7,
             sliding_per_segment: 4,
             sliding_head_dim: 256,
+            sliding_num_q_heads: 4,
             sliding_num_kv_heads: 1,
             full_head_dim: 256,
+            full_num_q_heads: 8,
             full_num_kv_heads: 1,
             full_layer_indices: vec![4, 9, 14, 19, 24, 29, 34],
             small_intermediate: 2304,
@@ -2500,18 +2529,24 @@ mod tests {
 
     #[test]
     fn build_hetero_config_full_kv_heads_when_head_dim_nonzero() {
+        // head_dim = hidden_size / num_heads = 512 / 8 = 64
         let geo = ModelGeometry {
             hidden_size: 512,
             num_layers: 4,
             num_heads: 8,
             num_kv_heads: 4,
+            head_dim: 64, // SSOT: derived from hidden_size/num_heads
             ..make_geometry()
         };
-        let sizes: HashMap<String, usize> = HashMap::new();
+        let mut sizes: HashMap<String, usize> = HashMap::new();
         let find_size = |c: &str| -> Option<usize> { sizes.get(c).copied() };
 
-        // q_dim_full = 16 => full_head_dim = 16/8 = 2
-        // kv_dim_full = 8 => full_num_kv_heads = 8/2 = 4
+        // ref_q=4096, ref_q_dim=4096/(512*4)=2
+        // head_dim = 64 (from geometry SSOT)
+        // sliding_num_q_heads = ref_q_dim / head_dim = 2/64 = 0
+        // full_head_dim = 64 (same as sliding)
+        // full_num_q_heads = q_dim_full / head_dim = 16/64 = 0
+        // full_num_kv_heads = kv_dim_full / head_dim = 8/64 = 0
         let result = TestExec::build_hetero_config(
             &find_size,
             4096, // ref_q
@@ -2524,25 +2559,26 @@ mod tests {
         );
         assert!(result.is_some());
         let cfg = result.unwrap();
-        assert_eq!(cfg.full_head_dim, 2);
-        assert_eq!(cfg.full_num_kv_heads, 4);
+        assert_eq!(cfg.sliding_head_dim, 64);
+        assert_eq!(cfg.full_head_dim, 64);
+        assert_eq!(cfg.full_num_kv_heads, 0);
     }
 
     // ======================================================================
-    // MegaKernelBusinessConfig manual construction with fields
+    // BusinessConfig manual construction with fields
     // ======================================================================
 
     #[test]
     fn business_config_manual_with_mtp() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
+        use gllm_kernels::compiler::BusinessConfig;
         let mtp = MtpKernelConfig {
             depth: 2,
             hidden_size: 256,
             vocab_size: 32000,
         };
-        let cfg = MegaKernelBusinessConfig {
+        let cfg = BusinessConfig {
             mtp_config: Some(mtp),
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.mtp_config.is_some());
         let m = cfg.mtp_config.unwrap();
@@ -2553,12 +2589,12 @@ mod tests {
 
     #[test]
     fn business_config_with_qk_norm() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             has_qk_norm: true,
             has_value_norm: true,
             value_norm_eps: 1e-5,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.has_qk_norm);
         assert!(cfg.has_value_norm);
@@ -2567,21 +2603,21 @@ mod tests {
 
     #[test]
     fn business_config_geglu_activation() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             ffn_activation: FfnActivation::GeGLU,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert_eq!(cfg.ffn_activation, FfnActivation::GeGLU);
     }
 
     #[test]
     fn business_config_with_embedding_scale() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
+        use gllm_kernels::compiler::BusinessConfig;
         let scale = (256.0f32).sqrt();
-        let cfg = MegaKernelBusinessConfig {
+        let cfg = BusinessConfig {
             embedding_scale: Some(scale),
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.embedding_scale.is_some());
         assert!((cfg.embedding_scale.unwrap() - scale).abs() < 1e-5);
@@ -2657,15 +2693,15 @@ mod tests {
     // ======================================================================
 
     // ======================================================================
-    // MegaKernelBusinessConfig: guardrail_enabled default and override
+    // BusinessConfig: guardrail_enabled default and override
     // ======================================================================
 
     #[test]
     fn business_config_guardrail_override() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             guardrail_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.guardrail_enabled);
         // All other fields should remain default
@@ -2675,10 +2711,10 @@ mod tests {
 
     #[test]
     fn business_config_session_enabled_override() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             session_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.session_enabled);
         assert!(!cfg.guardrail_enabled);
@@ -2686,20 +2722,20 @@ mod tests {
 
     #[test]
     fn business_config_multimodal_enabled_override() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             multimodal_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.multimodal_enabled);
     }
 
     #[test]
     fn business_config_logit_softcapping_override() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             logit_softcapping: Some(30.0),
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.logit_softcapping.is_some());
         assert!((cfg.logit_softcapping.unwrap() - 30.0).abs() < 1e-5);
@@ -2707,23 +2743,23 @@ mod tests {
 
     #[test]
     fn business_config_debug_jit_override() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             debug_jit: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.debug_jit);
     }
 
     #[test]
     fn business_config_multiple_output_modes() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             output_modes: vec![
                 OutputMode::Generate { max_new_tokens: 256, eos_token_id: 2 },
                 OutputMode::ClassifyBinary { positive_token_id: 1, negative_token_id: 0 },
             ],
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert_eq!(cfg.output_modes.len(), 2);
     }
@@ -3259,8 +3295,10 @@ mod tests {
             num_segments: 2,
             sliding_per_segment: 3,
             sliding_head_dim: 64,
+            sliding_num_q_heads: 4,
             sliding_num_kv_heads: 2,
             full_head_dim: 128,
+            full_num_q_heads: 8,
             full_num_kv_heads: 4,
             full_layer_indices: vec![3, 7],
             small_intermediate: 1024,
@@ -4072,8 +4110,10 @@ mod tests {
             num_segments: 3,
             sliding_per_segment: 2,
             sliding_head_dim: 64,
+            sliding_num_q_heads: 8,
             sliding_num_kv_heads: 4,
             full_head_dim: 128,
+            full_num_q_heads: 16,
             full_num_kv_heads: 8,
             full_layer_indices: vec![2, 5, 8],
             small_intermediate: 1024,
@@ -4124,35 +4164,35 @@ mod tests {
     // ======================================================================
 
     // ======================================================================
-    // MegaKernelBusinessConfig: guardrail, session, multimodal overrides
+    // BusinessConfig: guardrail, session, multimodal overrides
     // ======================================================================
 
     #[test]
     fn business_config_guardrail_true() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             guardrail_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.guardrail_enabled);
     }
 
     #[test]
     fn business_config_session_true() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             session_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.session_enabled);
     }
 
     #[test]
     fn business_config_multimodal_true() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
-        let cfg = MegaKernelBusinessConfig {
+        use gllm_kernels::compiler::BusinessConfig;
+        let cfg = BusinessConfig {
             multimodal_enabled: true,
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
         assert!(cfg.multimodal_enabled);
     }
@@ -4996,7 +5036,7 @@ mod tests {
 
     #[test]
     fn build_output_modes_encoder_unknown_kind_falls_to_generate() {
-        // ModelKind::Chat on encoder path falls through to _ => Generate
+        // ModelKind::Chat on 无 Argmax 的图 falls through to _ => Generate
         let manifest = make_manifest(ModelKind::Chat);
         let modes = TestExec::build_output_modes(&manifest, true, 128, 7);
         assert_eq!(modes.len(), 1);
@@ -5667,15 +5707,15 @@ mod tests {
     }
 
     // ======================================================================
-    // MegaKernelBusinessConfig: intent_anchor_layer and cot_step_hook defaults
+    // BusinessConfig: intent_anchor_layer and cot_step_hook defaults
     // @trace TEST-EXEC-COMPILE-014
     // ======================================================================
 
     #[test]
     fn business_config_intent_and_cot_default_none() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
+        use gllm_kernels::compiler::BusinessConfig;
 
-        let cfg = MegaKernelBusinessConfig::default();
+        let cfg = BusinessConfig::default();
         assert!(cfg.intent_anchor_layer.is_none());
         assert!(cfg.cot_step_hook.is_none());
     }
@@ -5996,13 +6036,13 @@ mod tests {
     }
 
     // ======================================================================
-    // MegaKernelBusinessConfig: semantic_gatekeeper with SgConfig
+    // BusinessConfig: semantic_gatekeeper with SgConfig
     // @trace TEST-EXEC-COMPILE-027
     // ======================================================================
 
     #[test]
     fn business_config_with_semantic_gatekeeper() {
-        use gllm_kernels::compiler::MegaKernelBusinessConfig;
+        use gllm_kernels::compiler::BusinessConfig;
         use gllm_kernels::compiler::mega_kernel_abi::SgConfig;
 
         // Arrange
@@ -6014,9 +6054,9 @@ mod tests {
         };
 
         // Act
-        let cfg = MegaKernelBusinessConfig {
+        let cfg = BusinessConfig {
             semantic_gatekeeper: Some(sg),
-            ..MegaKernelBusinessConfig::default()
+            ..BusinessConfig::default()
         };
 
         // Assert

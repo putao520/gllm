@@ -613,23 +613,23 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
     }
 
     pub fn rerank_pair(&mut self, query: &str, document: &str) -> ExecutorResult<Vec<f32>> {
-        let is_decoder = self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
-        let tokens = if is_decoder {
+        let is_generative = self.model_ctx.forward_config.arch_family == crate::manifest::ArchFamily::Decoder;
+        let tokens = if is_generative {
             self.model_ctx.tokenizer.encode(&format!("{} {}", query, document), self.model_ctx.add_special_tokens)?
         } else {
             self.model_ctx.tokenizer.encode_pair(query, document, self.model_ctx.add_special_tokens)?
         };
         if tokens.is_empty() { return Err(ExecutorError::EmptyPrompt); }
-        self.resolve_rerank_token_ids(is_decoder);
+        self.resolve_rerank_token_ids(is_generative);
         let mega = self.compute.mega_kernel.as_ref().ok_or_else(|| {
             ExecutorError::Backend(BackendError::Other("mega-kernel not compiled".into()))
         })?;
-        if is_decoder && mega.has_mega_compiled() {
+        if is_generative && mega.has_mega_compiled() {
             let yes_id = self.model_ctx.forward_config.rerank_yes_token_id.ok_or_else(|| {
-                ExecutorError::Compilation("decoder reranker: yes_token_id not resolved".into())
+                ExecutorError::Compilation("generative reranker: yes_token_id not resolved".into())
             })?;
             let no_id = self.model_ctx.forward_config.rerank_no_token_id.ok_or_else(|| {
-                ExecutorError::Compilation("decoder reranker: no_token_id not resolved".into())
+                ExecutorError::Compilation("generative reranker: no_token_id not resolved".into())
             })?;
             mega.execute_rerank(&tokens, yes_id, no_id).map_err(|e| ExecutorError::Backend(BackendError::Other(e.to_string())))
         } else {
@@ -638,15 +638,15 @@ impl<B: Backend<E> + 'static, E: Element> Executor<B, E> {
         }
     }
 
-    fn resolve_rerank_token_ids(&mut self, is_decoder: bool) {
-        if is_decoder && self.model_ctx.forward_config.rerank_yes_token_id.is_none() {
+    fn resolve_rerank_token_ids(&mut self, is_generative: bool) {
+        if is_generative && self.model_ctx.forward_config.rerank_yes_token_id.is_none() {
             if let Ok(yes_ids) = self.model_ctx.tokenizer.encode("yes", false) {
                 if let Some(&id) = yes_ids.first() {
                     self.model_ctx.forward_config.rerank_yes_token_id = Some(id);
                 }
             }
         }
-        if is_decoder && self.model_ctx.forward_config.rerank_no_token_id.is_none() {
+        if is_generative && self.model_ctx.forward_config.rerank_no_token_id.is_none() {
             if let Ok(no_ids) = self.model_ctx.tokenizer.encode("no", false) {
                 if let Some(&id) = no_ids.first() {
                     self.model_ctx.forward_config.rerank_no_token_id = Some(id);

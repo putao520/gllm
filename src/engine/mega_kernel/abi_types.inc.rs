@@ -1,9 +1,10 @@
 // Mega-Kernel 执行器 (SPEC §9.1)
 //
 // ARCH-RUST-IS-CODEGEN 铁律: 推理时 Rust 只做一次 CALL。
-// 整个 decoder 模型（embedding → N 层 → lm_head → sampling → generate loop）
-// 编译为单一 JIT 机器码，推理时通过 MegaKernelFn 单次 CALL 完成。
-// Encoder 模型（embedding/rerank/classify）通过 CompiledLayerFn 单次 CALL 完成。
+// 整个模型（embedding → N 层 → output ops）编译为单一 JIT 机器码，
+// 推理时通过 MegaKernelFn 单次 CALL 完成。
+// SPEC/39: 所有模型形态（decoder/encoder/embedding/rerank/classify）统一走
+// mega-kernel 路径，图拓扑决定编译产物内容，无第二条编译路径。
 //
 // 无 fallback。编译失败 = 致命错误。
 
@@ -287,7 +288,7 @@ pub enum MegaKernelError {
 
 /// True mega-kernel 编译产物。
 ///
-/// 持有完整的 mega-kernel 机器码（embedding → layer loop → lm_head → sampling → generate loop）
+/// 持有完整的 mega-kernel 机器码（embedding → layer loop → logits-producer → sampling → generate loop）
 /// + 全模型权重布局 + 缓冲布局。推理时通过单次 CALL 执行。
 #[allow(dead_code)]
 struct MegaKernelCompiled {
@@ -296,7 +297,7 @@ struct MegaKernelCompiled {
     /// (canonical_name, byte_offset) 对 — 用于诊断查询
     named_offsets: Vec<(String, usize)>,
     /// 运行时缓冲布局（activation ping/pong, logits, sampling workspace）
-    buffer_layout: gllm_kernels::compiler::MegaKernelBufferLayout,
+    buffer_layout: gllm_kernels::compiler::BufferLayout,
     /// Logits 区域在 scratchpad 中的偏移（alloc + RoPE cache 之后）
     logits_scratch_offset: usize,
     /// 预打包的连续权重 blob
@@ -347,10 +348,18 @@ impl MegaKernelCompiled {
             0
         };
 
+        // Mega-kernel scratchpad sizing:
+        // - scratchpad_base_bytes (= logits_scratch_offset) covers all intermediate
+        //   tensors from the VAM alloc, including activation ping/pong sentinel slots.
+        // - logits_bytes uses max_total (actual tokens), NOT max_seq_len — the
+        //   mega-kernel never needs logits for the full context window at once.
+        // - buffer_layout.total_scratchpad_bytes is NOT used as a lower bound because
+        //   it computes logits as max_seq_len * vocab * elem_bytes, which for large
+        //   context models (Gemma 4 E2B: 131072 * 262144 * 4 = 128 GB) is grossly
+        //   oversized. The alloc-based offsets already account for activation buffers.
         (self.scratchpad_base_bytes + logits_bytes
             + mtp_logits_bytes + mtp_sampling_bytes)
             .max(sg_end)
-            .max(self.buffer_layout.total_scratchpad_bytes)
             .max(64)
     }
 

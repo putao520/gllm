@@ -138,7 +138,7 @@ pub mod backend_trait {
         ///
         /// # Contract
         /// - `tokens.is_empty()` → `BackendError::Other("empty tokens")`
-        /// - Model must be a decoder generator: encoder path raises
+        /// - Model must be a decoder generator: 无 Argmax 的图 raises
         ///   `Unimplemented` to avoid silent fallbacks.
         /// - `config.callback_chain` must be non-null and point at a
         ///   `CallbackChain` containing a `MidLayerEncodeCallback`.
@@ -274,17 +274,16 @@ pub mod backend_trait {
         /// CPU backend: no-op. GPU backend: uploads weight blob to device,
         /// stores PTX in cache.
         ///
-        /// `decoder_gpu_code`: mega-kernel GPU code for decoder path (21-param ABI).
-        /// `forward_gpu_code`: forward-only GPU code for encoder path (10-param ABI).
+        /// SPEC/39: unified path — one mega-kernel covers all model families.
+        /// `gpu_code`: JIT-compiled GPU code for the mega-kernel.
         /// `scratchpad_bytes`: scratchpad size needed by the mega-kernel.
         fn prepare_gpu_mega_kernel(
             &self,
             weight_blob: &[u8],
-            decoder_gpu_code: Option<&[u8]>,
-            forward_gpu_code: Option<&[u8]>,
+            gpu_code: Option<&[u8]>,
             scratchpad_bytes: usize,
         ) -> Result<(), BackendError> {
-            let _ = (weight_blob, decoder_gpu_code, forward_gpu_code, scratchpad_bytes);
+            let _ = (weight_blob, gpu_code, scratchpad_bytes);
             Ok(())
         }
     }

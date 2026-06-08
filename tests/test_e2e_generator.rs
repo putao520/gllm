@@ -78,6 +78,47 @@ extern "C" fn segv_handler(
         eprintln!("[{}] CR2=0x{:x} TRAPNO={} ERR_CODE=0x{:x}",
             sig_name, cr2, trapno, err_code);
 
+        // Dump critical spill slots near the crash site
+        let rbp_val = r(10);
+        let rsp_val = r(15);
+        if rbp_val > 0x10000 && rsp_val > 0x10000 {
+            let dump_slot = |off: u64, label: &str| {
+                let addr = rbp_val - off;
+                // Safety: only read if within stack frame bounds
+                if addr >= rsp_val && addr <= rbp_val {
+                    let val = unsafe { *(addr as *const u64) };
+                    eprintln!("[{}] [rbp-0x{:x}] = 0x{:x}  ({})", sig_name, off, val, label);
+                } else {
+                    eprintln!("[{}] [rbp-0x{:x}] OUT OF FRAME (addr=0x{:x})", sig_name, off, addr);
+                }
+            };
+            dump_slot(0xeb8, "rope_output_base");
+            dump_slot(0xeb0, "rope_input_base");
+            dump_slot(0xea0, "rope_base_ptr");
+            dump_slot(0x260, "rope_offset_in");
+            dump_slot(0x270, "loop_offset");
+            dump_slot(0x268, "loop_counter");
+            dump_slot(0xe90, "kv_cache_base");
+            dump_slot(0xea8, "head_index");
+            // DIAG: dump ping/pong spill slots for legacy decode
+            // [rbp-0x588] = ping_ptr, [rbp-0x590] = pong_ptr (from JIT disasm)
+            dump_slot(0x588, "legacy_ping_ptr");
+            dump_slot(0x590, "legacy_pong_ptr");
+            // DIAG: dump scratch_base
+            dump_slot(0x560, "scratch_base");
+            // DIAG: dump the VRegs used to compute rope_base_ptr
+            dump_slot(0xe88, "rope_base_src");  // [rbp-0xe88] used to compute [rbp-0xea0]
+            dump_slot(0xe80, "rope_input_src"); // [rbp-0xe80] used to compute [rbp-0xe98]
+            dump_slot(0xe98, "rope_input_base2"); // computed input base
+            dump_slot(0xe90, "kv_cache_base");
+            // DIAG: check if scratchpad ABI arg ([rbp+0x18]) is valid
+            {
+                let addr = rbp_val + 0x18;
+                let val = unsafe { *(addr as *const u64) };
+                eprintln!("[{}] [rbp+0x18] = 0x{:x}  (scratchpad_abi_arg)", sig_name, val);
+            }
+        }
+
         // Find JIT code region from /proc/self/maps to compute crash offset
         let rip = r(16);
         if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {

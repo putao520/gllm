@@ -15,7 +15,11 @@
 
 use std::sync::Arc;
 
-use gllm_kernels::compiler::{CompiledLayer, CompilerGraph, InferenceCompiler, OpKind, SymDim};
+use gllm_kernels::compiler::{
+    CompiledLayer, CompilerGraph, InferenceCompiler, BusinessConfig, OpKind, OutputMode,
+    SymDim,
+};
+use gllm_kernels::compiler::mega_kernel_abi::CompileConfig;
 use gllm_kernels::types::DType;
 
 use super::SemanticGatekeeperError;
@@ -144,17 +148,30 @@ impl EmbedLookupOnlyGraph {
                 embed_dim: hidden_size,
                 index_dim: sym_seq(max_seq_len),
                 indices_kind: Default::default(),
+                scale: None,
             },
             vec![indices, table],
             vec![output],
             "sg_embed_gather",
         );
 
+        let config = CompileConfig {
+            max_seq_len,
+            business_config: BusinessConfig {
+                output_modes: vec![OutputMode::EncodeToLayer {
+                    anchor_layer: 0,
+                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+                }],
+                ..BusinessConfig::default()
+            },
+            hetero: None,
+        };
         let mut compiler = InferenceCompiler::new();
-        let compiled = compiler
-            .compile_graph(&g)
+        let output = compiler
+            .compile_mega_kernel_from_graph(g, &config, None)
             .map_err(|e| SemanticGatekeeperError::SmallGraph(format!("Gather compile failed: {e}")))?;
         compiler.print_resource_report();
+        let compiled = output.layer_code;
 
         Ok(Self {
             hidden_size,
@@ -216,12 +233,9 @@ impl EmbedLookupOnlyGraph {
         // 经由 ABI arg6 传入,JIT 的 SymDim::Symbolic("seq_len") 通过 SymDimSlotMap
         // 解析到同一槽位.
         unsafe {
-            self.compiled.execute(
+            self.compiled.execute_as_mega_kernel(
                 indices_bytes.as_ptr(),
                 self.embed_weight_blob.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq_len,
                 output.as_mut_ptr(),
@@ -410,12 +424,26 @@ impl KProjOnlyGraph {
             "sg_rmsnorm",
         );
 
+        let norm_config = CompileConfig {
+            max_seq_len,
+            business_config: BusinessConfig {
+                output_modes: vec![OutputMode::EncodeToLayer {
+                    anchor_layer: 0,
+                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+                }],
+                ..BusinessConfig::default()
+            },
+            hetero: None,
+        };
         let mut compiler = InferenceCompiler::new();
-        let norm_compiled = compiler.compile_graph(&gn).map_err(|e| {
-            SemanticGatekeeperError::SmallGraph(format!(
-                "RmsNorm compile failed for layer {layer_idx}: {e}"
-            ))
-        })?;
+        let norm_compiled = compiler
+            .compile_mega_kernel_from_graph(gn, &norm_config, None)
+            .map_err(|e| {
+                SemanticGatekeeperError::SmallGraph(format!(
+                    "RmsNorm compile failed for layer {layer_idx}: {e}"
+                ))
+            })?
+            .layer_code;
         compiler.print_resource_report();
 
         // ── Stage 2: Gemm(norm_out, k_w) → k_out ──
@@ -446,11 +474,25 @@ impl KProjOnlyGraph {
             "sg_gemm",
         );
 
-        let gemm_compiled = compiler.compile_graph(&gg).map_err(|e| {
-            SemanticGatekeeperError::SmallGraph(format!(
-                "Gemm compile failed for layer {layer_idx}: {e}"
-            ))
-        })?;
+        let gemm_config = CompileConfig {
+            max_seq_len,
+            business_config: BusinessConfig {
+                output_modes: vec![OutputMode::EncodeToLayer {
+                    anchor_layer: 0,
+                    pool_mode: gllm_kernels::compiler::mega_kernel_abi::PoolMode::MeanPool,
+                }],
+                ..BusinessConfig::default()
+            },
+            hetero: None,
+        };
+        let gemm_compiled = compiler
+            .compile_mega_kernel_from_graph(gg, &gemm_config, None)
+            .map_err(|e| {
+                SemanticGatekeeperError::SmallGraph(format!(
+                    "Gemm compile failed for layer {layer_idx}: {e}"
+                ))
+            })?
+            .layer_code;
 
         Ok(Self {
             layer_idx,
@@ -519,12 +561,9 @@ impl KProjOnlyGraph {
         let mut norm_output = vec![0u8; norm_out_bytes];
         let mut norm_scratch = alloc_scratchpad(self.norm_compiled.scratchpad_bytes);
         unsafe {
-            self.norm_compiled.execute(
+            self.norm_compiled.execute_as_mega_kernel(
                 embed_bytes.as_ptr(),
                 self.norm_weight.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq_len,
                 norm_output.as_mut_ptr(),
@@ -537,12 +576,9 @@ impl KProjOnlyGraph {
         let mut output = vec![0u8; out_bytes];
         let mut gemm_scratch = alloc_scratchpad(self.gemm_compiled.scratchpad_bytes);
         unsafe {
-            self.gemm_compiled.execute(
+            self.gemm_compiled.execute_as_mega_kernel(
                 norm_output.as_ptr(),
                 self.gemm_weight.as_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
                 1,
                 seq_len,
                 output.as_mut_ptr(),

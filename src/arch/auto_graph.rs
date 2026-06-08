@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use gllm_kernels::compiler::graph::{CompilerGraph, OpKind, SymDim, TensorId};
-use gllm_kernels::compiler::mega_kernel_abi::MegaKernelBusinessConfig;
+use gllm_kernels::compiler::mega_kernel_abi::BusinessConfig;
 use gllm_kernels::types::DType;
 
 use crate::manifest::TensorRole;

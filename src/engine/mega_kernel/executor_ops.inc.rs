@@ -9,7 +9,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let prompt_len = prompt_tokens.len();
         let mut input_ids = vec![0u32; prompt_len + 1];
@@ -103,7 +103,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let prompt_len = prompt_tokens.len();
         let mut input_ids = vec![0u32; prompt_len + 1];
@@ -191,7 +191,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let prompt_len = prompt_tokens.len();
         let mut input_ids = vec![0u32; prompt_len];
@@ -257,7 +257,7 @@ impl MegaKernelExecutor {
         };
 
         // The graph output tensor (MeanPool/classifier result) is redirected to the Output region
-        // at scratchpad + logits_scratch_offset (same mechanism as lm_head logits for decoder).
+        // at scratchpad + logits_scratch_offset (same mechanism as logits-producer output for 含 Argmax 的图).
         let mut output = vec![0.0f32; output_elems];
         let offset = mega.logits_scratch_offset;
         let copy_bytes = output_elems * 4;
@@ -275,7 +275,7 @@ impl MegaKernelExecutor {
 
     /// Execute mega-kernel in ClassifyBinary mode for decoder-based reranker.
     ///
-    /// Runs forward pass through all layers (including lm_head), then extracts
+    /// Runs forward pass through all layers (including logits-producer), then extracts
     /// the logits for yes/no tokens from the scratchpad logits region.
     /// Returns [score_for_yes_token, score_for_no_token].
     pub fn execute_rerank(
@@ -287,7 +287,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let prompt_len = prompt_tokens.len();
         let mut input_ids = vec![0u32; prompt_len];
@@ -398,7 +398,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let seq_len = tokens.len();
         let mut input_ids = vec![0u32; seq_len];
@@ -489,7 +489,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         let seq_len = tokens.len();
         let mut input_ids = vec![0u32; seq_len];
@@ -561,7 +561,7 @@ impl MegaKernelExecutor {
         Ok(output)
     }
 
-    /// Returns true if this executor has a decoder mega-kernel (compile_from_template/geometry path).
+    /// Returns true if this executor has a mega-kernel compiled (compile_from_template/geometry path).
     pub fn has_mega_compiled(&self) -> bool {
         self.mega_compiled.is_some()
     }
@@ -810,7 +810,7 @@ impl MegaKernelExecutor {
         &self.variant_registry
     }
 
-    /// Store GPU mega-kernel PTX/HIP code for decoder path.
+    /// Store GPU mega-kernel PTX/HIP code for mega-kernel path.
     pub fn set_decoder_gpu_code(&mut self, code: Vec<u8>) {
         if let Some(ref mut mega) = self.mega_compiled {
             mega.gpu_code = Some(code);
@@ -826,7 +826,7 @@ impl MegaKernelExecutor {
         let mega = self
             .mega_compiled
             .as_ref()
-            .ok_or_else(|| MegaKernelError::Execution("not a decoder mega-kernel model".into()))?;
+            .ok_or_else(|| MegaKernelError::Execution("not a generate-loop mega-kernel".into()))?;
 
         // We reuse the mega-kernel weight_blob — same weights, same layout.
         // But compile a fresh forward-only graph via InferenceCompiler::compile_graph.

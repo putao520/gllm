@@ -17,6 +17,7 @@ fn pack_weights_from_graph(
     layer_config: Option<&gllm_kernels::compiler::graph::LayerLoopConfig>,
     hetero_config: Option<&gllm_kernels::compiler::graph::HeteroLayerLoopConfig>,
     num_layers: usize,
+    gemma_norm_residual: bool,
 ) -> Vec<u8> {
     let mut blob = vec![0u8; total_bytes];
     let mut packed_count = 0usize;
@@ -28,7 +29,23 @@ fn pack_weights_from_graph(
     // named_offsets uses reference layer canonical names (L0., L4., L15., L19.)
     // because weight tensors are registered with cn_layer(ref_layer, suffix).
     let _ = hetero_config; // used in packing loop below
-    let hetero_ref_layers: [usize; 4] = [0, 4, 15, 19]; // reference layers for each type
+    // SPEC/39: 从 HeteroLayerConfig 推导参考层索引，替代硬编码 [0,4,15,19]。
+    // 4 种异构层类型的参考层（每种取第一个出现的层索引）：
+    //   ss_ref = 0 (第一个 sliding_small)
+    //   fs_ref = sliding_per_segment (第一个 full_small)
+    //   sl_ref = large_ffn_start_segment * layers_per_seg (第一个 sliding_large)
+    //   fl_ref = sl_ref + sliding_per_segment (第一个 full_large)
+    let (ss_ref, fs_ref, sl_ref, fl_ref) = if let Some(ref hcfg) = hetero_config {
+        let lps = hcfg.sliding_per_segment + 1; // layers per segment
+        let ss = 0;
+        let fs = hcfg.sliding_per_segment;
+        let sl = hcfg.large_ffn_start_segment * lps;
+        let fl = sl + hcfg.sliding_per_segment;
+        (ss, fs, sl, fl)
+    } else {
+        (0, 4, 15, 19) // fallback (shouldn't be reached in non-hetero mode)
+    };
+    let hetero_ref_layers: [usize; 4] = [ss_ref, fs_ref, sl_ref, fl_ref];
     let hetero_ref_prefixes: [String; 4] = [
         format!("L{}.", hetero_ref_layers[0]),
         format!("L{}.", hetero_ref_layers[1]),
@@ -120,6 +137,26 @@ fn pack_weights_from_graph(
 
     for (canonical_name, offset) in named_offsets {
         let ext_name = name_map.resolve_external_to_string(canonical_name);
+        // Debug: trace norm weight packing path
+        if canonical_name.contains("q_norm") || canonical_name.contains("k_norm") || canonical_name.contains("input_norm") {
+            let in_raw = raw_floats.get(&ext_name).is_some();
+            let in_ptr = weight_ptrs.get(canonical_name).is_some();
+            eprintln!("[PACK-TRACE] {} ext={} raw_floats={} weight_ptrs={}", canonical_name, ext_name, in_raw, in_ptr);
+            if in_raw {
+                if let Some(raw) = raw_floats.get(&ext_name) {
+                    match raw.dtype {
+                        ::safetensors::Dtype::BF16 => {
+                            let src = unsafe {
+                                std::slice::from_raw_parts(raw.data.as_ptr() as *const half::bf16, raw.data.len() / 2)
+                            };
+                            let first_4: Vec<f32> = src.iter().take(4).map(|v| v.to_f32()).collect();
+                            eprintln!("[PACK-RAW] {} dtype=BF16 first_4=[{:.6},{:.6},{:.6},{:.6}]", canonical_name, first_4[0], first_4[1], first_4[2], first_4[3]);
+                        }
+                        other => { eprintln!("[PACK-RAW] {} dtype={:?}", canonical_name, other); }
+                    }
+                }
+            }
+        }
         if let Some(raw) = raw_floats.get(&ext_name) {
             let elem_size = match raw.dtype {
                 ::safetensors::Dtype::BF16 | ::safetensors::Dtype::F16 => 2,
@@ -136,7 +173,9 @@ fn pack_weights_from_graph(
             let is_per_layer_rf = (layer_config.is_some()
                 && canonical_name.starts_with("L0.")
                 && !canonical_name.contains("embed")
-                && !canonical_name.contains("lm_head")
+                // SPEC/39: global weights (final_norm, output head) don't start with "L0."
+                // so the starts_with check already excludes them; "embed" guard is for safety
+                // in case future PLE variants use "L0.embed" naming.
                 && !canonical_name.contains("final_norm"))
                 || is_hetero_layer_rf;
 
@@ -158,7 +197,17 @@ fn pack_weights_from_graph(
                         let ref_layer = hetero_ref_layers[type_idx];
                         let ref_cn = format!("L{}.{}", ref_layer, suffix);
                         let ref_ext = name_map.resolve_external_to_string(&ref_cn);
-                        (Box::new(move |li| hetero_layer_offset(li, hcfg)), ref_ext, Some(suffix.to_string()))
+                        // Compute template-relative offset: offset in named_offsets is the absolute
+                        // offset within the weight layout. For hetero, we need the offset relative
+                        // to this template type's base (type_base_offsets[type_idx]).
+                        let type_base_offsets: [usize; 4] = [
+                            hcfg.layer_blob_base_offset,
+                            hcfg.layer_blob_base_offset + hcfg.sliding_small_stride,
+                            hcfg.layer_blob_base_offset + hcfg.sliding_small_stride + hcfg.full_small_stride,
+                            hcfg.layer_blob_base_offset + hcfg.sliding_small_stride + hcfg.full_small_stride + hcfg.sliding_large_stride,
+                        ];
+                        let rel_off = (*offset).saturating_sub(type_base_offsets[type_idx]);
+                        (Box::new(move |li| hetero_layer_offset(li, hcfg) + rel_off), ref_ext, Some(suffix.to_string()))
                     } else {
                         let cfg = layer_config.unwrap();
                         let stride = cfg.weight_stride;
@@ -205,6 +254,16 @@ fn pack_weights_from_graph(
                             name_map.resolve_external_to_string(&lcn)
                         };
 
+                        // Gemma RMSNorm stores weights as residuals: gamma = 1.0 + weight.
+                        // Pre-shift during packing so the JIT RMSNorm code (which does x * weight)
+                        // applies the correct gamma.
+                        // Gemma RMSNorm stores q_norm/k_norm weights as residuals: gamma = 1.0 + weight.
+                        // Only q_norm and k_norm use residual convention.
+                        // input_norm/post_attn_norm use standard gamma (already the actual value).
+                        let is_gemma_norm = gemma_norm_residual
+                            && (canonical_name.ends_with(".q_norm")
+                                || canonical_name.ends_with(".k_norm"));
+
                         if let Some(lr) = raw_floats.get(&layer_ext) {
                             let dst = unsafe {
                                 std::slice::from_raw_parts_mut(
@@ -219,7 +278,14 @@ fn pack_weights_from_graph(
                                     };
                                     for (i, &v) in src.iter().enumerate() {
                                         if i >= dst.len() { break; }
-                                        dst[i] = v.to_f32();
+                                        let mut f = v.to_f32();
+                                        if is_gemma_norm { f += 1.0; }
+                                        dst[i] = f;
+                                    }
+                                    if is_gemma_norm && layer_idx == 0 && dst.len() >= 4 {
+                                        eprintln!("[PACK-SHIFT] {} layer={} gemma_norm={} first_4=[{:.4},{:.4},{:.4},{:.4}]",
+                                            canonical_name, layer_idx, is_gemma_norm,
+                                            dst[0], dst[1], dst[2], dst[3]);
                                     }
                                 }
                                 ::safetensors::Dtype::F16 => {
@@ -228,12 +294,26 @@ fn pack_weights_from_graph(
                                     };
                                     for (i, &v) in src.iter().enumerate() {
                                         if i >= dst.len() { break; }
-                                        dst[i] = v.to_f32();
+                                        let mut f = v.to_f32();
+                                        if is_gemma_norm { f += 1.0; }
+                                        dst[i] = f;
                                     }
                                 }
                                 _ => {
                                     let cs = lr.data.len().min(blob.len().saturating_sub(abs_off));
                                     blob[abs_off..abs_off + cs].copy_from_slice(&lr.data[..cs]);
+                                    // Pre-shift F32 norm weights in-place
+                                    if is_gemma_norm && cs >= 4 {
+                                        let f32_dst = unsafe {
+                                            std::slice::from_raw_parts_mut(
+                                                blob[abs_off..].as_mut_ptr() as *mut f32,
+                                                cs / 4,
+                                            )
+                                        };
+                                        for v in f32_dst.iter_mut() {
+                                            *v += 1.0;
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -251,7 +331,9 @@ fn pack_weights_from_graph(
                                     };
                                     for (i, &v) in src.iter().enumerate() {
                                         if i >= dst.len() { break; }
-                                        dst[i] = v.to_f32();
+                                        let mut f = v.to_f32();
+                                        if is_gemma_norm { f += 1.0; }
+                                        dst[i] = f;
                                     }
                                 }
                                 ::safetensors::Dtype::F16 => {
@@ -260,12 +342,25 @@ fn pack_weights_from_graph(
                                     };
                                     for (i, &v) in src.iter().enumerate() {
                                         if i >= dst.len() { break; }
-                                        dst[i] = v.to_f32();
+                                        let mut f = v.to_f32();
+                                        if is_gemma_norm { f += 1.0; }
+                                        dst[i] = f;
                                     }
                                 }
                                 _ => {
                                     let cs = layer_raw.data.len().min(blob.len().saturating_sub(abs_off));
                                     blob[abs_off..abs_off + cs].copy_from_slice(&layer_raw.data[..cs]);
+                                    if is_gemma_norm && cs >= 4 {
+                                        let f32_dst = unsafe {
+                                            std::slice::from_raw_parts_mut(
+                                                blob[abs_off..].as_mut_ptr() as *mut f32,
+                                                cs / 4,
+                                            )
+                                        };
+                                        for v in f32_dst.iter_mut() {
+                                            *v += 1.0;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -316,7 +411,9 @@ fn pack_weights_from_graph(
                             if i >= dst_f32s.len() {
                                 break;
                             }
-                            dst_f32s[i] = v.to_f32();
+                            let mut f = v.to_f32();
+                            if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) { f += 1.0; }
+                            dst_f32s[i] = f;
                         }
                     }
                     ::safetensors::Dtype::F16 => {
@@ -327,12 +424,25 @@ fn pack_weights_from_graph(
                             if i >= dst_f32s.len() {
                                 break;
                             }
-                            dst_f32s[i] = v.to_f32();
+                            let mut f = v.to_f32();
+                            if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) { f += 1.0; }
+                            dst_f32s[i] = f;
                         }
                     }
                     _ => {
                         let copy_size = raw.data.len().min(blob.len().saturating_sub(blob_off));
                         blob[blob_off..blob_off + copy_size].copy_from_slice(&raw.data[..copy_size]);
+                        if gemma_norm_residual && (canonical_name.ends_with(".q_norm") || canonical_name.ends_with(".k_norm")) && copy_size >= 4 {
+                            let f32_dst = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    blob[blob_off..].as_mut_ptr() as *mut f32,
+                                    copy_size / 4,
+                                )
+                            };
+                            for v in f32_dst.iter_mut() {
+                                *v += 1.0;
+                            }
+                        }
                     }
                 }
             }
@@ -367,27 +477,41 @@ fn pack_weights_from_graph(
                 ];
                 let rel_off = offset.saturating_sub(type_base_offsets[type_idx]);
 
+                // Gemma RMSNorm residual pre-shift detection for hetero path
+                let is_gemma_norm_hetero = gemma_norm_residual
+                    && (suffix.ends_with(".q_norm")
+                        || suffix.ends_with(".k_norm"));
+                if canonical_name.contains("q_norm") {
+                    eprintln!("[HETERO-NORM] {} suffix={} is_gemma={} gemma_norm_residual={}", canonical_name, suffix, is_gemma_norm_hetero, gemma_norm_residual);
+                }
+
                 for layer_idx in 0..num_layers {
                     if hetero_type_index(layer_idx, hcfg) != type_idx { continue; }
                     let abs_off = hetero_layer_offset(layer_idx, hcfg) + rel_off;
                     let copy_size = ref_size.min(blob.len().saturating_sub(abs_off));
                     if copy_size == 0 || abs_off >= blob.len() { continue; }
 
-                    if layer_idx == ref_layer {
-                        let src = unsafe { std::slice::from_raw_parts(ref_ptr, copy_size) };
-                        blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+                    let layer_ptr = if layer_idx == ref_layer {
+                        ref_ptr
                     } else {
                         let layer_cn = format!("L{}.{}", layer_idx, suffix);
-                        if let Some(&lp) = weight_ptrs.get(&layer_cn) {
-                            if !lp.is_null() {
-                                let ls = *weight_sizes.get(&layer_cn).unwrap_or(&copy_size);
-                                let lc = ls.min(copy_size);
-                                let src = unsafe { std::slice::from_raw_parts(lp, lc) };
-                                blob[abs_off..abs_off + lc].copy_from_slice(src);
-                            }
-                        } else {
-                            let src = unsafe { std::slice::from_raw_parts(ref_ptr, copy_size) };
-                            blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+                        weight_ptrs.get(&layer_cn)
+                            .map(|&p| if !p.is_null() { p } else { ref_ptr })
+                            .unwrap_or(ref_ptr)
+                    };
+                    let src = unsafe { std::slice::from_raw_parts(layer_ptr, copy_size) };
+                    blob[abs_off..abs_off + copy_size].copy_from_slice(src);
+
+                    // Post-copy: pre-shift norm weights (+1.0 for Gemma residual convention)
+                    if is_gemma_norm_hetero && copy_size >= 4 {
+                        let f32_dst = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                blob[abs_off..].as_mut_ptr() as *mut f32,
+                                copy_size / 4,
+                            )
+                        };
+                        for v in f32_dst.iter_mut() {
+                            *v += 1.0;
                         }
                     }
                 }
@@ -413,7 +537,8 @@ fn pack_weights_from_graph(
         let is_per_layer = layer_config.is_some()
             && canonical_name.starts_with("L0.")
             && !canonical_name.contains("embed")
-            && !canonical_name.contains("lm_head")
+            // SPEC/39: global weights (final_norm, output head) don't start with "L0."
+            // so the starts_with check already excludes them; "embed" guard is for safety.
             && !canonical_name.contains("final_norm");
 
         if is_per_layer {

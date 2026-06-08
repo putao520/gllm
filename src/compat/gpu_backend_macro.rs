@@ -54,8 +54,7 @@ macro_rules! impl_gpu_backend {
             fn prepare_gpu_mega_kernel(
                 &self,
                 weight_blob: &[u8],
-                decoder_gpu_code: Option<&[u8]>,
-                forward_gpu_code: Option<&[u8]>,
+                gpu_code: Option<&[u8]>,
                 scratchpad_bytes: usize,
             ) -> Result<(), BE> {
                 #[cfg( $($cfg_pred)+ )]
@@ -67,16 +66,10 @@ macro_rules! impl_gpu_backend {
                     backend_f32.upload_weight_blob(weight_blob)
                         .map_err(|e| BE::$upload_err_variant(e))?;
 
-                    if let Some(code) = decoder_gpu_code {
+                    if let Some(code) = gpu_code {
                         let mut cache = backend_f32.compiled_ptx.lock()
                             .map_err(|e| BE::$upload_err_variant(format!("lock poisoned: {e}")))?;
                         cache.insert("mega_kernel".to_string(), code.to_vec());
-                    }
-
-                    if let Some(code) = forward_gpu_code {
-                        let mut cache = backend_f32.compiled_ptx.lock()
-                            .map_err(|e| BE::$upload_err_variant(format!("lock poisoned: {e}")))?;
-                        cache.insert("forward_kernel".to_string(), code.to_vec());
                     }
 
                     {
@@ -89,7 +82,7 @@ macro_rules! impl_gpu_backend {
                 }
                 #[cfg(not( $($cfg_pred)+ ))]
                 {
-                    let _ = (weight_blob, decoder_gpu_code, forward_gpu_code, scratchpad_bytes);
+                    let _ = (weight_blob, gpu_code, scratchpad_bytes);
                     Ok(())
                 }
             }
@@ -550,11 +543,16 @@ macro_rules! impl_gpu_backend {
 }
 
 // ---------------------------------------------------------------------------
-// Encoder forward helper — used by embedding/rerank/classify methods
+// Encoder forward helper — DEPRECATED (SPEC/39)
 // ---------------------------------------------------------------------------
+// SPEC/39: encoder models now use the unified mega-kernel path via
+// execute_encode() with output_mode_selector=3. This dead code remains until
+// the Backend trait is cleaned up to remove rerank_forward_gpu_pure and
+// classify_forward_gpu_pure.
 
-/// Launch the forward-only kernel for encoder tasks (embedding, rerank, classify).
-/// Uses the "forward_kernel" PTX cached by prepare_gpu_mega_kernel.
+/// DEPRECATED (SPEC/39): Use execute_encode() via mega-kernel instead.
+/// Previously launched a forward-only kernel for encoder tasks using the
+/// separate "forward_kernel" PTX. Now superseded by the unified mega-kernel.
 #[allow(dead_code)]
 pub(crate) fn gpu_encoder_forward_impl<B>(
     backend: &B,
