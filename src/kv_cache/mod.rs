@@ -60,7 +60,7 @@ impl OomHaltError {
 // KV Page Header (per SPEC 07-OBSERVABILITY.md §7.1, 19-KV-CACHE-OPTIMIZATION.md §2.1)
 // ============================================================================
 
-/// KV 物理页头 (56B, per SPEC 22-PAGE-COMPRESSION.md §2)
+/// KV 物理页头 (64B, per SPEC 22-PAGE-COMPRESSION §2, REQ-KV-EXT-001 V2 扩展)
 ///
 /// 五区域布局：基础管理 + Epilogue 遥测 + 量化元数据 + 调度元数据 + 压缩/存储。
 /// Epilogue 遥测由 Mega-Kernel Epilogue 阶段直接写入。
@@ -94,10 +94,17 @@ impl OomHaltError {
 /// 0x29   | storage_tier        | 1     | 压缩+存储 (StorageTier)
 /// 0x2A   | checksum            | 2     | 压缩+存储 (CRC16)
 /// 0x2C   | compressed_size     | 4     | 压缩+存储
-/// 0x30   | _pad                | 8     | 压缩+存储 (56B 对齐填充)
+/// 0x30   | sequence_id         | 4     | V2 扩展 (ENT-KV-PAGE-HEADER, 请求标识)
+/// 0x34   | logical_index       | 4     | V2 扩展 (ENT-KV-PAGE-HEADER, 逻辑页索引)
+/// 0x38   | last_access_seq     | 8     | V2 扩展 (ENT-KV-PAGE-HEADER, 最后访问序列号)
+/// 0x40   | _pad                | 0     | (64B 对齐, 无需填充)
 /// -------|---------------------|-------|-------------------------------
-/// Total  |                     | 56    |
+/// Total  |                     | 64    |
 /// ```
+///
+/// V1 二进制兼容: V1 56B 头部字段偏移 0x00-0x2F 不变。V2 字段 sequence_id/logical_index/
+/// last_access_seq 位于偏移 0x30-0x3F，通过 ext_id 索引访问。旧代码只读 0x00-0x2F
+/// 区域，不受 V2 扩展影响。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct KvPageHeader {
@@ -147,7 +154,7 @@ pub struct KvPageHeader {
     /// Deopt 标志 (bit 0: 需 requantize, bit 1: 数据不一致)
     pub deopt_flags: u8,
 
-    // ── 压缩 + 存储元数据 (16B, per SPEC 22-PAGE-COMPRESSION §2, COMP1 扩展至 56B) ──
+    // ── 压缩 + 存储元数据 (8B, per SPEC 22-PAGE-COMPRESSION §2) ──
     /// 压缩编解码器 (见 CompressionCodec 枚举)
     pub codec: CompressionCodec,
     /// 当前 storage tier (见 StorageTier 枚举: 0=GpuHbm, 1=CpuDram, 2=Nvme)
@@ -156,11 +163,17 @@ pub struct KvPageHeader {
     pub checksum: u16,
     /// 压缩后字节数 (0 = 未压缩)
     pub compressed_size: u32,
-    /// 56B 对齐填充
-    pub _pad: [u8; 8],
+
+    // ── V2 扩展区域 (16B, REQ-KV-EXT-001) ──
+    /// 所属请求标识 (ENT-KV-PAGE-HEADER sequence_id)
+    pub sequence_id: u32,
+    /// 逻辑页索引 (ENT-KV-PAGE-HEADER logical_index)
+    pub logical_index: u32,
+    /// 最后访问序列号 (ENT-KV-PAGE-HEADER last_access_seq, 全局单调递增)
+    pub last_access_seq: u64,
 }
 
-const _: [(); 56] = [(); std::mem::size_of::<KvPageHeader>()];
+const _: [(); 64] = [(); std::mem::size_of::<KvPageHeader>()];
 
 /// 压缩编解码器 (per SPEC 22-PAGE-COMPRESSION §3.1)
 #[repr(u8)]
@@ -318,7 +331,9 @@ impl Default for KvPageHeader {
             storage_tier: StorageTier::GpuHbm,
             checksum: 0,
             compressed_size: 0,
-            _pad: [0; 8],
+            sequence_id: 0,
+            logical_index: 0,
+            last_access_seq: 0,
         }
     }
 }
@@ -495,8 +510,8 @@ pub fn dead_ratio_to_f32(x: u8) -> f32 {
 // ============================================================================
 
 /// Per-page donor/refcount metadata for **layer-level** KV sharing
-/// (Gemma 4 E2B/E4B). Kept outside of `KvPageHeader` so the 56-byte hardware
-/// page-header contract stays intact (see REQ-KV-OPT-001, COMP1 扩展至 56B).
+/// (Gemma 4 E2B/E4B). Kept outside of `KvPageHeader` so the 64-byte hardware
+/// page-header contract stays intact (see REQ-KV-OPT-001, REQ-KV-EXT-001 扩展至 64B).
 ///
 /// - `donor_layer = Some(n)` → this page is a *reference* pointing at the
 ///   physical storage of layer `n`. Writes are forbidden; reads follow the
@@ -713,7 +728,7 @@ impl KvCacheDoubleBuffer {
 ///
 /// ```text
 /// KvOptimizationConfig::default()
-///   → KvCache::new(config, num_layers, hardware)
+///   → KvCache::new(config, kv_config, hardware)
 ///   → cache.optimization.compose_batch(headers, ...)
 ///   → cache.optimization_status() for observability
 /// ```
@@ -728,12 +743,37 @@ impl KvCacheDoubleBuffer {
 /// | Observability        | `optimization_status()`             | Any time (cheap snapshot)   |
 /// | Runtime re-evaluation| `optimization.reevaluate()`         | KV cache pressure change    |
 #[derive(Debug, Clone)]
-#[derive(Default)]
 pub struct KvCache {
     /// Optimization strategy manager — owns all strategy instances.
     pub optimization: KvOptimization,
+
+    // ── ENT-KV-CACHE: 8 必填字段 (from KvCacheConfig, REQ-KV-EXT-001) ──
+    pub num_layers: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub max_seq_len: usize,
+    pub kv_dtype: String,
+    pub page_size: usize,
+    pub num_kv_shared_layers: usize,
+    pub is_mla: bool,
 }
 
+
+impl Default for KvCache {
+    fn default() -> Self {
+        Self {
+            optimization: KvOptimization::default(),
+            num_layers: 0,
+            num_kv_heads: 0,
+            head_dim: 0,
+            max_seq_len: 0,
+            kv_dtype: String::new(),
+            page_size: 0,
+            num_kv_shared_layers: 0,
+            is_mla: false,
+        }
+    }
+}
 
 impl KvCache {
     /// Create a new `KvCache` with optimization strategies initialized from a
@@ -749,11 +789,19 @@ impl KvCache {
     /// passing the config to this constructor (see [`KvOptimizationConfig::validate`]).
     pub fn new(
         config: KvOptimizationConfig,
-        num_layers: usize,
+        kv_config: &KvCacheConfig,
         hardware: kv_optimizer::HardwareProfile,
     ) -> Self {
         Self {
-            optimization: KvOptimization::from_config(config, num_layers, hardware),
+            optimization: KvOptimization::from_config(config, kv_config.num_layers(), hardware),
+            num_layers: kv_config.num_layers(),
+            num_kv_heads: kv_config.num_heads(),
+            head_dim: kv_config.head_dim(),
+            max_seq_len: kv_config.max_seq_len(),
+            kv_dtype: format!("{:?}", kv_config.kv_dtype),
+            page_size: kv_config.page_size,
+            num_kv_shared_layers: kv_config.num_kv_shared_layers(),
+            is_mla: kv_config.is_mla(),
         }
     }
 
@@ -766,6 +814,14 @@ impl KvCache {
                 num_layers,
                 kv_optimizer::HardwareProfile::default(),
             ),
+            num_layers,
+            num_kv_heads: 0,
+            head_dim: 0,
+            max_seq_len: 0,
+            kv_dtype: String::new(),
+            page_size: 0,
+            num_kv_shared_layers: 0,
+            is_mla: false,
         }
     }
 
@@ -776,6 +832,14 @@ impl KvCache {
                 num_layers,
                 kv_optimizer::HardwareProfile::default(),
             ),
+            num_layers,
+            num_kv_heads: 0,
+            head_dim: 0,
+            max_seq_len: 0,
+            kv_dtype: String::new(),
+            page_size: 0,
+            num_kv_shared_layers: 0,
+            is_mla: false,
         }
     }
 
@@ -788,6 +852,14 @@ impl KvCache {
                 num_layers,
                 kv_optimizer::HardwareProfile::default(),
             ),
+            num_layers,
+            num_kv_heads: 0,
+            head_dim: 0,
+            max_seq_len: 0,
+            kv_dtype: String::new(),
+            page_size: 0,
+            num_kv_shared_layers: 0,
+            is_mla: false,
         }
     }
 
@@ -899,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_kv_page_header_size() {
-        assert_eq!(std::mem::size_of::<KvPageHeader>(), 56);
+        assert_eq!(std::mem::size_of::<KvPageHeader>(), 64);
     }
 
     #[test]
@@ -914,6 +986,9 @@ mod tests {
         assert_eq!(header.channel_bitmap_lo, 0);
         assert_eq!(header.pipeline_id, 0);
         assert_eq!(header.deopt_flags, 0);
+        assert_eq!(header.sequence_id, 0);
+        assert_eq!(header.logical_index, 0);
+        assert_eq!(header.last_access_seq, 0);
     }
 
     #[test]
@@ -1584,7 +1659,7 @@ mod tests {
 
     #[test]
     fn kv_page_header_repr_c_alignment() {
-        assert_eq!(std::mem::size_of::<KvPageHeader>(), 56);
+        assert_eq!(std::mem::size_of::<KvPageHeader>(), 64);
         let header = KvPageHeader::default();
         let base = &header as *const KvPageHeader as usize;
         let page_id_offset = &header.page_id as *const u32 as usize - base;
@@ -2078,9 +2153,11 @@ mod tests {
     }
 
     #[test]
-    fn kv_page_header_pad_field_all_zeros_default() {
+    fn kv_page_header_v2_ext_fields_default() {
         let header = KvPageHeader::default();
-        assert_eq!(header._pad, [0u8; 8]);
+        assert_eq!(header.sequence_id, 0);
+        assert_eq!(header.logical_index, 0);
+        assert_eq!(header.last_access_seq, 0);
     }
 
     #[test]

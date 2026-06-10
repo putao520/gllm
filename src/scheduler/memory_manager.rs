@@ -57,9 +57,18 @@ pub enum PrefillPlan {
     },
 }
 
+/// Page table: maps virtual page IDs to physical locations with O(1) lookup.
+///
+/// REQ-KV-EXT-001: V2 扩展通过 `ext_id` 索引，保持 V1 二进制兼容。
+/// `ext_id` 是物理页的紧凑 u32 标识符，用于 BatchContext V2 扩展区
+/// `EXT_KV_EXT_ID_BASE_PTR` 指向的 ext slot 数组中快速定位。
 #[derive(Debug, Default)]
 pub struct PageTable {
     mappings: HashMap<VirtualPageId, PageLocation>,
+    /// O(1) ext_id → VirtualPageId 反向索引 (REQ-KV-EXT-001)
+    ext_id_index: HashMap<u32, VirtualPageId>,
+    /// 下一个可分配的 ext_id
+    next_ext_id: u32,
 }
 
 impl PageTable {
@@ -73,8 +82,14 @@ impl PageTable {
         tier: Tier,
         physical_id: PhysicalId,
     ) -> Option<PageLocation> {
-        self.mappings
-            .insert(virtual_id, PageLocation { tier, physical_id })
+        let old = self
+            .mappings
+            .insert(virtual_id, PageLocation { tier, physical_id });
+        // Assign ext_id for V2 extension indexing
+        let ext_id = self.next_ext_id;
+        self.next_ext_id = self.next_ext_id.wrapping_add(1);
+        self.ext_id_index.insert(ext_id, virtual_id);
+        old
     }
 
     pub fn remap(
@@ -97,6 +112,24 @@ impl PageTable {
 
     pub fn resolve(&self, virtual_id: VirtualPageId) -> Option<PageLocation> {
         self.mappings.get(&virtual_id).copied()
+    }
+
+    /// Resolve a page by ext_id (O(1), REQ-KV-EXT-001).
+    /// Returns the VirtualPageId and its physical PageLocation.
+    pub fn resolve_by_ext_id(&self, ext_id: u32) -> Option<(VirtualPageId, PageLocation)> {
+        let vid = self.ext_id_index.get(&ext_id)?;
+        let loc = self.mappings.get(vid)?;
+        Some((*vid, *loc))
+    }
+
+    /// Number of ext_id mappings (for observability).
+    pub fn ext_id_count(&self) -> usize {
+        self.ext_id_index.len()
+    }
+
+    /// Total number of virtual→physical mappings.
+    pub fn num_mappings(&self) -> usize {
+        self.mappings.len()
     }
 }
 

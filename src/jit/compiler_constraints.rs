@@ -266,8 +266,7 @@ impl CompilerConstraints {
             // sm_version 仅在 CUDA 平台有意义（HIP 使用 gfx_arch，Metal 使用 gpu_family）。
             constraints.gpu_sm_version = match gpu.platform {
                 GpuPlatform::Cuda { sm_version } => Some(sm_version),
-                // HIP/Metal 不使用 SM 版本；这里返回 None 让 codegen 走各自的 platform 路径。
-                GpuPlatform::Hip { .. } | GpuPlatform::Metal { .. } => None,
+                GpuPlatform::Hip { .. } | GpuPlatform::Metal { .. } | GpuPlatform::Cpu => None,
             };
 
             // ── Hopper/Blackwell 特性（仅 NVIDIA）──

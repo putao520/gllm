@@ -218,6 +218,21 @@ impl PagedScheduler {
         self.allocator.get_total_blocks()
     }
 
+    /// Total blocks in the pool (ENT-PAGED-SCHEDULER total_blocks, REQ-KV-EXT-001).
+    pub fn total_blocks(&self) -> usize {
+        self.allocator.get_total_blocks()
+    }
+
+    /// Used blocks in the pool (ENT-PAGED-SCHEDULER used_blocks, REQ-KV-EXT-001).
+    pub fn used_blocks(&self) -> usize {
+        self.allocator.get_total_blocks() - self.allocator.get_num_free_blocks()
+    }
+
+    /// Number of block tables (one per active request, ENT-PAGED-SCHEDULER num_block_tables).
+    pub fn num_block_tables(&self) -> usize {
+        self.block_tables.len()
+    }
+
     pub fn add_sequence(&mut self, mut group: SequenceGroup) -> Result<(), SchedulerError> {
         // Calculate needed blocks for the context
         let needed_blocks = group.context_len.div_ceil(self.block_size);

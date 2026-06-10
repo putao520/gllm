@@ -5424,9 +5424,9 @@ mod tests {
     // ── KvPageHeader size and field layout ──
 
     #[test]
-    fn kv_page_header_size_is_56_bytes() {
+    fn kv_page_header_size_is_64_bytes() {
         use crate::kv_cache::KvPageHeader;
-        assert_eq!(std::mem::size_of::<KvPageHeader>(), 56, "KvPageHeader must be exactly 56 bytes");
+        assert_eq!(std::mem::size_of::<KvPageHeader>(), 64, "KvPageHeader must be exactly 64 bytes");
     }
 
     #[test]
@@ -5456,7 +5456,9 @@ mod tests {
             storage_tier: StorageTier::GpuHbm,
             checksum: 0,
             compressed_size: 0,
-            _pad: [0; 8],
+            sequence_id: 0,
+            logical_index: 0,
+            last_access_seq: 0,
         };
         assert_eq!(hdr.codec, CompressionCodec::None);
     }
@@ -5488,7 +5490,9 @@ mod tests {
             storage_tier: StorageTier::CpuDram,
             checksum: 0,
             compressed_size: 0,
-            _pad: [0; 8],
+            sequence_id: 0,
+            logical_index: 0,
+            last_access_seq: 0,
         };
         assert_eq!(hdr.storage_tier, StorageTier::CpuDram);
     }

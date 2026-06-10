@@ -2402,7 +2402,9 @@ mod tests {
         assert_eq!(header.entropy_avg, 0);
         assert_eq!(header.sink_mask, 0);
         assert_eq!(header.compressed_size, 0);
-        assert_eq!(header._pad, [0u8; 8]);
+        assert_eq!(header.sequence_id, 0);
+        assert_eq!(header.logical_index, 0);
+        assert_eq!(header.last_access_seq, 0);
     }
 
     #[test]

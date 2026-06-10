@@ -555,9 +555,14 @@ pub const EXT_PENDING_FREE_COUNT_PTR: usize = 76;
 pub const EXT_OUTPUT_PER_CTA_DOORBELL_PTR: usize = 80;
 pub const EXT_OUTPUT_EPOCH_FLAG_PTR: usize = 88;
 pub const EXT_RESERVED: usize = 92;
+// ── REQ-KV-EXT-001: V2 扩展字段 (14 total) ──
+/// KvPageHeader stride in bytes (64 for V2, was 56 for V1).
+pub const EXT_KV_PAGE_HEADER_STRIDE: usize = 96;
+/// Base pointer for ext_id indexed KV extension slots (V2 ext_id → ext slot).
+pub const EXT_KV_EXT_ID_BASE_PTR: usize = 104;
 
-/// 扩展区总大小 (对齐到 96 字节).
-pub const BATCH_CTX_EXTENSION_SIZE: usize = 96;
+/// 扩展区总大小 (REQ-KV-EXT-001: 14 fields, aligned to 128 bytes).
+pub const BATCH_CTX_EXTENSION_SIZE: usize = 128;
 
 // ═══════════════════════════════════════════════════════════
 // §1.4 Prefill/Decode 编译参数
@@ -1322,13 +1327,13 @@ mod tests {
 
     #[test]
     fn batch_ctx_extension_size_alignment() {
-        assert_eq!(BATCH_CTX_EXTENSION_SIZE % 96, 0);
-        assert!(BATCH_CTX_EXTENSION_SIZE >= 96);
+        assert_eq!(BATCH_CTX_EXTENSION_SIZE % 128, 0);
+        assert!(BATCH_CTX_EXTENSION_SIZE >= 128);
     }
 
     #[test]
     fn extension_offsets_are_increasing() {
-        let offsets: [(usize, &str); 12] = [
+        let offsets: [(usize, &str); 14] = [
             (EXT_REQUEST_QUEUE_PTR, "REQUEST_QUEUE_PTR"),
             (EXT_OUTPUT_RING_PTR, "OUTPUT_RING_PTR"),
             (EXT_KV_FREE_BITMAP_PTR, "KV_FREE_BITMAP_PTR"),
@@ -1341,6 +1346,8 @@ mod tests {
             (EXT_PENDING_FREE_COUNT_PTR, "PENDING_FREE_COUNT_PTR"),
             (EXT_OUTPUT_PER_CTA_DOORBELL_PTR, "OUTPUT_PER_CTA_DOORBELL_PTR"),
             (EXT_OUTPUT_EPOCH_FLAG_PTR, "OUTPUT_EPOCH_FLAG_PTR"),
+            (EXT_KV_PAGE_HEADER_STRIDE, "KV_PAGE_HEADER_STRIDE"),
+            (EXT_KV_EXT_ID_BASE_PTR, "KV_EXT_ID_BASE_PTR"),
         ];
         for i in 1..offsets.len() {
             assert!(

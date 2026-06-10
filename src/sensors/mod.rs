@@ -11,6 +11,68 @@ pub mod gpu;
 
 pub use gpu::{GpuPlatform, GpuTopology};
 
+/// GPU feature summary derived from `GpuTopology`, consumed by the compiler
+/// to drive code generation paths (REQ-ARCH-004).
+///
+/// All fields are populated from runtime GPU detection — zero heuristics.
+/// `GpuInfo::none()` returns a CPU-only sentinel with no GPU fields set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuInfo {
+    /// Platform type (Cuda/Rocm/Metal/Cpu).
+    pub platform: GpuPlatform,
+    /// SM version (CUDA: major*10+minor), or equivalent for other platforms.
+    /// `None` for CPU-only.
+    pub sm_version: Option<u32>,
+    /// Total global memory in bytes.
+    /// `0` for CPU-only.
+    pub memory_bytes: usize,
+    /// Compute capability as (major, minor).
+    /// `None` for CPU-only.
+    pub compute_capability: Option<(u32, u32)>,
+    /// Number of compute units (SMs/CUs).
+    /// `0` for CPU-only.
+    pub compute_unit_count: usize,
+    /// Tensor Core / Matrix Unit generation.
+    /// `0` means no matrix units (CPU or old GPU).
+    pub tensor_core_gen: u32,
+}
+
+impl GpuInfo {
+    /// Derive `GpuInfo` from a detected `GpuTopology`.
+    pub fn from_topology(topo: &GpuTopology) -> Self {
+        Self {
+            platform: topo.platform,
+            sm_version: topo.sm_version(),
+            memory_bytes: topo.memory_bytes(),
+            compute_capability: topo.compute_capability(),
+            compute_unit_count: topo.compute_unit_count,
+            tensor_core_gen: topo.tensor_core_gen,
+        }
+    }
+
+    /// CPU-only sentinel — no GPU detected.
+    pub fn none() -> Self {
+        Self {
+            platform: GpuPlatform::Cpu,
+            sm_version: None,
+            memory_bytes: 0,
+            compute_capability: None,
+            compute_unit_count: 0,
+            tensor_core_gen: 0,
+        }
+    }
+
+    /// Whether any GPU was detected.
+    pub fn is_gpu(&self) -> bool {
+        !matches!(self.platform, GpuPlatform::Cpu)
+    }
+
+    /// Whether the GPU has tensor/matrix core units.
+    pub fn has_tensor_cores(&self) -> bool {
+        self.tensor_core_gen > 0
+    }
+}
+
 /// NUMA 拓扑结构
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumaTopology {
@@ -212,6 +274,8 @@ pub struct SystemTopology {
     pub cpu: CpuTopology,
     /// GPU 拓扑 (None = CPU-only)
     pub gpu: Option<GpuTopology>,
+    /// GPU 特性摘要 (REQ-ARCH-004): sm_version, memory_bytes, compute_capability etc.
+    pub gpu_info: GpuInfo,
     /// 底层传感器读数
     pub sensors: MemoryNetworkSensors,
     /// DeviceProfile (gllm-kernels)
@@ -262,9 +326,14 @@ impl SystemTopology {
 
         let constraints = CompilerConstraints::derive(&profile, &sensors, None, gpu.as_ref());
 
+        let gpu_info = gpu.as_ref()
+            .map(GpuInfo::from_topology)
+            .unwrap_or_else(GpuInfo::none);
+
         Ok(Self {
             cpu,
             gpu,
+            gpu_info,
             sensors,
             profile,
             constraints,
@@ -302,9 +371,14 @@ impl SystemTopology {
 
         let constraints = CompilerConstraints::derive(&profile, &sensors, None, gpu.as_ref());
 
+        let gpu_info = gpu.as_ref()
+            .map(GpuInfo::from_topology)
+            .unwrap_or_else(GpuInfo::none);
+
         Ok(Self {
             cpu,
             gpu,
+            gpu_info,
             sensors,
             profile,
             constraints,
@@ -318,7 +392,7 @@ impl SystemTopology {
 
     /// 是否有 GPU
     pub fn has_gpu(&self) -> bool {
-        self.gpu.is_some()
+        self.gpu_info.is_gpu()
     }
 
     /// NUMA 节点数
@@ -558,6 +632,79 @@ impl Default for CompressionTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── GpuInfo tests (REQ-ARCH-004) ─────────────────────────────────────────
+
+    #[test]
+    fn test_gpu_info_from_topology_cuda() {
+        let topo = GpuTopology {
+            platform: GpuPlatform::Cuda { sm_version: 90 },
+            compute_unit_count: 132,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 227_328,
+            l2_bytes: 50 * 1024 * 1024,
+            global_mem_bytes: 80 * 1024 * 1024 * 1024,
+            warp_size: 32,
+            compute_cap_major: 9,
+            compute_cap_minor: 0,
+        };
+        let info = GpuInfo::from_topology(&topo);
+        assert_eq!(info.platform, GpuPlatform::Cuda { sm_version: 90 });
+        assert_eq!(info.sm_version, Some(90));
+        assert_eq!(info.memory_bytes, 80 * 1024 * 1024 * 1024);
+        assert_eq!(info.compute_capability, Some((9, 0)));
+        assert_eq!(info.compute_unit_count, 132);
+        assert_eq!(info.tensor_core_gen, 3);
+        assert!(info.is_gpu());
+        assert!(info.has_tensor_cores());
+    }
+
+    #[test]
+    fn test_gpu_info_none_cpu_only() {
+        let info = GpuInfo::none();
+        assert_eq!(info.platform, GpuPlatform::Cpu);
+        assert_eq!(info.sm_version, None);
+        assert_eq!(info.memory_bytes, 0);
+        assert_eq!(info.compute_capability, None);
+        assert_eq!(info.compute_unit_count, 0);
+        assert_eq!(info.tensor_core_gen, 0);
+        assert!(!info.is_gpu());
+        assert!(!info.has_tensor_cores());
+    }
+
+    #[test]
+    fn test_gpu_info_from_topology_hip() {
+        let topo = GpuTopology {
+            platform: GpuPlatform::Hip { gfx_arch: 0x940 },
+            compute_unit_count: 228,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 65_536,
+            l2_bytes: 8 * 1024 * 1024,
+            global_mem_bytes: 128 * 1024 * 1024 * 1024,
+            warp_size: 64,
+            compute_cap_major: 9,
+            compute_cap_minor: 0x40,
+        };
+        let info = GpuInfo::from_topology(&topo);
+        assert!(info.is_gpu());
+        assert_eq!(info.sm_version, None);
+        assert_eq!(info.compute_capability, Some((9, 0x40)));
+        assert!(info.has_tensor_cores());
+    }
+
+    #[test]
+    fn test_system_topology_gpu_info_field() {
+        let topo = SystemTopology::detect();
+        // gpu_info must always be populated (either from GPU or CPU sentinel)
+        if topo.gpu.is_some() {
+            assert!(topo.gpu_info.is_gpu());
+            assert!(topo.gpu_info.memory_bytes > 0);
+            assert!(topo.gpu_info.compute_unit_count > 0);
+        } else {
+            assert!(!topo.gpu_info.is_gpu());
+            assert_eq!(topo.gpu_info.memory_bytes, 0);
+        }
+    }
 
     #[test]
     fn test_sensors_creation() {

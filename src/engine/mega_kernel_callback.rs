@@ -242,7 +242,7 @@ pub struct KvDecompressCtx {
     pub num_pages: u32,
     /// KV page size (uncompressed, in bytes) — used to size the decompress scratch buffer.
     pub page_size_bytes: u32,
-    /// Stride between page headers in the array (typically size_of::<KvPageHeader>() = 56).
+    /// Stride between page headers in the array (typically size_of::<KvPageHeader>() = 64).
     pub header_stride: u32,
 }
 

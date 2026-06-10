@@ -152,7 +152,7 @@
       
     </section>
 
-    <section id="req-symdim-010" data-req="REQ-SYMDIM-010" data-req-status="unknown" data-req-domain="symdim" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-api="API-SYMDIM" data-section="001" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" <h4="">REQ-SYMDIM-010: CompilerGraph 携带 max_seq_len
+    <section id="req-symdim-010" data-req="REQ-SYMDIM-010" data-req-status="implemented" data-req-domain="symdim" data-req-category="business" data-req-entity="ENT-COMPILER-GRAPH,ENT-KV-CACHE,ENT-PAGE-TABLE,ENT-BATCH-CONTEXT,ENT-MODEL-CONFIG" data-req-api="API-SYMDIM" data-section="001" data-entity-ref="ENT-COMPILER-GRAPH ENT-KV-CACHE ENT-PAGE-TABLE ENT-BATCH-CONTEXT ENT-MODEL-CONFIG" <h4="">REQ-SYMDIM-010: CompilerGraph 携带 max_seq_len
       <p>在 <code>CompilerGraph</code> 结构体中新增 <code>max_seq_len</code> 字段作为序列长度上界的唯一来源，替代全局常量 <code>SYMDIM_MAX_SEQ_LEN</code>，并将旧常量标记为 deprecated。</p>
       <code>CompilerGraph</code> 新增 <code>pub max_seq_len: usize</code> 字段。<code>new()</code> 默认 2048（向后兼容）。<code>weight_layout()</code> 使用 <code>self.max_seq_len</code> 替代 <code>SYMDIM_MAX_SEQ_LEN</code>。<code>SYMDIM_MAX_SEQ_LEN</code> 标记 <code>#[deprecated]</code>。
       <strong>文件</strong>: <code>gllm-kernels/src/compiler/graph.rs</code>

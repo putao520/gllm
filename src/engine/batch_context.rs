@@ -349,6 +349,18 @@ impl BatchContext {
     pub fn set_ext_output_epoch_flag_ptr(&mut self, p: *mut u32) {
         write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_OUTPUT_EPOCH_FLAG_PTR), p as usize);
     }
+
+    // ── REQ-KV-EXT-001: V2 extension field writers ──
+
+    /// Set KvPageHeader stride in bytes (64 for V2, was 56 for V1).
+    pub fn set_ext_kv_page_header_stride(&mut self, v: u32) {
+        write_u32(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_PAGE_HEADER_STRIDE), v);
+    }
+
+    /// Set base pointer for ext_id indexed KV extension slots.
+    pub fn set_ext_kv_ext_id_base_ptr(&mut self, p: *const u8) {
+        write_usize(&mut self.data, Self::ext_field(self.max_batch_size, mega_kernel_v2::EXT_KV_EXT_ID_BASE_PTR), p as usize);
+    }
 }
 
 // ── Helper functions for writing to flat memory ──

@@ -80,6 +80,28 @@ pub struct GpuTopology {
     pub compute_cap_minor: u32,
 }
 
+impl GpuTopology {
+    /// SM version (CUDA) or equivalent. Returns `None` for non-CUDA.
+    pub fn sm_version(&self) -> Option<u32> {
+        self.platform.sm_version()
+    }
+
+    /// Total global memory in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        self.global_mem_bytes
+    }
+
+    /// Compute capability as (major, minor). Returns `None` for CPU-only.
+    pub fn compute_capability(&self) -> Option<(u32, u32)> {
+        self.platform.compute_capability()
+    }
+
+    /// Whether the detected GPU has tensor/matrix core units.
+    pub fn has_tensor_cores(&self) -> bool {
+        self.platform.has_tensor_cores()
+    }
+}
+
 /// GPU 平台类型（与 gllm-kernels 的 `Platform` 枚举对齐）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GpuPlatform {
@@ -89,6 +111,33 @@ pub enum GpuPlatform {
     Hip { gfx_arch: u32 },
     /// Apple Metal（gpu_family）
     Metal { gpu_family: u32 },
+    /// CPU-only（无 GPU 加速，JIT codegen 走 CPU 路径）
+    Cpu,
+}
+
+impl GpuPlatform {
+    /// CUDA SM version (major*10 + minor). Returns `None` for non-CUDA platforms.
+    pub fn sm_version(&self) -> Option<u32> {
+        match self {
+            GpuPlatform::Cuda { sm_version } => Some(*sm_version),
+            _ => None,
+        }
+    }
+
+    /// Compute capability as (major, minor). Returns `None` for CPU.
+    pub fn compute_capability(&self) -> Option<(u32, u32)> {
+        match self {
+            GpuPlatform::Cuda { sm_version } => Some((*sm_version / 10, *sm_version % 10)),
+            GpuPlatform::Hip { gfx_arch } => Some((*gfx_arch >> 8 & 0xFF, *gfx_arch & 0xFF)),
+            GpuPlatform::Metal { gpu_family } => Some((*gpu_family, 0)),
+            GpuPlatform::Cpu => None,
+        }
+    }
+
+    /// Whether this platform has matrix/tensor core units.
+    pub fn has_tensor_cores(&self) -> bool {
+        !matches!(self, GpuPlatform::Cpu)
+    }
 }
 
 /// 一次性探测系统 GPU 拓扑。
@@ -544,8 +593,37 @@ mod tests {
         let cuda = GpuPlatform::Cuda { sm_version: 80 };
         let hip = GpuPlatform::Hip { gfx_arch: 0x908 };
         let metal = GpuPlatform::Metal { gpu_family: 7 };
+        let cpu = GpuPlatform::Cpu;
         assert_ne!(cuda, hip);
         assert_ne!(hip, metal);
+        assert_ne!(metal, cpu);
+        assert_ne!(cuda, cpu);
+    }
+
+    #[test]
+    fn test_gpu_platform_cpu_variant() {
+        let cpu = GpuPlatform::Cpu;
+        assert!(!cpu.has_tensor_cores());
+        assert_eq!(cpu.sm_version(), None);
+        assert_eq!(cpu.compute_capability(), None);
+    }
+
+    #[test]
+    fn test_gpu_platform_sm_version_accessors() {
+        let cuda = GpuPlatform::Cuda { sm_version: 90 };
+        assert_eq!(cuda.sm_version(), Some(90));
+        assert_eq!(cuda.compute_capability(), Some((9, 0)));
+        assert!(cuda.has_tensor_cores());
+
+        let hip = GpuPlatform::Hip { gfx_arch: 0x908 };
+        assert_eq!(hip.sm_version(), None);
+        assert_eq!(hip.compute_capability(), Some((9, 0x08)));
+        assert!(hip.has_tensor_cores());
+
+        let metal = GpuPlatform::Metal { gpu_family: 7 };
+        assert_eq!(metal.sm_version(), None);
+        assert_eq!(metal.compute_capability(), Some((7, 0)));
+        assert!(metal.has_tensor_cores());
     }
 
     #[test]
@@ -1952,17 +2030,18 @@ mod tests {
 
     #[test]
     fn gpu_platform_match_returns_field_value() {
-        // Exhaustive match over all 3 variants extracting the inner u32
-        fn extract_u32(p: GpuPlatform) -> u32 {
+        fn extract_u32(p: GpuPlatform) -> Option<u32> {
             match p {
-                GpuPlatform::Cuda { sm_version } => sm_version,
-                GpuPlatform::Hip { gfx_arch } => gfx_arch,
-                GpuPlatform::Metal { gpu_family } => gpu_family,
+                GpuPlatform::Cuda { sm_version } => Some(sm_version),
+                GpuPlatform::Hip { gfx_arch } => Some(gfx_arch),
+                GpuPlatform::Metal { gpu_family } => Some(gpu_family),
+                GpuPlatform::Cpu => None,
             }
         }
-        assert_eq!(extract_u32(GpuPlatform::Cuda { sm_version: 42 }), 42);
-        assert_eq!(extract_u32(GpuPlatform::Hip { gfx_arch: 0xFF }), 0xFF);
-        assert_eq!(extract_u32(GpuPlatform::Metal { gpu_family: 7 }), 7);
+        assert_eq!(extract_u32(GpuPlatform::Cuda { sm_version: 42 }), Some(42));
+        assert_eq!(extract_u32(GpuPlatform::Hip { gfx_arch: 0xFF }), Some(0xFF));
+        assert_eq!(extract_u32(GpuPlatform::Metal { gpu_family: 7 }), Some(7));
+        assert_eq!(extract_u32(GpuPlatform::Cpu), None);
     }
 
     // ── GpuPlatform Eq trait (strict equality, not just PartialEq) ─────────────
@@ -2089,10 +2168,12 @@ mod tests {
                 GpuPlatform::Cuda { .. } => "CUDA",
                 GpuPlatform::Hip { .. } => "HIP",
                 GpuPlatform::Metal { .. } => "Metal",
+                GpuPlatform::Cpu => "CPU",
             }
         }
         let cuda = GpuPlatform::Cuda { sm_version: 80 };
         assert_eq!(platform_name(&cuda), "CUDA");
+        assert_eq!(platform_name(&GpuPlatform::Cpu), "CPU");
         // Original still usable after borrow
         assert_eq!(cuda, GpuPlatform::Cuda { sm_version: 80 });
     }
@@ -2716,5 +2797,62 @@ mod tests {
         } else {
             panic!("expected Metal variant");
         }
+    }
+
+    // ── GpuTopology helper methods ────────────────────────────────────────────
+
+    #[test]
+    fn test_gpu_topology_sm_version_cuda() {
+        let topo = GpuTopology {
+            platform: GpuPlatform::Cuda { sm_version: 80 },
+            compute_unit_count: 108,
+            tensor_core_gen: 2,
+            shared_mem_per_sm_bytes: 163_840,
+            l2_bytes: 40 * 1024 * 1024,
+            global_mem_bytes: 24 * 1024 * 1024 * 1024,
+            warp_size: 32,
+            compute_cap_major: 8,
+            compute_cap_minor: 0,
+        };
+        assert_eq!(topo.sm_version(), Some(80));
+        assert_eq!(topo.memory_bytes(), 24 * 1024 * 1024 * 1024);
+        assert_eq!(topo.compute_capability(), Some((8, 0)));
+        assert!(topo.has_tensor_cores());
+    }
+
+    #[test]
+    fn test_gpu_topology_sm_version_hip() {
+        let topo = GpuTopology {
+            platform: GpuPlatform::Hip { gfx_arch: 0x940 },
+            compute_unit_count: 228,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 65_536,
+            l2_bytes: 8 * 1024 * 1024,
+            global_mem_bytes: 128 * 1024 * 1024 * 1024,
+            warp_size: 64,
+            compute_cap_major: 9,
+            compute_cap_minor: 0x40,
+        };
+        assert_eq!(topo.sm_version(), None);
+        assert_eq!(topo.compute_capability(), Some((9, 0x40)));
+        assert!(topo.has_tensor_cores());
+    }
+
+    #[test]
+    fn test_gpu_topology_metal() {
+        let topo = GpuTopology {
+            platform: GpuPlatform::Metal { gpu_family: 9 },
+            compute_unit_count: 0,
+            tensor_core_gen: 3,
+            shared_mem_per_sm_bytes: 32_768,
+            l2_bytes: 0,
+            global_mem_bytes: 18 * 1024 * 1024 * 1024,
+            warp_size: 32,
+            compute_cap_major: 9,
+            compute_cap_minor: 0,
+        };
+        assert_eq!(topo.sm_version(), None);
+        assert_eq!(topo.compute_capability(), Some((9, 0)));
+        assert!(topo.has_tensor_cores());
     }
 }

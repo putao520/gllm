@@ -4183,9 +4183,9 @@ mod tests {
     }
 
     #[test]
-    fn kv_page_header_size_is_56_bytes() {
+    fn kv_page_header_size_is_64_bytes() {
         use crate::kv_cache::KvPageHeader;
-        assert_eq!(std::mem::size_of::<KvPageHeader>(), 56);
+        assert_eq!(std::mem::size_of::<KvPageHeader>(), 64);
     }
 
     // ── KvPageHeader: clone ──
